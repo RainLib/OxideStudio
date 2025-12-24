@@ -15,6 +15,11 @@ export interface SavedConnection {
   name: string;
   driver: "postgres" | "mysql";
   url: string;
+  host?: string;
+  port?: number;
+  user?: string;
+  password?: string;
+  database?: string;
 }
 
 export interface Response<T> {
@@ -60,4 +65,16 @@ export const api = {
   loadConnections: async (): Promise<Response<SavedConnection[]>> => {
     return await invoke("load_connections");
   },
+
+  getSchemas: async (connectionId: string): Promise<Response<string[]>> => {
+      return await invoke("get_schemas", { connectionId });
+  },
+
+  getTables: async (connectionId: string, schema: string): Promise<Response<any[]>> => {
+      return await invoke("get_tables", { connectionId, schema });
+  },
+
+  getColumns: async (connectionId: string, schema: string, table: string): Promise<Response<any[]>> => {
+      return await invoke("get_columns", { connectionId, schema, table });
+  }
 };

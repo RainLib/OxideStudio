@@ -67,6 +67,42 @@ fn load_connections(
     Ok(Response::ok(config.connections))
 }
 
+#[tauri::command]
+async fn get_schemas(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+) -> Result<Response<Vec<String>>, String> {
+    match manager.get_schemas(&connection_id).await {
+        Ok(results) => Ok(Response::ok(results)),
+        Err(e) => Ok(Response::err("GET_SCHEMAS_FAILED", &e.to_string())),
+    }
+}
+
+#[tauri::command]
+async fn get_tables(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    schema: String,
+) -> Result<Response<Vec<core::protocol::TableInfo>>, String> {
+    match manager.get_tables(&connection_id, &schema).await {
+        Ok(results) => Ok(Response::ok(results)),
+        Err(e) => Ok(Response::err("GET_TABLES_FAILED", &e.to_string())),
+    }
+}
+
+#[tauri::command]
+async fn get_columns(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    schema: String,
+    table: String,
+) -> Result<Response<Vec<core::protocol::ColumnInfo>>, String> {
+    match manager.get_columns(&connection_id, &schema, &table).await {
+        Ok(results) => Ok(Response::ok(results)),
+        Err(e) => Ok(Response::err("GET_COLUMNS_FAILED", &e.to_string())),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let manager = ConnectionManager::new();
@@ -84,7 +120,10 @@ pub fn run() {
             connect_db,
             execute_query,
             save_connections,
-            load_connections
+            load_connections,
+            get_schemas,
+            get_tables,
+            get_columns
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

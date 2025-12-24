@@ -14,8 +14,11 @@ pub struct SavedConnection {
     pub name: String,
     pub driver: String,
     pub url: String,
-    // In a real app never store passwords in plain text!
-    // For this MVP we will, but mark as insecure.
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub user: Option<String>,
+    pub password: Option<String>,
+    pub database: Option<String>,
 }
 
 pub struct ConfigManager {

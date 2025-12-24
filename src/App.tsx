@@ -1,15 +1,29 @@
-import { ConnectionPage } from "./pages/connection";
-import { useConnectionStore } from "./store/useConnectionStore";
-import "./App.css";
+import { useEffect } from "react";
+import { useConnectionStore } from "@/store/useConnectionStore";
+import { ConnectionPage } from "@/pages/connection";
+import { Workspace } from "@/components/workspace/Workspace";
+import { Loader2 } from "lucide-react";
 
 function App() {
-  const isConnected = useConnectionStore((state) => state.isConnected);
+  const { isConnected, loadConnections, isLoading } = useConnectionStore();
 
-  if (isConnected) {
-      return <div className="h-screen w-screen flex items-center justify-center">Connected! Workspace coming soon...</div>
+  useEffect(() => {
+    loadConnections();
+  }, [loadConnections]);
+
+  if (isLoading) {
+      return (
+        <div className="h-screen w-full flex items-center justify-center bg-background text-foreground">
+             <Loader2 className="animate-spin mr-2" /> Loading...
+        </div>
+      )
   }
 
-  return <ConnectionPage />;
+  return (
+    <div className="bg-background text-foreground h-screen w-screen overflow-hidden">
+        {isConnected ? <Workspace /> : <ConnectionPage />}
+    </div>
+  );
 }
 
 export default App;
