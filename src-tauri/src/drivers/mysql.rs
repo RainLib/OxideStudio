@@ -1,0 +1,185 @@
+use crate::core::driver::DatabaseDriver;
+use crate::core::protocol::{ColumnDef, ColumnInfo, QueryResult, TableInfo};
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlRow};
+use sqlx::{Column, ConnectOptions, Pool, MySql, Row, TypeInfo};
+use std::str::FromStr;
+use std::time::Duration;
+
+pub struct MysqlDriver {
+    pub pool: Option<Pool<MySql>>,
+    pub connection_string: String,
+}
+
+impl MysqlDriver {
+    pub fn new(connection_string: &str) -> Self {
+        Self {
+            pool: None,
+            connection_string: connection_string.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl DatabaseDriver for MysqlDriver {
+    async fn connect(&mut self) -> Result<()> {
+        let options = MySqlConnectOptions::from_str(&self.connection_string)?
+            .disable_statement_logging()
+            .to_owned();
+
+        let pool = MySqlPoolOptions::new()
+            .max_connections(5)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_with(options)
+            .await?;
+
+        self.pool = Some(pool);
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> Result<()> {
+        if let Some(pool) = self.pool.take() {
+            pool.close().await;
+        }
+        Ok(())
+    }
+
+    async fn ping(&self) -> Result<()> {
+        if let Some(pool) = &self.pool {
+            sqlx::query("SELECT 1").execute(pool).await?;
+            Ok(())
+        } else {
+            Err(anyhow!("Not connected"))
+        }
+    }
+
+    async fn query(&self, sql: &str) -> Result<Vec<QueryResult>> {
+        let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
+
+        let rows = sqlx::query(sql).fetch_all(pool).await?;
+
+        if rows.is_empty() {
+             return Ok(vec![]);
+        }
+
+        let first_row = &rows[0];
+        let columns: Vec<ColumnDef> = first_row.columns().iter().map(|c| {
+            ColumnDef {
+                name: c.name().to_string(),
+                data_type: c.type_info().name().to_string(),
+            }
+        }).collect();
+
+        let mut data_rows = Vec::new();
+        for row in rows {
+            let mut row_values = Vec::new();
+            for (i, _) in columns.iter().enumerate() {
+                let val = decode_mysql_value(&row, i);
+                row_values.push(val);
+            }
+            data_rows.push(row_values);
+        }
+
+        Ok(vec![QueryResult {
+            columns,
+            rows: data_rows,
+        }])
+    }
+
+    async fn get_schemas(&self) -> Result<Vec<String>> {
+        let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
+        let rows = sqlx::query("SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')")
+            .fetch_all(pool)
+            .await?;
+
+        let schemas: Vec<String> = rows.iter()
+            .map(|r| r.try_get("schema_name").unwrap_or_default())
+            .collect();
+
+        Ok(schemas)
+    }
+
+    async fn get_tables(&self, schema: &str) -> Result<Vec<TableInfo>> {
+        let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
+        let rows = sqlx::query("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = ?")
+            .bind(schema)
+            .fetch_all(pool)
+            .await?;
+
+        let tables = rows.iter().map(|r| {
+             TableInfo {
+                 name: r.try_get("TABLE_NAME").unwrap_or_default(),
+                 schema: Some(schema.to_string()),
+                 comment: None,
+             }
+        }).collect();
+
+        Ok(tables)
+    }
+
+    async fn get_columns(&self, schema: &str, table: &str) -> Result<Vec<ColumnInfo>> {
+        let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
+        let rows = sqlx::query(
+            r#"
+            SELECT column_name, data_type, is_nullable, column_default
+            FROM information_schema.columns
+            WHERE table_schema = ? AND table_name = ?
+            ORDER BY ordinal_position
+            "#
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_all(pool)
+        .await?;
+
+        let cols = rows.iter().map(|r| {
+             let is_nullable = r.try_get::<String, _>("IS_NULLABLE").unwrap_or("YES".to_string()) == "YES";
+             ColumnInfo {
+                 name: r.try_get("COLUMN_NAME").unwrap_or_default(),
+                 data_type: r.try_get("DATA_TYPE").unwrap_or_default(),
+                 is_nullable,
+                 is_primary_key: false,
+                 default_value: r.try_get("COLUMN_DEFAULT").ok(),
+                 comment: None,
+             }
+        }).collect();
+
+        Ok(cols)
+    }
+}
+
+fn decode_mysql_value(row: &MySqlRow, index: usize) -> serde_json::Value {
+    let col = row.column(index);
+    let type_name = col.type_info().name();
+
+    // Basic mapping for MySQL types
+    // Note: sqlx mysql type names are uppercase usually
+    match type_name {
+        "BOOLEAN" | "BOOL" | "TINYINT" => {
+            // Tinyint(1) is often boolean, but not always.
+             let v: Option<i8> = row.try_get(index).ok();
+             serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+        },
+        "SMALLINT" | "INT" | "INTEGER" | "MEDIUMINT" | "BIGINT" => {
+            let v: Option<i64> = row.try_get(index).ok();
+            serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+        },
+        "FLOAT" | "DOUBLE" | "DECIMAL" => {
+            let v: Option<f64> = row.try_get(index).ok();
+             serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+        },
+        "VARCHAR" | "CHAR" | "TEXT" | "LONGTEXT" | "MEDIUMTEXT" | "TINYTEXT" | "ENUM" => {
+            let v: Option<String> = row.try_get(index).ok();
+             serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+         },
+        "JSON" => {
+             let v: Option<serde_json::Value> = row.try_get(index).ok();
+             v.unwrap_or(serde_json::Value::Null)
+        },
+        _ => {
+             let v: Option<String> = row.try_get(index).ok();
+             serde_json::to_value(v).unwrap_or(serde_json::Value::String(format!("<{}>", type_name)))
+        }
+    }
+}
