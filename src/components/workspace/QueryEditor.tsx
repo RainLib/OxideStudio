@@ -7,11 +7,12 @@ import { Button } from "@/components/ui/button";
 import {
   Play,
   Loader2,
+  Save,
+  Paintbrush,
+  ChevronDown,
   History,
   Star,
-  Save,
   Trash2,
-  Paintbrush,
 } from "lucide-react";
 import {
   Dialog,
@@ -22,8 +23,9 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { useState, useRef, useEffect } from "react";
+import { cn } from "@/lib/utils";
 import { format } from "date-fns";
-import { useState } from "react";
 
 export function QueryEditor() {
   const { tabs, activeTabId, updateTabSql, runTabQuery } = useTabStore();
@@ -33,8 +35,25 @@ export function QueryEditor() {
 
   const [saveName, setSaveName] = useState("");
   const [isSaveOpen, setIsSaveOpen] = useState(false);
+  const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<any>(null);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
+
+  // Close dropdown on click outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        dropdownRef.current &&
+        !dropdownRef.current.contains(event.target as Node)
+      ) {
+        setIsRunDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   const handleRun = () => {
     if (activeConnectionId && activeTab) {
@@ -51,83 +70,60 @@ export function QueryEditor() {
   };
 
   const handleFormat = () => {
-    // Placeholder for formatting
+    if (editorRef.current) {
+      editorRef.current.getAction("editor.action.formatDocument").run();
+    }
   };
 
   if (!activeTab) return null;
 
   return (
-    <div className="flex flex-col h-full bg-[#1e1e1e]">
-      {/* Row 1: Primary Actions */}
-      <div className="h-11 border-b border-[#333] flex items-center px-4 bg-[#252525] gap-2 shrink-0">
+    <div className="relative h-full w-full bg-[#1e1e1e] group">
+      {/* Editor */}
+      <Editor
+        height="100%"
+        defaultLanguage="sql"
+        value={activeTab.sql}
+        onChange={(value) => updateTabSql(activeTab.id, value || "")}
+        onMount={(editor) => (editorRef.current = editor)}
+        theme="vs-dark"
+        options={{
+          minimap: { enabled: false },
+          fontSize: 16, // Slightly larger for "fashionable" look
+          fontFamily: "'JetBrains Mono', 'Fira Code', Consolas, monospace",
+          scrollBeyondLastLine: false,
+          automaticLayout: true,
+          padding: { top: 24, bottom: 24 },
+          lineNumbers: "on",
+          renderLineHighlight: "all",
+          smoothScrolling: true,
+          cursorBlinking: "smooth",
+        }}
+      />
+
+      {/* Floating Action Bar */}
+      <div className="absolute bottom-6 right-6 flex items-center gap-3 z-50">
+        {/* Format Button */}
         <Button
-          onClick={handleRun}
-          disabled={activeTab.isExecuting || !activeConnectionId}
-          size="sm"
-          className="h-7 px-4 bg-orange-600 hover:bg-orange-700 text-white border-none text-[11px] gap-1.5 font-bold rounded"
-        >
-          {activeTab.isExecuting ? (
-            <Loader2 className="animate-spin h-3 w-3" />
-          ) : (
-            <Play size={12} className="fill-white text-white" />
-          )}
-          RUN
-        </Button>
-
-        <Dialog open={isSaveOpen} onOpenChange={setIsSaveOpen}>
-          <DialogTrigger asChild>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 px-3 text-gray-400 hover:text-gray-200 hover:bg-[#333] text-[11px] gap-1.5"
-            >
-              <Save size={12} />
-              Save
-            </Button>
-          </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Save Query</DialogTitle>
-            </DialogHeader>
-            <div className="py-2">
-              <Input
-                placeholder="Query Name..."
-                value={saveName}
-                onChange={(e) => setSaveName(e.target.value)}
-              />
-            </div>
-            <DialogFooter>
-              <Button onClick={handleSave}>Save</Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-
-        <div className="ml-auto text-[10px] text-gray-500 font-medium tracking-tight">
-          Auto Commit
-        </div>
-      </div>
-
-      {/* Row 2: Secondary Iconic Actions */}
-      <div className="h-9 border-b border-[#333] flex items-center px-2 bg-[#252525] gap-1 shrink-0">
-        <Button
-          onClick={handleRun}
           variant="ghost"
-          size="sm"
-          className="h-7 px-2 text-gray-400 hover:text-white hover:bg-[#333] text-[11px] gap-1.5"
-          disabled={activeTab.isExecuting || !activeConnectionId}
+          size="icon"
+          onClick={handleFormat}
+          className="h-9 w-9 bg-black/50 hover:bg-black/80 text-gray-400 hover:text-white backdrop-blur-sm transition-all rounded-full border border-white/10"
+          title="Format Query"
         >
-          <Play size={14} className="fill-gray-400" />
-          Run
+          <Paintbrush size={16} />
         </Button>
 
+        {/* History Dialog & Button */}
         <Dialog>
           <DialogTrigger asChild>
             <Button
               variant="ghost"
-              size="sm"
-              className="h-7 px-2 text-gray-400 hover:text-white hover:bg-[#333] text-[11px] gap-1.5"
+              size="icon"
+              className="h-9 w-9 bg-black/50 hover:bg-black/80 text-gray-400 hover:text-white backdrop-blur-sm transition-all rounded-full border border-white/10"
+              title="Query History"
             >
-              <History size={14} /> History
+              <History size={16} />
             </Button>
           </DialogTrigger>
           <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col bg-[#1e1e1e] border-[#333] text-gray-200">
@@ -156,14 +152,16 @@ export function QueryEditor() {
           </DialogContent>
         </Dialog>
 
+        {/* Saved Queries Dialog & Button */}
         <Dialog>
           <DialogTrigger asChild>
             <Button
               variant="ghost"
-              size="sm"
-              className="h-7 px-2 text-gray-400 hover:text-white hover:bg-[#333] text-[11px] gap-1.5"
+              size="icon"
+              className="h-9 w-9 bg-black/50 hover:bg-black/80 text-gray-400 hover:text-white backdrop-blur-sm transition-all rounded-full border border-white/10"
+              title="Saved Queries"
             >
-              <Star size={14} /> Saved
+              <Star size={16} />
             </Button>
           </DialogTrigger>
           <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col bg-[#1e1e1e] border-[#333] text-gray-200">
@@ -206,50 +204,103 @@ export function QueryEditor() {
           </DialogContent>
         </Dialog>
 
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 px-2 text-gray-400 hover:text-white hover:bg-[#333] text-[11px] gap-1.5"
-          onClick={() => setIsSaveOpen(true)}
+        {/* Save Dialog & Button */}
+        <Dialog open={isSaveOpen} onOpenChange={setIsSaveOpen}>
+          <DialogTrigger asChild>
+            <Button className="h-9 px-4 bg-black/50 hover:bg-black/80 text-white backdrop-blur-sm border border-white/10 font-medium transition-all rounded-md">
+              Save
+            </Button>
+          </DialogTrigger>
+          <DialogContent className="bg-[#1e1e1e] border-[#333] text-gray-200">
+            <DialogHeader>
+              <DialogTitle>Save Query</DialogTitle>
+            </DialogHeader>
+            <div className="py-4">
+              <Input
+                placeholder="Query Name..."
+                value={saveName}
+                onChange={(e) => setSaveName(e.target.value)}
+                className="bg-[#2a2a2a] border-[#444] text-white focus-visible:ring-orange-500"
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                onClick={handleSave}
+                className="bg-orange-600 hover:bg-orange-700 text-white"
+              >
+                Save
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Run Split Button */}
+        <div
+          className="relative flex items-center shadow-lg shadow-orange-900/20"
+          ref={dropdownRef}
         >
-          <Save size={14} /> Save
-        </Button>
+          <Button
+            onClick={handleRun}
+            disabled={activeTab.isExecuting || !activeConnectionId}
+            className={cn(
+              "h-9 px-4 bg-white hover:bg-gray-100 text-black font-bold rounded-l-md rounded-r-none border-r border-gray-200 transition-all flex items-center gap-2",
+              activeTab.isExecuting && "opacity-80 disabled:opacity-80"
+            )}
+          >
+            {activeTab.isExecuting ? (
+              <Loader2 className="animate-spin h-4 w-4 text-orange-600" />
+            ) : (
+              <Play size={16} className="fill-orange-600 text-orange-600" />
+            )}
+            RUN
+          </Button>
+          <Button
+            size="icon"
+            onClick={() => setIsRunDropdownOpen(!isRunDropdownOpen)}
+            disabled={activeTab.isExecuting || !activeConnectionId}
+            className="h-9 w-8 bg-white hover:bg-gray-100 text-gray-600 rounded-l-none rounded-r-md transition-all"
+          >
+            <ChevronDown size={16} />
+          </Button>
 
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 px-2 text-gray-400 hover:text-white hover:bg-[#333] text-[11px] gap-1.5"
-          onClick={handleFormat}
-        >
-          <Paintbrush size={14} /> Format
-        </Button>
-
-        <div className="h-4 w-px bg-[#333] mx-1" />
-
-        <div className="text-[10px] text-gray-500 ml-2">
-          {activeTab.results ? "Results ready" : "No results"}
+          {/* Custom Dropdown Menu */}
+          {isRunDropdownOpen && (
+            <div className="absolute bottom-full right-0 mb-2 w-48 bg-[#252525] border border-[#333] rounded-lg shadow-xl overflow-hidden flex flex-col py-1 animate-in fade-in slide-in-from-bottom-2">
+              <button
+                className="px-4 py-2 text-left text-xs text-gray-300 hover:bg-[#333] flex items-center gap-2 transition-colors"
+                onClick={() => {
+                  handleRun();
+                  setIsRunDropdownOpen(false);
+                }}
+              >
+                <Play size={12} /> Run Selection
+              </button>
+              <button
+                className="px-4 py-2 text-left text-xs text-gray-300 hover:bg-[#333] flex items-center gap-2 transition-colors"
+                onClick={() => {
+                  // Placeholder for explain
+                  setIsRunDropdownOpen(false);
+                }}
+              >
+                <div className="w-3 h-3 rounded-full border border-gray-400 flex items-center justify-center text-[8px]">
+                  ?
+                </div>{" "}
+                Explain Query
+              </button>
+              <div className="h-px bg-[#333] my-1" />
+              <div className="px-4 py-1.5 text-[10px] text-gray-500 font-medium">
+                SHORTCUTS
+              </div>
+              <div className="px-4 py-1 flex justify-between text-[11px] text-gray-400">
+                <span>Run</span> <span className="opacity-50">Ctrl+Enter</span>
+              </div>
+              <div className="px-4 py-1 flex justify-between text-[11px] text-gray-400">
+                <span>Format</span>{" "}
+                <span className="opacity-50">Shift+Alt+F</span>
+              </div>
+            </div>
+          )}
         </div>
-
-        <div className="text-xs text-gray-600 ml-auto mr-4 italic select-none">
-          {activeConnectionId ? "Connected" : "Not connected"}
-        </div>
-      </div>
-
-      {/* Editor */}
-      <div className="flex-1 min-h-0">
-        <Editor
-          height="100%"
-          defaultLanguage="sql"
-          value={activeTab.sql}
-          onChange={(value) => updateTabSql(activeTab.id, value || "")}
-          theme="vs-dark"
-          options={{
-            minimap: { enabled: false },
-            fontSize: 14,
-            scrollBeyondLastLine: false,
-            automaticLayout: true,
-          }}
-        />
       </div>
     </div>
   );
