@@ -14,8 +14,7 @@
             {
                 "title": "OxideStudio",
                 "width": 1200,
-                "height": 800,
-                "hiddenTitle": true
+                "height": 800
             }
         ],
         "security": {

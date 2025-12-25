@@ -1,4 +1,5 @@
 import { ReactNode } from "react";
+import { WindowControls } from "./WindowControls";
 
 interface AppBarProps {
   /**
@@ -18,6 +19,11 @@ interface AppBarProps {
 }
 
 export function AppBar({ center, right, title }: AppBarProps) {
+  // Detect if we're on macOS
+  const isMacOS =
+    typeof window !== "undefined" &&
+    navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+
   return (
     <div
       data-tauri-drag-region
@@ -26,7 +32,9 @@ export function AppBar({ center, right, title }: AppBarProps) {
       {/* Left: Space for macOS traffic lights + Optional Title */}
       <div
         data-tauri-drag-region
-        className="pl-20 pr-4 flex items-center gap-3 shrink-0"
+        className={`pr-4 flex items-center gap-3 shrink-0 ${
+          isMacOS ? "pl-20" : "pl-4"
+        }`}
       >
         {title && (
           <span
@@ -40,17 +48,25 @@ export function AppBar({ center, right, title }: AppBarProps) {
 
       {/* Center: Custom content or draggable spacer */}
       {center ? (
-        <div className="flex-1 min-w-0 flex items-center justify-center px-4">
+        <div
+          data-tauri-drag-region
+          className="flex-1 min-w-0 flex items-center justify-center px-4"
+        >
           {center}
         </div>
       ) : (
         <div data-tauri-drag-region className="flex-1 min-w-0" />
       )}
 
-      {/* Right: Custom content (not draggable) */}
-      {right && (
-        <div className="flex items-center gap-2 pr-3 shrink-0">{right}</div>
-      )}
+      {/* Right: Custom content + Window controls on Windows */}
+      <div data-tauri-drag-region className="flex items-center gap-2 shrink-0">
+        {right && (
+          <div data-tauri-drag-region className="pr-3">
+            {right}
+          </div>
+        )}
+        {!isMacOS && <WindowControls />}
+      </div>
     </div>
   );
 }

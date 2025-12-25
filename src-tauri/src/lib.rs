@@ -25,15 +25,22 @@ async fn connect_db(
     let db_driver: Box<dyn core::driver::DatabaseDriver> = match driver.as_str() {
         "postgres" => Box::new(PostgresDriver::new(&url)),
         "mysql" => Box::new(MysqlDriver::new(&url)),
-        _ => return Ok(Response::err("DRIVER_NOT_SUPPORTED", "Driver not supported")),
+        _ => {
+            return Ok(Response::err(
+                "DRIVER_NOT_SUPPORTED",
+                "Driver not supported",
+            ))
+        }
     };
 
     let mut db_driver = db_driver;
     if let Err(e) = db_driver.connect().await {
-         return Ok(Response::err("CONNECTION_FAILED", &e.to_string()));
+        return Ok(Response::err("CONNECTION_FAILED", &e.to_string()));
     }
 
-    manager.add_connection(connection_id.clone(), db_driver).await;
+    manager
+        .add_connection(connection_id.clone(), db_driver)
+        .await;
     Ok(Response::ok("Connected".to_string()))
 }
 
@@ -113,6 +120,23 @@ pub fn run() {
         .setup(|app| {
             let config_manager = ConfigManager::new(app.handle());
             app.manage(config_manager);
+
+            // Platform-specific window configuration
+            if let Some(window) = app.get_webview_window("main") {
+                #[cfg(target_os = "macos")]
+                {
+                    use tauri::TitleBarStyle;
+                    // On macOS, use overlay style to show traffic lights
+                    let _ = window.set_title_bar_style(TitleBarStyle::Overlay);
+                }
+
+                #[cfg(target_os = "windows")]
+                {
+                    // On Windows, disable decorations for custom title bar
+                    let _ = window.set_decorations(false);
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
