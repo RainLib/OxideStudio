@@ -8,6 +8,8 @@ export interface ConnectionConfig extends SavedConnection {
   user?: string;
   password?: string;
   database?: string;
+  connectionUrl?: string;
+  sslMode?: string;
 }
 
 interface ConnectionState {
@@ -105,17 +107,30 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   connect: async (config) => {
-    // Construct URL with encoded components to handle special characters
-    const user = encodeURIComponent(config.user || "");
-    const password = encodeURIComponent(config.password || "");
-    const host = config.host || "localhost";
-    const port = config.port || (config.driver === "postgres" ? 5432 : 3306);
-    const db = encodeURIComponent(config.database || "");
+    // Use connectionUrl if provided, otherwise build from individual fields
+    let url: string;
 
-    const url =
-      config.driver === "postgres"
-        ? `postgres://${user}:${password}@${host}:${port}/${db}`
-        : `mysql://${user}:${password}@${host}:${port}/${db}`;
+    if (config.connectionUrl && config.connectionUrl.trim()) {
+      // Use the provided connection URL directly
+      url = config.connectionUrl.trim();
+    } else {
+      // Construct URL with encoded components to handle special characters
+      const user = encodeURIComponent(config.user || "");
+      const password = encodeURIComponent(config.password || "");
+      const host = config.host || "localhost";
+      const port = config.port || (config.driver === "postgres" ? 5432 : 3306);
+      const db = encodeURIComponent(config.database || "");
+
+      url =
+        config.driver === "postgres"
+          ? `postgres://${user}:${password}@${host}:${port}/${db}`
+          : `mysql://${user}:${password}@${host}:${port}/${db}`;
+
+      // Add SSL mode if specified
+      if (config.sslMode && config.sslMode !== "disable") {
+        url += `?sslmode=${config.sslMode}`;
+      }
+    }
 
     try {
       const res = await api.connect(config.id, config.driver, url);

@@ -4,9 +4,10 @@ import {
 } from "@/store/useConnectionStore";
 import { Button } from "@/components/ui/button";
 import { AppBar } from "@/components/AppBar";
-import { Save, Play, CheckCircle2, AlertCircle } from "lucide-react";
+import { Save, Play, CheckCircle2, AlertCircle, Link2 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
+import { parseConnectionUrl } from "@/lib/connectionUrlParser";
 
 // Custom Styled Input for the Dark Theme
 function ConfigInput({
@@ -44,6 +45,7 @@ export function ConnectionForm() {
     type: "success" | "error" | "loading";
     msg: string;
   } | null>(null);
+  const [inputMode, setInputMode] = useState<"url" | "fields">("fields");
 
   if (!selectedConnection) {
     return (
@@ -90,10 +92,33 @@ export function ConnectionForm() {
     }
   };
 
+  const handleParseUrl = () => {
+    if (selectedConnection?.connectionUrl) {
+      const parsed = parseConnectionUrl(selectedConnection.connectionUrl);
+      if (parsed) {
+        updateConnectionConfig({
+          driver: parsed.driver,
+          host: parsed.host,
+          port: parsed.port,
+          user: parsed.user,
+          password: parsed.password,
+          database: parsed.database,
+          sslMode: parsed.sslMode,
+        });
+        setTestStatus({ type: "success", msg: "URL parsed successfully!" });
+      } else {
+        setTestStatus({
+          type: "error",
+          msg: "Failed to parse URL. Please check the format.",
+        });
+      }
+    }
+  };
+
   return (
-    <>
+    <div className="flex-1 flex flex-col h-full min-w-0">
       <AppBar title="Connection" />
-      <div className="flex-1 flex flex-col h-full bg-[#131313] text-gray-200 overflow-y-auto">
+      <div className="flex-1 flex flex-col min-h-0 bg-[#131313] text-gray-200 overflow-y-auto">
         {/* Form Header */}
         <div className="px-8 py-6 border-b border-[#222] bg-[#1e1e1e]/50">
           <div className="flex items-center gap-4 mb-4">
@@ -158,49 +183,161 @@ export function ConnectionForm() {
 
         {/* Form Content */}
         <div className="flex-1 p-8 max-w-4xl mx-auto w-full">
+          {/* Toggle Button */}
+          <div className="flex justify-end mb-4">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() =>
+                setInputMode(inputMode === "url" ? "fields" : "url")
+              }
+              className="gap-2 border-[#444] bg-[#252525] text-gray-300 hover:bg-[#333]"
+            >
+              <Link2 size={14} />
+              {inputMode === "url"
+                ? "Use Individual Fields"
+                : "Use Connection URL"}
+            </Button>
+          </div>
+
           <div className="grid gap-6 bg-[#1a1a1a] p-6 rounded-lg border border-[#333] shadow-sm">
-            <div className="grid grid-cols-12 gap-6">
-              <div className="col-span-8">
-                <ConfigInput
-                  label="Host"
-                  value={selectedConnection.host || ""}
-                  onChange={(e) => handleChange("host", e.target.value)}
-                  placeholder="localhost"
-                />
-              </div>
-              <div className="col-span-4">
-                <ConfigInput
-                  label="Port"
-                  type="number"
-                  value={selectedConnection.port || ""}
-                  onChange={(e) =>
-                    handleChange("port", parseInt(e.target.value) || 5432)
-                  }
-                />
-              </div>
-            </div>
+            {inputMode === "url" ? (
+              <>
+                {/* URL Input Mode */}
+                <div className="grid gap-3">
+                  <label className="text-[11px] uppercase tracking-wide font-bold text-gray-500">
+                    Connection URL
+                  </label>
+                  <textarea
+                    className={cn(
+                      "flex w-full rounded border border-[#333] bg-[#1a1a1a] px-3 py-2 text-sm text-gray-200 shadow-sm transition-colors resize-none",
+                      "placeholder:text-gray-600",
+                      "focus-visible:outline-none focus-visible:border-[#f39c12] focus-visible:ring-1 focus-visible:ring-[#f39c12]"
+                    )}
+                    value={selectedConnection.connectionUrl || ""}
+                    onChange={(e) =>
+                      handleChange("connectionUrl", e.target.value)
+                    }
+                    placeholder="postgres://user:password@host:5432/database?sslmode=require"
+                    rows={3}
+                  />
+                  <div className="flex justify-end">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleParseUrl}
+                      disabled={!selectedConnection.connectionUrl}
+                      className="border-[#444] bg-[#252525] text-gray-300 hover:bg-[#333] disabled:opacity-50"
+                    >
+                      Auto-parse URL
+                    </Button>
+                  </div>
+                </div>
 
-            <div className="grid grid-cols-2 gap-6">
-              <ConfigInput
-                label="Username"
-                value={selectedConnection.user || ""}
-                onChange={(e) => handleChange("user", e.target.value)}
-                autoComplete="off"
-              />
-              <ConfigInput
-                label="Password"
-                type="password"
-                value={selectedConnection.password || ""}
-                onChange={(e) => handleChange("password", e.target.value)}
-                autoComplete="off"
-              />
-            </div>
+                {/* Show parsed values as read-only badges if URL is present */}
+                {selectedConnection.connectionUrl &&
+                  selectedConnection.host && (
+                    <div className="grid gap-2 p-4 bg-[#252525] rounded border border-[#333]">
+                      <div className="text-[10px] uppercase tracking-wide font-bold text-gray-500 mb-1">
+                        Parsed Components
+                      </div>
+                      <div className="flex flex-wrap gap-2 text-xs">
+                        {selectedConnection.host && (
+                          <span className="px-2 py-1 bg-[#1a1a1a] rounded border border-[#444] text-gray-400">
+                            Host: {selectedConnection.host}
+                          </span>
+                        )}
+                        {selectedConnection.port && (
+                          <span className="px-2 py-1 bg-[#1a1a1a] rounded border border-[#444] text-gray-400">
+                            Port: {selectedConnection.port}
+                          </span>
+                        )}
+                        {selectedConnection.user && (
+                          <span className="px-2 py-1 bg-[#1a1a1a] rounded border border-[#444] text-gray-400">
+                            User: {selectedConnection.user}
+                          </span>
+                        )}
+                        {selectedConnection.database && (
+                          <span className="px-2 py-1 bg-[#1a1a1a] rounded border border-[#444] text-gray-400">
+                            Database: {selectedConnection.database}
+                          </span>
+                        )}
+                        {selectedConnection.sslMode && (
+                          <span className="px-2 py-1 bg-green-500/10 rounded border border-green-500/30 text-green-400">
+                            SSL: {selectedConnection.sslMode}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+              </>
+            ) : (
+              <>
+                {/* Individual Fields Mode */}
+                <div className="grid grid-cols-12 gap-6">
+                  <div className="col-span-8">
+                    <ConfigInput
+                      label="Host"
+                      value={selectedConnection.host || ""}
+                      onChange={(e) => handleChange("host", e.target.value)}
+                      placeholder="localhost"
+                    />
+                  </div>
+                  <div className="col-span-4">
+                    <ConfigInput
+                      label="Port"
+                      type="number"
+                      value={selectedConnection.port || ""}
+                      onChange={(e) =>
+                        handleChange("port", parseInt(e.target.value) || 5432)
+                      }
+                    />
+                  </div>
+                </div>
 
-            <ConfigInput
-              label="Default Database"
-              value={selectedConnection.database || ""}
-              onChange={(e) => handleChange("database", e.target.value)}
-            />
+                <div className="grid grid-cols-2 gap-6">
+                  <ConfigInput
+                    label="Username"
+                    value={selectedConnection.user || ""}
+                    onChange={(e) => handleChange("user", e.target.value)}
+                    autoComplete="off"
+                  />
+                  <ConfigInput
+                    label="Password"
+                    type="password"
+                    value={selectedConnection.password || ""}
+                    onChange={(e) => handleChange("password", e.target.value)}
+                    autoComplete="off"
+                  />
+                </div>
+
+                <ConfigInput
+                  label="Default Database"
+                  value={selectedConnection.database || ""}
+                  onChange={(e) => handleChange("database", e.target.value)}
+                />
+
+                {/* SSL Mode Dropdown */}
+                <div className="grid gap-1.5">
+                  <label className="text-[11px] uppercase tracking-wide font-bold text-gray-500">
+                    SSL Mode
+                  </label>
+                  <select
+                    className={cn(
+                      "flex h-9 w-full rounded border border-[#333] bg-[#1a1a1a] px-3 py-1 text-sm text-gray-200 shadow-sm transition-colors",
+                      "focus-visible:outline-none focus-visible:border-[#f39c12] focus-visible:ring-1 focus-visible:ring-[#f39c12]"
+                    )}
+                    value={selectedConnection.sslMode || "disable"}
+                    onChange={(e) => handleChange("sslMode", e.target.value)}
+                  >
+                    <option value="disable">Disable</option>
+                    <option value="require">Require</option>
+                    <option value="verify-ca">Verify CA</option>
+                    <option value="verify-full">Verify Full</option>
+                  </select>
+                </div>
+              </>
+            )}
           </div>
 
           {/* Status Message */}
@@ -246,6 +383,6 @@ export function ConnectionForm() {
           </Button>
         </div>
       </div>
-    </>
+    </div>
   );
 }
