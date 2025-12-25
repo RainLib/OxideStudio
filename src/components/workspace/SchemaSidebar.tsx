@@ -40,7 +40,7 @@ export function SchemaSidebar() {
     }
   }, [activeConnectionId, currentSchema, loadTables]);
 
-  const { createTab, runTabQuery } = useTabStore();
+  const { createTab, runTabQuery, updateTabSql } = useTabStore();
 
   const handleSchemaClick = (schema: string) => {
     if (currentSchema === schema) {
@@ -52,9 +52,19 @@ export function SchemaSidebar() {
 
   const handleTableClick = (tableName: string) => {
     selectTable(tableName);
-    const sql = `SELECT * FROM ${tableName} LIMIT 100;`;
-    const tabId = createTab("query", tableName, sql);
+    if (!currentSchema) return;
+
+    // Open a dedicated table tab
+    const tabId = createTab("table", tableName, "", {
+      tableName,
+      schemaName: currentSchema,
+    });
+
     if (activeConnectionId) {
+      // For table tabs, we'll need a way to fetch the initial data
+      // For now, we'll use a SELECT query, but we could optimize this later
+      const sql = `SELECT * FROM "${currentSchema}"."${tableName}" LIMIT 100;`;
+      updateTabSql(tabId, sql);
       runTabQuery(tabId, activeConnectionId);
     }
   };

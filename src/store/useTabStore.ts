@@ -11,6 +11,9 @@ export interface TabData {
   title: string;
   type: TabType;
   sql: string;
+  tableName?: string;
+  schemaName?: string;
+  filters?: any[];
   results: QueryResult[] | null;
   isExecuting: boolean;
   error: string | null;
@@ -20,7 +23,12 @@ interface TabState {
   tabs: TabData[];
   activeTabId: string | null;
 
-  createTab: (type?: TabType, title?: string, initialSql?: string) => string;
+  createTab: (
+    type?: TabType,
+    title?: string,
+    initialSql?: string,
+    metadata?: Partial<Pick<TabData, "tableName" | "schemaName" | "filters">>
+  ) => string;
   closeTab: (id: string) => void;
   setActiveTab: (id: string) => void;
   updateTabSql: (id: string, sql: string) => void;
@@ -31,7 +39,12 @@ export const useTabStore = create<TabState>((set, get) => ({
   tabs: [],
   activeTabId: null,
 
-  createTab: (type = "query", title = "New Query", initialSql = "") => {
+  createTab: (
+    type = "query",
+    title = "New Query",
+    initialSql = "",
+    metadata = {}
+  ) => {
     const newTab: TabData = {
       id: uuidv4(),
       title,
@@ -40,6 +53,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       results: null,
       isExecuting: false,
       error: null,
+      ...metadata,
     };
 
     set((state) => ({
