@@ -15,7 +15,6 @@
                 "title": "OxideStudio",
                 "width": 1200,
                 "height": 800,
-                "titleBarStyle": "overlay",
                 "hiddenTitle": true
             }
         ],
