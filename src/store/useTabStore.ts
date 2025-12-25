@@ -20,7 +20,7 @@ interface TabState {
   tabs: TabData[];
   activeTabId: string | null;
 
-  createTab: (type?: TabType, title?: string, initialSql?: string) => void;
+  createTab: (type?: TabType, title?: string, initialSql?: string) => string;
   closeTab: (id: string) => void;
   setActiveTab: (id: string) => void;
   updateTabSql: (id: string, sql: string) => void;
@@ -46,6 +46,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       tabs: [...state.tabs, newTab],
       activeTabId: newTab.id,
     }));
+    return newTab.id;
   },
 
   closeTab: (id: string) => {
@@ -56,7 +57,9 @@ export const useTabStore = create<TabState>((set, get) => ({
       // If closing active tab, switch to another
       if (id === state.activeTabId) {
         newActiveId =
-          newTabs.length > 0 ? newTabs[newTabs.length - 1].id : null;
+          newTabs.length > 0 && newTabs[newTabs.length - 1]
+            ? newTabs[newTabs.length - 1].id
+            : null;
       }
 
       return { tabs: newTabs, activeTabId: newActiveId };

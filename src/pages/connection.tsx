@@ -12,11 +12,15 @@ export function ConnectionPage() {
   }, [loadConnections]);
 
   if (isLoading) {
-      return <div className="h-screen w-full flex items-center justify-center"><Loader2 className="animate-spin" /></div>
+    return (
+      <div className="h-screen w-full flex items-center justify-center">
+        <Loader2 className="animate-spin" />
+      </div>
+    );
   }
 
   return (
-    <div className="flex h-screen w-full bg-background text-foreground overflow-hidden">
+    <div className="flex h-screen w-full bg-[#131313] text-gray-200 overflow-hidden">
       <ConnectionSidebar />
       <ConnectionForm />
     </div>

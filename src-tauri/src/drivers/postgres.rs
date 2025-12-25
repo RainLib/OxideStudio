@@ -65,16 +65,18 @@ impl DatabaseDriver for PostgresDriver {
         let rows = sqlx::query(sql).fetch_all(pool).await?;
 
         if rows.is_empty() {
-             return Ok(vec![]);
+            return Ok(vec![]);
         }
 
         let first_row = &rows[0];
-        let columns: Vec<ColumnDef> = first_row.columns().iter().map(|c| {
-            ColumnDef {
+        let columns: Vec<ColumnDef> = first_row
+            .columns()
+            .iter()
+            .map(|c| ColumnDef {
                 name: c.name().to_string(),
                 data_type: c.type_info().name().to_string(),
-            }
-        }).collect();
+            })
+            .collect();
 
         let mut data_rows = Vec::new();
         for row in rows {
@@ -112,8 +114,9 @@ impl DatabaseDriver for PostgresDriver {
             .fetch_all(pool)
             .await?;
 
-        let schemas: Vec<String> = rows.iter()
-            .map(|r| r.try_get("schema_name").unwrap_or_default())
+        let schemas: Vec<String> = rows
+            .iter()
+            .map(|r| r.try_get(0).unwrap_or_default())
             .collect();
 
         Ok(schemas)
@@ -121,18 +124,23 @@ impl DatabaseDriver for PostgresDriver {
 
     async fn get_tables(&self, schema: &str) -> Result<Vec<TableInfo>> {
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
-        let rows = sqlx::query("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1")
-            .bind(schema)
-            .fetch_all(pool)
-            .await?;
+        let rows = sqlx::query(
+            "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1",
+        )
+        .bind(schema)
+        .fetch_all(pool)
+        .await?;
 
-        let tables = rows.iter().map(|r| {
-             TableInfo {
-                 name: r.try_get("table_name").unwrap_or_default(),
-                 schema: Some(schema.to_string()),
-                 comment: None, // Need join with pg_description for comments, skipped for MVP
-             }
-        }).collect();
+        let tables = rows
+            .iter()
+            .map(|r| {
+                TableInfo {
+                    name: r.try_get(0).unwrap_or_default(),
+                    schema: Some(schema.to_string()),
+                    comment: None, // Need join with pg_description for comments, skipped for MVP
+                }
+            })
+            .collect();
 
         Ok(tables)
     }
@@ -145,31 +153,36 @@ impl DatabaseDriver for PostgresDriver {
             FROM information_schema.columns
             WHERE table_schema = $1 AND table_name = $2
             ORDER BY ordinal_position
-            "#
+            "#,
         )
         .bind(schema)
         .bind(table)
         .fetch_all(pool)
         .await?;
 
-        let cols = rows.iter().map(|r| {
-             let is_nullable = r.try_get::<String, _>("is_nullable").unwrap_or("YES".to_string()) == "YES";
-             ColumnInfo {
-                 name: r.try_get("column_name").unwrap_or_default(),
-                 data_type: r.try_get("data_type").unwrap_or_default(),
-                 is_nullable,
-                 is_primary_key: false, // Need separate query for constraints
-                 default_value: r.try_get("column_default").ok(),
-                 comment: None,
-             }
-        }).collect();
+        let cols = rows
+            .iter()
+            .map(|r| {
+                let is_nullable = r
+                    .try_get::<String, _>("is_nullable")
+                    .unwrap_or("YES".to_string())
+                    == "YES";
+                ColumnInfo {
+                    name: r.try_get("column_name").unwrap_or_default(),
+                    data_type: r.try_get("data_type").unwrap_or_default(),
+                    is_nullable,
+                    is_primary_key: false, // Need separate query for constraints
+                    default_value: r.try_get("column_default").ok(),
+                    comment: None,
+                }
+            })
+            .collect();
 
         Ok(cols)
     }
 }
 
 fn decode_pg_value(row: &PgRow, index: usize) -> serde_json::Value {
-
     let col = row.column(index);
     let type_name = col.type_info().name();
 
@@ -178,29 +191,51 @@ fn decode_pg_value(row: &PgRow, index: usize) -> serde_json::Value {
         "BOOL" | "bool" => {
             let v: Option<bool> = row.try_get(index).ok();
             serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
-        },
+        }
         "INT2" | "INT4" | "INT8" | "int2" | "int4" | "int8" => {
             let v: Option<i64> = row.try_get(index).ok();
             serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
-        },
+        }
         "FLOAT4" | "FLOAT8" | "float4" | "float8" | "NUMERIC" | "numeric" => {
             let v: Option<f64> = row.try_get(index).ok();
-             serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
-        },
+            serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+        }
         "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "text" | "varchar" | "char" => {
             let v: Option<String> = row.try_get(index).ok();
-             serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
-        },
+            serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+        }
         "JSON" | "JSONB" | "json" | "jsonb" => {
-             let v: Option<serde_json::Value> = row.try_get(index).ok();
-             v.unwrap_or(serde_json::Value::Null)
-        },
+            let v: Option<serde_json::Value> = row.try_get(index).ok();
+            v.unwrap_or(serde_json::Value::Null)
+        }
         _ => {
             // Fallback to string representation for dates, uuid, unknown types
-             // sqlx doesn't always perform automatic toString for unknown types.
-             // We often try to get as String.
-             let v: Option<String> = row.try_get(index).ok();
-             serde_json::to_value(v).unwrap_or(serde_json::Value::String(format!("<{}>", type_name)))
+            // sqlx doesn't always perform automatic toString for unknown types.
+            // We often try to get as String.
+            let v: Option<String> = row.try_get(index).ok();
+            serde_json::to_value(v).unwrap_or(serde_json::Value::String(format!("<{}>", type_name)))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dotenvy::dotenv;
+    use std::env;
+
+    #[tokio::test]
+    async fn test_get_schemas() {
+        dotenv().ok();
+        let database_url = env::var("TEST_POSTGRES_URL").expect("TEST_POSTGRES_URL must be set");
+        
+        let mut driver = PostgresDriver::new(&database_url);
+        driver.connect().await.expect("Failed to connect");
+        
+        let schemas = driver.get_schemas().await.expect("Failed to get schemas");
+        println!("Schemas: {:?}", schemas);
+        assert!(!schemas.is_empty());
+        
+        driver.disconnect().await.expect("Failed to disconnect");
     }
 }

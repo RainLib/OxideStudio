@@ -6,49 +6,94 @@ interface SchemaState {
   schemas: string[];
   tables: TableInfo[];
   currentSchema: string | null;
+  defaultSchema: string | null; // User's preferred default
   selectedTable: string | null;
   isLoading: boolean;
 
   loadSchemas: (connectionId: string) => Promise<void>;
   loadTables: (connectionId: string, schema: string) => Promise<void>;
   setCurrentSchema: (schema: string) => void;
+  setDefaultSchema: (schema: string) => void; // Persist user's choice
   selectTable: (table: string | null) => void;
 }
+
+const STORAGE_KEY = "oxide-studio-default-schema";
 
 export const useSchemaStore = create<SchemaState>((set, get) => ({
   schemas: [],
   tables: [],
   currentSchema: null,
+  defaultSchema: localStorage.getItem(STORAGE_KEY),
   selectedTable: null,
   isLoading: false,
 
   loadSchemas: async (connectionId: string) => {
+    console.log("Store: loadSchemas called with connectionId:", connectionId);
     set({ isLoading: true });
     const res = await api.getSchemas(connectionId);
+    console.log("Store: loadSchemas API response:", res);
     if (res.success && res.data) {
-        // Default to 'public' or first schema if available
-        const defaultSchema = res.data.includes("public") ? "public" : res.data[0];
-        set({ schemas: res.data, currentSchema: defaultSchema, isLoading: false });
+      const { defaultSchema: savedDefault } = get();
+      // Priority: 1. Saved default (if available), 2. 'public', 3. First schema
+      let schemaToSelect = res.data[0];
+
+      if (savedDefault && res.data.includes(savedDefault)) {
+        schemaToSelect = savedDefault;
+      } else if (res.data.includes("public")) {
+        schemaToSelect = "public";
+      }
+
+      console.log(
+        "Store: loadSchemas - Setting currentSchema to:",
+        schemaToSelect,
+        "from",
+        res.data.length,
+        "schemas"
+      );
+      set({
+        schemas: res.data,
+        currentSchema: schemaToSelect,
+        isLoading: false,
+      });
+      console.log(
+        "Store: loadSchemas - State updated. currentSchema is now:",
+        schemaToSelect
+      );
     } else {
-        set({ schemas: [], isLoading: false });
+      console.warn("Store: loadSchemas failed or empty", res);
+      set({ schemas: [], isLoading: false });
     }
   },
 
   loadTables: async (connectionId: string, schema: string) => {
-      set({ isLoading: true });
-      const res = await api.getTables(connectionId, schema);
-      if (res.success && res.data) {
-          set({ tables: res.data, isLoading: false });
-      } else {
-          set({ tables: [], isLoading: false });
-      }
+    console.log("Store: loadTables called", { connectionId, schema });
+    set({ isLoading: true });
+    const res = await api.getTables(connectionId, schema);
+    console.log("Store: loadTables result", res);
+    if (res.success && res.data) {
+      console.log("Store: loadTables updating state", {
+        count: res.data.length,
+        tables: res.data,
+      });
+      set({ tables: res.data, isLoading: false });
+    } else {
+      console.warn("Store: loadTables failed or empty", res);
+      set({ tables: [], isLoading: false });
+    }
   },
 
   setCurrentSchema: (schema: string) => {
-      set({ currentSchema: schema });
+    set({ currentSchema: schema });
+  },
+
+  setDefaultSchema: (schema: string) => {
+    console.log("Store: setDefaultSchema called with:", schema);
+    localStorage.setItem(STORAGE_KEY, schema);
+    set({ defaultSchema: schema, currentSchema: schema });
+    console.log("Store: setDefaultSchema - currentSchema updated to:", schema);
   },
 
   selectTable: (table: string | null) => {
-      set({ selectedTable: table });
-  }
+    set({ selectedTable: table });
+  },
 }));

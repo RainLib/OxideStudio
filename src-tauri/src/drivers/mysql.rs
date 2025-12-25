@@ -3,7 +3,7 @@ use crate::core::protocol::{ColumnDef, ColumnInfo, QueryResult, TableInfo};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlRow};
-use sqlx::{Column, ConnectOptions, Pool, MySql, Row, TypeInfo};
+use sqlx::{Column, ConnectOptions, MySql, Pool, Row, TypeInfo};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -60,16 +60,18 @@ impl DatabaseDriver for MysqlDriver {
         let rows = sqlx::query(sql).fetch_all(pool).await?;
 
         if rows.is_empty() {
-             return Ok(vec![]);
+            return Ok(vec![]);
         }
 
         let first_row = &rows[0];
-        let columns: Vec<ColumnDef> = first_row.columns().iter().map(|c| {
-            ColumnDef {
+        let columns: Vec<ColumnDef> = first_row
+            .columns()
+            .iter()
+            .map(|c| ColumnDef {
                 name: c.name().to_string(),
                 data_type: c.type_info().name().to_string(),
-            }
-        }).collect();
+            })
+            .collect();
 
         let mut data_rows = Vec::new();
         for row in rows {
@@ -89,12 +91,23 @@ impl DatabaseDriver for MysqlDriver {
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
-        let rows = sqlx::query("SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')")
-            .fetch_all(pool)
-            .await?;
+        let rows = sqlx::query("SHOW DATABASES").fetch_all(pool).await?;
 
-        let schemas: Vec<String> = rows.iter()
-            .map(|r| r.try_get("schema_name").unwrap_or_default())
+        let schemas: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                // Try to get as String first, then as Vec<u8> (VARBINARY)
+                if let Ok(name) = r.try_get::<String, _>(0) {
+                    name
+                } else if let Ok(bytes) = r.try_get::<Vec<u8>, _>(0) {
+                    String::from_utf8_lossy(&bytes).to_string()
+                } else {
+                    // Fallback or panic with clear error
+                    eprintln!("Failed to decode schema name for row: {:?}", r);
+                    "".to_string()
+                }
+            })
+            .filter(|s| !s.is_empty())
             .collect();
 
         Ok(schemas)
@@ -102,18 +115,33 @@ impl DatabaseDriver for MysqlDriver {
 
     async fn get_tables(&self, schema: &str) -> Result<Vec<TableInfo>> {
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
-        let rows = sqlx::query("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = ?")
-            .bind(schema)
-            .fetch_all(pool)
-            .await?;
+        let rows = sqlx::query(
+            "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = ?",
+        )
+        .bind(schema)
+        .fetch_all(pool)
+        .await?;
 
-        let tables = rows.iter().map(|r| {
-             TableInfo {
-                 name: r.try_get("TABLE_NAME").unwrap_or_default(),
-                 schema: Some(schema.to_string()),
-                 comment: None,
-             }
-        }).collect();
+        let tables = rows
+            .iter()
+            .map(|r| {
+                // Handle VARBINARY type like we did for schemas
+                let name = if let Ok(name) = r.try_get::<String, _>(0) {
+                    name
+                } else if let Ok(bytes) = r.try_get::<Vec<u8>, _>(0) {
+                    String::from_utf8_lossy(&bytes).to_string()
+                } else {
+                    "".to_string()
+                };
+
+                TableInfo {
+                    name,
+                    schema: Some(schema.to_string()),
+                    comment: None,
+                }
+            })
+            .filter(|t| !t.name.is_empty())
+            .collect();
 
         Ok(tables)
     }
@@ -126,24 +154,30 @@ impl DatabaseDriver for MysqlDriver {
             FROM information_schema.columns
             WHERE table_schema = ? AND table_name = ?
             ORDER BY ordinal_position
-            "#
+            "#,
         )
         .bind(schema)
         .bind(table)
         .fetch_all(pool)
         .await?;
 
-        let cols = rows.iter().map(|r| {
-             let is_nullable = r.try_get::<String, _>("IS_NULLABLE").unwrap_or("YES".to_string()) == "YES";
-             ColumnInfo {
-                 name: r.try_get("COLUMN_NAME").unwrap_or_default(),
-                 data_type: r.try_get("DATA_TYPE").unwrap_or_default(),
-                 is_nullable,
-                 is_primary_key: false,
-                 default_value: r.try_get("COLUMN_DEFAULT").ok(),
-                 comment: None,
-             }
-        }).collect();
+        let cols = rows
+            .iter()
+            .map(|r| {
+                let is_nullable = r
+                    .try_get::<String, _>("IS_NULLABLE")
+                    .unwrap_or("YES".to_string())
+                    == "YES";
+                ColumnInfo {
+                    name: r.try_get("COLUMN_NAME").unwrap_or_default(),
+                    data_type: r.try_get("DATA_TYPE").unwrap_or_default(),
+                    is_nullable,
+                    is_primary_key: false,
+                    default_value: r.try_get("COLUMN_DEFAULT").ok(),
+                    comment: None,
+                }
+            })
+            .collect();
 
         Ok(cols)
     }
@@ -158,28 +192,50 @@ fn decode_mysql_value(row: &MySqlRow, index: usize) -> serde_json::Value {
     match type_name {
         "BOOLEAN" | "BOOL" | "TINYINT" => {
             // Tinyint(1) is often boolean, but not always.
-             let v: Option<i8> = row.try_get(index).ok();
-             serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
-        },
+            let v: Option<i8> = row.try_get(index).ok();
+            serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+        }
         "SMALLINT" | "INT" | "INTEGER" | "MEDIUMINT" | "BIGINT" => {
             let v: Option<i64> = row.try_get(index).ok();
             serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
-        },
+        }
         "FLOAT" | "DOUBLE" | "DECIMAL" => {
             let v: Option<f64> = row.try_get(index).ok();
-             serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
-        },
+            serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+        }
         "VARCHAR" | "CHAR" | "TEXT" | "LONGTEXT" | "MEDIUMTEXT" | "TINYTEXT" | "ENUM" => {
             let v: Option<String> = row.try_get(index).ok();
-             serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
-         },
-        "JSON" => {
-             let v: Option<serde_json::Value> = row.try_get(index).ok();
-             v.unwrap_or(serde_json::Value::Null)
-        },
-        _ => {
-             let v: Option<String> = row.try_get(index).ok();
-             serde_json::to_value(v).unwrap_or(serde_json::Value::String(format!("<{}>", type_name)))
+            serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
         }
+        "JSON" => {
+            let v: Option<serde_json::Value> = row.try_get(index).ok();
+            v.unwrap_or(serde_json::Value::Null)
+        }
+        _ => {
+            let v: Option<String> = row.try_get(index).ok();
+            serde_json::to_value(v).unwrap_or(serde_json::Value::String(format!("<{}>", type_name)))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dotenvy::dotenv;
+    use std::env;
+
+    #[tokio::test]
+    async fn test_get_schemas() {
+        dotenv().ok();
+        let database_url = env::var("TEST_MYSQL_URL").expect("TEST_MYSQL_URL must be set");
+
+        let mut driver = MysqlDriver::new(&database_url);
+        driver.connect().await.expect("Failed to connect");
+
+        let schemas = driver.get_schemas().await.expect("Failed to get schemas");
+        println!("Schemas: {:?}", schemas);
+        assert!(!schemas.is_empty());
+
+        driver.disconnect().await.expect("Failed to disconnect");
     }
 }
