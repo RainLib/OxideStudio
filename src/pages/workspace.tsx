@@ -1,18 +1,18 @@
 import { useRef, useState } from "react";
-import { Sidebar } from "./Sidebar";
-import { TabBar } from "./TabBar";
-import { QueryEditor } from "./QueryEditor";
-import { DataGrid } from "./DataGrid";
-import { EditorStatusBar } from "./EditorStatusBar";
-import { ActivityBar, SidebarTab } from "./ActivityBar";
-import { AppBar } from "../AppBar";
+import { Sidebar } from "@/components/workspace/Sidebar";
+import { TabBar } from "@/components/workspace/TabBar";
+import { QueryEditor } from "@/components/workspace/QueryEditor";
+import { DataGrid } from "@/components/workspace/DataGrid";
+import { EditorStatusBar } from "@/components/workspace/EditorStatusBar";
+import { ActivityBar, SidebarTab } from "@/components/workspace/ActivityBar";
+import { AppBar } from "@/components/AppBar";
 import { useTabStore } from "@/store/useTabStore";
 import {
   ResizableHandle,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { Panel } from "react-resizable-panels";
-import { Button } from "../ui/button";
+import { Button } from "@/components/ui/button";
 import {
   Play,
   Save,

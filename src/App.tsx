@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { ConnectionPage } from "@/pages/connection";
-import { Workspace } from "@/components/workspace/Workspace";
+import { Workspace } from "@/pages/workspace";
 import { Loader2 } from "lucide-react";
 
 function App() {
@@ -12,16 +12,16 @@ function App() {
   }, [loadConnections]);
 
   if (isLoading) {
-      return (
-        <div className="h-screen w-full flex items-center justify-center bg-background text-foreground">
-             <Loader2 className="animate-spin mr-2" /> Loading...
-        </div>
-      )
+    return (
+      <div className="h-screen w-full flex items-center justify-center bg-background text-foreground">
+        <Loader2 className="animate-spin mr-2" /> Loading...
+      </div>
+    );
   }
 
   return (
     <div className="bg-background text-foreground h-screen w-screen overflow-hidden">
-        {isConnected ? <Workspace /> : <ConnectionPage />}
+      {isConnected ? <Workspace /> : <ConnectionPage />}
     </div>
   );
 }
