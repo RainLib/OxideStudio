@@ -152,12 +152,16 @@ export function Workspace() {
                 <div className="flex-1 min-h-0 relative">
                   <ResizablePanelGroup
                     direction="vertical"
-                    className="flex-col"
+                    className="!flex-col"
+                    style={{ flexDirection: "column" }}
                   >
                     <ResizablePanel defaultSize={50} minSize={20}>
                       <QueryEditor />
                     </ResizablePanel>
-                    <ResizableHandle className="h-1 bg-[#333] hover:bg-orange-500 transition-colors z-50" />
+                    <ResizableHandle
+                      withHandle
+                      className="h-1.5 w-full bg-[#333] hover:bg-orange-500 transition-colors z-50 cursor-row-resize"
+                    />
                     <ResizablePanel defaultSize={50} minSize={20}>
                       {currentResult ? <DataGrid /> : <QueryShortcuts />}
                     </ResizablePanel>

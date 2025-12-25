@@ -11,17 +11,24 @@ const ResizablePanelGroup = ({
   className,
   direction,
   ...props
-}: React.ComponentProps<typeof PanelGroup>) => (
-  <PanelGroup
-    direction={direction}
-    className={cn(
-      "flex h-full w-full",
-      direction === "vertical" ? "flex-col" : "flex-row",
-      className
-    )}
-    {...props}
-  />
-);
+}: React.ComponentProps<typeof PanelGroup> & {
+  direction?: "horizontal" | "vertical";
+}) => {
+  // @ts-ignore - PanelGroup types might be missing direction in some versions
+  return (
+    <PanelGroup
+      direction={direction}
+      data-panel-group-direction={direction}
+      className={cn(
+        "flex h-full w-full",
+        direction === "vertical" ? "flex-col" : "flex-row",
+        className
+      )}
+      style={{ flexDirection: direction === "vertical" ? "column" : "row" }}
+      {...props}
+    />
+  );
+};
 
 const ResizablePanel = Panel;
 
