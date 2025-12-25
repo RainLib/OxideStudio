@@ -38,83 +38,87 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   loadConnections: async () => {
     const res = await api.loadConnections();
     if (res.success && res.data) {
-        // If we have connections, select the first one or none? Beekeeper usually selects new.
-       set({ connections: res.data, isLoading: false });
+      // If we have connections, select the first one or none? Beekeeper usually selects new.
+      set({ connections: res.data, isLoading: false });
     } else {
       set({ isLoading: false });
     }
   },
 
   selectConnection: (id: string | null) => {
-      if (!id) {
-          set({ selectedConnection: null });
-          return;
-      }
-      const conn = get().connections.find(c => c.id === id);
-      if (conn) {
-          set({ selectedConnection: { ...conn } }); // Clone to avoid direct mutation
-      }
+    if (!id) {
+      set({ selectedConnection: null });
+      return;
+    }
+    const conn = get().connections.find((c) => c.id === id);
+    if (conn) {
+      set({ selectedConnection: { ...conn } }); // Clone to avoid direct mutation
+    }
   },
 
   createNewConnection: () => {
-      set({
-          selectedConnection: {
-              id: uuidv4(),
-              name: "New Connection",
-              driver: "postgres",
-              url: "",
-              host: "localhost",
-              port: 5432,
-              user: "",
-              password: "",
-              database: "postgres"
-          }
-      });
+    set({
+      selectedConnection: {
+        id: uuidv4(),
+        name: "New Connection",
+        driver: "postgres",
+        url: "",
+        host: "localhost",
+        port: 5432,
+        user: "",
+        password: "",
+        database: "postgres",
+      },
+    });
   },
 
   updateConnectionConfig: (updates) => {
-      const current = get().selectedConnection;
-      if (current) {
-          set({ selectedConnection: { ...current, ...updates } });
-      }
+    const current = get().selectedConnection;
+    if (current) {
+      set({ selectedConnection: { ...current, ...updates } });
+    }
   },
 
   saveConnection: async (config) => {
-      const connections = get().connections;
-      const existingIndex = connections.findIndex(c => c.id === config.id);
+    const connections = get().connections;
+    const existingIndex = connections.findIndex((c) => c.id === config.id);
 
-      let updatedConnections;
-      if (existingIndex >= 0) {
-          updatedConnections = [...connections];
-          updatedConnections[existingIndex] = config;
-      } else {
-          updatedConnections = [...connections, config];
-      }
+    let updatedConnections;
+    if (existingIndex >= 0) {
+      updatedConnections = [...connections];
+      updatedConnections[existingIndex] = config;
+    } else {
+      updatedConnections = [...connections, config];
+    }
 
-      // Optimistic update
-      set({ connections: updatedConnections, selectedConnection: config });
+    // Optimistic update
+    set({ connections: updatedConnections, selectedConnection: config });
 
-      // Save to backend
-      await api.saveConnections(updatedConnections);
+    // Save to backend
+    await api.saveConnections(updatedConnections);
   },
 
   // Deprecated simplified add
   addConnection: async (config) => {
-      const newConn = { ...config, id: uuidv4() };
-      await get().saveConnection(newConn);
+    const newConn = { ...config, id: uuidv4() };
+    await get().saveConnection(newConn);
   },
 
   connect: async (config) => {
-    // Construct URL if missing
-    let url = config.url;
-    if (!url && config.host) {
-        // Very basic URL construction
-        const protocol = config.driver === "postgres" ? "postgresql" : "mysql";
-        url = `${protocol}://${config.user}:${config.password}@${config.host}:${config.port}/${config.database}`;
-    }
+    // Construct URL with encoded components to handle special characters
+    const user = encodeURIComponent(config.user || "");
+    const password = encodeURIComponent(config.password || "");
+    const host = config.host || "localhost";
+    const port = config.port || (config.driver === "postgres" ? 5432 : 3306);
+    const db = encodeURIComponent(config.database || "");
+
+    const url =
+      config.driver === "postgres"
+        ? `postgres://${user}:${password}@${host}:${port}/${db}`
+        : `mysql://${user}:${password}@${host}:${port}/${db}`;
 
     try {
-      const res = await api.connect(config.id, config.driver, url || "");
+      const res = await api.connect(config.id, config.driver, url);
 
       if (res.success) {
         set({ activeConnectionId: config.id, isConnected: true });
