@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   DataEditor,
   GridCell,
@@ -7,6 +7,8 @@ import {
   Theme,
   GridCellKind,
   EditableGridCell,
+  GridSelection,
+  CompactSelection,
 } from "@glideapps/glide-data-grid";
 import "@glideapps/glide-data-grid/dist/index.css";
 import { useTabStore } from "@/store/useTabStore";
@@ -31,6 +33,7 @@ export function DataGrid({
     setCellEdit,
     commitEdits,
     cancelEdits,
+    setColumnWidth,
   } = useTabStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
@@ -39,6 +42,13 @@ export function DataGrid({
   const gridState = activeTab?.gridState;
   const pendingEdits = activeTab?.pendingEdits || new Map();
   const hasEdits = pendingEdits.size > 0;
+  const columnWidths = activeTab?.columnWidths || {};
+
+  // Row selection state
+  const [gridSelection, setGridSelection] = useState<GridSelection>({
+    columns: CompactSelection.empty(),
+    rows: CompactSelection.empty(),
+  });
 
   // Apply filters and sorting
   const { filteredRows, sortedIndices } = useMemo(() => {
@@ -113,16 +123,17 @@ export function DataGrid({
     };
   }, [result, gridState, globalFilter, columnFilters]);
 
-  // Column definitions with sorting indicators
+  // Column definitions with custom widths and sorting indicators
   const columns = useMemo<GridColumn[]>(() => {
     if (!result) return [];
     return result.columns.map((col) => {
       const isSorted = gridState?.sortColumn === col.name;
       const sortDir = gridState?.sortDirection;
+      const customWidth = columnWidths[col.name];
       return {
         title: col.name,
         id: col.name,
-        width: 150,
+        width: customWidth || 150, // Use custom width or default
         icon: isSorted
           ? sortDir === "asc"
             ? ("headerRowID" as any)
@@ -131,7 +142,7 @@ export function DataGrid({
         hasMenu: false,
       };
     });
-  }, [result, gridState]);
+  }, [result, gridState, columnWidths]);
 
   // Cell content with type styling and edit support
   const getCellContent = useCallback(
@@ -204,6 +215,15 @@ export function DataGrid({
       setCellEdit(activeTab.id, actualRowIndex, col, value);
     },
     [activeTab, result, sortedIndices, setCellEdit]
+  );
+
+  // Column resize handler
+  const onColumnResize = useCallback(
+    (column: GridColumn, newSize: number) => {
+      if (!activeTab || !column.id) return;
+      setColumnWidth(activeTab.id, column.id, newSize);
+    },
+    [activeTab, setColumnWidth]
   );
 
   const gridTheme: Partial<Theme> = {
@@ -288,14 +308,17 @@ export function DataGrid({
             rows={filteredRows.length}
             onHeaderClicked={onHeaderClicked}
             onCellEdited={onCellEdited}
+            onColumnResize={onColumnResize}
             smoothScrollX
             smoothScrollY
             width="100%"
             height="100%"
             theme={gridTheme}
             getCellsForSelection={true}
-            rowMarkers="number"
+            rowMarkers="clickable-number"
             rowMarkerStartIndex={1}
+            gridSelection={gridSelection}
+            onGridSelectionChange={setGridSelection}
             keybindings={{ search: true }}
             headerIcons={{
               headerRowID: () => (

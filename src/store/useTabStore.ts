@@ -34,6 +34,8 @@ export interface TabData {
     logic?: "AND" | "OR";
   }>;
   sqlFilter?: string;
+  // Column layout state (per-tab)
+  columnWidths?: Record<string, number>;
 }
 
 interface TabState {
@@ -91,6 +93,8 @@ interface TabState {
     }>
   ) => void;
   setSqlFilter: (tabId: string, sqlFilter: string) => void;
+  // Column layout methods
+  setColumnWidth: (tabId: string, columnId: string, width: number) => void;
 }
 
 export const useTabStore = create<TabState>((set, get) => ({
@@ -407,6 +411,22 @@ export const useTabStore = create<TabState>((set, get) => ({
   setSqlFilter: (tabId, sqlFilter) => {
     set((state) => ({
       tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, sqlFilter } : t)),
+    }));
+  },
+
+  setColumnWidth: (tabId, columnId, width) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) => {
+        if (t.id !== tabId) return t;
+        const columnWidths = t.columnWidths || {};
+        return {
+          ...t,
+          columnWidths: {
+            ...columnWidths,
+            [columnId]: width,
+          },
+        };
+      }),
     }));
   },
 }));
