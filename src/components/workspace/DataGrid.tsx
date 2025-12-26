@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, useRef } from "react";
 import {
   DataEditor,
   GridCell,
@@ -49,6 +49,18 @@ export function DataGrid({
     columns: CompactSelection.empty(),
     rows: CompactSelection.empty(),
   });
+
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState<{
+    type: "cell" | "header" | null;
+    x: number;
+    y: number;
+    col?: number;
+    row?: number;
+    columnName?: string;
+  }>({ type: null, x: 0, y: 0 });
+
+  const gridContainerRef = useRef<HTMLDivElement>(null);
 
   // Apply filters and sorting
   const { filteredRows, sortedIndices } = useMemo(() => {
@@ -136,10 +148,10 @@ export function DataGrid({
         width: customWidth || 150, // Use custom width or default
         icon: isSorted
           ? sortDir === "asc"
-            ? ("headerRowID" as any)
-            : ("headerCode" as any)
+            ? "headerSortAsc"
+            : "headerSortDesc"
           : undefined,
-        hasMenu: false,
+        hasMenu: true, // Show arrow/menu indicator
       };
     });
   }, [result, gridState, columnWidths]);
@@ -169,9 +181,18 @@ export function DataGrid({
     [result, filteredRows, sortedIndices, pendingEdits]
   );
 
-  // Handle header click for sorting
-  const onHeaderClicked = useCallback(
-    (col: number) => {
+  // Handle header click - no sorting, just for future actions
+  const onHeaderClicked = useCallback((col: number) => {
+    // Clicking header name doesn't sort anymore
+    console.log("Header clicked (no sort):", col);
+  }, []);
+
+  // Handle header menu/arrow click for sorting
+  const onHeaderMenuClick = useCallback(
+    (
+      col: number,
+      bounds: { x: number; y: number; width: number; height: number }
+    ) => {
       if (!activeTab || !result) return;
 
       const column = result.columns[col];
@@ -181,9 +202,14 @@ export function DataGrid({
       const currentDir = gridState?.sortDirection;
 
       let newDirection: "asc" | "desc" | null = "asc";
+
       if (currentSort === column.name) {
-        if (currentDir === "asc") newDirection = "desc";
-        else if (currentDir === "desc") newDirection = null;
+        // Cycling: asc -> desc -> none
+        if (currentDir === "asc") {
+          newDirection = "desc";
+        } else if (currentDir === "desc") {
+          newDirection = null;
+        }
       }
 
       setGridSort(
@@ -226,31 +252,219 @@ export function DataGrid({
     [activeTab, setColumnWidth]
   );
 
+  // Copy selected cells to clipboard
+  const onCopy = useCallback(
+    async (selection: GridSelection) => {
+      if (!result) return;
+
+      const rows = selection.rows.toArray();
+      const cols = selection.columns.toArray();
+
+      let text = "";
+
+      // If specific cells are selected
+      if (cols.length > 0 && rows.length > 0) {
+        for (const row of rows) {
+          const rowData: string[] = [];
+          for (const col of cols) {
+            const actualRowIndex = sortedIndices[row] ?? row;
+            const value = result.rows[actualRowIndex]?.[col];
+            rowData.push(value != null ? String(value) : "");
+          }
+          text += rowData.join("\t") + "\n";
+        }
+      }
+      // If only rows are selected (clicked row markers)
+      else if (rows.length > 0) {
+        for (const row of rows) {
+          const actualRowIndex = sortedIndices[row] ?? row;
+          const rowData = result.rows[actualRowIndex];
+          if (rowData) {
+            text +=
+              rowData.map((v) => (v != null ? String(v) : "")).join("\t") +
+              "\n";
+          }
+        }
+      }
+
+      if (text) {
+        try {
+          await navigator.clipboard.writeText(text.trim());
+          console.log("Copied to clipboard");
+        } catch (err) {
+          console.error("Failed to copy:", err);
+        }
+      }
+    },
+    [result, sortedIndices]
+  );
+
+  // Handle right-click on grid overlay
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      console.log("Context menu triggered!", { x: e.clientX, y: e.clientY });
+
+      if (!result || !gridContainerRef.current) return;
+
+      const rect = gridContainerRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      console.log("Position:", { x, y, rect });
+
+      // Simple heuristic: if y < 40, it's likely a header
+      const isHeader = y < 40;
+
+      if (isHeader) {
+        // Estimate column from x position
+        const estimatedCol = Math.floor(x / 150); // Assume 150px width
+        const columnName = result.columns[estimatedCol]?.name || "";
+        console.log("Header menu:", { estimatedCol, columnName });
+        setContextMenu({
+          type: "header",
+          x: e.clientX,
+          y: e.clientY,
+          col: estimatedCol,
+          columnName,
+        });
+      } else {
+        // Estimate row and column from position
+        const estimatedRow = Math.floor((y - 40) / 34); // Header ~40px, row ~34px
+        const estimatedCol = Math.floor(x / 150);
+        console.log("Cell menu:", { estimatedRow, estimatedCol });
+        setContextMenu({
+          type: "cell",
+          x: e.clientX,
+          y: e.clientY,
+          row: estimatedRow,
+          col: estimatedCol,
+        });
+      }
+    },
+    [result]
+  );
+
+  // Close context menu
+  const closeContextMenu = useCallback(() => {
+    setContextMenu({ type: null, x: 0, y: 0 });
+  }, []);
+
+  // Context menu action handlers
+  const handleCopyColumnName = useCallback(() => {
+    if (contextMenu.columnName) {
+      navigator.clipboard.writeText(contextMenu.columnName);
+      console.log("Copied column name:", contextMenu.columnName);
+    }
+    closeContextMenu();
+  }, [contextMenu, closeContextMenu]);
+
+  const handleSortAsc = useCallback(() => {
+    if (!activeTab || !result || contextMenu.col === undefined) return;
+    const column = result.columns[contextMenu.col];
+    if (column) {
+      setGridSort(activeTab.id, column.name, "asc");
+    }
+    closeContextMenu();
+  }, [activeTab, result, contextMenu, setGridSort, closeContextMenu]);
+
+  const handleSortDesc = useCallback(() => {
+    if (!activeTab || !result || contextMenu.col === undefined) return;
+    closeContextMenu();
+  }, [activeTab, result, contextMenu, setGridSort, closeContextMenu]);
+
+  // Draw borders after cells are rendered
+  const drawCustomCell = useCallback(
+    (args: any) => {
+      const { ctx, rect, col, row } = args;
+      const { x, y, width, height } = rect;
+
+      const isColumnSelected = gridSelection.columns.hasIndex(col);
+      const isRowSelected = gridSelection.rows.hasIndex(row);
+
+      // Draw column selection borders (left and right)
+      if (isColumnSelected) {
+        ctx.save();
+        ctx.strokeStyle = "#f97316";
+        ctx.lineWidth = 3;
+
+        // Left border
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x, y + height);
+        ctx.stroke();
+
+        // Right border
+        ctx.beginPath();
+        ctx.moveTo(x + width, y);
+        ctx.lineTo(x + width, y + height);
+        ctx.stroke();
+
+        ctx.restore();
+      }
+
+      // Draw row selection borders (top and bottom)
+      if (isRowSelected) {
+        ctx.save();
+        ctx.strokeStyle = "#f97316";
+        ctx.lineWidth = 3;
+
+        // Top border
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + width, y);
+        ctx.stroke();
+
+        // Bottom border
+        ctx.beginPath();
+        ctx.moveTo(x, y + height);
+        ctx.lineTo(x + width, y + height);
+        ctx.stroke();
+
+        ctx.restore();
+      }
+
+      return false;
+    },
+    [gridSelection]
+  );
+
   const gridTheme: Partial<Theme> = {
     accentColor: "#f97316",
     accentLight: "rgba(249, 115, 22, 0.1)",
+    bgCell: "#1a1a1a",
+    bgCellMedium: "#1a1a1a",
+    bgHeader: "#0f0f0f",
+    bgHeaderHasFocus: "#0f0f0f",
+    bgHeaderHovered: "#1a1a1a",
+    textHeader: "#e5e5e5",
+    textGroupHeader: "#a3a3a3",
     textDark: "#e5e5e5",
     textMedium: "#a3a3a3",
     textLight: "#737373",
     textBubble: "#e5e5e5",
-    bgIconHeader: "#404040",
-    fgIconHeader: "#a3a3a3",
-    textHeader: "#e5e5e5",
-    textGroupHeader: "#a3a3a3",
-    bgCell: "#1e1e1e",
-    bgCellMedium: "#262626",
-    bgHeader: "#252525",
-    bgHeaderHasFocus: "#2a2a2a",
-    bgHeaderHovered: "#2a2a2a",
-    bgBubble: "#262626",
-    bgBubbleSelected: "#2a2a2a",
-    bgSearchResult: "rgba(249, 115, 22, 0.15)",
-    borderColor: "#333",
-    drilldownBorder: "rgba(249, 115, 22, 0.3)",
-    linkColor: "#60a5fa",
-    headerFontStyle: "600 12px",
-    baseFontStyle: "12px",
+    borderColor: "#333333",
+    drilldownBorder: "#404040",
+    linkColor: "#f97316",
+    headerFontStyle: "600 13px",
+    baseFontStyle: "13px",
     fontFamily: "Inter, system-ui, sans-serif",
+    editorFontSize: "13px",
+    lineHeight: 1.4,
+
+    // Row marker (row number) styling when selected
+    bgIconHeader: "#0f0f0f",
+    fgIconHeader: "#e5e5e5",
+
+    // Remove selection background, use only borders
+    bgBubble: "transparent",
+    bgBubbleSelected: "transparent",
+
+    // Border width for selections
+    cellHorizontalPadding: 8,
+    cellVerticalPadding: 3,
   };
 
   if (error) {
@@ -289,8 +503,12 @@ export function DataGrid({
         </div>
       )}
 
-      {/* DataEditor container */}
-      <div className="flex-1 overflow-hidden relative">
+      {/* DataEditor container with overlay */}
+      <div
+        ref={gridContainerRef}
+        className="flex-1 overflow-hidden relative"
+        onContextMenu={handleContextMenu}
+      >
         {!result ? (
           <div className="absolute inset-0 flex items-center justify-center text-gray-500 text-sm">
             Run a query to see results
@@ -307,8 +525,11 @@ export function DataGrid({
             columns={columns}
             rows={filteredRows.length}
             onHeaderClicked={onHeaderClicked}
+            onHeaderMenuClick={onHeaderMenuClick}
             onCellEdited={onCellEdited}
             onColumnResize={onColumnResize}
+            onCopy={() => onCopy(gridSelection)}
+            drawCustomCell={drawCustomCell}
             smoothScrollX
             smoothScrollY
             width="100%"
@@ -321,18 +542,101 @@ export function DataGrid({
             onGridSelectionChange={setGridSelection}
             keybindings={{ search: true }}
             headerIcons={{
-              headerRowID: () => (
+              headerSortAsc: () => (
                 <div className="flex items-center justify-center w-full h-full">
-                  <ArrowUp size={10} className="text-orange-500" />
+                  <ArrowUp size={12} className="text-orange-500" />
                 </div>
               ),
-              headerCode: () => (
+              headerSortDesc: () => (
                 <div className="flex items-center justify-center w-full h-full">
-                  <ArrowDown size={10} className="text-orange-500" />
+                  <ArrowDown size={12} className="text-orange-500" />
                 </div>
               ),
             }}
           />
+        )}
+
+        {/* Backdrop for closing menu - only appears when menu is open */}
+        {contextMenu.type && (
+          <div
+            className="absolute inset-0"
+            style={{
+              pointerEvents: "auto",
+              zIndex: 40,
+              backgroundColor: "transparent",
+            }}
+            onClick={closeContextMenu}
+          />
+        )}
+
+        {/* Context Menu Portal */}
+        {contextMenu.type === "header" && contextMenu.columnName && (
+          <div
+            className="fixed z-50"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            <div className="min-w-56 bg-[#1a1a1a] border border-[#333] rounded-md shadow-lg p-1">
+              <button
+                onClick={handleCopyColumnName}
+                className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-[#2a2a2a] rounded"
+              >
+                Copy Column Name
+              </button>
+              <div className="h-px bg-[#333] my-1" />
+              <button
+                onClick={handleSortAsc}
+                className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-[#2a2a2a] rounded"
+              >
+                Sort ascending
+              </button>
+              <button
+                onClick={handleSortDesc}
+                className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-[#2a2a2a] rounded"
+              >
+                Sort descending
+              </button>
+              <div className="h-px bg-[#333] my-1" />
+              <button
+                onClick={() => {
+                  // TODO: Implement column filter
+                  console.log(
+                    "Open filter for column:",
+                    contextMenu.columnName
+                  );
+                  closeContextMenu();
+                }}
+                className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-[#2a2a2a] rounded"
+              >
+                Open Column Filter
+              </button>
+            </div>
+          </div>
+        )}
+
+        {contextMenu.type === "cell" && (
+          <div
+            className="fixed z-50"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            <div className="min-w-56 bg-[#1a1a1a] border border-[#333] rounded-md shadow-lg p-1">
+              <button
+                onClick={() => {
+                  onCopy(gridSelection);
+                  closeContextMenu();
+                }}
+                className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-[#2a2a2a] rounded"
+              >
+                Copy
+                <span className="ml-auto text-xs text-gray-500">⌘C</span>
+              </button>
+              <button
+                onClick={closeContextMenu}
+                className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-[#2a2a2a] rounded"
+              >
+                Quick Filter
+              </button>
+            </div>
+          </div>
         )}
       </div>
     </div>
