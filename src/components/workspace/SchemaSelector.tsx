@@ -78,9 +78,9 @@ export function SchemaSelector({
         />
       </button>
 
-      {/* Dropdown Menu */}
+      {/* Dropdown Menu - Opens Upward */}
       {isOpen && (
-        <div className="absolute top-full left-0 mt-1 w-64 bg-[#252525] border border-[#333] rounded-lg shadow-xl overflow-hidden z-50 animate-in fade-in slide-in-from-top-2">
+        <div className="absolute bottom-full left-0 mb-1 w-64 bg-[#252525] border border-[#333] rounded-lg shadow-xl overflow-hidden z-50 animate-in fade-in slide-in-from-bottom-2">
           {/* Search Input (if many schemas) */}
           {schemas.length > 10 && (
             <div className="p-2 border-b border-[#333]">
