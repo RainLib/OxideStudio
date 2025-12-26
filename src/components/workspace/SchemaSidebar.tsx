@@ -123,22 +123,22 @@ export function SchemaSidebar() {
     setFilterText,
   ]);
 
-  const { createTab, runTabQuery, updateTabSql } = useTabStore();
+  const { findOrCreateTableTab, runTabQuery, updateTabSql } = useTabStore();
 
   const handleTableClick = (tableName: string) => {
     selectTable(tableName);
-    if (!currentSchema) return;
+    if (!currentSchema || !activeConnectionId) return;
 
-    const tabId = createTab("table", tableName, "", {
-      tableName,
-      schemaName: currentSchema,
-    });
+    // Use findOrCreateTableTab to reuse existing tabs
+    const tabId = findOrCreateTableTab(
+      activeConnectionId,
+      currentSchema,
+      tableName
+    );
 
-    if (activeConnectionId) {
-      const sql = `SELECT * FROM "${currentSchema}"."${tableName}" LIMIT 100;`;
-      updateTabSql(tabId, sql);
-      runTabQuery(tabId, activeConnectionId);
-    }
+    const sql = `SELECT * FROM "${currentSchema}"."${tableName}" LIMIT 100;`;
+    updateTabSql(tabId, sql);
+    runTabQuery(tabId, activeConnectionId);
   };
 
   // Highlight matching text

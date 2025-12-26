@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { TabBar } from "@/components/workspace/TabBar";
 import { QueryEditor } from "@/components/workspace/QueryEditor";
 import { DataGrid } from "@/components/workspace/DataGrid";
@@ -23,15 +23,8 @@ import {
 } from "lucide-react";
 
 export function Workspace() {
-  const { tabs, activeTabId, createTab } = useTabStore();
+  const { tabs, activeTabId } = useTabStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
-
-  // Default tab creation if empty
-  useEffect(() => {
-    if (tabs.length === 0) {
-      createTab("query", "Query #1", "");
-    }
-  }, [tabs.length, createTab]);
 
   const currentResult = Array.isArray(activeTab?.results)
     ? activeTab?.results[0]
@@ -133,36 +126,40 @@ export function Workspace() {
           <div className="flex flex-1 min-h-0">
             {/* Main Editor Area */}
             <div className="flex-1 min-w-0">
-              <div className="flex flex-col h-full min-w-0 bg-[#1e1e1e]">
-                <div className="border-b border-[#333] bg-[#1e1e1e]">
-                  <TabBar />
-                </div>
-
-                {activeTab?.type === "table" ? (
-                  <TableDataView />
-                ) : (
-                  <div className="flex flex-col h-full min-h-0">
-                    <div className="flex-1 min-h-0 relative">
-                      <ResizablePanelGroup
-                        direction="vertical"
-                        className="!flex-col"
-                        style={{ flexDirection: "column" }}
-                      >
-                        <ResizablePanel defaultSize={50} minSize={20}>
-                          <QueryEditor />
-                        </ResizablePanel>
-                        <ResizableHandle
-                          withHandle
-                          className="h-1.5 w-full bg-[#333] hover:bg-orange-500 transition-colors z-50 cursor-row-resize"
-                        />
-                        <ResizablePanel defaultSize={50} minSize={20}>
-                          {currentResult ? <DataGrid /> : <QueryShortcuts />}
-                        </ResizablePanel>
-                      </ResizablePanelGroup>
-                    </div>
+              {tabs.length === 0 ? (
+                <QueryShortcuts />
+              ) : (
+                <div className="flex flex-col h-full min-w-0 bg-[#1e1e1e]">
+                  <div className="border-b border-[#333] bg-[#1e1e1e]">
+                    <TabBar />
                   </div>
-                )}
-              </div>
+
+                  {activeTab?.type === "table" ? (
+                    <TableDataView />
+                  ) : (
+                    <div className="flex flex-col h-full min-h-0">
+                      <div className="flex-1 min-h-0 relative">
+                        <ResizablePanelGroup
+                          direction="vertical"
+                          className="!flex-col"
+                          style={{ flexDirection: "column" }}
+                        >
+                          <ResizablePanel defaultSize={50} minSize={20}>
+                            <QueryEditor />
+                          </ResizablePanel>
+                          <ResizableHandle
+                            withHandle
+                            className="h-1.5 w-full bg-[#333] hover:bg-orange-500 transition-colors z-50 cursor-row-resize"
+                          />
+                          <ResizablePanel defaultSize={50} minSize={20}>
+                            {currentResult ? <DataGrid /> : <QueryShortcuts />}
+                          </ResizablePanel>
+                        </ResizablePanelGroup>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Right Panel */}

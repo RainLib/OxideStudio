@@ -17,6 +17,7 @@ export interface TabData {
   results: QueryResult[] | null;
   isExecuting: boolean;
   error: string | null;
+  isPinned: boolean;
 }
 
 interface TabState {
@@ -29,7 +30,18 @@ interface TabState {
     initialSql?: string,
     metadata?: Partial<Pick<TabData, "tableName" | "schemaName" | "filters">>
   ) => string;
+  findOrCreateTableTab: (
+    connectionId: string,
+    schemaName: string,
+    tableName: string
+  ) => string;
   closeTab: (id: string) => void;
+  forceCloseTab: (id: string) => void;
+  closeOtherTabs: (id: string) => void;
+  closeAllTabs: () => void;
+  closeTabsToLeft: (id: string) => void;
+  closeTabsToRight: (id: string) => void;
+  togglePinTab: (id: string) => void;
   setActiveTab: (id: string) => void;
   updateTabSql: (id: string, sql: string) => void;
   runTabQuery: (id: string, connectionId: string) => Promise<void>;
@@ -53,6 +65,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       results: null,
       isExecuting: false,
       error: null,
+      isPinned: false,
       ...metadata,
     };
 
@@ -63,7 +76,59 @@ export const useTabStore = create<TabState>((set, get) => ({
     return newTab.id;
   },
 
+  findOrCreateTableTab: (
+    _connectionId: string, // Reserved for future use
+    schemaName: string,
+    tableName: string
+  ) => {
+    const { tabs } = get();
+
+    // Find existing tab with same schema+table
+    const existingTab = tabs.find(
+      (tab) =>
+        tab.type === "table" &&
+        tab.tableName === tableName &&
+        tab.schemaName === schemaName
+      // Note: We don't store connectionId in tab, but in practice
+      // if schema+table match, it's likely the same tab
+      // You could add connectionId to TabData if needed
+    );
+
+    if (existingTab) {
+      // Reuse existing tab
+      set({ activeTabId: existingTab.id });
+      return existingTab.id;
+    }
+
+    // Create new tab if no match found
+    return get().createTab("table", tableName, "", {
+      tableName,
+      schemaName,
+    });
+  },
+
   closeTab: (id: string) => {
+    set((state) => {
+      const tab = state.tabs.find((t) => t.id === id);
+      // Don't close pinned tabs with regular close
+      if (tab?.isPinned) return state;
+
+      const newTabs = state.tabs.filter((t) => t.id !== id);
+      let newActiveId = state.activeTabId;
+
+      // If closing active tab, switch to another
+      if (id === state.activeTabId) {
+        newActiveId =
+          newTabs.length > 0 && newTabs[newTabs.length - 1]
+            ? newTabs[newTabs.length - 1]!.id
+            : null;
+      }
+
+      return { tabs: newTabs, activeTabId: newActiveId };
+    });
+  },
+
+  forceCloseTab: (id: string) => {
     set((state) => {
       const newTabs = state.tabs.filter((t) => t.id !== id);
       let newActiveId = state.activeTabId;
@@ -72,11 +137,70 @@ export const useTabStore = create<TabState>((set, get) => ({
       if (id === state.activeTabId) {
         newActiveId =
           newTabs.length > 0 && newTabs[newTabs.length - 1]
-            ? newTabs[newTabs.length - 1].id
+            ? newTabs[newTabs.length - 1]!.id
             : null;
       }
 
       return { tabs: newTabs, activeTabId: newActiveId };
+    });
+  },
+
+  closeOtherTabs: (id: string) => {
+    set((state) => ({
+      tabs: state.tabs.filter((t) => t.id === id || t.isPinned),
+      activeTabId: id,
+    }));
+  },
+
+  closeAllTabs: () => {
+    set((state) => {
+      const pinnedTabs = state.tabs.filter((t) => t.isPinned);
+      return {
+        tabs: pinnedTabs,
+        activeTabId: pinnedTabs.length > 0 ? pinnedTabs[0]!.id : null,
+      };
+    });
+  },
+
+  closeTabsToLeft: (id: string) => {
+    set((state) => {
+      const index = state.tabs.findIndex((t) => t.id === id);
+      if (index === -1) return state;
+
+      const newTabs = [
+        ...state.tabs.slice(0, index).filter((t) => t.isPinned),
+        ...state.tabs.slice(index),
+      ];
+
+      return { tabs: newTabs };
+    });
+  },
+
+  closeTabsToRight: (id: string) => {
+    set((state) => {
+      const index = state.tabs.findIndex((t) => t.id === id);
+      if (index === -1) return state;
+
+      const newTabs = [
+        ...state.tabs.slice(0, index + 1),
+        ...state.tabs.slice(index + 1).filter((t) => t.isPinned),
+      ];
+
+      return { tabs: newTabs };
+    });
+  },
+
+  togglePinTab: (id: string) => {
+    set((state) => {
+      const tabs = state.tabs.map((t) =>
+        t.id === id ? { ...t, isPinned: !t.isPinned } : t
+      );
+
+      // Sort tabs: pinned first, then unpinned
+      const pinnedTabs = tabs.filter((t) => t.isPinned);
+      const unpinnedTabs = tabs.filter((t) => !t.isPinned);
+
+      return { tabs: [...pinnedTabs, ...unpinnedTabs] };
     });
   },
 
