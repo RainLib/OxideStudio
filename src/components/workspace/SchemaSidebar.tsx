@@ -136,7 +136,7 @@ export function SchemaSidebar() {
       tableName
     );
 
-    const sql = `SELECT * FROM "${currentSchema}"."${tableName}" LIMIT 100;`;
+    const sql = `SELECT * FROM \`${currentSchema}\`.\`${tableName}\` LIMIT 100;`;
     updateTabSql(tabId, sql);
     runTabQuery(tabId, activeConnectionId);
   };
