@@ -36,6 +36,8 @@ export interface TabData {
   sqlFilter?: string;
   // Column layout state (per-tab)
   columnWidths?: Record<string, number>;
+  // Target schema for query execution
+  targetSchema?: string | null;
 }
 
 interface TabState {
@@ -95,6 +97,8 @@ interface TabState {
   setSqlFilter: (tabId: string, sqlFilter: string) => void;
   // Column layout methods
   setColumnWidth: (tabId: string, columnId: string, width: number) => void;
+  // Schema selection method
+  setTargetSchema: (tabId: string, schema: string | null) => void;
 }
 
 export const useTabStore = create<TabState>((set, get) => ({
@@ -427,6 +431,14 @@ export const useTabStore = create<TabState>((set, get) => ({
           },
         };
       }),
+    }));
+  },
+
+  setTargetSchema: (tabId, schema) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === tabId ? { ...t, targetSchema: schema } : t
+      ),
     }));
   },
 }));
