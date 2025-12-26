@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { api } from "@/lib/api";
 import { QueryResult } from "@/types/protocol";
 import { useHistoryStore } from "./useHistoryStore";
+import type { FilterOperator } from "@/components/workspace/GridFilterRow";
 
 export type TabType = "query" | "table";
 
@@ -23,6 +24,16 @@ export interface TabData {
     sortColumn: string | null;
     sortDirection: "asc" | "desc" | null;
   };
+  pendingEdits?: Map<string, any>; // key: "rowIndex:colIndex", value: new value
+  // Filter UI state (per-tab)
+  filterMode?: "visual" | "sql";
+  visualFilters?: Array<{
+    column: string;
+    operator: FilterOperator;
+    value: string;
+    logic?: "AND" | "OR";
+  }>;
+  sqlFilter?: string;
 }
 
 interface TabState {
@@ -60,6 +71,26 @@ interface TabState {
     column: string | null,
     direction: "asc" | "desc" | null
   ) => void;
+  setCellEdit: (
+    tabId: string,
+    rowIndex: number,
+    colIndex: number,
+    value: any
+  ) => void;
+  commitEdits: (tabId: string) => Promise<void>;
+  cancelEdits: (tabId: string) => void;
+  // Filter UI methods
+  setFilterMode: (tabId: string, mode: "visual" | "sql") => void;
+  setVisualFilters: (
+    tabId: string,
+    filters: Array<{
+      column: string;
+      operator: FilterOperator;
+      value: string;
+      logic?: "AND" | "OR";
+    }>
+  ) => void;
+  setSqlFilter: (tabId: string, sqlFilter: string) => void;
 }
 
 export const useTabStore = create<TabState>((set, get) => ({
@@ -318,6 +349,64 @@ export const useTabStore = create<TabState>((set, get) => ({
           },
         };
       }),
+    }));
+  },
+
+  setCellEdit: (tabId, rowIndex, colIndex, value) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) => {
+        if (t.id !== tabId) return t;
+        const pendingEdits = new Map(t.pendingEdits || new Map());
+        const key = `${rowIndex}:${colIndex}`;
+        pendingEdits.set(key, value);
+        return { ...t, pendingEdits };
+      }),
+    }));
+  },
+
+  commitEdits: async (tabId) => {
+    const state = get();
+    const tab = state.tabs.find((t) => t.id === tabId);
+    if (!tab || !tab.pendingEdits || tab.pendingEdits.size === 0) return;
+
+    // For now, just clear the edits
+    // TODO: Generate and execute UPDATE SQL statements
+    console.log("Committing edits:", tab.pendingEdits);
+
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === tabId ? { ...t, pendingEdits: new Map() } : t
+      ),
+    }));
+  },
+
+  cancelEdits: (tabId) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === tabId ? { ...t, pendingEdits: new Map() } : t
+      ),
+    }));
+  },
+
+  setFilterMode: (tabId, mode) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === tabId ? { ...t, filterMode: mode } : t
+      ),
+    }));
+  },
+
+  setVisualFilters: (tabId, filters) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === tabId ? { ...t, visualFilters: filters } : t
+      ),
+    }));
+  },
+
+  setSqlFilter: (tabId, sqlFilter) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, sqlFilter } : t)),
     }));
   },
 }));

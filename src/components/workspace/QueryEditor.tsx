@@ -1,31 +1,30 @@
-import Editor from "@monaco-editor/react";
-import { useTabStore } from "@/store/useTabStore";
-import { useConnectionStore } from "@/store/useConnectionStore";
-import { useHistoryStore } from "@/store/useHistoryStore";
-import { useSavedQueryStore } from "@/store/useSavedQueryStore";
 import { Button } from "@/components/ui/button";
-import {
-  Play,
-  Loader2,
-  Save,
-  Paintbrush,
-  ChevronDown,
-  History,
-  Star,
-  Trash2,
-} from "lucide-react";
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-  DialogFooter,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { useState, useRef, useEffect } from "react";
 import { cn } from "@/lib/utils";
+import { useConnectionStore } from "@/store/useConnectionStore";
+import { useHistoryStore } from "@/store/useHistoryStore";
+import { useSavedQueryStore } from "@/store/useSavedQueryStore";
+import { useTabStore } from "@/store/useTabStore";
+import Editor from "@monaco-editor/react";
 import { format } from "date-fns";
+import {
+  ChevronDown,
+  History,
+  Loader2,
+  Paintbrush,
+  Play,
+  Star,
+  Trash2,
+} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 export function QueryEditor() {
   const { tabs, activeTabId, updateTabSql, runTabQuery } = useTabStore();

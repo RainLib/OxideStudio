@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
 import {
   DataEditor,
   GridCell,
@@ -6,28 +6,39 @@ import {
   Item,
   Theme,
   GridCellKind,
-  HeaderClickedEventArgs,
+  EditableGridCell,
 } from "@glideapps/glide-data-grid";
 import "@glideapps/glide-data-grid/dist/index.css";
 import { useTabStore } from "@/store/useTabStore";
-import { GridToolbar } from "./GridToolbar";
-import { GridFilterMenu } from "./GridFilterMenu";
-import {
-  createTypedCell,
-  applyFilter,
-  compareValues,
-  FilterState,
-} from "@/lib/gridUtils";
-import { ArrowUp, ArrowDown } from "lucide-react";
+import { createTypedCell, applyFilter, compareValues } from "@/lib/gridUtils";
+import { ArrowUp, ArrowDown, Check, X as XIcon } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { ColumnFilter } from "./GridFilterRow";
 
-export function DataGrid() {
-  const { tabs, activeTabId, setGridFilter, setGridSort } = useTabStore();
+interface DataGridProps {
+  globalFilter?: string;
+  columnFilters?: ColumnFilter[];
+}
+
+export function DataGrid({
+  globalFilter = "",
+  columnFilters = [],
+}: DataGridProps) {
+  const {
+    tabs,
+    activeTabId,
+    setGridSort,
+    setCellEdit,
+    commitEdits,
+    cancelEdits,
+  } = useTabStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
-  const [globalFilter, setGlobalFilter] = useState("");
 
   const result = activeTab?.results?.[0];
   const error = activeTab?.error;
   const gridState = activeTab?.gridState;
+  const pendingEdits = activeTab?.pendingEdits || new Map();
+  const hasEdits = pendingEdits.size > 0;
 
   // Apply filters and sorting
   const { filteredRows, sortedIndices } = useMemo(() => {
@@ -35,41 +46,64 @@ export function DataGrid() {
 
     let indices = result.rows.map((_, i) => i);
 
-    // Apply column filters
-    if (gridState?.columnFilters) {
-      Object.entries(gridState.columnFilters).forEach(([column, filter]) => {
-        const colIndex = result.columns.findIndex((c) => c.name === column);
-        if (colIndex >= 0) {
-          indices = indices.filter((i) =>
-            applyFilter(result.rows[i][colIndex], filter as FilterState)
+    // Apply column filters (from query builder filter row)
+    if (columnFilters.length > 0 && result) {
+      indices = indices.filter((rowIndex) => {
+        // Evaluate filters with AND/OR logic
+        let passesFilter = true;
+
+        for (let i = 0; i < columnFilters.length; i++) {
+          const filter = columnFilters[i];
+          if (!filter) continue;
+
+          const colIndex = result.columns.findIndex(
+            (c) => c.name === filter.column
           );
+
+          if (colIndex === -1) continue;
+
+          const cellValue = result.rows[rowIndex]?.[colIndex];
+          const matches = applyFilter(cellValue, filter);
+
+          if (i === 0) {
+            // First filter sets the initial state
+            passesFilter = matches;
+          } else {
+            // Subsequent filters use their logic operator
+            if (filter.logic === "OR") {
+              passesFilter = passesFilter || matches;
+            } else {
+              // Default to AND
+              passesFilter = passesFilter && matches;
+            }
+          }
         }
+
+        return passesFilter;
       });
     }
 
     // Apply global filter
-    if (globalFilter) {
+    if (globalFilter && result) {
       const searchLower = globalFilter.toLowerCase();
       indices = indices.filter((i) =>
-        result.rows[i].some((cell) =>
+        result.rows[i]?.some((cell) =>
           String(cell).toLowerCase().includes(searchLower)
         )
       );
     }
 
     // Apply sorting
-    if (gridState?.sortColumn && gridState?.sortDirection) {
+    if (gridState?.sortColumn && gridState?.sortDirection && result) {
       const colIndex = result.columns.findIndex(
         (c) => c.name === gridState.sortColumn
       );
       if (colIndex >= 0) {
-        indices.sort((a, b) =>
-          compareValues(
-            result.rows[a][colIndex],
-            result.rows[b][colIndex],
-            gridState.sortDirection!
-          )
-        );
+        indices.sort((a, b) => {
+          const valA = result.rows[a]?.[colIndex];
+          const valB = result.rows[b]?.[colIndex];
+          return compareValues(valA, valB, gridState.sortDirection!);
+        });
       }
     }
 
@@ -77,7 +111,7 @@ export function DataGrid() {
       filteredRows: indices.map((i) => result.rows[i]),
       sortedIndices: indices,
     };
-  }, [result, gridState, globalFilter]);
+  }, [result, gridState, globalFilter, columnFilters]);
 
   // Column definitions with sorting indicators
   const columns = useMemo<GridColumn[]>(() => {
@@ -85,47 +119,57 @@ export function DataGrid() {
     return result.columns.map((col) => {
       const isSorted = gridState?.sortColumn === col.name;
       const sortDir = gridState?.sortDirection;
-
       return {
         title: col.name,
         id: col.name,
         width: 150,
         icon: isSorted
           ? sortDir === "asc"
-            ? "headerRowID"
-            : "headerCode"
+            ? ("headerRowID" as any)
+            : ("headerCode" as any)
           : undefined,
-        hasMenu: true,
+        hasMenu: false,
       };
     });
   }, [result, gridState]);
 
-  // Cell content with type styling
+  // Cell content with type styling and edit support
   const getCellContent = useCallback(
     (cell: Item): GridCell => {
       if (!result || filteredRows.length === 0)
-        return { kind: GridCellKind.Text, displayData: "", data: "" };
+        return {
+          kind: GridCellKind.Text,
+          displayData: "",
+          data: "",
+          allowOverlay: false,
+        };
 
       const [col, row] = cell;
       const actualRowIndex = sortedIndices[row];
-      const val = result.rows[actualRowIndex][col];
 
-      return createTypedCell(val);
+      // Check if this cell has a pending edit
+      const editKey = `${actualRowIndex}:${col}`;
+      const val = pendingEdits.has(editKey)
+        ? pendingEdits.get(editKey)
+        : result.rows[actualRowIndex][col];
+
+      return createTypedCell(val, true); // allowOverlay = true for editing
     },
-    [result, filteredRows, sortedIndices]
+    [result, filteredRows, sortedIndices, pendingEdits]
   );
 
   // Handle header click for sorting
   const onHeaderClicked = useCallback(
-    (col: number, args: HeaderClickedEventArgs) => {
+    (col: number) => {
       if (!activeTab || !result) return;
 
       const column = result.columns[col];
+      if (!column) return;
+
       const currentSort = gridState?.sortColumn;
       const currentDir = gridState?.sortDirection;
 
       let newDirection: "asc" | "desc" | null = "asc";
-
       if (currentSort === column.name) {
         if (currentDir === "asc") newDirection = "desc";
         else if (currentDir === "desc") newDirection = null;
@@ -140,81 +184,100 @@ export function DataGrid() {
     [activeTab, result, gridState, setGridSort]
   );
 
-  // Handle column filter
-  const handleFilterChange = useCallback(
-    (column: string, filter: FilterState | undefined) => {
-      if (!activeTab) return;
-      setGridFilter(activeTab.id, column, filter);
+  // Handle cell edit
+  const onCellEdited = useCallback(
+    (cell: Item, newValue: EditableGridCell): void => {
+      if (!activeTab || !result) return;
+
+      const [col, row] = cell;
+      const actualRowIndex = sortedIndices[row];
+      if (actualRowIndex === undefined) return;
+
+      // Extract the actual value from the edited cell based on its type
+      let value: any;
+      if ("data" in newValue) {
+        value = newValue.data;
+      } else {
+        value = null;
+      }
+
+      setCellEdit(activeTab.id, actualRowIndex, col, value);
     },
-    [activeTab, setGridFilter]
+    [activeTab, result, sortedIndices, setCellEdit]
   );
 
-  // Modern dark theme
   const gridTheme: Partial<Theme> = {
-    accentColor: "#f97316", // orange-500
+    accentColor: "#f97316",
     accentLight: "rgba(249, 115, 22, 0.1)",
-    accentFg: "#ffffff",
-
+    textDark: "#e5e5e5",
+    textMedium: "#a3a3a3",
+    textLight: "#737373",
+    textBubble: "#e5e5e5",
+    bgIconHeader: "#404040",
+    fgIconHeader: "#a3a3a3",
+    textHeader: "#e5e5e5",
+    textGroupHeader: "#a3a3a3",
     bgCell: "#1e1e1e",
-    bgCellMedium: "#252525",
-    bgHeader: "#2a2a2a",
-    bgHeaderHasFocus: "#333333",
-    bgHeaderHovered: "#303030",
-
-    textDark: "#e5e7eb", // gray-200
-    textMedium: "#9ca3af", // gray-400
-    textLight: "#6b7280", // gray-500
-    textBubble: "#ffffff",
-    textHeader: "#d1d5db", // gray-300
-    textHeaderSelected: "#ffffff",
-
-    borderColor: "#3a3a3a",
-    horizontalBorderColor: "#2a2a2a",
-
-    fontFamily:
-      'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
-
-    headerFontStyle: "600 11px",
-    baseFontStyle: "11px",
-    editorFontSize: "11px",
-    lineHeight: 1.4,
+    bgCellMedium: "#262626",
+    bgHeader: "#252525",
+    bgHeaderHasFocus: "#2a2a2a",
+    bgHeaderHovered: "#2a2a2a",
+    bgBubble: "#262626",
+    bgBubbleSelected: "#2a2a2a",
+    bgSearchResult: "rgba(249, 115, 22, 0.15)",
+    borderColor: "#333",
+    drilldownBorder: "rgba(249, 115, 22, 0.3)",
+    linkColor: "#60a5fa",
+    headerFontStyle: "600 12px",
+    baseFontStyle: "12px",
+    fontFamily: "Inter, system-ui, sans-serif",
   };
-
-  if (!activeTab) {
-    return (
-      <div className="h-full flex items-center justify-center text-gray-500 text-sm">
-        No active tab
-      </div>
-    );
-  }
 
   if (error) {
     return (
-      <div className="h-full p-4 text-red-400 overflow-auto whitespace-pre-wrap font-mono text-xs bg-[#1e1e1e]">
-        {error}
+      <div className="flex items-center justify-center h-full text-red-400 text-sm">
+        Error: {error}
       </div>
     );
   }
 
   return (
     <div className="flex flex-col h-full bg-[#1e1e1e]">
-      {/* Toolbar */}
-      <GridToolbar
-        result={result || null}
-        globalFilter={globalFilter}
-        onGlobalFilterChange={setGlobalFilter}
-      />
+      {/* Commit/Cancel Bar */}
+      {hasEdits && (
+        <div className="h-10 border-b border-orange-500/30 bg-orange-500/10 flex items-center px-3 gap-2 shrink-0">
+          <div className="flex-1 text-[11px] text-orange-200 font-medium">
+            {pendingEdits.size} cell{pendingEdits.size > 1 ? "s" : ""} modified
+          </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => activeTab && cancelEdits(activeTab.id)}
+            className="h-7 px-3 text-xs text-gray-400 hover:text-white hover:bg-[#333]"
+          >
+            <XIcon size={14} className="mr-1.5" />
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => activeTab && commitEdits(activeTab.id)}
+            className="h-7 px-3 text-xs bg-orange-600 hover:bg-orange-700 text-white"
+          >
+            <Check size={14} className="mr-1.5" />
+            Commit Changes
+          </Button>
+        </div>
+      )}
 
-      {/* Grid Area */}
-      <div className="flex-1 min-h-0 relative">
+      {/* DataEditor container */}
+      <div className="flex-1 overflow-hidden relative">
         {!result ? (
           <div className="absolute inset-0 flex items-center justify-center text-gray-500 text-sm">
             Run a query to see results
           </div>
         ) : filteredRows.length === 0 ? (
           <div className="absolute inset-0 flex items-center justify-center text-gray-500 text-sm">
-            {globalFilter ||
-            Object.keys(gridState?.columnFilters || {}).length > 0
+            {columnFilters.length > 0 || globalFilter
               ? "No rows match the current filters"
               : "No rows returned"}
           </div>
@@ -224,13 +287,15 @@ export function DataGrid() {
             columns={columns}
             rows={filteredRows.length}
             onHeaderClicked={onHeaderClicked}
+            onCellEdited={onCellEdited}
             smoothScrollX
             smoothScrollY
             width="100%"
             height="100%"
             theme={gridTheme}
             getCellsForSelection={true}
-            rowMarkers="none"
+            rowMarkers="number"
+            rowMarkerStartIndex={1}
             keybindings={{ search: true }}
             headerIcons={{
               headerRowID: () => (
@@ -244,18 +309,6 @@ export function DataGrid() {
                 </div>
               ),
             }}
-            headerMenus={result.columns.map((col, idx) => ({
-              col: idx,
-              menu: () => (
-                <GridFilterMenu
-                  column={col.name}
-                  filter={gridState?.columnFilters?.[col.name] as FilterState}
-                  onFilterChange={(filter) =>
-                    handleFilterChange(col.name, filter)
-                  }
-                />
-              ),
-            }))}
           />
         )}
       </div>

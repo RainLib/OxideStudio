@@ -90,7 +90,15 @@ export function createTypedCell(value: any, allowOverlay = true): GridCell {
  * Filter data based on column filters
  */
 export interface FilterState {
-  operator: "equals" | "contains" | "startsWith" | "endsWith" | "gt" | "lt";
+  operator:
+    | "equals"
+    | "contains"
+    | "startsWith"
+    | "endsWith"
+    | ">"
+    | "<"
+    | ">="
+    | "<=";
   value: string;
 }
 
@@ -109,10 +117,14 @@ export function applyFilter(rowValue: any, filter: FilterState): boolean {
       return cellValue.startsWith(searchValue);
     case "endsWith":
       return cellValue.endsWith(searchValue);
-    case "gt":
+    case ">":
       return Number(rowValue) > Number(filter.value);
-    case "lt":
+    case "<":
       return Number(rowValue) < Number(filter.value);
+    case ">=":
+      return Number(rowValue) >= Number(filter.value);
+    case "<=":
+      return Number(rowValue) <= Number(filter.value);
     default:
       return true;
   }
