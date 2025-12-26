@@ -27,6 +27,7 @@ interface ConnectionState {
   saveConnection: (config: ConnectionConfig) => Promise<void>;
   addConnection: (config: Omit<ConnectionConfig, "id">) => Promise<void>;
   connect: (config: ConnectionConfig) => Promise<string | null>;
+  setActiveConnection: (id: string) => void;
   disconnect: () => void;
 }
 
@@ -144,6 +145,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     } catch (e) {
       return String(e);
     }
+  },
+
+  setActiveConnection: (id: string) => {
+    set({ activeConnectionId: id, isConnected: true });
   },
 
   disconnect: () => {

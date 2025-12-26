@@ -1,7 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { Database, Clock, Settings, LogOut, Code, Hexagon } from "lucide-react";
-import { useConnectionStore } from "@/store/useConnectionStore";
+import { Database, Clock, Settings, Code, Hexagon } from "lucide-react";
+import { SidebarStatusBar } from "./SidebarStatusBar";
 
 export type SidebarTab = "tables" | "history" | "saved" | "settings";
 
@@ -16,57 +16,51 @@ export function ActivityBar({
   onTabClick,
   isDrawerOpen,
 }: ActivityBarProps) {
-  const { disconnect } = useConnectionStore();
-
   return (
-    <div className="w-[50px] flex flex-col items-center py-4 bg-[#1a1a1a] gap-3 border-r border-[#2a2a2a] shrink-0 z-50">
-      {/* App Logo */}
-      <div className="mb-2">
-        <div className="h-8 w-8 bg-[#f39c12] rounded-lg flex items-center justify-center text-[#1a1a1a] shadow-lg shadow-orange-900/20">
-          <Database size={20} strokeWidth={2.5} />
+    <div className="w-[50px] flex flex-col bg-[#1a1a1a] border-r border-[#2a2a2a] shrink-0 z-50">
+      <div className="flex-1 flex flex-col items-center py-4 gap-3">
+        {/* App Logo */}
+        <div className="mb-2">
+          <div className="h-8 w-8 bg-[#f39c12] rounded-lg flex items-center justify-center text-[#1a1a1a] shadow-lg shadow-orange-900/20">
+            <Database size={20} strokeWidth={2.5} />
+          </div>
+        </div>
+
+        {/* Navigation Items */}
+        <div className="flex flex-col gap-2 w-full px-1">
+          <ActivityBarButton
+            active={activeTab === "tables" && isDrawerOpen}
+            onClick={() => onTabClick("tables")}
+            icon={Hexagon}
+            title="Entities (Tables)"
+          />
+          <ActivityBarButton
+            active={activeTab === "history" && isDrawerOpen}
+            onClick={() => onTabClick("history")}
+            icon={Clock}
+            title="History"
+          />
+          <ActivityBarButton
+            active={activeTab === "saved" && isDrawerOpen}
+            onClick={() => onTabClick("saved")}
+            icon={Code}
+            title="Saved Queries"
+          />
+        </div>
+
+        {/* Bottom Items */}
+        <div className="mt-auto flex flex-col gap-2 w-full px-1">
+          <ActivityBarButton
+            active={activeTab === "settings" && isDrawerOpen}
+            onClick={() => onTabClick("settings")}
+            icon={Settings}
+            title="Settings"
+          />
         </div>
       </div>
 
-      {/* Navigation Items */}
-      <div className="flex flex-col gap-2 w-full px-1">
-        <ActivityBarButton
-          active={activeTab === "tables" && isDrawerOpen}
-          onClick={() => onTabClick("tables")}
-          icon={Hexagon}
-          title="Entities (Tables)"
-        />
-        <ActivityBarButton
-          active={activeTab === "history" && isDrawerOpen}
-          onClick={() => onTabClick("history")}
-          icon={Clock}
-          title="History"
-        />
-        <ActivityBarButton
-          active={activeTab === "saved" && isDrawerOpen}
-          onClick={() => onTabClick("saved")}
-          icon={Code}
-          title="Saved Queries"
-        />
-      </div>
-
-      {/* Bottom Items */}
-      <div className="mt-auto flex flex-col gap-2 w-full px-1">
-        <ActivityBarButton
-          active={activeTab === "settings" && isDrawerOpen}
-          onClick={() => onTabClick("settings")}
-          icon={Settings}
-          title="Settings"
-        />
-        <Button
-          variant="ghost"
-          size="icon"
-          className="w-full h-10 text-gray-600 hover:text-red-400 hover:bg-red-500/5 transition-all rounded-md mt-2"
-          onClick={disconnect}
-          title="Disconnect"
-        >
-          <LogOut size={20} />
-        </Button>
-      </div>
+      {/* Bottom Status Bar - only shows when sidebar is closed */}
+      {!isDrawerOpen && <SidebarStatusBar isDrawerOpen={false} />}
     </div>
   );
 }

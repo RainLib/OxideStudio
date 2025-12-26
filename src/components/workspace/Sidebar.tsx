@@ -7,9 +7,10 @@ import { SidebarStatusBar } from "./SidebarStatusBar";
 
 interface SidebarProps {
   activeTab: SidebarTab | null;
+  isDrawerOpen: boolean;
 }
 
-export function Sidebar({ activeTab }: SidebarProps) {
+export function Sidebar({ activeTab, isDrawerOpen }: SidebarProps) {
   return (
     <div className="flex-1 flex flex-col bg-[#1e1e1e] min-w-0 overflow-hidden h-full">
       {/* Content Area */}
@@ -31,7 +32,7 @@ export function Sidebar({ activeTab }: SidebarProps) {
       </div>
 
       {/* Sidebar Footer */}
-      <SidebarStatusBar />
+      <SidebarStatusBar isDrawerOpen={isDrawerOpen} />
     </div>
   );
 }

@@ -1,10 +1,9 @@
 import { useState, useEffect } from "react";
-import { Sidebar } from "@/components/workspace/Sidebar";
 import { TabBar } from "@/components/workspace/TabBar";
 import { QueryEditor } from "@/components/workspace/QueryEditor";
 import { DataGrid } from "@/components/workspace/DataGrid";
 import { EditorStatusBar } from "@/components/workspace/EditorStatusBar";
-import { ActivityBar, SidebarTab } from "@/components/workspace/ActivityBar";
+import { LeftPanel, SidebarTab } from "@/components/workspace/LeftPanel";
 import { TableDataView } from "@/components/workspace/TableDataView";
 import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
 import { AppBar } from "@/components/AppBar";
@@ -86,7 +85,6 @@ export function Workspace() {
   return (
     <div className="h-screen w-screen flex flex-col bg-[#131313] text-gray-200 font-sans overflow-hidden">
       <AppBar
-        title="OxideStudio"
         right={
           <>
             <Button
@@ -120,24 +118,14 @@ export function Workspace() {
       />
 
       <div className="flex-1 flex overflow-hidden">
-        <ActivityBar
+        {/* Unified Left Panel */}
+        <LeftPanel
           activeTab={activeSidebarTab}
           onTabClick={handleActivityBarClick}
           isDrawerOpen={isLeftDrawerOpen}
+          sidebarWidth={sidebarWidth}
+          onDragStart={handleDragStart}
         />
-
-        {isLeftDrawerOpen && (
-          <div
-            className="border-r border-[#111] bg-[#1e1e1e] relative shrink-0 transition-all duration-200"
-            style={{ width: `${sidebarWidth}px` }}
-          >
-            <Sidebar activeTab={activeSidebarTab} />
-            <div
-              className="absolute right-0 top-0 bottom-0 w-1 bg-[#111] hover:bg-orange-500 cursor-col-resize z-50 transition-colors"
-              onMouseDown={handleDragStart}
-            />
-          </div>
-        )}
 
         <div className="flex-1 min-w-0">
           <div className="flex flex-col h-full min-w-0 bg-[#1e1e1e]">
