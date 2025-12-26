@@ -1,15 +1,16 @@
 import { cn } from "@/lib/utils";
-import {
-  Database,
-  Table,
-  Search,
-  ChevronRight,
-  ChevronDown,
-} from "lucide-react";
+import { Database, Table, Search } from "lucide-react";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useEffect, useState } from "react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 export function SchemaSidebar() {
   const { activeConnectionId } = useConnectionStore();
@@ -19,17 +20,19 @@ export function SchemaSidebar() {
     currentSchema,
     loadSchemas,
     loadTables,
-    tables, // These are tables for the *currentSchema*
+    tables,
     setCurrentSchema,
     selectTable,
     selectedTable,
   } = useSchemaStore();
 
   const [filterText, setFilterText] = useState("");
+  const [databaseFilter, setDatabaseFilter] = useState("");
+  const [isSelectOpen, setIsSelectOpen] = useState(false);
+  const [focusedIndex, setFocusedIndex] = useState(0);
 
   useEffect(() => {
     if (activeConnectionId) {
-      // Load schemas when connection is active
       loadSchemas(activeConnectionId);
     }
   }, [activeConnectionId, loadSchemas]);
@@ -40,43 +43,212 @@ export function SchemaSidebar() {
     }
   }, [activeConnectionId, currentSchema, loadTables]);
 
-  const { createTab, runTabQuery, updateTabSql } = useTabStore();
-
-  const handleSchemaClick = (schema: string) => {
-    if (currentSchema === schema) {
-      // Toggle logic if needed
-    } else {
-      setCurrentSchema(schema);
+  // Clear database filter when select closes
+  useEffect(() => {
+    if (!isSelectOpen) {
+      setDatabaseFilter("");
+      setFocusedIndex(0);
     }
-  };
+  }, [isSelectOpen]);
+
+  // Reset focus when filter changes
+  useEffect(() => {
+    setFocusedIndex(0);
+  }, [databaseFilter]);
+
+  // Filter tables based on search text
+  const filteredTables = tables.filter((table) =>
+    table.name.toLowerCase().includes(filterText.toLowerCase())
+  );
+
+  // Filter databases based on search text
+  const filteredSchemas = schemas.filter((schema) =>
+    schema.toLowerCase().includes(databaseFilter.toLowerCase())
+  );
+
+  // Handle keyboard input when select is open
+  useEffect(() => {
+    if (!isSelectOpen) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Handle typing (alphanumeric and some special chars)
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        setDatabaseFilter((prev) => prev + e.key);
+      }
+      // Handle backspace
+      else if (e.key === "Backspace") {
+        e.preventDefault();
+        setDatabaseFilter((prev) => prev.slice(0, -1));
+      }
+      // Handle Escape to clear filter or close
+      else if (e.key === "Escape") {
+        e.preventDefault();
+        if (databaseFilter) {
+          setDatabaseFilter("");
+        } else {
+          setIsSelectOpen(false);
+        }
+      }
+      // Arrow key navigation
+      else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setFocusedIndex((prev) =>
+          Math.min(prev + 1, filteredSchemas.length - 1)
+        );
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setFocusedIndex((prev) => Math.max(prev - 1, 0));
+      }
+      // Enter to select focused item
+      else if (e.key === "Enter" && filteredSchemas.length > 0) {
+        e.preventDefault();
+        const selectedSchema = filteredSchemas[focusedIndex];
+        if (selectedSchema) {
+          setCurrentSchema(selectedSchema);
+          setFilterText("");
+          setIsSelectOpen(false);
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    isSelectOpen,
+    databaseFilter,
+    focusedIndex,
+    filteredSchemas,
+    setCurrentSchema,
+    setFilterText,
+  ]);
+
+  const { createTab, runTabQuery, updateTabSql } = useTabStore();
 
   const handleTableClick = (tableName: string) => {
     selectTable(tableName);
     if (!currentSchema) return;
 
-    // Open a dedicated table tab
     const tabId = createTab("table", tableName, "", {
       tableName,
       schemaName: currentSchema,
     });
 
     if (activeConnectionId) {
-      // For table tabs, we'll need a way to fetch the initial data
-      // For now, we'll use a SELECT query, but we could optimize this later
       const sql = `SELECT * FROM "${currentSchema}"."${tableName}" LIMIT 100;`;
       updateTabSql(tabId, sql);
       runTabQuery(tabId, activeConnectionId);
     }
   };
 
-  const filteredSchemas = schemas.filter((s) =>
-    s.toLowerCase().includes(filterText.toLowerCase())
-  );
+  // Highlight matching text
+  const highlightMatch = (text: string, filter: string) => {
+    if (!filter) return <span>{text}</span>;
+
+    const index = text.toLowerCase().indexOf(filter.toLowerCase());
+    if (index === -1) return <span>{text}</span>;
+
+    const before = text.slice(0, index);
+    const match = text.slice(index, index + filter.length);
+    const after = text.slice(index + filter.length);
+
+    return (
+      <span>
+        {before}
+        <span className="bg-[#f39c12] text-[#1a1a1a] font-bold">{match}</span>
+        {after}
+      </span>
+    );
+  };
 
   return (
     <div className="flex flex-col h-full bg-[#1e1e1e]">
-      {/* Filter Input */}
-      <div className="p-2 border-b border-[#333] bg-[#222]">
+      {/* Top: Database Selector */}
+      <div className="p-2 border-b border-[#333] bg-[#222] shrink-0">
+        <div className="flex items-center gap-2 mb-1">
+          <Database size={13} className="text-[#f39c12] shrink-0" />
+          <span className="text-[10px] uppercase tracking-wider text-gray-500 font-bold">
+            Database
+          </span>
+        </div>
+
+        <Select
+          value={currentSchema || ""}
+          onValueChange={(value: string) => {
+            setCurrentSchema(value);
+            setFilterText(""); // Clear table filter when switching database
+            setIsSelectOpen(false);
+          }}
+          open={isSelectOpen}
+          onOpenChange={setIsSelectOpen}
+        >
+          <SelectTrigger className="w-full h-7 text-[11px] bg-[#161616] border-[#333] focus:border-[#f39c12] text-gray-300">
+            <SelectValue placeholder="Select database..." />
+          </SelectTrigger>
+          <SelectContent className="bg-[#2a2a2a] border-[#3a3a3a] text-gray-200">
+            {/* Filter indicator at top-right (no input box) */}
+            {databaseFilter && (
+              <div className="sticky top-0 z-10 bg-[#2a2a2a] px-2 py-1.5 border-b border-[#3a3a3a] flex items-center justify-between">
+                <span className="text-[10px] text-gray-500 italic">
+                  Type to filter...
+                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-[#1a1a1a] text-[#f39c12] font-mono border border-[#3a3a3a]">
+                    {databaseFilter}
+                  </span>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#f39c12]/20 text-[#f39c12] border border-[#f39c12]/30">
+                    {filteredSchemas.length}/{schemas.length}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Database list */}
+            <div className="max-h-[300px] overflow-auto">
+              {isLoading && schemas.length === 0 ? (
+                <div className="px-2 py-1.5 text-[11px] text-gray-500 italic">
+                  Loading...
+                </div>
+              ) : filteredSchemas.length === 0 ? (
+                <div className="px-2 py-1.5 text-[11px] text-gray-500 italic">
+                  {databaseFilter ? (
+                    <>
+                      No match for{" "}
+                      <span className="text-[#f39c12] font-mono">
+                        "{databaseFilter}"
+                      </span>
+                      <div className="text-[9px] mt-1 opacity-60">
+                        Press Esc to clear
+                      </div>
+                    </>
+                  ) : (
+                    "No databases found"
+                  )}
+                </div>
+              ) : (
+                filteredSchemas.map((schema, index) => (
+                  <SelectItem
+                    key={schema}
+                    value={schema}
+                    className={cn(
+                      "text-[11px] focus:bg-[#3a3a3a] focus:text-gray-100",
+                      index === focusedIndex && "bg-[#3a3a3a] text-gray-100"
+                    )}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Database size={12} className="text-gray-500" />
+                      {highlightMatch(schema, databaseFilter)}
+                    </div>
+                  </SelectItem>
+                ))
+              )}
+            </div>
+          </SelectContent>
+        </Select>
+      </div>
+
+      {/* Middle: Filter Input for Tables */}
+      <div className="p-2 border-b border-[#333] bg-[#222] shrink-0">
         <div className="relative">
           <Search
             size={12}
@@ -84,98 +256,58 @@ export function SchemaSidebar() {
           />
           <input
             type="text"
-            placeholder="Search databases..."
+            placeholder="Filter tables..."
             className="w-full bg-[#161616] text-gray-300 text-[11px] h-7 pl-7 pr-2 rounded-sm border border-[#333] focus:border-[#f39c12] focus:outline-none transition-colors placeholder:text-gray-600"
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
+            disabled={!currentSchema}
           />
         </div>
       </div>
 
-      {/* Tree View Content: Database List */}
+      {/* Bottom: Tables List */}
       <div className="flex-1 overflow-auto bg-[#1e1e1e] py-1 custom-scrollbar">
-        {isLoading && schemas.length === 0 ? (
+        {!currentSchema ? (
           <div className="p-4 text-xs text-center text-gray-500 italic">
-            Loading databases...
+            Select a database to view tables
+          </div>
+        ) : isLoading && tables.length === 0 ? (
+          <div className="p-4 text-xs text-center text-gray-500 italic">
+            Loading tables...
+          </div>
+        ) : filteredTables.length === 0 ? (
+          <div className="p-4 text-xs text-center text-gray-500 italic">
+            {filterText ? `No tables match "${filterText}"` : "No tables found"}
           </div>
         ) : (
-          <div>
-            {filteredSchemas.map((schema) => {
-              const isActive = currentSchema === schema;
-
-              return (
-                <div key={schema}>
-                  {/* Database Item */}
-                  <div
-                    className={cn(
-                      "flex items-center gap-1.5 px-2 py-1.5 cursor-pointer text-[12px] group transition-all select-none hover:bg-[#252525]",
-                      isActive ? "text-gray-100" : "text-gray-400"
-                    )}
-                    onClick={() => handleSchemaClick(schema)}
-                    title={schema}
-                  >
-                    <div className="text-gray-500">
-                      {isActive ? (
-                        <ChevronDown size={14} />
-                      ) : (
-                        <ChevronRight size={14} />
-                      )}
-                    </div>
-                    <Database
-                      size={13}
-                      className={cn(
-                        "shrink-0",
-                        isActive ? "text-[#f39c12]" : "text-gray-500"
-                      )}
-                    />
-                    <span className="truncate font-medium flex-1">
-                      {schema}
-                    </span>
-                  </div>
-
-                  {/* Tables List (if active) */}
-                  {isActive && (
-                    <div className="ml-5 border-l border-[#333] pl-1">
-                      {isLoading && tables.length === 0 ? (
-                        <div className="py-2 pl-4 text-[10px] text-gray-600 italic">
-                          Loading tables...
-                        </div>
-                      ) : (
-                        <div>
-                          {tables.map((table) => (
-                            <div
-                              key={table.name}
-                              className={cn(
-                                "flex items-center gap-2 pl-2 pr-2 py-1 cursor-pointer text-[11px] group transition-all select-none rounded-r-sm",
-                                selectedTable === table.name
-                                  ? "bg-[#2d2d2d] text-[#f39c12]"
-                                  : "text-gray-400 hover:text-gray-200 hover:bg-[#252525]"
-                              )}
-                              onClick={() => handleTableClick(table.name)}
-                              title={table.name}
-                            >
-                              <Table
-                                size={12}
-                                className={cn(
-                                  "shrink-0 opacity-70",
-                                  selectedTable === table.name && "opacity-100"
-                                )}
-                              />
-                              <span className="truncate">{table.name}</span>
-                            </div>
-                          ))}
-                          {tables.length === 0 && (
-                            <div className="py-2 pl-2 text-[10px] text-gray-600 italic">
-                              No tables
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
+          <div className="px-1">
+            {filteredTables.map((table) => (
+              <div
+                key={table.name}
+                className={cn(
+                  "flex items-center gap-2 px-2 py-1.5 cursor-pointer text-[11px] group transition-all select-none rounded-sm",
+                  selectedTable === table.name
+                    ? "bg-[#2d2d2d] text-[#f39c12]"
+                    : "text-gray-400 hover:text-gray-200 hover:bg-[#252525]"
+                )}
+                onClick={() => handleTableClick(table.name)}
+                title={table.name}
+              >
+                <Table
+                  size={12}
+                  className={cn(
+                    "shrink-0 opacity-70",
+                    selectedTable === table.name && "opacity-100"
                   )}
-                </div>
-              );
-            })}
+                />
+                <span className="truncate flex-1">{table.name}</span>
+                {table.type && (
+                  <span className="text-[9px] uppercase opacity-50 shrink-0">
+                    {table.type}
+                  </span>
+                )}
+              </div>
+            ))}
           </div>
         )}
       </div>
