@@ -22,7 +22,7 @@ interface ConnectionState {
   // Actions
   loadConnections: () => Promise<void>;
   selectConnection: (id: string | null) => void;
-  createNewConnection: () => void;
+  createNewConnection: () => ConnectionConfig;
   updateConnectionConfig: (updates: Partial<ConnectionConfig>) => void;
   saveConnection: (config: ConnectionConfig) => Promise<void>;
   addConnection: (config: Omit<ConnectionConfig, "id">) => Promise<void>;
@@ -60,19 +60,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   createNewConnection: () => {
+    const newConn = {
+      id: uuidv4(),
+      name: "New Connection",
+      driver: "postgres",
+      url: "",
+      host: "localhost",
+      port: 5432,
+      user: "",
+      password: "",
+      database: "postgres",
+    } as const; // literal types help inference if needed, but not strictly necessary here
+
     set({
-      selectedConnection: {
-        id: uuidv4(),
-        name: "New Connection",
-        driver: "postgres",
-        url: "",
-        host: "localhost",
-        port: 5432,
-        user: "",
-        password: "",
-        database: "postgres",
-      },
+      selectedConnection: { ...newConn, driver: "postgres" }, // Ensure type compatibility
     });
+    return { ...newConn, driver: "postgres" as const };
   },
 
   updateConnectionConfig: (updates) => {

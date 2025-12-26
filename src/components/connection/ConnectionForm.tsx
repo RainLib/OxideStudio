@@ -3,35 +3,20 @@ import {
   ConnectionConfig,
 } from "@/store/useConnectionStore";
 import { Button } from "@/components/ui/button";
-import { Save, Play, CheckCircle2, AlertCircle, Link2 } from "lucide-react";
+import {
+  Save,
+  Play,
+  CheckCircle2,
+  AlertCircle,
+  Eye,
+  EyeOff,
+  Globe,
+  Database,
+  Lock,
+} from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
-import { parseConnectionUrl } from "@/lib/connectionUrlParser";
-
-// Custom Styled Input for the Dark Theme
-function ConfigInput({
-  label,
-  type = "text",
-  ...props
-}: React.InputHTMLAttributes<HTMLInputElement> & { label: string }) {
-  return (
-    <div className="grid gap-1.5">
-      <label className="text-[11px] uppercase tracking-wide font-bold text-gray-500">
-        {label}
-      </label>
-      <input
-        type={type}
-        className={cn(
-          "flex h-9 w-full rounded border border-[#333] bg-[#1a1a1a] px-3 py-1 text-sm text-gray-200 shadow-sm transition-colors",
-          "placeholder:text-gray-600",
-          "focus-visible:outline-none focus-visible:border-[#f39c12] focus-visible:ring-1 focus-visible:ring-[#f39c12]",
-          "disabled:cursor-not-allowed disabled:opacity-50"
-        )}
-        {...props}
-      />
-    </div>
-  );
-}
+import { Switch } from "@/components/ui/switch";
 
 export function ConnectionForm() {
   const {
@@ -40,19 +25,28 @@ export function ConnectionForm() {
     connect,
     updateConnectionConfig,
   } = useConnectionStore();
+
   const [testStatus, setTestStatus] = useState<{
     type: "success" | "error" | "loading";
     msg: string;
   } | null>(null);
-  const [inputMode, setInputMode] = useState<"url" | "fields">("fields");
+
+  const [showPassword, setShowPassword] = useState(false);
 
   if (!selectedConnection) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center text-gray-500 bg-[#131313] gap-4">
-        <div className="w-16 h-16 rounded-full bg-[#1a1a1a] flex items-center justify-center">
-          <Play size={24} className="opacity-20 translate-x-1" />
+      <div className="flex-1 flex flex-col items-center justify-center bg-[#090909] text-gray-500 gap-4">
+        <div className="w-20 h-20 rounded-2xl bg-[#111] border border-[#222] flex items-center justify-center shadow-2xl">
+          <Database size={32} className="opacity-20 text-white" />
         </div>
-        <p>Select a connection to configure</p>
+        <div className="text-center space-y-1">
+          <h3 className="text-lg font-medium text-gray-300">
+            No Connection Selected
+          </h3>
+          <p className="text-sm text-gray-600">
+            Select a connection or create a new one to get started.
+          </p>
+        </div>
       </div>
     );
   }
@@ -61,320 +55,242 @@ export function ConnectionForm() {
     updateConnectionConfig({ [field]: value });
   };
 
-  const handleSave = async () => {
-    if (selectedConnection) {
-      await saveConnection(selectedConnection);
+  const handleTest = async () => {
+    setTestStatus({ type: "loading", msg: "Testing connection..." });
+    const error = await connect(selectedConnection);
+    if (error) {
+      setTestStatus({ type: "error", msg: error });
+    } else {
+      setTestStatus({ type: "success", msg: "Connection successful" });
+      setTimeout(() => setTestStatus(null), 3000);
     }
+  };
+
+  const handleSave = async () => {
+    await saveConnection(selectedConnection);
   };
 
   const handleConnect = async () => {
-    if (selectedConnection) {
-      const error = await connect(selectedConnection);
-      if (error) {
-        setTestStatus({ type: "error", msg: error });
-      }
-    }
-  };
-
-  const handleTest = async () => {
-    if (selectedConnection) {
-      setTestStatus({ type: "loading", msg: "Testing connection..." });
-      const error = await connect(selectedConnection);
-      if (error) {
-        setTestStatus({ type: "error", msg: error });
-      } else {
-        setTestStatus({ type: "success", msg: "Connection successful!" });
-        // We don't disconnect here to allow immediate use if desired,
-        // but technically "Test" implies generic check.
-        // Oxide's connect also sets active connection, which is fine.
-      }
-    }
-  };
-
-  const handleParseUrl = () => {
-    if (selectedConnection?.connectionUrl) {
-      const parsed = parseConnectionUrl(selectedConnection.connectionUrl);
-      if (parsed) {
-        updateConnectionConfig({
-          driver: parsed.driver,
-          host: parsed.host,
-          port: parsed.port,
-          user: parsed.user,
-          password: parsed.password,
-          database: parsed.database,
-          sslMode: parsed.sslMode,
-        });
-        setTestStatus({ type: "success", msg: "URL parsed successfully!" });
-      } else {
-        setTestStatus({
-          type: "error",
-          msg: "Failed to parse URL. Please check the format.",
-        });
-      }
+    await handleSave();
+    const error = await connect(selectedConnection);
+    if (error) {
+      setTestStatus({ type: "error", msg: error });
     }
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 bg-[#131313] text-gray-200 overflow-y-auto">
-      {/* Form Header */}
-      <div className="px-8 py-6 border-b border-[#222] bg-[#1e1e1e]/50">
-        <div className="flex items-center gap-4 mb-4">
-          <div
-            className={cn(
-              "w-12 h-12 rounded-lg flex items-center justify-center shadow-lg",
-              selectedConnection.driver === "postgres"
-                ? "bg-blue-600 text-white"
-                : "bg-orange-600 text-white"
-            )}
-          >
-            {selectedConnection.driver === "postgres" ? "PG" : "MY"}
-          </div>
-          <div>
-            <input
-              className="bg-transparent text-2xl font-bold text-white focus:outline-none placeholder:text-gray-600 w-full"
-              value={selectedConnection.name || ""}
-              onChange={(e) => handleChange("name", e.target.value)}
-              placeholder="Name your connection..."
-            />
-            <div className="flex gap-4 mt-1">
-              <label className="flex items-center gap-2 cursor-pointer group">
-                <div
-                  className={cn(
-                    "w-3 h-3 rounded-full border border-gray-500 group-hover:border-blue-500 transition-colors",
-                    selectedConnection.driver === "postgres" &&
-                      "bg-blue-500 border-blue-500 ring-2 ring-blue-500/20"
-                  )}
-                />
-                <span className="text-xs text-gray-400 group-hover:text-gray-300">
-                  PostgreSQL
-                </span>
-                <input
-                  type="radio"
-                  className="hidden"
-                  checked={selectedConnection.driver === "postgres"}
-                  onChange={() => handleChange("driver", "postgres")}
-                />
-              </label>
-              <label className="flex items-center gap-2 cursor-pointer group">
-                <div
-                  className={cn(
-                    "w-3 h-3 rounded-full border border-gray-500 group-hover:border-orange-500 transition-colors",
-                    selectedConnection.driver === "mysql" &&
-                      "bg-orange-500 border-orange-500 ring-2 ring-orange-500/20"
-                  )}
-                />
-                <span className="text-xs text-gray-400 group-hover:text-gray-300">
-                  MySQL
-                </span>
-                <input
-                  type="radio"
-                  className="hidden"
-                  checked={selectedConnection.driver === "mysql"}
-                  onChange={() => handleChange("driver", "mysql")}
-                />
-              </label>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Form Content */}
-      <div className="flex-1 p-8 max-w-4xl mx-auto w-full">
-        {/* Toggle Button */}
-        <div className="flex justify-end mb-4">
+    <div className="flex-1 flex justify-center bg-[#090909] overflow-y-auto p-8">
+      <div className="w-full max-w-2xl flex flex-col min-h-0">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-8">
+          <h2 className="text-2xl font-bold text-white tracking-tight">
+            {selectedConnection.name || "New Connection"}
+          </h2>
           <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setInputMode(inputMode === "url" ? "fields" : "url")}
-            className="gap-2 border-[#444] bg-[#252525] text-gray-300 hover:bg-[#333]"
+            variant="ghost"
+            className="text-xs text-gray-400 hover:text-white uppercase tracking-wider font-bold"
+            onClick={() => {
+              /* Toggle Import from URL maybe? */
+            }}
           >
-            <Link2 size={14} />
-            {inputMode === "url"
-              ? "Use Individual Fields"
-              : "Use Connection URL"}
+            Import from URL
           </Button>
         </div>
 
-        <div className="grid gap-6 bg-[#1a1a1a] p-6 rounded-lg border border-[#333] shadow-sm">
-          {inputMode === "url" ? (
-            <>
-              {/* URL Input Mode */}
-              <div className="grid gap-3">
-                <label className="text-[11px] uppercase tracking-wide font-bold text-gray-500">
-                  Connection URL
-                </label>
-                <textarea
+        <div className="space-y-6">
+          {/* Connection Type */}
+          <div className="space-y-2">
+            <label className="text-xs font-medium text-gray-400">
+              Connection Type
+            </label>
+            <div className="grid grid-cols-2 gap-4 p-1 bg-[#111] rounded-lg border border-[#222]">
+              {[
+                { id: "postgres", label: "PostgreSQL", icon: Database },
+                { id: "mysql", label: "MySQL", icon: Database }, // Use appropriate icons
+              ].map((type) => (
+                <button
+                  key={type.id}
+                  onClick={() => handleChange("driver", type.id)}
                   className={cn(
-                    "flex w-full rounded border border-[#333] bg-[#1a1a1a] px-3 py-2 text-sm text-gray-200 shadow-sm transition-colors resize-none",
-                    "placeholder:text-gray-600",
-                    "focus-visible:outline-none focus-visible:border-[#f39c12] focus-visible:ring-1 focus-visible:ring-[#f39c12]"
+                    "flex items-center justify-center gap-2 py-2.5 rounded-md text-sm font-medium transition-all duration-200",
+                    selectedConnection.driver === type.id
+                      ? "bg-[#222] text-white shadow-sm ring-1 ring-[#333]"
+                      : "text-gray-500 hover:text-gray-300 hover:bg-[#1a1a1a]"
                   )}
-                  value={selectedConnection.connectionUrl || ""}
-                  onChange={(e) =>
-                    handleChange("connectionUrl", e.target.value)
-                  }
-                  placeholder="postgres://user:password@host:5432/database?sslmode=require"
-                  rows={3}
-                />
-                <div className="flex justify-end">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleParseUrl}
-                    disabled={!selectedConnection.connectionUrl}
-                    className="border-[#444] bg-[#252525] text-gray-300 hover:bg-[#333] disabled:opacity-50"
-                  >
-                    Auto-parse URL
-                  </Button>
-                </div>
-              </div>
-
-              {/* Show parsed values as read-only badges if URL is present */}
-              {selectedConnection.connectionUrl && selectedConnection.host && (
-                <div className="grid gap-2 p-4 bg-[#252525] rounded border border-[#333]">
-                  <div className="text-[10px] uppercase tracking-wide font-bold text-gray-500 mb-1">
-                    Parsed Components
-                  </div>
-                  <div className="flex flex-wrap gap-2 text-xs">
-                    {selectedConnection.host && (
-                      <span className="px-2 py-1 bg-[#1a1a1a] rounded border border-[#444] text-gray-400">
-                        Host: {selectedConnection.host}
-                      </span>
-                    )}
-                    {selectedConnection.port && (
-                      <span className="px-2 py-1 bg-[#1a1a1a] rounded border border-[#444] text-gray-400">
-                        Port: {selectedConnection.port}
-                      </span>
-                    )}
-                    {selectedConnection.user && (
-                      <span className="px-2 py-1 bg-[#1a1a1a] rounded border border-[#444] text-gray-400">
-                        User: {selectedConnection.user}
-                      </span>
-                    )}
-                    {selectedConnection.database && (
-                      <span className="px-2 py-1 bg-[#1a1a1a] rounded border border-[#444] text-gray-400">
-                        Database: {selectedConnection.database}
-                      </span>
-                    )}
-                    {selectedConnection.sslMode && (
-                      <span className="px-2 py-1 bg-green-500/10 rounded border border-green-500/30 text-green-400">
-                        SSL: {selectedConnection.sslMode}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
-            </>
-          ) : (
-            <>
-              {/* Individual Fields Mode */}
-              <div className="grid grid-cols-12 gap-6">
-                <div className="col-span-8">
-                  <ConfigInput
-                    label="Host"
-                    value={selectedConnection.host || ""}
-                    onChange={(e) => handleChange("host", e.target.value)}
-                    placeholder="localhost"
-                  />
-                </div>
-                <div className="col-span-4">
-                  <ConfigInput
-                    label="Port"
-                    type="number"
-                    value={selectedConnection.port || ""}
-                    onChange={(e) =>
-                      handleChange("port", parseInt(e.target.value) || 5432)
+                >
+                  <type.icon
+                    size={16}
+                    className={
+                      selectedConnection.driver === type.id
+                        ? "text-[#f39c12]"
+                        : "currentColor"
                     }
                   />
-                </div>
-              </div>
+                  {type.label}
+                </button>
+              ))}
+            </div>
+          </div>
 
-              <div className="grid grid-cols-2 gap-6">
-                <ConfigInput
-                  label="Username"
-                  value={selectedConnection.user || ""}
-                  onChange={(e) => handleChange("user", e.target.value)}
-                  autoComplete="off"
+          {/* Host & Port */}
+          <div className="grid grid-cols-12 gap-4">
+            <div className="col-span-9 space-y-2">
+              <label className="text-xs font-medium text-gray-400">Host</label>
+              <div className="relative group">
+                <Globe
+                  size={14}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 transition-colors group-focus-within:text-[#f39c12]"
                 />
-                <ConfigInput
-                  label="Password"
-                  type="password"
+                <input
+                  className="w-full h-10 bg-[#111] border border-[#222] rounded-lg pl-9 pr-3 text-sm text-gray-200 placeholder:text-gray-700 outline-none focus:border-[#f39c12] focus:ring-1 focus:ring-[#f39c12] transition-all"
+                  placeholder="localhost"
+                  value={selectedConnection.host || ""}
+                  onChange={(e) => handleChange("host", e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="col-span-3 space-y-2">
+              <label className="text-xs font-medium text-gray-400">Port</label>
+              <input
+                type="number"
+                className="w-full h-10 bg-[#111] border border-[#222] rounded-lg px-3 text-sm text-gray-200 placeholder:text-gray-700 outline-none focus:border-[#f39c12] focus:ring-1 focus:ring-[#f39c12] transition-all text-center font-mono"
+                placeholder="5432"
+                value={selectedConnection.port || ""}
+                onChange={(e) => handleChange("port", parseInt(e.target.value))}
+              />
+            </div>
+          </div>
+
+          {/* Authentication */}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-gray-400">User</label>
+              <input
+                className="w-full h-10 bg-[#111] border border-[#222] rounded-lg px-3 text-sm text-gray-200 placeholder:text-gray-700 outline-none focus:border-[#f39c12] focus:ring-1 focus:ring-[#f39c12] transition-all"
+                placeholder="postgres"
+                value={selectedConnection.user || ""}
+                onChange={(e) => handleChange("user", e.target.value)}
+                autoComplete="off"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-gray-400">
+                Password
+              </label>
+              <div className="relative">
+                <input
+                  type={showPassword ? "text" : "password"}
+                  className="w-full h-10 bg-[#111] border border-[#222] rounded-lg px-3 pr-10 text-sm text-gray-200 placeholder:text-gray-700 outline-none focus:border-[#f39c12] focus:ring-1 focus:ring-[#f39c12] transition-all"
+                  placeholder="••••••••"
                   value={selectedConnection.password || ""}
                   onChange={(e) => handleChange("password", e.target.value)}
                   autoComplete="off"
                 />
-              </div>
-
-              <ConfigInput
-                label="Default Database"
-                value={selectedConnection.database || ""}
-                onChange={(e) => handleChange("database", e.target.value)}
-              />
-
-              {/* SSL Mode Dropdown */}
-              <div className="grid gap-1.5">
-                <label className="text-[11px] uppercase tracking-wide font-bold text-gray-500">
-                  SSL Mode
-                </label>
-                <select
-                  className={cn(
-                    "flex h-9 w-full rounded border border-[#333] bg-[#1a1a1a] px-3 py-1 text-sm text-gray-200 shadow-sm transition-colors",
-                    "focus-visible:outline-none focus-visible:border-[#f39c12] focus-visible:ring-1 focus-visible:ring-[#f39c12]"
-                  )}
-                  value={selectedConnection.sslMode || "disable"}
-                  onChange={(e) => handleChange("sslMode", e.target.value)}
+                <button
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-400"
                 >
-                  <option value="disable">Disable</option>
-                  <option value="require">Require</option>
-                  <option value="verify-ca">Verify CA</option>
-                  <option value="verify-full">Verify Full</option>
-                </select>
+                  {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
               </div>
-            </>
-          )}
+            </div>
+          </div>
+
+          {/* Database & SSL */}
+          <div className="space-y-2">
+            <label className="text-xs font-medium text-gray-400">
+              Default Database
+            </label>
+            <input
+              className="w-full h-10 bg-[#111] border border-[#222] rounded-lg px-3 text-sm text-gray-200 placeholder:text-gray-700 outline-none focus:border-[#f39c12] focus:ring-1 focus:ring-[#f39c12] transition-all"
+              placeholder="postgres"
+              value={selectedConnection.database || ""}
+              onChange={(e) => handleChange("database", e.target.value)}
+            />
+          </div>
+
+          {/* Options Toggles */}
+          <div className="pt-4 space-y-4">
+            <div className="flex items-center justify-between p-3 rounded-lg bg-[#111] border border-[#222]">
+              <div className="flex items-center gap-3">
+                <Lock size={16} className="text-gray-500" />
+                <div className="text-xs font-medium text-gray-300">
+                  Enable SSL
+                </div>
+              </div>
+              <Switch
+                checked={selectedConnection.sslMode === "require"}
+                onCheckedChange={(checked) =>
+                  handleChange("sslMode", checked ? "require" : "disable")
+                }
+                className="data-[state=checked]:bg-[#f39c12]"
+              />
+            </div>
+          </div>
+
+          {/* Connection Name */}
+          <div className="space-y-2 pt-4 border-t border-[#222]">
+            <label className="text-xs font-medium text-gray-400">
+              Connection Name
+            </label>
+            <input
+              className="w-full h-10 bg-[#111] border border-[#222] rounded-lg px-3 text-sm text-gray-200 placeholder:text-gray-700 outline-none focus:border-[#f39c12] focus:ring-1 focus:ring-[#f39c12] transition-all"
+              placeholder="My Production DB"
+              value={selectedConnection.name || ""}
+              onChange={(e) => handleChange("name", e.target.value)}
+            />
+          </div>
         </div>
 
-        {/* Status Message */}
-        {testStatus && (
-          <div
-            className={cn(
-              "mt-4 p-4 rounded border flex items-center gap-3",
-              testStatus.type === "error"
-                ? "bg-red-500/10 border-red-500/50 text-red-200"
-                : testStatus.type === "success"
-                ? "bg-green-500/10 border-green-500/50 text-green-200"
-                : "bg-[#252525] border-[#444] text-gray-300"
-            )}
-          >
-            {testStatus.type === "error" && <AlertCircle size={18} />}
-            {testStatus.type === "success" && <CheckCircle2 size={18} />}
-            <span className="text-sm font-medium">{testStatus.msg}</span>
-          </div>
-        )}
-      </div>
+        {/* Footer */}
+        <div className="mt-8 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Button
+              variant="ghost"
+              onClick={handleTest}
+              className="text-gray-400 hover:text-white hover:bg-[#222]"
+              disabled={testStatus?.type === "loading"}
+            >
+              {testStatus?.type === "loading"
+                ? "Testing..."
+                : "Test Connection"}
+            </Button>
 
-      {/* Footer Actions */}
-      <div className="p-6 border-t border-[#222] bg-[#161616] flex justify-end gap-3 sticky bottom-0">
-        <Button
-          variant="ghost"
-          className="hover:bg-[#252525] hover:text-white text-gray-400"
-          onClick={handleTest}
-        >
-          Test Connection
-        </Button>
-        <Button
-          variant="outline"
-          className="border-[#444] bg-[#252525] text-gray-200 hover:bg-[#333]"
-          onClick={handleSave}
-        >
-          <Save size={16} className="mr-2" /> Save
-        </Button>
-        <Button
-          className="bg-[#e67e22] hover:bg-[#d35400] text-white px-8 font-bold shadow-lg shadow-orange-900/20"
-          onClick={handleConnect}
-        >
-          <Play size={16} className="mr-2 fill-current" /> Connect
-        </Button>
+            {testStatus && testStatus.type !== "loading" && (
+              <div
+                className={cn(
+                  "text-xs font-medium flex items-center gap-1.5",
+                  testStatus.type === "success"
+                    ? "text-green-500"
+                    : "text-red-500"
+                )}
+              >
+                {testStatus.type === "success" ? (
+                  <CheckCircle2 size={14} />
+                ) : (
+                  <AlertCircle size={14} />
+                )}
+                {testStatus.msg}
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-3">
+            <Button
+              variant="secondary"
+              onClick={handleSave}
+              className="bg-[#222] text-gray-200 hover:bg-[#333] border border-[#333]"
+            >
+              Save
+            </Button>
+            <Button
+              onClick={handleConnect}
+              className="bg-white text-black hover:bg-gray-200 font-bold px-6"
+            >
+              Connect
+            </Button>
+          </div>
+        </div>
       </div>
     </div>
   );

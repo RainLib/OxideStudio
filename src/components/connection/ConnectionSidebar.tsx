@@ -1,4 +1,5 @@
 import { useConnectionStore } from "@/store/useConnectionStore";
+import { useWorkspaceStore } from "@/store/useWorkspaceStore";
 import { Button } from "@/components/ui/button";
 import { Plus, Database, Monitor, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -13,13 +14,23 @@ export function ConnectionSidebar() {
     selectConnection,
     createNewConnection,
   } = useConnectionStore();
+  const { activeWorkspaceId, workspaceConnections } = useWorkspaceStore();
   const [filter, setFilter] = useState("");
 
-  const filteredConnections = connections.filter(
-    (c) =>
+  const filteredConnections = connections.filter((c) => {
+    const matchesFilter =
       c.name.toLowerCase().includes(filter.toLowerCase()) ||
-      c.host?.toLowerCase().includes(filter.toLowerCase())
-  );
+      c.host?.toLowerCase().includes(filter.toLowerCase());
+
+    if (!matchesFilter) return false;
+
+    if (activeWorkspaceId) {
+      const workspaceConnIds = workspaceConnections[activeWorkspaceId] || [];
+      return workspaceConnIds.includes(c.id);
+    }
+
+    return true;
+  });
 
   return (
     <div className="w-[280px] border-r border-[#333] bg-[#1a1a1a] flex flex-col h-full">
@@ -39,7 +50,13 @@ export function ConnectionSidebar() {
         </div>
 
         <Button
-          onClick={createNewConnection}
+          onClick={() => {
+            const newConn = createNewConnection();
+            if (activeWorkspaceId) {
+              const { addConnectionToWorkspace } = useWorkspaceStore.getState();
+              addConnectionToWorkspace(activeWorkspaceId, newConn.id);
+            }
+          }}
           className="w-full gap-2 bg-[#f39c12] hover:bg-[#d35400] text-white h-8 text-xs font-semibold shadow-md"
           size="sm"
         >

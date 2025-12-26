@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { ConnectionSidebar } from "@/components/connection/ConnectionSidebar";
+import { WorkspaceSidebar } from "@/components/connection/WorkspaceSidebar";
 import { ConnectionForm } from "@/components/connection/ConnectionForm";
 import { AppBar } from "@/components/AppBar";
 import { Loader2 } from "lucide-react";
@@ -24,6 +25,7 @@ export function ConnectionPage() {
     <div className="flex flex-col h-screen w-full bg-[#131313] text-gray-200 overflow-hidden">
       <AppBar title="OxideStudio" />
       <div className="flex flex-1 min-h-0">
+        <WorkspaceSidebar />
         <ConnectionSidebar />
         <ConnectionForm />
       </div>
