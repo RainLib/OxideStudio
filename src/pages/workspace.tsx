@@ -127,60 +127,71 @@ export function Workspace() {
           onDragStart={handleDragStart}
         />
 
-        <div className="flex-1 min-w-0">
-          <div className="flex flex-col h-full min-w-0 bg-[#1e1e1e]">
-            <div className="border-b border-[#333] bg-[#1e1e1e]">
-              <TabBar />
-            </div>
-
-            {activeTab?.type === "table" ? (
-              <TableDataView />
-            ) : (
-              <div className="flex flex-col h-full min-h-0">
-                <div className="flex-1 min-h-0 relative">
-                  <ResizablePanelGroup
-                    direction="vertical"
-                    className="!flex-col"
-                    style={{ flexDirection: "column" }}
-                  >
-                    <ResizablePanel defaultSize={50} minSize={20}>
-                      <QueryEditor />
-                    </ResizablePanel>
-                    <ResizableHandle
-                      withHandle
-                      className="h-1.5 w-full bg-[#333] hover:bg-orange-500 transition-colors z-50 cursor-row-resize"
-                    />
-                    <ResizablePanel defaultSize={50} minSize={20}>
-                      {currentResult ? <DataGrid /> : <QueryShortcuts />}
-                    </ResizablePanel>
-                  </ResizablePanelGroup>
+        {/* Main Content Area + Right Panel with Unified Bottom StatusBar */}
+        <div className="flex-1 flex flex-col min-w-0">
+          {/* Top: Content Areas */}
+          <div className="flex flex-1 min-h-0">
+            {/* Main Editor Area */}
+            <div className="flex-1 min-w-0">
+              <div className="flex flex-col h-full min-w-0 bg-[#1e1e1e]">
+                <div className="border-b border-[#333] bg-[#1e1e1e]">
+                  <TabBar />
                 </div>
 
-                <EditorStatusBar
-                  rowCount={currentResult?.rows?.length}
-                  executionTime={124}
-                />
+                {activeTab?.type === "table" ? (
+                  <TableDataView />
+                ) : (
+                  <div className="flex flex-col h-full min-h-0">
+                    <div className="flex-1 min-h-0 relative">
+                      <ResizablePanelGroup
+                        direction="vertical"
+                        className="!flex-col"
+                        style={{ flexDirection: "column" }}
+                      >
+                        <ResizablePanel defaultSize={50} minSize={20}>
+                          <QueryEditor />
+                        </ResizablePanel>
+                        <ResizableHandle
+                          withHandle
+                          className="h-1.5 w-full bg-[#333] hover:bg-orange-500 transition-colors z-50 cursor-row-resize"
+                        />
+                        <ResizablePanel defaultSize={50} minSize={20}>
+                          {currentResult ? <DataGrid /> : <QueryShortcuts />}
+                        </ResizablePanel>
+                      </ResizablePanelGroup>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Right Panel */}
+            {!isRightCollapsed && (
+              <div
+                className="border-l border-[#111] bg-[#1a1a1a] shrink-0"
+                style={{ width: "220px" }}
+              >
+                <div className="h-full flex flex-col">
+                  <div className="h-9 border-b border-[#333] flex items-center px-3 text-[10px] font-bold text-gray-500 uppercase tracking-widest">
+                    Details
+                  </div>
+                  <div className="flex-1 flex flex-col items-center justify-center text-gray-600 text-[11px] p-6 text-center leading-relaxed">
+                    <Settings2 size={32} className="opacity-20 mb-4" />
+                    Select an item to view its metadata and properties
+                  </div>
+                </div>
               </div>
             )}
           </div>
-        </div>
 
-        {!isRightCollapsed && (
-          <div
-            className="border-l border-[#111] bg-[#1a1a1a] shrink-0"
-            style={{ width: "220px" }}
-          >
-            <div className="h-full flex flex-col">
-              <div className="h-9 border-b border-[#333] flex items-center px-3 text-[10px] font-bold text-gray-500 uppercase tracking-widest">
-                Details
-              </div>
-              <div className="flex-1 flex flex-col items-center justify-center text-gray-600 text-[11px] p-6 text-center leading-relaxed">
-                <Settings2 size={32} className="opacity-20 mb-4" />
-                Select an item to view its metadata and properties
-              </div>
-            </div>
-          </div>
-        )}
+          {/* Bottom: Unified EditorStatusBar spanning entire width */}
+          {activeTab?.type !== "table" && (
+            <EditorStatusBar
+              rowCount={currentResult?.rows?.length}
+              executionTime={124}
+            />
+          )}
+        </div>
       </div>
     </div>
   );
