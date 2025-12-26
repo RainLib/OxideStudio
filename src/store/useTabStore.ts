@@ -18,6 +18,11 @@ export interface TabData {
   isExecuting: boolean;
   error: string | null;
   isPinned: boolean;
+  gridState?: {
+    columnFilters: Record<string, { operator: string; value: string }>;
+    sortColumn: string | null;
+    sortDirection: "asc" | "desc" | null;
+  };
 }
 
 interface TabState {
@@ -45,6 +50,16 @@ interface TabState {
   setActiveTab: (id: string) => void;
   updateTabSql: (id: string, sql: string) => void;
   runTabQuery: (id: string, connectionId: string) => Promise<void>;
+  setGridFilter: (
+    tabId: string,
+    column: string,
+    filter: { operator: string; value: string } | undefined
+  ) => void;
+  setGridSort: (
+    tabId: string,
+    column: string | null,
+    direction: "asc" | "desc" | null
+  ) => void;
 }
 
 export const useTabStore = create<TabState>((set, get) => ({
@@ -263,5 +278,46 @@ export const useTabStore = create<TabState>((set, get) => ({
         ),
       }));
     }
+  },
+
+  setGridFilter: (tabId, column, filter) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) => {
+        if (t.id !== tabId) return t;
+        const gridState = t.gridState || {
+          columnFilters: {},
+          sortColumn: null,
+          sortDirection: null,
+        };
+        const columnFilters = { ...gridState.columnFilters };
+        if (filter) {
+          columnFilters[column] = filter;
+        } else {
+          delete columnFilters[column];
+        }
+        return { ...t, gridState: { ...gridState, columnFilters } };
+      }),
+    }));
+  },
+
+  setGridSort: (tabId, column, direction) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) => {
+        if (t.id !== tabId) return t;
+        const gridState = t.gridState || {
+          columnFilters: {},
+          sortColumn: null,
+          sortDirection: null,
+        };
+        return {
+          ...t,
+          gridState: {
+            ...gridState,
+            sortColumn: column,
+            sortDirection: direction,
+          },
+        };
+      }),
+    }));
   },
 }));
