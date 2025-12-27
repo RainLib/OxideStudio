@@ -13,7 +13,7 @@ import {
 import "@glideapps/glide-data-grid/dist/index.css";
 import { useTabStore } from "@/store/useTabStore";
 import { createTypedCell, applyFilter, compareValues } from "@/lib/gridUtils";
-import { ArrowUp, ArrowDown, Check, X as XIcon } from "lucide-react";
+import { Check, X as XIcon, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ColumnFilter } from "./GridFilterRow";
 
@@ -170,6 +170,15 @@ export function DataGrid({
       const [col, row] = cell;
       const actualRowIndex = sortedIndices[row];
 
+      if (actualRowIndex === undefined || !result.rows[actualRowIndex]) {
+        return {
+          kind: GridCellKind.Text,
+          displayData: "",
+          data: "",
+          allowOverlay: false,
+        };
+      }
+
       // Check if this cell has a pending edit
       const editKey = `${actualRowIndex}:${col}`;
       const val = pendingEdits.has(editKey)
@@ -191,7 +200,7 @@ export function DataGrid({
   const onHeaderMenuClick = useCallback(
     (
       col: number,
-      bounds: { x: number; y: number; width: number; height: number }
+      _bounds: { x: number; y: number; width: number; height: number }
     ) => {
       if (!activeTab || !result) return;
 
@@ -376,60 +385,6 @@ export function DataGrid({
   }, [activeTab, result, contextMenu, setGridSort, closeContextMenu]);
 
   // Draw borders after cells are rendered
-  const drawCustomCell = useCallback(
-    (args: any) => {
-      const { ctx, rect, col, row } = args;
-      const { x, y, width, height } = rect;
-
-      const isColumnSelected = gridSelection.columns.hasIndex(col);
-      const isRowSelected = gridSelection.rows.hasIndex(row);
-
-      // Draw column selection borders (left and right)
-      if (isColumnSelected) {
-        ctx.save();
-        ctx.strokeStyle = "#f97316";
-        ctx.lineWidth = 3;
-
-        // Left border
-        ctx.beginPath();
-        ctx.moveTo(x, y);
-        ctx.lineTo(x, y + height);
-        ctx.stroke();
-
-        // Right border
-        ctx.beginPath();
-        ctx.moveTo(x + width, y);
-        ctx.lineTo(x + width, y + height);
-        ctx.stroke();
-
-        ctx.restore();
-      }
-
-      // Draw row selection borders (top and bottom)
-      if (isRowSelected) {
-        ctx.save();
-        ctx.strokeStyle = "#f97316";
-        ctx.lineWidth = 3;
-
-        // Top border
-        ctx.beginPath();
-        ctx.moveTo(x, y);
-        ctx.lineTo(x + width, y);
-        ctx.stroke();
-
-        // Bottom border
-        ctx.beginPath();
-        ctx.moveTo(x, y + height);
-        ctx.lineTo(x + width, y + height);
-        ctx.stroke();
-
-        ctx.restore();
-      }
-
-      return false;
-    },
-    [gridSelection]
-  );
 
   const gridTheme: Partial<Theme> = {
     accentColor: "#f97316",
@@ -528,8 +483,6 @@ export function DataGrid({
             onHeaderMenuClick={onHeaderMenuClick}
             onCellEdited={onCellEdited}
             onColumnResize={onColumnResize}
-            onCopy={() => onCopy(gridSelection)}
-            drawCustomCell={drawCustomCell}
             smoothScrollX
             smoothScrollY
             width="100%"
@@ -541,18 +494,6 @@ export function DataGrid({
             gridSelection={gridSelection}
             onGridSelectionChange={setGridSelection}
             keybindings={{ search: true }}
-            headerIcons={{
-              headerSortAsc: () => (
-                <div className="flex items-center justify-center w-full h-full">
-                  <ArrowUp size={12} className="text-orange-500" />
-                </div>
-              ),
-              headerSortDesc: () => (
-                <div className="flex items-center justify-center w-full h-full">
-                  <ArrowDown size={12} className="text-orange-500" />
-                </div>
-              ),
-            }}
           />
         )}
 
@@ -635,6 +576,30 @@ export function DataGrid({
               >
                 Quick Filter
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* Loading Overlay */}
+        {activeTab?.isExecuting && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-[#1e1e1e]/40 backdrop-blur-[2px] animate-in fade-in duration-200">
+            <div className="bg-[#111] border border-[#333] px-6 py-4 rounded-xl shadow-2xl flex flex-col items-center gap-3">
+              <div className="relative">
+                <Loader2 size={32} className="text-[#f39c12] animate-spin" />
+                <div className="absolute inset-0 text-[#f39c12]/20 animate-pulse blur-sm">
+                  <Loader2 size={32} />
+                </div>
+              </div>
+              <div className="flex flex-col items-center gap-1">
+                <span className="text-sm font-bold text-white tracking-tight">
+                  {activeTab.type === "table"
+                    ? "Fetching data..."
+                    : "Executing..."}
+                </span>
+                <span className="text-[10px] text-gray-500 font-medium uppercase tracking-widest">
+                  Loading Results
+                </span>
+              </div>
             </div>
           </div>
         )}

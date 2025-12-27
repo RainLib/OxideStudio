@@ -4,8 +4,6 @@ import {
 } from "@/store/useConnectionStore";
 import { Button } from "@/components/ui/button";
 import {
-  Save,
-  Play,
   CheckCircle2,
   AlertCircle,
   Eye,
@@ -13,6 +11,7 @@ import {
   Globe,
   Database,
   Lock,
+  Loader2,
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
@@ -43,6 +42,7 @@ export function ConnectionForm() {
   const [showPassword, setShowPassword] = useState(false);
   const [importUrl, setImportUrl] = useState("");
   const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
 
   if (!selectedConnection) {
     return (
@@ -134,10 +134,15 @@ export function ConnectionForm() {
   };
 
   const handleConnect = async () => {
-    await handleSave();
-    const error = await connect(selectedConnection);
-    if (error) {
-      setTestStatus({ type: "error", msg: error });
+    setIsConnecting(true);
+    try {
+      await handleSave();
+      const error = await connect(selectedConnection);
+      if (error) {
+        setTestStatus({ type: "error", msg: error });
+      }
+    } finally {
+      setIsConnecting(false);
     }
   };
 
@@ -349,9 +354,14 @@ export function ConnectionForm() {
               className="text-gray-400 hover:text-white hover:bg-[#222]"
               disabled={testStatus?.type === "loading"}
             >
-              {testStatus?.type === "loading"
-                ? "Testing..."
-                : "Test Connection"}
+              {testStatus?.type === "loading" ? (
+                <>
+                  <Loader2 size={14} className="mr-2 animate-spin" />
+                  Testing...
+                </>
+              ) : (
+                "Test Connection"
+              )}
             </Button>
 
             {testStatus && testStatus.type !== "loading" && (
@@ -383,9 +393,17 @@ export function ConnectionForm() {
             </Button>
             <Button
               onClick={handleConnect}
-              className="bg-white text-black hover:bg-gray-200 font-bold px-6"
+              disabled={isConnecting}
+              className="bg-white text-black hover:bg-gray-200 font-bold px-6 min-w-[120px]"
             >
-              Connect
+              {isConnecting ? (
+                <>
+                  <Loader2 size={16} className="mr-2 animate-spin" />
+                  Connecting...
+                </>
+              ) : (
+                "Connect"
+              )}
             </Button>
           </div>
         </div>
