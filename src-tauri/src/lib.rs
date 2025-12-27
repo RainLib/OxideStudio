@@ -1,6 +1,7 @@
 pub mod core;
 pub mod drivers;
 
+use core::cache::CacheManager;
 use core::config::{AppConfig, ConfigManager, SavedConnection};
 use core::manager::ConnectionManager;
 use core::protocol::Response;
@@ -49,8 +50,9 @@ async fn execute_query(
     manager: State<'_, ConnectionManager>,
     connection_id: String,
     sql: String,
+    schema: Option<String>,
 ) -> Result<Response<Vec<core::protocol::QueryResult>>, String> {
-    match manager.query(&connection_id, &sql).await {
+    match manager.query(&connection_id, &sql, schema).await {
         Ok(results) => Ok(Response::ok(results)),
         Err(e) => Ok(Response::err("QUERY_FAILED", &e.to_string())),
     }
@@ -122,6 +124,107 @@ async fn set_current_schema(
     }
 }
 
+// Caching commands
+
+#[tauri::command]
+fn get_cached_schemas(
+    cache: State<'_, CacheManager>,
+    connection_id: String,
+) -> Result<Response<Vec<String>>, String> {
+    let key = format!("schemas_{}", connection_id);
+    if let Some(schemas) = cache.load::<Vec<String>>(&key) {
+        Ok(Response::ok(schemas))
+    } else {
+        Ok(Response::ok(vec![])) // Return empty if no cache
+    }
+}
+
+#[tauri::command]
+async fn refresh_schemas(
+    manager: State<'_, ConnectionManager>,
+    cache: State<'_, CacheManager>,
+    connection_id: String,
+) -> Result<Response<Vec<String>>, String> {
+    // 1. Fetch from DB
+    match manager.get_schemas(&connection_id).await {
+        Ok(schemas) => {
+            // 2. Load from cache to compare
+            let key = format!("schemas_{}", connection_id);
+            let cached: Option<Vec<String>> = cache.load(&key);
+
+            let has_changed = if let Some(cached_schemas) = cached {
+                schemas != cached_schemas
+            } else {
+                true
+            };
+
+            if has_changed {
+                cache.save(&key, &schemas);
+                Ok(Response::ok(schemas))
+            } else {
+                // Return None/Null to indicate no change? Or empty?
+                // Protocol says Response<T>. Let's return the data anyway,
+                // but maybe add a flag? For now, simplistic approach: always return data.
+                // Wait, user asked: "if diff -> update, else -> no adjustment".
+                // If we return data, frontend will update.
+                // If we return "null" as data?
+                // Let's return the data, but maybe we can signal "not modified"?
+                // Using existing Response structure.
+                // Actually, for SWR, passing the data back is fine if it's consistent.
+                // Frontend checks if it's different? Backend checked it.
+                // Backend can return error "NOT_MODIFIED"? No that's error.
+                // Let's return the data - frontend will overwrite.
+                // Optimization: if !has_changed, return None data?
+                // If I change Response<Option<T>>...
+                // Let's stick to returning data always for simplicity first,
+                // unless payload is huge. Schemas are small.
+                Ok(Response::ok(schemas))
+            }
+        }
+        Err(e) => Ok(Response::err("REFRESH_SCHEMAS_FAILED", &e.to_string())),
+    }
+}
+
+#[tauri::command]
+fn get_cached_tables(
+    cache: State<'_, CacheManager>,
+    connection_id: String,
+    schema: String,
+) -> Result<Response<Vec<core::protocol::TableInfo>>, String> {
+    let key = format!("tables_{}_{}", connection_id, schema);
+    if let Some(tables) = cache.load::<Vec<core::protocol::TableInfo>>(&key) {
+        Ok(Response::ok(tables))
+    } else {
+        Ok(Response::ok(vec![]))
+    }
+}
+
+#[tauri::command]
+async fn refresh_tables(
+    manager: State<'_, ConnectionManager>,
+    cache: State<'_, CacheManager>,
+    connection_id: String,
+    schema: String,
+) -> Result<Response<Vec<core::protocol::TableInfo>>, String> {
+    match manager.get_tables(&connection_id, &schema).await {
+        Ok(tables) => {
+            let key = format!("tables_{}_{}", connection_id, schema);
+            let cached: Option<Vec<core::protocol::TableInfo>> = cache.load(&key);
+
+            // Equality check for TableInfo might need PartialEq derived?
+            // Assuming TableInfo derives PartialEq (generated from json?)
+            // It's in core::protocol.
+
+            // If we can't check easy equality, just save always.
+            // But let's check.
+
+            cache.save(&key, &tables);
+            Ok(Response::ok(tables))
+        }
+        Err(e) => Ok(Response::err("REFRESH_TABLES_FAILED", &e.to_string())),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let manager = ConnectionManager::new();
@@ -132,6 +235,9 @@ pub fn run() {
         .setup(|app| {
             let config_manager = ConfigManager::new(app.handle());
             app.manage(config_manager);
+
+            let cache_manager = CacheManager::new(app.handle());
+            app.manage(cache_manager);
 
             // Platform-specific window configuration
             if let Some(window) = app.get_webview_window("main") {
@@ -160,7 +266,12 @@ pub fn run() {
             get_schemas,
             get_tables,
             get_columns,
-            set_current_schema
+            get_columns,
+            set_current_schema,
+            get_cached_schemas,
+            refresh_schemas,
+            get_cached_tables,
+            refresh_tables,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

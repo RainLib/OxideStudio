@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { api } from "@/lib/api";
 import { QueryResult } from "@/types/protocol";
 import { useHistoryStore } from "./useHistoryStore";
+import { useSchemaStore } from "./useSchemaStore";
 import type { FilterOperator } from "@/components/workspace/GridFilterRow";
 
 export type TabType = "query" | "table";
@@ -282,7 +283,25 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
 
     try {
-      const res = await api.query(connectionId, tab.sql);
+      // Determine schema context: use targetSchema (if set) > tab.schemaName (if table type) > globally selected schema
+      let schemaContext = tab.targetSchema || tab.schemaName;
+      if (!schemaContext) {
+        const { currentSchema } = useSchemaStore.getState();
+        if (currentSchema) {
+          schemaContext = currentSchema;
+        }
+      }
+
+      console.log(
+        "TabStore: Running query with schema context:",
+        schemaContext
+      );
+
+      const res = await api.query(
+        connectionId,
+        tab.sql,
+        schemaContext || undefined
+      );
 
       // Add to history regardless of result? Usually only if success, but Beekeeper saves all attempts often.
       // Let's save on attempt for now, or maybe on success. Plan said "successful".

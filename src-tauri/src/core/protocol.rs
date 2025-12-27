@@ -12,7 +12,7 @@ pub struct ColumnDef {
     pub data_type: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TableInfo {
     pub name: String,
     pub schema: Option<String>,

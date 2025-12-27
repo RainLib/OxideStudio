@@ -61,7 +61,7 @@ impl DatabaseDriver for MysqlDriver {
 
         let pool = MySqlPoolOptions::new()
             .max_connections(5)
-            .acquire_timeout(Duration::from_secs(5))
+            .acquire_timeout(Duration::from_secs(30))
             .connect_with(options)
             .await?;
 
@@ -78,7 +78,10 @@ impl DatabaseDriver for MysqlDriver {
 
     async fn ping(&self) -> Result<()> {
         if let Some(pool) = &self.pool {
-            sqlx::query("SELECT 1").execute(pool).await?;
+            sqlx::query("SELECT 1")
+                .persistent(false)
+                .execute(pool)
+                .await?;
             Ok(())
         } else {
             Err(anyhow!("Not connected"))
@@ -87,7 +90,7 @@ impl DatabaseDriver for MysqlDriver {
 
     async fn query(&self, sql: &str) -> Result<Vec<QueryResult>> {
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
-        let rows = sqlx::query(sql).fetch_all(pool).await?;
+        let rows = sqlx::query(sql).persistent(false).fetch_all(pool).await?;
         self.process_rows(rows)
     }
 
@@ -97,17 +100,24 @@ impl DatabaseDriver for MysqlDriver {
 
         // Use database for this session
         sqlx::query(&format!("USE `{}`", schema))
+            .persistent(false)
             .execute(&mut *conn)
             .await?;
 
         // Execute the actual query on the same connection
-        let rows = sqlx::query(sql).fetch_all(&mut *conn).await?;
+        let rows = sqlx::query(sql)
+            .persistent(false)
+            .fetch_all(&mut *conn)
+            .await?;
         self.process_rows(rows)
     }
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
-        let rows = sqlx::query("SHOW DATABASES").fetch_all(pool).await?;
+        let rows = sqlx::query("SHOW DATABASES")
+            .persistent(false)
+            .fetch_all(pool)
+            .await?;
 
         let mut schemas: Vec<String> = rows
             .iter()
@@ -134,6 +144,7 @@ impl DatabaseDriver for MysqlDriver {
             "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = ? ORDER BY table_name",
         )
         .bind(schema)
+        .persistent(false)
         .fetch_all(pool)
         .await?;
 
@@ -172,6 +183,7 @@ impl DatabaseDriver for MysqlDriver {
         )
         .bind(schema)
         .bind(table)
+        .persistent(false)
         .fetch_all(pool)
         .await?;
 
@@ -200,7 +212,7 @@ impl DatabaseDriver for MysqlDriver {
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
         // Use backticks for MySQL database names
         let sql = format!("USE `{}`", schema);
-        sqlx::query(&sql).execute(pool).await?;
+        sqlx::query(&sql).persistent(false).execute(pool).await?;
         Ok(())
     }
 }

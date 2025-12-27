@@ -35,65 +35,107 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
 
     // Prevent duplicate calls if we're already loading or if the connection hasn't changed (unless forced)
     if ((isLoading || lastLoadedConnectionId === connectionId) && !force) {
-      console.log(
-        "Store: loadSchemas skipped (redundant for connectionId:",
-        connectionId,
-        ")"
-      );
+      console.log("Store: loadSchemas skipped (redundant)");
       return;
     }
 
-    console.log("Store: loadSchemas called with connectionId:", connectionId);
+    console.log("Store: loadSchemas called with SWR for:", connectionId);
     set({ isLoading: true, lastLoadedConnectionId: connectionId });
-    const res = await api.getSchemas(connectionId);
-    console.log("Store: loadSchemas API response:", res);
+
+    // 1. Try Cache First
+    const cachedRes = await api.getCachedSchemas(connectionId);
+    if (cachedRes.success && cachedRes.data && cachedRes.data.length > 0) {
+      console.log("Store: Loaded schemas from cache", cachedRes.data.length);
+      const { defaultSchema: savedDefault } = get();
+
+      const connections = useConnectionStore.getState().connections;
+      const activeConn = connections.find((c) => c.id === connectionId);
+      const configDefault = activeConn?.database;
+
+      let schemaToSelect = cachedRes.data[0];
+      if (configDefault && cachedRes.data.includes(configDefault)) {
+        schemaToSelect = configDefault;
+      } else if (savedDefault && cachedRes.data.includes(savedDefault)) {
+        schemaToSelect = savedDefault;
+      } else if (cachedRes.data.includes("public")) {
+        schemaToSelect = "public";
+      }
+
+      set({
+        schemas: cachedRes.data,
+        currentSchema: schemaToSelect,
+        isLoading: false, // Show cached data immediately
+      });
+      // Continue to refresh in background...
+    }
+
+    // 2. Refresh from DB (Background Sync)
+    console.log("Store: Refreshing schemas from DB...");
+    const res = await api.refreshSchemas(connectionId);
+    console.log("Store: loadSchemas Refresh result:", res);
+
     if (res.success && res.data) {
       const { defaultSchema: savedDefault } = get();
-      // Priority: 1. Saved default (if available), 2. 'public', 3. First schema
+      const connections = useConnectionStore.getState().connections;
+      const activeConn = connections.find((c) => c.id === connectionId);
+      const configDefault = activeConn?.database;
+
       let schemaToSelect = res.data[0];
 
-      if (savedDefault && res.data.includes(savedDefault)) {
+      if (configDefault && res.data.includes(configDefault)) {
+        schemaToSelect = configDefault;
+      } else if (savedDefault && res.data.includes(savedDefault)) {
         schemaToSelect = savedDefault;
       } else if (res.data.includes("public")) {
         schemaToSelect = "public";
       }
 
-      console.log(
-        "Store: loadSchemas - Setting currentSchema to:",
-        schemaToSelect,
-        "from",
-        res.data.length,
-        "schemas"
-      );
+      // Check if data actually changed? API returns data either way currently.
+      // Ideally we check equality here or rely on React to not re-render if same.
+      // But we need to update state if it's different.
+      // For now, simple update.
       set({
         schemas: res.data,
-        currentSchema: schemaToSelect,
+        // Only update currentSchema if it wasn't set or invalid?
+        // Or if we need to re-apply defaults?
+        // If user already selected something else while loading?
+        // Let's keep currentSchema if valid, otherwise reset.
+        // Actually, for initial load, re-evaluating default is safer.
+        currentSchema: get().currentSchema || schemaToSelect,
         isLoading: false,
       });
-      console.log(
-        "Store: loadSchemas - State updated. currentSchema is now:",
-        schemaToSelect
-      );
     } else {
-      console.warn("Store: loadSchemas failed or empty", res);
-      set({ schemas: [], isLoading: false });
+      console.warn("Store: loadSchemas refresh failed", res);
+      // If we didn't have cache, stop loading
+      if (get().schemas.length === 0) {
+        set({ schemas: [], isLoading: false });
+      }
     }
   },
 
   loadTables: async (connectionId: string, schema: string) => {
-    console.log("Store: loadTables called", { connectionId, schema });
+    console.log("Store: loadTables called SWR", { connectionId, schema });
     set({ isLoading: true });
-    const res = await api.getTables(connectionId, schema);
-    console.log("Store: loadTables result", res);
+
+    // 1. Try Cache First
+    const cachedRes = await api.getCachedTables(connectionId, schema);
+    if (cachedRes.success && cachedRes.data && cachedRes.data.length > 0) {
+      console.log("Store: Loaded tables from cache", cachedRes.data.length);
+      set({ tables: cachedRes.data, isLoading: false });
+    }
+
+    // 2. Refresh from DB
+    const res = await api.refreshTables(connectionId, schema);
+    console.log("Store: loadTables refresh result", res);
     if (res.success && res.data) {
-      console.log("Store: loadTables updating state", {
-        count: res.data.length,
-        tables: res.data,
-      });
+      // Only update if different?
+      // For now, update always.
       set({ tables: res.data, isLoading: false });
     } else {
-      console.warn("Store: loadTables failed or empty", res);
-      set({ tables: [], isLoading: false });
+      console.warn("Store: loadTables refresh failed", res);
+      if (get().tables.length === 0) {
+        set({ tables: [], isLoading: false });
+      }
     }
   },
 

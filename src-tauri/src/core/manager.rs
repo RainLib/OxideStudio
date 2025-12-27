@@ -42,14 +42,24 @@ impl ConnectionManager {
     }
 
     /// Execute a query
-    pub async fn query(&self, id: &str, sql: &str) -> Result<Vec<super::protocol::QueryResult>> {
+    pub async fn query(
+        &self,
+        id: &str,
+        sql: &str,
+        query_schema: Option<String>,
+    ) -> Result<Vec<super::protocol::QueryResult>> {
         let conns = self.connections.lock().await;
         if let Some(driver) = conns.get(id) {
-            let schemas = self.active_schemas.lock().await;
-            if let Some(schema) = schemas.get(id) {
-                driver.query_with_context(sql, schema).await
+            // Priority: 1. Explicit schema, 2. Active schema for session, 3. Default
+            if let Some(schema) = query_schema {
+                driver.query_with_context(sql, &schema).await
             } else {
-                driver.query(sql).await
+                let schemas = self.active_schemas.lock().await;
+                if let Some(schema) = schemas.get(id) {
+                    driver.query_with_context(sql, schema).await
+                } else {
+                    driver.query(sql).await
+                }
             }
         } else {
             Err(anyhow!("Connection not found: {}", id))

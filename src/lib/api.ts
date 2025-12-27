@@ -46,11 +46,13 @@ export const api = {
 
   query: async (
     connectionId: string,
-    sql: string
+    sql: string,
+    schema?: string
   ): Promise<Response<QueryResult[]>> => {
     return await invoke("execute_query", {
       connectionId,
       sql,
+      schema,
     });
   },
 
@@ -101,5 +103,29 @@ export const api = {
     schema: string
   ): Promise<Response<string>> => {
     return await invoke("set_current_schema", { connectionId, schema });
+  },
+
+  getCachedSchemas: async (
+    connectionId: string
+  ): Promise<Response<string[]>> => {
+    return await invoke("get_cached_schemas", { connectionId });
+  },
+
+  refreshSchemas: async (connectionId: string): Promise<Response<string[]>> => {
+    return await invoke("refresh_schemas", { connectionId });
+  },
+
+  getCachedTables: async (
+    connectionId: string,
+    schema: string
+  ): Promise<Response<any[]>> => {
+    return await invoke("get_cached_tables", { connectionId, schema });
+  },
+
+  refreshTables: async (
+    connectionId: string,
+    schema: string
+  ): Promise<Response<any[]>> => {
+    return await invoke("refresh_tables", { connectionId, schema });
   },
 };
