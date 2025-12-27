@@ -115,8 +115,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     let url: string;
 
     if (config.connectionUrl && config.connectionUrl.trim()) {
-      // Use the provided connection URL directly
+      // Use the provided connection URL directly, but strip jdbc: if present
       url = config.connectionUrl.trim();
+      if (url.toLowerCase().startsWith("jdbc:")) {
+        url = url.substring(5);
+      }
+
+      // Robust mapping for MySQL SSL parameters
+      if (config.driver === "mysql") {
+        // Map sslMode=... to ssl-mode=... and use lowercase for the value
+        const sslModeMatch = url.match(/[?&]sslMode=([^&]+)/i);
+        if (sslModeMatch && sslModeMatch[1]) {
+          const originalParam = sslModeMatch[0].substring(1); // e.g. "sslMode=VERIFY_IDENTITY"
+          const value = sslModeMatch[1].toLowerCase();
+          url = url.replace(originalParam, `ssl-mode=${value}`);
+        }
+      }
     } else {
       // Construct URL with encoded components to handle special characters
       const user = encodeURIComponent(config.user || "");
@@ -125,14 +139,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const port = config.port || (config.driver === "postgres" ? 5432 : 3306);
       const db = encodeURIComponent(config.database || "");
 
+      const sslParamName =
+        config.driver === "postgres" ? "sslmode" : "ssl-mode";
+      const sslMode = (config.sslMode || "disable").toLowerCase();
+      const sslValue = sslMode;
+
       url =
         config.driver === "postgres"
           ? `postgres://${user}:${password}@${host}:${port}/${db}`
           : `mysql://${user}:${password}@${host}:${port}/${db}`;
 
       // Add SSL mode if specified
-      if (config.sslMode && config.sslMode !== "disable") {
-        url += `?sslmode=${config.sslMode}`;
+      if (sslMode !== "disable") {
+        url += `?${sslParamName}=${sslValue}`;
       }
     }
 

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { api } from "@/lib/api";
 import { TableInfo } from "@/types/protocol";
+import { useConnectionStore } from "./useConnectionStore";
 
 interface SchemaState {
   schemas: string[];
@@ -8,9 +9,10 @@ interface SchemaState {
   currentSchema: string | null;
   defaultSchema: string | null; // User's preferred default
   selectedTable: string | null;
+  lastLoadedConnectionId: string | null; // Guard for duplicate calls
   isLoading: boolean;
 
-  loadSchemas: (connectionId: string) => Promise<void>;
+  loadSchemas: (connectionId: string, force?: boolean) => Promise<void>;
   loadTables: (connectionId: string, schema: string) => Promise<void>;
   setCurrentSchema: (schema: string) => void;
   setDefaultSchema: (schema: string) => void; // Persist user's choice
@@ -25,11 +27,24 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
   currentSchema: null,
   defaultSchema: localStorage.getItem(STORAGE_KEY),
   selectedTable: null,
+  lastLoadedConnectionId: null,
   isLoading: false,
 
-  loadSchemas: async (connectionId: string) => {
+  loadSchemas: async (connectionId: string, force = false) => {
+    const { lastLoadedConnectionId, isLoading } = get();
+
+    // Prevent duplicate calls if we're already loading or if the connection hasn't changed (unless forced)
+    if ((isLoading || lastLoadedConnectionId === connectionId) && !force) {
+      console.log(
+        "Store: loadSchemas skipped (redundant for connectionId:",
+        connectionId,
+        ")"
+      );
+      return;
+    }
+
     console.log("Store: loadSchemas called with connectionId:", connectionId);
-    set({ isLoading: true });
+    set({ isLoading: true, lastLoadedConnectionId: connectionId });
     const res = await api.getSchemas(connectionId);
     console.log("Store: loadSchemas API response:", res);
     if (res.success && res.data) {
@@ -82,8 +97,13 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     }
   },
 
-  setCurrentSchema: (schema: string) => {
-    set({ currentSchema: schema });
+  setCurrentSchema: async (schema: string) => {
+    const { activeConnectionId } = useConnectionStore.getState();
+    set({ currentSchema: schema, selectedTable: null });
+
+    if (activeConnectionId && schema) {
+      await api.setCurrentSchema(activeConnectionId, schema);
+    }
   },
 
   setDefaultSchema: (schema: string) => {

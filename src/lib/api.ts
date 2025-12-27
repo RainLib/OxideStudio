@@ -95,4 +95,11 @@ export const api = {
   ): Promise<Response<any[]>> => {
     return await invoke("get_columns", { connectionId, schema, table });
   },
+
+  setCurrentSchema: async (
+    connectionId: string,
+    schema: string
+  ): Promise<Response<string>> => {
+    return await invoke("set_current_schema", { connectionId, schema });
+  },
 };

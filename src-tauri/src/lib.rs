@@ -110,6 +110,18 @@ async fn get_columns(
     }
 }
 
+#[tauri::command]
+async fn set_current_schema(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    schema: String,
+) -> Result<Response<String>, String> {
+    match manager.set_current_schema(&connection_id, &schema).await {
+        Ok(_) => Ok(Response::ok("Context switched".to_string())),
+        Err(e) => Ok(Response::err("SET_SCHEMA_FAILED", &e.to_string())),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let manager = ConnectionManager::new();
@@ -147,7 +159,8 @@ pub fn run() {
             load_connections,
             get_schemas,
             get_tables,
-            get_columns
+            get_columns,
+            set_current_schema
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

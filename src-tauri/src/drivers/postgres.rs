@@ -19,6 +19,37 @@ impl PostgresDriver {
             connection_string: connection_string.to_string(),
         }
     }
+
+    fn process_rows(&self, rows: Vec<PgRow>) -> Result<Vec<QueryResult>> {
+        if rows.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let first_row = &rows[0];
+        let columns: Vec<ColumnDef> = first_row
+            .columns()
+            .iter()
+            .map(|c| ColumnDef {
+                name: c.name().to_string(),
+                data_type: c.type_info().name().to_string(),
+            })
+            .collect();
+
+        let mut data_rows = Vec::new();
+        for row in rows {
+            let mut row_values = Vec::new();
+            for (i, _) in columns.iter().enumerate() {
+                let val = decode_pg_value(&row, i);
+                row_values.push(val);
+            }
+            data_rows.push(row_values);
+        }
+
+        Ok(vec![QueryResult {
+            columns,
+            rows: data_rows,
+        }])
+    }
 }
 
 #[async_trait]
@@ -26,6 +57,7 @@ impl DatabaseDriver for PostgresDriver {
     async fn connect(&mut self) -> Result<()> {
         let options = PgConnectOptions::from_str(&self.connection_string)?
             .disable_statement_logging()
+            .statement_cache_capacity(0)
             .to_owned();
 
         let pool = PgPoolOptions::new()
@@ -47,7 +79,10 @@ impl DatabaseDriver for PostgresDriver {
 
     async fn ping(&self) -> Result<()> {
         if let Some(pool) = &self.pool {
-            sqlx::query("SELECT 1").execute(pool).await?;
+            sqlx::query("SELECT 1")
+                .persistent(false)
+                .execute(pool)
+                .await?;
             Ok(())
         } else {
             Err(anyhow!("Not connected"))
@@ -56,61 +91,32 @@ impl DatabaseDriver for PostgresDriver {
 
     async fn query(&self, sql: &str) -> Result<Vec<QueryResult>> {
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
+        let rows = sqlx::query(sql).persistent(false).fetch_all(pool).await?;
+        self.process_rows(rows)
+    }
 
-        // SQLx doesn't support generic "Any" query returning dynamic results easily without knowing types beforehand
-        // OR using the Any driver. Since we are in PostgresDriver, we know it's Postgres.
-        // But map to JSON is manual.
+    async fn query_with_context(&self, sql: &str, schema: &str) -> Result<Vec<QueryResult>> {
+        let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
+        let mut conn = pool.acquire().await?;
 
-        // We use fetch_all to get rows.
-        let rows = sqlx::query(sql).fetch_all(pool).await?;
+        // Set search path for this session
+        sqlx::query(&format!("SET search_path TO \"{}\"", schema))
+            .persistent(false)
+            .execute(&mut *conn)
+            .await?;
 
-        if rows.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let first_row = &rows[0];
-        let columns: Vec<ColumnDef> = first_row
-            .columns()
-            .iter()
-            .map(|c| ColumnDef {
-                name: c.name().to_string(),
-                data_type: c.type_info().name().to_string(),
-            })
-            .collect();
-
-        let mut data_rows = Vec::new();
-        for row in rows {
-            let mut row_values = Vec::new();
-            for (i, _) in columns.iter().enumerate() {
-                // This is the tricky part: extracting value dynamically.
-                // SQLx doesn't have a simple "to_json_value" on Row.
-                // We have to try_get based on expected type or use some reflection?
-                // Actually `sqlx::Row` has `try_get_raw`.
-
-                // For MVP: Let's handle basic types.
-                // A robust implementation would use a helper to map PgTypeInfo to value.
-
-                // Simplified approach: treat everything as string for now if possible?
-                // Or try to specifically decode common types.
-
-                // Let's use a helper (implemented below or inline)
-                // Ideally this needs a match on type_info
-
-                let val = decode_pg_value(&row, i);
-                row_values.push(val);
-            }
-            data_rows.push(row_values);
-        }
-
-        Ok(vec![QueryResult {
-            columns,
-            rows: data_rows,
-        }])
+        // Execute the actual query on the same connection
+        let rows = sqlx::query(sql)
+            .persistent(false)
+            .fetch_all(&mut *conn)
+            .await?;
+        self.process_rows(rows)
     }
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
-        let rows = sqlx::query("SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast')")
+        let rows = sqlx::query("SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast') ORDER BY schema_name")
+            .persistent(false)
             .fetch_all(pool)
             .await?;
 
@@ -125,20 +131,19 @@ impl DatabaseDriver for PostgresDriver {
     async fn get_tables(&self, schema: &str) -> Result<Vec<TableInfo>> {
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
         let rows = sqlx::query(
-            "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1",
+            "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name",
         )
         .bind(schema)
+        .persistent(false)
         .fetch_all(pool)
         .await?;
 
         let tables = rows
             .iter()
-            .map(|r| {
-                TableInfo {
-                    name: r.try_get(0).unwrap_or_default(),
-                    schema: Some(schema.to_string()),
-                    comment: None, // Need join with pg_description for comments, skipped for MVP
-                }
+            .map(|r| TableInfo {
+                name: r.try_get(0).unwrap_or_default(),
+                schema: Some(schema.to_string()),
+                comment: None,
             })
             .collect();
 
@@ -157,6 +162,7 @@ impl DatabaseDriver for PostgresDriver {
         )
         .bind(schema)
         .bind(table)
+        .persistent(false)
         .fetch_all(pool)
         .await?;
 
@@ -171,7 +177,7 @@ impl DatabaseDriver for PostgresDriver {
                     name: r.try_get("column_name").unwrap_or_default(),
                     data_type: r.try_get("data_type").unwrap_or_default(),
                     is_nullable,
-                    is_primary_key: false, // Need separate query for constraints
+                    is_primary_key: false,
                     default_value: r.try_get("column_default").ok(),
                     comment: None,
                 }
@@ -180,13 +186,20 @@ impl DatabaseDriver for PostgresDriver {
 
         Ok(cols)
     }
+
+    async fn set_current_schema(&self, schema: &str) -> Result<()> {
+        let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
+        // Use double quotes for Postgres schema names
+        let sql = format!("SET search_path TO \"{}\"", schema);
+        sqlx::query(&sql).persistent(false).execute(pool).await?;
+        Ok(())
+    }
 }
 
 fn decode_pg_value(row: &PgRow, index: usize) -> serde_json::Value {
     let col = row.column(index);
     let type_name = col.type_info().name();
 
-    // Very basic mapping. In production this needs to be exhaustive.
     match type_name {
         "BOOL" | "bool" => {
             let v: Option<bool> = row.try_get(index).ok();
@@ -209,9 +222,6 @@ fn decode_pg_value(row: &PgRow, index: usize) -> serde_json::Value {
             v.unwrap_or(serde_json::Value::Null)
         }
         _ => {
-            // Fallback to string representation for dates, uuid, unknown types
-            // sqlx doesn't always perform automatic toString for unknown types.
-            // We often try to get as String.
             let v: Option<String> = row.try_get(index).ok();
             serde_json::to_value(v).unwrap_or(serde_json::Value::String(format!("<{}>", type_name)))
         }
@@ -228,14 +238,14 @@ mod tests {
     async fn test_get_schemas() {
         dotenv().ok();
         let database_url = env::var("TEST_POSTGRES_URL").expect("TEST_POSTGRES_URL must be set");
-        
+
         let mut driver = PostgresDriver::new(&database_url);
         driver.connect().await.expect("Failed to connect");
-        
+
         let schemas = driver.get_schemas().await.expect("Failed to get schemas");
         println!("Schemas: {:?}", schemas);
         assert!(!schemas.is_empty());
-        
+
         driver.disconnect().await.expect("Failed to disconnect");
     }
 }

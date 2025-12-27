@@ -16,6 +16,9 @@ pub trait DatabaseDriver: Send + Sync {
     /// Execute a query and return generic result set
     async fn query(&self, sql: &str) -> Result<Vec<QueryResult>>;
 
+    /// Execute a query within a specific schema context
+    async fn query_with_context(&self, sql: &str, schema: &str) -> Result<Vec<QueryResult>>;
+
     /// Get list of schemas (databases)
     async fn get_schemas(&self) -> Result<Vec<String>>;
 
@@ -24,4 +27,7 @@ pub trait DatabaseDriver: Send + Sync {
 
     /// Get columns for a specific table
     async fn get_columns(&self, schema: &str, table: &str) -> Result<Vec<ColumnInfo>>;
+
+    /// Set the current schema/database context
+    async fn set_current_schema(&self, schema: &str) -> Result<()>;
 }

@@ -64,20 +64,33 @@ export function ConnectionForm() {
 
   const parseConnectionString = (url: string): Partial<ConnectionConfig> => {
     try {
-      const parsed = new URL(url);
-      const driver = parsed.protocol.replace(":", "");
+      let workingUrl = url.trim();
+      if (workingUrl.startsWith("jdbc:")) {
+        workingUrl = workingUrl.substring(5);
+      }
+
+      const parsed = new URL(workingUrl);
+      const protocol = parsed.protocol.replace(":", "");
       const host = parsed.hostname;
+
+      // Map protocol to driver
+      const driver =
+        protocol === "postgresql" || protocol === "postgres"
+          ? "postgres"
+          : "mysql";
+
       const port = parsed.port
         ? parseInt(parsed.port)
         : driver === "postgres"
         ? 5432
         : 3306;
+
       const user = decodeURIComponent(parsed.username);
       const password = decodeURIComponent(parsed.password);
       const database = decodeURIComponent(parsed.pathname.split("/")[1] || "");
 
       return {
-        driver: (driver === "postgresql" ? "postgres" : driver) as any,
+        driver,
         host,
         port,
         user,

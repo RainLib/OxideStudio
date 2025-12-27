@@ -19,6 +19,37 @@ impl MysqlDriver {
             connection_string: connection_string.to_string(),
         }
     }
+
+    fn process_rows(&self, rows: Vec<MySqlRow>) -> Result<Vec<QueryResult>> {
+        if rows.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let first_row = &rows[0];
+        let columns: Vec<ColumnDef> = first_row
+            .columns()
+            .iter()
+            .map(|c| ColumnDef {
+                name: c.name().to_string(),
+                data_type: c.type_info().name().to_string(),
+            })
+            .collect();
+
+        let mut data_rows = Vec::new();
+        for row in rows {
+            let mut row_values = Vec::new();
+            for (i, _) in columns.iter().enumerate() {
+                let val = decode_mysql_value(&row, i);
+                row_values.push(val);
+            }
+            data_rows.push(row_values);
+        }
+
+        Ok(vec![QueryResult {
+            columns,
+            rows: data_rows,
+        }])
+    }
 }
 
 #[async_trait]
@@ -56,59 +87,43 @@ impl DatabaseDriver for MysqlDriver {
 
     async fn query(&self, sql: &str) -> Result<Vec<QueryResult>> {
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
-
         let rows = sqlx::query(sql).fetch_all(pool).await?;
+        self.process_rows(rows)
+    }
 
-        if rows.is_empty() {
-            return Ok(vec![]);
-        }
+    async fn query_with_context(&self, sql: &str, schema: &str) -> Result<Vec<QueryResult>> {
+        let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
+        let mut conn = pool.acquire().await?;
 
-        let first_row = &rows[0];
-        let columns: Vec<ColumnDef> = first_row
-            .columns()
-            .iter()
-            .map(|c| ColumnDef {
-                name: c.name().to_string(),
-                data_type: c.type_info().name().to_string(),
-            })
-            .collect();
+        // Use database for this session
+        sqlx::query(&format!("USE `{}`", schema))
+            .execute(&mut *conn)
+            .await?;
 
-        let mut data_rows = Vec::new();
-        for row in rows {
-            let mut row_values = Vec::new();
-            for (i, _) in columns.iter().enumerate() {
-                let val = decode_mysql_value(&row, i);
-                row_values.push(val);
-            }
-            data_rows.push(row_values);
-        }
-
-        Ok(vec![QueryResult {
-            columns,
-            rows: data_rows,
-        }])
+        // Execute the actual query on the same connection
+        let rows = sqlx::query(sql).fetch_all(&mut *conn).await?;
+        self.process_rows(rows)
     }
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
         let rows = sqlx::query("SHOW DATABASES").fetch_all(pool).await?;
 
-        let schemas: Vec<String> = rows
+        let mut schemas: Vec<String> = rows
             .iter()
             .map(|r| {
-                // Try to get as String first, then as Vec<u8> (VARBINARY)
                 if let Ok(name) = r.try_get::<String, _>(0) {
                     name
                 } else if let Ok(bytes) = r.try_get::<Vec<u8>, _>(0) {
                     String::from_utf8_lossy(&bytes).to_string()
                 } else {
-                    // Fallback or panic with clear error
-                    eprintln!("Failed to decode schema name for row: {:?}", r);
                     "".to_string()
                 }
             })
             .filter(|s| !s.is_empty())
             .collect();
+
+        schemas.sort();
 
         Ok(schemas)
     }
@@ -116,7 +131,7 @@ impl DatabaseDriver for MysqlDriver {
     async fn get_tables(&self, schema: &str) -> Result<Vec<TableInfo>> {
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
         let rows = sqlx::query(
-            "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = ?",
+            "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = ? ORDER BY table_name",
         )
         .bind(schema)
         .fetch_all(pool)
@@ -125,7 +140,6 @@ impl DatabaseDriver for MysqlDriver {
         let tables = rows
             .iter()
             .map(|r| {
-                // Handle VARBINARY type like we did for schemas
                 let name = if let Ok(name) = r.try_get::<String, _>(0) {
                     name
                 } else if let Ok(bytes) = r.try_get::<Vec<u8>, _>(0) {
@@ -181,17 +195,22 @@ impl DatabaseDriver for MysqlDriver {
 
         Ok(cols)
     }
+
+    async fn set_current_schema(&self, schema: &str) -> Result<()> {
+        let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
+        // Use backticks for MySQL database names
+        let sql = format!("USE `{}`", schema);
+        sqlx::query(&sql).execute(pool).await?;
+        Ok(())
+    }
 }
 
 fn decode_mysql_value(row: &MySqlRow, index: usize) -> serde_json::Value {
     let col = row.column(index);
     let type_name = col.type_info().name();
 
-    // Basic mapping for MySQL types
-    // Note: sqlx mysql type names are uppercase usually
     match type_name {
         "BOOLEAN" | "BOOL" | "TINYINT" => {
-            // Tinyint(1) is often boolean, but not always.
             let v: Option<i8> = row.try_get(index).ok();
             serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
         }

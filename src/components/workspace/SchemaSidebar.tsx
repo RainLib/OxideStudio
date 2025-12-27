@@ -124,6 +124,7 @@ export function SchemaSidebar() {
   ]);
 
   const { findOrCreateTableTab, runTabQuery, updateTabSql } = useTabStore();
+  const { connections } = useConnectionStore();
 
   const handleTableClick = (tableName: string) => {
     selectTable(tableName);
@@ -136,7 +137,15 @@ export function SchemaSidebar() {
       tableName
     );
 
-    const sql = `SELECT * FROM \`${currentSchema}\`.\`${tableName}\` LIMIT 100;`;
+    // Get current connection to check driver
+    const connection = connections.find((c) => c.id === activeConnectionId);
+    const driver = connection?.driver || "postgres";
+
+    // Use driver-aware quoting
+    // We strictly rely on backend context switching now, so no schema prefix needed.
+    const quote = driver === "mysql" ? "`" : '"';
+    const sql = `SELECT * FROM ${quote}${tableName}${quote} LIMIT 100;`;
+
     updateTabSql(tabId, sql);
     runTabQuery(tabId, activeConnectionId);
   };
