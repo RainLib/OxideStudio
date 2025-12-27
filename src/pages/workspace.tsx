@@ -182,12 +182,15 @@ export function Workspace() {
           </div>
 
           {/* Bottom: Unified EditorStatusBar spanning entire width */}
-          {activeTab?.type !== "table" && (
-            <EditorStatusBar
-              rowCount={currentResult?.rows?.length}
-              executionTime={124}
-            />
-          )}
+          <EditorStatusBar
+            type={activeTab?.type === "table" ? "table" : "editor"}
+            rowCount={currentResult?.rows?.length}
+            executionTime={activeTab?.type === "table" ? undefined : 124}
+            onRefresh={() => console.log("Refresh table")}
+            onAdd={() => console.log("Add row")}
+            onSettings={() => console.log("Table settings")}
+            onStructure={() => console.log("View structure")}
+          />
         </div>
       </div>
     </div>

@@ -6,6 +6,8 @@ export interface Workspace {
   id: string;
   name: string;
   color: string;
+  icon: string; // Icon name from Lucide
+  description?: string;
 }
 
 interface WorkspaceState {
@@ -14,7 +16,12 @@ interface WorkspaceState {
   activeWorkspaceId: string | null;
 
   // Actions
-  createWorkspace: (name: string, color?: string) => void;
+  createWorkspace: (
+    name: string,
+    icon: string,
+    color?: string,
+    description?: string
+  ) => void;
   updateWorkspace: (
     id: string,
     updates: Partial<Omit<Workspace, "id">>
@@ -35,11 +42,13 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       workspaceConnections: {},
       activeWorkspaceId: null,
 
-      createWorkspace: (name: string, color = "#f39c12") => {
+      createWorkspace: (name, icon, color = "#f39c12", description = "") => {
         const newWorkspace: Workspace = {
           id: uuidv4(),
           name,
           color,
+          icon,
+          description,
         };
         set((state) => ({
           workspaces: [...state.workspaces, newWorkspace],

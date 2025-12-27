@@ -17,6 +17,15 @@ import {
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 
 export function ConnectionForm() {
   const {
@@ -32,6 +41,8 @@ export function ConnectionForm() {
   } | null>(null);
 
   const [showPassword, setShowPassword] = useState(false);
+  const [importUrl, setImportUrl] = useState("");
+  const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
 
   if (!selectedConnection) {
     return (
@@ -50,6 +61,45 @@ export function ConnectionForm() {
       </div>
     );
   }
+
+  const parseConnectionString = (url: string): Partial<ConnectionConfig> => {
+    try {
+      const parsed = new URL(url);
+      const driver = parsed.protocol.replace(":", "");
+      const host = parsed.hostname;
+      const port = parsed.port
+        ? parseInt(parsed.port)
+        : driver === "postgres"
+        ? 5432
+        : 3306;
+      const user = decodeURIComponent(parsed.username);
+      const password = decodeURIComponent(parsed.password);
+      const database = decodeURIComponent(parsed.pathname.split("/")[1] || "");
+
+      return {
+        driver: (driver === "postgresql" ? "postgres" : driver) as any,
+        host,
+        port,
+        user,
+        password,
+        database,
+        connectionUrl: url,
+      };
+    } catch (e) {
+      console.error("Failed to parse connection string:", e);
+      return {};
+    }
+  };
+
+  const handleImport = () => {
+    if (!importUrl.trim()) return;
+    const updates = parseConnectionString(importUrl.trim());
+    if (Object.keys(updates).length > 0) {
+      updateConnectionConfig(updates);
+    }
+    setImportUrl("");
+    setIsImportDialogOpen(false);
+  };
 
   const handleChange = (field: keyof ConnectionConfig, value: any) => {
     updateConnectionConfig({ [field]: value });
@@ -86,15 +136,50 @@ export function ConnectionForm() {
           <h2 className="text-2xl font-bold text-white tracking-tight">
             {selectedConnection.name || "New Connection"}
           </h2>
-          <Button
-            variant="ghost"
-            className="text-xs text-gray-400 hover:text-white uppercase tracking-wider font-bold"
-            onClick={() => {
-              /* Toggle Import from URL maybe? */
-            }}
+          <Dialog
+            open={isImportDialogOpen}
+            onOpenChange={setIsImportDialogOpen}
           >
-            Import from URL
-          </Button>
+            <DialogTrigger asChild>
+              <Button
+                variant="ghost"
+                className="text-xs text-gray-400 hover:text-white uppercase tracking-wider font-bold"
+              >
+                Import from URL
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="bg-[#111] border-[#222] text-white">
+              <DialogHeader>
+                <DialogTitle>Import from URL</DialogTitle>
+              </DialogHeader>
+              <div className="py-4 space-y-4">
+                <p className="text-sm text-gray-400">
+                  Paste your database connection string below.
+                </p>
+                <Input
+                  className="bg-[#1a1a1a] border-[#333] text-white"
+                  placeholder="postgres://user:pass@localhost:5432/mydb"
+                  value={importUrl}
+                  onChange={(e) => setImportUrl(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleImport()}
+                />
+              </div>
+              <DialogFooter>
+                <Button
+                  variant="ghost"
+                  onClick={() => setIsImportDialogOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleImport}
+                  className="bg-[#f39c12] hover:bg-[#d35400] text-white"
+                >
+                  Import
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
 
         <div className="space-y-6">
