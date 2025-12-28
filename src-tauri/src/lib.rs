@@ -4,15 +4,33 @@ pub mod drivers;
 use core::cache::CacheManager;
 use core::config::{AppConfig, ConfigManager, SavedConnection};
 use core::manager::ConnectionManager;
+use core::parser::SqlParser;
 use core::protocol::Response;
 use drivers::mysql::MysqlDriver;
 use drivers::postgres::PostgresDriver;
+use std::sync::Mutex;
 use tauri::{Manager, State};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+// State for the SQL Parser
+pub struct ParserState(pub Mutex<SqlParser>);
+
+#[tauri::command]
+async fn get_sql_completion(
+    parser_state: State<'_, ParserState>,
+    sql: String,
+    cursor: usize,
+) -> Result<core::parser::CompletionContext, String> {
+    let mut parser = parser_state.0.lock().map_err(|e| e.to_string())?;
+    // parser.get_completion_context is what we defined, but I updated it to parse_and_get_context in the file content I wrote?
+    // Let me double check what I wrote in the previous turn.
+    // I wrote `parse_and_get_context`.
+    Ok(parser.parse_and_get_context(&sql, cursor))
 }
 
 #[tauri::command]
@@ -209,7 +227,7 @@ async fn refresh_tables(
     match manager.get_tables(&connection_id, &schema).await {
         Ok(tables) => {
             let key = format!("tables_{}_{}", connection_id, schema);
-            let cached: Option<Vec<core::protocol::TableInfo>> = cache.load(&key);
+            let _cached: Option<Vec<core::protocol::TableInfo>> = cache.load(&key);
 
             // Equality check for TableInfo might need PartialEq derived?
             // Assuming TableInfo derives PartialEq (generated from json?)
@@ -238,6 +256,9 @@ pub fn run() {
 
             let cache_manager = CacheManager::new(app.handle());
             app.manage(cache_manager);
+
+            // Initialize SQL Parser state
+            app.manage(ParserState(Mutex::new(SqlParser::new())));
 
             // Platform-specific window configuration
             if let Some(window) = app.get_webview_window("main") {
@@ -271,7 +292,9 @@ pub fn run() {
             get_cached_schemas,
             refresh_schemas,
             get_cached_tables,
+            get_cached_tables,
             refresh_tables,
+            get_sql_completion,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

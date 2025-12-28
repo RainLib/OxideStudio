@@ -31,6 +31,13 @@ export interface Response<T> {
   };
 }
 
+export interface CompletionContext {
+  suggestionType: "table" | "column" | "keyword" | "none";
+  relevantTable?: string;
+  candidates?: string[];
+  matchString?: string;
+}
+
 export const api = {
   connect: async (
     connectionId: string,
@@ -127,5 +134,12 @@ export const api = {
     schema: string
   ): Promise<Response<any[]>> => {
     return await invoke("refresh_tables", { connectionId, schema });
+  },
+
+  getSqlCompletion: async (
+    sql: string,
+    cursor: number
+  ): Promise<Response<CompletionContext>> => {
+    return await invoke("get_sql_completion", { sql, cursor });
   },
 };
