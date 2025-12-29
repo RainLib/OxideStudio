@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { TabBar } from "@/components/workspace/TabBar";
 import { QueryEditor } from "@/components/workspace/QueryEditor";
 import { DataGrid } from "@/components/workspace/DataGrid";
@@ -21,15 +21,9 @@ import {
   PanelRightClose,
   Settings2,
 } from "lucide-react";
-import {
-  containerVariants,
-  iconButtonVariants,
-  panelHeaderVariants,
-} from "@/styles/variants";
-import { cn } from "@/styles/utils";
 
 export function Workspace() {
-  const { tabs, activeTabId } = useTabStore();
+  const { tabs, activeTabId, createTab } = useTabStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
   const currentResult = Array.isArray(activeTab?.results)
@@ -43,6 +37,14 @@ export function Workspace() {
   const [sidebarWidth, setSidebarWidth] = useState(280); // Fixed pixel width
 
   const [isRightCollapsed, setIsRightCollapsed] = useState(true);
+
+  // Auto-create default SQL tab on first load
+  useEffect(() => {
+    if (tabs.length === 0) {
+      createTab("query", "Query #1", "");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount
 
   // Toggle Logic
   const handleActivityBarClick = (tab: SidebarTab) => {
@@ -82,14 +84,14 @@ export function Workspace() {
   };
 
   return (
-    <div className={containerVariants({ layout: "workspace" })}>
+    <div className="h-screen w-screen flex flex-col bg-[#131313] text-gray-200 font-sans overflow-hidden">
       <AppBar
         right={
           <>
             <Button
               variant="ghost"
               size="icon"
-              className={iconButtonVariants({ size: "md", variant: "ghost" })}
+              className="h-8 w-8 text-gray-500 hover:text-gray-300 hover:bg-[#2a2a2a]"
               onClick={() => setIsLeftDrawerOpen(!isLeftDrawerOpen)}
               title="Toggle Left Panel"
             >
@@ -102,7 +104,7 @@ export function Workspace() {
             <Button
               variant="ghost"
               size="icon"
-              className={iconButtonVariants({ size: "md", variant: "ghost" })}
+              className="h-8 w-8 text-gray-500 hover:text-gray-300 hover:bg-[#2a2a2a]"
               onClick={() => setIsRightCollapsed(!isRightCollapsed)}
               title="Toggle Right Panel"
             >
@@ -116,9 +118,7 @@ export function Workspace() {
         }
       />
 
-      <div
-        className={containerVariants({ direction: "row", layout: "content" })}
-      >
+      <div className="flex-1 flex overflow-hidden">
         {/* Unified Left Panel */}
         <LeftPanel
           activeTab={activeSidebarTab}
@@ -173,23 +173,11 @@ export function Workspace() {
             {/* Right Panel */}
             {!isRightCollapsed && (
               <div
-                className={cn(
-                  "border-l border-[#111] bg-[#1a1a1a] shrink-0",
-                  "w-[220px]"
-                )}
+                className="border-l border-[#111] bg-[#1a1a1a] shrink-0"
+                style={{ width: "220px" }}
               >
-                <div
-                  className={containerVariants({
-                    direction: "col",
-                    layout: "content",
-                  })}
-                >
-                  <div
-                    className={panelHeaderVariants({
-                      size: "md",
-                      variant: "bold",
-                    })}
-                  >
+                <div className="h-full flex flex-col">
+                  <div className="h-9 border-b border-[#333] flex items-center px-3 text-[10px] font-bold text-gray-500 uppercase tracking-widest">
                     Details
                   </div>
                   <div className="flex-1 flex flex-col items-center justify-center text-gray-600 text-[11px] p-6 text-center leading-relaxed">

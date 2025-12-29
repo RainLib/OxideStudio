@@ -61,7 +61,7 @@ export const containerVariants = cva("flex", {
 /**
  * 面板变体 - 定义各种面板的样式
  */
-export const panelVariants = cva("shrink-0", {
+export const panelVariants = cva("flex shrink-0", {
   variants: {
     side: {
       left: "border-r border-[#111]",
