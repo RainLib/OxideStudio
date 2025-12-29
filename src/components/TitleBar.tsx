@@ -10,6 +10,12 @@ import {
   PanelRightClose,
 } from "lucide-react";
 import { useState, useEffect } from "react";
+import {
+  panelVariants,
+  iconButtonVariants,
+  dividerVariants,
+} from "@/styles/variants";
+import { cn } from "@/styles/utils";
 
 interface TitleBarProps {
   isLeftPanelOpen: boolean;
@@ -49,7 +55,16 @@ export function TitleBar({
   const handleClose = () => getCurrentWindow().close();
 
   return (
-    <div className="h-8 bg-[#1a1a1a] border-b border-[#333] flex items-center select-none shrink-0">
+    <div
+      className={cn(
+        panelVariants({
+          side: "top",
+          background: "secondary",
+          size: "titleBar",
+        }),
+        "flex items-center select-none"
+      )}
+    >
       {/* Left: App Title (Draggable) */}
       <div
         data-tauri-drag-region
@@ -67,7 +82,7 @@ export function TitleBar({
         <Button
           variant="ghost"
           size="icon"
-          className="h-6 w-6 text-gray-500 hover:text-gray-300 hover:bg-[#2a2a2a]"
+          className={iconButtonVariants({ size: "sm", variant: "ghost" })}
           onClick={onToggleLeft}
           title="Toggle Left Panel"
         >
@@ -81,7 +96,7 @@ export function TitleBar({
         <Button
           variant="ghost"
           size="icon"
-          className="h-6 w-6 text-gray-500 hover:text-gray-300 hover:bg-[#2a2a2a]"
+          className={iconButtonVariants({ size: "sm", variant: "ghost" })}
           onClick={onToggleRight}
           title="Toggle Right Panel"
         >
@@ -92,13 +107,19 @@ export function TitleBar({
           )}
         </Button>
 
-        <div className="w-px h-4 bg-[#444] mx-1" />
+        <div
+          className={dividerVariants({
+            orientation: "vertical",
+            color: "divider",
+            spacing: "xs",
+          })}
+        />
 
         {/* Window Controls */}
         <Button
           variant="ghost"
           size="icon"
-          className="h-6 w-6 text-gray-500 hover:text-gray-300 hover:bg-[#2a2a2a]"
+          className={iconButtonVariants({ size: "sm", variant: "ghost" })}
           onClick={handleMinimize}
           title="Minimize"
         >
@@ -108,7 +129,7 @@ export function TitleBar({
         <Button
           variant="ghost"
           size="icon"
-          className="h-6 w-6 text-gray-500 hover:text-gray-300 hover:bg-[#2a2a2a]"
+          className={iconButtonVariants({ size: "sm", variant: "ghost" })}
           onClick={handleMaximize}
           title="Maximize"
         >
@@ -118,7 +139,7 @@ export function TitleBar({
         <Button
           variant="ghost"
           size="icon"
-          className="h-6 w-6 text-gray-500 hover:text-red-500 hover:bg-red-500/10"
+          className={iconButtonVariants({ size: "sm", variant: "danger" })}
           onClick={handleClose}
           title="Close"
         >

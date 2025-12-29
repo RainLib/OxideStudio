@@ -5,6 +5,7 @@ import { WorkspaceSidebar } from "@/components/connection/WorkspaceSidebar";
 import { ConnectionForm } from "@/components/connection/ConnectionForm";
 import { AppBar } from "@/components/AppBar";
 import { Loader2 } from "lucide-react";
+import { containerVariants } from "@/styles/variants";
 
 export function ConnectionPage() {
   const { loadConnections, isLoading } = useConnectionStore();
@@ -22,9 +23,11 @@ export function ConnectionPage() {
   }
 
   return (
-    <div className="flex flex-col h-screen w-full bg-[#131313] text-gray-200 overflow-hidden">
+    <div className={containerVariants({ layout: "connection" })}>
       <AppBar title="OxideStudio" />
-      <div className="flex flex-1 min-h-0">
+      <div
+        className={containerVariants({ direction: "row", layout: "content" })}
+      >
         <WorkspaceSidebar />
         <ConnectionSidebar />
         <ConnectionForm />

@@ -1,5 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Minus, Square, X } from "lucide-react";
+import { iconButtonVariants } from "@/styles/variants";
+import { cn } from "@/styles/utils";
 
 export function WindowControls() {
   const appWindow = getCurrentWindow();
@@ -20,24 +22,33 @@ export function WindowControls() {
     <div className="flex items-center h-full">
       <button
         onClick={handleMinimize}
-        className="h-full px-4 hover:bg-white/10 transition-colors"
+        className={cn(
+          iconButtonVariants({ size: "md", variant: "ghost" }),
+          "h-full px-4 rounded-none"
+        )}
         aria-label="Minimize"
       >
-        <Minus size={14} className="text-gray-400" />
+        <Minus size={14} />
       </button>
       <button
         onClick={handleMaximize}
-        className="h-full px-4 hover:bg-white/10 transition-colors"
+        className={cn(
+          iconButtonVariants({ size: "md", variant: "ghost" }),
+          "h-full px-4 rounded-none"
+        )}
         aria-label="Maximize"
       >
-        <Square size={12} className="text-gray-400" />
+        <Square size={12} />
       </button>
       <button
         onClick={handleClose}
-        className="h-full px-4 hover:bg-red-600 transition-colors"
+        className={cn(
+          iconButtonVariants({ size: "md", variant: "danger" }),
+          "h-full px-4 rounded-none"
+        )}
         aria-label="Close"
       >
-        <X size={16} className="text-gray-400 hover:text-white" />
+        <X size={16} />
       </button>
     </div>
   );

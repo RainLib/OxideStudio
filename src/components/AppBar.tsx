@@ -1,5 +1,7 @@
 import { ReactNode } from "react";
 import { WindowControls } from "./WindowControls";
+import { panelVariants } from "@/styles/variants";
+import { cn } from "@/styles/utils";
 
 interface AppBarProps {
   /**
@@ -27,14 +29,18 @@ export function AppBar({ center, right, title }: AppBarProps) {
   return (
     <div
       data-tauri-drag-region
-      className="h-12 bg-[#1a1a1a] border-b border-[#333] flex items-center shrink-0"
+      className={cn(
+        panelVariants({ side: "top", background: "secondary", size: "appBar" }),
+        "flex items-center"
+      )}
     >
       {/* Left: Space for macOS traffic lights + Optional Title */}
       <div
         data-tauri-drag-region
-        className={`pr-4 flex items-center gap-3 shrink-0 ${
+        className={cn(
+          "pr-4 flex items-center gap-3 shrink-0",
           isMacOS ? "pl-20" : "pl-4"
-        }`}
+        )}
       >
         {title && (
           <span
