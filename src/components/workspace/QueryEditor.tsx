@@ -59,169 +59,110 @@ export function QueryEditor() {
         const { activeConnectionId } = useConnectionStore.getState();
         const { currentSchema, tables } = useSchemaStore.getState();
 
-        // If no connection, return static SQL keywords
-        if (!activeConnectionId) {
-          console.log("[PROVIDER] No connection, returning static keywords");
-          return {
-            suggestions: [
-              {
-                label: "SELECT",
-                kind: monaco.languages.CompletionItemKind.Keyword,
-                insertText: "SELECT",
-                range,
-              },
-              {
-                label: "FROM",
-                kind: monaco.languages.CompletionItemKind.Keyword,
-                insertText: "FROM",
-                range,
-              },
-              {
-                label: "WHERE",
-                kind: monaco.languages.CompletionItemKind.Keyword,
-                insertText: "WHERE",
-                range,
-              },
-              {
-                label: "INSERT",
-                kind: monaco.languages.CompletionItemKind.Keyword,
-                insertText: "INSERT",
-                range,
-              },
-              {
-                label: "UPDATE",
-                kind: monaco.languages.CompletionItemKind.Keyword,
-                insertText: "UPDATE",
-                range,
-              },
-              {
-                label: "DELETE",
-                kind: monaco.languages.CompletionItemKind.Keyword,
-                insertText: "DELETE",
-                range,
-              },
-            ],
-          };
-        }
+        console.log("[PROVIDER] Connection state:", {
+          activeConnectionId,
+          currentSchema,
+          tablesCount: tables.length,
+        });
 
         try {
           // Call Rust backend for context analysis
+          // Note: SQL parsing doesn't require a DB connection
           const response = await api.getSqlCompletion(fullText, offset);
           console.log("[PROVIDER] Backend response:", response);
 
           if (!response.success || !response.data) {
-            console.warn(
-              "[PROVIDER] Backend failed, returning static keywords"
-            );
-            return {
-              suggestions: [
-                {
-                  label: "SELECT",
-                  kind: monaco.languages.CompletionItemKind.Keyword,
-                  insertText: "SELECT",
-                  range,
-                },
-                {
-                  label: "FROM",
-                  kind: monaco.languages.CompletionItemKind.Keyword,
-                  insertText: "FROM",
-                  range,
-                },
-                {
-                  label: "WHERE",
-                  kind: monaco.languages.CompletionItemKind.Keyword,
-                  insertText: "WHERE",
-                  range,
-                },
-              ],
-            };
+            console.warn("[PROVIDER] Backend failed");
+            return { suggestions: [] };
           }
 
           const { suggestionType, relevantTable, candidates } = response.data;
           const suggestions: any[] = [];
-          const type = suggestionType.toLowerCase();
 
           console.log(
-            `[PROVIDER] Type: ${type}, Candidates: ${candidates?.length || 0}`
+            `[PROVIDER] Type: ${suggestionType}, Candidates: ${
+              candidates?.length || 0
+            }`
           );
 
-          // Handle different suggestion types
-          if (type === "table") {
-            // Suggest tables from schema
-            tables.forEach((t) => {
-              suggestions.push({
-                label: t.name,
-                kind: monaco.languages.CompletionItemKind.Class,
-                insertText: t.name,
-                detail: `Table (${t.schema || currentSchema})`,
-                range,
-              });
-            });
-          } else if (type === "column") {
-            // Suggest columns from the relevant table
-            if (relevantTable) {
-              const targetSchema = currentSchema || "public";
-              try {
-                const colsRes = await api.getColumns(
-                  activeConnectionId,
-                  targetSchema,
-                  relevantTable
-                );
-                if (colsRes.success && colsRes.data) {
-                  colsRes.data.forEach((col: any) => {
-                    suggestions.push({
-                      label: col.name,
-                      kind: monaco.languages.CompletionItemKind.Field,
-                      insertText: col.name,
-                      detail: `${col.data_type} (${relevantTable})`,
-                      range,
-                    });
+          // Handle different suggestion types based on backend analysis
+          switch (suggestionType.toLowerCase()) {
+            case "table":
+              // Suggest tables from schema store (requires connection)
+              console.log(`[PROVIDER] Suggesting tables from schema`);
+              if (activeConnectionId && tables.length > 0) {
+                tables.forEach((t) => {
+                  suggestions.push({
+                    label: t.name,
+                    kind: monaco.languages.CompletionItemKind.Class,
+                    insertText: t.name,
+                    detail: `Table (${t.schema || currentSchema})`,
+                    range,
                   });
-                }
-              } catch (err) {
-                console.error("[PROVIDER] Failed to fetch columns:", err);
+                });
+              } else {
+                console.log(`[PROVIDER] No connection or tables available`);
               }
-            }
-          } else if (type === "keyword" || type === "none") {
-            // Use keywords from backend
-            console.log(`[PROVIDER] Processing keywords:`, candidates);
-            if (candidates && candidates.length > 0) {
-              candidates.forEach((k) => {
-                const item = {
-                  label: k,
-                  kind: monaco.languages.CompletionItemKind.Keyword,
-                  insertText: k,
-                  detail: "SQL Keyword",
-                  range,
-                };
-                console.log(`[PROVIDER] Adding keyword:`, k, item);
-                suggestions.push(item);
-              });
-            }
+              break;
+
+            case "column":
+              // Suggest columns from the relevant table
+              console.log(
+                `[PROVIDER] Suggesting columns for table: ${relevantTable}`
+              );
+              if (relevantTable) {
+                const targetSchema = currentSchema || "public";
+                try {
+                  const colsRes = await api.getColumns(
+                    activeConnectionId,
+                    targetSchema,
+                    relevantTable
+                  );
+                  if (colsRes.success && colsRes.data) {
+                    colsRes.data.forEach((col: any) => {
+                      suggestions.push({
+                        label: col.name,
+                        kind: monaco.languages.CompletionItemKind.Field,
+                        insertText: col.name,
+                        detail: `${col.data_type} (${relevantTable})`,
+                        range,
+                      });
+                    });
+                  }
+                } catch (err) {
+                  console.error("[PROVIDER] Failed to fetch columns:", err);
+                }
+              }
+              break;
+
+            case "keyword":
+            case "none":
+            default:
+              // Use keywords from backend (already filtered by prefix)
+              console.log(
+                `[PROVIDER] Using ${
+                  candidates?.length || 0
+                } keywords from backend`
+              );
+              if (candidates && candidates.length > 0) {
+                candidates.forEach((keyword) => {
+                  suggestions.push({
+                    label: keyword,
+                    kind: monaco.languages.CompletionItemKind.Keyword,
+                    insertText: keyword,
+                    detail: "SQL Keyword",
+                    range,
+                  });
+                });
+              }
+              break;
           }
 
-          console.log(`[PROVIDER] Final suggestions array:`, suggestions);
           console.log(`[PROVIDER] Returning ${suggestions.length} suggestions`);
           return { suggestions };
         } catch (e) {
           console.error("[PROVIDER] Error:", e);
-          // Return static keywords on error
-          return {
-            suggestions: [
-              {
-                label: "SELECT",
-                kind: monaco.languages.CompletionItemKind.Keyword,
-                insertText: "SELECT",
-                range,
-              },
-              {
-                label: "FROM",
-                kind: monaco.languages.CompletionItemKind.Keyword,
-                insertText: "FROM",
-                range,
-              },
-            ],
-          };
+          return { suggestions: [] };
         }
       },
     });

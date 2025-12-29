@@ -82,11 +82,19 @@ pub struct SqlParser {
 
 impl SqlParser {
     pub fn new() -> Self {
+        println!("[SqlParser] Initializing parser...");
         let mut parser = Parser::new();
-        parser
-            .set_language(&tree_sitter_sql::language())
-            .expect("Error loading SQL grammar");
-        Self { parser }
+
+        match parser.set_language(&tree_sitter_sql::language()) {
+            Ok(_) => {
+                println!("[SqlParser] SQL grammar loaded successfully");
+                Self { parser }
+            }
+            Err(e) => {
+                eprintln!("[SqlParser] FATAL: Failed to load SQL grammar: {:?}", e);
+                panic!("Error loading SQL grammar: {:?}", e);
+            }
+        }
     }
 }
 
