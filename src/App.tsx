@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { ThemeProvider } from "@/theme";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { ConnectionPage } from "@/pages/connection";
 import { Workspace } from "@/pages/workspace";
@@ -20,9 +21,11 @@ function App() {
   }
 
   return (
-    <div className="bg-background text-foreground h-screen w-screen overflow-hidden">
-      {isConnected ? <Workspace /> : <ConnectionPage />}
-    </div>
+    <ThemeProvider>
+      <div className="bg-background text-foreground h-screen w-screen overflow-hidden">
+        {isConnected ? <Workspace /> : <ConnectionPage />}
+      </div>
+    </ThemeProvider>
   );
 }
 

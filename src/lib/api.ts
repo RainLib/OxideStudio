@@ -1,27 +1,37 @@
-import { invoke } from "@tauri-apps/api/core";
+/**
+ * @deprecated 此文件保留用于向后兼容
+ * 请使用新的 service 层: @/services/tauri
+ *
+ * 迁移指南:
+ * - api.connect() -> connectionService.connect()
+ * - api.query() -> queryService.executeQuery()
+ * - api.getSchemas() -> schemaService.getSchemas()
+ *
+ * @see {@link file:///Users/houshuai/project/rust/OxideStudio/src/services/tauri/index.ts}
+ */
 
-export interface QueryResult {
-  columns: ColumnDef[];
-  rows: any[][];
-}
+import {
+  connectionService,
+  queryService,
+  schemaService,
+} from "@/services/tauri";
+import type {
+  QueryResult as NewQueryResult,
+  ColumnDef as NewColumnDef,
+  SavedConnection as NewSavedConnection,
+  CompletionContext as NewCompletionContext,
+} from "@/services/tauri";
 
-export interface ColumnDef {
-  name: string;
-  data_type: string;
-}
+// Re-export types for backward compatibility
+export type QueryResult = NewQueryResult;
+export type ColumnDef = NewColumnDef;
+export type SavedConnection = NewSavedConnection;
+export type CompletionContext = NewCompletionContext;
 
-export interface SavedConnection {
-  id: string;
-  name: string;
-  driver: "postgres" | "mysql";
-  url: string;
-  host?: string;
-  port?: number;
-  user?: string;
-  password?: string;
-  database?: string;
-}
-
+/**
+ * Legacy Response type (deprecated)
+ * @deprecated Use ApiResponse from @/services/tauri instead
+ */
 export interface Response<T> {
   success: boolean;
   data?: T;
@@ -31,115 +41,171 @@ export interface Response<T> {
   };
 }
 
-export interface CompletionContext {
-  suggestionType: "table" | "column" | "keyword" | "none";
-  relevantTable?: string;
-  candidates?: string[];
-  matchString?: string;
+/**
+ * 包装新 API 为旧的 Response 格式
+ */
+async function wrapResponse<T>(promise: Promise<T>): Promise<Response<T>> {
+  try {
+    const data = await promise;
+    return { success: true, data };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const code = (error as any).code || "UNKNOWN_ERROR";
+    return {
+      success: false,
+      error: { code, message },
+    };
+  }
 }
 
+/**
+ * Legacy API object
+ * @deprecated Use service functions from @/services/tauri instead
+ *
+ * This object is maintained for backward compatibility.
+ * All methods now delegate to the new service layer.
+ */
 export const api = {
+  /**
+   * Connect to database
+   * @deprecated Use connectionService.connect() instead
+   */
   connect: async (
     connectionId: string,
     driver: string,
     url: string
   ): Promise<Response<string>> => {
-    return await invoke("connect_db", {
-      connectionId,
-      driver,
-      url,
-    });
+    return wrapResponse(connectionService.connect(connectionId, driver, url));
   },
 
+  /**
+   * Execute SQL query
+   * @deprecated Use queryService.executeQuery() instead
+   */
   query: async (
     connectionId: string,
     sql: string,
     schema?: string
   ): Promise<Response<QueryResult[]>> => {
-    return await invoke("execute_query", {
-      connectionId,
-      sql,
-      schema,
-    });
+    return wrapResponse(queryService.executeQuery(connectionId, sql, schema));
   },
 
+  /**
+   * Save connections
+   * @deprecated Use connectionService.saveConnections() instead
+   */
   saveConnections: async (
     connections: SavedConnection[]
   ): Promise<Response<string>> => {
-    return await invoke("save_connections", {
-      connections,
-    });
+    return wrapResponse(connectionService.saveConnections(connections));
   },
 
+  /**
+   * Load connections
+   * @deprecated Use connectionService.loadConnections() instead
+   */
   loadConnections: async (): Promise<Response<SavedConnection[]>> => {
-    return await invoke("load_connections");
+    return wrapResponse(connectionService.loadConnections());
   },
 
+  /**
+   * Get schemas
+   * @deprecated Use schemaService.getSchemas() instead
+   */
   getSchemas: async (connectionId: string): Promise<Response<string[]>> => {
-    console.log("API: getSchemas calling invoke for", connectionId);
-    const res = await invoke<Response<string[]>>("get_schemas", {
-      connectionId,
-    });
-    console.log("API: getSchemas result:", res);
-    return res;
+    console.log("API: getSchemas calling service for", connectionId);
+    const result = await wrapResponse(schemaService.getSchemas(connectionId));
+    console.log("API: getSchemas result:", result);
+    return result;
   },
 
+  /**
+   * Get tables
+   * @deprecated Use schemaService.getTables() instead
+   */
   getTables: async (
     connectionId: string,
     schema: string
   ): Promise<Response<any[]>> => {
-    console.log("API: getTables calling invoke for", connectionId, schema);
-    const res = await invoke<Response<any[]>>("get_tables", {
-      connectionId,
-      schema,
-    });
-    console.log("API: getTables result:", res);
-    return res;
+    console.log("API: getTables calling service for", connectionId, schema);
+    const result = await wrapResponse(
+      schemaService.getTables(connectionId, schema)
+    );
+    console.log("API: getTables result:", result);
+    return result;
   },
 
+  /**
+   * Get columns
+   * @deprecated Use schemaService.getColumns() instead
+   */
   getColumns: async (
     connectionId: string,
     schema: string,
     table: string
   ): Promise<Response<any[]>> => {
-    return await invoke("get_columns", { connectionId, schema, table });
+    return wrapResponse(schemaService.getColumns(connectionId, schema, table));
   },
 
+  /**
+   * Set current schema
+   * @deprecated Use schemaService.setCurrentSchema() instead
+   */
   setCurrentSchema: async (
     connectionId: string,
     schema: string
   ): Promise<Response<string>> => {
-    return await invoke("set_current_schema", { connectionId, schema });
+    return wrapResponse(schemaService.setCurrentSchema(connectionId, schema));
   },
 
+  /**
+   * Get cached schemas
+   * @deprecated Use schemaService.getCachedSchemas() instead
+   */
   getCachedSchemas: async (
     connectionId: string
   ): Promise<Response<string[]>> => {
-    return await invoke("get_cached_schemas", { connectionId });
+    return wrapResponse(schemaService.getCachedSchemas(connectionId));
   },
 
+  /**
+   * Refresh schemas
+   * @deprecated Use schemaService.refreshSchemas() instead
+   */
   refreshSchemas: async (connectionId: string): Promise<Response<string[]>> => {
-    return await invoke("refresh_schemas", { connectionId });
+    return wrapResponse(schemaService.refreshSchemas(connectionId));
   },
 
+  /**
+   * Get cached tables
+   * @deprecated Use schemaService.getCachedTables() instead
+   */
   getCachedTables: async (
     connectionId: string,
     schema: string
   ): Promise<Response<any[]>> => {
-    return await invoke("get_cached_tables", { connectionId, schema });
+    return wrapResponse(schemaService.getCachedTables(connectionId, schema));
   },
 
+  /**
+   * Refresh tables
+   * @deprecated Use schemaService.refreshTables() instead
+   */
   refreshTables: async (
     connectionId: string,
     schema: string
   ): Promise<Response<any[]>> => {
-    return await invoke("refresh_tables", { connectionId, schema });
+    return wrapResponse(schemaService.refreshTables(connectionId, schema));
   },
 
+  /**
+   * Get SQL completion
+   * @deprecated Use queryService.getSqlCompletion() instead
+   */
   getSqlCompletion: async (
     sql: string,
     cursor: number
   ): Promise<Response<CompletionContext>> => {
-    return await invoke("get_sql_completion", { sql, cursor });
+    return wrapResponse(queryService.getSqlCompletion(sql, cursor));
   },
 };

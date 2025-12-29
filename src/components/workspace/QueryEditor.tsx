@@ -39,33 +39,190 @@ export function QueryEditor() {
     console.log("[SETUP] Registering SQL completion provider");
 
     const disposable = monaco.languages.registerCompletionItemProvider("sql", {
-      // Remove trigger characters - let it trigger on any typing
+      triggerCharacters: [" ", ".", "(", ","],
       provideCompletionItems: async (model: any, position: any) => {
-        console.log("[PROVIDER] Called! Position:", position);
+        console.log("[PROVIDER] Called at position:", position);
 
-        // STEP 1: Test with purely static suggestions (no backend, no range)
-        return {
-          suggestions: [
-            {
-              label: "SELECT",
-              kind: monaco.languages.CompletionItemKind.Keyword,
-              insertText: "SELECT",
-              detail: "SQL Keyword",
-            },
-            {
-              label: "FROM",
-              kind: monaco.languages.CompletionItemKind.Keyword,
-              insertText: "FROM",
-              detail: "SQL Keyword",
-            },
-            {
-              label: "WHERE",
-              kind: monaco.languages.CompletionItemKind.Keyword,
-              insertText: "WHERE",
-              detail: "SQL Keyword",
-            },
-          ],
-        };
+        const fullText = model.getValue();
+        const offset = model.getOffsetAt(position);
+
+        // Get the word being typed for range calculation
+        const word = model.getWordUntilPosition(position);
+        const range = new monaco.Range(
+          position.lineNumber,
+          word.startColumn,
+          position.lineNumber,
+          word.endColumn
+        );
+
+        // Get state from stores
+        const { activeConnectionId } = useConnectionStore.getState();
+        const { currentSchema, tables } = useSchemaStore.getState();
+
+        // If no connection, return static SQL keywords
+        if (!activeConnectionId) {
+          console.log("[PROVIDER] No connection, returning static keywords");
+          return {
+            suggestions: [
+              {
+                label: "SELECT",
+                kind: monaco.languages.CompletionItemKind.Keyword,
+                insertText: "SELECT",
+                range,
+              },
+              {
+                label: "FROM",
+                kind: monaco.languages.CompletionItemKind.Keyword,
+                insertText: "FROM",
+                range,
+              },
+              {
+                label: "WHERE",
+                kind: monaco.languages.CompletionItemKind.Keyword,
+                insertText: "WHERE",
+                range,
+              },
+              {
+                label: "INSERT",
+                kind: monaco.languages.CompletionItemKind.Keyword,
+                insertText: "INSERT",
+                range,
+              },
+              {
+                label: "UPDATE",
+                kind: monaco.languages.CompletionItemKind.Keyword,
+                insertText: "UPDATE",
+                range,
+              },
+              {
+                label: "DELETE",
+                kind: monaco.languages.CompletionItemKind.Keyword,
+                insertText: "DELETE",
+                range,
+              },
+            ],
+          };
+        }
+
+        try {
+          // Call Rust backend for context analysis
+          const response = await api.getSqlCompletion(fullText, offset);
+          console.log("[PROVIDER] Backend response:", response);
+
+          if (!response.success || !response.data) {
+            console.warn(
+              "[PROVIDER] Backend failed, returning static keywords"
+            );
+            return {
+              suggestions: [
+                {
+                  label: "SELECT",
+                  kind: monaco.languages.CompletionItemKind.Keyword,
+                  insertText: "SELECT",
+                  range,
+                },
+                {
+                  label: "FROM",
+                  kind: monaco.languages.CompletionItemKind.Keyword,
+                  insertText: "FROM",
+                  range,
+                },
+                {
+                  label: "WHERE",
+                  kind: monaco.languages.CompletionItemKind.Keyword,
+                  insertText: "WHERE",
+                  range,
+                },
+              ],
+            };
+          }
+
+          const { suggestionType, relevantTable, candidates } = response.data;
+          const suggestions: any[] = [];
+          const type = suggestionType.toLowerCase();
+
+          console.log(
+            `[PROVIDER] Type: ${type}, Candidates: ${candidates?.length || 0}`
+          );
+
+          // Handle different suggestion types
+          if (type === "table") {
+            // Suggest tables from schema
+            tables.forEach((t) => {
+              suggestions.push({
+                label: t.name,
+                kind: monaco.languages.CompletionItemKind.Class,
+                insertText: t.name,
+                detail: `Table (${t.schema || currentSchema})`,
+                range,
+              });
+            });
+          } else if (type === "column") {
+            // Suggest columns from the relevant table
+            if (relevantTable) {
+              const targetSchema = currentSchema || "public";
+              try {
+                const colsRes = await api.getColumns(
+                  activeConnectionId,
+                  targetSchema,
+                  relevantTable
+                );
+                if (colsRes.success && colsRes.data) {
+                  colsRes.data.forEach((col: any) => {
+                    suggestions.push({
+                      label: col.name,
+                      kind: monaco.languages.CompletionItemKind.Field,
+                      insertText: col.name,
+                      detail: `${col.data_type} (${relevantTable})`,
+                      range,
+                    });
+                  });
+                }
+              } catch (err) {
+                console.error("[PROVIDER] Failed to fetch columns:", err);
+              }
+            }
+          } else if (type === "keyword" || type === "none") {
+            // Use keywords from backend
+            console.log(`[PROVIDER] Processing keywords:`, candidates);
+            if (candidates && candidates.length > 0) {
+              candidates.forEach((k) => {
+                const item = {
+                  label: k,
+                  kind: monaco.languages.CompletionItemKind.Keyword,
+                  insertText: k,
+                  detail: "SQL Keyword",
+                  range,
+                };
+                console.log(`[PROVIDER] Adding keyword:`, k, item);
+                suggestions.push(item);
+              });
+            }
+          }
+
+          console.log(`[PROVIDER] Final suggestions array:`, suggestions);
+          console.log(`[PROVIDER] Returning ${suggestions.length} suggestions`);
+          return { suggestions };
+        } catch (e) {
+          console.error("[PROVIDER] Error:", e);
+          // Return static keywords on error
+          return {
+            suggestions: [
+              {
+                label: "SELECT",
+                kind: monaco.languages.CompletionItemKind.Keyword,
+                insertText: "SELECT",
+                range,
+              },
+              {
+                label: "FROM",
+                kind: monaco.languages.CompletionItemKind.Keyword,
+                insertText: "FROM",
+                range,
+              },
+            ],
+          };
+        }
       },
     });
 
@@ -155,6 +312,8 @@ export function QueryEditor() {
             cursorBlinking: "smooth",
             quickSuggestions: { other: true, comments: true, strings: true },
             suggestOnTriggerCharacters: true,
+            acceptSuggestionOnCommitCharacter: false,
+            "suggest.filterGraceful": false,
           }}
         />
       </div>
