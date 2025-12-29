@@ -36,106 +36,43 @@ export function QueryEditor() {
   useEffect(() => {
     if (!monaco) return;
 
+    console.log("[SETUP] Registering SQL completion provider");
+
     const disposable = monaco.languages.registerCompletionItemProvider("sql", {
-      triggerCharacters: [" ", ".", "(", ","],
+      // Remove trigger characters - let it trigger on any typing
       provideCompletionItems: async (model: any, position: any) => {
-        const fullText = model.getValue();
-        const offset = model.getOffsetAt(position);
+        console.log("[PROVIDER] Called! Position:", position);
 
-        // Use the current connection ID from the store
-        const { activeConnectionId } = useConnectionStore.getState();
-        const { currentSchema, tables } = useSchemaStore.getState();
-
-        if (!activeConnectionId) return { suggestions: [] };
-
-        try {
-          // Get context from Rust backend
-
-          const response = await api.getSqlCompletion(fullText, offset);
-          console.log("Completion response:", response);
-
-          if (!response.success || !response.data) {
-            return { suggestions: [] };
-          }
-
-          const { suggestionType, relevantTable, matchString } = response.data;
-          const suggestions: any[] = [];
-
-          // Calculate replacement range
-          // If matchString is "s", we want to replace "s" with "SELECT"
-          // Range is [position.lineNumber, position.column - matchString.length] to [position.lineNumber, position.column]
-          let range: any = undefined;
-          if (matchString) {
-            const startColumn = position.column - matchString.length;
-            range = new monaco.Range(
-              position.lineNumber,
-              startColumn,
-              position.lineNumber,
-              position.column
-            );
-          }
-
-          // Rust returns camelCase values due to #[serde(rename_all = "camelCase")]
-          // e.g. "table", "column", "keyword"
-          const type = suggestionType.toLowerCase();
-
-          if (type === "table") {
-            // Suggest tables from the store
-            tables.forEach((t) => {
-              suggestions.push({
-                label: t.name,
-                kind: monaco.languages.CompletionItemKind.Class,
-                insertText: t.name,
-                detail: t.schema || currentSchema,
-                // range: range,
-              });
-            });
-          } else if (type === "column") {
-            // Suggest columns
-            let targetTable = relevantTable;
-            const targetSchema = currentSchema || "public";
-
-            if (targetTable) {
-              // Fetch columns for this table
-              const colsRes = await api.getColumns(
-                activeConnectionId,
-                targetSchema,
-                targetTable
-              );
-              if (colsRes.success && colsRes.data) {
-                colsRes.data.forEach((col: any) => {
-                  suggestions.push({
-                    label: col.name,
-                    kind: monaco.languages.CompletionItemKind.Field,
-                    insertText: col.name,
-                    detail: col.data_type,
-                    // range: range,
-                  });
-                });
-              }
-            }
-          } else if (type === "keyword" || type === "none") {
-            // Suggest keywords returned from Rust backend
-            const candidates = response.data.candidates || [];
-            candidates.forEach((k) => {
-              suggestions.push({
-                label: k,
-                kind: monaco.languages.CompletionItemKind.Keyword,
-                insertText: k,
-                // range: range, // Let Monaco handle word replacement for now
-              });
-            });
-          }
-
-          return { suggestions };
-        } catch (e) {
-          console.error("Completion error:", e);
-          return { suggestions: [] };
-        }
+        // STEP 1: Test with purely static suggestions (no backend, no range)
+        return {
+          suggestions: [
+            {
+              label: "SELECT",
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: "SELECT",
+              detail: "SQL Keyword",
+            },
+            {
+              label: "FROM",
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: "FROM",
+              detail: "SQL Keyword",
+            },
+            {
+              label: "WHERE",
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: "WHERE",
+              detail: "SQL Keyword",
+            },
+          ],
+        };
       },
     });
 
-    return () => disposable.dispose();
+    return () => {
+      console.log("[SETUP] Disposing SQL completion provider");
+      disposable.dispose();
+    };
   }, [monaco]);
 
   // Initialize targetSchema from currentSchema if not set
@@ -216,6 +153,8 @@ export function QueryEditor() {
             renderLineHighlight: "all",
             smoothScrolling: true,
             cursorBlinking: "smooth",
+            quickSuggestions: { other: true, comments: true, strings: true },
+            suggestOnTriggerCharacters: true,
           }}
         />
       </div>
