@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
-import { api, SavedConnection } from "@/lib/api";
+import { connectionService, SavedConnection } from "@/services/tauri";
 
 export interface ConnectionConfig extends SavedConnection {
   host?: string;
@@ -39,11 +39,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   selectedConnection: null,
 
   loadConnections: async () => {
-    const res = await api.loadConnections();
-    if (res.success && res.data) {
-      // If we have connections, select the first one or none? Beekeeper usually selects new.
-      set({ connections: res.data, isLoading: false });
-    } else {
+    try {
+      const connections = await connectionService.loadConnections();
+      set({ connections, isLoading: false });
+    } catch (e) {
+      console.error("Failed to load connections:", e);
       set({ isLoading: false });
     }
   },
@@ -101,7 +101,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ connections: updatedConnections, selectedConnection: config });
 
     // Save to backend
-    await api.saveConnections(updatedConnections);
+    await connectionService.saveConnections(updatedConnections);
   },
 
   // Deprecated simplified add
@@ -156,16 +156,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
 
     try {
-      const res = await api.connect(config.id, config.driver, url);
-
-      if (res.success) {
-        set({ activeConnectionId: config.id, isConnected: true });
-        return null; // No error
-      } else {
-        return res.error?.message || "Unknown error";
-      }
-    } catch (e) {
-      return String(e);
+      await connectionService.connect(config.id, config.driver, url);
+      set({ activeConnectionId: config.id, isConnected: true });
+      return null; // No error
+    } catch (e: any) {
+      const message = e.message || String(e);
+      return message;
     }
   },
 

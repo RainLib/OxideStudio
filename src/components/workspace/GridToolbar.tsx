@@ -2,7 +2,7 @@ import React from "react";
 import { Search, Download, FileJson, RefreshCw, Filter } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { QueryResult } from "@/types/protocol";
+import { QueryResult } from "@/services/tauri";
 
 interface GridToolbarProps {
   result?: QueryResult;

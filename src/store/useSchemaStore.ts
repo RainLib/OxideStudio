@@ -1,6 +1,5 @@
 import { create } from "zustand";
-import { api } from "@/lib/api";
-import { TableInfo } from "@/types/protocol";
+import { schemaService, TableInfo } from "@/services/tauri";
 import { useConnectionStore } from "./useConnectionStore";
 
 interface SchemaState {
@@ -43,69 +42,66 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     set({ isLoading: true, lastLoadedConnectionId: connectionId });
 
     // 1. Try Cache First
-    const cachedRes = await api.getCachedSchemas(connectionId);
-    if (cachedRes.success && cachedRes.data && cachedRes.data.length > 0) {
-      console.log("Store: Loaded schemas from cache", cachedRes.data.length);
-      const { defaultSchema: savedDefault } = get();
+    try {
+      const cachedSchemas = await schemaService.getCachedSchemas(connectionId);
+      if (cachedSchemas && cachedSchemas.length > 0) {
+        console.log("Store: Loaded schemas from cache", cachedSchemas.length);
+        const { defaultSchema: savedDefault } = get();
 
-      const connections = useConnectionStore.getState().connections;
-      const activeConn = connections.find((c) => c.id === connectionId);
-      const configDefault = activeConn?.database;
+        const connections = useConnectionStore.getState().connections;
+        const activeConn = connections.find((c) => c.id === connectionId);
+        const configDefault = activeConn?.database;
 
-      let schemaToSelect = cachedRes.data[0];
-      if (configDefault && cachedRes.data.includes(configDefault)) {
-        schemaToSelect = configDefault;
-      } else if (savedDefault && cachedRes.data.includes(savedDefault)) {
-        schemaToSelect = savedDefault;
-      } else if (cachedRes.data.includes("public")) {
-        schemaToSelect = "public";
+        let schemaToSelect = cachedSchemas[0];
+        if (configDefault && cachedSchemas.includes(configDefault)) {
+          schemaToSelect = configDefault;
+        } else if (savedDefault && cachedSchemas.includes(savedDefault)) {
+          schemaToSelect = savedDefault;
+        } else if (cachedSchemas.includes("public")) {
+          schemaToSelect = "public";
+        }
+
+        set({
+          schemas: cachedSchemas,
+          currentSchema: schemaToSelect,
+          isLoading: false, // Show cached data immediately
+        });
+        // Continue to refresh in background...
       }
-
-      set({
-        schemas: cachedRes.data,
-        currentSchema: schemaToSelect,
-        isLoading: false, // Show cached data immediately
-      });
-      // Continue to refresh in background...
+    } catch (e) {
+      console.warn("Store: Schema cache miss or error", e);
     }
 
     // 2. Refresh from DB (Background Sync)
     console.log("Store: Refreshing schemas from DB...");
-    const res = await api.refreshSchemas(connectionId);
-    console.log("Store: loadSchemas Refresh result:", res);
+    try {
+      const schemas = await schemaService.refreshSchemas(connectionId);
+      console.log("Store: loadSchemas Refresh result:", schemas);
 
-    if (res.success && res.data) {
-      const { defaultSchema: savedDefault } = get();
-      const connections = useConnectionStore.getState().connections;
-      const activeConn = connections.find((c) => c.id === connectionId);
-      const configDefault = activeConn?.database;
+      if (schemas) {
+        const { defaultSchema: savedDefault } = get();
+        const connections = useConnectionStore.getState().connections;
+        const activeConn = connections.find((c) => c.id === connectionId);
+        const configDefault = activeConn?.database;
 
-      let schemaToSelect = res.data[0];
+        let schemaToSelect = schemas[0];
 
-      if (configDefault && res.data.includes(configDefault)) {
-        schemaToSelect = configDefault;
-      } else if (savedDefault && res.data.includes(savedDefault)) {
-        schemaToSelect = savedDefault;
-      } else if (res.data.includes("public")) {
-        schemaToSelect = "public";
+        if (configDefault && schemas.includes(configDefault)) {
+          schemaToSelect = configDefault;
+        } else if (savedDefault && schemas.includes(savedDefault)) {
+          schemaToSelect = savedDefault;
+        } else if (schemas.includes("public")) {
+          schemaToSelect = "public";
+        }
+
+        set({
+          schemas: schemas,
+          currentSchema: get().currentSchema || schemaToSelect,
+          isLoading: false,
+        });
       }
-
-      // Check if data actually changed? API returns data either way currently.
-      // Ideally we check equality here or rely on React to not re-render if same.
-      // But we need to update state if it's different.
-      // For now, simple update.
-      set({
-        schemas: res.data,
-        // Only update currentSchema if it wasn't set or invalid?
-        // Or if we need to re-apply defaults?
-        // If user already selected something else while loading?
-        // Let's keep currentSchema if valid, otherwise reset.
-        // Actually, for initial load, re-evaluating default is safer.
-        currentSchema: get().currentSchema || schemaToSelect,
-        isLoading: false,
-      });
-    } else {
-      console.warn("Store: loadSchemas refresh failed", res);
+    } catch (e) {
+      console.warn("Store: loadSchemas refresh failed", e);
       // If we didn't have cache, stop loading
       if (get().schemas.length === 0) {
         set({ schemas: [], isLoading: false });
@@ -118,21 +114,26 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     set({ isLoading: true });
 
     // 1. Try Cache First
-    const cachedRes = await api.getCachedTables(connectionId, schema);
-    if (cachedRes.success && cachedRes.data && cachedRes.data.length > 0) {
-      console.log("Store: Loaded tables from cache", cachedRes.data.length);
-      set({ tables: cachedRes.data, isLoading: false });
+    try {
+      const cachedTables = await schemaService.getCachedTables(
+        connectionId,
+        schema
+      );
+      if (cachedTables && cachedTables.length > 0) {
+        console.log("Store: Loaded tables from cache", cachedTables.length);
+        set({ tables: cachedTables, isLoading: false });
+      }
+    } catch (e) {
+      console.warn("Store: Table cache miss or error", e);
     }
 
     // 2. Refresh from DB
-    const res = await api.refreshTables(connectionId, schema);
-    console.log("Store: loadTables refresh result", res);
-    if (res.success && res.data) {
-      // Only update if different?
-      // For now, update always.
-      set({ tables: res.data, isLoading: false });
-    } else {
-      console.warn("Store: loadTables refresh failed", res);
+    try {
+      const tables = await schemaService.refreshTables(connectionId, schema);
+      console.log("Store: loadTables refresh result", tables);
+      set({ tables: tables, isLoading: false });
+    } catch (e) {
+      console.warn("Store: loadTables refresh failed", e);
       if (get().tables.length === 0) {
         set({ tables: [], isLoading: false });
       }
@@ -144,7 +145,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     set({ currentSchema: schema, selectedTable: null });
 
     if (activeConnectionId && schema) {
-      await api.setCurrentSchema(activeConnectionId, schema);
+      await schemaService.setCurrentSchema(activeConnectionId, schema);
     }
   },
 

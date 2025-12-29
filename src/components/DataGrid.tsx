@@ -5,7 +5,7 @@ import DataEditor, {
   Item,
 } from "@glideapps/glide-data-grid";
 import "@glideapps/glide-data-grid/dist/index.css";
-import { ColumnDef } from "@/lib/api";
+import { ColumnDef } from "@/services/tauri";
 
 interface DataGridProps {
   data: any[][];

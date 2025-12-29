@@ -6,7 +6,7 @@ import { useSchemaStore } from "@/store/useSchemaStore";
 import { EditorActionBar } from "./EditorActionBar";
 import Editor, { useMonaco } from "@monaco-editor/react";
 import { useEffect, useRef, useState } from "react";
-import { api } from "@/lib/api";
+import { queryService, schemaService } from "@/services/tauri";
 
 type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
@@ -68,15 +68,18 @@ export function QueryEditor() {
         try {
           // Call Rust backend for context analysis
           // Note: SQL parsing doesn't require a DB connection
-          const response = await api.getSqlCompletion(fullText, offset);
+          const response = await queryService.getSqlCompletion(
+            fullText,
+            offset
+          );
           console.log("[PROVIDER] Backend response:", response);
 
-          if (!response.success || !response.data) {
+          if (!response) {
             console.warn("[PROVIDER] Backend failed");
             return { suggestions: [] };
           }
 
-          const { suggestionType, relevantTable, candidates } = response.data;
+          const { suggestionType, relevantTable, candidates } = response;
           const suggestions: any[] = [];
 
           console.log(
@@ -112,25 +115,27 @@ export function QueryEditor() {
               );
               if (relevantTable) {
                 const targetSchema = currentSchema || "public";
-                try {
-                  const colsRes = await api.getColumns(
-                    activeConnectionId,
-                    targetSchema,
-                    relevantTable
-                  );
-                  if (colsRes.success && colsRes.data) {
-                    colsRes.data.forEach((col: any) => {
-                      suggestions.push({
-                        label: col.name,
-                        kind: monaco.languages.CompletionItemKind.Field,
-                        insertText: col.name,
-                        detail: `${col.data_type} (${relevantTable})`,
-                        range,
+                if (activeConnectionId) {
+                  try {
+                    const cols = await schemaService.getColumns(
+                      activeConnectionId,
+                      targetSchema,
+                      relevantTable
+                    );
+                    if (cols) {
+                      cols.forEach((col: any) => {
+                        suggestions.push({
+                          label: col.name,
+                          kind: monaco.languages.CompletionItemKind.Field,
+                          insertText: col.name,
+                          detail: `${col.data_type} (${relevantTable})`,
+                          range,
+                        });
                       });
-                    });
+                    }
+                  } catch (err) {
+                    console.error("[PROVIDER] Failed to fetch columns:", err);
                   }
-                } catch (err) {
-                  console.error("[PROVIDER] Failed to fetch columns:", err);
                 }
               }
               break;

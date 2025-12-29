@@ -1,7 +1,6 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
-import { api } from "@/lib/api";
-import { QueryResult } from "@/types/protocol";
+import { queryService, QueryResult } from "@/services/tauri";
 import { useHistoryStore } from "./useHistoryStore";
 import { useSchemaStore } from "./useSchemaStore";
 import type { FilterOperator } from "@/components/workspace/GridFilterRow";
@@ -297,7 +296,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         schemaContext
       );
 
-      const res = await api.query(
+      const results = await queryService.executeQuery(
         connectionId,
         tab.sql,
         schemaContext || undefined
@@ -308,31 +307,19 @@ export const useTabStore = create<TabState>((set, get) => ({
       // Actually, let's save immediately so we don't lose it if it crashes.
       useHistoryStore.getState().addToHistory(tab.sql);
 
-      if (res.success && res.data) {
-        set((state) => ({
-          tabs: state.tabs.map((t) =>
-            t.id === id
-              ? { ...t, isExecuting: false, results: res.data || null }
-              : t
-          ),
-        }));
-      } else {
-        set((state) => ({
-          tabs: state.tabs.map((t) =>
-            t.id === id
-              ? {
-                  ...t,
-                  isExecuting: false,
-                  error: res.error?.message || "Query failed",
-                }
-              : t
-          ),
-        }));
-      }
-    } catch (e) {
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === id ? { ...t, isExecuting: false, error: String(e) } : t
+          t.id === id
+            ? { ...t, isExecuting: false, results: results || null }
+            : t
+        ),
+      }));
+    } catch (e: any) {
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === id
+            ? { ...t, isExecuting: false, error: e.message || String(e) }
+            : t
         ),
       }));
     }
