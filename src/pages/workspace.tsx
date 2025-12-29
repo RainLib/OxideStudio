@@ -84,14 +84,14 @@ export function Workspace() {
   };
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-[#131313] text-gray-200 font-sans overflow-hidden">
+    <div className="h-screen w-screen flex flex-col bg-background text-foreground font-sans overflow-hidden">
       <AppBar
         right={
           <>
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 text-gray-500 hover:text-gray-300 hover:bg-[#2a2a2a]"
+              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-accent"
               onClick={() => setIsLeftDrawerOpen(!isLeftDrawerOpen)}
               title="Toggle Left Panel"
             >
@@ -104,7 +104,7 @@ export function Workspace() {
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 text-gray-500 hover:text-gray-300 hover:bg-[#2a2a2a]"
+              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-accent"
               onClick={() => setIsRightCollapsed(!isRightCollapsed)}
               title="Toggle Right Panel"
             >
@@ -137,8 +137,8 @@ export function Workspace() {
               {tabs.length === 0 ? (
                 <QueryShortcuts />
               ) : (
-                <div className="flex flex-col h-full min-w-0 bg-[#1e1e1e]">
-                  <div className="border-b border-[#333] bg-[#1e1e1e]">
+                <div className="flex flex-col h-full min-w-0 bg-background">
+                  <div className="border-b border-border bg-background">
                     <TabBar />
                   </div>
 
@@ -157,7 +157,7 @@ export function Workspace() {
                           </ResizablePanel>
                           <ResizableHandle
                             withHandle
-                            className="h-1.5 w-full bg-[#333] hover:bg-orange-500 transition-colors z-50 cursor-row-resize"
+                            className="h-1.5 w-full bg-border hover:bg-orange-500 transition-colors z-50 cursor-row-resize"
                           />
                           <ResizablePanel defaultSize={50} minSize={20}>
                             {currentResult ? <DataGrid /> : <QueryShortcuts />}
@@ -173,14 +173,14 @@ export function Workspace() {
             {/* Right Panel */}
             {!isRightCollapsed && (
               <div
-                className="border-l border-[#111] bg-[#1a1a1a] shrink-0"
+                className="border-l border-border bg-muted shrink-0"
                 style={{ width: "220px" }}
               >
                 <div className="h-full flex flex-col">
-                  <div className="h-9 border-b border-[#333] flex items-center px-3 text-[10px] font-bold text-gray-500 uppercase tracking-widest">
+                  <div className="h-9 border-b border-border flex items-center px-3 text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
                     Details
                   </div>
-                  <div className="flex-1 flex flex-col items-center justify-center text-gray-600 text-[11px] p-6 text-center leading-relaxed">
+                  <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground text-[11px] p-6 text-center leading-relaxed">
                     <Settings2 size={32} className="opacity-20 mb-4" />
                     Select an item to view its metadata and properties
                   </div>

@@ -46,15 +46,15 @@ export function ConnectionForm() {
 
   if (!selectedConnection) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center bg-[#090909] text-gray-500 gap-4">
-        <div className="w-20 h-20 rounded-2xl bg-[#111] border border-[#222] flex items-center justify-center shadow-2xl">
-          <Database size={32} className="opacity-20 text-white" />
+      <div className="flex-1 flex flex-col items-center justify-center bg-background-primary text-muted-foreground gap-4">
+        <div className="w-20 h-20 rounded-2xl bg-background-tertiary border border-border flex items-center justify-center shadow-2xl">
+          <Database size={32} className="opacity-20 text-foreground" />
         </div>
         <div className="text-center space-y-1">
-          <h3 className="text-lg font-medium text-gray-300">
+          <h3 className="text-lg font-medium text-foreground">
             No Connection Selected
           </h3>
-          <p className="text-sm text-gray-600">
+          <p className="text-sm text-muted-foreground/60">
             Select a connection or create a new one to get started.
           </p>
         </div>
@@ -147,11 +147,11 @@ export function ConnectionForm() {
   };
 
   return (
-    <div className="flex-1 flex justify-center bg-[#090909] overflow-y-auto p-8">
+    <div className="flex-1 flex justify-center bg-background-primary overflow-y-auto p-8">
       <div className="w-full max-w-2xl flex flex-col min-h-0">
         {/* Header */}
         <div className="flex items-center justify-between mb-8">
-          <h2 className="text-2xl font-bold text-white tracking-tight">
+          <h2 className="text-2xl font-bold text-foreground tracking-tight">
             {selectedConnection.name || "New Connection"}
           </h2>
           <Dialog
@@ -161,21 +161,21 @@ export function ConnectionForm() {
             <DialogTrigger asChild>
               <Button
                 variant="ghost"
-                className="text-xs text-gray-400 hover:text-white uppercase tracking-wider font-bold"
+                className="text-xs text-muted-foreground hover:text-foreground uppercase tracking-wider font-bold"
               >
                 Import from URL
               </Button>
             </DialogTrigger>
-            <DialogContent className="bg-[#111] border-[#222] text-white">
+            <DialogContent className="bg-background-elevated border-border text-foreground">
               <DialogHeader>
                 <DialogTitle>Import from URL</DialogTitle>
               </DialogHeader>
               <div className="py-4 space-y-4">
-                <p className="text-sm text-gray-400">
+                <p className="text-sm text-muted-foreground">
                   Paste your database connection string below.
                 </p>
                 <Input
-                  className="bg-[#1a1a1a] border-[#333] text-white"
+                  className="bg-background-tertiary border-border text-foreground"
                   placeholder="postgres://user:pass@localhost:5432/mydb"
                   value={importUrl}
                   onChange={(e) => setImportUrl(e.target.value)}
@@ -191,7 +191,7 @@ export function ConnectionForm() {
                 </Button>
                 <Button
                   onClick={handleImport}
-                  className="bg-[#f39c12] hover:bg-[#d35400] text-white"
+                  className="bg-primary hover:bg-primary/90 text-primary-foreground"
                 >
                   Import
                 </Button>
@@ -203,10 +203,10 @@ export function ConnectionForm() {
         <div className="space-y-6">
           {/* Connection Type */}
           <div className="space-y-2">
-            <label className="text-xs font-medium text-gray-400">
+            <label className="text-xs font-medium text-muted-foreground">
               Connection Type
             </label>
-            <div className="grid grid-cols-2 gap-4 p-1 bg-[#111] rounded-lg border border-[#222]">
+            <div className="grid grid-cols-2 gap-4 p-1 bg-background-tertiary rounded-lg border border-border">
               {[
                 { id: "postgres", label: "PostgreSQL", icon: Database },
                 { id: "mysql", label: "MySQL", icon: Database }, // Use appropriate icons
@@ -217,15 +217,15 @@ export function ConnectionForm() {
                   className={cn(
                     "flex items-center justify-center gap-2 py-2.5 rounded-md text-sm font-medium transition-all duration-200",
                     selectedConnection.driver === type.id
-                      ? "bg-[#222] text-white shadow-sm ring-1 ring-[#333]"
-                      : "text-gray-500 hover:text-gray-300 hover:bg-[#1a1a1a]"
+                      ? "bg-background-elevated text-foreground shadow-sm ring-1 ring-border"
+                      : "text-muted-foreground hover:text-foreground hover:bg-background-elevated/50"
                   )}
                 >
                   <type.icon
                     size={16}
                     className={
                       selectedConnection.driver === type.id
-                        ? "text-[#f39c12]"
+                        ? "text-primary"
                         : "currentColor"
                     }
                   />
@@ -238,14 +238,16 @@ export function ConnectionForm() {
           {/* Host & Port */}
           <div className="grid grid-cols-12 gap-4">
             <div className="col-span-9 space-y-2">
-              <label className="text-xs font-medium text-gray-400">Host</label>
+              <label className="text-xs font-medium text-muted-foreground">
+                Host
+              </label>
               <div className="relative group">
                 <Globe
                   size={14}
-                  className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 transition-colors group-focus-within:text-[#f39c12]"
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/50 transition-colors group-focus-within:text-primary"
                 />
                 <input
-                  className="w-full h-10 bg-[#111] border border-[#222] rounded-lg pl-9 pr-3 text-sm text-gray-200 placeholder:text-gray-700 outline-none focus:border-[#f39c12] focus:ring-1 focus:ring-[#f39c12] transition-all"
+                  className="w-full h-10 bg-background-tertiary border border-border rounded-lg pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
                   placeholder="localhost"
                   value={selectedConnection.host || ""}
                   onChange={(e) => handleChange("host", e.target.value)}
@@ -253,10 +255,12 @@ export function ConnectionForm() {
               </div>
             </div>
             <div className="col-span-3 space-y-2">
-              <label className="text-xs font-medium text-gray-400">Port</label>
+              <label className="text-xs font-medium text-muted-foreground">
+                Port
+              </label>
               <input
                 type="number"
-                className="w-full h-10 bg-[#111] border border-[#222] rounded-lg px-3 text-sm text-gray-200 placeholder:text-gray-700 outline-none focus:border-[#f39c12] focus:ring-1 focus:ring-[#f39c12] transition-all text-center font-mono"
+                className="w-full h-10 bg-background-tertiary border border-border rounded-lg px-3 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all text-center font-mono"
                 placeholder="5432"
                 value={selectedConnection.port || ""}
                 onChange={(e) => handleChange("port", parseInt(e.target.value))}
@@ -267,9 +271,11 @@ export function ConnectionForm() {
           {/* Authentication */}
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <label className="text-xs font-medium text-gray-400">User</label>
+              <label className="text-xs font-medium text-muted-foreground">
+                User
+              </label>
               <input
-                className="w-full h-10 bg-[#111] border border-[#222] rounded-lg px-3 text-sm text-gray-200 placeholder:text-gray-700 outline-none focus:border-[#f39c12] focus:ring-1 focus:ring-[#f39c12] transition-all"
+                className="w-full h-10 bg-background-tertiary border border-border rounded-lg px-3 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
                 placeholder="postgres"
                 value={selectedConnection.user || ""}
                 onChange={(e) => handleChange("user", e.target.value)}
@@ -277,13 +283,13 @@ export function ConnectionForm() {
               />
             </div>
             <div className="space-y-2">
-              <label className="text-xs font-medium text-gray-400">
+              <label className="text-xs font-medium text-muted-foreground">
                 Password
               </label>
               <div className="relative">
                 <input
                   type={showPassword ? "text" : "password"}
-                  className="w-full h-10 bg-[#111] border border-[#222] rounded-lg px-3 pr-10 text-sm text-gray-200 placeholder:text-gray-700 outline-none focus:border-[#f39c12] focus:ring-1 focus:ring-[#f39c12] transition-all"
+                  className="w-full h-10 bg-background-tertiary border border-border rounded-lg px-3 pr-10 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
                   placeholder="••••••••"
                   value={selectedConnection.password || ""}
                   onChange={(e) => handleChange("password", e.target.value)}
@@ -291,7 +297,7 @@ export function ConnectionForm() {
                 />
                 <button
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-400"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-foreground"
                 >
                   {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
                 </button>
@@ -301,11 +307,11 @@ export function ConnectionForm() {
 
           {/* Database & SSL */}
           <div className="space-y-2">
-            <label className="text-xs font-medium text-gray-400">
+            <label className="text-xs font-medium text-muted-foreground">
               Default Database
             </label>
             <input
-              className="w-full h-10 bg-[#111] border border-[#222] rounded-lg px-3 text-sm text-gray-200 placeholder:text-gray-700 outline-none focus:border-[#f39c12] focus:ring-1 focus:ring-[#f39c12] transition-all"
+              className="w-full h-10 bg-background-tertiary border border-border rounded-lg px-3 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
               placeholder="postgres"
               value={selectedConnection.database || ""}
               onChange={(e) => handleChange("database", e.target.value)}
@@ -314,10 +320,10 @@ export function ConnectionForm() {
 
           {/* Options Toggles */}
           <div className="pt-4 space-y-4">
-            <div className="flex items-center justify-between p-3 rounded-lg bg-[#111] border border-[#222]">
+            <div className="flex items-center justify-between p-3 rounded-lg bg-background-tertiary border border-border">
               <div className="flex items-center gap-3">
-                <Lock size={16} className="text-gray-500" />
-                <div className="text-xs font-medium text-gray-300">
+                <Lock size={16} className="text-muted-foreground/50" />
+                <div className="text-xs font-medium text-foreground">
                   Enable SSL
                 </div>
               </div>
@@ -326,18 +332,18 @@ export function ConnectionForm() {
                 onCheckedChange={(checked) =>
                   handleChange("sslMode", checked ? "require" : "disable")
                 }
-                className="data-[state=checked]:bg-[#f39c12]"
+                className="data-[state=checked]:bg-primary"
               />
             </div>
           </div>
 
           {/* Connection Name */}
-          <div className="space-y-2 pt-4 border-t border-[#222]">
-            <label className="text-xs font-medium text-gray-400">
+          <div className="space-y-2 pt-4 border-t border-border">
+            <label className="text-xs font-medium text-muted-foreground">
               Connection Name
             </label>
             <input
-              className="w-full h-10 bg-[#111] border border-[#222] rounded-lg px-3 text-sm text-gray-200 placeholder:text-gray-700 outline-none focus:border-[#f39c12] focus:ring-1 focus:ring-[#f39c12] transition-all"
+              className="w-full h-10 bg-background-tertiary border border-border rounded-lg px-3 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
               placeholder="My Production DB"
               value={selectedConnection.name || ""}
               onChange={(e) => handleChange("name", e.target.value)}
@@ -351,7 +357,7 @@ export function ConnectionForm() {
             <Button
               variant="ghost"
               onClick={handleTest}
-              className="text-gray-400 hover:text-white hover:bg-[#222]"
+              className="text-muted-foreground hover:text-foreground hover:bg-background-elevated"
               disabled={testStatus?.type === "loading"}
             >
               {testStatus?.type === "loading" ? (
@@ -387,14 +393,14 @@ export function ConnectionForm() {
             <Button
               variant="secondary"
               onClick={handleSave}
-              className="bg-[#222] text-gray-200 hover:bg-[#333] border border-[#333]"
+              className="bg-background-elevated text-foreground hover:bg-background-tertiary border border-border"
             >
               Save
             </Button>
             <Button
               onClick={handleConnect}
               disabled={isConnecting}
-              className="bg-white text-black hover:bg-gray-200 font-bold px-6 min-w-[120px]"
+              className="bg-foreground text-background hover:bg-foreground/90 font-bold px-6 min-w-[120px]"
             >
               {isConnecting ? (
                 <>

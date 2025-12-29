@@ -25,7 +25,7 @@ export function TableDataView() {
   const sqlFilter = activeTab.sqlFilter || "";
 
   return (
-    <div className="flex flex-col h-full bg-[#1e1e1e]">
+    <div className="flex flex-col h-full bg-background-tertiary">
       {/* Query Builder Filter Row */}
       {result && (
         <GridFilterRow
@@ -42,7 +42,7 @@ export function TableDataView() {
       )}
 
       {/* Main Grid View */}
-      <div className="flex-1 min-h-0 bg-[#1e1e1e]">
+      <div className="flex-1 min-h-0 bg-background-tertiary">
         <DataGrid columnFilters={visualFilters} />
       </div>
     </div>

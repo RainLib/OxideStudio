@@ -3,7 +3,7 @@
  * 定义设计系统的所有 design tokens
  */
 
-export type ThemeMode = "light" | "dark";
+export type ThemeMode = "light" | "dark" | "system";
 
 /**
  * 颜色系统配置
@@ -187,5 +187,15 @@ export const darkTheme: ThemeConfig = {
  * 获取指定模式的主题配置
  */
 export function getThemeConfig(mode: ThemeMode): ThemeConfig {
+  if (mode === "system") {
+    // This should ideally be resolved to 'light' or 'dark' before calling this,
+    // but as a fallback we check system preference or default to dark
+    if (typeof window !== "undefined" && window.matchMedia) {
+      return window.matchMedia("(prefers-color-scheme: light)").matches
+        ? lightTheme
+        : darkTheme;
+    }
+    return darkTheme;
+  }
   return mode === "light" ? lightTheme : darkTheme;
 }

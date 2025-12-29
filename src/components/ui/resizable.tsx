@@ -14,10 +14,10 @@ const ResizablePanelGroup = ({
 }: React.ComponentProps<typeof PanelGroup> & {
   direction?: "horizontal" | "vertical";
 }) => {
-  // @ts-ignore - PanelGroup types might be missing direction in some versions
   return (
+    // @ts-ignore
     <PanelGroup
-      direction={direction}
+      direction={direction as any}
       data-panel-group-direction={direction}
       className={cn(
         "flex h-full w-full",

@@ -1,4 +1,6 @@
+import React from "react";
 import { Button } from "@/components/ui/button";
+import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { cn } from "@/lib/utils";
 import { Database, Clock, Settings, Code, Hexagon } from "lucide-react";
 import { SchemaSidebar } from "./SchemaSidebar";
@@ -24,20 +26,23 @@ export function LeftPanel({
   onDragStart,
 }: LeftPanelProps) {
   const totalWidth = isDrawerOpen ? 50 + sidebarWidth : 50;
+  const [showSettings, setShowSettings] = React.useState(false);
 
   return (
     <div
       className="flex flex-col shrink-0"
       style={{ width: `${totalWidth}px` }}
     >
+      <SettingsDialog open={showSettings} onOpenChange={setShowSettings} />
+
       {/* Top section: ActivityBar + Sidebar content */}
       <div className="flex flex-1 min-h-0">
         {/* ActivityBar */}
-        <div className="w-[50px] flex flex-col bg-[#1a1a1a] border-r border-[#2a2a2a] shrink-0 z-50">
+        <div className="w-[50px] flex flex-col bg-muted border-r border-border shrink-0 z-50">
           <div className="flex-1 flex flex-col items-center py-4 gap-3">
             {/* App Logo */}
             <div className="mb-2">
-              <div className="h-8 w-8 bg-[#f39c12] rounded-lg flex items-center justify-center text-[#1a1a1a] shadow-lg shadow-orange-900/20">
+              <div className="h-8 w-8 bg-primary rounded-lg flex items-center justify-center text-primary-foreground shadow-lg shadow-primary/20">
                 <Database size={20} strokeWidth={2.5} />
               </div>
             </div>
@@ -67,8 +72,8 @@ export function LeftPanel({
             {/* Bottom Items */}
             <div className="mt-auto flex flex-col gap-2 w-full px-1">
               <ActivityBarButton
-                active={activeTab === "settings" && isDrawerOpen}
-                onClick={() => onTabClick("settings")}
+                active={showSettings}
+                onClick={() => setShowSettings(true)}
                 icon={Settings}
                 title="Settings"
               />
@@ -79,7 +84,7 @@ export function LeftPanel({
         {/* Sidebar Content */}
         {isDrawerOpen && (
           <div
-            className="border-r border-[#111] bg-[#1e1e1e] relative shrink-0 transition-all duration-200 flex flex-col"
+            className="border-r border-border bg-card relative shrink-0 transition-all duration-200 flex flex-col"
             style={{ width: `${sidebarWidth}px` }}
           >
             {/* Sidebar Content Area */}
@@ -87,14 +92,9 @@ export function LeftPanel({
               {activeTab === "tables" && <SchemaSidebar />}
               {activeTab === "history" && <HistorySidebar />}
               {activeTab === "saved" && <SavedQueriesSidebar />}
-              {activeTab === "settings" && (
-                <div className="p-8 text-center text-gray-500 text-xs mt-10">
-                  <Settings size={32} className="mx-auto mb-4 opacity-20" />
-                  <p>Settings panel coming soon</p>
-                </div>
-              )}
+              {/* Settings removed from here as it is now a modal */}
               {!activeTab && (
-                <div className="p-4 text-center text-gray-600 text-xs mt-10">
+                <div className="p-4 text-center text-muted-foreground text-xs mt-10">
                   Select a tab
                 </div>
               )}
@@ -102,7 +102,7 @@ export function LeftPanel({
 
             {/* Resize Handle */}
             <div
-              className="absolute right-0 top-0 bottom-0 w-1 bg-[#111] hover:bg-orange-500 cursor-col-resize z-50 transition-colors"
+              className="absolute right-0 top-0 bottom-0 w-1 bg-border hover:bg-primary cursor-col-resize z-50 transition-colors"
               onMouseDown={onDragStart}
             />
           </div>
@@ -135,14 +135,14 @@ function ActivityBarButton({
       className={cn(
         "relative w-full h-10 transition-all rounded-md group",
         active
-          ? "text-gray-100 bg-[#252525]"
-          : "text-gray-500 hover:text-gray-300 hover:bg-[#252525]"
+          ? "text-foreground bg-accent"
+          : "text-muted-foreground hover:text-foreground hover:bg-accent"
       )}
       onClick={onClick}
       title={title}
     >
       {active && (
-        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-6 bg-[#f39c12] rounded-r-md shadow-[0_0_8px_rgba(243,156,18,0.4)]" />
+        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-6 bg-primary rounded-r-md shadow-[0_0_8px_rgba(var(--primary),0.4)]" />
       )}
       <Icon
         size={20}

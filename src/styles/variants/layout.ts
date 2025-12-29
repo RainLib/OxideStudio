@@ -15,11 +15,11 @@ export const containerVariants = cva("flex", {
 
       // Workspace 主容器
       workspace:
-        "h-screen w-screen flex-col bg-[#131313] text-gray-200 font-sans overflow-hidden",
+        "h-screen w-screen flex-col bg-background-primary text-foreground font-sans overflow-hidden",
 
       // Connection 页面容器
       connection:
-        "flex-col h-screen w-full bg-[#131313] text-gray-200 overflow-hidden",
+        "flex-col h-screen w-full bg-background-primary text-foreground overflow-hidden",
 
       // 内容区（自适应）
       content: "flex-1 min-w-0 min-h-0",
@@ -64,15 +64,15 @@ export const containerVariants = cva("flex", {
 export const panelVariants = cva("flex shrink-0", {
   variants: {
     side: {
-      left: "border-r border-[#111]",
-      right: "border-l border-[#111]",
-      top: "border-b border-[#333]",
-      bottom: "border-t border-[#333]",
+      left: "border-r border-border-subtle",
+      right: "border-l border-border-subtle",
+      top: "border-b border-border",
+      bottom: "border-t border-border",
     },
     background: {
-      primary: "bg-[#131313]",
-      secondary: "bg-[#1a1a1a]",
-      tertiary: "bg-[#1e1e1e]",
+      primary: "bg-background-primary",
+      secondary: "bg-background-secondary",
+      tertiary: "bg-background-tertiary",
     },
     size: {
       titleBar: "h-8", // 32px
@@ -97,9 +97,9 @@ export const dividerVariants = cva("", {
       vertical: "w-px h-full",
     },
     color: {
-      default: "bg-[#333]",
-      subtle: "bg-[#111]",
-      divider: "bg-[#444]",
+      default: "bg-border",
+      subtle: "bg-border-subtle",
+      divider: "bg-border-divider",
     },
     spacing: {
       none: "",

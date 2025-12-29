@@ -4,8 +4,9 @@ import { useSavedQueryStore } from "@/store/useSavedQueryStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { EditorActionBar } from "./EditorActionBar";
+import { ThemeContext } from "@/theme/ThemeProvider";
 import Editor, { useMonaco } from "@monaco-editor/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useContext } from "react";
 import { queryService, schemaService } from "@/services/tauri";
 
 type TransactionMode = "auto" | "manual";
@@ -232,10 +233,18 @@ export function QueryEditor() {
     console.log("Rollback transaction");
   };
 
+  const { mode } = (useContext(ThemeContext) as any) || { mode: "dark" };
+
+  // Update Monaco theme when app theme changes
+  useEffect(() => {
+    if (!monaco) return;
+    monaco.editor.setTheme(mode === "light" ? "vs" : "vs-dark");
+  }, [monaco, mode]);
+
   if (!activeTab) return null;
 
   return (
-    <div className="relative h-full w-full bg-[#1e1e1e] flex flex-col">
+    <div className="relative h-full w-full bg-background flex flex-col">
       {/* Editor */}
       <div className="flex-1 min-h-0">
         <Editor
@@ -244,7 +253,7 @@ export function QueryEditor() {
           value={activeTab.sql}
           onChange={(value) => updateTabSql(activeTab.id, value || "")}
           onMount={(editor) => (editorRef.current = editor)}
-          theme="vs-dark"
+          // Theme is updated via useEffect to ensure it responds to context
           options={{
             minimap: { enabled: false },
             fontSize: 16,

@@ -1,8 +1,7 @@
 import React, { useCallback } from "react";
 import { GridColumn } from "@glideapps/glide-data-grid";
-import { X, Plus, Code, Table } from "lucide-react";
+import { Plus, Code, Table } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
 
 export type FilterOperator =
   | "equals"
@@ -149,12 +148,12 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
   );
 
   return (
-    <div className="border-b border-[#2a2a2a] bg-[#0a0a0a] px-2 py-1.5">
+    <div className="border-b border-border bg-background-primary px-2 py-1.5">
       <div className="flex items-center gap-2">
         {/* Mode Toggle Button */}
         <button
           onClick={() => onModeChange(mode === "visual" ? "sql" : "visual")}
-          className="h-6 w-6 flex items-center justify-center text-gray-500 hover:text-gray-300 hover:bg-[#1a1a1a] rounded transition-colors"
+          className="h-6 w-6 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background-elevated rounded transition-colors"
           title={
             mode === "visual" ? "Switch to SQL mode" : "Switch to Visual mode"
           }
@@ -169,7 +168,7 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
             placeholder="WHERE clause (e.g., id > 10 AND name LIKE '%test%')"
             value={sqlFilter}
             onChange={(e) => onSqlFilterChange(e.target.value)}
-            className="h-6 flex-1 text-xs bg-[#1a1a1a] border-[#2a2a2a] text-gray-300 placeholder:text-gray-600 focus-visible:ring-1 focus-visible:ring-orange-500 focus-visible:border-orange-500"
+            className="h-6 flex-1 text-xs bg-background-tertiary border-border text-foreground placeholder:text-muted-foreground/40 focus-visible:ring-1 focus-visible:ring-primary focus-visible:border-primary"
           />
         ) : (
           /* Visual Mode */
@@ -180,7 +179,7 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
                 {filter.logic && (
                   <button
                     onClick={() => handleToggleLogic(index)}
-                    className="px-1.5 h-6 text-[10px] font-mono bg-black text-white border border-[#333] hover:bg-[#1a1a1a] rounded uppercase"
+                    className="px-1.5 h-6 text-[10px] font-mono bg-background-elevated text-foreground border border-border hover:bg-background-tertiary rounded uppercase"
                   >
                     {filter.logic}
                   </button>
@@ -190,7 +189,7 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
                 <select
                   value={filter.column}
                   onChange={(e) => handleColumnChange(index, e.target.value)}
-                  className="h-6 px-1.5 text-[11px] bg-[#1a1a1a] text-gray-300 border border-[#2a2a2a] hover:border-[#3a3a3a] rounded focus:outline-none focus:border-orange-500"
+                  className="h-6 px-1.5 text-[11px] bg-background-tertiary text-foreground border border-border hover:border-border-divider rounded focus:outline-none focus:border-primary"
                 >
                   {columns.map((col) => {
                     const colId = col.id || col.title;
@@ -211,7 +210,7 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
                       e.target.value as FilterOperator
                     )
                   }
-                  className="h-6 px-1.5 text-[11px] bg-[#1a1a1a] text-gray-300 border border-[#2a2a2a] hover:border-[#3a3a3a] rounded focus:outline-none focus:border-orange-500"
+                  className="h-6 px-1.5 text-[11px] bg-background-tertiary text-foreground border border-border hover:border-border-divider rounded focus:outline-none focus:border-primary"
                 >
                   {Object.entries(operatorLabels).map(([op, label]) => (
                     <option key={op} value={op}>
@@ -226,13 +225,13 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
                   placeholder="Enter Value"
                   value={filter.value}
                   onChange={(e) => handleValueChange(index, e.target.value)}
-                  className="h-6 flex-1 text-[11px] bg-[#1a1a1a] border-[#2a2a2a] text-gray-300 placeholder:text-gray-600 focus-visible:ring-1 focus-visible:ring-orange-500 focus-visible:border-orange-500"
+                  className="h-6 flex-1 text-[11px] bg-background-tertiary border-border text-foreground placeholder:text-muted-foreground/40 focus-visible:ring-1 focus-visible:ring-primary focus-visible:border-primary"
                 />
 
                 {/* Remove Button */}
                 <button
                   onClick={() => handleRemoveFilter(index)}
-                  className="h-6 w-6 flex items-center justify-center text-gray-500 hover:text-white hover:bg-[#1a1a1a] rounded"
+                  className="h-6 w-6 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background-elevated rounded"
                 >
                   <span className="text-sm">−</span>
                 </button>
@@ -244,7 +243,7 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
               <div className="flex items-center gap-1.5">
                 <button
                   onClick={handleAddFilter}
-                  className="h-6 w-6 flex items-center justify-center text-yellow-500 hover:text-yellow-400 hover:bg-[#1a1a1a] rounded transition-colors"
+                  className="h-6 w-6 flex items-center justify-center text-primary hover:text-primary/80 hover:bg-background-elevated rounded transition-colors"
                   title="Add filter"
                 >
                   <Plus size={14} />
@@ -258,7 +257,7 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
         {mode === "visual" && visualFilters.length === 0 && (
           <button
             onClick={handleAddFilter}
-            className="h-6 w-6 flex items-center justify-center text-yellow-500 hover:text-yellow-400 hover:bg-[#1a1a1a] rounded transition-colors ml-auto"
+            className="h-6 w-6 flex items-center justify-center text-primary hover:text-primary/80 hover:bg-background-elevated rounded transition-colors ml-auto"
             title="Add filter"
           >
             <Plus size={14} />

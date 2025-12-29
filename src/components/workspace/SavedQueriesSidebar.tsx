@@ -1,10 +1,9 @@
 import { Button } from "@/components/ui/button";
 import { useSavedQueryStore } from "@/store/useSavedQueryStore";
 import { format } from "date-fns";
-import { Star, Trash2, Play, Edit2 } from "lucide-react";
+import { Star, Trash2, Play } from "lucide-react";
 import { useTabStore } from "@/store/useTabStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
-import { cn } from "@/lib/utils";
 
 export function SavedQueriesSidebar() {
   const { savedQueries, deleteQuery } = useSavedQueryStore();
@@ -19,7 +18,7 @@ export function SavedQueriesSidebar() {
   };
 
   return (
-    <div className="flex flex-col h-full border-r bg-muted/10">
+    <div className="flex flex-col h-full border-r border-border bg-background-tertiary">
       {/* Header */}
       <div className="p-2 border-b flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -62,7 +61,7 @@ export function SavedQueriesSidebar() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="h-5 text-[10px] px-1.5 opacity-0 group-hover:opacity-100 bg-background/50"
+                    className="h-5 text-[10px] px-1.5 opacity-0 group-hover:opacity-100 bg-background-elevated/50"
                     onClick={() => handleRun(item.sql, item.name)}
                   >
                     <Play size={10} className="mr-1" /> Run

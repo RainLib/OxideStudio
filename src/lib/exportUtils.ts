@@ -5,9 +5,12 @@ export function exportToCsv(result: QueryResult, filename = "export.csv") {
 
   const headers = result.columns.map((c) => c.name);
   const rows = result.rows.map((row) => {
+    // Fix implicit any by typing row explicitly or using keyof check
+    // Since columns.name matches keys in row, we can assert type or use any
+    const rowData = row as Record<string, any>;
     return headers
       .map((header) => {
-        const val = row[header];
+        const val = rowData[header];
         if (val === null) return "";
         const str = String(val);
         // Escape quotes and wrap in quotes if contains comma or quote

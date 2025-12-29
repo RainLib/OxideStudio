@@ -36,7 +36,7 @@ export function EditorStatusBar({
   return (
     <div
       className={cn(
-        "h-[28px] px-3 flex items-center gap-4 text-[11px] font-bold select-none shrink-0 shadow-[0_-1px_2px_rgba(0,0,0,0.1)] z-50 transition-colors duration-200 bg-[#e67e22] text-[#1a1a1a]"
+        "h-[28px] px-3 flex items-center gap-4 text-[11px] font-bold select-none shrink-0 shadow-[0_-1px_2px_rgba(0,0,0,0.1)] z-50 transition-colors duration-200 bg-primary text-primary-foreground"
       )}
     >
       {isTable ? (
@@ -45,17 +45,17 @@ export function EditorStatusBar({
           <div className="flex items-center gap-4">
             <button
               onClick={onStructure}
-              className="text-[10px] font-bold uppercase tracking-wider text-[#1a1a1a] hover:opacity-70 transition-opacity"
+              className="text-[10px] font-bold uppercase tracking-wider text-primary-foreground hover:opacity-70 transition-opacity"
             >
               Structure
             </button>
-            <div className="h-3 w-px bg-[#1a1a1a]/20" />
-            <span className="text-[10px] text-[#1a1a1a]/60 font-medium">
+            <div className="h-3 w-px bg-primary-foreground/20" />
+            <span className="text-[10px] text-primary-foreground/60 font-medium">
               {lastRefresh}
             </span>
           </div>
 
-          <div className="h-3 w-px bg-[#1a1a1a]/20" />
+          <div className="h-3 w-px bg-primary-foreground/20" />
 
           {/* Row Count */}
           <div className="flex items-center gap-2 opacity-80">
@@ -68,11 +68,11 @@ export function EditorStatusBar({
           {/* Table Pagination Placeholder (Can be expanded) */}
           <div className="flex-1 flex justify-center">
             <div className="flex items-center gap-4">
-              <div className="flex items-center gap-1 bg-[#1a1a1a]/10 border border-[#1a1a1a]/20 rounded px-2 h-5">
-                <span className="text-[10px] text-[#1a1a1a]">1</span>
-                <ChevronDown size={12} className="text-[#1a1a1a]/60" />
+              <div className="flex items-center gap-1 bg-primary-foreground/10 border border-primary-foreground/20 rounded px-2 h-5">
+                <span className="text-[10px] text-primary-foreground">1</span>
+                <ChevronDown size={12} className="text-primary-foreground/60" />
               </div>
-              <div className="flex items-center gap-4 text-[#1a1a1a]/60">
+              <div className="flex items-center gap-4 text-primary-foreground/60">
                 <ChevronDown className="rotate-90" size={12} />
                 <ChevronDown className="-rotate-90" size={12} />
               </div>
@@ -85,7 +85,7 @@ export function EditorStatusBar({
               variant="ghost"
               size="icon"
               onClick={onRefresh}
-              className="h-6 w-6 text-[#1a1a1a]/60 hover:text-[#1a1a1a] hover:bg-[#1a1a1a]/10"
+              className="h-6 w-6 text-primary-foreground/60 hover:text-primary-foreground hover:bg-primary-foreground/10"
             >
               <RefreshCw size={12} />
             </Button>
@@ -93,7 +93,7 @@ export function EditorStatusBar({
               variant="ghost"
               size="icon"
               onClick={onAdd}
-              className="h-6 w-6 text-[#1a1a1a]/60 hover:text-[#1a1a1a] hover:bg-[#1a1a1a]/10"
+              className="h-6 w-6 text-primary-foreground/60 hover:text-primary-foreground hover:bg-primary-foreground/10"
             >
               <Plus size={12} />
             </Button>
@@ -101,7 +101,7 @@ export function EditorStatusBar({
               variant="ghost"
               size="icon"
               onClick={onSettings}
-              className="h-6 w-6 text-[#1a1a1a]/60 hover:text-[#1a1a1a] hover:bg-[#1a1a1a]/10"
+              className="h-6 w-6 text-primary-foreground/60 hover:text-primary-foreground hover:bg-primary-foreground/10"
             >
               <Settings2 size={12} />
             </Button>
@@ -115,7 +115,7 @@ export function EditorStatusBar({
             <span>{executionTime ? `${executionTime}ms` : "Ready"}</span>
           </div>
 
-          <div className="h-3 w-[1px] bg-[#1a1a1a]/20" />
+          <div className="h-3 w-[1px] bg-primary-foreground/20" />
 
           {/* Editor Row Count */}
           <div className="flex items-center gap-2 opacity-80">

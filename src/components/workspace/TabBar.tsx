@@ -21,8 +21,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 const TabIcon = ({ type }: { type: TabType }) => {
-  if (type === "table")
-    return <TableIcon size={12} className="text-orange-500" />;
+  if (type === "table") return <TableIcon size={12} className="text-primary" />;
   return <Terminal size={12} className="text-blue-500" />;
 };
 
@@ -75,7 +74,7 @@ export function TabBar() {
   }, [activeTabId]);
 
   return (
-    <div className="flex items-center bg-[#1e1e1e] h-9 w-full overflow-hidden border-b border-[#111]">
+    <div className="flex items-center bg-background-tertiary h-9 w-full overflow-hidden border-b border-border-subtle">
       {/* Scrollable tabs container*/}
       <div
         ref={scrollContainerRef}
@@ -114,8 +113,8 @@ export function TabBar() {
                   className={cn(
                     "flex items-center gap-2 px-4 h-8 min-w-[120px] max-w-[200px] text-[11px] cursor-pointer select-none group border-t border-x border-transparent transition-all shrink-0",
                     activeTabId === tab.id
-                      ? "bg-[#252525] text-gray-100 font-semibold border-[#333] border-b-transparent rounded-t-sm"
-                      : "bg-[#161616] text-gray-500 hover:bg-[#1e1e1e] hover:text-gray-300 border-transparent"
+                      ? "bg-background-tertiary text-foreground font-semibold border-border border-b-transparent rounded-t-sm"
+                      : "bg-background-secondary text-muted-foreground hover:bg-background-tertiary hover:text-foreground border-transparent"
                   )}
                   onClick={() => setActiveTab(tab.id)}
                   onContextMenu={(e) => {
@@ -123,12 +122,12 @@ export function TabBar() {
                     setContextMenuTabId(tab.id);
                   }}
                 >
-                  {tab.isPinned && <Pin size={10} className="text-[#f39c12]" />}
+                  {tab.isPinned && <Pin size={10} className="text-primary" />}
                   <TabIcon type={tab.type} />
                   <span className="truncate flex-1">{tab.title}</span>
                   {!tab.isPinned && (
                     <div
-                      className="opacity-0 group-hover:opacity-100 hover:bg-[#333] rounded p-0.5 transition-opacity"
+                      className="opacity-0 group-hover:opacity-100 hover:bg-background-elevated rounded p-0.5 transition-opacity"
                       onClick={(e) => {
                         e.stopPropagation();
                         closeTab(tab.id);
@@ -139,24 +138,24 @@ export function TabBar() {
                   )}
                 </div>
               </DropdownMenuTrigger>
-              <DropdownMenuContent className="w-48 bg-[#2a2a2a] border-[#3a3a3a] text-gray-200">
+              <DropdownMenuContent className="w-48 bg-background-elevated border-border text-foreground">
                 <DropdownMenuItem
                   onClick={() => {
                     togglePinTab(tab.id);
                     setContextMenuTabId(null);
                   }}
-                  className="text-[11px] cursor-pointer focus:bg-[#353535]"
+                  className="text-[11px] cursor-pointer focus:bg-background-tertiary"
                 >
                   <Pin size={12} className="mr-2" />
                   {tab.isPinned ? "Unpin Tab" : "Pin Tab"}
                 </DropdownMenuItem>
-                <DropdownMenuSeparator className="bg-[#3a3a3a]" />
+                <DropdownMenuSeparator className="bg-border" />
                 <DropdownMenuItem
                   onClick={() => {
                     closeTab(tab.id);
                     setContextMenuTabId(null);
                   }}
-                  className="text-[11px] cursor-pointer focus:bg-[#353535]"
+                  className="text-[11px] cursor-pointer focus:bg-background-tertiary"
                   disabled={tab.isPinned}
                 >
                   <X size={12} className="mr-2" />
@@ -168,7 +167,7 @@ export function TabBar() {
                       forceCloseTab(tab.id);
                       setContextMenuTabId(null);
                     }}
-                    className="text-[11px] cursor-pointer focus:bg-[#353535] text-orange-400"
+                    className="text-[11px] cursor-pointer focus:bg-background-tertiary text-red-500"
                   >
                     <X size={12} className="mr-2" />
                     Close with Pin
@@ -179,7 +178,7 @@ export function TabBar() {
                     closeOtherTabs(tab.id);
                     setContextMenuTabId(null);
                   }}
-                  className="text-[11px] cursor-pointer focus:bg-[#353535]"
+                  className="text-[11px] cursor-pointer focus:bg-background-tertiary"
                 >
                   <X size={12} className="mr-2" />
                   Close Others
@@ -189,7 +188,7 @@ export function TabBar() {
                     closeTabsToLeft(tab.id);
                     setContextMenuTabId(null);
                   }}
-                  className="text-[11px] cursor-pointer focus:bg-[#353535]"
+                  className="text-[11px] cursor-pointer focus:bg-background-tertiary"
                   disabled={!canCloseLeft}
                 >
                   <X size={12} className="mr-2" />
@@ -200,19 +199,19 @@ export function TabBar() {
                     closeTabsToRight(tab.id);
                     setContextMenuTabId(null);
                   }}
-                  className="text-[11px] cursor-pointer focus:bg-[#353535]"
+                  className="text-[11px] cursor-pointer focus:bg-background-tertiary"
                   disabled={!canCloseRight}
                 >
                   <X size={12} className="mr-2" />
                   Close to the Right
                 </DropdownMenuItem>
-                <DropdownMenuSeparator className="bg-[#3a3a3a]" />
+                <DropdownMenuSeparator className="bg-border" />
                 <DropdownMenuItem
                   onClick={() => {
                     closeAllTabs();
                     setContextMenuTabId(null);
                   }}
-                  className="text-[11px] cursor-pointer focus:bg-[#353535]"
+                  className="text-[11px] cursor-pointer focus:bg-background-tertiary"
                 >
                   <X size={12} className="mr-2" />
                   Close All
@@ -225,13 +224,13 @@ export function TabBar() {
 
       {/* Overflow dropdown */}
       {hasOverflow && (
-        <div className="px-1 h-full flex items-center border-l border-[#222]">
+        <div className="px-1 h-full flex items-center border-l border-border-subtle">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-7 w-7 text-gray-500 hover:text-white hover:bg-[#2a2a2a]"
+                className="h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-background-elevated"
                 title="All tabs"
               >
                 <ChevronDown size={14} />
@@ -239,7 +238,7 @@ export function TabBar() {
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="end"
-              className="w-56 bg-[#2a2a2a] border-[#3a3a3a] text-gray-200 max-h-[400px] overflow-y-auto"
+              className="w-56 bg-background-elevated border-border text-foreground max-h-[400px] overflow-y-auto"
             >
               {(() => {
                 const queryTabs = tabs.filter((t) => t.type === "query");
@@ -258,7 +257,7 @@ export function TabBar() {
                   <>
                     {queryTabs.length > 0 && (
                       <>
-                        <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-gray-500 font-bold px-2 py-1">
+                        <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground font-bold px-2 py-1">
                           Queries
                         </DropdownMenuLabel>
                         {queryTabs.map((tab) => (
@@ -267,8 +266,8 @@ export function TabBar() {
                             className={cn(
                               "flex items-center gap-2 text-[11px] cursor-pointer",
                               activeTabId === tab.id
-                                ? "bg-[#3a3a3a] text-gray-100"
-                                : "text-gray-400 hover:text-gray-200 focus:bg-[#353535]"
+                                ? "bg-background-tertiary text-foreground"
+                                : "text-muted-foreground hover:text-foreground focus:bg-background-tertiary"
                             )}
                             onClick={() => setActiveTab(tab.id)}
                           >
@@ -279,7 +278,7 @@ export function TabBar() {
                                 e.stopPropagation();
                                 closeTab(tab.id);
                               }}
-                              className="opacity-60 hover:opacity-100 hover:bg-[#444] rounded p-0.5"
+                              className="opacity-60 hover:opacity-100 hover:bg-border rounded p-0.5"
                             >
                               <X size={10} />
                             </button>
@@ -289,7 +288,7 @@ export function TabBar() {
                     )}
 
                     {queryTabs.length > 0 && tableTabs.length > 0 && (
-                      <DropdownMenuSeparator className="my-1 bg-[#3a3a3a]" />
+                      <DropdownMenuSeparator className="my-1 bg-border" />
                     )}
 
                     {Object.keys(tablesBySchema)
@@ -297,10 +296,10 @@ export function TabBar() {
                       .map((schema, idx) => (
                         <div key={schema}>
                           {idx > 0 && (
-                            <DropdownMenuSeparator className="my-1 bg-[#3a3a3a]" />
+                            <DropdownMenuSeparator className="my-1 bg-border" />
                           )}
-                          <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-gray-500 font-bold px-2 py-1 flex items-center gap-1.5">
-                            <Database size={11} className="text-[#f39c12]" />
+                          <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground font-bold px-2 py-1 flex items-center gap-1.5">
+                            <Database size={11} className="text-primary" />
                             {schema}
                           </DropdownMenuLabel>
                           {tablesBySchema[schema]?.map((tab) => (
@@ -309,8 +308,8 @@ export function TabBar() {
                               className={cn(
                                 "flex items-center gap-2 text-[11px] cursor-pointer pl-4",
                                 activeTabId === tab.id
-                                  ? "bg-[#3a3a3a] text-gray-100"
-                                  : "text-gray-400 hover:text-gray-200 focus:bg-[#353535]"
+                                  ? "bg-background-tertiary text-foreground"
+                                  : "text-muted-foreground hover:text-foreground focus:bg-background-tertiary"
                               )}
                               onClick={() => setActiveTab(tab.id)}
                             >
@@ -323,7 +322,7 @@ export function TabBar() {
                                   e.stopPropagation();
                                   closeTab(tab.id);
                                 }}
-                                className="opacity-60 hover:opacity-100 hover:bg-[#444] rounded p-0.5"
+                                className="opacity-60 hover:opacity-100 hover:bg-background-elevated rounded p-0.5"
                               >
                                 <X size={10} />
                               </button>
@@ -340,11 +339,11 @@ export function TabBar() {
       )}
 
       {/* New tab button */}
-      <div className="px-2 h-full flex items-center border-l border-[#222]">
+      <div className="px-2 h-full flex items-center border-l border-border-subtle">
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7 text-gray-500 hover:text-white hover:bg-[#2a2a2a]"
+          className="h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-background-elevated"
           onClick={() =>
             createTab(
               "query",

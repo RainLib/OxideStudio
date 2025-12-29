@@ -25,7 +25,7 @@ export function SidebarStatusBar({ isDrawerOpen }: SidebarStatusBarProps) {
       <PopoverTrigger asChild>
         <div
           className={cn(
-            "h-[28px] px-2 bg-[#e67e22] flex items-center gap-2 text-[11px] text-[#1a1a1a] font-bold select-none shrink-0 shadow-[0_-1px_2px_rgba(0,0,0,0.1)] z-50 overflow-hidden cursor-pointer hover:bg-[#d67319] transition-colors",
+            "h-[28px] px-2 bg-primary flex items-center gap-2 text-[11px] text-primary-foreground font-bold select-none shrink-0 shadow-[0_-1px_2px_rgba(0,0,0,0.1)] z-50 overflow-hidden cursor-pointer hover:bg-primary/90 transition-colors",
             isDrawerOpen ? "w-auto" : "w-[50px]"
           )}
         >
@@ -39,7 +39,7 @@ export function SidebarStatusBar({ isDrawerOpen }: SidebarStatusBarProps) {
                 <div
                   className={`w-2 h-2 rounded-full shrink-0 ${
                     activeConnection
-                      ? "bg-[#1a1a1a]"
+                      ? "bg-primary-foreground"
                       : "bg-red-900 animate-pulse"
                   }`}
                 />
@@ -50,7 +50,7 @@ export function SidebarStatusBar({ isDrawerOpen }: SidebarStatusBarProps) {
 
               {activeConnection && (
                 <>
-                  <div className="h-3 w-px bg-[#1a1a1a]/20 shrink-0" />
+                  <div className="h-3 w-px bg-primary-foreground/20 shrink-0" />
                   <div
                     className="flex items-center gap-1 opacity-80 shrink-0"
                     title={`Driver: ${activeConnection.driver}`}
@@ -69,7 +69,9 @@ export function SidebarStatusBar({ isDrawerOpen }: SidebarStatusBarProps) {
             <div className="flex items-center justify-center w-full">
               <div
                 className={`w-2 h-2 rounded-full ${
-                  activeConnection ? "bg-[#1a1a1a]" : "bg-red-900 animate-pulse"
+                  activeConnection
+                    ? "bg-primary-foreground"
+                    : "bg-red-900 animate-pulse"
                 }`}
               />
             </div>
@@ -77,13 +79,13 @@ export function SidebarStatusBar({ isDrawerOpen }: SidebarStatusBarProps) {
         </div>
       </PopoverTrigger>
       <PopoverContent
-        className="w-64 p-2 bg-[#2a2a2a] border-[#3a3a3a] text-gray-200"
+        className="w-64 p-2 bg-background-elevated border-border text-foreground"
         align="start"
         side="top"
       >
         <div className="flex flex-col gap-1">
           {/* Connection List */}
-          <div className="text-[10px] uppercase tracking-wider text-gray-500 px-2 py-1">
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground px-2 py-1">
             Connections
           </div>
           {connections.map((conn) => (
@@ -93,8 +95,8 @@ export function SidebarStatusBar({ isDrawerOpen }: SidebarStatusBarProps) {
               className={cn(
                 "w-full justify-start text-xs h-8 px-2",
                 conn.id === activeConnectionId
-                  ? "bg-[#3a3a3a] text-gray-100"
-                  : "text-gray-400 hover:text-gray-200 hover:bg-[#353535]"
+                  ? "bg-background-tertiary text-foreground"
+                  : "text-muted-foreground hover:text-foreground hover:bg-background-tertiary/50"
               )}
               onClick={() => {
                 setActiveConnection(conn.id);
@@ -105,8 +107,8 @@ export function SidebarStatusBar({ isDrawerOpen }: SidebarStatusBarProps) {
                 <div
                   className={`w-1.5 h-1.5 rounded-full ${
                     conn.id === activeConnectionId
-                      ? "bg-[#f39c12]"
-                      : "bg-gray-600"
+                      ? "bg-primary"
+                      : "bg-muted-foreground"
                   }`}
                 />
                 <span className="truncate flex-1 text-left">{conn.name}</span>
@@ -117,7 +119,7 @@ export function SidebarStatusBar({ isDrawerOpen }: SidebarStatusBarProps) {
             </Button>
           ))}
 
-          <div className="h-px bg-[#3a3a3a] my-1" />
+          <div className="h-px bg-border my-1" />
 
           {/* Actions */}
           <Button

@@ -12,23 +12,23 @@
 export const colors = {
   // 背景色
   background: {
-    primary: "#131313", // 主背景
-    secondary: "#1a1a1a", // 次级背景（AppBar, TitleBar）
-    tertiary: "#1e1e1e", // 三级背景（编辑器区域）
-    elevated: "#2a2a2a", // 悬停/激活状态
+    primary: "var(--color-background-primary)", // #131313 in dark
+    secondary: "var(--color-background-secondary)", // #1a1a1a in dark
+    tertiary: "var(--color-background-tertiary)", // #1e1e1e in dark
+    elevated: "var(--color-background-elevated)", // #2a2a2a in dark
   },
 
   // 边框色
   border: {
-    default: "#333", // 默认边框
-    subtle: "#111", // 更暗的边框
-    divider: "#444", // 分割线
+    default: "var(--color-border)", // #333 in dark
+    subtle: "var(--color-border-subtle)", // #111 in dark
+    divider: "var(--color-border-divider)", // #444 in dark
   },
 
   // 文字色
   text: {
-    primary: "#e5e5e5", // 主要文字（gray-200）
-    secondary: "#9ca3af", // 次要文字（gray-400）
+    primary: "var(--color-foreground)", // 主要文字
+    secondary: "var(--color-muted-foreground)", // 次要文字
     tertiary: "#6b7280", // 三级文字（gray-500）
     muted: "#4b5563", // 弱化文字（gray-600）
     white: "#ffffff", // 纯白
@@ -36,9 +36,9 @@ export const colors = {
 
   // 品牌色/强调色
   accent: {
-    orange: "#f97316", // 主题橙色
+    orange: "var(--color-primary)", // 主题色
     orangeHover: "#ea580c", // 橙色悬停
-    red: "#ef4444", // 错误/关闭
+    red: "var(--color-destructive)", // 错误/关闭
     redHover: "#dc2626", // 红色悬停
     green: "#10b981", // 成功
     blue: "#3b82f6", // 信息

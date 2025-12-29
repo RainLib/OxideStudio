@@ -30,10 +30,10 @@ export function DatabaseSelector() {
       <div className="relative flex-1">
         <select
           className={cn(
-            "w-full text-[12px] h-7 pl-2 pr-6 border border-[#444] rounded bg-[#131313] text-gray-200 font-medium",
+            "w-full text-[12px] h-7 pl-2 pr-6 border border-border rounded bg-background-primary text-foreground font-medium",
             "appearance-none outline-none transition-all shadow-sm",
-            "focus:ring-1 focus:ring-[#f39c12] focus:border-[#f39c12]",
-            "hover:border-gray-500",
+            "focus:ring-1 focus:ring-primary focus:border-primary",
+            "hover:border-border-divider",
             "disabled:opacity-50 disabled:cursor-not-allowed"
           )}
           value={currentSchema || ""}
@@ -58,7 +58,7 @@ export function DatabaseSelector() {
       <Button
         variant="ghost"
         size="icon"
-        className="h-7 w-7 text-gray-500 hover:text-gray-300 hover:bg-white/5 transition-colors"
+        className="h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-background-elevated transition-colors"
         onClick={handleRefresh}
         disabled={isLoading}
         title="Refresh databases"

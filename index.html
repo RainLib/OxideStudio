@@ -21,7 +21,47 @@
 </head>
 
 <body>
-    <div id="root"></div>
+    <div id="root">
+        <!-- Static Loading State -->
+        <style>
+            .app-loader {
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background-color: #131313; /* match dark theme bg */
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                z-index: 9999;
+                transition: opacity 0.3s ease-out;
+            }
+            .loader-spinner {
+                width: 40px;
+                height: 40px;
+                border: 3px solid rgba(255, 255, 255, 0.1);
+                border-radius: 50%;
+                border-top-color: #ffffff;
+                animation: spin 1s ease-in-out infinite;
+                margin-bottom: 20px;
+            }
+            @keyframes spin {
+                to { transform: rotate(360deg); }
+            }
+            .loader-text {
+                font-family: system-ui, -apple-system, sans-serif;
+                color: #888;
+                font-size: 14px;
+                letter-spacing: 1px;
+            }
+        </style>
+        <div id="app-loader">
+            <div class="loader-spinner"></div>
+            <div class="loader-text">OXIDE STUDIO</div>
+        </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
 </body>
 

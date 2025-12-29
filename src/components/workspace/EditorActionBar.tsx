@@ -79,7 +79,7 @@ export function EditorActionBar({
   };
 
   return (
-    <div className="h-10 shrink-0 bg-[#1a1a1a] border-t border-[#333] flex items-center justify-between px-3">
+    <div className="h-10 shrink-0 bg-background-primary border-t border-border flex items-center justify-between px-3">
       {/* Left Side - Transaction Control */}
       <div className="flex items-center gap-3">
         <TransactionControl
@@ -105,7 +105,7 @@ export function EditorActionBar({
           variant="ghost"
           size="icon"
           onClick={onFormat}
-          className="h-8 w-8 text-gray-400 hover:text-white hover:bg-[#2a2a2a]"
+          className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-background-elevated"
           title="Format Query"
         >
           <Paintbrush size={14} />
@@ -117,7 +117,7 @@ export function EditorActionBar({
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 text-gray-400 hover:text-white hover:bg-[#2a2a2a]"
+              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-background-elevated"
               title="Query History"
             >
               <History size={14} />
@@ -134,13 +134,13 @@ export function EditorActionBar({
               {history.map((item) => (
                 <div
                   key={item.id}
-                  className="p-3 border-b border-[#333] hover:bg-[#252525] cursor-pointer flex flex-col gap-1"
+                  className="p-3 border-b border-border hover:bg-background-tertiary cursor-pointer flex flex-col gap-1"
                   onClick={() => onLoadQuery(item.sql)}
                 >
-                  <div className="font-mono text-xs text-gray-400 whitespace-pre-wrap max-h-20 overflow-hidden text-ellipsis">
+                  <div className="font-mono text-xs text-muted-foreground/80 whitespace-pre-wrap max-h-20 overflow-hidden text-ellipsis">
                     {item.sql}
                   </div>
-                  <div className="text-[10px] text-gray-500 text-right">
+                  <div className="text-[10px] text-muted-foreground/50 text-right">
                     {format(new Date(item.timestamp), "MMM d, HH:mm:ss")}
                   </div>
                 </div>
@@ -174,16 +174,16 @@ export function EditorActionBar({
               {savedQueries.map((item) => (
                 <div
                   key={item.id}
-                  className="p-3 border-b border-[#333] hover:bg-[#252525] flex items-center gap-2 group"
+                  className="p-3 border-b border-border hover:bg-background-tertiary flex items-center gap-2 group"
                 >
                   <div
                     className="flex-1 cursor-pointer"
                     onClick={() => onLoadQuery(item.sql)}
                   >
-                    <div className="font-medium text-sm text-gray-300">
+                    <div className="font-medium text-sm text-foreground">
                       {item.name}
                     </div>
-                    <div className="font-mono text-xs text-gray-500 whitespace-pre-wrap max-h-12 overflow-hidden text-ellipsis opacity-75">
+                    <div className="font-mono text-xs text-muted-foreground/60 whitespace-pre-wrap max-h-12 overflow-hidden text-ellipsis opacity-75">
                       {item.sql}
                     </div>
                   </div>
@@ -204,11 +204,11 @@ export function EditorActionBar({
         {/* Save Dialog & Button */}
         <Dialog open={isSaveOpen} onOpenChange={setIsSaveOpen}>
           <DialogTrigger asChild>
-            <Button className="h-8 px-3 text-xs bg-[#2a2a2a] hover:bg-[#333] text-white font-medium">
+            <Button className="h-8 px-3 text-xs bg-background-elevated hover:bg-background-tertiary text-foreground font-medium border border-border">
               Save
             </Button>
           </DialogTrigger>
-          <DialogContent className="bg-[#1e1e1e] border-[#333] text-gray-200">
+          <DialogContent className="bg-background-elevated border-border text-foreground">
             <DialogHeader>
               <DialogTitle>Save Query</DialogTitle>
             </DialogHeader>
@@ -217,13 +217,13 @@ export function EditorActionBar({
                 placeholder="Query Name..."
                 value={saveName}
                 onChange={(e) => setSaveName(e.target.value)}
-                className="bg-[#2a2a2a] border-[#444] text-white focus-visible:ring-orange-500"
+                className="bg-background-tertiary border-border text-foreground focus-visible:ring-primary"
               />
             </div>
             <DialogFooter>
               <Button
                 onClick={handleSave}
-                className="bg-orange-600 hover:bg-orange-700 text-white"
+                className="bg-primary hover:bg-primary/90 text-primary-foreground"
               >
                 Save
               </Button>
@@ -237,14 +237,14 @@ export function EditorActionBar({
             onClick={onRun}
             disabled={isExecuting || !isConnected}
             className={cn(
-              "h-8 px-3 bg-white hover:bg-gray-100 text-black text-xs font-bold rounded-l-md rounded-r-none border-r border-gray-200 transition-all flex items-center gap-1.5",
+              "h-8 px-3 bg-foreground text-background hover:bg-foreground/90 text-xs font-bold rounded-l-md rounded-r-none border-r border-background/20 transition-all flex items-center gap-1.5",
               isExecuting && "opacity-80 disabled:opacity-80"
             )}
           >
             {isExecuting ? (
-              <Loader2 className="animate-spin h-3.5 w-3.5 text-orange-600" />
+              <Loader2 className="animate-spin h-3.5 w-3.5 text-primary" />
             ) : (
-              <Play size={14} className="fill-orange-600 text-orange-600" />
+              <Play size={14} className="fill-primary text-primary" />
             )}
             RUN
           </Button>
@@ -252,42 +252,42 @@ export function EditorActionBar({
             size="icon"
             onClick={() => setIsRunDropdownOpen(!isRunDropdownOpen)}
             disabled={isExecuting || !isConnected}
-            className="h-8 w-7 bg-white hover:bg-gray-100 text-gray-600 rounded-l-none rounded-r-md transition-all"
+            className="h-8 w-7 bg-foreground text-background hover:bg-foreground/90 rounded-l-none rounded-r-md transition-all border-l border-background/10"
           >
             <ChevronDown size={14} />
           </Button>
 
           {/* Custom Dropdown Menu */}
           {isRunDropdownOpen && (
-            <div className="absolute bottom-full right-0 mb-2 w-48 bg-[#252525] border border-[#333] rounded-lg shadow-xl overflow-hidden flex flex-col py-1">
+            <div className="absolute bottom-full right-0 mb-2 w-48 bg-background-elevated border border-border rounded-lg shadow-xl overflow-hidden flex flex-col py-1">
               <button
-                className="px-4 py-2 text-left text-xs text-gray-300 hover:bg-[#333] flex items-center gap-2 transition-colors"
+                className="px-4 py-2 text-left text-xs text-foreground hover:bg-background-tertiary flex items-center gap-2 transition-colors"
                 onClick={() => {
                   onRun();
                   setIsRunDropdownOpen(false);
                 }}
               >
-                <Play size={12} /> Run Selection
+                <Play size={12} className="text-primary" /> Run Selection
               </button>
               <button
-                className="px-4 py-2 text-left text-xs text-gray-300 hover:bg-[#333] flex items-center gap-2 transition-colors"
+                className="px-4 py-2 text-left text-xs text-foreground hover:bg-background-tertiary flex items-center gap-2 transition-colors"
                 onClick={() => {
                   setIsRunDropdownOpen(false);
                 }}
               >
-                <div className="w-3 h-3 rounded-full border border-gray-400 flex items-center justify-center text-[8px]">
+                <div className="w-3 h-3 rounded-full border border-muted-foreground flex items-center justify-center text-[8px]">
                   ?
                 </div>
                 Explain Query
               </button>
-              <div className="h-px bg-[#333] my-1" />
-              <div className="px-4 py-1.5 text-[10px] text-gray-500 font-medium">
+              <div className="h-px bg-border my-1" />
+              <div className="px-4 py-1.5 text-[10px] text-muted-foreground/60 font-medium">
                 SHORTCUTS
               </div>
-              <div className="px-4 py-1 flex justify-between text-[11px] text-gray-400">
+              <div className="px-4 py-1 flex justify-between text-[11px] text-muted-foreground/80">
                 <span>Run</span> <span className="opacity-50">Ctrl+Enter</span>
               </div>
-              <div className="px-4 py-1 flex justify-between text-[11px] text-gray-400">
+              <div className="px-4 py-1 flex justify-between text-[11px] text-muted-foreground/80">
                 <span>Format</span>
                 <span className="opacity-50">Shift+Alt+F</span>
               </div>

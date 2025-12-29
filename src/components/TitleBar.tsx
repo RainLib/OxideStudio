@@ -30,26 +30,6 @@ export function TitleBar({
   onToggleLeft,
   onToggleRight,
 }: TitleBarProps) {
-  const [isMaximized, setIsMaximized] = useState(false);
-
-  useEffect(() => {
-    const appWindow = getCurrentWindow();
-
-    const checkMaximized = async () => {
-      const maximized = await appWindow.isMaximized();
-      setIsMaximized(maximized);
-    };
-    checkMaximized();
-
-    const unlisten = appWindow.onResized(() => {
-      checkMaximized();
-    });
-
-    return () => {
-      unlisten.then((fn: () => void) => fn());
-    };
-  }, []);
-
   const handleMinimize = () => getCurrentWindow().minimize();
   const handleMaximize = () => getCurrentWindow().toggleMaximize();
   const handleClose = () => getCurrentWindow().close();

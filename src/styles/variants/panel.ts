@@ -6,13 +6,13 @@ import { cva, type VariantProps } from "class-variance-authority";
 export const sidebarVariants = cva("flex flex-col shrink-0", {
   variants: {
     side: {
-      left: "border-r border-[#111]",
-      right: "border-l border-[#111]",
+      left: "border-r border-border-subtle",
+      right: "border-l border-border-subtle",
     },
     background: {
-      primary: "bg-[#131313]",
-      secondary: "bg-[#1a1a1a]",
-      tertiary: "bg-[#1e1e1e]",
+      primary: "bg-background-primary",
+      secondary: "bg-background-secondary",
+      tertiary: "bg-background-tertiary",
     },
     collapsible: {
       true: "transition-all duration-200",
@@ -30,7 +30,7 @@ export const sidebarVariants = cva("flex flex-col shrink-0", {
  * Activity Bar 变体 - 垂直导航栏
  */
 export const activityBarVariants = cva(
-  "flex flex-col items-center gap-1 py-2 shrink-0 bg-[#131313] border-r border-[#111]",
+  "flex flex-col items-center gap-1 py-2 shrink-0 bg-background-primary border-r border-border-subtle",
   {
     variants: {
       width: {
@@ -53,8 +53,9 @@ export const activityBarItemVariants = cva(
   {
     variants: {
       active: {
-        true: "text-gray-200 bg-[#2a2a2a] border-l-2 border-orange-500",
-        false: "text-gray-500 hover:text-gray-300 hover:bg-[#1e1e1e]",
+        true: "text-foreground bg-background-elevated border-l-2 border-primary",
+        false:
+          "text-muted-foreground hover:text-foreground hover:bg-background-tertiary",
       },
     },
     defaultVariants: {
@@ -71,8 +72,8 @@ export const statusBarVariants = cva(
   {
     variants: {
       type: {
-        editor: "h-7 bg-[#1a1a1a] border-[#333] justify-between",
-        table: "h-9 bg-[#1e1e1e] border-[#333] gap-2",
+        editor: "h-7 bg-background-secondary border-border justify-between",
+        table: "h-9 bg-background-tertiary border-border gap-2",
       },
       position: {
         bottom: "border-t",
@@ -90,7 +91,7 @@ export const statusBarVariants = cva(
  * 标签栏变体 - 顶部标签栏
  */
 export const tabBarVariants = cva(
-  "flex items-center border-b border-[#333] bg-[#1e1e1e] shrink-0",
+  "flex items-center border-b border-border bg-background-tertiary shrink-0",
   {
     variants: {
       size: {
@@ -114,7 +115,7 @@ export const tabBarVariants = cva(
  * 面板头部变体 - 用于侧边栏、右侧面板的标题栏
  */
 export const panelHeaderVariants = cva(
-  "flex items-center px-3 border-b border-[#333] shrink-0",
+  "flex items-center px-3 border-b border-border shrink-0",
   {
     variants: {
       size: {
@@ -123,8 +124,8 @@ export const panelHeaderVariants = cva(
         lg: "h-10 text-sm",
       },
       variant: {
-        default: "text-gray-400 font-medium",
-        bold: "text-gray-300 font-bold uppercase tracking-widest",
+        default: "text-muted-foreground font-medium",
+        bold: "text-foreground font-bold uppercase tracking-widest",
       },
     },
     defaultVariants: {

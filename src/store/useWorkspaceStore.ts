@@ -37,12 +37,17 @@ interface WorkspaceState {
 
 export const useWorkspaceStore = create<WorkspaceState>()(
   persist(
-    (set, get) => ({
+    (set) => ({
       workspaces: [],
       workspaceConnections: {},
       activeWorkspaceId: null,
 
-      createWorkspace: (name, icon, color = "#f39c12", description = "") => {
+      createWorkspace: (
+        name,
+        icon,
+        color = "var(--color-primary)",
+        description = ""
+      ) => {
         const newWorkspace: Workspace = {
           id: uuidv4(),
           name,

@@ -56,20 +56,20 @@ export function createTypedCell(value: any, allowOverlay = true): GridCell {
     switch (type) {
       case "null":
         return {
-          textDark: "#6b7280", // gray-500
+          textDark: "var(--color-muted-foreground)",
           fontStyle: "italic",
         };
       case "number":
         return {
-          textDark: "#60a5fa", // blue-400
+          textDark: "var(--color-blue)",
         };
       case "boolean":
         return {
-          textDark: value ? "#34d399" : "#f87171", // green-400 or red-400
+          textDark: value ? "var(--color-green)" : "var(--color-destructive)",
         };
       case "date":
         return {
-          textDark: "#a78bfa", // purple-400
+          textDark: "var(--color-primary)",
         };
       default:
         return undefined;

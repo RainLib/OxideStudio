@@ -7,13 +7,6 @@ import {
   Edit3,
   Palette,
   Briefcase,
-  Code,
-  Terminal,
-  Database,
-  Cloud,
-  Server,
-  Folder,
-  Box,
 } from "lucide-react";
 import {
   Tooltip,
@@ -40,7 +33,6 @@ import {
 } from "@/components/ui/context-menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea"; // Assuming Textarea component exists, or use Input as textarea
 import { useState } from "react";
 import * as LucideIcons from "lucide-react";
 

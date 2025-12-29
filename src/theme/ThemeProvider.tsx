@@ -29,22 +29,15 @@ const THEME_STORAGE_KEY = "oxide-studio-theme";
 function getStoredTheme(): ThemeMode {
   try {
     const stored = localStorage.getItem(THEME_STORAGE_KEY);
-    if (stored === "light" || stored === "dark") {
+    if (stored === "light" || stored === "dark" || stored === "system") {
       return stored;
     }
   } catch (error) {
     console.warn("Failed to read theme from localStorage:", error);
   }
 
-  // 默认检查系统偏好
-  if (
-    window.matchMedia &&
-    window.matchMedia("(prefers-color-scheme: dark)").matches
-  ) {
-    return "dark";
-  }
-
-  return "light";
+  // Default to system
+  return "system";
 }
 
 /**
@@ -94,53 +87,71 @@ export interface ThemeProviderProps {
  * 管理主题状态、CSS 变量注入和持久化
  */
 export function ThemeProvider({ children, defaultTheme }: ThemeProviderProps) {
+  // Initialize state from storage or default
   const [mode, setMode] = useState<ThemeMode>(() => {
-    return defaultTheme || getStoredTheme();
+    return (getStoredTheme() as ThemeMode) || defaultTheme || "system";
   });
 
-  const theme = getThemeConfig(mode);
+  // Calculate the effective theme (light or dark) based on mode and system preference
+  const [effectiveMode, setEffectiveMode] = useState<"light" | "dark">("dark");
 
-  // 应用主题变量
-  useEffect(() => {
-    applyCSSVariables(theme, mode);
-  }, [theme, mode]);
-
-  // 切换主题
-  const toggleTheme = useCallback(() => {
-    setMode((prev) => {
-      const newMode = prev === "light" ? "dark" : "light";
-      storeTheme(newMode);
-      return newMode;
-    });
+  const resolveSystemTheme = useCallback(() => {
+    if (typeof window !== "undefined" && window.matchMedia) {
+      return window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light";
+    }
+    return "dark"; // Default fallback
   }, []);
 
-  // 设置主题
-  const setTheme = useCallback((newMode: ThemeMode) => {
-    setMode(newMode);
-    storeTheme(newMode);
-  }, []);
-
-  // 监听系统主题变化
   useEffect(() => {
+    if (mode === "system") {
+      setEffectiveMode(resolveSystemTheme());
+    } else {
+      setEffectiveMode(mode);
+    }
+  }, [mode, resolveSystemTheme]);
+
+  // Listen for system preference changes when in system mode
+  useEffect(() => {
+    if (mode !== "system") return;
+
     const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
-
     const handleChange = (e: MediaQueryListEvent) => {
-      // 只在没有用户偏好设置时才自动切换
-      const stored = localStorage.getItem(THEME_STORAGE_KEY);
-      if (!stored) {
-        setMode(e.matches ? "dark" : "light");
-      }
+      setEffectiveMode(e.matches ? "dark" : "light");
     };
 
-    // 兼容不同浏览器的 API
     if (mediaQuery.addEventListener) {
       mediaQuery.addEventListener("change", handleChange);
       return () => mediaQuery.removeEventListener("change", handleChange);
     } else {
-      // Safari 旧版本
+      // Safari legacy
       mediaQuery.addListener(handleChange);
       return () => mediaQuery.removeListener(handleChange);
     }
+  }, [mode]);
+
+  const theme = getThemeConfig(effectiveMode);
+
+  // Apply theme variables to DOM
+  useEffect(() => {
+    applyCSSVariables(theme, effectiveMode);
+  }, [theme, effectiveMode]);
+
+  // Toggle theme (cycles: light -> dark -> system)
+  const toggleTheme = useCallback(() => {
+    setMode((prev) => {
+      const next: ThemeMode =
+        prev === "light" ? "dark" : prev === "dark" ? "system" : "light";
+      storeTheme(next);
+      return next;
+    });
+  }, []);
+
+  // Set specific theme
+  const setTheme = useCallback((newMode: ThemeMode) => {
+    setMode(newMode);
+    storeTheme(newMode);
   }, []);
 
   const value: ThemeContextType = {

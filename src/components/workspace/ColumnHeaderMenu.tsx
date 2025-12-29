@@ -33,7 +33,6 @@ interface ColumnHeaderMenuProps {
 }
 
 export function ColumnHeaderMenu({
-  column,
   onSetNull,
   onCopy,
   onCopyColumnName,

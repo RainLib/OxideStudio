@@ -4,7 +4,6 @@ import { format } from "date-fns";
 import { Clock, Trash2, Play } from "lucide-react";
 import { useTabStore } from "@/store/useTabStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
-import { cn } from "@/lib/utils";
 
 export function HistorySidebar() {
   const { history, clearHistory } = useHistoryStore();
@@ -19,7 +18,7 @@ export function HistorySidebar() {
   };
 
   return (
-    <div className="flex flex-col h-full border-r bg-muted/10">
+    <div className="flex flex-col h-full border-r border-border bg-background-tertiary">
       {/* Header */}
       <div className="p-2 border-b flex items-center justify-between">
         <div className="flex items-center gap-2">

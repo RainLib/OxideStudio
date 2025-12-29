@@ -27,7 +27,7 @@ export function AppBar({ center, right, title }: AppBarProps) {
   return (
     <div
       data-tauri-drag-region
-      className="h-12 bg-[#1a1a1a] border-b border-[#333] flex items-center shrink-0"
+      className="h-12 bg-muted border-b border-border flex items-center shrink-0"
     >
       {/* Left: Space for macOS traffic lights + Optional Title */}
       <div
@@ -39,7 +39,7 @@ export function AppBar({ center, right, title }: AppBarProps) {
         {title && (
           <span
             data-tauri-drag-region
-            className="text-sm text-gray-300 font-medium whitespace-nowrap"
+            className="text-sm text-foreground font-medium whitespace-nowrap"
           >
             {title}
           </span>

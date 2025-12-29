@@ -386,41 +386,45 @@ export function DataGrid({
 
   // Draw borders after cells are rendered
 
-  const gridTheme: Partial<Theme> = {
-    accentColor: "#f97316",
-    accentLight: "rgba(249, 115, 22, 0.1)",
-    bgCell: "#1a1a1a",
-    bgCellMedium: "#1a1a1a",
-    bgHeader: "#0f0f0f",
-    bgHeaderHasFocus: "#0f0f0f",
-    bgHeaderHovered: "#1a1a1a",
-    textHeader: "#e5e5e5",
-    textGroupHeader: "#a3a3a3",
-    textDark: "#e5e5e5",
-    textMedium: "#a3a3a3",
-    textLight: "#737373",
-    textBubble: "#e5e5e5",
-    borderColor: "#333333",
-    drilldownBorder: "#404040",
-    linkColor: "#f97316",
-    headerFontStyle: "600 13px",
-    baseFontStyle: "13px",
-    fontFamily: "Inter, system-ui, sans-serif",
-    editorFontSize: "13px",
-    lineHeight: 1.4,
+  // Create a dynamic grid theme that pulls from CSS variables
+  const gridTheme: Partial<Theme> = useMemo(
+    () => ({
+      accentColor: "hsl(var(--primary))",
+      accentLight: "hsla(var(--primary), 0.1)",
+      bgCell: "hsl(var(--background))",
+      bgCellMedium: "hsl(var(--muted))",
+      bgHeader: "hsl(var(--muted))",
+      bgHeaderHasFocus: "hsl(var(--accent))",
+      bgHeaderHovered: "hsl(var(--accent))",
+      textHeader: "hsl(var(--foreground))",
+      textGroupHeader: "hsl(var(--muted-foreground))",
+      textDark: "hsl(var(--foreground))",
+      textMedium: "hsl(var(--muted-foreground))",
+      textLight: "hsl(var(--muted-foreground))",
+      textBubble: "hsl(var(--foreground))",
+      borderColor: "hsl(var(--border))",
+      drilldownBorder: "hsl(var(--border))",
+      linkColor: "hsl(var(--primary))",
+      headerFontStyle: "600 13px",
+      baseFontStyle: "13px",
+      fontFamily: "Inter, system-ui, sans-serif",
+      editorFontSize: "13px",
+      lineHeight: 1.4,
 
-    // Row marker (row number) styling when selected
-    bgIconHeader: "#0f0f0f",
-    fgIconHeader: "#e5e5e5",
+      // Row marker (row number) styling
+      bgIconHeader: "hsl(var(--background))",
+      fgIconHeader: "hsl(var(--foreground))",
 
-    // Remove selection background, use only borders
-    bgBubble: "transparent",
-    bgBubbleSelected: "transparent",
+      // Remove selection background, use only borders
+      bgBubble: "transparent",
+      bgBubbleSelected: "transparent",
 
-    // Border width for selections
-    cellHorizontalPadding: 8,
-    cellVerticalPadding: 3,
-  };
+      // Border width for selections
+      cellHorizontalPadding: 8,
+      cellVerticalPadding: 3,
+    }),
+    []
+  );
 
   if (error) {
     return (
@@ -431,18 +435,18 @@ export function DataGrid({
   }
 
   return (
-    <div className="flex flex-col h-full bg-[#1e1e1e]">
+    <div className="flex flex-col h-full bg-background">
       {/* Commit/Cancel Bar */}
       {hasEdits && (
-        <div className="h-10 border-b border-orange-500/30 bg-orange-500/10 flex items-center px-3 gap-2 shrink-0">
-          <div className="flex-1 text-[11px] text-orange-200 font-medium">
+        <div className="h-10 border-b border-primary/30 bg-primary/10 flex items-center px-3 gap-2 shrink-0">
+          <div className="flex-1 text-[11px] text-primary font-medium">
             {pendingEdits.size} cell{pendingEdits.size > 1 ? "s" : ""} modified
           </div>
           <Button
             size="sm"
             variant="ghost"
             onClick={() => activeTab && cancelEdits(activeTab.id)}
-            className="h-7 px-3 text-xs text-gray-400 hover:text-white hover:bg-[#333]"
+            className="h-7 px-3 text-xs text-muted-foreground hover:text-foreground hover:bg-accent"
           >
             <XIcon size={14} className="mr-1.5" />
             Cancel
@@ -450,7 +454,7 @@ export function DataGrid({
           <Button
             size="sm"
             onClick={() => activeTab && commitEdits(activeTab.id)}
-            className="h-7 px-3 text-xs bg-orange-600 hover:bg-orange-700 text-white"
+            className="h-7 px-3 text-xs bg-primary hover:bg-primary/90 text-primary-foreground"
           >
             <Check size={14} className="mr-1.5" />
             Commit Changes
@@ -465,11 +469,11 @@ export function DataGrid({
         onContextMenu={handleContextMenu}
       >
         {!result ? (
-          <div className="absolute inset-0 flex items-center justify-center text-gray-500 text-sm">
+          <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
             Run a query to see results
           </div>
         ) : filteredRows.length === 0 ? (
-          <div className="absolute inset-0 flex items-center justify-center text-gray-500 text-sm">
+          <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
             {columnFilters.length > 0 || globalFilter
               ? "No rows match the current filters"
               : "No rows returned"}
@@ -516,23 +520,23 @@ export function DataGrid({
             className="fixed z-50"
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
-            <div className="min-w-56 bg-[#1a1a1a] border border-[#333] rounded-md shadow-lg p-1">
+            <div className="min-w-56 bg-popover border border-border rounded-md shadow-lg p-1">
               <button
                 onClick={handleCopyColumnName}
-                className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-[#2a2a2a] rounded"
+                className="w-full text-left px-2 py-1.5 text-sm text-foreground hover:bg-accent rounded"
               >
                 Copy Column Name
               </button>
               <div className="h-px bg-[#333] my-1" />
               <button
                 onClick={handleSortAsc}
-                className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-[#2a2a2a] rounded"
+                className="w-full text-left px-2 py-1.5 text-sm text-foreground hover:bg-accent rounded"
               >
                 Sort ascending
               </button>
               <button
                 onClick={handleSortDesc}
-                className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-[#2a2a2a] rounded"
+                className="w-full text-left px-2 py-1.5 text-sm text-foreground hover:bg-accent rounded"
               >
                 Sort descending
               </button>
@@ -546,7 +550,7 @@ export function DataGrid({
                   );
                   closeContextMenu();
                 }}
-                className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-[#2a2a2a] rounded"
+                className="w-full text-left px-2 py-1.5 text-sm text-foreground hover:bg-accent rounded"
               >
                 Open Column Filter
               </button>
@@ -559,20 +563,22 @@ export function DataGrid({
             className="fixed z-50"
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
-            <div className="min-w-56 bg-[#1a1a1a] border border-[#333] rounded-md shadow-lg p-1">
+            <div className="min-w-56 bg-popover border border-border rounded-md shadow-lg p-1">
               <button
                 onClick={() => {
                   onCopy(gridSelection);
                   closeContextMenu();
                 }}
-                className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-[#2a2a2a] rounded"
+                className="w-full text-left px-2 py-1.5 text-sm text-foreground hover:bg-accent rounded"
               >
                 Copy
-                <span className="ml-auto text-xs text-gray-500">⌘C</span>
+                <span className="ml-auto text-xs text-muted-foreground">
+                  ⌘C
+                </span>
               </button>
               <button
                 onClick={closeContextMenu}
-                className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-[#2a2a2a] rounded"
+                className="w-full text-left px-2 py-1.5 text-sm text-foreground hover:bg-accent rounded"
               >
                 Quick Filter
               </button>
@@ -582,21 +588,21 @@ export function DataGrid({
 
         {/* Loading Overlay */}
         {activeTab?.isExecuting && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center bg-[#1e1e1e]/40 backdrop-blur-[2px] animate-in fade-in duration-200">
-            <div className="bg-[#111] border border-[#333] px-6 py-4 rounded-xl shadow-2xl flex flex-col items-center gap-3">
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/40 backdrop-blur-[2px] animate-in fade-in duration-200">
+            <div className="bg-card border border-border px-6 py-4 rounded-xl shadow-2xl flex flex-col items-center gap-3">
               <div className="relative">
-                <Loader2 size={32} className="text-[#f39c12] animate-spin" />
-                <div className="absolute inset-0 text-[#f39c12]/20 animate-pulse blur-sm">
+                <Loader2 size={32} className="text-primary animate-spin" />
+                <div className="absolute inset-0 text-primary/20 animate-pulse blur-sm">
                   <Loader2 size={32} />
                 </div>
               </div>
               <div className="flex flex-col items-center gap-1">
-                <span className="text-sm font-bold text-white tracking-tight">
+                <span className="text-sm font-bold text-foreground tracking-tight">
                   {activeTab.type === "table"
                     ? "Fetching data..."
                     : "Executing..."}
                 </span>
-                <span className="text-[10px] text-gray-500 font-medium uppercase tracking-widest">
+                <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-widest">
                   Loading Results
                 </span>
               </div>

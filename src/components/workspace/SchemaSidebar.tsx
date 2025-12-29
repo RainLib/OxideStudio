@@ -164,19 +164,21 @@ export function SchemaSidebar() {
     return (
       <span>
         {before}
-        <span className="bg-[#f39c12] text-[#1a1a1a] font-bold">{match}</span>
+        <span className="bg-primary text-primary-foreground font-bold">
+          {match}
+        </span>
         {after}
       </span>
     );
   };
 
   return (
-    <div className="flex flex-col h-full bg-[#1e1e1e]">
+    <div className="flex flex-col h-full bg-background-tertiary">
       {/* Top: Database Selector */}
-      <div className="p-2 border-b border-[#333] bg-[#222] shrink-0">
+      <div className="p-2 border-b border-border bg-background-secondary shrink-0">
         <div className="flex items-center gap-2 mb-1">
-          <Database size={13} className="text-[#f39c12] shrink-0" />
-          <span className="text-[10px] uppercase tracking-wider text-gray-500 font-bold">
+          <Database size={13} className="text-primary shrink-0" />
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-bold">
             Database
           </span>
         </div>
@@ -191,21 +193,21 @@ export function SchemaSidebar() {
           open={isSelectOpen}
           onOpenChange={setIsSelectOpen}
         >
-          <SelectTrigger className="w-full h-7 text-[11px] bg-[#161616] border-[#333] focus:border-[#f39c12] text-gray-300">
+          <SelectTrigger className="w-full h-7 text-[11px] bg-background-tertiary border-border focus:border-primary text-foreground">
             <SelectValue placeholder="Select database..." />
           </SelectTrigger>
-          <SelectContent className="bg-[#2a2a2a] border-[#3a3a3a] text-gray-200">
+          <SelectContent className="bg-background-elevated border-border text-foreground">
             {/* Filter indicator at top-right (no input box) */}
             {databaseFilter && (
-              <div className="sticky top-0 z-10 bg-[#2a2a2a] px-2 py-1.5 border-b border-[#3a3a3a] flex items-center justify-between">
-                <span className="text-[10px] text-gray-500 italic">
+              <div className="sticky top-0 z-10 bg-background-elevated px-2 py-1.5 border-b border-border flex items-center justify-between">
+                <span className="text-[10px] text-muted-foreground italic">
                   Type to filter...
                 </span>
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] px-2 py-0.5 rounded bg-[#1a1a1a] text-[#f39c12] font-mono border border-[#3a3a3a]">
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-background-tertiary text-primary font-mono border border-border">
                     {databaseFilter}
                   </span>
-                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#f39c12]/20 text-[#f39c12] border border-[#f39c12]/30">
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-primary/20 text-primary border border-primary/30">
                     {filteredSchemas.length}/{schemas.length}
                   </span>
                 </div>
@@ -223,7 +225,7 @@ export function SchemaSidebar() {
                   {databaseFilter ? (
                     <>
                       No match for{" "}
-                      <span className="text-[#f39c12] font-mono">
+                      <span className="text-primary font-mono">
                         "{databaseFilter}"
                       </span>
                       <div className="text-[9px] mt-1 opacity-60">
@@ -240,8 +242,9 @@ export function SchemaSidebar() {
                     key={schema}
                     value={schema}
                     className={cn(
-                      "text-[11px] focus:bg-[#3a3a3a] focus:text-gray-100",
-                      index === focusedIndex && "bg-[#3a3a3a] text-gray-100"
+                      "text-[11px] focus:bg-background-tertiary focus:text-foreground",
+                      index === focusedIndex &&
+                        "bg-background-tertiary text-foreground"
                     )}
                   >
                     <div className="flex items-center gap-2">
@@ -257,16 +260,16 @@ export function SchemaSidebar() {
       </div>
 
       {/* Middle: Filter Input for Tables */}
-      <div className="p-2 border-b border-[#333] bg-[#222] shrink-0">
+      <div className="p-2 border-b border-border bg-background-secondary shrink-0">
         <div className="relative">
           <Search
             size={12}
-            className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-500"
+            className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground"
           />
           <input
             type="text"
             placeholder="Filter tables..."
-            className="w-full bg-[#161616] text-gray-300 text-[11px] h-7 pl-7 pr-2 rounded-sm border border-[#333] focus:border-[#f39c12] focus:outline-none transition-colors placeholder:text-gray-600"
+            className="w-full bg-background-tertiary text-foreground text-[11px] h-7 pl-7 pr-2 rounded-sm border border-border focus:border-primary focus:outline-none transition-colors placeholder:text-muted-foreground/50"
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
             disabled={!currentSchema}
@@ -275,7 +278,7 @@ export function SchemaSidebar() {
       </div>
 
       {/* Bottom: Tables List */}
-      <div className="flex-1 overflow-auto bg-[#1e1e1e] py-1 custom-scrollbar">
+      <div className="flex-1 overflow-auto bg-background-tertiary py-1 custom-scrollbar">
         {!currentSchema ? (
           <div className="p-4 text-xs text-center text-gray-500 italic">
             Select a database to view tables
@@ -296,8 +299,8 @@ export function SchemaSidebar() {
                 className={cn(
                   "flex items-center gap-2 px-2 py-1.5 cursor-pointer text-[11px] group transition-all select-none rounded-sm",
                   selectedTable === table.name
-                    ? "bg-[#2d2d2d] text-[#f39c12]"
-                    : "text-gray-400 hover:text-gray-200 hover:bg-[#252525]"
+                    ? "bg-background-secondary text-primary"
+                    : "text-muted-foreground hover:text-foreground hover:bg-background-tertiary"
                 )}
                 onClick={() => handleTableClick(table.name)}
                 title={table.name}

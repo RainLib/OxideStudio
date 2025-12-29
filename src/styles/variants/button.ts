@@ -9,10 +9,12 @@ export const iconButtonVariants = cva(
   {
     variants: {
       variant: {
-        ghost: "text-gray-500 hover:text-gray-300 hover:bg-[#2a2a2a]",
-        danger: "text-gray-500 hover:text-red-500 hover:bg-red-500/10",
-        active: "text-gray-300 bg-[#2a2a2a]",
-        orange: "text-orange-500 hover:text-orange-400 hover:bg-orange-500/10",
+        ghost:
+          "text-muted-foreground hover:text-foreground hover:bg-background-elevated",
+        danger:
+          "text-muted-foreground hover:text-destructive hover:bg-destructive/10",
+        active: "text-foreground bg-background-elevated",
+        orange: "text-primary hover:text-primary/90 hover:bg-primary/10",
       },
       size: {
         xs: "h-5 w-5 text-[10px]", // 20px - 超小按钮
@@ -41,10 +43,11 @@ export const toolbarButtonVariants = cva(
   {
     variants: {
       variant: {
-        default: "text-gray-300 hover:bg-[#2a2a2a]",
-        primary: "bg-orange-500 text-white hover:bg-orange-600",
-        secondary: "bg-[#2a2a2a] text-gray-300 hover:bg-[#333]",
-        outline: "border border-[#333] text-gray-300 hover:bg-[#2a2a2a]",
+        default: "text-foreground hover:bg-background-elevated",
+        primary: "bg-primary text-primary-foreground hover:bg-primary/90",
+        secondary: "bg-background-elevated text-foreground hover:bg-border",
+        outline:
+          "border border-border text-foreground hover:bg-background-elevated",
       },
       size: {
         sm: "px-2 py-1 text-xs",
@@ -72,9 +75,9 @@ export const tabButtonVariants = cva(
   {
     variants: {
       active: {
-        true: "border-orange-500 text-gray-200 bg-[#1e1e1e]",
+        true: "border-primary text-foreground bg-background-tertiary",
         false:
-          "border-transparent text-gray-500 hover:text-gray-300 hover:bg-[#2a2a2a]",
+          "border-transparent text-muted-foreground hover:text-foreground hover:bg-background-elevated",
       },
       closable: {
         true: "",

@@ -19,7 +19,7 @@ export interface MonacoCompletionOptions {
  * @param options - Configuration options (currently unused)
  * @returns Monaco editor instance or null
  */
-export function useMonacoCompletion(options: MonacoCompletionOptions = {}) {
+export function useMonacoCompletion() {
   const monaco = useMonaco();
 
   // TODO: Implement SQL auto-completion when Monaco types are properly configured

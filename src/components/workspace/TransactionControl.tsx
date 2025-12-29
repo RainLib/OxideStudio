@@ -22,16 +22,16 @@ export function TransactionControl({
   onRollback,
 }: TransactionControlProps) {
   return (
-    <div className="flex items-center gap-1 px-2 py-1 bg-[#1a1a1a]/80 backdrop-blur-sm rounded-md border border-[#333]">
+    <div className="flex items-center gap-1 px-2 py-1 bg-background-secondary/80 backdrop-blur-sm rounded-md border border-border">
       {/* Mode Toggle */}
-      <div className="flex items-center gap-0.5 bg-[#0f0f0f] rounded p-0.5">
+      <div className="flex items-center gap-0.5 bg-background-primary rounded p-0.5">
         <button
           onClick={() => onModeChange("auto")}
           className={cn(
             "px-2.5 py-0.5 text-[11px] font-medium rounded transition-all",
             mode === "auto"
-              ? "bg-[#2a2a2a] text-gray-200 shadow-sm"
-              : "text-gray-500 hover:text-gray-300"
+              ? "bg-background-elevated text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground"
           )}
         >
           Auto
@@ -41,8 +41,8 @@ export function TransactionControl({
           className={cn(
             "px-2.5 py-0.5 text-[11px] font-medium rounded transition-all",
             mode === "manual"
-              ? "bg-[#2a2a2a] text-gray-200 shadow-sm"
-              : "text-gray-500 hover:text-gray-300"
+              ? "bg-background-elevated text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground"
           )}
         >
           Manual Commit
@@ -52,7 +52,7 @@ export function TransactionControl({
       {/* Manual Controls */}
       {mode === "manual" && (
         <>
-          <div className="h-4 w-px bg-[#333] mx-1" />
+          <div className="h-4 w-px bg-border mx-1" />
           <div className="flex items-center gap-1">
             <Button
               size="sm"
@@ -63,7 +63,7 @@ export function TransactionControl({
                 "h-6 px-2 text-[11px] font-medium transition-all",
                 state === "active"
                   ? "text-green-500 bg-green-500/10"
-                  : "text-gray-400 hover:text-gray-200 hover:bg-[#2a2a2a]"
+                  : "text-muted-foreground hover:text-foreground hover:bg-background-elevated"
               )}
             >
               {state === "active" ? "● Begin" : "Begin"}
@@ -73,7 +73,7 @@ export function TransactionControl({
               variant="ghost"
               onClick={onCommit}
               disabled={state !== "active"}
-              className="h-6 px-2 text-[11px] font-medium text-gray-400 hover:text-gray-200 hover:bg-[#2a2a2a] disabled:opacity-40"
+              className="h-6 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-background-elevated disabled:opacity-40"
             >
               Commit
             </Button>
@@ -82,7 +82,7 @@ export function TransactionControl({
               variant="ghost"
               onClick={onRollback}
               disabled={state !== "active"}
-              className="h-6 px-2 text-[11px] font-medium text-gray-400 hover:text-gray-200 hover:bg-[#2a2a2a] disabled:opacity-40"
+              className="h-6 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-background-elevated disabled:opacity-40"
             >
               Rollback
             </Button>
