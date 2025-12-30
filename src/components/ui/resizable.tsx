@@ -1,9 +1,5 @@
 import { GripVertical } from "lucide-react";
-import {
-  Panel,
-  Group as PanelGroup,
-  Separator as PanelResizeHandle,
-} from "react-resizable-panels";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 
 import { cn } from "@/lib/utils";
 
@@ -15,16 +11,12 @@ const ResizablePanelGroup = ({
   direction?: "horizontal" | "vertical";
 }) => {
   return (
-    // @ts-ignore
     <PanelGroup
-      direction={direction as any}
-      data-panel-group-direction={direction}
+      direction={direction}
       className={cn(
-        "flex h-full w-full",
-        direction === "vertical" ? "flex-col" : "flex-row",
+        "flex h-full w-full data-[panel-group-direction=vertical]:flex-col",
         className
       )}
-      style={{ flexDirection: direction === "vertical" ? "column" : "row" }}
       {...props}
     />
   );
@@ -41,7 +33,13 @@ const ResizableHandle = ({
 }) => (
   <PanelResizeHandle
     className={cn(
-      "relative flex w-px items-center justify-center bg-border after:absolute after:inset-y-0 after:left-1/2 after:w-1 after:-translate-x-1/2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-offset-1 data-[panel-group-direction=vertical]:h-px data-[panel-group-direction=vertical]:w-full data-[panel-group-direction=vertical]:after:left-0 data-[panel-group-direction=vertical]:after:h-1 data-[panel-group-direction=vertical]:after:w-full data-[panel-group-direction=vertical]:after:-translate-y-1/2 data-[panel-group-direction=vertical]:after:translate-x-0 [&[data-panel-group-direction=vertical]>div]:rotate-90",
+      "relative flex w-px items-center justify-center bg-border focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-offset-1",
+      // Vertical rules (when parent is data-panel-group-direction="vertical")
+      "[&[data-panel-group-direction=vertical]]:h-px [&[data-panel-group-direction=vertical]]:w-full",
+      "[&[data-panel-group-direction=vertical]>div]:rotate-90",
+      // Handle Bar (Pseudo-element)
+      "after:absolute after:inset-y-0 after:left-1/2 after:w-1 after:-translate-x-1/2",
+      "[&[data-panel-group-direction=vertical]]:after:left-0 [&[data-panel-group-direction=vertical]]:after:h-1 [&[data-panel-group-direction=vertical]]:after:w-full [&[data-panel-group-direction=vertical]]:after:-translate-y-1/2 [&[data-panel-group-direction=vertical]]:after:translate-x-0",
       className
     )}
     {...props}
