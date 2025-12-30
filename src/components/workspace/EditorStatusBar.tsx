@@ -1,6 +1,5 @@
 import {
   Download,
-  Clock,
   AlignJustify,
   ChevronDown,
   RefreshCw,
@@ -36,30 +35,30 @@ export function EditorStatusBar({
   return (
     <div
       className={cn(
-        "h-[28px] px-3 flex items-center gap-4 text-[11px] font-bold select-none shrink-0 shadow-[0_-1px_2px_rgba(0,0,0,0.1)] z-50 transition-colors duration-200 bg-primary text-primary-foreground"
+        "h-[28px] px-3 flex items-center gap-4 text-[10px] select-none shrink-0 transition-colors duration-200"
       )}
     >
       {isTable ? (
         <>
           {/* Table Left Actions */}
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
             <button
               onClick={onStructure}
-              className="text-[10px] font-bold uppercase tracking-wider text-primary-foreground hover:opacity-70 transition-opacity"
+              className="font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors"
             >
               Structure
             </button>
-            <div className="h-3 w-px bg-primary-foreground/20" />
-            <span className="text-[10px] text-primary-foreground/60 font-medium">
+            <div className="h-3 w-px bg-border" />
+            <span className="text-muted-foreground/70 font-medium">
               {lastRefresh}
             </span>
           </div>
 
-          <div className="h-3 w-px bg-primary-foreground/20" />
+          <div className="h-3 w-px bg-border" />
 
           {/* Row Count */}
-          <div className="flex items-center gap-2 opacity-80">
-            <AlignJustify size={12} strokeWidth={2.5} />
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <AlignJustify size={12} strokeWidth={2} />
             <span>
               {rowCount !== undefined ? `${rowCount} rows` : "No results"}
             </span>
@@ -68,13 +67,17 @@ export function EditorStatusBar({
           {/* Table Pagination Placeholder (Can be expanded) */}
           <div className="flex-1 flex justify-center">
             <div className="flex items-center gap-4">
-              <div className="flex items-center gap-1 bg-primary-foreground/10 border border-primary-foreground/20 rounded px-2 h-5">
-                <span className="text-[10px] text-primary-foreground">1</span>
-                <ChevronDown size={12} className="text-primary-foreground/60" />
+              <div className="flex items-center gap-1 bg-muted border border-border/60 rounded px-2 h-5 text-muted-foreground">
+                <span className="text-[10px] font-medium">1</span>
+                <ChevronDown size={10} className="opacity-50" />
               </div>
-              <div className="flex items-center gap-4 text-primary-foreground/60">
-                <ChevronDown className="rotate-90" size={12} />
-                <ChevronDown className="-rotate-90" size={12} />
+              <div className="flex items-center gap-3 text-muted-foreground/50">
+                <button className="hover:text-foreground transition-colors">
+                  <ChevronDown className="rotate-90" size={10} />
+                </button>
+                <button className="hover:text-foreground transition-colors">
+                  <ChevronDown className="-rotate-90" size={10} />
+                </button>
               </div>
             </div>
           </div>
@@ -85,7 +88,7 @@ export function EditorStatusBar({
               variant="ghost"
               size="icon"
               onClick={onRefresh}
-              className="h-6 w-6 text-primary-foreground/60 hover:text-primary-foreground hover:bg-primary-foreground/10"
+              className="h-6 w-6 text-muted-foreground hover:text-foreground hover:bg-muted/50"
             >
               <RefreshCw size={12} />
             </Button>
@@ -93,7 +96,7 @@ export function EditorStatusBar({
               variant="ghost"
               size="icon"
               onClick={onAdd}
-              className="h-6 w-6 text-primary-foreground/60 hover:text-primary-foreground hover:bg-primary-foreground/10"
+              className="h-6 w-6 text-muted-foreground hover:text-foreground hover:bg-muted/50"
             >
               <Plus size={12} />
             </Button>
@@ -101,7 +104,7 @@ export function EditorStatusBar({
               variant="ghost"
               size="icon"
               onClick={onSettings}
-              className="h-6 w-6 text-primary-foreground/60 hover:text-primary-foreground hover:bg-primary-foreground/10"
+              className="h-6 w-6 text-muted-foreground hover:text-foreground hover:bg-muted/50"
             >
               <Settings2 size={12} />
             </Button>
@@ -110,27 +113,40 @@ export function EditorStatusBar({
       ) : (
         <>
           {/* Editor Execution Info */}
-          <div className="flex items-center gap-2 opacity-80">
-            <Clock size={12} strokeWidth={2.5} />
-            <span>{executionTime ? `${executionTime}ms` : "Ready"}</span>
-          </div>
-
-          <div className="h-3 w-[1px] bg-primary-foreground/20" />
-
-          {/* Editor Row Count */}
-          <div className="flex items-center gap-2 opacity-80">
-            <AlignJustify size={12} strokeWidth={2.5} />
-            <span>
-              {rowCount !== undefined ? `${rowCount} rows` : "No results"}
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <div
+              className={cn(
+                "w-2 h-2 rounded-full",
+                executionTime ? "bg-green-500/50" : "bg-muted-foreground/30"
+              )}
+            />
+            <span className="font-mono">
+              {executionTime ? `${executionTime}ms` : "Ready"}
             </span>
           </div>
 
+          <div className="h-3 w-px bg-border" />
+
+          {/* Editor Row Count */}
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <AlignJustify size={12} strokeWidth={2} />
+            <span>
+              {rowCount !== undefined ? `${rowCount} rows` : "0 rows"}
+            </span>
+          </div>
+
+          <div className="flex-1" />
+
           {/* Editor Right Actions */}
-          <div className="ml-auto flex items-center gap-3 opacity-70">
-            <div className="flex items-center gap-1 cursor-pointer hover:opacity-100 transition-opacity">
+          <div className="flex items-center gap-3 text-muted-foreground/70">
+            <button className="flex items-center gap-1.5 hover:text-foreground transition-colors px-2 py-0.5 rounded hover:bg-muted/50">
               <Download size={12} />
-              <span className="text-[10px]">Download CSV</span>
-            </div>
+              <span className="text-[10px] font-medium">CSV</span>
+            </button>
+            <button className="flex items-center gap-1.5 hover:text-foreground transition-colors px-2 py-0.5 rounded hover:bg-muted/50">
+              <Download size={12} />
+              <span className="text-[10px] font-medium">JSON</span>
+            </button>
           </div>
         </>
       )}

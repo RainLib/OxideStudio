@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { cn } from "@/lib/utils";
 import { TabBar } from "@/components/workspace/TabBar";
 import { QueryEditor } from "@/components/workspace/QueryEditor";
 import { DataGrid } from "@/components/workspace/DataGrid";
@@ -91,7 +92,7 @@ export function Workspace() {
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-accent"
+              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-accent/50"
               onClick={() => setIsLeftDrawerOpen(!isLeftDrawerOpen)}
               title="Toggle Left Panel"
             >
@@ -104,7 +105,7 @@ export function Workspace() {
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-accent"
+              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-accent/50"
               onClick={() => setIsRightCollapsed(!isRightCollapsed)}
               title="Toggle Right Panel"
             >
@@ -129,41 +130,48 @@ export function Workspace() {
         />
 
         {/* Main Content Area + Right Panel with Unified Bottom StatusBar */}
-        <div className="flex-1 flex flex-col min-w-0">
+        <div className="flex-1 flex flex-col min-w-0 bg-background/50 relative z-10">
           {/* Top: Content Areas */}
           <div className="flex flex-1 min-h-0">
             {/* Main Editor Area */}
-            <div className="flex-1 min-w-0">
+            <div className="flex-1 min-w-0 flex flex-col">
               {tabs.length === 0 ? (
                 <QueryShortcuts />
               ) : (
-                <div className="flex flex-col h-full min-w-0 bg-background">
-                  <div className="border-b border-border bg-background">
+                <div className="flex flex-col h-full min-w-0 bg-background shadow-sm z-10">
+                  {/* Main functionality area */}
+                  <div className="border-b border-border/40 bg-background/95 backdrop-blur z-20">
                     <TabBar />
                   </div>
 
                   {activeTab?.type === "table" ? (
                     <TableDataView />
                   ) : (
-                    <div className="flex flex-col h-full min-h-0">
-                      <div className="flex-1 min-h-0 relative">
-                        <ResizablePanelGroup
-                          direction="vertical"
-                          className="!flex-col"
-                          style={{ flexDirection: "column" }}
+                    <div className="flex flex-col h-full min-h-0 relative">
+                      <ResizablePanelGroup
+                        direction="vertical"
+                        className="!flex-col flex-1"
+                        style={{ flexDirection: "column" }}
+                      >
+                        <ResizablePanel
+                          defaultSize={50}
+                          minSize={20}
+                          className="flex flex-col"
                         >
-                          <ResizablePanel defaultSize={50} minSize={20}>
-                            <QueryEditor />
-                          </ResizablePanel>
-                          <ResizableHandle
-                            withHandle
-                            className="h-1.5 w-full bg-border hover:bg-orange-500 transition-colors z-50 cursor-row-resize"
-                          />
-                          <ResizablePanel defaultSize={50} minSize={20}>
-                            {currentResult ? <DataGrid /> : <QueryShortcuts />}
-                          </ResizablePanel>
-                        </ResizablePanelGroup>
-                      </div>
+                          <QueryEditor />
+                        </ResizablePanel>
+                        <ResizableHandle
+                          withHandle
+                          className="h-1 lg:h-1. bg-border/40 hover:bg-primary/50 transition-colors z-50 cursor-row-resize interact-none"
+                        />
+                        <ResizablePanel
+                          defaultSize={50}
+                          minSize={20}
+                          className="flex flex-col bg-muted/5"
+                        >
+                          {currentResult ? <DataGrid /> : <QueryShortcuts />}
+                        </ResizablePanel>
+                      </ResizablePanelGroup>
                     </div>
                   )}
                 </div>
@@ -171,34 +179,42 @@ export function Workspace() {
             </div>
 
             {/* Right Panel */}
-            {!isRightCollapsed && (
-              <div
-                className="border-l border-border bg-muted shrink-0"
-                style={{ width: "220px" }}
-              >
-                <div className="h-full flex flex-col">
-                  <div className="h-9 border-b border-border flex items-center px-3 text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
-                    Details
+            <div
+              className={cn(
+                "border-l border-border/40 bg-muted/10 shrink-0 transition-all duration-300 ease-in-out overflow-hidden flex flex-col",
+                isRightCollapsed
+                  ? "w-0 opacity-0 border-l-0"
+                  : "w-[260px] opacity-100"
+              )}
+            >
+              <div className="h-full flex flex-col min-w-[260px]">
+                <div className="h-10 border-b border-border/40 flex items-center px-4 bg-muted/20">
+                  <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
+                    Item Details
+                  </span>
+                </div>
+                <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground/50 text-xs p-8 text-center leading-relaxed gap-3">
+                  <div className="p-4 rounded-full bg-muted/30 text-muted-foreground/40">
+                    <Settings2 size={24} strokeWidth={1.5} />
                   </div>
-                  <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground text-[11px] p-6 text-center leading-relaxed">
-                    <Settings2 size={32} className="opacity-20 mb-4" />
-                    Select an item to view its metadata and properties
-                  </div>
+                  <p>Select an item to view its properties</p>
                 </div>
               </div>
-            )}
+            </div>
           </div>
 
-          {/* Bottom: Unified EditorStatusBar spanning entire width */}
-          <EditorStatusBar
-            type={activeTab?.type === "table" ? "table" : "editor"}
-            rowCount={currentResult?.rows?.length}
-            executionTime={activeTab?.type === "table" ? undefined : 124}
-            onRefresh={() => console.log("Refresh table")}
-            onAdd={() => console.log("Add row")}
-            onSettings={() => console.log("Table settings")}
-            onStructure={() => console.log("View structure")}
-          />
+          {/* Bottom: Unified EditorStatusBar */}
+          <div className="border-t border-border/40 bg-background/80 backdrop-blur-sm z-30">
+            <EditorStatusBar
+              type={activeTab?.type === "table" ? "table" : "editor"}
+              rowCount={currentResult?.rows?.length}
+              executionTime={activeTab?.type === "table" ? undefined : 124}
+              onRefresh={() => console.log("Refresh table")}
+              onAdd={() => console.log("Add row")}
+              onSettings={() => console.log("Table settings")}
+              onStructure={() => console.log("View structure")}
+            />
+          </div>
         </div>
       </div>
     </div>

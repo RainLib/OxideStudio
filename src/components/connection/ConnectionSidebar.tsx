@@ -36,45 +36,56 @@ export function ConnectionSidebar() {
   });
 
   return (
-    <div className="w-[280px] border-r border-border bg-card flex flex-col h-full">
-      {/* Search / Filter Header */}
-      <div className="p-3 border-b border-border">
-        <div className="relative mb-3">
+    <div className="w-[300px] border-r border-border/40 bg-card/50 backdrop-blur-sm flex flex-col h-full z-10">
+      {/* Header & Actions */}
+      <div className="p-4 pb-2 flex flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold tracking-tight text-foreground/90">
+            Connections
+          </h2>
+          <Button
+            onClick={() => {
+              const newConn = createNewConnection();
+              if (activeWorkspaceId) {
+                const { addConnectionToWorkspace } =
+                  useWorkspaceStore.getState();
+                addConnectionToWorkspace(activeWorkspaceId, newConn.id);
+              }
+            }}
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-lg transition-colors"
+          >
+            <Plus size={16} strokeWidth={2.5} />
+          </Button>
+        </div>
+
+        {/* Search */}
+        <div className="relative group">
           <Search
-            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/50 transition-colors group-focus-within:text-foreground/70"
             size={14}
           />
           <input
-            className="w-full bg-accent text-foreground text-xs pl-8 pr-2 h-8 rounded border border-transparent focus:border-primary focus:outline-none transition-colors"
-            placeholder="Search connections..."
+            className="w-full bg-secondary/50 hover:bg-secondary/80 focus:bg-background text-foreground text-xs pl-9 pr-3 h-9 rounded-lg border border-transparent focus:border-border/60 focus:outline-none focus:ring-2 focus:ring-primary/10 transition-all placeholder:text-muted-foreground/50"
+            placeholder="Search..."
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
         </div>
-
-        <Button
-          onClick={() => {
-            const newConn = createNewConnection();
-            if (activeWorkspaceId) {
-              const { addConnectionToWorkspace } = useWorkspaceStore.getState();
-              addConnectionToWorkspace(activeWorkspaceId, newConn.id);
-            }
-          }}
-          className="w-full gap-2 bg-primary hover:bg-primary/90 text-primary-foreground h-8 text-xs font-semibold shadow-md"
-          size="sm"
-        >
-          <Plus size={14} strokeWidth={2.5} /> New Connection
-        </Button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
-        <div className="text-[10px] uppercase font-bold text-muted-foreground px-2 py-2 tracking-wider">
-          Saved Connections
-        </div>
-
+      <div className="flex-1 overflow-y-auto px-2 space-y-1 custom-scrollbar">
         {isLoading && (
-          <div className="p-4 text-center text-xs text-muted-foreground">
-            Loading connections...
+          <div className="p-8 text-center text-xs text-muted-foreground/50 animate-pulse">
+            Loading...
+          </div>
+        )}
+
+        {!isLoading && filteredConnections.length === 0 && (
+          <div className="flex flex-col items-center justify-center py-12 text-center text-muted-foreground/40 gap-2">
+            <Search size={24} strokeWidth={1} />
+            <p className="text-xs">No connections found</p>
           </div>
         )}
 
@@ -82,47 +93,55 @@ export function ConnectionSidebar() {
           <div
             key={conn.id}
             className={cn(
-              "flex items-center gap-3 p-3 rounded-md cursor-pointer group transition-all border border-transparent",
+              "flex items-center gap-3 p-3 rounded-lg cursor-pointer group transition-all duration-200 border border-transparent",
               // Selected state
               selectedConnection?.id === conn.id
-                ? "bg-secondary border-primary/50 shadow-sm"
-                : "hover:bg-secondary/50 hover:border-border",
+                ? "bg-secondary shadow-sm ring-1 ring-border/50"
+                : "hover:bg-secondary/40",
               // Active (Connected) state
-              activeConnectionId === conn.id &&
-                "border-l-4 border-l-green-500 pl-2 bg-secondary/50"
+              activeConnectionId === conn.id && "bg-secondary/30"
             )}
             onClick={() => selectConnection(conn.id)}
           >
+            {/* Status Indicator */}
+            <div
+              className={cn(
+                "w-1 h-8 rounded-full transition-all duration-500",
+                activeConnectionId === conn.id
+                  ? "bg-green-500 scale-y-100 opacity-100"
+                  : "bg-transparent scale-y-0 opacity-0 w-0"
+              )}
+            />
+
             {/* Icon Box */}
             <div
               className={cn(
-                "w-8 h-8 rounded flex items-center justify-center shrink-0 transition-colors",
+                "w-9 h-9 rounded-xl flex items-center justify-center shrink-0 transition-all duration-300",
                 conn.driver === "postgres"
-                  ? "bg-muted text-muted-foreground"
-                  : "bg-muted text-muted-foreground",
-                selectedConnection?.id === conn.id &&
-                  "bg-primary/10 text-primary"
+                  ? "bg-blue-500/10 text-blue-600 dark:text-blue-400 group-hover:bg-blue-500/20"
+                  : "bg-orange-500/10 text-orange-600 dark:text-orange-400 group-hover:bg-orange-500/20",
+                selectedConnection?.id === conn.id && "scale-105"
               )}
             >
               {conn.driver === "postgres" ? (
-                <Database size={16} />
+                <Database size={16} strokeWidth={2} />
               ) : (
-                <Monitor size={16} />
+                <Monitor size={16} strokeWidth={2} />
               )}
             </div>
 
-            <div className="flex-1 overflow-hidden">
+            <div className="flex-1 overflow-hidden min-w-0">
               <div
                 className={cn(
-                  "font-medium text-sm truncate",
+                  "font-medium text-sm truncate transition-colors",
                   selectedConnection?.id === conn.id
                     ? "text-foreground"
-                    : "text-muted-foreground group-hover:text-foreground"
+                    : "text-muted-foreground group-hover:text-foreground/90"
                 )}
               >
                 {conn.name}
               </div>
-              <div className="text-[11px] text-muted-foreground/70 truncate group-hover:text-muted-foreground">
+              <div className="text-[11px] text-muted-foreground/60 truncate transition-colors group-hover:text-muted-foreground/80 font-mono mt-0.5">
                 {conn.host
                   ? `${conn.user}@${conn.host}:${conn.port}`
                   : "Local file"}
@@ -130,19 +149,13 @@ export function ConnectionSidebar() {
             </div>
           </div>
         ))}
-
-        {filteredConnections.length === 0 && !isLoading && (
-          <div className="text-center text-xs text-muted-foreground italic mt-8">
-            No connections found
-          </div>
-        )}
       </div>
 
-      <div className="p-3 border-t border-border bg-muted flex items-center justify-between text-[10px] text-muted-foreground">
-        <span>v0.1.0</span>
+      <div className="p-3 border-t border-border/40 bg-secondary/20 flex items-center justify-between text-[10px] text-muted-foreground/60 backdrop-blur-md">
+        <span className="font-mono opacity-50">v0.1.0</span>
         <button
           onClick={() => setShowSettings(true)}
-          className="hover:text-foreground transition-colors"
+          className="hover:text-foreground hover:bg-secondary/80 p-1.5 rounded-md transition-all"
           title="Settings"
         >
           <Settings size={14} />

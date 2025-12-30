@@ -147,236 +147,237 @@ export function ConnectionForm() {
   };
 
   return (
-    <div className="flex-1 flex justify-center bg-background-primary overflow-y-auto p-8">
-      <div className="w-full max-w-2xl flex flex-col min-h-0">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-8">
-          <h2 className="text-2xl font-bold text-foreground tracking-tight">
-            {selectedConnection.name || "New Connection"}
-          </h2>
-          <Dialog
-            open={isImportDialogOpen}
-            onOpenChange={setIsImportDialogOpen}
-          >
-            <DialogTrigger asChild>
-              <Button
-                variant="ghost"
-                className="text-xs text-muted-foreground hover:text-foreground uppercase tracking-wider font-bold"
-              >
-                Import from URL
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="bg-background-elevated border-border text-foreground">
-              <DialogHeader>
-                <DialogTitle>Import from URL</DialogTitle>
-              </DialogHeader>
-              <div className="py-4 space-y-4">
-                <p className="text-sm text-muted-foreground">
-                  Paste your database connection string below.
-                </p>
-                <Input
-                  className="bg-background-tertiary border-border text-foreground"
-                  placeholder="postgres://user:pass@localhost:5432/mydb"
-                  value={importUrl}
-                  onChange={(e) => setImportUrl(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleImport()}
-                />
-              </div>
-              <DialogFooter>
+    <div className="flex-1 flex justify-center overflow-y-auto p-4 md:p-8 custom-scrollbar">
+      <div className="w-full max-w-3xl flex flex-col min-h-0 pb-20">
+        {/* Header Section */}
+        <div className="mb-8 flex flex-col gap-1">
+          <div className="flex items-center justify-between">
+            <h1 className="text-2xl font-bold tracking-tight text-foreground">
+              {selectedConnection?.name || "New Connection"}
+            </h1>
+            <Dialog
+              open={isImportDialogOpen}
+              onOpenChange={setIsImportDialogOpen}
+            >
+              <DialogTrigger asChild>
                 <Button
-                  variant="ghost"
-                  onClick={() => setIsImportDialogOpen(false)}
+                  variant="outline"
+                  size="sm"
+                  className="h-8 gap-2 text-xs uppercase tracking-wide font-semibold opacity-70 hover:opacity-100"
                 >
-                  Cancel
+                  <Globe size={14} /> Import URL
                 </Button>
-                <Button
-                  onClick={handleImport}
-                  className="bg-primary hover:bg-primary/90 text-primary-foreground"
-                >
-                  Import
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-md">
+                <DialogHeader>
+                  <DialogTitle>Import Connection</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 py-4">
+                  <p className="text-sm text-muted-foreground">
+                    Paste your connection URL (e.g. postgres://...)
+                  </p>
+                  <Input
+                    placeholder="postgres://user:pass@host:5432/db"
+                    value={importUrl}
+                    onChange={(e) => setImportUrl(e.target.value)}
+                    className="font-mono text-sm"
+                  />
+                </div>
+                <DialogFooter>
+                  <Button
+                    variant="ghost"
+                    onClick={() => setIsImportDialogOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button onClick={handleImport}>Import</Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            Configure your database connection details below.
+          </p>
         </div>
 
-        <div className="space-y-6">
-          {/* Connection Type */}
-          <div className="space-y-2">
-            <label className="text-xs font-medium text-muted-foreground">
-              Connection Type
-            </label>
-            <div className="grid grid-cols-2 gap-4 p-1 bg-background-tertiary rounded-lg border border-border">
+        <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+          {/* Section: Connection Type */}
+          <section className="space-y-4">
+            <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/80 flex items-center gap-2">
+              <Database size={14} /> Database Type
+            </h3>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               {[
                 { id: "postgres", label: "PostgreSQL", icon: Database },
-                { id: "mysql", label: "MySQL", icon: Database }, // Use appropriate icons
+                { id: "mysql", label: "MySQL", icon: Database },
               ].map((type) => (
                 <button
                   key={type.id}
                   onClick={() => handleChange("driver", type.id)}
                   className={cn(
-                    "flex items-center justify-center gap-2 py-2.5 rounded-md text-sm font-medium transition-all duration-200",
-                    selectedConnection.driver === type.id
-                      ? "bg-background-elevated text-foreground shadow-sm ring-1 ring-border"
-                      : "text-muted-foreground hover:text-foreground hover:bg-background-elevated/50"
+                    "flex flex-col items-center justify-center gap-3 p-4 rounded-xl border transition-all duration-200",
+                    selectedConnection?.driver === type.id
+                      ? "bg-primary/5 border-primary text-primary ring-1 ring-primary/20 shadow-sm"
+                      : "bg-card border-border/50 text-muted-foreground hover:bg-accent/50 hover:border-border hover:text-foreground"
                   )}
                 >
-                  <type.icon
-                    size={16}
-                    className={
-                      selectedConnection.driver === type.id
-                        ? "text-primary"
-                        : "currentColor"
-                    }
-                  />
-                  {type.label}
+                  <type.icon size={24} strokeWidth={1.5} />
+                  <span className="text-sm font-medium">{type.label}</span>
                 </button>
               ))}
             </div>
-          </div>
+          </section>
 
-          {/* Host & Port */}
-          <div className="grid grid-cols-12 gap-4">
-            <div className="col-span-9 space-y-2">
-              <label className="text-xs font-medium text-muted-foreground">
-                Host
-              </label>
-              <div className="relative group">
-                <Globe
-                  size={14}
-                  className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/50 transition-colors group-focus-within:text-primary"
-                />
-                <input
-                  className="w-full h-10 bg-background-tertiary border border-border rounded-lg pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
-                  placeholder="localhost"
-                  value={selectedConnection.host || ""}
-                  onChange={(e) => handleChange("host", e.target.value)}
+          {/* Section: Connection Details */}
+          <section className="space-y-4">
+            <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/80 flex items-center gap-2">
+              <Globe size={14} /> Connection Details
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-6 rounded-xl border border-border/50 bg-card/30">
+              <div className="space-y-2">
+                <label className="text-xs font-medium text-muted-foreground ml-1">
+                  Display Name
+                </label>
+                <Input
+                  className="bg-background/50 border-input/60 focus:border-primary/50"
+                  placeholder="My Production DB"
+                  value={selectedConnection?.name || ""}
+                  onChange={(e) => handleChange("name", e.target.value)}
                 />
               </div>
-            </div>
-            <div className="col-span-3 space-y-2">
-              <label className="text-xs font-medium text-muted-foreground">
-                Port
-              </label>
-              <input
-                type="number"
-                className="w-full h-10 bg-background-tertiary border border-border rounded-lg px-3 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all text-center font-mono"
-                placeholder="5432"
-                value={selectedConnection.port || ""}
-                onChange={(e) => handleChange("port", parseInt(e.target.value))}
-              />
-            </div>
-          </div>
+              <div className="space-y-2">
+                <label className="text-xs font-medium text-muted-foreground ml-1">
+                  Database Name
+                </label>
+                <Input
+                  className="bg-background/50 border-input/60 focus:border-primary/50"
+                  placeholder="postgres"
+                  value={selectedConnection?.database || ""}
+                  onChange={(e) => handleChange("database", e.target.value)}
+                />
+              </div>
 
-          {/* Authentication */}
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <label className="text-xs font-medium text-muted-foreground">
-                User
-              </label>
-              <input
-                className="w-full h-10 bg-background-tertiary border border-border rounded-lg px-3 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
-                placeholder="postgres"
-                value={selectedConnection.user || ""}
-                onChange={(e) => handleChange("user", e.target.value)}
-                autoComplete="off"
-              />
+              <div className="col-span-1 md:col-span-2 grid grid-cols-12 gap-4">
+                <div className="col-span-8 space-y-2">
+                  <label className="text-xs font-medium text-muted-foreground ml-1">
+                    Host
+                  </label>
+                  <div className="relative">
+                    <Input
+                      className="bg-background/50 border-input/60 focus:border-primary/50 font-mono"
+                      placeholder="localhost"
+                      value={selectedConnection?.host || ""}
+                      onChange={(e) => handleChange("host", e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div className="col-span-4 space-y-2">
+                  <label className="text-xs font-medium text-muted-foreground ml-1">
+                    Port
+                  </label>
+                  <Input
+                    className="bg-background/50 border-input/60 focus:border-primary/50 font-mono text-center"
+                    type="number"
+                    placeholder="5432"
+                    value={selectedConnection?.port || ""}
+                    onChange={(e) =>
+                      handleChange("port", parseInt(e.target.value))
+                    }
+                  />
+                </div>
+              </div>
             </div>
-            <div className="space-y-2">
-              <label className="text-xs font-medium text-muted-foreground">
-                Password
-              </label>
-              <div className="relative">
-                <input
-                  type={showPassword ? "text" : "password"}
-                  className="w-full h-10 bg-background-tertiary border border-border rounded-lg px-3 pr-10 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
-                  placeholder="••••••••"
-                  value={selectedConnection.password || ""}
-                  onChange={(e) => handleChange("password", e.target.value)}
+          </section>
+
+          {/* Section: Authentication */}
+          <section className="space-y-4">
+            <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/80 flex items-center gap-2">
+              <Lock size={14} /> Authentication
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-6 rounded-xl border border-border/50 bg-card/30">
+              <div className="space-y-2">
+                <label className="text-xs font-medium text-muted-foreground ml-1">
+                  Username
+                </label>
+                <Input
+                  className="bg-background/50 border-input/60 focus:border-primary/50"
+                  placeholder="postgres"
+                  value={selectedConnection?.user || ""}
+                  onChange={(e) => handleChange("user", e.target.value)}
                   autoComplete="off"
                 />
-                <button
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-foreground"
-                >
-                  {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
-                </button>
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-medium text-muted-foreground ml-1">
+                  Password
+                </label>
+                <div className="relative">
+                  <Input
+                    type={showPassword ? "text" : "password"}
+                    className="bg-background/50 border-input/60 focus:border-primary/50 pr-10"
+                    placeholder="••••••••"
+                    value={selectedConnection?.password || ""}
+                    onChange={(e) => handleChange("password", e.target.value)}
+                    autoComplete="off"
+                  />
+                  <button
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-foreground transition-colors"
+                  >
+                    {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
+          </section>
 
-          {/* Database & SSL */}
-          <div className="space-y-2">
-            <label className="text-xs font-medium text-muted-foreground">
-              Default Database
-            </label>
-            <input
-              className="w-full h-10 bg-background-tertiary border border-border rounded-lg px-3 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
-              placeholder="postgres"
-              value={selectedConnection.database || ""}
-              onChange={(e) => handleChange("database", e.target.value)}
-            />
-          </div>
-
-          {/* Options Toggles */}
-          <div className="pt-4 space-y-4">
-            <div className="flex items-center justify-between p-3 rounded-lg bg-background-tertiary border border-border">
+          {/* Section: Advanced */}
+          <section className="space-y-2">
+            <div className="flex items-center justify-between p-4 rounded-xl border border-border/50 bg-card/30 hover:bg-card/50 transition-colors">
               <div className="flex items-center gap-3">
-                <Lock size={16} className="text-muted-foreground/50" />
-                <div className="text-xs font-medium text-foreground">
-                  Enable SSL
+                <div className="p-2 rounded-full bg-primary/10 text-primary">
+                  <Lock size={16} />
+                </div>
+                <div>
+                  <div className="text-sm font-medium">SSL Connection</div>
+                  <div className="text-xs text-muted-foreground">
+                    Enable secure connection
+                  </div>
                 </div>
               </div>
               <Switch
-                checked={selectedConnection.sslMode === "require"}
+                checked={selectedConnection?.sslMode === "require"}
                 onCheckedChange={(checked) =>
                   handleChange("sslMode", checked ? "require" : "disable")
                 }
-                className="data-[state=checked]:bg-primary"
               />
             </div>
-          </div>
-
-          {/* Connection Name */}
-          <div className="space-y-2 pt-4 border-t border-border">
-            <label className="text-xs font-medium text-muted-foreground">
-              Connection Name
-            </label>
-            <input
-              className="w-full h-10 bg-background-tertiary border border-border rounded-lg px-3 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
-              placeholder="My Production DB"
-              value={selectedConnection.name || ""}
-              onChange={(e) => handleChange("name", e.target.value)}
-            />
-          </div>
+          </section>
         </div>
 
-        {/* Footer */}
-        <div className="mt-8 flex items-center justify-between">
-          <div className="flex items-center gap-3">
+        {/* Footer Actions */}
+        <div className="sticky bottom-0 mt-10 py-4 bg-background/80 backdrop-blur-lg border-t border-border/40 flex items-center justify-between z-10 -mx-4 px-8 md:px-8 md:-mx-8 md:rounded-b-xl">
+          <div className="flex items-center gap-4">
             <Button
               variant="ghost"
               onClick={handleTest}
-              className="text-muted-foreground hover:text-foreground hover:bg-background-elevated"
               disabled={testStatus?.type === "loading"}
+              className="text-muted-foreground hover:text-foreground"
             >
               {testStatus?.type === "loading" ? (
-                <>
-                  <Loader2 size={14} className="mr-2 animate-spin" />
-                  Testing...
-                </>
+                <Loader2 size={16} className="animate-spin mr-2" />
               ) : (
-                "Test Connection"
+                <CheckCircle2 size={16} className="mr-2" />
               )}
+              Test Connection
             </Button>
-
             {testStatus && testStatus.type !== "loading" && (
-              <div
+              <span
                 className={cn(
-                  "text-xs font-medium flex items-center gap-1.5",
+                  "text-xs font-medium animate-in fade-in flex items-center gap-1.5",
                   testStatus.type === "success"
                     ? "text-green-500"
-                    : "text-red-500"
+                    : "text-destructive"
                 )}
               >
                 {testStatus.type === "success" ? (
@@ -385,7 +386,7 @@ export function ConnectionForm() {
                   <AlertCircle size={14} />
                 )}
                 {testStatus.msg}
-              </div>
+              </span>
             )}
           </div>
 
@@ -393,20 +394,17 @@ export function ConnectionForm() {
             <Button
               variant="secondary"
               onClick={handleSave}
-              className="bg-background-elevated text-foreground hover:bg-background-tertiary border border-border"
+              className="bg-secondary/80 hover:bg-secondary"
             >
-              Save
+              Save Draft
             </Button>
             <Button
               onClick={handleConnect}
               disabled={isConnecting}
-              className="bg-foreground text-background hover:bg-foreground/90 font-bold px-6 min-w-[120px]"
+              className="shadow-lg shadow-primary/20 min-w-[140px]"
             >
               {isConnecting ? (
-                <>
-                  <Loader2 size={16} className="mr-2 animate-spin" />
-                  Connecting...
-                </>
+                <Loader2 size={16} className="animate-spin mr-2" />
               ) : (
                 "Connect"
               )}

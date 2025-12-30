@@ -30,7 +30,7 @@ export function LeftPanel({
 
   return (
     <div
-      className="flex flex-col shrink-0"
+      className="flex flex-col shrink-0 h-full transition-[width] duration-300 ease-in-out"
       style={{ width: `${totalWidth}px` }}
     >
       <SettingsDialog open={showSettings} onOpenChange={setShowSettings} />
@@ -38,53 +38,51 @@ export function LeftPanel({
       {/* Top section: ActivityBar + Sidebar content */}
       <div className="flex flex-1 min-h-0">
         {/* ActivityBar */}
-        <div className="w-[50px] flex flex-col bg-muted border-r border-border shrink-0 z-50">
-          <div className="flex-1 flex flex-col items-center py-4 gap-3">
-            {/* App Logo */}
-            <div className="mb-2">
-              <div className="h-8 w-8 bg-primary rounded-lg flex items-center justify-center text-primary-foreground shadow-lg shadow-primary/20">
-                <Database size={20} strokeWidth={2.5} />
-              </div>
+        <div className="w-[50px] flex flex-col items-center py-4 gap-4 bg-muted/20 border-r border-border/40 shrink-0 z-20 backdrop-blur-sm">
+          {/* App Logo */}
+          <div className="mb-2 shrink-0">
+            <div className="h-8 w-8 bg-primary/10 rounded-xl flex items-center justify-center text-primary shadow-sm ring-1 ring-primary/20">
+              <Database size={18} strokeWidth={2.5} />
             </div>
+          </div>
 
-            {/* Navigation Items */}
-            <div className="flex flex-col gap-2 w-full px-1">
-              <ActivityBarButton
-                active={activeTab === "tables" && isDrawerOpen}
-                onClick={() => onTabClick("tables")}
-                icon={Hexagon}
-                title="Entities (Tables)"
-              />
-              <ActivityBarButton
-                active={activeTab === "history" && isDrawerOpen}
-                onClick={() => onTabClick("history")}
-                icon={Clock}
-                title="History"
-              />
-              <ActivityBarButton
-                active={activeTab === "saved" && isDrawerOpen}
-                onClick={() => onTabClick("saved")}
-                icon={Code}
-                title="Saved Queries"
-              />
-            </div>
+          {/* Navigation Items */}
+          <div className="flex flex-col gap-3 w-full px-2">
+            <ActivityBarButton
+              active={activeTab === "tables" && isDrawerOpen}
+              onClick={() => onTabClick("tables")}
+              icon={Hexagon}
+              title="Entities (Tables)"
+            />
+            <ActivityBarButton
+              active={activeTab === "history" && isDrawerOpen}
+              onClick={() => onTabClick("history")}
+              icon={Clock}
+              title="History"
+            />
+            <ActivityBarButton
+              active={activeTab === "saved" && isDrawerOpen}
+              onClick={() => onTabClick("saved")}
+              icon={Code}
+              title="Saved Queries"
+            />
+          </div>
 
-            {/* Bottom Items */}
-            <div className="mt-auto flex flex-col gap-2 w-full px-1">
-              <ActivityBarButton
-                active={showSettings}
-                onClick={() => setShowSettings(true)}
-                icon={Settings}
-                title="Settings"
-              />
-            </div>
+          {/* Bottom Items */}
+          <div className="mt-auto flex flex-col gap-3 w-full px-2">
+            <ActivityBarButton
+              active={showSettings}
+              onClick={() => setShowSettings(true)}
+              icon={Settings}
+              title="Settings"
+            />
           </div>
         </div>
 
         {/* Sidebar Content */}
         {isDrawerOpen && (
           <div
-            className="border-r border-border bg-card relative shrink-0 transition-all duration-200 flex flex-col"
+            className="border-r border-border/40 bg-card/50 relative shrink-0 flex flex-col overflow-hidden"
             style={{ width: `${sidebarWidth}px` }}
           >
             {/* Sidebar Content Area */}
@@ -92,25 +90,29 @@ export function LeftPanel({
               {activeTab === "tables" && <SchemaSidebar />}
               {activeTab === "history" && <HistorySidebar />}
               {activeTab === "saved" && <SavedQueriesSidebar />}
-              {/* Settings removed from here as it is now a modal */}
               {!activeTab && (
-                <div className="p-4 text-center text-muted-foreground text-xs mt-10">
-                  Select a tab
+                <div className="flex-1 flex items-center justify-center p-4 text-center text-muted-foreground text-xs">
+                  <span className="opacity-50">Select a section</span>
                 </div>
               )}
             </div>
 
             {/* Resize Handle */}
             <div
-              className="absolute right-0 top-0 bottom-0 w-1 bg-border hover:bg-primary cursor-col-resize z-50 transition-colors"
+              className="absolute right-0 top-0 bottom-0 w-[3px] hover:w-[4px] bg-transparent hover:bg-primary/50 cursor-col-resize z-50 transition-all flex items-center justify-center group"
               onMouseDown={onDragStart}
-            />
+            >
+              <div className="w-px h-8 bg-border group-hover:bg-primary transition-colors delay-75" />
+            </div>
           </div>
         )}
       </div>
 
       {/* Bottom: Unified Status Bar spanning entire width */}
-      <div style={{ width: `${totalWidth}px` }}>
+      <div
+        style={{ width: `${totalWidth}px` }}
+        className="border-t border-border/40 bg-background/50 backdrop-blur-sm"
+      >
         <SidebarStatusBar isDrawerOpen={isDrawerOpen} />
       </div>
     </div>
@@ -133,23 +135,23 @@ function ActivityBarButton({
       variant="ghost"
       size="icon"
       className={cn(
-        "relative w-full h-10 transition-all rounded-md group",
+        "relative w-full h-9 transition-all rounded-lg group",
         active
-          ? "text-foreground bg-accent"
-          : "text-muted-foreground hover:text-foreground hover:bg-accent"
+          ? "text-primary bg-primary/10 shadow-sm"
+          : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
       )}
       onClick={onClick}
       title={title}
     >
       {active && (
-        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-6 bg-primary rounded-r-md shadow-[0_0_8px_rgba(var(--primary),0.4)]" />
+        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-4 bg-primary rounded-r-full" />
       )}
       <Icon
-        size={20}
-        strokeWidth={1.5}
+        size={18}
+        strokeWidth={2}
         className={cn(
-          "transition-transform group-hover:scale-105",
-          active && "stroke-[2px]"
+          "transition-transform duration-300 group-active:scale-95",
+          active ? "scale-100" : "opacity-80 group-hover:opacity-100"
         )}
       />
     </Button>

@@ -144,8 +144,10 @@ export function WorkspaceSidebar() {
   return (
     <div
       className={cn(
-        "w-[72px] border-r flex flex-col items-center py-6 gap-3 z-20 shadow-2xl h-full",
-        isDark ? "bg-[#0c0c0c] border-[#222]" : "bg-gray-50 border-gray-200"
+        "w-[70px] flex flex-col items-center py-6 gap-4 z-20 h-full transition-colors",
+        isDark
+          ? "bg-[#09090b]" // Zinc-950 for deep contrast
+          : "bg-[#f4f4f5]" // Zinc-100 for light mode
       )}
     >
       <TooltipProvider delayDuration={0}>
@@ -155,28 +157,26 @@ export function WorkspaceSidebar() {
             <div
               onClick={() => setActiveWorkspace(null)}
               className={cn(
-                "w-10 h-10 rounded-xl flex items-center justify-center cursor-pointer transition-all duration-300 group relative mb-2",
+                "w-10 h-10 rounded-2xl flex items-center justify-center cursor-pointer transition-all duration-300 group relative",
                 activeWorkspaceId === null
-                  ? "bg-linear-to-br from-[#f39c12] to-[#d35400] text-white shadow-lg shadow-orange-900/40 scale-105"
+                  ? "bg-primary text-primary-foreground shadow-lg shadow-primary/25 scale-100"
                   : isDark
-                  ? "bg-[#1a1a1a] text-gray-500 hover:bg-[#252525] hover:text-gray-200 hover:scale-105"
-                  : "bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-800 hover:scale-105"
+                  ? "text-muted-foreground hover:bg-white/10 hover:text-foreground"
+                  : "text-muted-foreground hover:bg-black/5 hover:text-foreground"
               )}
             >
               <LayoutGrid size={20} strokeWidth={1.5} />
-              {activeWorkspaceId === null && (
-                <div className="absolute -left-1 top-1/2 -translate-y-1/2 w-1 h-5 bg-white rounded-r-full" />
-              )}
             </div>
           </TooltipTrigger>
           <TooltipContent
             side="right"
             className={cn(
-              "font-medium ml-2",
+              "font-medium ml-3 px-3 py-1.5 rounded-lg text-xs",
               isDark
-                ? "bg-[#1a1a1a] border-[#333] text-white"
-                : "bg-white border-gray-200 text-gray-900"
+                ? "bg-zinc-800 text-zinc-100 border-zinc-700"
+                : "bg-white text-zinc-900 border-zinc-200 shadow-md"
             )}
+            sideOffset={5}
           >
             <p>All Connections</p>
           </TooltipContent>
@@ -184,8 +184,8 @@ export function WorkspaceSidebar() {
 
         <div
           className={cn(
-            "w-10 h-px mx-auto rounded-full",
-            isDark ? "bg-[#222]" : "bg-gray-300"
+            "w-8 h-[2px] rounded-full mx-auto opacity-50",
+            isDark ? "bg-white/10" : "bg-black/5"
           )}
         />
 
@@ -199,29 +199,36 @@ export function WorkspaceSidebar() {
                     <div
                       onClick={() => setActiveWorkspace(workspace.id)}
                       className={cn(
-                        "w-10 h-10 rounded-xl flex items-center justify-center cursor-pointer transition-all duration-300 group relative border-2",
+                        "w-10 h-10 rounded-2xl flex items-center justify-center cursor-pointer transition-all duration-300 group relative",
                         activeWorkspaceId === workspace.id
-                          ? "border-white/20 scale-105 shadow-xl"
+                          ? "shadow-md scale-100 ring-2 ring-offset-2 ring-offset-background"
                           : isDark
-                          ? "border-transparent bg-[#1a1a1a] text-gray-400 hover:bg-[#252525] hover:text-gray-200 hover:scale-105 shadow-md"
-                          : "border-transparent bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-800 hover:scale-105 shadow-md"
+                          ? "text-muted-foreground hover:bg-white/10 hover:text-foreground"
+                          : "text-muted-foreground hover:bg-black/5 hover:text-foreground"
                       )}
                       style={
                         activeWorkspaceId === workspace.id
-                          ? {
+                          ? ({
                               backgroundColor: workspace.color,
-                              color: "white",
-                              textShadow: "0 1px 2px rgba(0,0,0,0.3)",
-                            }
+                              "--tw-ring-color": workspace.color,
+                            } as React.CSSProperties)
                           : {}
                       }
                     >
                       {/* Render Dynamic Icon */}
-                      {renderIcon(workspace.icon || "Folder")}
+                      <span
+                        className={cn(
+                          "transition-colors",
+                          activeWorkspaceId === workspace.id ? "text-white" : ""
+                        )}
+                      >
+                        {renderIcon(workspace.icon || "Folder")}
+                      </span>
 
-                      {activeWorkspaceId === workspace.id && (
-                        <div className="absolute -left-3 top-1/2 -translate-y-1/2 w-1 h-5 bg-white rounded-r-full" />
-                      )}
+                      {/* Active Indicator Dot (optional, if we want to be very minimal) */}
+                      {/* {activeWorkspaceId === workspace.id && (
+                         <div className="absolute -right-1 top-1/2 -translate-y-1/2 w-1 h-1 bg-white rounded-full" />
+                      )} */}
                     </div>
                   </TooltipTrigger>
                   <TooltipContent

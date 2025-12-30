@@ -22,12 +22,14 @@ export function ConnectionPage() {
   }
 
   return (
-    <div className="flex flex-col h-screen w-full bg-background-primary text-foreground overflow-hidden">
+    <div className="flex flex-col h-screen w-full bg-background/95 text-foreground overflow-hidden">
       <AppBar title="OxideStudio" />
-      <div className="flex flex-1 min-h-0">
+      <div className="flex flex-1 min-h-0 bg-background">
         <WorkspaceSidebar />
         <ConnectionSidebar />
-        <ConnectionForm />
+        <div className="flex-1 min-w-0 bg-background relative z-10">
+          <ConnectionForm />
+        </div>
       </div>
     </div>
   );
