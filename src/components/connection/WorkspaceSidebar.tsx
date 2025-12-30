@@ -146,8 +146,8 @@ export function WorkspaceSidebar() {
       className={cn(
         "w-[70px] flex flex-col items-center py-6 gap-4 z-20 h-full transition-colors",
         isDark
-          ? "bg-[#09090b]" // Zinc-950 for deep contrast
-          : "bg-[#f4f4f5]" // Zinc-100 for light mode
+          ? "bg-[#18181b] border-r border-white/5" // Unified Frame Color
+          : "bg-[#f4f4f5] border-r border-border" // Light mode can stay or be adjusted, keeping simple for now
       )}
     >
       <TooltipProvider delayDuration={0}>

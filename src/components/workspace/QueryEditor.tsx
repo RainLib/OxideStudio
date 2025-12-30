@@ -238,7 +238,7 @@ export function QueryEditor() {
   // Update Monaco theme when app theme changes
   useEffect(() => {
     if (!monaco) return;
-    monaco.editor.setTheme(mode === "light" ? "vs" : "vs-dark");
+    monaco.editor.setTheme(mode === "light" ? "vs" : "oxide-dark");
   }, [monaco, mode]);
 
   if (!activeTab) return null;
@@ -252,7 +252,22 @@ export function QueryEditor() {
           defaultLanguage="sql"
           value={activeTab.sql}
           onChange={(value) => updateTabSql(activeTab.id, value || "")}
-          onMount={(editor) => (editorRef.current = editor)}
+          onMount={(editor, monaco) => {
+            editorRef.current = editor;
+            // Force theme update on mount
+            monaco.editor.setTheme(mode === "light" ? "vs" : "vs-dark");
+          }}
+          beforeMount={(monaco) => {
+            // Optional: Define a custom theme that perfectly matches our app's background
+            monaco.editor.defineTheme("oxide-dark", {
+              base: "vs-dark",
+              inherit: true,
+              rules: [],
+              colors: {
+                "editor.background": "#09090b", // zinc-950
+              },
+            });
+          }}
           // Theme is updated via useEffect to ensure it responds to context
           options={{
             minimap: { enabled: false },

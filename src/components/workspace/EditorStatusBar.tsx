@@ -44,7 +44,7 @@ export function EditorStatusBar({
           <div className="flex items-center gap-3">
             <button
               onClick={onStructure}
-              className="font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors"
+              className="h-8 w-full border-t border-border/40 flex items-center justify-between px-3 select-none bg-transparent text-xs text-white/90 font-medium z-10 transition-colors"
             >
               Structure
             </button>
@@ -113,11 +113,11 @@ export function EditorStatusBar({
       ) : (
         <>
           {/* Editor Execution Info */}
-          <div className="flex items-center gap-2 text-muted-foreground">
+          <div className="flex items-center gap-2 text-inherit/80">
             <div
               className={cn(
                 "w-2 h-2 rounded-full",
-                executionTime ? "bg-green-500/50" : "bg-muted-foreground/30"
+                executionTime ? "bg-current" : "bg-current/30"
               )}
             />
             <span className="font-mono">
@@ -128,7 +128,7 @@ export function EditorStatusBar({
           <div className="h-3 w-px bg-border" />
 
           {/* Editor Row Count */}
-          <div className="flex items-center gap-2 text-muted-foreground">
+          <div className="flex items-center gap-2 text-inherit/80">
             <AlignJustify size={12} strokeWidth={2} />
             <span>
               {rowCount !== undefined ? `${rowCount} rows` : "0 rows"}
@@ -138,7 +138,7 @@ export function EditorStatusBar({
           <div className="flex-1" />
 
           {/* Editor Right Actions */}
-          <div className="flex items-center gap-3 text-muted-foreground/70">
+          <div className="flex items-center gap-3 text-inherit/60">
             <button className="flex items-center gap-1.5 hover:text-foreground transition-colors px-2 py-0.5 rounded hover:bg-muted/50">
               <Download size={12} />
               <span className="text-[10px] font-medium">CSV</span>

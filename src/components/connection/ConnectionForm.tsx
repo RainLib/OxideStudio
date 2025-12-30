@@ -46,8 +46,8 @@ export function ConnectionForm() {
 
   if (!selectedConnection) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center bg-background-primary text-muted-foreground gap-4">
-        <div className="w-20 h-20 rounded-2xl bg-background-tertiary border border-border flex items-center justify-center shadow-2xl">
+      <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground gap-4">
+        <div className="w-20 h-20 rounded-2xl bg-[#18181b] border border-white/5 flex items-center justify-center shadow-2xl">
           <Database size={32} className="opacity-20 text-foreground" />
         </div>
         <div className="text-center space-y-1">
@@ -356,7 +356,7 @@ export function ConnectionForm() {
         </div>
 
         {/* Footer Actions */}
-        <div className="sticky bottom-0 mt-10 py-4 bg-background/80 backdrop-blur-lg border-t border-border/40 flex items-center justify-between z-10 -mx-4 px-8 md:px-8 md:-mx-8 md:rounded-b-xl">
+        <div className="sticky bottom-0 mt-10 py-4 bg-[#09090b]/90 backdrop-blur-lg border-t border-white/5 flex items-center justify-between z-10 -mx-4 px-8 md:px-8 md:-mx-8 md:rounded-b-xl">
           <div className="flex items-center gap-4">
             <Button
               variant="ghost"

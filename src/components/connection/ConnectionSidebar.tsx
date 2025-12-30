@@ -36,7 +36,7 @@ export function ConnectionSidebar() {
   });
 
   return (
-    <div className="w-[300px] border-r border-border/40 bg-card/50 backdrop-blur-sm flex flex-col h-full z-10">
+    <div className="w-[300px] border-r border-white/5 bg-[#18181b] flex flex-col h-full z-10">
       {/* Header & Actions */}
       <div className="p-4 pb-2 flex flex-col gap-4">
         <div className="flex items-center justify-between">
@@ -151,7 +151,7 @@ export function ConnectionSidebar() {
         ))}
       </div>
 
-      <div className="p-3 border-t border-border/40 bg-secondary/20 flex items-center justify-between text-[10px] text-muted-foreground/60 backdrop-blur-md">
+      <div className="h-8 border-t border-white/5 bg-[#18181b] flex items-center justify-between px-3 text-[10px] text-muted-foreground/60">
         <span className="font-mono opacity-50">v0.1.0</span>
         <button
           onClick={() => setShowSettings(true)}

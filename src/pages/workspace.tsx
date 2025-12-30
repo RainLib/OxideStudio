@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
+import { useTheme } from "@/theme/useTheme";
 import { TabBar } from "@/components/workspace/TabBar";
 import { QueryEditor } from "@/components/workspace/QueryEditor";
 import { DataGrid } from "@/components/workspace/DataGrid";
@@ -23,7 +24,9 @@ import {
   Settings2,
 } from "lucide-react";
 
-export function Workspace() {
+export function WorkspacePage() {
+  const { mode } = useTheme();
+  // const { activeConnectionId } = useConnectionStore(); // Removed unused
   const { tabs, activeTabId, createTab } = useTabStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
@@ -204,7 +207,14 @@ export function Workspace() {
           </div>
 
           {/* Bottom: Unified EditorStatusBar */}
-          <div className="border-t border-border/40 bg-background/80 backdrop-blur-sm z-30">
+          <div
+            className={cn(
+              "h-8 w-full flex items-center border-t z-30 transition-colors duration-300",
+              mode === "dark"
+                ? "bg-orange-500/10 text-orange-500 border-orange-500/20"
+                : "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
+            )}
+          >
             <EditorStatusBar
               type={activeTab?.type === "table" ? "table" : "editor"}
               rowCount={currentResult?.rows?.length}

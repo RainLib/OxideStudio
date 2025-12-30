@@ -74,7 +74,7 @@ export function TabBar() {
   }, [activeTabId]);
 
   return (
-    <div className="flex items-center bg-background-tertiary h-9 w-full overflow-hidden border-b border-border-subtle">
+    <div className="flex items-center bg-[#18181b] h-10 w-full overflow-visible border-b border-white/5 pt-1">
       {/* Scrollable tabs container*/}
       <div
         ref={scrollContainerRef}
@@ -111,10 +111,10 @@ export function TabBar() {
                     }
                   }}
                   className={cn(
-                    "flex items-center gap-2 px-4 h-8 min-w-[120px] max-w-[200px] text-[11px] cursor-pointer select-none group border-t border-x border-transparent transition-all shrink-0",
+                    "flex items-center gap-2 px-4 h-9 min-w-[120px] max-w-[200px] text-[11px] cursor-pointer select-none group transition-all shrink-0 relative top-px",
                     activeTabId === tab.id
-                      ? "bg-background-tertiary text-foreground font-semibold border-border border-b-transparent rounded-t-sm"
-                      : "bg-background-secondary text-muted-foreground hover:bg-background-tertiary hover:text-foreground border-transparent"
+                      ? "bg-[#09090b] text-foreground font-semibold border-t border-x border-white/10 rounded-t-md z-10 shadow-sm relative -bottom-px"
+                      : "bg-transparent text-muted-foreground hover:bg-white/5 hover:text-foreground border-transparent opacity-70 hover:opacity-100"
                   )}
                   onClick={() => setActiveTab(tab.id)}
                   onContextMenu={(e) => {

@@ -8,6 +8,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useState } from "react";
+import { useTheme } from "@/theme/useTheme";
 
 interface SidebarStatusBarProps {
   isDrawerOpen: boolean;
@@ -17,6 +18,7 @@ export function SidebarStatusBar({ isDrawerOpen }: SidebarStatusBarProps) {
   const { activeConnectionId, connections, disconnect, setActiveConnection } =
     useConnectionStore();
   const [open, setOpen] = useState(false);
+  const { mode } = useTheme();
 
   const activeConnection = connections.find((c) => c.id === activeConnectionId);
 
@@ -25,7 +27,11 @@ export function SidebarStatusBar({ isDrawerOpen }: SidebarStatusBarProps) {
       <PopoverTrigger asChild>
         <div
           className={cn(
-            "h-[28px] px-2 bg-primary flex items-center gap-2 text-[11px] text-primary-foreground font-bold select-none shrink-0 shadow-[0_-1px_2px_rgba(0,0,0,0.1)] z-50 overflow-hidden cursor-pointer hover:bg-primary/90 transition-colors",
+            "h-8 px-2 flex items-center gap-2 text-[10px] font-bold select-none shrink-0 border-t z-50 overflow-hidden cursor-pointer transition-colors duration-300",
+            // Premium Aesthetic: Subtle background + Accent Text + Matching Border
+            mode === "dark"
+              ? "bg-orange-500/10 text-orange-500 border-orange-500/20 hover:bg-orange-500/20"
+              : "bg-emerald-500/10 text-emerald-600 border-emerald-500/20 hover:bg-emerald-500/20",
             isDrawerOpen ? "w-auto" : "w-[50px]"
           )}
         >

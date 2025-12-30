@@ -30,7 +30,11 @@ export function LeftPanel({
 
   return (
     <div
-      className="flex flex-col shrink-0 h-full transition-[width] duration-300 ease-in-out"
+      className={cn(
+        "flex flex-col shrink-0 h-full transition-[width] duration-300 ease-in-out",
+        // Unified background for the entire left panel (Frame)
+        "bg-[#18181b] border-r border-white/5"
+      )}
       style={{ width: `${totalWidth}px` }}
     >
       <SettingsDialog open={showSettings} onOpenChange={setShowSettings} />
@@ -38,7 +42,7 @@ export function LeftPanel({
       {/* Top section: ActivityBar + Sidebar content */}
       <div className="flex flex-1 min-h-0">
         {/* ActivityBar */}
-        <div className="w-[50px] flex flex-col items-center py-4 gap-4 bg-muted/20 border-r border-border/40 shrink-0 z-20 backdrop-blur-sm">
+        <div className="w-[50px] flex flex-col items-center py-4 gap-4 shrink-0 z-20 bg-transparent">
           {/* App Logo */}
           <div className="mb-2 shrink-0">
             <div className="h-8 w-8 bg-primary/10 rounded-xl flex items-center justify-center text-primary shadow-sm ring-1 ring-primary/20">
@@ -82,11 +86,11 @@ export function LeftPanel({
         {/* Sidebar Content */}
         {isDrawerOpen && (
           <div
-            className="border-r border-border/40 bg-card/50 relative shrink-0 flex flex-col overflow-hidden"
+            className="border-r border-white/5 relative shrink-0 flex flex-col overflow-hidden"
             style={{ width: `${sidebarWidth}px` }}
           >
             {/* Sidebar Content Area */}
-            <div className="flex-1 overflow-hidden flex flex-col min-h-0">
+            <div className="flex-1 h-full min-w-0 flex flex-col">
               {activeTab === "tables" && <SchemaSidebar />}
               {activeTab === "history" && <HistorySidebar />}
               {activeTab === "saved" && <SavedQueriesSidebar />}
