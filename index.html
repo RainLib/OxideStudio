@@ -24,42 +24,169 @@
     <div id="root">
         <!-- Static Loading State -->
         <style>
-            .app-loader {
-                position: absolute;
+            body,
+            html {
+                margin: 0;
+                padding: 0;
+                width: 100%;
+                height: 100%;
+                background-color: #09090b;
+                /* Zinc-950 */
+                font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                overflow: hidden;
+            }
+
+            #app-loader {
+                position: fixed;
                 top: 0;
                 left: 0;
                 width: 100%;
                 height: 100%;
-                background-color: #131313; /* match dark theme bg */
                 display: flex;
                 flex-direction: column;
                 align-items: center;
                 justify-content: center;
+                background-color: #09090b;
                 z-index: 9999;
-                transition: opacity 0.3s ease-out;
+                transition: opacity 0.5s ease-out;
             }
-            .loader-spinner {
-                width: 40px;
-                height: 40px;
-                border: 3px solid rgba(255, 255, 255, 0.1);
-                border-radius: 50%;
-                border-top-color: #ffffff;
-                animation: spin 1s ease-in-out infinite;
-                margin-bottom: 20px;
+
+            .loader-content {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 24px;
+                position: relative;
             }
-            @keyframes spin {
-                to { transform: rotate(360deg); }
+
+            /* Premium Hexagon Logo Animation */
+            .logo-container {
+                position: relative;
+                width: 64px;
+                height: 64px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
             }
+
+            .logo-hex {
+                position: absolute;
+                width: 100%;
+                height: 100%;
+                border-radius: 16px;
+                border: 2px solid rgba(255, 255, 255, 0.1);
+                transform: rotate(45deg);
+                animation: breath 3s infinite ease-in-out;
+            }
+
+            .logo-hex::after {
+                content: '';
+                position: absolute;
+                inset: 4px;
+                border-radius: 12px;
+                border: 2px solid #ea580c;
+                /* Orange-600 */
+                opacity: 0.8;
+            }
+
+            .logo-inner {
+                width: 24px;
+                height: 24px;
+                background-color: #ea580c;
+                border-radius: 6px;
+                transform: rotate(45deg);
+                box-shadow: 0 0 20px rgba(234, 88, 12, 0.4);
+                animation: inner-pulse 2s infinite ease-in-out;
+            }
+
             .loader-text {
-                font-family: system-ui, -apple-system, sans-serif;
-                color: #888;
                 font-size: 14px;
-                letter-spacing: 1px;
+                font-weight: 500;
+                letter-spacing: 0.2em;
+                color: rgba(255, 255, 255, 0.8);
+                text-transform: uppercase;
+                animation: fade-in-up 0.8s ease-out;
+            }
+
+            .loader-bar-bg {
+                width: 140px;
+                height: 2px;
+                background-color: rgba(255, 255, 255, 0.1);
+                border-radius: 4px;
+                overflow: hidden;
+                margin-top: 8px;
+            }
+
+            .loader-bar-fill {
+                width: 50%;
+                height: 100%;
+                background-color: #ea580c;
+                border-radius: 4px;
+                animation: shimmer 1.5s infinite linear;
+                transform-origin: left;
+            }
+
+            @keyframes breath {
+
+                0%,
+                100% {
+                    transform: rotate(45deg) scale(1);
+                    border-color: rgba(255, 255, 255, 0.1);
+                }
+
+                50% {
+                    transform: rotate(45deg) scale(1.05);
+                    border-color: rgba(255, 255, 255, 0.2);
+                }
+            }
+
+            @keyframes inner-pulse {
+
+                0%,
+                100% {
+                    transform: rotate(45deg) scale(1);
+                    opacity: 1;
+                }
+
+                50% {
+                    transform: rotate(45deg) scale(0.85);
+                    opacity: 0.8;
+                }
+            }
+
+            @keyframes shimmer {
+                0% {
+                    transform: translateX(-100%);
+                }
+
+                100% {
+                    transform: translateX(200%);
+                }
+            }
+
+            @keyframes fade-in-up {
+                from {
+                    opacity: 0;
+                    transform: translateY(10px);
+                }
+
+                to {
+                    opacity: 1;
+                    transform: translateY(0);
+                }
             }
         </style>
         <div id="app-loader">
-            <div class="loader-spinner"></div>
-            <div class="loader-text">OXIDE STUDIO</div>
+            <div class="loader-content">
+                <div class="logo-container">
+                    <div class="logo-hex"></div>
+                    <div class="logo-inner"></div>
+                </div>
+                <div class="loader-text">OXIDE STUDIO</div>
+                <div class="loader-bar-bg">
+                    <div class="loader-bar-fill"></div>
+                </div>
+            </div>
         </div>
     </div>
     <script type="module" src="/src/main.tsx"></script>

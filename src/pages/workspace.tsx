@@ -151,30 +151,14 @@ export function WorkspacePage() {
                     <TableDataView />
                   ) : (
                     <div className="flex flex-col h-full min-h-0 relative">
-                      <ResizablePanelGroup
-                        direction="vertical"
-                        className="!flex-col flex-1"
-                        style={{ flexDirection: "column" }}
-                      >
-                        <ResizablePanel
-                          defaultSize={50}
-                          minSize={20}
-                          className="flex flex-col"
-                        >
-                          <QueryEditor />
-                        </ResizablePanel>
-                        <ResizableHandle
-                          withHandle
-                          className="h-1 lg:h-1. bg-border/40 hover:bg-primary/50 transition-colors z-50 cursor-row-resize interact-none"
-                        />
-                        <ResizablePanel
-                          defaultSize={50}
-                          minSize={20}
-                          className="flex flex-col bg-muted/5"
-                        >
-                          {currentResult ? <DataGrid /> : <QueryShortcuts />}
-                        </ResizablePanel>
-                      </ResizablePanelGroup>
+                      {/* Top: Editor */}
+                      <div className="h-1/2 min-h-0 border-b border-border/40 flex flex-col">
+                        <QueryEditor />
+                      </div>
+                      {/* Bottom: Results or Shortcuts */}
+                      <div className="h-1/2 min-h-0 flex flex-col bg-muted/5 z-0">
+                        {currentResult ? <DataGrid /> : <QueryShortcuts />}
+                      </div>
                     </div>
                   )}
                 </div>

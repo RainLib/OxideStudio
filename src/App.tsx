@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { ThemeProvider } from "@/theme";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { ConnectionPage } from "@/pages/connection";
-import { Workspace } from "@/pages/workspace";
+import { WorkspacePage } from "@/pages/workspace";
 import { Loader2 } from "lucide-react";
 
 function App() {
@@ -23,7 +23,7 @@ function App() {
   return (
     <ThemeProvider>
       <div className="bg-background text-foreground h-screen w-screen overflow-hidden">
-        {isConnected ? <Workspace /> : <ConnectionPage />}
+        {isConnected ? <WorkspacePage /> : <ConnectionPage />}
       </div>
     </ThemeProvider>
   );
