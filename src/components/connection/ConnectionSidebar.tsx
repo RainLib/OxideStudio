@@ -85,11 +85,11 @@ export function ConnectionSidebar() {
               "flex items-center gap-3 p-3 rounded-md cursor-pointer group transition-all border border-transparent",
               // Selected state
               selectedConnection?.id === conn.id
-                ? "bg-accent border-primary/50 shadow-sm" // Subtle orange-ish border for selected
-                : "hover:bg-accent/50 hover:border-border",
+                ? "bg-secondary border-primary/50 shadow-sm"
+                : "hover:bg-secondary/50 hover:border-border",
               // Active (Connected) state
               activeConnectionId === conn.id &&
-                "border-l-4 border-l-green-500 pl-2 bg-accent/50"
+                "border-l-4 border-l-green-500 pl-2 bg-secondary/50"
             )}
             onClick={() => selectConnection(conn.id)}
           >
@@ -98,9 +98,10 @@ export function ConnectionSidebar() {
               className={cn(
                 "w-8 h-8 rounded flex items-center justify-center shrink-0 transition-colors",
                 conn.driver === "postgres"
-                  ? "bg-blue-500/10 text-blue-500"
-                  : "bg-orange-500/10 text-orange-500",
-                selectedConnection?.id === conn.id && "bg-card"
+                  ? "bg-muted text-muted-foreground"
+                  : "bg-muted text-muted-foreground",
+                selectedConnection?.id === conn.id &&
+                  "bg-primary/10 text-primary"
               )}
             >
               {conn.driver === "postgres" ? (

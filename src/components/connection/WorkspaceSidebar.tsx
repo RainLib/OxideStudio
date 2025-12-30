@@ -1,5 +1,6 @@
 import { useWorkspaceStore } from "@/store/useWorkspaceStore";
 import { cn } from "@/lib/utils";
+import { useTheme } from "@/theme";
 import {
   Plus,
   LayoutGrid,
@@ -70,6 +71,9 @@ export function WorkspaceSidebar() {
     deleteWorkspace,
   } = useWorkspaceStore();
 
+  const { mode } = useTheme();
+  const isDark = mode === "dark";
+
   // Dialog States
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -138,7 +142,12 @@ export function WorkspaceSidebar() {
   };
 
   return (
-    <div className="w-[72px] bg-[#0c0c0c] border-r border-[#222] flex flex-col items-center py-6 gap-3 z-20 shadow-2xl h-full">
+    <div
+      className={cn(
+        "w-[72px] border-r flex flex-col items-center py-6 gap-3 z-20 shadow-2xl h-full",
+        isDark ? "bg-[#0c0c0c] border-[#222]" : "bg-gray-50 border-gray-200"
+      )}
+    >
       <TooltipProvider delayDuration={0}>
         {/* ALL CONNECTIONS (Default) */}
         <Tooltip>
@@ -148,8 +157,10 @@ export function WorkspaceSidebar() {
               className={cn(
                 "w-10 h-10 rounded-xl flex items-center justify-center cursor-pointer transition-all duration-300 group relative mb-2",
                 activeWorkspaceId === null
-                  ? "bg-gradient-to-br from-[#f39c12] to-[#d35400] text-white shadow-lg shadow-orange-900/40 scale-105"
-                  : "bg-[#1a1a1a] text-gray-500 hover:bg-[#252525] hover:text-gray-200 hover:scale-105"
+                  ? "bg-linear-to-br from-[#f39c12] to-[#d35400] text-white shadow-lg shadow-orange-900/40 scale-105"
+                  : isDark
+                  ? "bg-[#1a1a1a] text-gray-500 hover:bg-[#252525] hover:text-gray-200 hover:scale-105"
+                  : "bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-800 hover:scale-105"
               )}
             >
               <LayoutGrid size={20} strokeWidth={1.5} />
@@ -160,13 +171,23 @@ export function WorkspaceSidebar() {
           </TooltipTrigger>
           <TooltipContent
             side="right"
-            className="bg-[#1a1a1a] border-[#333] font-medium ml-2 text-white"
+            className={cn(
+              "font-medium ml-2",
+              isDark
+                ? "bg-[#1a1a1a] border-[#333] text-white"
+                : "bg-white border-gray-200 text-gray-900"
+            )}
           >
             <p>All Connections</p>
           </TooltipContent>
         </Tooltip>
 
-        <div className="w-10 h-px bg-[#222] mx-auto rounded-full" />
+        <div
+          className={cn(
+            "w-10 h-px mx-auto rounded-full",
+            isDark ? "bg-[#222]" : "bg-gray-300"
+          )}
+        />
 
         {/* WORKSPACES LIST */}
         <div className="flex-1 w-full flex flex-col items-center gap-3 overflow-y-auto px-2 custom-scrollbar no-scrollbar">
@@ -181,7 +202,9 @@ export function WorkspaceSidebar() {
                         "w-10 h-10 rounded-xl flex items-center justify-center cursor-pointer transition-all duration-300 group relative border-2",
                         activeWorkspaceId === workspace.id
                           ? "border-white/20 scale-105 shadow-xl"
-                          : "border-transparent bg-[#1a1a1a] text-gray-400 hover:bg-[#252525] hover:text-gray-200 hover:scale-105 shadow-md"
+                          : isDark
+                          ? "border-transparent bg-[#1a1a1a] text-gray-400 hover:bg-[#252525] hover:text-gray-200 hover:scale-105 shadow-md"
+                          : "border-transparent bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-800 hover:scale-105 shadow-md"
                       )}
                       style={
                         activeWorkspaceId === workspace.id
@@ -203,7 +226,12 @@ export function WorkspaceSidebar() {
                   </TooltipTrigger>
                   <TooltipContent
                     side="right"
-                    className="bg-[#1a1a1a] border-[#333] ml-2 flex flex-col gap-1 min-w-[150px] p-3 shadow-xl"
+                    className={cn(
+                      "ml-2 flex flex-col gap-1 min-w-[150px] p-3 shadow-xl",
+                      isDark
+                        ? "bg-[#1a1a1a] border-[#333]"
+                        : "bg-white border-gray-200"
+                    )}
                   >
                     <div className="flex items-center gap-2">
                       <div
@@ -213,16 +241,33 @@ export function WorkspaceSidebar() {
                           backgroundColor: workspace.color,
                         }}
                       />
-                      <p className="font-bold text-white text-sm">
+                      <p
+                        className={cn(
+                          "font-bold text-sm",
+                          isDark ? "text-white" : "text-gray-900"
+                        )}
+                      >
                         {workspace.name}
                       </p>
                     </div>
                     {workspace.description && (
-                      <p className="text-xs text-gray-400 leading-relaxed border-t border-[#333] pt-2 mt-1">
+                      <p
+                        className={cn(
+                          "text-xs leading-relaxed border-t pt-2 mt-1",
+                          isDark
+                            ? "text-gray-400 border-[#333]"
+                            : "text-gray-600 border-gray-200"
+                        )}
+                      >
                         {workspace.description}
                       </p>
                     )}
-                    <div className="text-[10px] text-gray-600 mt-2 italic flex items-center gap-1">
+                    <div
+                      className={cn(
+                        "text-[10px] mt-2 italic flex items-center gap-1",
+                        isDark ? "text-gray-600" : "text-gray-500"
+                      )}
+                    >
                       Right-click to edit
                     </div>
                   </TooltipContent>
@@ -230,9 +275,21 @@ export function WorkspaceSidebar() {
               </ContextMenuTrigger>
 
               {/* RIGHT CLICK MENU */}
-              <ContextMenuContent className="w-48 bg-[#1a1a1a] border-[#333] text-gray-200 shadow-2xl">
+              <ContextMenuContent
+                className={cn(
+                  "w-48 shadow-2xl",
+                  isDark
+                    ? "bg-[#1a1a1a] border-[#333] text-gray-200"
+                    : "bg-white border-gray-200 text-gray-900"
+                )}
+              >
                 <ContextMenuItem
-                  className="focus:bg-[#252525] focus:text-white cursor-pointer"
+                  className={cn(
+                    "cursor-pointer",
+                    isDark
+                      ? "focus:bg-[#252525] focus:text-white"
+                      : "focus:bg-gray-100 focus:text-gray-900"
+                  )}
                   onSelect={() =>
                     startRename(
                       workspace.id,
@@ -245,14 +302,33 @@ export function WorkspaceSidebar() {
                 </ContextMenuItem>
 
                 <ContextMenuSub>
-                  <ContextMenuSubTrigger className="focus:bg-[#252525] focus:text-white cursor-pointer">
+                  <ContextMenuSubTrigger
+                    className={cn(
+                      "cursor-pointer",
+                      isDark
+                        ? "focus:bg-[#252525] focus:text-white"
+                        : "focus:bg-gray-100 focus:text-gray-900"
+                    )}
+                  >
                     <Palette size={14} className="mr-2" /> Change Color
                   </ContextMenuSubTrigger>
-                  <ContextMenuSubContent className="w-36 bg-[#1a1a1a] border-[#333] p-1 grid grid-cols-4 gap-1">
+                  <ContextMenuSubContent
+                    className={cn(
+                      "w-36 p-1 grid grid-cols-4 gap-1",
+                      isDark
+                        ? "bg-[#1a1a1a] border-[#333]"
+                        : "bg-white border-gray-200"
+                    )}
+                  >
                     {COLORS.map((color) => (
                       <ContextMenuItem
                         key={color}
-                        className="w-6 h-6 rounded cursor-pointer transition-transform border border-transparent focus:scale-110 focus:border-white p-0 data-[highlighted]:scale-110 data-[highlighted]:border-white"
+                        className={cn(
+                          "w-6 h-6 rounded cursor-pointer transition-transform border border-transparent focus:scale-110 p-0 data-highlighted:scale-110",
+                          isDark
+                            ? "focus:border-white data-highlighted:border-white"
+                            : "focus:border-gray-900 data-highlighted:border-gray-900"
+                        )}
                         style={{ backgroundColor: color }}
                         onSelect={() =>
                           updateWorkspace(workspace.id, { color })
@@ -270,14 +346,33 @@ export function WorkspaceSidebar() {
 
                 {/* Icon Change Submenu */}
                 <ContextMenuSub>
-                  <ContextMenuSubTrigger className="focus:bg-[#252525] focus:text-white cursor-pointer">
+                  <ContextMenuSubTrigger
+                    className={cn(
+                      "cursor-pointer",
+                      isDark
+                        ? "focus:bg-[#252525] focus:text-white"
+                        : "focus:bg-gray-100 focus:text-gray-900"
+                    )}
+                  >
                     <Briefcase size={14} className="mr-2" /> Change Icon
                   </ContextMenuSubTrigger>
-                  <ContextMenuSubContent className="w-40 bg-[#1a1a1a] border-[#333] p-1 grid grid-cols-4 gap-1">
+                  <ContextMenuSubContent
+                    className={cn(
+                      "w-40 p-1 grid grid-cols-4 gap-1",
+                      isDark
+                        ? "bg-[#1a1a1a] border-[#333]"
+                        : "bg-white border-gray-200"
+                    )}
+                  >
                     {ICONS.map((icon) => (
                       <ContextMenuItem
                         key={icon}
-                        className="w-8 h-8 rounded cursor-pointer flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#252525] focus:bg-[#252525] focus:text-white transition-colors"
+                        className={cn(
+                          "w-8 h-8 rounded cursor-pointer flex items-center justify-center transition-colors",
+                          isDark
+                            ? "text-gray-400 hover:text-white hover:bg-[#252525] focus:bg-[#252525] focus:text-white"
+                            : "text-gray-600 hover:text-gray-900 hover:bg-gray-100 focus:bg-gray-100 focus:text-gray-900"
+                        )}
                         onSelect={() => updateWorkspace(workspace.id, { icon })}
                       >
                         {renderIcon(icon, 16)}
@@ -286,7 +381,9 @@ export function WorkspaceSidebar() {
                   </ContextMenuSubContent>
                 </ContextMenuSub>
 
-                <ContextMenuSeparator className="bg-[#333]" />
+                <ContextMenuSeparator
+                  className={isDark ? "bg-[#333]" : "bg-gray-200"}
+                />
 
                 <ContextMenuItem
                   className="text-red-500 focus:bg-red-500/10 focus:text-red-400 cursor-pointer"
@@ -313,14 +410,24 @@ export function WorkspaceSidebar() {
                   setSelectedIcon("Briefcase");
                   setCreateDialogOpen(true);
                 }}
-                className="w-10 h-10 rounded-xl border-2 border-dashed border-[#333] text-[#444] flex items-center justify-center cursor-pointer hover:border-[#f39c12] hover:text-[#f39c12] hover:bg-[#f39c12]/10 transition-all duration-300 mt-2 hover:scale-105"
+                className={cn(
+                  "w-10 h-10 rounded-xl border-2 border-dashed flex items-center justify-center cursor-pointer hover:border-[#f39c12] hover:text-[#f39c12] hover:bg-[#f39c12]/10 transition-all duration-300 mt-2 hover:scale-105",
+                  isDark
+                    ? "border-[#333] text-[#444]"
+                    : "border-gray-300 text-gray-400"
+                )}
               >
                 <Plus size={20} strokeWidth={1.5} />
               </div>
             </TooltipTrigger>
             <TooltipContent
               side="right"
-              className="bg-[#1a1a1a] border-[#333] font-medium ml-2 text-white"
+              className={cn(
+                "font-medium ml-2",
+                isDark
+                  ? "bg-[#1a1a1a] border-[#333] text-white"
+                  : "bg-white border-gray-200 text-gray-900"
+              )}
             >
               Create Workspace
             </TooltipContent>
@@ -329,7 +436,14 @@ export function WorkspaceSidebar() {
 
         {/* CREATE DIALOG */}
         <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
-          <DialogContent className="bg-[#1e1e1e] border-[#333] text-gray-200 sm:max-w-md">
+          <DialogContent
+            className={cn(
+              "sm:max-w-md",
+              isDark
+                ? "bg-[#1e1e1e] border-[#333] text-gray-200"
+                : "bg-white border-gray-200 text-gray-900"
+            )}
+          >
             <DialogHeader>
               <DialogTitle>Create Workspace</DialogTitle>
             </DialogHeader>
@@ -342,7 +456,12 @@ export function WorkspaceSidebar() {
                   placeholder="e.g. Production"
                   value={workspaceName}
                   onChange={(e) => setWorkspaceName(e.target.value)}
-                  className="bg-[#252525] border-[#444] text-white focus-visible:ring-[#f39c12]"
+                  className={cn(
+                    "focus-visible:ring-[#f39c12]",
+                    isDark
+                      ? "bg-[#252525] border-[#444] text-white"
+                      : "bg-white border-gray-300 text-gray-900"
+                  )}
                   autoFocus
                 />
               </div>
@@ -355,7 +474,12 @@ export function WorkspaceSidebar() {
                   placeholder="Briefly describe this workspace..."
                   value={workspaceDescription}
                   onChange={(e) => setWorkspaceDescription(e.target.value)} // Using Input as lighter textarea replacement for now
-                  className="bg-[#252525] border-[#444] text-white focus-visible:ring-[#f39c12]"
+                  className={cn(
+                    "focus-visible:ring-[#f39c12]",
+                    isDark
+                      ? "bg-[#252525] border-[#444] text-white"
+                      : "bg-white border-gray-300 text-gray-900"
+                  )}
                 />
               </div>
 
@@ -363,16 +487,25 @@ export function WorkspaceSidebar() {
                 <label className="text-xs font-bold text-gray-500 uppercase">
                   Icon
                 </label>
-                <div className="flex flex-wrap gap-2 bg-[#252525] p-3 rounded-lg border border-[#444]">
+                <div
+                  className={cn(
+                    "flex flex-wrap gap-2 p-3 rounded-lg border",
+                    isDark
+                      ? "bg-[#252525] border-[#444]"
+                      : "bg-gray-50 border-gray-300"
+                  )}
+                >
                   {ICONS.map((icon) => (
                     <div
                       key={icon}
                       onClick={() => setSelectedIcon(icon)}
                       className={cn(
-                        "w-9 h-9 rounded-md flex items-center justify-center cursor-pointer transition-all hover:bg-[#333]",
+                        "w-9 h-9 rounded-md flex items-center justify-center cursor-pointer transition-all",
                         selectedIcon === icon
                           ? "bg-[#f39c12] text-white shadow-lg scale-110"
-                          : "text-gray-400"
+                          : isDark
+                          ? "text-gray-400 hover:bg-[#333]"
+                          : "text-gray-600 hover:bg-gray-200"
                       )}
                     >
                       {renderIcon(icon, 18)}
@@ -385,7 +518,11 @@ export function WorkspaceSidebar() {
               <Button
                 variant="ghost"
                 onClick={() => setCreateDialogOpen(false)}
-                className="hover:bg-[#333] text-gray-400"
+                className={
+                  isDark
+                    ? "hover:bg-[#333] text-gray-400"
+                    : "hover:bg-gray-100 text-gray-600"
+                }
               >
                 Cancel
               </Button>
@@ -401,7 +538,14 @@ export function WorkspaceSidebar() {
 
         {/* RENAME/EDIT DIALOG */}
         <Dialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen}>
-          <DialogContent className="bg-[#1e1e1e] border-[#333] text-gray-200 sm:max-w-sm">
+          <DialogContent
+            className={cn(
+              "sm:max-w-sm",
+              isDark
+                ? "bg-[#1e1e1e] border-[#333] text-gray-200"
+                : "bg-white border-gray-200 text-gray-900"
+            )}
+          >
             <DialogHeader>
               <DialogTitle>Edit Workspace</DialogTitle>
             </DialogHeader>
@@ -414,7 +558,12 @@ export function WorkspaceSidebar() {
                   placeholder="e.g. Production"
                   value={workspaceName}
                   onChange={(e) => setWorkspaceName(e.target.value)}
-                  className="bg-[#252525] border-[#444] text-white focus-visible:ring-[#f39c12]"
+                  className={cn(
+                    "focus-visible:ring-[#f39c12]",
+                    isDark
+                      ? "bg-[#252525] border-[#444] text-white"
+                      : "bg-white border-gray-300 text-gray-900"
+                  )}
                 />
               </div>
 
@@ -426,7 +575,12 @@ export function WorkspaceSidebar() {
                   placeholder="Briefly describe this workspace..."
                   value={workspaceDescription}
                   onChange={(e) => setWorkspaceDescription(e.target.value)}
-                  className="bg-[#252525] border-[#444] text-white focus-visible:ring-[#f39c12]"
+                  className={cn(
+                    "focus-visible:ring-[#f39c12]",
+                    isDark
+                      ? "bg-[#252525] border-[#444] text-white"
+                      : "bg-white border-gray-300 text-gray-900"
+                  )}
                 />
               </div>
             </div>
@@ -434,7 +588,11 @@ export function WorkspaceSidebar() {
               <Button
                 variant="ghost"
                 onClick={() => setRenameDialogOpen(false)}
-                className="hover:bg-[#333] text-gray-400"
+                className={
+                  isDark
+                    ? "hover:bg-[#333] text-gray-400"
+                    : "hover:bg-gray-100 text-gray-600"
+                }
               >
                 Cancel
               </Button>

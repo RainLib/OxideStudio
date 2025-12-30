@@ -100,8 +100,10 @@ function ThemeCard({
     <div
       onClick={onClick}
       className={cn(
-        "cursor-pointer rounded-lg border-2 border-muted bg-popover p-4 hover:bg-accent hover:text-accent-foreground flex flex-col items-center justify-center transition-all",
-        active && "border-primary bg-accent"
+        "cursor-pointer rounded-lg border-2 bg-popover p-4 hover:bg-accent transition-all flex flex-col items-center justify-center",
+        active
+          ? "border-primary bg-accent text-foreground"
+          : "border-muted text-muted-foreground hover:text-foreground"
       )}
     >
       {icon}
