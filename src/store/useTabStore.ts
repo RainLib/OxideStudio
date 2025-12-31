@@ -5,13 +5,14 @@ import { useHistoryStore } from "./useHistoryStore";
 import { useSchemaStore } from "./useSchemaStore";
 import type { FilterOperator } from "@/components/workspace/GridFilterRow";
 
-export type TabType = "query" | "table";
+export type TabType = "query" | "table" | "create_table";
 
 export interface TabData {
   id: string;
   title: string;
   type: TabType;
   sql: string;
+  connectionId?: string;
   tableName?: string;
   schemaName?: string;
   filters?: any[];
@@ -56,6 +57,8 @@ interface TabState {
     schemaName: string,
     tableName: string
   ) => string;
+  createTableTab: (connectionId: string, schemaName: string) => string;
+  updateTabTitle: (id: string, title: string) => void;
   closeTab: (id: string) => void;
   forceCloseTab: (id: string) => void;
   closeOtherTabs: (id: string) => void;
@@ -161,6 +164,35 @@ export const useTabStore = create<TabState>((set, get) => ({
       tableName,
       schemaName,
     });
+  },
+
+  createTableTab: (connectionId: string, schemaName: string) => {
+    const newTab: TabData = {
+      id: uuidv4(),
+      title: "New Table",
+      type: "create_table",
+      sql: "",
+      connectionId,
+      schemaName,
+      tableName: undefined,
+      results: null,
+      isExecuting: false,
+      error: null,
+      isPinned: false,
+      targetSchema: schemaName,
+    };
+
+    set((state) => ({
+      tabs: [...state.tabs, newTab],
+      activeTabId: newTab.id,
+    }));
+    return newTab.id;
+  },
+
+  updateTabTitle: (id: string, title: string) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) => (t.id === id ? { ...t, title } : t)),
+    }));
   },
 
   closeTab: (id: string) => {

@@ -1,8 +1,10 @@
 import { cn } from "@/lib/utils";
-import { Database, Table, Search } from "lucide-react";
+import { Database, Table, Search, RefreshCw, Plus } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useTabStore } from "@/store/useTabStore";
+import { CreateDatabaseDialog } from "./CreateDatabaseDialog";
 import { useEffect, useState } from "react";
 import {
   Select,
@@ -30,6 +32,7 @@ export function SchemaSidebar() {
   const [databaseFilter, setDatabaseFilter] = useState("");
   const [isSelectOpen, setIsSelectOpen] = useState(false);
   const [focusedIndex, setFocusedIndex] = useState(0);
+  const [isCreateDbDialogOpen, setIsCreateDbDialogOpen] = useState(false);
 
   useEffect(() => {
     if (activeConnectionId) {
@@ -123,7 +126,8 @@ export function SchemaSidebar() {
     setFilterText,
   ]);
 
-  const { findOrCreateTableTab, runTabQuery, updateTabSql } = useTabStore();
+  const { findOrCreateTableTab, runTabQuery, updateTabSql, createTableTab } =
+    useTabStore();
   const { connections } = useConnectionStore();
 
   const handleTableClick = (tableName: string) => {
@@ -172,6 +176,33 @@ export function SchemaSidebar() {
     );
   };
 
+  const handleTableContextMenu = (e: React.MouseEvent, tableName: string) => {
+    e.preventDefault();
+    // TODO: Implement context menu for tables (Rename, Delete, etc.)
+    console.log("Context menu for:", tableName);
+  };
+
+  const handleCreateTable = () => {
+    if (activeConnectionId && currentSchema) {
+      createTableTab(activeConnectionId, currentSchema);
+    }
+  };
+
+  const handleCreateDatabase = () => {
+    setIsCreateDbDialogOpen(true);
+  };
+
+  const handleRefresh = async () => {
+    if (activeConnectionId) {
+      // Force refresh schemas
+      await loadSchemas(activeConnectionId, true);
+      // If currentSchema is selected, force refresh tables too
+      if (currentSchema) {
+        await loadTables(activeConnectionId, currentSchema);
+      }
+    }
+  };
+
   return (
     <div className="flex flex-col h-full bg-background-tertiary">
       {/* Top: Database Selector */}
@@ -183,97 +214,132 @@ export function SchemaSidebar() {
           </span>
         </div>
 
-        <Select
-          value={currentSchema || ""}
-          onValueChange={(value: string) => {
-            setCurrentSchema(value);
-            setFilterText(""); // Clear table filter when switching database
-            setIsSelectOpen(false);
-          }}
-          open={isSelectOpen}
-          onOpenChange={setIsSelectOpen}
-        >
-          <SelectTrigger className="w-full h-7 text-[11px] bg-background-tertiary border-border focus:border-primary text-foreground">
-            <SelectValue placeholder="Select database..." />
-          </SelectTrigger>
-          <SelectContent className="bg-background-elevated border-border text-foreground">
-            {/* Filter indicator at top-right (no input box) */}
-            {databaseFilter && (
-              <div className="sticky top-0 z-10 bg-background-elevated px-2 py-1.5 border-b border-border flex items-center justify-between">
-                <span className="text-[10px] text-muted-foreground italic">
-                  Type to filter...
-                </span>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] px-2 py-0.5 rounded bg-background-tertiary text-primary font-mono border border-border">
-                    {databaseFilter}
+        <div className="flex items-center gap-2">
+          <Select
+            value={currentSchema || ""}
+            onValueChange={(value: string) => {
+              setCurrentSchema(value);
+              setFilterText(""); // Clear table filter when switching database
+              setIsSelectOpen(false);
+            }}
+            open={isSelectOpen}
+            onOpenChange={setIsSelectOpen}
+          >
+            <SelectTrigger className="w-full h-7 text-[11px] bg-background-tertiary border-border focus:border-primary text-foreground flex-1">
+              <SelectValue placeholder="Select database..." />
+            </SelectTrigger>
+            <SelectContent className="bg-background-elevated border-border text-foreground">
+              {/* Filter indicator at top-right (no input box) */}
+              {databaseFilter && (
+                <div className="sticky top-0 z-10 bg-background-elevated px-2 py-1.5 border-b border-border flex items-center justify-between">
+                  <span className="text-[10px] text-muted-foreground italic">
+                    Type to filter...
                   </span>
-                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-primary/20 text-primary border border-primary/30">
-                    {filteredSchemas.length}/{schemas.length}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-background-tertiary text-primary font-mono border border-border">
+                      {databaseFilter}
+                    </span>
+                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-primary/20 text-primary border border-primary/30">
+                      {filteredSchemas.length}/{schemas.length}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            )}
-
-            {/* Database list */}
-            <div className="max-h-[300px] overflow-auto">
-              {isLoading && schemas.length === 0 ? (
-                <div className="px-2 py-1.5 text-[11px] text-gray-500 italic">
-                  Loading...
-                </div>
-              ) : filteredSchemas.length === 0 ? (
-                <div className="px-2 py-1.5 text-[11px] text-gray-500 italic">
-                  {databaseFilter ? (
-                    <>
-                      No match for{" "}
-                      <span className="text-primary font-mono">
-                        "{databaseFilter}"
-                      </span>
-                      <div className="text-[9px] mt-1 opacity-60">
-                        Press Esc to clear
-                      </div>
-                    </>
-                  ) : (
-                    "No databases found"
-                  )}
-                </div>
-              ) : (
-                filteredSchemas.map((schema, index) => (
-                  <SelectItem
-                    key={schema}
-                    value={schema}
-                    className={cn(
-                      "text-[11px] focus:bg-background-tertiary focus:text-foreground",
-                      index === focusedIndex &&
-                        "bg-background-tertiary text-foreground"
-                    )}
-                  >
-                    <div className="flex items-center gap-2">
-                      <Database size={12} className="text-gray-500" />
-                      {highlightMatch(schema, databaseFilter)}
-                    </div>
-                  </SelectItem>
-                ))
               )}
-            </div>
-          </SelectContent>
-        </Select>
+
+              {/* Database list */}
+              <div className="max-h-[300px] overflow-auto">
+                {isLoading && schemas.length === 0 ? (
+                  <div className="px-2 py-1.5 text-[11px] text-gray-500 italic">
+                    Loading...
+                  </div>
+                ) : filteredSchemas.length === 0 ? (
+                  <div className="px-2 py-1.5 text-[11px] text-gray-500 italic">
+                    {databaseFilter ? (
+                      <>
+                        No match for{" "}
+                        <span className="text-primary font-mono">
+                          "{databaseFilter}"
+                        </span>
+                        <div className="text-[9px] mt-1 opacity-60">
+                          Press Esc to clear
+                        </div>
+                      </>
+                    ) : (
+                      "No databases found"
+                    )}
+                  </div>
+                ) : (
+                  filteredSchemas.map((schema, index) => (
+                    <SelectItem
+                      key={schema}
+                      value={schema}
+                      className={cn(
+                        "text-[11px] focus:bg-background-tertiary focus:text-foreground",
+                        index === focusedIndex &&
+                          "bg-background-tertiary text-foreground"
+                      )}
+                    >
+                      <div className="flex items-center gap-2">
+                        <Database size={12} className="text-gray-500" />
+                        {highlightMatch(schema, databaseFilter)}
+                      </div>
+                    </SelectItem>
+                  ))
+                )}
+              </div>
+            </SelectContent>
+          </Select>
+
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground hover:bg-[#27272a] rounded-sm"
+            onClick={handleRefresh}
+            title="Refresh Schemas & Tables"
+            disabled={isLoading}
+          >
+            <RefreshCw size={12} className={cn(isLoading && "animate-spin")} />
+          </Button>
+
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground hover:bg-[#27272a] rounded-sm"
+            onClick={handleCreateDatabase}
+            title="Create New Database"
+          >
+            <Plus size={12} />
+          </Button>
+        </div>
       </div>
 
       {/* Middle: Filter Input for Tables */}
       <div className="p-2 border-b border-border bg-background-secondary shrink-0">
-        <div className="relative">
-          <Search
-            size={12}
-            className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground"
-          />
-          <input
-            type="text"
-            placeholder="Filter tables..."
-            className="w-full bg-background-tertiary text-foreground text-[11px] h-7 pl-7 pr-2 rounded-sm border border-border focus:border-primary focus:outline-none transition-colors placeholder:text-muted-foreground/50"
-            value={filterText}
-            onChange={(e) => setFilterText(e.target.value)}
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <Search
+              size={12}
+              className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground"
+            />
+            <input
+              type="text"
+              placeholder="Filter tables..."
+              className="w-full bg-background-tertiary text-foreground text-[11px] h-7 pl-7 pr-2 rounded-sm border border-border focus:border-primary focus:outline-none transition-colors placeholder:text-muted-foreground/50"
+              value={filterText}
+              onChange={(e) => setFilterText(e.target.value)}
+              disabled={!currentSchema}
+            />
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-primary hover:bg-[#27272a] rounded-sm"
+            onClick={handleCreateTable}
+            title="Create New Table"
             disabled={!currentSchema}
-          />
+          >
+            <Plus size={12} />
+          </Button>
         </div>
       </div>
 
@@ -303,6 +369,7 @@ export function SchemaSidebar() {
                     : "text-muted-foreground hover:text-foreground hover:bg-background-tertiary"
                 )}
                 onClick={() => handleTableClick(table.name)}
+                onContextMenu={(e) => handleTableContextMenu(e, table.name)}
                 title={table.name}
               >
                 <Table
@@ -323,6 +390,11 @@ export function SchemaSidebar() {
           </div>
         )}
       </div>
+      <CreateDatabaseDialog
+        isOpen={isCreateDbDialogOpen}
+        onClose={() => setIsCreateDbDialogOpen(false)}
+        activeConnectionId={activeConnectionId || ""}
+      />
     </div>
   );
 }

@@ -59,7 +59,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       "Store: loadSchemas called (MetaStore aware) for:",
       connectionId
     );
-    set({ isLoading: true, lastLoadedConnectionId: connectionId });
+    set({ lastLoadedConnectionId: connectionId }); // Mark as loading for this ID to prevent re-entry
 
     // 1. Try MetaStore Cache First (SQLite)
     try {
@@ -102,7 +102,8 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       console.warn("Store: MetaStore cache miss or error", e);
     }
 
-    // 2. Refresh from Driver & Update MetaStore
+    // 2. Refresh from Driver & Update MetaStore (Only if cache miss or forced)
+    set({ isLoading: true });
     console.log("Store: Refreshing schemas from Driver...");
     try {
       const schemas = await schemaService.refreshSchemas(connectionId);
@@ -159,7 +160,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       connectionId,
       schema,
     });
-    set({ isLoading: true });
+    // Don't set isLoading true yet - check cache first
 
     // Parent ID for tables is the schema resource ID: connectionId:schema
     const schemaResourceId = `${connectionId}:${schema}`;
@@ -183,6 +184,8 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
         set({ tables: cachedTables, isLoading: false });
 
         // Return if cache hit (unless force - but loadTables doesn't have force param yet)
+        // If we want to support 'refresh button' for tables, we might need a force param here too.
+        // For now, let's assume if cache hits, we use it.
         return;
       }
     } catch (e) {
@@ -190,6 +193,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     }
 
     // 2. Refresh from Driver & Update MetaStore
+    set({ isLoading: true });
     try {
       const tables = await schemaService.refreshTables(connectionId, schema);
       console.log("Store: loadTables refresh result", tables);

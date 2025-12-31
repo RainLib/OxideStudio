@@ -7,6 +7,7 @@ import { QueryEditor } from "@/components/workspace/QueryEditor";
 import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
 import { TabBar } from "@/components/workspace/TabBar";
 import { TableDataView } from "@/components/workspace/TableDataView";
+import { CreateTableTab } from "@/components/workspace/CreateTableTab";
 import { cn } from "@/lib/utils";
 import { useTabStore } from "@/store/useTabStore";
 import { useTheme } from "@/theme/useTheme";
@@ -144,6 +145,12 @@ export function WorkspacePage() {
 
                   {activeTab?.type === "table" ? (
                     <TableDataView />
+                  ) : activeTab?.type === "create_table" ? (
+                    <CreateTableTab
+                      tabId={activeTab.id}
+                      connectionId={activeTab.connectionId || ""}
+                      schemaName={activeTab.schemaName || ""}
+                    />
                   ) : (
                     <div className="flex flex-col h-full min-h-0 relative">
                       {/* Top: Editor */}
