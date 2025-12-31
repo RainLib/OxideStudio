@@ -34,6 +34,7 @@ export function WorkspacePage() {
     useState<SidebarTab>("tables");
   const [isLeftDrawerOpen, setIsLeftDrawerOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(280); // Fixed pixel width
+  const [editorHeight, setEditorHeight] = useState(400); // Default pixel height for editor
 
   const [isRightCollapsed, setIsRightCollapsed] = useState(true);
 
@@ -80,6 +81,32 @@ export function WorkspacePage() {
 
     document.addEventListener("mousemove", handleDrag);
     document.addEventListener("mouseup", handleDragEnd);
+  };
+
+  const handleVerticalDragStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = editorHeight;
+
+    const handleDrag = (moveEvent: MouseEvent) => {
+      const deltaY = moveEvent.clientY - startY;
+      // Constraint: min 100px, max window height - 200px
+      const newHeight = Math.max(
+        100,
+        Math.min(startHeight + deltaY, window.innerHeight - 200)
+      );
+      setEditorHeight(newHeight);
+    };
+
+    const handleDragEnd = () => {
+      document.removeEventListener("mousemove", handleDrag);
+      document.removeEventListener("mouseup", handleDragEnd);
+      document.body.style.cursor = "default";
+    };
+
+    document.addEventListener("mousemove", handleDrag);
+    document.addEventListener("mouseup", handleDragEnd);
+    document.body.style.cursor = "row-resize";
   };
 
   return (
@@ -153,11 +180,23 @@ export function WorkspacePage() {
                   ) : (
                     <div className="flex flex-col h-full min-h-0 relative">
                       {/* Top: Editor */}
-                      <div className="h-1/2 min-h-0 border-b border-border/40 flex flex-col">
+                      <div
+                        style={{ height: `${editorHeight}px` }}
+                        className="min-h-[100px] border-b border-border/40 flex flex-col shrink-0 overflow-hidden"
+                      >
                         <QueryEditor />
                       </div>
+
+                      {/* Resizer Handle */}
+                      <div
+                        className="h-1.5 w-full hover:bg-primary/30 cursor-row-resize z-50 transition-colors relative group shrink-0"
+                        onMouseDown={handleVerticalDragStart}
+                      >
+                        <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-px bg-border/50 group-hover:bg-primary/40 transition-colors" />
+                      </div>
+
                       {/* Bottom: Results or Shortcuts */}
-                      <div className="h-1/2 min-h-0 flex flex-col bg-muted/5 z-0">
+                      <div className="flex-1 min-h-0 flex flex-col bg-muted/5 z-0">
                         {currentResult ? <DataGrid /> : <QueryShortcuts />}
                       </div>
                     </div>
