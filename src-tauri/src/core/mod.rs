@@ -5,3 +5,4 @@ pub mod error;
 pub mod manager;
 pub mod parser;
 pub mod protocol;
+pub mod store;

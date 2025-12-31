@@ -4,9 +4,11 @@ pub mod cache;
 pub mod connection;
 pub mod query;
 pub mod schema;
+pub mod store;
 
 // Re-export all commands for easy access
 pub use cache::*;
 pub use connection::*;
 pub use query::*;
 pub use schema::*;
+pub use store::*;

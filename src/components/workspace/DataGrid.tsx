@@ -486,7 +486,7 @@ export function DataGrid({
       // Slightly lighter headers
       bgHeader: mode === "dark" ? "#18181b" : "#f4f4f5",
       bgHeaderHasFocus: mode === "dark" ? "#27272a" : "#e4e4e7",
-      bgHeaderHovered: mode === "dark" ? "#27272a" : "#e4e4e7",
+      bgHeaderHovered: mode === "dark" ? "#3f3f46" : "#d4d4d8", // Lighter (Zinc 700/300) for distinct hover effect
 
       // Text Colors - High Contrast
       textHeader: mode === "dark" ? "#a1a1aa" : "#52525b", // Zinc-400 / Zinc-600
