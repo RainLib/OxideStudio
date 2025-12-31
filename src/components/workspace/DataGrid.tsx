@@ -215,6 +215,14 @@ export function DataGrid({
 
       // Map visual column index to actual data column index
       const visualColumn = columns[col];
+      if (!visualColumn) {
+        return {
+          kind: GridCellKind.Text,
+          displayData: "",
+          data: "",
+          allowOverlay: false,
+        };
+      }
       const originalColIndex = result.columns.findIndex(
         (c) => c.name === visualColumn.id
       );

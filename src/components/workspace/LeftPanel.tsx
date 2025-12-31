@@ -2,7 +2,7 @@ import React from "react";
 import { Button } from "@/components/ui/button";
 import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { cn } from "@/lib/utils";
-import { Database, Clock, Settings, Code, Hexagon } from "lucide-react";
+import { Database, Clock, Code } from "lucide-react";
 import { SchemaSidebar } from "./SchemaSidebar";
 import { HistorySidebar } from "./HistorySidebar";
 import { SavedQueriesSidebar } from "./SavedQueriesSidebar";
@@ -63,16 +63,6 @@ export function LeftPanel({
               onClick={() => onTabClick("saved")}
               icon={Code}
               title="Saved Queries"
-            />
-          </div>
-
-          {/* Bottom Items */}
-          <div className="mt-auto flex flex-col gap-3 w-full px-2">
-            <ActivityBarButton
-              active={showSettings}
-              onClick={() => setShowSettings(true)}
-              icon={Settings}
-              title="Settings"
             />
           </div>
         </div>

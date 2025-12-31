@@ -1,5 +1,5 @@
 import { useConnectionStore } from "@/store/useConnectionStore";
-import { Database, LogOut, ChevronDown } from "lucide-react";
+import { Database, LogOut, ChevronDown, Slack } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -34,12 +34,18 @@ export function SidebarStatusBar({
           <PopoverTrigger asChild>
             <div
               className={cn(
-                "h-full px-2 flex-1 flex items-center gap-2 text-[10px] font-bold select-none overflow-hidden cursor-pointer transition-colors duration-300",
+                "h-full flex-1 flex items-center gap-0 select-none overflow-hidden cursor-pointer transition-colors duration-300",
                 "hover:bg-current/10"
               )}
             >
-              {isDrawerOpen ? (
-                <>
+              {/* Fixed-width icon area (matches ActivityBar width 50px) */}
+              <div className="w-[50px] h-full flex items-center justify-center shrink-0">
+                <Slack size={18} />
+              </div>
+
+              {/* Expandable content area */}
+              {isDrawerOpen && (
+                <div className="flex-1 flex items-center gap-2 px-2 text-[10px] font-bold overflow-hidden">
                   {/* Connection Info */}
                   <div
                     className="flex items-center gap-1.5 min-w-0 flex-1"
@@ -64,23 +70,12 @@ export function SidebarStatusBar({
                         className="flex items-center gap-1 opacity-80 shrink-0"
                         title={`Driver: ${activeConnection.driver}`}
                       >
-                        <Database size={12} strokeWidth={2.5} />
                         <span className="uppercase tracking-wider text-[9px]">
                           {activeConnection?.driver || "SQL"}
                         </span>
                       </div>
                     </>
                   )}
-                </>
-              ) : (
-                <div className="flex items-center justify-center w-full">
-                  <div
-                    className={`w-2 h-2 rounded-full ${
-                      activeConnection
-                        ? "bg-primary-foreground"
-                        : "bg-red-900 animate-pulse"
-                    }`}
-                  />
                 </div>
               )}
             </div>
