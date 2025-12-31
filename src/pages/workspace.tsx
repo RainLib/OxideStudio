@@ -196,16 +196,19 @@ export function WorkspacePage() {
       {/* Bottom: Unified Status Bar spanning full width - content rendered via Portal from components */}
       <div
         className={cn(
-          "h-8 w-full flex items-center border-t z-30 transition-colors duration-300 shrink-0",
+          "h-12 w-full flex items-center border-t z-30 transition-colors duration-300 shrink-0",
           mode === "dark"
             ? "bg-orange-500/10 text-orange-500 border-orange-500/20"
             : "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
         )}
       >
-        {/* Left slot - for sidebar status (connection info, etc.) - includes separator */}
+        {/* Left slot - for sidebar status (connection info, etc.) - lighter bg */}
         <div
           id="status-bar-left"
-          className="h-full flex items-center shrink-0"
+          className={cn(
+            "h-full flex items-center shrink-0",
+            mode === "dark" ? "bg-orange-500/5" : "bg-emerald-500/5"
+          )}
         />
 
         {/* Right slot - for tab status bar content */}

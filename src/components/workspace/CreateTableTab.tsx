@@ -442,7 +442,7 @@ export function CreateTableTab({
             size="sm"
             onClick={() => closeTab(tabId)}
             disabled={isSubmitting}
-            className="h-6 text-xs"
+            className="h-8 text-xs"
           >
             Cancel
           </Button>
@@ -450,7 +450,7 @@ export function CreateTableTab({
             size="sm"
             onClick={handleCreate}
             disabled={isSubmitting || success}
-            className="h-6 text-xs"
+            className="h-8 text-xs"
           >
             {isSubmitting ? "Creating..." : "Create Table"}
           </Button>

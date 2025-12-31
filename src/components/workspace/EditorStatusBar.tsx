@@ -35,7 +35,7 @@ export function EditorStatusBar({
   return (
     <div
       className={cn(
-        "h-[28px] px-3 flex items-center gap-4 text-[10px] select-none shrink-0 transition-colors duration-200"
+        "h-full px-3 flex items-center gap-4 text-[10px] select-none shrink-0 transition-colors duration-200"
       )}
     >
       {isTable ? (

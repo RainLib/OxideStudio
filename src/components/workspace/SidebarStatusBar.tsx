@@ -34,7 +34,7 @@ export function SidebarStatusBar({
           <PopoverTrigger asChild>
             <div
               className={cn(
-                "h-8 px-2 flex-1 flex items-center gap-2 text-[10px] font-bold select-none overflow-hidden cursor-pointer transition-colors duration-300",
+                "h-full px-2 flex-1 flex items-center gap-2 text-[10px] font-bold select-none overflow-hidden cursor-pointer transition-colors duration-300",
                 "hover:bg-current/10"
               )}
             >
