@@ -12,6 +12,7 @@ import {
 } from "@glideapps/glide-data-grid";
 import "@glideapps/glide-data-grid/dist/index.css";
 import { useTabStore } from "@/store/useTabStore";
+import { useTheme } from "@/theme/useTheme";
 import { createTypedCell, applyFilter, compareValues } from "@/lib/gridUtils";
 import { Check, X as XIcon, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -170,6 +171,12 @@ export function DataGrid({
       const [col, row] = cell;
       const actualRowIndex = sortedIndices[row];
 
+      if (row === 0 && col === 0) {
+        console.log("[DataGrid] getCellContent called for 0,0", {
+          actualRowIndex,
+        });
+      }
+
       if (actualRowIndex === undefined || !result.rows[actualRowIndex]) {
         return {
           kind: GridCellKind.Text,
@@ -185,7 +192,9 @@ export function DataGrid({
         ? pendingEdits.get(editKey)
         : result.rows[actualRowIndex][col];
 
-      return createTypedCell(val, true); // allowOverlay = true for editing
+      const gridCell = createTypedCell(val, true);
+
+      return gridCell;
     },
     [result, filteredRows, sortedIndices, pendingEdits]
   );
@@ -381,49 +390,78 @@ export function DataGrid({
 
   const handleSortDesc = useCallback(() => {
     if (!activeTab || !result || contextMenu.col === undefined) return;
+    const column = result.columns[contextMenu.col];
+    if (column) {
+      setGridSort(activeTab.id, column.name, "desc");
+    }
     closeContextMenu();
   }, [activeTab, result, contextMenu, setGridSort, closeContextMenu]);
 
   // Draw borders after cells are rendered
 
+  const { mode } = useTheme();
   // Create a dynamic grid theme that pulls from CSS variables
   const gridTheme: Partial<Theme> = useMemo(
     () => ({
-      accentColor: "hsl(var(--primary))",
-      accentLight: "hsla(var(--primary), 0.1)",
-      bgCell: "hsl(var(--background))",
-      bgCellMedium: "hsl(var(--muted))",
-      bgHeader: "hsl(var(--muted))",
-      bgHeaderHasFocus: "hsl(var(--accent))",
-      bgHeaderHovered: "hsl(var(--accent))",
-      textHeader: "hsl(var(--foreground))",
-      textGroupHeader: "hsl(var(--muted-foreground))",
-      textDark: "hsl(var(--foreground))",
-      textMedium: "hsl(var(--muted-foreground))",
-      textLight: "hsl(var(--muted-foreground))",
-      textBubble: "hsl(var(--foreground))",
-      borderColor: "hsl(var(--border))",
-      drilldownBorder: "hsl(var(--border))",
+      // Premium Dark Palette (Zinc based)
+      accentColor: "#3b82f6", // Bright Blue for selection border
+      accentLight: "rgba(59, 130, 246, 0.2)", // Blue tint (Used for selected Row/Column Headers)
+
+      // Deep background for cells
+      bgCell: mode === "dark" ? "#09090b" : "#ffffff",
+      bgCellMedium: mode === "dark" ? "#18181b" : "#f4f4f5", // Zinc-900 / Zinc-100
+
+      // Slightly lighter headers
+      bgHeader: mode === "dark" ? "#18181b" : "#f4f4f5",
+      bgHeaderHasFocus: mode === "dark" ? "#27272a" : "#e4e4e7",
+      bgHeaderHovered: mode === "dark" ? "#27272a" : "#e4e4e7",
+
+      // Text Colors - High Contrast
+      textHeader: mode === "dark" ? "#a1a1aa" : "#52525b", // Zinc-400 / Zinc-600
+      textGroupHeader: mode === "dark" ? "#71717a" : "#a1a1aa",
+
+      // Main data text - pure white in dark mode for pop
+      textDark: mode === "dark" ? "#ffffff" : "#09090b",
+
+      textMedium: mode === "dark" ? "#a1a1aa" : "#71717a",
+      textLight: mode === "dark" ? "#71717a" : "#a1a1aa",
+      textBubble: mode === "dark" ? "#ffffff" : "#09090b",
+
+      // Subtle Borders
+      borderColor: mode === "dark" ? "#27272a" : "#e4e4e7", // Zinc-800 / Zinc-200
+      drilldownBorder: mode === "dark" ? "#27272a" : "#e4e4e7",
+
       linkColor: "hsl(var(--primary))",
+
+      // Typography
       headerFontStyle: "600 13px",
       baseFontStyle: "13px",
       fontFamily: "Inter, system-ui, sans-serif",
       editorFontSize: "13px",
-      lineHeight: 1.4,
+      lineHeight: 1.5, // Slightly more breathing room
 
-      // Row marker (row number) styling
-      bgIconHeader: "hsl(var(--background))",
-      fgIconHeader: "hsl(var(--foreground))",
+      // Row marker styling
+      bgIconHeader: mode === "dark" ? "#09090b" : "#ffffff", // Blend with bgCell
+      fgIconHeader: mode === "dark" ? "#a1a1aa" : "#71717a",
 
-      // Remove selection background, use only borders
-      bgBubble: "transparent",
+      // Selection STYLING
+      // bgBubble: The background of non-selected cells in specific contexts? Usually transparent or match bgCell.
+      bgBubble: mode === "dark" ? "#09090b" : "#ffffff",
+
+      // bgBubbleSelected: The background of SELECTED cells.
+      // User Req: "background is original color" -> Transparent fill.
       bgBubbleSelected: "transparent",
 
-      // Border width for selections
-      cellHorizontalPadding: 8,
-      cellVerticalPadding: 3,
+      // Note: Row Header highlight typically derives from 'accentLight' in GDG.
+      // By setting accentLight to blue tint and bgBubbleSelected to transparent, we hope to achieve:
+      // - Cells: Transparent fill (no blue tint).
+      // - Cells: Transparent fill (no blue tint).
+      // - Row Header: Blue tint (from accentLight).
+
+      cellHorizontalPadding: 12, // More padding for premium feel
+      cellVerticalPadding: 6,
     }),
-    []
+    [mode]
   );
 
   if (error) {
@@ -498,6 +536,7 @@ export function DataGrid({
             gridSelection={gridSelection}
             onGridSelectionChange={setGridSelection}
             keybindings={{ search: true }}
+            experimental={{ strict: true }}
           />
         )}
 

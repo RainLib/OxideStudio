@@ -25,7 +25,7 @@ export function TableDataView() {
   const sqlFilter = activeTab.sqlFilter || "";
 
   return (
-    <div className="flex flex-col h-full bg-background-tertiary">
+    <div className="flex flex-col h-full bg-background">
       {/* Query Builder Filter Row */}
       {result && (
         <GridFilterRow

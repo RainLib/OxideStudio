@@ -307,6 +307,8 @@ export const useTabStore = create<TabState>((set, get) => ({
       // Actually, let's save immediately so we don't lose it if it crashes.
       useHistoryStore.getState().addToHistory(tab.sql);
 
+      console.log("[TabStore] Query successfully finished", results);
+
       set((state) => ({
         tabs: state.tabs.map((t) =>
           t.id === id

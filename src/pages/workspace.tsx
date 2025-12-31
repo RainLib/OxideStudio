@@ -1,28 +1,23 @@
-import { useState, useEffect } from "react";
-import { cn } from "@/lib/utils";
-import { useTheme } from "@/theme/useTheme";
-import { TabBar } from "@/components/workspace/TabBar";
-import { QueryEditor } from "@/components/workspace/QueryEditor";
+import { AppBar } from "@/components/AppBar";
+import { Button } from "@/components/ui/button";
 import { DataGrid } from "@/components/workspace/DataGrid";
 import { EditorStatusBar } from "@/components/workspace/EditorStatusBar";
 import { LeftPanel, SidebarTab } from "@/components/workspace/LeftPanel";
-import { TableDataView } from "@/components/workspace/TableDataView";
+import { QueryEditor } from "@/components/workspace/QueryEditor";
 import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
-import { AppBar } from "@/components/AppBar";
+import { TabBar } from "@/components/workspace/TabBar";
+import { TableDataView } from "@/components/workspace/TableDataView";
+import { cn } from "@/lib/utils";
 import { useTabStore } from "@/store/useTabStore";
-import {
-  ResizableHandle,
-  ResizablePanelGroup,
-  ResizablePanel,
-} from "@/components/ui/resizable";
-import { Button } from "@/components/ui/button";
+import { useTheme } from "@/theme/useTheme";
 import {
   PanelLeft,
-  PanelRight,
   PanelLeftClose,
+  PanelRight,
   PanelRightClose,
   Settings2,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 
 export function WorkspacePage() {
   const { mode } = useTheme();
