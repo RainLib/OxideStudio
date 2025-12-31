@@ -79,6 +79,7 @@ export function WorkspaceSidebar() {
   // Dialog States
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   // Form States
   const [workspaceName, setWorkspaceName] = useState("");
@@ -87,6 +88,10 @@ export function WorkspaceSidebar() {
   const [editingWorkspaceId, setEditingWorkspaceId] = useState<string | null>(
     null
   );
+  const [workspaceToDelete, setWorkspaceToDelete] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
 
   const handleCreate = () => {
@@ -129,12 +134,15 @@ export function WorkspaceSidebar() {
   };
 
   const handleDelete = (id: string, name: string) => {
-    if (
-      confirm(
-        `Are you sure you want to delete workspace "${name}"?\nThis will hide its connections until they are reassigned.`
-      )
-    ) {
-      deleteWorkspace(id);
+    setWorkspaceToDelete({ id, name });
+    setDeleteDialogOpen(true);
+  };
+
+  const confirmDelete = () => {
+    if (workspaceToDelete) {
+      deleteWorkspace(workspaceToDelete.id);
+      setWorkspaceToDelete(null);
+      setDeleteDialogOpen(false);
     }
   };
 
@@ -147,7 +155,7 @@ export function WorkspaceSidebar() {
   return (
     <div
       className={cn(
-        "w-[70px] flex flex-col items-center py-6 gap-4 z-20 h-full transition-colors",
+        "w-[70px] shrink-0 flex flex-col items-center py-6 gap-4 z-20 h-full transition-colors",
         isDark
           ? "bg-[#18181b] border-r border-white/5" // Unified Frame Color
           : "bg-[#f4f4f5] border-r border-border" // Light mode can stay or be adjusted, keeping simple for now
@@ -397,11 +405,11 @@ export function WorkspaceSidebar() {
 
                 <ContextMenuItem
                   className="text-red-500 focus:bg-red-500/10 focus:text-red-400 cursor-pointer"
-                  onSelect={() => {
-                    setTimeout(
-                      () => handleDelete(workspace.id, workspace.name),
-                      0
-                    );
+                  onSelect={(e) => {
+                    // Prevent closing immediately so we can handle state if needed,
+                    // but for Dialog trigger, standard behavior is fine.
+                    // We just call the handler.
+                    handleDelete(workspace.id, workspace.name);
                   }}
                 >
                   <Trash2 size={14} className="mr-2" /> Delete
@@ -421,7 +429,7 @@ export function WorkspaceSidebar() {
                   setCreateDialogOpen(true);
                 }}
                 className={cn(
-                  "w-10 h-10 rounded-xl border-2 border-dashed flex items-center justify-center cursor-pointer hover:border-[#f39c12] hover:text-[#f39c12] hover:bg-[#f39c12]/10 transition-all duration-300 mt-2 hover:scale-105",
+                  "w-10 h-10 shrink-0 rounded-xl border-2 border-dashed flex items-center justify-center cursor-pointer hover:border-[#f39c12] hover:text-[#f39c12] hover:bg-[#f39c12]/10 transition-all duration-300 mt-2 hover:scale-105",
                   isDark
                     ? "border-[#333] text-[#444]"
                     : "border-gray-300 text-gray-400"
@@ -615,6 +623,49 @@ export function WorkspaceSidebar() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* DELETE CONFIRMATION DIALOG */}
+        <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+          <DialogContent
+            className={cn(
+              "sm:max-w-sm",
+              isDark
+                ? "bg-[#1e1e1e] border-[#333] text-gray-200"
+                : "bg-white border-gray-200 text-gray-900"
+            )}
+          >
+            <DialogHeader>
+              <DialogTitle>Delete Workspace</DialogTitle>
+            </DialogHeader>
+            <div className="py-2 text-sm opacity-80">
+              Are you sure you want to delete workspace "
+              <span className="font-bold">{workspaceToDelete?.name}</span>"?
+              <div className="mt-2 text-xs text-muted-foreground">
+                This will hide its connections until they are reassigned.
+              </div>
+            </div>
+            <DialogFooter>
+              <Button
+                variant="ghost"
+                onClick={() => setDeleteDialogOpen(false)}
+                className={
+                  isDark
+                    ? "hover:bg-[#333] text-gray-400"
+                    : "hover:bg-gray-100 text-gray-600"
+                }
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={confirmDelete}
+                className="bg-red-600 hover:bg-red-700 text-white"
+              >
+                Delete
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
         {/* Version and Settings Footer */}
         <div className="w-full mt-auto py-4 border-t border-white/5 flex flex-col items-center gap-4">
           <Tooltip>
