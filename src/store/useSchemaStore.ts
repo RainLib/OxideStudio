@@ -10,6 +10,7 @@ import { useConnectionStore } from "./useConnectionStore";
 interface SchemaState {
   schemas: string[];
   tables: TableInfo[];
+  pinnedTables: string[];
   currentSchema: string | null;
   defaultSchema: string | null; // User's preferred default
   selectedTable: string | null;
@@ -18,6 +19,7 @@ interface SchemaState {
 
   loadSchemas: (connectionId: string, force?: boolean) => Promise<void>;
   loadTables: (connectionId: string, schema: string) => Promise<void>;
+  togglePinTable: (tableName: string) => void;
   setCurrentSchema: (schema: string) => void;
   setDefaultSchema: (schema: string) => void; // Persist user's choice
   selectTable: (table: string | null) => void;
@@ -25,10 +27,13 @@ interface SchemaState {
 }
 
 const STORAGE_KEY = "oxide-studio-default-schema";
+const getPinnedTablesKey = (connId: string, schema: string) =>
+  `oxide-studio-pinned-tables:${connId}:${schema}`;
 
 export const useSchemaStore = create<SchemaState>((set, get) => ({
   schemas: [],
   tables: [],
+  pinnedTables: [],
   currentSchema: null,
   defaultSchema: localStorage.getItem(STORAGE_KEY),
   selectedTable: null,
@@ -39,6 +44,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     set({
       schemas: [],
       tables: [],
+      pinnedTables: [],
       currentSchema: null,
       selectedTable: null,
       lastLoadedConnectionId: null,
@@ -160,7 +166,11 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       connectionId,
       schema,
     });
-    // Don't set isLoading true yet - check cache first
+
+    // Load pinned tables for this context
+    const pinKey = getPinnedTablesKey(connectionId, schema);
+    const savedPins = JSON.parse(localStorage.getItem(pinKey) || "[]");
+    set({ pinnedTables: savedPins });
 
     // Parent ID for tables is the schema resource ID: connectionId:schema
     const schemaResourceId = `${connectionId}:${schema}`;
@@ -182,10 +192,6 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
 
         console.log("Store: Loaded tables from MetaStore", cachedTables.length);
         set({ tables: cachedTables, isLoading: false });
-
-        // Return if cache hit (unless force - but loadTables doesn't have force param yet)
-        // If we want to support 'refresh button' for tables, we might need a force param here too.
-        // For now, let's assume if cache hits, we use it.
         return;
       }
     } catch (e) {
@@ -196,8 +202,6 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     set({ isLoading: true });
     try {
       const tables = await schemaService.refreshTables(connectionId, schema);
-      console.log("Store: loadTables refresh result", tables);
-
       set({ tables: tables, isLoading: false });
 
       // Save to MetaStore in background
@@ -220,6 +224,21 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
         set({ tables: [], isLoading: false });
       }
     }
+  },
+
+  togglePinTable: (tableName: string) => {
+    const { activeConnectionId } = useConnectionStore.getState();
+    const { currentSchema, pinnedTables } = get();
+    if (!activeConnectionId || !currentSchema) return;
+
+    const pinKey = getPinnedTablesKey(activeConnectionId, currentSchema);
+    const isPinned = pinnedTables.includes(tableName);
+    const newPinned = isPinned
+      ? pinnedTables.filter((t) => t !== tableName)
+      : [...pinnedTables, tableName];
+
+    localStorage.setItem(pinKey, JSON.stringify(newPinned));
+    set({ pinnedTables: newPinned });
   },
 
   setCurrentSchema: async (schema: string) => {

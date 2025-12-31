@@ -1,5 +1,13 @@
 import { cn } from "@/lib/utils";
-import { Database, Table, Search, RefreshCw, Plus } from "lucide-react";
+import {
+  Database,
+  Table,
+  Search,
+  RefreshCw,
+  Plus,
+  Pin,
+  PinOff,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
@@ -23,6 +31,8 @@ export function SchemaSidebar() {
     loadSchemas,
     loadTables,
     tables,
+    pinnedTables,
+    togglePinTable,
     setCurrentSchema,
     selectTable,
     selectedTable,
@@ -33,6 +43,7 @@ export function SchemaSidebar() {
   const [isSelectOpen, setIsSelectOpen] = useState(false);
   const [focusedIndex, setFocusedIndex] = useState(0);
   const [isCreateDbDialogOpen, setIsCreateDbDialogOpen] = useState(false);
+  const [isTablesHovered, setIsTablesHovered] = useState(false);
 
   useEffect(() => {
     if (activeConnectionId) {
@@ -59,8 +70,17 @@ export function SchemaSidebar() {
     setFocusedIndex(0);
   }, [databaseFilter]);
 
+  // Sort tables: pinned first, then alphabetical
+  const sortedTables = [...tables].sort((a, b) => {
+    const aPinned = pinnedTables.includes(a.name);
+    const bPinned = pinnedTables.includes(b.name);
+    if (aPinned && !bPinned) return -1;
+    if (!aPinned && bPinned) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
   // Filter tables based on search text
-  const filteredTables = tables.filter((table) =>
+  const filteredTables = sortedTables.filter((table) =>
     table.name.toLowerCase().includes(filterText.toLowerCase())
   );
 
@@ -205,8 +225,8 @@ export function SchemaSidebar() {
 
   return (
     <div className="flex flex-col h-full bg-background-tertiary">
-      {/* Top: Database Selector */}
-      <div className="p-2 border-b border-border bg-background-secondary shrink-0">
+      {/* Top: Database Selector Group */}
+      <div className="p-2 border-b border-border bg-background-secondary/50 shrink-0">
         <div className="flex items-center gap-2">
           <Select
             value={currentSchema || ""}
@@ -286,9 +306,9 @@ export function SchemaSidebar() {
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground hover:bg-[#27272a] rounded-sm"
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground hover:bg-background-tertiary rounded-sm"
             onClick={handleRefresh}
-            title="Refresh Schemas & Tables"
+            title="Refresh Schemas"
             disabled={isLoading}
           >
             <RefreshCw size={12} className={cn(isLoading && "animate-spin")} />
@@ -297,7 +317,7 @@ export function SchemaSidebar() {
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground hover:bg-[#27272a] rounded-sm"
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground hover:bg-background-tertiary rounded-sm"
             onClick={handleCreateDatabase}
             title="Create New Database"
           >
@@ -307,37 +327,81 @@ export function SchemaSidebar() {
       </div>
 
       {/* Middle: Filter Input for Tables */}
-      <div className="p-2 border-b border-border bg-background-secondary shrink-0">
-        <div className="flex items-center gap-2">
-          <div className="relative flex-1">
-            <Search
-              size={12}
-              className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground"
-            />
-            <input
-              type="text"
-              placeholder="Filter tables..."
-              className="w-full bg-background-tertiary text-foreground text-[11px] h-7 pl-7 pr-2 rounded-sm border border-border focus:border-primary focus:outline-none transition-colors placeholder:text-muted-foreground/50"
-              value={filterText}
-              onChange={(e) => setFilterText(e.target.value)}
-              disabled={!currentSchema}
-            />
-          </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-primary hover:bg-[#27272a] rounded-sm"
-            onClick={handleCreateTable}
-            title="Create New Table"
+      <div className="p-2 border-b border-border bg-background-secondary/30 shrink-0">
+        <div className="relative">
+          <Search
+            size={12}
+            className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground"
+          />
+          <input
+            type="text"
+            placeholder="Filter tables..."
+            className="w-full bg-background-tertiary text-foreground text-[11px] h-7 pl-7 pr-2 rounded-sm border border-border focus:border-primary focus:outline-none transition-colors placeholder:text-muted-foreground/50"
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
             disabled={!currentSchema}
-          >
-            <Plus size={12} />
-          </Button>
+          />
         </div>
       </div>
 
+      {/* Tables Section Header - Contextual */}
+      <div
+        className="flex items-center justify-between px-2 py-1.5 bg-background-tertiary shrink-0"
+        onMouseEnter={() => setIsTablesHovered(true)}
+        onMouseLeave={() => setIsTablesHovered(false)}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-bold text-muted-foreground tracking-wider uppercase">
+            Tables
+          </span>
+          {currentSchema && (
+            <span className="text-[9px] bg-background-secondary px-1.5 py-0.5 rounded text-muted-foreground border border-border">
+              {filteredTables.length}
+            </span>
+          )}
+        </div>
+
+        {/* Action buttons - only show on hover of tables area */}
+        {isTablesHovered && currentSchema && (
+          <div
+            className={cn(
+              "flex items-center gap-1 transition-opacity duration-200",
+              isTablesHovered ? "opacity-100" : "opacity-0"
+            )}
+          >
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-5 w-5 text-muted-foreground hover:text-primary rounded-sm"
+              onClick={handleRefresh}
+              title="Refresh Tables"
+              disabled={isLoading}
+            >
+              <RefreshCw
+                size={10}
+                className={cn(isLoading && "animate-spin")}
+              />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-5 w-5 text-muted-foreground hover:text-primary rounded-sm"
+              onClick={handleCreateTable}
+              title="Create New Table"
+              disabled={!currentSchema}
+            >
+              <Plus size={10} />
+            </Button>
+          </div>
+        )}
+      </div>
+
       {/* Bottom: Tables List */}
-      <div className="flex-1 overflow-auto bg-background-tertiary py-1 custom-scrollbar">
+      <div
+        className="flex-1 overflow-auto bg-background-tertiary py-0 custom-scrollbar"
+        onMouseEnter={() => setIsTablesHovered(true)}
+        onMouseLeave={() => setIsTablesHovered(false)}
+      >
         {!currentSchema ? (
           <div className="p-4 text-xs text-center text-gray-500 italic">
             Select a database to view tables
@@ -352,34 +416,66 @@ export function SchemaSidebar() {
           </div>
         ) : (
           <div className="px-1">
-            {filteredTables.map((table) => (
-              <div
-                key={table.name}
-                className={cn(
-                  "flex items-center gap-2 px-2 py-1.5 cursor-pointer text-[11px] group transition-all select-none rounded-sm",
-                  selectedTable === table.name
-                    ? "bg-background-secondary text-primary"
-                    : "text-muted-foreground hover:text-foreground hover:bg-background-tertiary"
-                )}
-                onClick={() => handleTableClick(table.name)}
-                onContextMenu={(e) => handleTableContextMenu(e, table.name)}
-                title={table.name}
-              >
-                <Table
-                  size={12}
+            {filteredTables.map((table) => {
+              const isPinned = pinnedTables.includes(table.name);
+              return (
+                <div
+                  key={table.name}
                   className={cn(
-                    "shrink-0 opacity-70",
-                    selectedTable === table.name && "opacity-100"
+                    "flex items-center gap-2 px-2 py-1.5 cursor-pointer text-[11px] group transition-all select-none rounded-sm relative",
+                    selectedTable === table.name
+                      ? "bg-background-secondary text-primary"
+                      : "text-muted-foreground hover:text-foreground hover:bg-background-secondary/50"
                   )}
-                />
-                <span className="truncate flex-1">{table.name}</span>
-                {table.type && (
-                  <span className="text-[9px] uppercase opacity-50 shrink-0">
-                    {table.type}
+                  onClick={() => handleTableClick(table.name)}
+                  onContextMenu={(e) => handleTableContextMenu(e, table.name)}
+                  title={table.name}
+                >
+                  <Table
+                    size={12}
+                    className={cn(
+                      "shrink-0 opacity-70",
+                      selectedTable === table.name && "opacity-100",
+                      isPinned && "text-primary opacity-100"
+                    )}
+                  />
+                  <span
+                    className={cn(
+                      "truncate flex-1",
+                      isPinned && "font-bold text-foreground"
+                    )}
+                  >
+                    {table.name}
                   </span>
-                )}
-              </div>
-            ))}
+
+                  {/* Pin/Unpin Button - Visible on Hover */}
+                  <div className="flex items-center gap-1">
+                    {table.type && !isPinned && (
+                      <span className="text-[9px] uppercase opacity-50 shrink-0 group-hover:hidden">
+                        {table.type}
+                      </span>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className={cn(
+                        "h-4 w-4 shrink-0 transition-all duration-200",
+                        isPinned
+                          ? "text-primary opacity-100"
+                          : "text-muted-foreground opacity-0 group-hover:opacity-60 hover:opacity-100"
+                      )}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        togglePinTable(table.name);
+                      }}
+                      title={isPinned ? "Unpin Table" : "Pin Table"}
+                    >
+                      {isPinned ? <PinOff size={10} /> : <Pin size={10} />}
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
