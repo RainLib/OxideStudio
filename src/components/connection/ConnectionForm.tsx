@@ -15,8 +15,9 @@ import {
   Tag,
   X,
   Plus,
+  Upload,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -36,7 +37,41 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import * as LucideIcons from "lucide-react";
 import React from "react";
+
+// Predefined colors
+const COLORS = [
+  "#f39c12", // Orange
+  "#e74c3c", // Red
+  "#8e44ad", // Purple
+  "#3498db", // Blue
+  "#2ecc71", // Green
+  "#1abc9c", // Teal
+  "#34495e", // Navy
+  "#95a5a6", // Grey
+];
+
+// Predefined icons
+const ICONS = [
+  "Database",
+  "Server",
+  "Cloud",
+  "HardDrive",
+  "Box",
+  "Layers",
+  "LayoutGrid",
+  "Settings",
+  "Terminal",
+  "Code",
+  "Cpu",
+  "Activity",
+];
 
 export function ConnectionForm() {
   const {
@@ -56,6 +91,7 @@ export function ConnectionForm() {
   const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [tagInput, setTagInput] = useState("");
+  const uploadIconRef = useRef<HTMLInputElement>(null);
 
   const PREDEFINED_TAGS = [
     "Production",
@@ -160,6 +196,52 @@ export function ConnectionForm() {
     );
   };
 
+  const handleIconUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        handleChange("icon", reader.result as string); // Save as base64
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // Helper to render dynamic icon
+  const renderIcon = (iconName?: string, size: number = 20) => {
+    if (!iconName) {
+      const Icon = LucideIcons.Database;
+      return <Icon size={size} strokeWidth={1.5} />;
+    }
+
+    // Check if it is a base64 image (upload)
+    if (iconName.startsWith("data:image")) {
+      return (
+        <img
+          src={iconName}
+          alt="icon"
+          style={{ width: size, height: size, objectFit: "contain" }}
+        />
+      );
+    }
+
+    // Check if it's a valid Lucide icon
+    const IconComponent = (LucideIcons as any)[iconName];
+    if (IconComponent) {
+      return <IconComponent size={size} strokeWidth={1.5} />;
+    }
+
+    // Otherwise treat as text
+    return (
+      <span
+        style={{ fontSize: size * 0.6 }}
+        className="font-bold font-mono leading-none truncate"
+      >
+        {iconName.slice(0, 3)}
+      </span>
+    );
+  };
+
   const handleTest = async () => {
     setTestStatus({ type: "loading", msg: "Testing connection..." });
     const error = await connect(selectedConnection);
@@ -195,9 +277,119 @@ export function ConnectionForm() {
           {/* Header Section */}
           <div className="mb-8 flex flex-col gap-1">
             <div className="flex items-center justify-between">
-              <div className="flex-1 mr-4">
+              <div className="flex items-center gap-3 flex-1 mr-4">
+                {/* Icon Selector */}
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <div
+                      className={cn(
+                        "w-12 h-12 rounded-xl flex items-center justify-center cursor-pointer hover:shadow-lg transition-all border border-transparent hover:border-border/60",
+                        !selectedConnection.icon &&
+                          !selectedConnection.color &&
+                          "bg-secondary/50"
+                      )}
+                      style={{
+                        backgroundColor: selectedConnection.color
+                          ? `${selectedConnection.color}20`
+                          : undefined,
+                        color: selectedConnection.color || undefined,
+                      }}
+                    >
+                      {renderIcon(selectedConnection.icon, 24)}
+                    </div>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-72 p-3" align="start">
+                    <div className="space-y-4">
+                      {/* Icon Grid */}
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-muted-foreground uppercase">
+                          Icon
+                        </label>
+                        <div className="grid grid-cols-6 gap-2">
+                          {ICONS.map((icon) => (
+                            <div
+                              key={icon}
+                              onClick={() => handleChange("icon", icon)}
+                              className={cn(
+                                "w-8 h-8 rounded-md flex items-center justify-center cursor-pointer hover:bg-secondary transition-colors",
+                                selectedConnection.icon === icon &&
+                                  "bg-secondary text-primary"
+                              )}
+                            >
+                              {renderIcon(icon, 16)}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Text Icon Input */}
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-muted-foreground uppercase">
+                          Text Icon
+                        </label>
+                        <Input
+                          placeholder="e.g. DEV, PROD, 🚀"
+                          value={
+                            !selectedConnection.icon?.startsWith(
+                              "data:image"
+                            ) &&
+                            !ICONS.includes(selectedConnection.icon || "") &&
+                            !(LucideIcons as any)[selectedConnection.icon || ""]
+                              ? selectedConnection.icon || ""
+                              : ""
+                          }
+                          onChange={(e) => handleChange("icon", e.target.value)}
+                          maxLength={3}
+                          className="h-8 text-xs font-mono"
+                        />
+                      </div>
+
+                      {/* Upload & Color */}
+                      <div className="pt-2 border-t border-border/50 space-y-4">
+                        <div className="space-y-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="w-full text-xs h-7"
+                            onClick={() => uploadIconRef.current?.click()}
+                          >
+                            <Upload size={12} className="mr-2" /> Upload Image
+                          </Button>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            ref={uploadIconRef}
+                            onChange={handleIconUpload}
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="text-xs font-bold text-muted-foreground uppercase">
+                            Color
+                          </label>
+                          <div className="grid grid-cols-8 gap-2">
+                            {COLORS.map((color) => (
+                              <div
+                                key={color}
+                                onClick={() => handleChange("color", color)}
+                                className={cn(
+                                  "w-6 h-6 rounded-full cursor-pointer hover:scale-110 transition-transform border border-transparent",
+                                  selectedConnection.color === color &&
+                                    "ring-2 ring-offset-2 ring-offset-background ring-primary border-white"
+                                )}
+                                style={{ backgroundColor: color }}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+
                 <Input
-                  className="text-2xl font-bold tracking-tight text-foreground bg-transparent border-none p-0 h-auto focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:opacity-20 hover:bg-white/5 transition-colors cursor-text px-2 -ml-2 rounded-md"
+                  className="text-2xl font-bold tracking-tight text-foreground bg-transparent border-none p-0 h-auto focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:opacity-20 hover:bg-white/5 transition-colors cursor-text px-2 rounded-md"
                   placeholder="New Connection"
                   value={selectedConnection?.name || ""}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -247,7 +439,7 @@ export function ConnectionForm() {
                 </DialogContent>
               </Dialog>
             </div>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-sm text-muted-foreground ml-16">
               Configure your database connection details below.
             </p>
           </div>
@@ -384,107 +576,108 @@ export function ConnectionForm() {
             {/* Section: Connection Parameters */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
               {/* Left Column: Network & Database */}
-              <div className="space-y-8">
-                <section className="space-y-4">
-                  <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/80 flex items-center gap-2">
-                    <Globe size={14} /> Network
+              {/* Left Column: Network & Database */}
+              <div className="space-y-6">
+                <section className="space-y-3">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground/50 flex items-center gap-2 mb-3">
+                    <Globe size={12} /> Network & Database
                   </h3>
-                  <div className="space-y-4">
-                    <div className="space-y-2">
-                      <label className="text-xs font-medium text-muted-foreground ml-1">
-                        Host
-                      </label>
-                      <Input
-                        className="bg-background/50 border-input/60 focus:border-primary/50 font-mono"
-                        placeholder="localhost"
-                        value={selectedConnection?.host || ""}
-                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                          handleChange("host", e.target.value)
-                        }
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs font-medium text-muted-foreground ml-1">
-                        Port
-                      </label>
-                      <Input
-                        className="bg-background/50 border-input/60 focus:border-primary/50 font-mono"
-                        type="number"
-                        placeholder="5432"
-                        value={selectedConnection?.port || ""}
-                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                          handleChange("port", parseInt(e.target.value))
-                        }
-                      />
-                    </div>
-                  </div>
-                </section>
 
-                <section className="space-y-4">
-                  <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/80 flex items-center gap-2">
-                    <Database size={14} /> Database
-                  </h3>
-                  <div className="space-y-2">
-                    <label className="text-xs font-medium text-muted-foreground ml-1">
-                      Database Name
-                    </label>
-                    <Input
-                      className="bg-background/50 border-input/60 focus:border-primary/50"
-                      placeholder="postgres"
-                      value={selectedConnection?.database || ""}
-                      onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                        handleChange("database", e.target.value)
-                      }
-                    />
+                  <div className="bg-card/20 border border-border/40 rounded-xl p-4 space-y-4">
+                    <div className="grid grid-cols-4 gap-3">
+                      <div className="col-span-3 space-y-1.5">
+                        <label className="text-xs font-medium text-muted-foreground ml-1">
+                          Host
+                        </label>
+                        <Input
+                          className="bg-background/50 border-input/60 focus:border-primary/50 font-mono h-9"
+                          placeholder="localhost"
+                          value={selectedConnection?.host || ""}
+                          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                            handleChange("host", e.target.value)
+                          }
+                        />
+                      </div>
+                      <div className="col-span-1 space-y-1.5">
+                        <label className="text-xs font-medium text-muted-foreground ml-1">
+                          Port
+                        </label>
+                        <Input
+                          className="bg-background/50 border-input/60 focus:border-primary/50 font-mono h-9"
+                          type="number"
+                          placeholder="5432"
+                          value={selectedConnection?.port || ""}
+                          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                            handleChange("port", parseInt(e.target.value))
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-muted-foreground ml-1">
+                        Database Name
+                      </label>
+                      <Input
+                        className="bg-background/50 border-input/60 focus:border-primary/50 h-9"
+                        placeholder="postgres"
+                        value={selectedConnection?.database || ""}
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                          handleChange("database", e.target.value)
+                        }
+                      />
+                    </div>
                   </div>
                 </section>
               </div>
 
               {/* Right Column: Authentication */}
-              <section className="space-y-4">
-                <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/80 flex items-center gap-2">
-                  <Lock size={14} /> Authentication
+              <section className="space-y-3">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground/50 flex items-center gap-2 mb-3">
+                  <Lock size={12} /> Authentication
                 </h3>
-                <div className="space-y-4 p-6 rounded-xl border border-border/50 bg-card/10">
-                  <div className="space-y-2">
-                    <label className="text-xs font-medium text-muted-foreground ml-1">
-                      Username
-                    </label>
-                    <Input
-                      className="bg-background/50 border-input/60 focus:border-primary/50"
-                      placeholder="postgres"
-                      value={selectedConnection?.user || ""}
-                      onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                        handleChange("user", e.target.value)
-                      }
-                      autoComplete="off"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-medium text-muted-foreground ml-1">
-                      Password
-                    </label>
-                    <div className="relative">
+                <div className="space-y-4 p-4 rounded-xl border border-border/40 bg-card/20">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-muted-foreground ml-1">
+                        Username
+                      </label>
                       <Input
-                        type={showPassword ? "text" : "password"}
-                        className="bg-background/50 border-input/60 focus:border-primary/50 pr-10"
-                        placeholder="••••••••"
-                        value={selectedConnection?.password || ""}
+                        className="bg-background/50 border-input/60 focus:border-primary/50 h-9"
+                        placeholder="postgres"
+                        value={selectedConnection?.user || ""}
                         onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                          handleChange("password", e.target.value)
+                          handleChange("user", e.target.value)
                         }
                         autoComplete="off"
                       />
-                      <button
-                        onClick={() => setShowPassword(!showPassword)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-foreground transition-colors"
-                      >
-                        {showPassword ? (
-                          <EyeOff size={14} />
-                        ) : (
-                          <Eye size={14} />
-                        )}
-                      </button>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-muted-foreground ml-1">
+                        Password
+                      </label>
+                      <div className="relative">
+                        <Input
+                          type={showPassword ? "text" : "password"}
+                          className="bg-background/50 border-input/60 focus:border-primary/50 pr-8 h-9"
+                          placeholder="••••••••"
+                          value={selectedConnection?.password || ""}
+                          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                            handleChange("password", e.target.value)
+                          }
+                          autoComplete="off"
+                        />
+                        <button
+                          onClick={() => setShowPassword(!showPassword)}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-foreground transition-colors"
+                        >
+                          {showPassword ? (
+                            <EyeOff size={12} />
+                          ) : (
+                            <Eye size={12} />
+                          )}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>

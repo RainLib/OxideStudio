@@ -50,6 +50,8 @@ export interface SavedConnection {
   password?: string;
   database?: string;
   tags?: string[];
+  icon?: string;
+  color?: string;
 }
 
 /**
