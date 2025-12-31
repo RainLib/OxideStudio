@@ -1,14 +1,17 @@
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useWorkspaceStore } from "@/store/useWorkspaceStore";
 import { Button } from "@/components/ui/button";
-import { Plus, Database, Monitor, Search } from "lucide-react";
+import { Plus, Database, Monitor, Search, X, Filter } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useState } from "react";
-import { Settings } from "lucide-react";
-import { SettingsDialog } from "@/components/settings/SettingsDialog";
+import { useState, useMemo } from "react";
+import { Badge } from "@/components/ui/badge";
+import { ConnectionConfig } from "@/store/useConnectionStore";
 
-export function ConnectionSidebar() {
-  const [showSettings, setShowSettings] = useState(false);
+interface ConnectionSidebarProps {
+  width?: number;
+}
+
+export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
   const {
     connections,
     isLoading,
@@ -19,13 +22,31 @@ export function ConnectionSidebar() {
   } = useConnectionStore();
   const { activeWorkspaceId, workspaceConnections } = useWorkspaceStore();
   const [filter, setFilter] = useState("");
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
 
-  const filteredConnections = connections.filter((c) => {
+  // Get all unique tags from all connections
+  const allTags = useMemo(() => {
+    const tags = new Set<string>();
+    connections.forEach((c: ConnectionConfig) => {
+      c.tags?.forEach((t: string) => tags.add(t));
+    });
+    return Array.from(tags).sort();
+  }, [connections]);
+
+  const filteredConnections = connections.filter((c: ConnectionConfig) => {
     const matchesFilter =
       c.name.toLowerCase().includes(filter.toLowerCase()) ||
       c.host?.toLowerCase().includes(filter.toLowerCase());
 
     if (!matchesFilter) return false;
+
+    // Tag filtering (OR logic: if any selected tag matches)
+    if (selectedTags.length > 0) {
+      const hasMatchingTag = selectedTags.some((tag: string) =>
+        c.tags?.includes(tag)
+      );
+      if (!hasMatchingTag) return false;
+    }
 
     if (activeWorkspaceId) {
       const workspaceConnIds = workspaceConnections[activeWorkspaceId] || [];
@@ -35,8 +56,17 @@ export function ConnectionSidebar() {
     return true;
   });
 
+  const toggleTag = (tag: string) => {
+    setSelectedTags((prev) =>
+      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
+    );
+  };
+
   return (
-    <div className="w-[300px] border-r border-white/5 bg-[#18181b] flex flex-col h-full z-10">
+    <div
+      style={{ width: `${width}px` }}
+      className="border-r border-white/5 bg-[#18181b] flex flex-col h-full z-10"
+    >
       {/* Header & Actions */}
       <div className="p-4 pb-2 flex flex-col gap-4">
         <div className="flex items-center justify-between">
@@ -73,6 +103,38 @@ export function ConnectionSidebar() {
             onChange={(e) => setFilter(e.target.value)}
           />
         </div>
+
+        {/* Tag Filters */}
+        {allTags.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 pb-1">
+            {allTags.map((tag: string) => {
+              const isActive = selectedTags.includes(tag);
+              return (
+                <button
+                  key={tag}
+                  onClick={() => toggleTag(tag)}
+                  className={cn(
+                    "text-[10px] px-2 py-0.5 rounded-full border transition-all flex items-center gap-1",
+                    isActive
+                      ? "bg-primary/20 border-primary/40 text-primary shadow-sm"
+                      : "bg-secondary/30 border-border/40 text-muted-foreground/60 hover:border-border/80 hover:text-muted-foreground"
+                  )}
+                >
+                  {isActive && <Filter size={8} />}
+                  {tag}
+                </button>
+              );
+            })}
+            {selectedTags.length > 0 && (
+              <button
+                onClick={() => setSelectedTags([])}
+                className="text-[10px] px-2 py-0.5 text-muted-foreground/40 hover:text-destructive transition-colors flex items-center gap-1"
+              >
+                <X size={8} /> Clear
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto px-2 space-y-1 custom-scrollbar">
@@ -89,7 +151,7 @@ export function ConnectionSidebar() {
           </div>
         )}
 
-        {filteredConnections.map((conn) => (
+        {filteredConnections.map((conn: ConnectionConfig) => (
           <div
             key={conn.id}
             className={cn(
@@ -141,28 +203,35 @@ export function ConnectionSidebar() {
               >
                 {conn.name}
               </div>
-              <div className="text-[11px] text-muted-foreground/60 truncate transition-colors group-hover:text-muted-foreground/80 font-mono mt-0.5">
-                {conn.host
-                  ? `${conn.user}@${conn.host}:${conn.port}`
-                  : "Local file"}
+              <div className="flex items-center gap-2 mt-0.5">
+                <div className="text-[11px] text-muted-foreground/60 truncate transition-colors group-hover:text-muted-foreground/80 font-mono">
+                  {conn.host
+                    ? `${conn.user}@${conn.host}:${conn.port}`
+                    : "Local file"}
+                </div>
+
+                {/* Inline Tags on Hover */}
+                <div className="hidden group-hover:flex items-center gap-1 overflow-hidden animate-in fade-in slide-in-from-left-1 duration-200">
+                  {conn.tags?.slice(0, 2).map((tag: string) => (
+                    <Badge
+                      key={tag}
+                      variant="outline"
+                      className="text-[9px] px-1 py-0 leading-none h-3.5 border-primary/20 text-primary/70 font-normal whitespace-nowrap"
+                    >
+                      {tag}
+                    </Badge>
+                  ))}
+                  {(conn.tags?.length || 0) > 2 && (
+                    <span className="text-[9px] text-muted-foreground/40">
+                      +{conn.tags!.length - 2}
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
           </div>
         ))}
       </div>
-
-      <div className="h-8 border-t border-white/5 bg-[#18181b] flex items-center justify-between px-3 text-[10px] text-muted-foreground/60">
-        <span className="font-mono opacity-50">v0.1.0</span>
-        <button
-          onClick={() => setShowSettings(true)}
-          className="hover:text-foreground hover:bg-secondary/80 p-1.5 rounded-md transition-all"
-          title="Settings"
-        >
-          <Settings size={14} />
-        </button>
-      </div>
-
-      <SettingsDialog open={showSettings} onOpenChange={setShowSettings} />
     </div>
   );
 }

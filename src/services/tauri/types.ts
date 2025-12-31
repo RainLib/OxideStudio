@@ -49,6 +49,7 @@ export interface SavedConnection {
   user?: string;
   password?: string;
   database?: string;
+  tags?: string[];
 }
 
 /**

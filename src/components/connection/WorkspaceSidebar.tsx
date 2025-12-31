@@ -8,6 +8,7 @@ import {
   Edit3,
   Palette,
   Briefcase,
+  Settings,
 } from "lucide-react";
 import {
   Tooltip,
@@ -36,6 +37,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useState } from "react";
 import * as LucideIcons from "lucide-react";
+import { SettingsDialog } from "@/components/settings/SettingsDialog";
 
 // Predefined colors
 const COLORS = [
@@ -85,6 +87,7 @@ export function WorkspaceSidebar() {
   const [editingWorkspaceId, setEditingWorkspaceId] = useState<string | null>(
     null
   );
+  const [showSettings, setShowSettings] = useState(false);
 
   const handleCreate = () => {
     if (workspaceName.trim()) {
@@ -190,7 +193,7 @@ export function WorkspaceSidebar() {
         />
 
         {/* WORKSPACES LIST */}
-        <div className="flex-1 w-full flex flex-col items-center gap-3 overflow-y-auto px-2 custom-scrollbar no-scrollbar">
+        <div className="flex-1 w-full flex flex-col items-center gap-3 overflow-y-auto overflow-x-hidden px-2 no-scrollbar">
           {workspaces.map((workspace) => (
             <ContextMenu key={workspace.id}>
               <ContextMenuTrigger>
@@ -612,7 +615,39 @@ export function WorkspaceSidebar() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+        {/* Version and Settings Footer */}
+        <div className="w-full mt-auto py-4 border-t border-white/5 flex flex-col items-center gap-4">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={() => setShowSettings(true)}
+                className={cn(
+                  "w-10 h-10 rounded-2xl flex items-center justify-center cursor-pointer transition-all duration-300",
+                  isDark
+                    ? "text-muted-foreground hover:bg-white/10 hover:text-foreground"
+                    : "text-muted-foreground hover:bg-black/5 hover:text-foreground"
+                )}
+              >
+                <Settings size={20} strokeWidth={1.5} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent
+              side="right"
+              className={cn(
+                "font-medium ml-2 px-3 py-1.5 rounded-lg text-xs",
+                isDark
+                  ? "bg-zinc-800 text-zinc-100 border-zinc-700"
+                  : "bg-white text-zinc-900 border-zinc-200 shadow-md"
+              )}
+              sideOffset={5}
+            >
+              <p>Settings</p>
+            </TooltipContent>
+          </Tooltip>
+        </div>
       </TooltipProvider>
+
+      <SettingsDialog open={showSettings} onOpenChange={setShowSettings} />
     </div>
   );
 }

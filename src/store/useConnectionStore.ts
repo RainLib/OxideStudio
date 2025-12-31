@@ -11,6 +11,7 @@ export interface ConnectionConfig extends SavedConnection {
   database?: string;
   connectionUrl?: string;
   sslMode?: string;
+  tags?: string[];
 }
 
 interface ConnectionState {
@@ -61,7 +62,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   createNewConnection: () => {
-    const newConn = {
+    const newConn: ConnectionConfig = {
       id: uuidv4(),
       name: "New Connection",
       driver: "postgres",
@@ -71,12 +72,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       user: "",
       password: "",
       database: "postgres",
-    } as const; // literal types help inference if needed, but not strictly necessary here
+      tags: [],
+    };
 
     set({
-      selectedConnection: { ...newConn, driver: "postgres" }, // Ensure type compatibility
+      selectedConnection: { ...newConn },
     });
-    return { ...newConn, driver: "postgres" as const };
+    return newConn;
   },
 
   updateConnectionConfig: (updates) => {
