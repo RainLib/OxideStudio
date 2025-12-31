@@ -35,6 +35,7 @@ export function DataGrid({
     commitEdits,
     cancelEdits,
     setColumnWidth,
+    setColumnOrder,
   } = useTabStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
@@ -44,6 +45,7 @@ export function DataGrid({
   const pendingEdits = activeTab?.pendingEdits || new Map();
   const hasEdits = pendingEdits.size > 0;
   const columnWidths = activeTab?.columnWidths || {};
+  const columnOrder = activeTab?.columnOrder || [];
 
   // Row selection state
   const [gridSelection, setGridSelection] = useState<GridSelection>({
@@ -62,6 +64,55 @@ export function DataGrid({
   }>({ type: null, x: 0, y: 0 });
 
   const gridContainerRef = useRef<HTMLDivElement>(null);
+
+  // Column definitions with custom widths and sorting indicators
+  const columns = useMemo<GridColumn[]>(() => {
+    if (!result) return [];
+
+    // Default columns from result
+    const allColumns = result.columns.map((col) => {
+      const isSorted = gridState?.sortColumn === col.name;
+      const sortDir = gridState?.sortDirection;
+      const customWidth = columnWidths[col.name];
+      return {
+        title: col.name,
+        id: col.name,
+        width: customWidth || 150, // Use custom width or default
+        icon: isSorted
+          ? sortDir === "asc"
+            ? "headerSortAsc"
+            : "headerSortDesc"
+          : undefined,
+        hasMenu: true, // Show arrow/menu indicator
+      };
+    });
+
+    if (!columnOrder || columnOrder.length === 0) {
+      return allColumns;
+    }
+
+    // Reorder based on saved state
+    const orderedColumns: GridColumn[] = [];
+    const usedIds = new Set<string>();
+
+    // Add columns in saved order
+    columnOrder.forEach((colId) => {
+      const col = allColumns.find((c) => c.id === colId);
+      if (col) {
+        orderedColumns.push(col);
+        usedIds.add(colId);
+      }
+    });
+
+    // Append any new/remaining columns that weren't in the saved order
+    allColumns.forEach((col) => {
+      if (!usedIds.has(col.id as string)) {
+        orderedColumns.push(col);
+      }
+    });
+
+    return orderedColumns;
+  }, [result, gridState, columnWidths, columnOrder]);
 
   // Apply filters and sorting
   const { filteredRows, sortedIndices } = useMemo(() => {
@@ -136,28 +187,8 @@ export function DataGrid({
     };
   }, [result, gridState, globalFilter, columnFilters]);
 
-  // Column definitions with custom widths and sorting indicators
-  const columns = useMemo<GridColumn[]>(() => {
-    if (!result) return [];
-    return result.columns.map((col) => {
-      const isSorted = gridState?.sortColumn === col.name;
-      const sortDir = gridState?.sortDirection;
-      const customWidth = columnWidths[col.name];
-      return {
-        title: col.name,
-        id: col.name,
-        width: customWidth || 150, // Use custom width or default
-        icon: isSorted
-          ? sortDir === "asc"
-            ? "headerSortAsc"
-            : "headerSortDesc"
-          : undefined,
-        hasMenu: true, // Show arrow/menu indicator
-      };
-    });
-  }, [result, gridState, columnWidths]);
-
   // Cell content with type styling and edit support
+  // IMPORTANT: 'col' here is the VISUAL column index from 'columns' array
   const getCellContent = useCallback(
     (cell: Item): GridCell => {
       if (!result || filteredRows.length === 0)
@@ -171,12 +202,6 @@ export function DataGrid({
       const [col, row] = cell;
       const actualRowIndex = sortedIndices[row];
 
-      if (row === 0 && col === 0) {
-        console.log("[DataGrid] getCellContent called for 0,0", {
-          actualRowIndex,
-        });
-      }
-
       if (actualRowIndex === undefined || !result.rows[actualRowIndex]) {
         return {
           kind: GridCellKind.Text,
@@ -186,17 +211,34 @@ export function DataGrid({
         };
       }
 
+      // Map visual column index to actual data column index
+      const visualColumn = columns[col];
+      const originalColIndex = result.columns.findIndex(
+        (c) => c.name === visualColumn.id
+      );
+
+      if (originalColIndex === -1) {
+        return {
+          kind: GridCellKind.Text,
+          displayData: "Err",
+          data: "Err",
+          allowOverlay: false,
+        };
+      }
+
       // Check if this cell has a pending edit
-      const editKey = `${actualRowIndex}:${col}`;
+      // Key format: "rowIndex:colIndex" -> using ORIGINAL column index for stable edits
+      const editKey = `${actualRowIndex}:${originalColIndex}`;
       const val = pendingEdits.has(editKey)
         ? pendingEdits.get(editKey)
-        : result.rows[actualRowIndex][col];
+        : result.rows[actualRowIndex][originalColIndex];
 
       const gridCell = createTypedCell(val, true);
 
       return gridCell;
     },
-    [result, filteredRows, sortedIndices, pendingEdits]
+    // Add 'columns' to deps because column order changes mapping
+    [result, filteredRows, sortedIndices, pendingEdits, columns]
   );
 
   // Handle header click - no sorting, just for future actions
@@ -206,6 +248,7 @@ export function DataGrid({
   }, []);
 
   // Handle header menu/arrow click for sorting
+  // 'col' is visual index
   const onHeaderMenuClick = useCallback(
     (
       col: number,
@@ -213,7 +256,11 @@ export function DataGrid({
     ) => {
       if (!activeTab || !result) return;
 
-      const column = result.columns[col];
+      const visualColumn = columns[col];
+      if (!visualColumn) return;
+
+      // Find original column from visual column ID (name)
+      const column = result.columns.find((c) => c.name === visualColumn.id);
       if (!column) return;
 
       const currentSort = gridState?.sortColumn;
@@ -236,7 +283,7 @@ export function DataGrid({
         newDirection
       );
     },
-    [activeTab, result, gridState, setGridSort]
+    [activeTab, result, gridState, setGridSort, columns]
   );
 
   // Handle cell edit
@@ -248,6 +295,14 @@ export function DataGrid({
       const actualRowIndex = sortedIndices[row];
       if (actualRowIndex === undefined) return;
 
+      // Map visual to original
+      const visualColumn = columns[col];
+      if (!visualColumn) return;
+      const originalColIndex = result.columns.findIndex(
+        (c) => c.name === visualColumn.id
+      );
+      if (originalColIndex === -1) return;
+
       // Extract the actual value from the edited cell based on its type
       let value: any;
       if ("data" in newValue) {
@@ -256,9 +311,9 @@ export function DataGrid({
         value = null;
       }
 
-      setCellEdit(activeTab.id, actualRowIndex, col, value);
+      setCellEdit(activeTab.id, actualRowIndex, originalColIndex, value);
     },
-    [activeTab, result, sortedIndices, setCellEdit]
+    [activeTab, result, sortedIndices, setCellEdit, columns]
   );
 
   // Column resize handler
@@ -268,6 +323,23 @@ export function DataGrid({
       setColumnWidth(activeTab.id, column.id, newSize);
     },
     [activeTab, setColumnWidth]
+  );
+
+  // Column move handler
+  const onColumnMoved = useCallback(
+    (startIndex: number, endIndex: number) => {
+      if (!activeTab) return;
+
+      const newOrder = [...columns]
+        .map((c) => c.id || "")
+        .filter(Boolean) as string[];
+      const [moved] = newOrder.splice(startIndex, 1);
+      if (moved) {
+        newOrder.splice(endIndex, 0, moved);
+        setColumnOrder(activeTab.id, newOrder);
+      }
+    },
+    [activeTab, columns, setColumnOrder]
   );
 
   // Copy selected cells to clipboard
@@ -525,6 +597,7 @@ export function DataGrid({
             onHeaderMenuClick={onHeaderMenuClick}
             onCellEdited={onCellEdited}
             onColumnResize={onColumnResize}
+            onColumnMoved={onColumnMoved}
             smoothScrollX
             smoothScrollY
             width="100%"
