@@ -14,6 +14,7 @@ import { useConnectionStore } from "@/store/useConnectionStore";
 import { queryService } from "@/services/tauri/query.service";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
+import { StatusBarPortal } from "./StatusBarPortal";
 
 interface CreateTableTabProps {
   tabId: string;
@@ -433,19 +434,28 @@ export function CreateTableTab({
         </div>
       </div>
 
-      {/* Footer */}
-      <div className="p-4 border-t border-white/5 bg-[#27272a]/30 flex justify-end gap-2">
-        <Button
-          variant="ghost"
-          onClick={() => closeTab(tabId)}
-          disabled={isSubmitting}
-        >
-          Cancel
-        </Button>
-        <Button onClick={handleCreate} disabled={isSubmitting || success}>
-          {isSubmitting ? "Creating..." : "Create Table"}
-        </Button>
-      </div>
+      {/* Footer via Portal to status bar */}
+      <StatusBarPortal>
+        <div className="flex-1 flex items-center justify-end gap-2 px-4 h-full">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => closeTab(tabId)}
+            disabled={isSubmitting}
+            className="h-6 text-xs"
+          >
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            onClick={handleCreate}
+            disabled={isSubmitting || success}
+            className="h-6 text-xs"
+          >
+            {isSubmitting ? "Creating..." : "Create Table"}
+          </Button>
+        </div>
+      </StatusBarPortal>
     </div>
   );
 }

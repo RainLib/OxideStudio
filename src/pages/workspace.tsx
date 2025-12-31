@@ -1,7 +1,6 @@
 import { AppBar } from "@/components/AppBar";
 import { Button } from "@/components/ui/button";
 import { DataGrid } from "@/components/workspace/DataGrid";
-import { EditorStatusBar } from "@/components/workspace/EditorStatusBar";
 import { LeftPanel, SidebarTab } from "@/components/workspace/LeftPanel";
 import { QueryEditor } from "@/components/workspace/QueryEditor";
 import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
@@ -191,27 +190,26 @@ export function WorkspacePage() {
               </div>
             </div>
           </div>
-
-          {/* Bottom: Unified EditorStatusBar */}
-          <div
-            className={cn(
-              "h-8 w-full flex items-center border-t z-30 transition-colors duration-300",
-              mode === "dark"
-                ? "bg-orange-500/10 text-orange-500 border-orange-500/20"
-                : "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
-            )}
-          >
-            <EditorStatusBar
-              type={activeTab?.type === "table" ? "table" : "editor"}
-              rowCount={currentResult?.rows?.length}
-              executionTime={activeTab?.type === "table" ? undefined : 124}
-              onRefresh={() => console.log("Refresh table")}
-              onAdd={() => console.log("Add row")}
-              onSettings={() => console.log("Table settings")}
-              onStructure={() => console.log("View structure")}
-            />
-          </div>
         </div>
+      </div>
+
+      {/* Bottom: Unified Status Bar spanning full width - content rendered via Portal from components */}
+      <div
+        className={cn(
+          "h-8 w-full flex items-center border-t z-30 transition-colors duration-300 shrink-0",
+          mode === "dark"
+            ? "bg-orange-500/10 text-orange-500 border-orange-500/20"
+            : "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
+        )}
+      >
+        {/* Left slot - for sidebar status (connection info, etc.) - includes separator */}
+        <div
+          id="status-bar-left"
+          className="h-full flex items-center shrink-0"
+        />
+
+        {/* Right slot - for tab status bar content */}
+        <div id="status-bar-slot" className="flex-1 h-full flex items-center" />
       </div>
     </div>
   );

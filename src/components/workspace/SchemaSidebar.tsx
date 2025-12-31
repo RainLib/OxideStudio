@@ -207,13 +207,6 @@ export function SchemaSidebar() {
     <div className="flex flex-col h-full bg-background-tertiary">
       {/* Top: Database Selector */}
       <div className="p-2 border-b border-border bg-background-secondary shrink-0">
-        <div className="flex items-center gap-2 mb-1">
-          <Database size={13} className="text-primary shrink-0" />
-          <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-bold">
-            Database
-          </span>
-        </div>
-
         <div className="flex items-center gap-2">
           <Select
             value={currentSchema || ""}

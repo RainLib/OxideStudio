@@ -17,6 +17,8 @@ import { createTypedCell, applyFilter, compareValues } from "@/lib/gridUtils";
 import { Check, X as XIcon, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ColumnFilter } from "./GridFilterRow";
+import { StatusBarPortal } from "./StatusBarPortal";
+import { EditorStatusBar } from "./EditorStatusBar";
 
 interface DataGridProps {
   globalFilter?: string;
@@ -722,6 +724,15 @@ export function DataGrid({
           </div>
         )}
       </div>
+
+      {/* Status Bar via Portal */}
+      <StatusBarPortal>
+        <EditorStatusBar
+          type="editor"
+          rowCount={result?.rows?.length || 0}
+          executionTime={124} // TODO: get from tab
+        />
+      </StatusBarPortal>
     </div>
   );
 }
