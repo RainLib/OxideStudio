@@ -45,6 +45,7 @@ export interface TabData {
 interface TabState {
   tabs: TabData[];
   activeTabId: string | null;
+  closedTabsStack: TabData[];
 
   createTab: (
     type?: TabType,
@@ -67,8 +68,13 @@ interface TabState {
   closeTabsToRight: (id: string) => void;
   togglePinTab: (id: string) => void;
   setActiveTab: (id: string) => void;
+  reopenTab: () => void;
   updateTabSql: (id: string, sql: string) => void;
-  runTabQuery: (id: string, connectionId: string) => Promise<void>;
+  runTabQuery: (
+    id: string,
+    connectionId: string,
+    sqlOverride?: string
+  ) => Promise<void>;
   setGridFilter: (
     tabId: string,
     column: string,
@@ -109,6 +115,7 @@ interface TabState {
 export const useTabStore = create<TabState>((set, get) => ({
   tabs: [],
   activeTabId: null,
+  closedTabsStack: [],
 
   createTab: (
     type = "query",
@@ -198,13 +205,13 @@ export const useTabStore = create<TabState>((set, get) => ({
   closeTab: (id: string) => {
     set((state) => {
       const tab = state.tabs.find((t) => t.id === id);
+      if (!tab) return state;
       // Don't close pinned tabs with regular close
-      if (tab?.isPinned) return state;
+      if (tab.isPinned) return state;
 
       const newTabs = state.tabs.filter((t) => t.id !== id);
       let newActiveId = state.activeTabId;
 
-      // If closing active tab, switch to another
       if (id === state.activeTabId) {
         newActiveId =
           newTabs.length > 0 && newTabs[newTabs.length - 1]
@@ -212,16 +219,22 @@ export const useTabStore = create<TabState>((set, get) => ({
             : null;
       }
 
-      return { tabs: newTabs, activeTabId: newActiveId };
+      return {
+        tabs: newTabs,
+        activeTabId: newActiveId,
+        closedTabsStack: [tab, ...state.closedTabsStack].slice(0, 20), // Keep last 20
+      };
     });
   },
 
   forceCloseTab: (id: string) => {
     set((state) => {
+      const tab = state.tabs.find((t) => t.id === id);
+      if (!tab) return state;
+
       const newTabs = state.tabs.filter((t) => t.id !== id);
       let newActiveId = state.activeTabId;
 
-      // If closing active tab, switch to another
       if (id === state.activeTabId) {
         newActiveId =
           newTabs.length > 0 && newTabs[newTabs.length - 1]
@@ -229,7 +242,11 @@ export const useTabStore = create<TabState>((set, get) => ({
             : null;
       }
 
-      return { tabs: newTabs, activeTabId: newActiveId };
+      return {
+        tabs: newTabs,
+        activeTabId: newActiveId,
+        closedTabsStack: [tab, ...state.closedTabsStack].slice(0, 20),
+      };
     });
   },
 
@@ -296,15 +313,41 @@ export const useTabStore = create<TabState>((set, get) => ({
     set({ activeTabId: id });
   },
 
+  reopenTab: () => {
+    const { closedTabsStack, tabs } = get();
+    if (closedTabsStack.length === 0) return;
+
+    const [tabToReopen, ...newStack] = closedTabsStack;
+
+    // Check if tab already exists (though it shouldn't be in stack if it does)
+    if (tabs.find((t) => t.id === tabToReopen!.id)) {
+      set({ closedTabsStack: newStack });
+      return;
+    }
+
+    set({
+      tabs: [...tabs, tabToReopen!],
+      activeTabId: tabToReopen!.id,
+      closedTabsStack: newStack,
+    });
+  },
+
   updateTabSql: (id: string, sql: string) => {
     set((state) => ({
       tabs: state.tabs.map((t) => (t.id === id ? { ...t, sql } : t)),
     }));
   },
 
-  runTabQuery: async (id: string, connectionId: string) => {
+  runTabQuery: async (
+    id: string,
+    connectionId: string,
+    sqlOverride?: string
+  ) => {
     const tab = get().tabs.find((t) => t.id === id);
-    if (!tab || !tab.sql.trim()) return;
+    if (!tab) return;
+
+    const sqlToRun = sqlOverride || tab.sql;
+    if (!sqlToRun.trim()) return;
 
     // Update state to executing
     set((state) => ({
@@ -332,14 +375,14 @@ export const useTabStore = create<TabState>((set, get) => ({
 
       const results = await queryService.executeQuery(
         connectionId,
-        tab.sql,
+        sqlToRun,
         schemaContext || undefined
       );
 
-      // Add to history regardless of result? Usually only if success, but Beekeeper saves all attempts often.
-      // Let's save on attempt for now, or maybe on success. Plan said "successful".
-      // Actually, let's save immediately so we don't lose it if it crashes.
-      useHistoryStore.getState().addToHistory(tab.sql);
+      // Add to history if it's the full tab SQL and successful
+      if (!sqlOverride) {
+        useHistoryStore.getState().addToHistory(tab.sql);
+      }
 
       console.log("[TabStore] Query successfully finished", results);
 

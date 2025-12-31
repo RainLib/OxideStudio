@@ -8,6 +8,11 @@ import { ThemeContext } from "@/theme/ThemeProvider";
 import Editor, { useMonaco } from "@monaco-editor/react";
 import { useEffect, useRef, useState, useContext } from "react";
 import { queryService, schemaService } from "@/services/tauri";
+import {
+  APP_EVENT_RUN_QUERY,
+  APP_EVENT_RUN_CURRENT,
+  APP_EVENT_FORMAT_SQL,
+} from "@/hooks/useShortcuts";
 
 type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
@@ -194,6 +199,40 @@ export function QueryEditor() {
       runTabQuery(activeTab.id, activeConnectionId);
     }
   };
+
+  const handleRunCurrent = () => {
+    if (!activeConnectionId || !activeTab || !editorRef.current) return;
+
+    const selection = editorRef.current.getSelection();
+    const model = editorRef.current.getModel();
+    if (!selection || !model) return;
+
+    const selectedText = model.getValueInRange(selection);
+
+    // If something is selected, run only that.
+    if (selectedText && selectedText.trim()) {
+      runTabQuery(activeTab.id, activeConnectionId, selectedText);
+    } else {
+      // Otherwise run the full tab query
+      runTabQuery(activeTab.id, activeConnectionId);
+    }
+  };
+
+  useEffect(() => {
+    const onRun = () => handleRun();
+    const onRunCurrent = () => handleRunCurrent();
+    const onFormat = () => handleFormat();
+
+    window.addEventListener(APP_EVENT_RUN_QUERY, onRun);
+    window.addEventListener(APP_EVENT_RUN_CURRENT, onRunCurrent);
+    window.addEventListener(APP_EVENT_FORMAT_SQL, onFormat);
+
+    return () => {
+      window.removeEventListener(APP_EVENT_RUN_QUERY, onRun);
+      window.removeEventListener(APP_EVENT_RUN_CURRENT, onRunCurrent);
+      window.removeEventListener(APP_EVENT_FORMAT_SQL, onFormat);
+    };
+  }, [activeConnectionId, activeTab]);
 
   const handleSchemaChange = (schema: string) => {
     if (activeTab) {
