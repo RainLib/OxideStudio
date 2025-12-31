@@ -141,8 +141,16 @@ export function CreateTableTab({
   };
 
   // Mouse-based drag handlers
-  const handleDragStart = (index: number) => {
+  const handleDragStart = (e: React.MouseEvent, index: number) => {
+    e.preventDefault(); // Prevent text selection
     setDragState({ isDragging: true, dragIndex: index, hoverIndex: null });
+
+    // Add global mouseup listener to handle drop anywhere
+    const handleGlobalMouseUp = () => {
+      handleDragEnd();
+      document.removeEventListener("mouseup", handleGlobalMouseUp);
+    };
+    document.addEventListener("mouseup", handleGlobalMouseUp);
   };
 
   const handleDragEnter = (index: number) => {
@@ -302,7 +310,7 @@ export function CreateTableTab({
               >
                 {/* Drag Handle */}
                 <div
-                  onMouseDown={() => handleDragStart(idx)}
+                  onMouseDown={(e) => handleDragStart(e, idx)}
                   className="h-8 w-6 flex items-center justify-center cursor-grab active:cursor-grabbing text-muted-foreground hover:text-foreground shrink-0 select-none"
                   title="Drag to reorder"
                 >
