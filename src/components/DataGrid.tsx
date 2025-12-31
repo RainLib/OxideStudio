@@ -5,31 +5,35 @@ import DataEditor, {
   Item,
 } from "@glideapps/glide-data-grid";
 import "@glideapps/glide-data-grid/dist/index.css";
-
-interface RowData {
-  [key: string]: string | number;
-}
+import { ColumnDef } from "@/services/tauri";
 
 interface DataGridProps {
-  data: RowData[];
-  columns: { id: string; title: string; width?: number }[];
+  data: any[][];
+  columns: ColumnDef[];
 }
 
 export function DataGrid({ data, columns }: DataGridProps) {
-  // 转换列格式
+  if (!columns || !data) {
+    return (
+      <div className="p-4 text-muted-foreground text-sm">
+        No data to display
+      </div>
+    );
+  }
+
+  // Convert columns
   const gridColumns: GridColumn[] = columns.map((col) => ({
-    title: col.title,
-    id: col.id,
-    width: col.width ?? 150,
+    title: col.name,
+    id: col.name,
+    width: 150,
   }));
 
-  // 提供单元格内容
+  // Provide cell content
   const getCellContent = (cell: Item): GridCell => {
     const [col, row] = cell;
     const rowData = data[row];
-    const columnId = columns[col]?.id;
 
-    if (!rowData || !columnId) {
+    if (!rowData) {
       return {
         kind: GridCellKind.Text,
         data: "",
@@ -38,13 +42,15 @@ export function DataGrid({ data, columns }: DataGridProps) {
       };
     }
 
-    const value = rowData[columnId];
+    const value = rowData[col];
 
     return {
       kind: GridCellKind.Text,
-      data: String(value ?? ""),
-      displayData: String(value ?? ""),
+      data: value === null || value === undefined ? "NULL" : String(value),
+      displayData:
+        value === null || value === undefined ? "NULL" : String(value),
       allowOverlay: true,
+      themeOverride: value === null ? { textDark: "#888" } : undefined, // Dim explicit NULLs
     };
   };
 
