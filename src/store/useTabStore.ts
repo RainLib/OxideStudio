@@ -1,9 +1,20 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
 import { queryService, QueryResult } from "@/services/tauri";
+import { schemaService } from "@/services/tauri/schema.service";
+import type { ColumnInfo } from "@/services/tauri/types";
 import { useHistoryStore } from "./useHistoryStore";
+import { useConnectionStore } from "./useConnectionStore";
 import { useSchemaStore } from "./useSchemaStore";
 import type { FilterOperator } from "@/components/workspace/GridFilterRow";
+
+function formatSqlValue(val: any): string {
+  if (val === null || val === undefined) return "NULL";
+  if (typeof val === "number") return val.toString();
+  if (typeof val === "boolean") return val ? "TRUE" : "FALSE";
+  // Escape single quotes for SQL string
+  return `'${String(val).replace(/'/g, "''")}'`;
+}
 
 export type TabType = "query" | "table" | "create_table";
 
@@ -41,6 +52,7 @@ export interface TabData {
   columnOrder?: string[];
   // Target schema for query execution
   targetSchema?: string | null;
+  tableColumns?: ColumnInfo[];
 }
 
 interface TabState {
@@ -92,6 +104,10 @@ interface TabState {
     colIndex: number,
     value: any
   ) => void;
+  setBulkCellEdit: (
+    tabId: string,
+    edits: Array<{ rowIndex: number; colIndex: number; value: any }>
+  ) => void;
   commitEdits: (tabId: string) => Promise<void>;
   cancelEdits: (tabId: string) => void;
   // Filter UI methods
@@ -112,6 +128,7 @@ interface TabState {
   setColumnOrder: (tabId: string, columnOrder: string[]) => void;
   // Schema selection method
   setTargetSchema: (tabId: string, schema: string | null) => void;
+  fetchTableColumns: (tabId: string) => Promise<void>;
 }
 
 export const useTabStore = create<TabState>((set, get) => ({
@@ -461,20 +478,192 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
   },
 
+  setBulkCellEdit: (tabId, edits) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) => {
+        if (t.id !== tabId) return t;
+        const pendingEdits = new Map(t.pendingEdits || new Map());
+
+        edits.forEach(({ rowIndex, colIndex, value }) => {
+          const key = `${rowIndex}:${colIndex}`;
+          pendingEdits.set(key, value);
+        });
+
+        return { ...t, pendingEdits };
+      }),
+    }));
+  },
+
   commitEdits: async (tabId) => {
     const state = get();
     const tab = state.tabs.find((t) => t.id === tabId);
     if (!tab || !tab.pendingEdits || tab.pendingEdits.size === 0) return;
 
-    // For now, just clear the edits
-    // TODO: Generate and execute UPDATE SQL statements
-    console.log("Committing edits:", tab.pendingEdits);
+    const schema = tab.schemaName || "public";
+    const table = tab.tableName;
+    if (!table) return;
 
-    set((state) => ({
-      tabs: state.tabs.map((t) =>
-        t.id === tabId ? { ...t, pendingEdits: new Map() } : t
-      ),
-    }));
+    // Use metadata if available, otherwise we can't save safely
+    const columnsMetadata = tab.tableColumns;
+    if (!columnsMetadata) {
+      console.error("Missing column metadata for table:", table);
+      // Try to fetch it?
+      await state.fetchTableColumns(tabId);
+      // Re-get state
+      const refreshedTab = get().tabs.find((t) => t.id === tabId);
+      if (!refreshedTab?.tableColumns) {
+        // Still missing
+        console.error("Failed to fetch metadata, cannot save.");
+        // Clear edits to avoid stuck state? No, let user retry.
+        return;
+      }
+    }
+
+    // Check PKs (using refreshed state)
+    const currentTab = get().tabs.find((t) => t.id === tabId)!;
+    const pks = currentTab.tableColumns?.filter((c) => c.is_primary_key) || [];
+
+    if (pks.length === 0) {
+      console.warn("No Primary Key found for table:", table);
+      // We could allow INSERTs but UPDATEs are risky.
+      // For now, proceed but UPDATEs might fail or require full row match (not implemented).
+      // Let's block UPDATEs if no PK.
+    }
+
+    const editsByRow = new Map<number, Record<number, any>>();
+    for (const [key, value] of currentTab.pendingEdits!.entries()) {
+      const [rStr, cStr] = key.split(":");
+      const r = parseInt(rStr);
+      const c = parseInt(cStr);
+      if (!editsByRow.has(r)) editsByRow.set(r, {});
+      editsByRow.get(r)![c] = value;
+    }
+
+    const sqlStatements: string[] = [];
+
+    for (const [rowIndex, rowEdits] of editsByRow.entries()) {
+      const colDefs = currentTab.results?.[0]?.columns;
+      if (!colDefs) continue;
+
+      if (rowIndex < 0) {
+        // INSERT
+        const cols: string[] = [];
+        const vals: string[] = [];
+
+        for (const [cIdx, val] of Object.entries(rowEdits)) {
+          const colName = colDefs[parseInt(cIdx)]?.name;
+          if (colName) {
+            cols.push(`"${colName}"`);
+            vals.push(formatSqlValue(val));
+          }
+        }
+
+        if (cols.length > 0) {
+          sqlStatements.push(
+            `INSERT INTO "${schema}"."${table}" (${cols.join(
+              ", "
+            )}) VALUES (${vals.join(", ")});`
+          );
+        }
+      } else {
+        // UPDATE
+        if (pks.length === 0) continue; // Skip updates if no PK
+
+        const originalRow = currentTab.results?.[0]?.rows[rowIndex];
+        if (!originalRow) continue;
+
+        const updates: string[] = [];
+        for (const [cIdx, val] of Object.entries(rowEdits)) {
+          const colName = colDefs[parseInt(cIdx)]?.name;
+          if (colName) {
+            updates.push(`"${colName}" = ${formatSqlValue(val)}`);
+          }
+        }
+
+        // Build WHERE clause
+        const whereParts: string[] = [];
+        for (const pk of pks) {
+          const pkIdx = colDefs.findIndex((c) => c.name === pk.name);
+          if (pkIdx !== -1) {
+            const pkVal = originalRow[pkIdx];
+            whereParts.push(`"${pk.name}" = ${formatSqlValue(pkVal)}`);
+          }
+        }
+
+        if (updates.length > 0 && whereParts.length > 0) {
+          sqlStatements.push(
+            `UPDATE "${schema}"."${table}" SET ${updates.join(
+              ", "
+            )} WHERE ${whereParts.join(" AND ")};`
+          );
+        }
+      }
+    }
+
+    if (sqlStatements.length === 0) {
+      // Nothing to do or failed to generate
+      console.log("No statements generated");
+      return;
+    }
+
+    console.log("Executing Save SQL:", sqlStatements);
+
+    // Execute
+    try {
+      // Get connection ID. currently not stored in tab explicitly for tables,
+      // but `results` usually comes from a connection.
+      // We stored `connectionId` in `createTableTab`!
+      const connId =
+        currentTab.connectionId ||
+        useConnectionStore.getState().activeConnectionId;
+
+      if (!connId) {
+        console.error("No connection ID found");
+        return;
+      }
+
+      await queryService.executeQuery(connId, sqlStatements.join("\n"));
+
+      // Success - clear edits and refresh data (re-run implicit query)
+      // We'll just runTabQuery with empty override to re-fetch
+      await state.runTabQuery(tabId, connId);
+
+      // Clear edits
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId
+            ? { ...t, pendingEdits: new Map(), newRowsCount: 0 }
+            : t
+        ),
+      }));
+    } catch (e) {
+      console.error("Save failed:", e);
+      // Don't clear edits on error
+    }
+  },
+
+  fetchTableColumns: async (tabId) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
+    if (!tab || !tab.tableName || !tab.schemaName) return;
+
+    const connId =
+      tab.connectionId || useConnectionStore.getState().activeConnectionId;
+    if (!connId) return;
+
+    try {
+      const cols = await schemaService.getColumns(
+        connId,
+        tab.schemaName,
+        tab.tableName
+      );
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId ? { ...t, tableColumns: cols } : t
+        ),
+      }));
+    } catch (e) {
+      console.error("Failed to fetch columns:", e);
+    }
   },
 
   cancelEdits: (tabId) => {

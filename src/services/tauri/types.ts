@@ -71,6 +71,7 @@ export interface ColumnInfo {
   name: string;
   data_type: string;
   is_nullable: boolean;
+  is_primary_key: boolean;
   column_default?: string;
   character_maximum_length?: number;
   numeric_precision?: number;

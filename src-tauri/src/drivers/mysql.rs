@@ -222,7 +222,7 @@ impl DatabaseDriver for MysqlDriver {
         let pool = self.get_pool(None).await?;
         let rows = sqlx::query(
             r#"
-            SELECT column_name, data_type, is_nullable, column_default
+            SELECT column_name, data_type, is_nullable, column_default, column_key
             FROM information_schema.columns
             WHERE table_schema = ? AND table_name = ?
             ORDER BY ordinal_position
@@ -241,11 +241,15 @@ impl DatabaseDriver for MysqlDriver {
                     .try_get::<String, _>("IS_NULLABLE")
                     .unwrap_or("YES".to_string())
                     == "YES";
+
+                let column_key = r.try_get::<String, _>("COLUMN_KEY").unwrap_or_default();
+                let is_primary_key = column_key == "PRI";
+
                 ColumnInfo {
                     name: r.try_get("COLUMN_NAME").unwrap_or_default(),
                     data_type: r.try_get("DATA_TYPE").unwrap_or_default(),
                     is_nullable,
-                    is_primary_key: false,
+                    is_primary_key,
                     default_value: r.try_get("COLUMN_DEFAULT").ok(),
                     comment: None,
                 }

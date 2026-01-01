@@ -154,10 +154,23 @@ impl DatabaseDriver for PostgresDriver {
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("Not connected"))?;
         let rows = sqlx::query(
             r#"
-            SELECT column_name, data_type, is_nullable, column_default
-            FROM information_schema.columns
-            WHERE table_schema = $1 AND table_name = $2
-            ORDER BY ordinal_position
+            SELECT
+                c.column_name,
+                c.data_type,
+                c.is_nullable,
+                c.column_default,
+                EXISTS (
+                    SELECT 1
+                    FROM information_schema.key_column_usage kcu
+                    JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name
+                    WHERE kcu.table_schema = c.table_schema
+                      AND kcu.table_name = c.table_name
+                      AND kcu.column_name = c.column_name
+                      AND tc.constraint_type = 'PRIMARY KEY'
+                ) as is_primary_key
+            FROM information_schema.columns c
+            WHERE c.table_schema = $1 AND c.table_name = $2
+            ORDER BY c.ordinal_position
             "#,
         )
         .bind(schema)
@@ -173,11 +186,13 @@ impl DatabaseDriver for PostgresDriver {
                     .try_get::<String, _>("is_nullable")
                     .unwrap_or("YES".to_string())
                     == "YES";
+                let is_primary_key = r.try_get::<bool, _>("is_primary_key").unwrap_or(false);
+
                 ColumnInfo {
                     name: r.try_get("column_name").unwrap_or_default(),
                     data_type: r.try_get("data_type").unwrap_or_default(),
                     is_nullable,
-                    is_primary_key: false,
+                    is_primary_key,
                     default_value: r.try_get("column_default").ok(),
                     comment: None,
                 }

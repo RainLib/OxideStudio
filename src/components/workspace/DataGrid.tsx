@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, useRef } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import {
   DataEditor,
   GridCell,
@@ -36,13 +36,26 @@ export function DataGrid({
     activeTabId,
     setGridSort,
     setCellEdit,
+    setBulkCellEdit,
     commitEdits,
     cancelEdits,
     setColumnWidth,
     setColumnOrder,
     addNewRow,
+    fetchTableColumns,
   } = useTabStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
+
+  useEffect(() => {
+    if (activeTabId && activeTab?.type === "table" && !activeTab.tableColumns) {
+      fetchTableColumns(activeTabId);
+    }
+  }, [
+    activeTabId,
+    activeTab?.type,
+    activeTab?.tableColumns,
+    fetchTableColumns,
+  ]);
 
   const result = activeTab?.results?.[0];
   const error = activeTab?.error;
@@ -377,35 +390,8 @@ export function DataGrid({
       if (!activeTab) return;
 
       const [col, row] = cell;
-      let actualRowKey_forEdit: number | undefined;
 
-      if (row >= filteredRows.length) {
-        // New Row
-        const newRowIndex = row - filteredRows.length;
-        actualRowKey_forEdit = -1 - newRowIndex;
-      } else {
-        actualRowKey_forEdit = sortedIndices[row];
-      }
-
-      if (actualRowKey_forEdit === undefined) return;
-
-      const visualColumn = columns[col];
-      if (!visualColumn) return;
-
-      let originalColIndex = -1;
-      if (result) {
-        originalColIndex = result.columns.findIndex(
-          (c) => c.name === visualColumn.id
-        );
-      } else if (overrideColumns) {
-        originalColIndex = overrideColumns.findIndex(
-          (c) => c.name === visualColumn.id
-        );
-      }
-
-      if (originalColIndex === -1) return;
-
-      // Extract the actual value from the edited cell based on its type
+      // Extract value
       let value: any;
       if ("data" in newValue) {
         value = newValue.data;
@@ -413,16 +399,79 @@ export function DataGrid({
         value = null;
       }
 
-      setCellEdit(activeTab.id, actualRowKey_forEdit, originalColIndex, value);
+      // Helper to map visual (r,c) to data indices
+      const getIndices = (r: number, c: number) => {
+        let actualRowKey: number | undefined;
+        if (r >= filteredRows.length) {
+          actualRowKey = -1 - (r - filteredRows.length);
+        } else {
+          actualRowKey = sortedIndices[r];
+        }
+
+        const vCol = columns[c];
+        if (!vCol) return null;
+
+        let origColIdx = -1;
+        if (result) {
+          origColIdx = result.columns.findIndex((col) => col.name === vCol.id);
+        } else if (overrideColumns) {
+          origColIdx = overrideColumns.findIndex((col) => col.name === vCol.id);
+        }
+
+        if (actualRowKey === undefined || origColIdx === -1) return null;
+        return { rowIndex: actualRowKey, colIndex: origColIdx };
+      };
+
+      const edits: Array<{ rowIndex: number; colIndex: number; value: any }> =
+        [];
+      let appliedToSelection = false;
+      const range = gridSelection.current?.range;
+
+      if (range) {
+        const { x, y, width, height } = range;
+        // Check if edited cell is inside the selection range
+        if (col >= x && col < x + width && row >= y && row < y + height) {
+          appliedToSelection = true;
+          for (let r = y; r < y + height; r++) {
+            for (let c = x; c < x + width; c++) {
+              const indices = getIndices(r, c);
+              if (indices) {
+                edits.push({ ...indices, value });
+              }
+            }
+          }
+        }
+      }
+
+      if (!appliedToSelection) {
+        const indices = getIndices(row, col);
+        if (indices) edits.push({ ...indices, value });
+      }
+
+      if (edits.length > 0) {
+        const firstEdit = edits[0];
+        if (edits.length === 1 && firstEdit) {
+          setCellEdit(
+            activeTab.id,
+            firstEdit.rowIndex,
+            firstEdit.colIndex,
+            value
+          );
+        } else {
+          setBulkCellEdit(activeTab.id, edits);
+        }
+      }
     },
     [
       activeTab,
       result,
       sortedIndices,
       setCellEdit,
+      setBulkCellEdit,
       columns,
       filteredRows,
       overrideColumns,
+      gridSelection,
     ]
   );
 
