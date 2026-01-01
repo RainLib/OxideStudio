@@ -237,16 +237,21 @@ export function EditorActionBar({
             onClick={onRun}
             disabled={isExecuting || !isConnected}
             className={cn(
-              "h-8 px-3 bg-foreground text-background hover:bg-foreground/90 text-xs font-bold rounded-l-md rounded-r-none border-r border-background/20 transition-all flex items-center gap-1.5",
-              isExecuting && "opacity-80 disabled:opacity-80"
+              "h-8 px-3 bg-foreground text-background hover:bg-foreground/90 text-xs font-bold rounded-l-md rounded-r-none border-r border-background/20 transition-all flex items-center gap-1.5 min-w-[70px]",
+              isExecuting && "opacity-80 disabled:opacity-80 cursor-not-allowed"
             )}
           >
             {isExecuting ? (
-              <Loader2 className="animate-spin h-3.5 w-3.5 text-primary" />
+              <>
+                <Loader2 className="animate-spin h-3.5 w-3.5 text-primary" />
+                <span>RUNNING</span>
+              </>
             ) : (
-              <Play size={14} className="fill-primary text-primary" />
+              <>
+                <Play size={14} className="fill-primary text-primary" />
+                <span>RUN</span>
+              </>
             )}
-            RUN
           </Button>
           <Button
             size="icon"

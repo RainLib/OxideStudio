@@ -45,6 +45,8 @@ import {
 import * as LucideIcons from "lucide-react";
 import React from "react";
 
+import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
+
 // Predefined colors
 const COLORS = [
   "#f39c12", // Orange
@@ -103,21 +105,7 @@ export function ConnectionForm() {
   ];
 
   if (!selectedConnection) {
-    return (
-      <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground gap-4">
-        <div className="w-20 h-20 rounded-2xl bg-[#18181b] border border-white/5 flex items-center justify-center shadow-2xl">
-          <Database size={32} className="opacity-20 text-foreground" />
-        </div>
-        <div className="text-center space-y-1">
-          <h3 className="text-lg font-medium text-foreground">
-            No Connection Selected
-          </h3>
-          <p className="text-sm text-muted-foreground/60">
-            Select a connection or create a new one to get started.
-          </p>
-        </div>
-      </div>
-    );
+    return <QueryShortcuts />;
   }
 
   const parseConnectionString = (url: string): Partial<ConnectionConfig> => {

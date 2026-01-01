@@ -198,32 +198,90 @@ impl DatabaseDriver for PostgresDriver {
 
 fn decode_pg_value(row: &PgRow, index: usize) -> serde_json::Value {
     let col = row.column(index);
-    let type_name = col.type_info().name();
+    let type_info = col.type_info();
+    let type_name = type_info.name();
+
+    // Helper macro to try getting a type, returning Null if it fails (silently)
+    // In a real debug scenario, we might want to log this error.
+    macro_rules! try_get {
+        ($ty:ty) => {
+            match row.try_get::<$ty, _>(index) {
+                Ok(v) => serde_json::to_value(v).unwrap_or(serde_json::Value::Null),
+                Err(_) => serde_json::Value::Null,
+            }
+        };
+    }
 
     match type_name {
-        "BOOL" | "bool" => {
-            let v: Option<bool> = row.try_get(index).ok();
-            serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+        "BOOL" | "bool" => try_get!(bool),
+        "INT2" | "int2" => try_get!(i16), // smallint
+        "INT4" | "int4" => try_get!(i32), // integer
+        "INT8" | "int8" => try_get!(i64), // bigint
+        "FLOAT4" | "float4" => try_get!(f32),
+        "FLOAT8" | "float8" => try_get!(f64),
+        "NUMERIC" | "numeric" => {
+            // sqlx maps numeric to BigDecimal, which might not serialize directly to JSON number easily without extra crates.
+            // safely cast to f64 for display, or string to preserve precision.
+            // For simplicity in this display-focused app, let's try string first to convert, then f64.
+            // Actually, sqlx recommend crate `rust_decimal`. Without it, let's just get as string?
+            // Fallback: try to get as f64 locally if possible, or string.
+            // Safest for generalized tools: String representation of the number.
+            // BUT, users want to sort potentially.
+            // Let's try `rust_decimal::Decimal` if available, but we don't have it in dependencies maybe?
+            // Let's just assume string for accuracy or f64 for convenience.
+            // If we try `row.try_get::<f64, _>(index)`, sqlx often allows numeric->f64 conversion.
+            if let Ok(v) = row.try_get::<f64, _>(index) {
+                serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+            } else {
+                // Fallback to string if f64 conversion fails (e.g. too big)
+                if let Ok(v) = row.try_get::<String, _>(index) {
+                    serde_json::Value::String(v)
+                } else {
+                    serde_json::Value::Null
+                }
+            }
         }
-        "INT2" | "INT4" | "INT8" | "int2" | "int4" | "int8" => {
-            let v: Option<i64> = row.try_get(index).ok();
-            serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+        "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "text" | "varchar" | "char"
+        | "bpchar" | "name" => {
+            try_get!(String)
         }
-        "FLOAT4" | "FLOAT8" | "float4" | "float8" | "NUMERIC" | "numeric" => {
-            let v: Option<f64> = row.try_get(index).ok();
-            serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+        "JSON" | "JSONB" | "json" | "jsonb" => match row.try_get::<serde_json::Value, _>(index) {
+            Ok(v) => v,
+            Err(_) => serde_json::Value::Null,
+        },
+        "UUID" | "uuid" => {
+            // UUID provided by sqlx::types::Uuid
+            // Try fetching as string mostly works for UUID in sqlx if features enabled, otherwise need Uuid type.
+            // Let's try string representation directly.
+            if let Ok(v) = row.try_get::<String, _>(index) {
+                serde_json::Value::String(v)
+            } else {
+                // Try getting raw Uuid and to_string? - Requires uuid crate dependency in main
+                // Simplest fallback for unknown types is usually checking if we can get it as String.
+                // SQLx `Row::try_get` for `String` works for many types that implement Display.
+                serde_json::Value::Null
+            }
         }
-        "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "text" | "varchar" | "char" => {
-            let v: Option<String> = row.try_get(index).ok();
-            serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
-        }
-        "JSON" | "JSONB" | "json" | "jsonb" => {
-            let v: Option<serde_json::Value> = row.try_get(index).ok();
-            v.unwrap_or(serde_json::Value::Null)
+        "TIMESTAMPTZ" | "TIMESTAMP" | "DATE" | "TIME" | "timestamptz" | "timestamp" | "date"
+        | "time" => {
+            // Try formatting as string.
+            // SQLx often maps these to `chrono` types.
+            if let Ok(v) = row.try_get::<String, _>(index) {
+                serde_json::Value::String(v)
+            } else {
+                // If string retrieve fails, maybe it's because we need to decode to chrono, then stringify.
+                // But typically string work. If not, returning Null is safer than panic.
+                serde_json::Value::Null
+            }
         }
         _ => {
-            let v: Option<String> = row.try_get(index).ok();
-            serde_json::to_value(v).unwrap_or(serde_json::Value::String(format!("<{}>", type_name)))
+            // "Catch-all": Try to read as String. This handles ENUMs, UUIDs (often), custom types etc.
+            if let Ok(v) = row.try_get::<String, _>(index) {
+                serde_json::Value::String(v)
+            } else {
+                // If we really can't get it, return a placeholder describing the type so the user knows.
+                serde_json::Value::String(format!("<{}>", type_name))
+            }
         }
     }
 }

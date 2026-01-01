@@ -20,14 +20,17 @@ import { ColumnFilter } from "./GridFilterRow";
 import { StatusBarPortal } from "./StatusBarPortal";
 import { EditorStatusBar } from "./EditorStatusBar";
 
+// In DataGridProps
 interface DataGridProps {
   globalFilter?: string;
   columnFilters?: ColumnFilter[];
+  overrideColumns?: Array<{ name: string; type?: string }>;
 }
 
 export function DataGrid({
   globalFilter = "",
   columnFilters = [],
+  overrideColumns,
 }: DataGridProps) {
   const {
     tabs,
@@ -67,54 +70,61 @@ export function DataGrid({
 
   const gridContainerRef = useRef<HTMLDivElement>(null);
 
-  // Column definitions with custom widths and sorting indicators
+  // Column definitions
   const columns = useMemo<GridColumn[]>(() => {
-    if (!result) return [];
+    // If we have a result, use its columns
+    if (result) {
+      const allColumns = result.columns.map((col) => {
+        const isSorted = gridState?.sortColumn === col.name;
+        const sortDir = gridState?.sortDirection;
+        const customWidth = columnWidths[col.name];
+        return {
+          title: col.name,
+          id: col.name,
+          width: customWidth || 150,
+          icon: isSorted
+            ? sortDir === "asc"
+              ? "headerSortAsc"
+              : "headerSortDesc"
+            : undefined,
+          hasMenu: true,
+        };
+      });
 
-    // Default columns from result
-    const allColumns = result.columns.map((col) => {
-      const isSorted = gridState?.sortColumn === col.name;
-      const sortDir = gridState?.sortDirection;
-      const customWidth = columnWidths[col.name];
-      return {
-        title: col.name,
-        id: col.name,
-        width: customWidth || 150, // Use custom width or default
-        icon: isSorted
-          ? sortDir === "asc"
-            ? "headerSortAsc"
-            : "headerSortDesc"
-          : undefined,
-        hasMenu: true, // Show arrow/menu indicator
-      };
-    });
+      if (!columnOrder || columnOrder.length === 0) {
+        return allColumns;
+      }
 
-    if (!columnOrder || columnOrder.length === 0) {
-      return allColumns;
+      // ... (reordering logic same as before)
+      const orderedColumns: GridColumn[] = [];
+      const usedIds = new Set<string>();
+      columnOrder.forEach((colId) => {
+        const col = allColumns.find((c) => c.id === colId);
+        if (col) {
+          orderedColumns.push(col);
+          usedIds.add(colId);
+        }
+      });
+      allColumns.forEach((col) => {
+        if (!usedIds.has(col.id as string)) {
+          orderedColumns.push(col);
+        }
+      });
+      return orderedColumns;
     }
 
-    // Reorder based on saved state
-    const orderedColumns: GridColumn[] = [];
-    const usedIds = new Set<string>();
+    // If no result but we have override columns (fallback for empty table view)
+    if (overrideColumns && overrideColumns.length > 0) {
+      return overrideColumns.map((col) => ({
+        title: col.name,
+        id: col.name,
+        width: 150,
+        hasMenu: true,
+      }));
+    }
 
-    // Add columns in saved order
-    columnOrder.forEach((colId) => {
-      const col = allColumns.find((c) => c.id === colId);
-      if (col) {
-        orderedColumns.push(col);
-        usedIds.add(colId);
-      }
-    });
-
-    // Append any new/remaining columns that weren't in the saved order
-    allColumns.forEach((col) => {
-      if (!usedIds.has(col.id as string)) {
-        orderedColumns.push(col);
-      }
-    });
-
-    return orderedColumns;
-  }, [result, gridState, columnWidths, columnOrder]);
+    return [];
+  }, [result, gridState, columnWidths, columnOrder, overrideColumns]);
 
   // Apply filters and sorting
   const { filteredRows, sortedIndices } = useMemo(() => {
@@ -189,11 +199,20 @@ export function DataGrid({
     };
   }, [result, gridState, globalFilter, columnFilters]);
 
-  // Cell content with type styling and edit support
-  // IMPORTANT: 'col' here is the VISUAL column index from 'columns' array
+  // Update getCellContent to handle missing result
   const getCellContent = useCallback(
     (cell: Item): GridCell => {
-      if (!result || filteredRows.length === 0)
+      // If no result, all cells are empty text (for the empty grid view)
+      if (!result) {
+        return {
+          kind: GridCellKind.Text,
+          displayData: "",
+          data: "",
+          allowOverlay: false,
+        };
+      }
+
+      if (filteredRows.length === 0)
         return {
           kind: GridCellKind.Text,
           displayData: "",
@@ -201,6 +220,7 @@ export function DataGrid({
           allowOverlay: false,
         };
 
+      // ... existing logic ...
       const [col, row] = cell;
       const actualRowIndex = sortedIndices[row];
 
@@ -247,9 +267,14 @@ export function DataGrid({
 
       return gridCell;
     },
-    // Add 'columns' to deps because column order changes mapping
     [result, filteredRows, sortedIndices, pendingEdits, columns]
   );
+
+  // Update rendering check
+  // ...
+
+  // In JSX:
+  // {!result && (!overrideColumns || overrideColumns.length === 0) ? ( ... Run a query ... ) : ( ... DataEditor ... )}
 
   // Handle header click - no sorting, just for future actions
   const onHeaderClicked = useCallback((col: number) => {
@@ -588,39 +613,42 @@ export function DataGrid({
         className="flex-1 overflow-hidden relative"
         onContextMenu={handleContextMenu}
       >
-        {!result ? (
+        {!result && (!overrideColumns || overrideColumns.length === 0) ? (
           <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
             Run a query to see results
           </div>
-        ) : filteredRows.length === 0 ? (
-          <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
-            {columnFilters.length > 0 || globalFilter
-              ? "No rows match the current filters"
-              : "No rows returned"}
-          </div>
         ) : (
-          <DataEditor
-            getCellContent={getCellContent}
-            columns={columns}
-            rows={filteredRows.length}
-            onHeaderClicked={onHeaderClicked}
-            onHeaderMenuClick={onHeaderMenuClick}
-            onCellEdited={onCellEdited}
-            onColumnResize={onColumnResize}
-            onColumnMoved={onColumnMoved}
-            smoothScrollX
-            smoothScrollY
-            width="100%"
-            height="100%"
-            theme={gridTheme}
-            getCellsForSelection={true}
-            rowMarkers="clickable-number"
-            rowMarkerStartIndex={1}
-            gridSelection={gridSelection}
-            onGridSelectionChange={setGridSelection}
-            keybindings={{ search: true }}
-            experimental={{ strict: true }}
-          />
+          <>
+            <DataEditor
+              getCellContent={getCellContent}
+              columns={columns}
+              rows={filteredRows.length}
+              onHeaderClicked={onHeaderClicked}
+              onHeaderMenuClick={onHeaderMenuClick}
+              onCellEdited={onCellEdited}
+              onColumnResize={onColumnResize}
+              onColumnMoved={onColumnMoved}
+              smoothScrollX
+              smoothScrollY
+              width="100%"
+              height="100%"
+              theme={gridTheme}
+              getCellsForSelection={true}
+              rowMarkers="clickable-number"
+              rowMarkerStartIndex={1}
+              gridSelection={gridSelection}
+              onGridSelectionChange={setGridSelection}
+              keybindings={{ search: true }}
+              experimental={{ strict: true }}
+            />
+            {filteredRows.length === 0 && (
+              <div className="absolute inset-x-0 top-12 bottom-0 flex items-center justify-center pointer-events-none">
+                <div className="flex flex-col items-center gap-2 text-muted-foreground/50">
+                  <span className="text-sm">No rows returned</span>
+                </div>
+              </div>
+            )}
+          </>
         )}
 
         {/* Backdrop for closing menu - only appears when menu is open */}
@@ -649,7 +677,7 @@ export function DataGrid({
               >
                 Copy Column Name
               </button>
-              <div className="h-px bg-[#333] my-1" />
+              <div className="h-px bg-border my-1" />
               <button
                 onClick={handleSortAsc}
                 className="w-full text-left px-2 py-1.5 text-sm text-foreground hover:bg-accent rounded"
@@ -662,7 +690,7 @@ export function DataGrid({
               >
                 Sort descending
               </button>
-              <div className="h-px bg-[#333] my-1" />
+              <div className="h-px bg-border my-1" />
               <button
                 onClick={() => {
                   // TODO: Implement column filter
@@ -710,22 +738,22 @@ export function DataGrid({
 
         {/* Loading Overlay */}
         {activeTab?.isExecuting && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/40 backdrop-blur-[2px] animate-in fade-in duration-200">
-            <div className="bg-card border border-border px-6 py-4 rounded-xl shadow-2xl flex flex-col items-center gap-3">
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-background-elevated border border-border px-8 py-6 rounded-xl shadow-2xl flex flex-col items-center gap-4">
               <div className="relative">
-                <Loader2 size={32} className="text-primary animate-spin" />
-                <div className="absolute inset-0 text-primary/20 animate-pulse blur-sm">
-                  <Loader2 size={32} />
+                <Loader2 size={36} className="text-primary animate-spin" />
+                <div className="absolute inset-0 text-primary/30 animate-pulse blur-md">
+                  <Loader2 size={36} />
                 </div>
               </div>
-              <div className="flex flex-col items-center gap-1">
-                <span className="text-sm font-bold text-foreground tracking-tight">
+              <div className="flex flex-col items-center gap-1.5">
+                <span className="text-base font-bold text-foreground tracking-tight">
                   {activeTab.type === "table"
                     ? "Fetching data..."
-                    : "Executing..."}
+                    : "Executing Query..."}
                 </span>
-                <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-widest">
-                  Loading Results
+                <span className="text-[10px] text-muted-foreground font-semibold uppercase tracking-widest">
+                  Please wait
                 </span>
               </div>
             </div>
