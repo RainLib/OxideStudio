@@ -25,7 +25,8 @@ export interface TabData {
     sortColumn: string | null;
     sortDirection: "asc" | "desc" | null;
   };
-  pendingEdits?: Map<string, any>; // key: "rowIndex:colIndex", value: new value
+  pendingEdits?: Map<string, any>; // key: "rowIndex:colIndex" or "new-N:colIndex", value: new value
+  newRowsCount?: number;
   // Filter UI state (per-tab)
   filterMode?: "visual" | "sql";
   visualFilters?: Array<{
@@ -94,6 +95,7 @@ interface TabState {
   commitEdits: (tabId: string) => Promise<void>;
   cancelEdits: (tabId: string) => void;
   // Filter UI methods
+  addNewRow: (tabId: string) => void;
   setFilterMode: (tabId: string, mode: "visual" | "sql") => void;
   setVisualFilters: (
     tabId: string,
@@ -132,6 +134,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       isExecuting: false,
       error: null,
       isPinned: false,
+      newRowsCount: 0,
       ...metadata,
     };
 
@@ -186,6 +189,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       isExecuting: false,
       error: null,
       isPinned: false,
+      newRowsCount: 0,
       targetSchema: schemaName,
     };
 
@@ -477,6 +481,14 @@ export const useTabStore = create<TabState>((set, get) => ({
     set((state) => ({
       tabs: state.tabs.map((t) =>
         t.id === tabId ? { ...t, pendingEdits: new Map() } : t
+      ),
+    }));
+  },
+
+  addNewRow: (tabId) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === tabId ? { ...t, newRowsCount: (t.newRowsCount || 0) + 1 } : t
       ),
     }));
   },

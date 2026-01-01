@@ -14,11 +14,10 @@ import "@glideapps/glide-data-grid/dist/index.css";
 import { useTabStore } from "@/store/useTabStore";
 import { useTheme } from "@/theme/useTheme";
 import { createTypedCell, applyFilter, compareValues } from "@/lib/gridUtils";
-import { Check, X as XIcon, Loader2 } from "lucide-react";
+import { Check, X as XIcon, Loader2, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ColumnFilter } from "./GridFilterRow";
 import { StatusBarPortal } from "./StatusBarPortal";
-import { EditorStatusBar } from "./EditorStatusBar";
 
 // In DataGridProps
 interface DataGridProps {
@@ -41,6 +40,7 @@ export function DataGrid({
     cancelEdits,
     setColumnWidth,
     setColumnOrder,
+    addNewRow,
   } = useTabStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
@@ -51,6 +51,7 @@ export function DataGrid({
   const hasEdits = pendingEdits.size > 0;
   const columnWidths = activeTab?.columnWidths || {};
   const columnOrder = activeTab?.columnOrder || [];
+  const newRowsCount = activeTab?.newRowsCount || 0;
 
   // Row selection state
   const [gridSelection, setGridSelection] = useState<GridSelection>({
@@ -199,11 +200,13 @@ export function DataGrid({
     };
   }, [result, gridState, globalFilter, columnFilters]);
 
-  // Update getCellContent to handle missing result
+  // Update getCellContent to handle missing result & new rows
   const getCellContent = useCallback(
     (cell: Item): GridCell => {
-      // If no result, all cells are empty text (for the empty grid view)
-      if (!result) {
+      const [col, row] = cell;
+
+      // Handle loading/empty state where result is null but overrideColumns exists
+      if (!result && (!overrideColumns || overrideColumns.length === 0)) {
         return {
           kind: GridCellKind.Text,
           displayData: "",
@@ -212,19 +215,36 @@ export function DataGrid({
         };
       }
 
-      if (filteredRows.length === 0)
-        return {
-          kind: GridCellKind.Text,
-          displayData: "",
-          data: "",
-          allowOverlay: false,
-        };
+      // Check if it's a new row
+      const isNewRow = row >= filteredRows.length;
 
-      // ... existing logic ...
-      const [col, row] = cell;
-      const actualRowIndex = sortedIndices[row];
+      // Determine the "Row Key" for editing/retrieval
+      let editRowKey: number;
+      let actualRowIndex: number | undefined;
 
-      if (actualRowIndex === undefined || !result.rows[actualRowIndex]) {
+      if (isNewRow) {
+        const newRowOffset = row - filteredRows.length;
+        editRowKey = -1 - newRowOffset; // -1, -2, -3...
+        actualRowIndex = undefined;
+      } else {
+        actualRowIndex = sortedIndices[row];
+        if (actualRowIndex === undefined) {
+          return {
+            kind: GridCellKind.Text,
+            displayData: "",
+            data: "",
+            allowOverlay: false,
+          };
+        }
+        editRowKey = actualRowIndex;
+      }
+
+      // If existing row but invalid index
+      if (
+        !isNewRow &&
+        (actualRowIndex === undefined ||
+          (result && !result.rows[actualRowIndex]))
+      ) {
         return {
           kind: GridCellKind.Text,
           displayData: "",
@@ -243,38 +263,68 @@ export function DataGrid({
           allowOverlay: false,
         };
       }
-      const originalColIndex = result.columns.findIndex(
-        (c) => c.name === visualColumn.id
-      );
+
+      // Determine original column index
+      let originalColIndex = -1;
+      if (result) {
+        originalColIndex = result.columns.findIndex(
+          (c) => c.name === visualColumn.id
+        );
+      } else if (overrideColumns) {
+        originalColIndex = overrideColumns.findIndex(
+          (c) => c.name === visualColumn.id
+        );
+      }
 
       if (originalColIndex === -1) {
         return {
           kind: GridCellKind.Text,
-          displayData: "Err",
-          data: "Err",
+          displayData: "",
+          data: "",
           allowOverlay: false,
         };
       }
 
-      // Check if this cell has a pending edit
-      // Key format: "rowIndex:colIndex" -> using ORIGINAL column index for stable edits
-      const editKey = `${actualRowIndex}:${originalColIndex}`;
-      const val = pendingEdits.has(editKey)
-        ? pendingEdits.get(editKey)
-        : result.rows[actualRowIndex][originalColIndex];
+      // Retrieval Value
+      const editKey = `${editRowKey}:${originalColIndex}`;
+      let val: any = null;
 
-      const gridCell = createTypedCell(val, true);
+      if (pendingEdits.has(editKey)) {
+        val = pendingEdits.get(editKey);
+      } else {
+        // If not in pending edits, get from result if existing row
+        if (!isNewRow && result && actualRowIndex !== undefined) {
+          val = result.rows[actualRowIndex]?.[originalColIndex];
+        }
+      }
+
+      const baseCell = createTypedCell(val !== null ? val : "", true);
+      const gridCell = { ...baseCell };
+
+      // Force editable for compatible types
+      if (gridCell.kind !== GridCellKind.Boolean) {
+        (gridCell as any).allowOverlay = true;
+        (gridCell as any).readonly = false;
+      }
+
+      // Apply theme override for new rows
+      if (isNewRow) {
+        gridCell.themeOverride = {
+          bgCell: "rgba(34, 197, 94, 0.1)", // Green tint
+        };
+      }
 
       return gridCell;
     },
-    [result, filteredRows, sortedIndices, pendingEdits, columns]
+    [
+      result,
+      filteredRows,
+      sortedIndices,
+      pendingEdits,
+      columns,
+      overrideColumns,
+    ]
   );
-
-  // Update rendering check
-  // ...
-
-  // In JSX:
-  // {!result && (!overrideColumns || overrideColumns.length === 0) ? ( ... Run a query ... ) : ( ... DataEditor ... )}
 
   // Handle header click - no sorting, just for future actions
   const onHeaderClicked = useCallback((col: number) => {
@@ -324,18 +374,35 @@ export function DataGrid({
   // Handle cell edit
   const onCellEdited = useCallback(
     (cell: Item, newValue: EditableGridCell): void => {
-      if (!activeTab || !result) return;
+      if (!activeTab) return;
 
       const [col, row] = cell;
-      const actualRowIndex = sortedIndices[row];
-      if (actualRowIndex === undefined) return;
+      let actualRowKey_forEdit: number | undefined;
 
-      // Map visual to original
+      if (row >= filteredRows.length) {
+        // New Row
+        const newRowIndex = row - filteredRows.length;
+        actualRowKey_forEdit = -1 - newRowIndex;
+      } else {
+        actualRowKey_forEdit = sortedIndices[row];
+      }
+
+      if (actualRowKey_forEdit === undefined) return;
+
       const visualColumn = columns[col];
       if (!visualColumn) return;
-      const originalColIndex = result.columns.findIndex(
-        (c) => c.name === visualColumn.id
-      );
+
+      let originalColIndex = -1;
+      if (result) {
+        originalColIndex = result.columns.findIndex(
+          (c) => c.name === visualColumn.id
+        );
+      } else if (overrideColumns) {
+        originalColIndex = overrideColumns.findIndex(
+          (c) => c.name === visualColumn.id
+        );
+      }
+
       if (originalColIndex === -1) return;
 
       // Extract the actual value from the edited cell based on its type
@@ -346,9 +413,17 @@ export function DataGrid({
         value = null;
       }
 
-      setCellEdit(activeTab.id, actualRowIndex, originalColIndex, value);
+      setCellEdit(activeTab.id, actualRowKey_forEdit, originalColIndex, value);
     },
-    [activeTab, result, sortedIndices, setCellEdit, columns]
+    [
+      activeTab,
+      result,
+      sortedIndices,
+      setCellEdit,
+      columns,
+      filteredRows,
+      overrideColumns,
+    ]
   );
 
   // Column resize handler
@@ -581,32 +656,6 @@ export function DataGrid({
 
   return (
     <div className="flex flex-col h-full bg-background">
-      {/* Commit/Cancel Bar */}
-      {hasEdits && (
-        <div className="h-10 border-b border-primary/30 bg-primary/10 flex items-center px-3 gap-2 shrink-0">
-          <div className="flex-1 text-[11px] text-primary font-medium">
-            {pendingEdits.size} cell{pendingEdits.size > 1 ? "s" : ""} modified
-          </div>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => activeTab && cancelEdits(activeTab.id)}
-            className="h-7 px-3 text-xs text-muted-foreground hover:text-foreground hover:bg-accent"
-          >
-            <XIcon size={14} className="mr-1.5" />
-            Cancel
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => activeTab && commitEdits(activeTab.id)}
-            className="h-7 px-3 text-xs bg-primary hover:bg-primary/90 text-primary-foreground"
-          >
-            <Check size={14} className="mr-1.5" />
-            Commit Changes
-          </Button>
-        </div>
-      )}
-
       {/* DataEditor container with overlay */}
       <div
         ref={gridContainerRef}
@@ -622,7 +671,7 @@ export function DataGrid({
             <DataEditor
               getCellContent={getCellContent}
               columns={columns}
-              rows={filteredRows.length}
+              rows={filteredRows.length + newRowsCount}
               onHeaderClicked={onHeaderClicked}
               onHeaderMenuClick={onHeaderMenuClick}
               onCellEdited={onCellEdited}
@@ -639,9 +688,8 @@ export function DataGrid({
               gridSelection={gridSelection}
               onGridSelectionChange={setGridSelection}
               keybindings={{ search: true }}
-              experimental={{ strict: true }}
             />
-            {filteredRows.length === 0 && (
+            {filteredRows.length === 0 && newRowsCount === 0 && (
               <div className="absolute inset-x-0 top-12 bottom-0 flex items-center justify-center pointer-events-none">
                 <div className="flex flex-col items-center gap-2 text-muted-foreground/50">
                   <span className="text-sm">No rows returned</span>
@@ -759,15 +807,51 @@ export function DataGrid({
             </div>
           </div>
         )}
+        {/* Floating Action Bar - Stats & Add Row */}
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 p-1.5 bg-background/80 backdrop-blur-md border border-border rounded-full shadow-xl transition-all animate-in slide-in-from-bottom-2">
+          <div className="px-3 text-xs font-medium text-muted-foreground flex items-center gap-2">
+            <span>{filteredRows.length + newRowsCount} rows</span>
+          </div>
+
+          <div className="h-4 w-px bg-border/50" />
+
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => activeTab && addNewRow(activeTab.id)}
+            className="h-7 px-3 text-xs rounded-full hover:bg-accent"
+          >
+            <Plus size={14} className="mr-1.5" /> Add Row
+          </Button>
+        </div>
       </div>
 
-      {/* Status Bar via Portal */}
+      {/* Status Bar Portal - Save/Cancel Actions */}
       <StatusBarPortal>
-        <EditorStatusBar
-          type="editor"
-          rowCount={result?.rows?.length || 0}
-          executionTime={124} // TODO: get from tab
-        />
+        {hasEdits && (
+          <div className="flex items-center gap-2 text-xs h-full w-full justify-end animate-in fade-in slide-in-from-bottom-1">
+            <span className="text-[10px] text-muted-foreground font-medium mr-2">
+              {pendingEdits.size} unsaved changes
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => activeTab && cancelEdits(activeTab.id)}
+              className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+            >
+              <XIcon size={13} className="mr-1.5" />
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => activeTab && commitEdits(activeTab.id)}
+              className="h-6 px-2 text-xs bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm"
+            >
+              <Check size={13} className="mr-1.5" />
+              Save
+            </Button>
+          </div>
+        )}
       </StatusBarPortal>
     </div>
   );
