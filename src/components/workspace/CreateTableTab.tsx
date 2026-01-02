@@ -29,6 +29,7 @@ interface ColumnDefinition {
   isPrimaryKey: boolean;
   isNotNull: boolean;
   isAutoIncrement: boolean;
+  comment: string;
 }
 
 const COMMON_TYPES = [
@@ -78,6 +79,7 @@ export function CreateTableTab({
       isPrimaryKey: true,
       isNotNull: true,
       isAutoIncrement: true,
+      comment: "",
     },
   ]);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -107,6 +109,7 @@ export function CreateTableTab({
         isPrimaryKey: true,
         isNotNull: true,
         isAutoIncrement: true,
+        comment: "",
       },
     ]);
   }, [driver]);
@@ -121,6 +124,7 @@ export function CreateTableTab({
         isPrimaryKey: false,
         isNotNull: false,
         isAutoIncrement: false,
+        comment: "",
       },
     ]);
   };
@@ -138,6 +142,17 @@ export function CreateTableTab({
   ) => {
     const newColumns = [...columns];
     (newColumns[index] as any)[field] = value;
+
+    // Set smart defaults when type changes
+    if (field === "type") {
+      if (value === "DECIMAL") {
+        newColumns[index].length = "10,2";
+      } else if (value === "VARCHAR") {
+        // Only set if empty or previous default
+        if (!newColumns[index].length) newColumns[index].length = "255";
+      }
+    }
+
     setColumns(newColumns);
   };
 
@@ -194,6 +209,10 @@ export function CreateTableTab({
         line += " NOT NULL";
       }
 
+      if (col.comment && driver === "mysql") {
+        line += ` COMMENT '${col.comment.replace(/'/g, "\\'")}'`;
+      }
+
       if (col.isPrimaryKey) {
         pkColumns.push(col.name);
       }
@@ -209,9 +228,25 @@ export function CreateTableTab({
       );
     }
 
-    return `CREATE TABLE ${quote}${tableName}${quote} (\n  ${lines.join(
+    let sql = `CREATE TABLE ${quote}${tableName}${quote} (\n  ${lines.join(
       ",\n  "
     )}\n);`;
+
+    if (driver === "postgres") {
+      const comments = columns
+        .filter((c) => c.comment)
+        .map(
+          (c) =>
+            `COMMENT ON COLUMN "${tableName}"."${
+              c.name
+            }" IS '${c.comment.replace(/'/g, "''")}';`
+        );
+      if (comments.length > 0) {
+        sql += "\n\n" + comments.join("\n");
+      }
+    }
+
+    return sql;
   };
 
   const handleCreate = async () => {
@@ -330,7 +365,7 @@ export function CreateTableTab({
                     />
                   </div>
                   {/* Type */}
-                  <div className="col-span-3">
+                  <div className="col-span-2">
                     <Select
                       value={col.type}
                       onValueChange={(val) => updateColumn(idx, "type", val)}
@@ -358,8 +393,19 @@ export function CreateTableTab({
                       className="h-8 text-xs bg-[#18181b]"
                     />
                   </div>
+                  {/* Comment */}
+                  <div className="col-span-2">
+                    <Input
+                      value={col.comment || ""}
+                      onChange={(e) =>
+                        updateColumn(idx, "comment", e.target.value)
+                      }
+                      placeholder="Comment"
+                      className="h-8 text-xs bg-[#18181b]"
+                    />
+                  </div>
                   {/* Options */}
-                  <div className="col-span-4 flex items-center gap-4 px-2 h-8">
+                  <div className="col-span-3 flex items-center gap-2 px-2 h-8">
                     <div className="flex items-center gap-1.5">
                       <Checkbox
                         id={`pk-${idx}`}

@@ -167,7 +167,27 @@ impl DatabaseDriver for PostgresDriver {
                       AND kcu.table_name = c.table_name
                       AND kcu.column_name = c.column_name
                       AND tc.constraint_type = 'PRIMARY KEY'
-                ) as is_primary_key
+                ) as is_primary_key,
+                EXISTS (
+                    SELECT 1
+                    FROM information_schema.key_column_usage kcu
+                    JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name
+                    WHERE kcu.table_schema = c.table_schema
+                      AND kcu.table_name = c.table_name
+                      AND kcu.column_name = c.column_name
+                      AND tc.constraint_type = 'UNIQUE'
+                ) as is_unique,
+                EXISTS (
+                    SELECT 1
+                    FROM pg_attribute a
+                    JOIN pg_class t ON a.attrelid = t.oid
+                    JOIN pg_namespace s ON t.relnamespace = s.oid
+                    JOIN pg_index i ON i.indrelid = t.oid
+                    WHERE s.nspname = c.table_schema
+                      AND t.relname = c.table_name
+                      AND a.attname = c.column_name
+                      AND a.attnum = ANY(i.indkey)
+                ) as is_indexed
             FROM information_schema.columns c
             WHERE c.table_schema = $1 AND c.table_name = $2
             ORDER BY c.ordinal_position
@@ -187,12 +207,16 @@ impl DatabaseDriver for PostgresDriver {
                     .unwrap_or("YES".to_string())
                     == "YES";
                 let is_primary_key = r.try_get::<bool, _>("is_primary_key").unwrap_or(false);
+                let is_unique = r.try_get::<bool, _>("is_unique").unwrap_or(false);
+                let is_indexed = r.try_get::<bool, _>("is_indexed").unwrap_or(false);
 
                 ColumnInfo {
                     name: r.try_get("column_name").unwrap_or_default(),
                     data_type: r.try_get("data_type").unwrap_or_default(),
                     is_nullable,
                     is_primary_key,
+                    is_unique,
+                    is_indexed,
                     default_value: r.try_get("column_default").ok(),
                     comment: None,
                 }

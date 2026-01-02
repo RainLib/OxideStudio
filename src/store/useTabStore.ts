@@ -53,6 +53,7 @@ export interface TabData {
   // Target schema for query execution
   targetSchema?: string | null;
   tableColumns?: ColumnInfo[];
+  isFetchingColumns?: boolean;
 }
 
 interface TabState {
@@ -644,11 +645,30 @@ export const useTabStore = create<TabState>((set, get) => ({
 
   fetchTableColumns: async (tabId) => {
     const tab = get().tabs.find((t) => t.id === tabId);
+    console.log("[fetchTableColumns]", {
+      tabId,
+      table: tab?.tableName,
+      schema: tab?.schemaName,
+      isFetching: tab?.isFetchingColumns,
+    });
+
     if (!tab || !tab.tableName || !tab.schemaName) return;
+    if (tab.isFetchingColumns) return;
 
     const connId =
       tab.connectionId || useConnectionStore.getState().activeConnectionId;
-    if (!connId) return;
+
+    if (!connId) {
+      console.warn("[fetchTableColumns] No connection ID found.");
+      return;
+    }
+
+    // Set fetching flag immediately
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === tabId ? { ...t, isFetchingColumns: true } : t
+      ),
+    }));
 
     try {
       const cols = await schemaService.getColumns(
@@ -656,13 +676,22 @@ export const useTabStore = create<TabState>((set, get) => ({
         tab.schemaName,
         tab.tableName
       );
+      console.log("[fetchTableColumns] Received metadata:", cols);
+
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === tabId ? { ...t, tableColumns: cols } : t
+          t.id === tabId
+            ? { ...t, tableColumns: cols, isFetchingColumns: false }
+            : t
         ),
       }));
     } catch (e) {
       console.error("Failed to fetch columns:", e);
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId ? { ...t, isFetchingColumns: false } : t
+        ),
+      }));
     }
   },
 

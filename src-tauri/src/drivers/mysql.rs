@@ -222,7 +222,12 @@ impl DatabaseDriver for MysqlDriver {
         let pool = self.get_pool(None).await?;
         let rows = sqlx::query(
             r#"
-            SELECT column_name, data_type, is_nullable, column_default, column_key
+            SELECT
+                column_name AS cn,
+                data_type AS dt,
+                is_nullable AS inl,
+                column_default AS cd,
+                column_key AS ck
             FROM information_schema.columns
             WHERE table_schema = ? AND table_name = ?
             ORDER BY ordinal_position
@@ -230,27 +235,28 @@ impl DatabaseDriver for MysqlDriver {
         )
         .bind(schema)
         .bind(table)
-        .persistent(false)
         .fetch_all(&pool)
         .await?;
 
         let cols = rows
             .iter()
             .map(|r| {
-                let is_nullable = r
-                    .try_get::<String, _>("IS_NULLABLE")
-                    .unwrap_or("YES".to_string())
-                    == "YES";
+                let is_nullable =
+                    r.try_get::<String, _>("inl").unwrap_or("YES".to_string()) == "YES";
 
-                let column_key = r.try_get::<String, _>("COLUMN_KEY").unwrap_or_default();
+                let column_key = r.try_get::<String, _>("ck").unwrap_or_default();
                 let is_primary_key = column_key == "PRI";
+                let is_unique = column_key == "PRI" || column_key == "UNI";
+                let is_indexed = !column_key.is_empty();
 
                 ColumnInfo {
-                    name: r.try_get("COLUMN_NAME").unwrap_or_default(),
-                    data_type: r.try_get("DATA_TYPE").unwrap_or_default(),
+                    name: r.try_get("cn").unwrap_or_default(),
+                    data_type: r.try_get("dt").unwrap_or_default(),
                     is_nullable,
                     is_primary_key,
-                    default_value: r.try_get("COLUMN_DEFAULT").ok(),
+                    is_unique,
+                    is_indexed,
+                    default_value: r.try_get("cd").ok(),
                     comment: None,
                 }
             })

@@ -47,13 +47,19 @@ export function DataGrid({
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
   useEffect(() => {
-    if (activeTabId && activeTab?.type === "table" && !activeTab.tableColumns) {
+    if (
+      activeTabId &&
+      activeTab?.type === "table" &&
+      !activeTab.tableColumns &&
+      !activeTab.isFetchingColumns
+    ) {
       fetchTableColumns(activeTabId);
     }
   }, [
     activeTabId,
     activeTab?.type,
     activeTab?.tableColumns,
+    activeTab?.isFetchingColumns,
     fetchTableColumns,
   ]);
 
@@ -84,6 +90,8 @@ export function DataGrid({
 
   const gridContainerRef = useRef<HTMLDivElement>(null);
 
+  const tableColumns = activeTab?.tableColumns;
+
   // Column definitions
   const columns = useMemo<GridColumn[]>(() => {
     // If we have a result, use its columns
@@ -92,8 +100,30 @@ export function DataGrid({
         const isSorted = gridState?.sortColumn === col.name;
         const sortDir = gridState?.sortDirection;
         const customWidth = columnWidths[col.name];
+
+        let title = col.name || "Unknown";
+        if (tableColumns) {
+          try {
+            const meta = tableColumns.find((c) => c.name === col.name);
+            if (meta) {
+              let prefix = "";
+              if (meta.is_primary_key) prefix = "🔑 ";
+              else if (meta.is_unique) prefix = "⭐️ ";
+              else if (meta.is_indexed) prefix = "⚡️ ";
+
+              let type = meta.data_type || "text";
+              if (type === "character varying") type = "varchar";
+              if (type === "timestamp without time zone") type = "timestamp";
+
+              title = `${prefix}${col.name} (${type})`;
+            }
+          } catch (e) {
+            console.error("DataGrid: Error generating column header", e);
+          }
+        }
+
         return {
-          title: col.name,
+          title,
           id: col.name,
           width: customWidth || 150,
           icon: isSorted
@@ -129,12 +159,24 @@ export function DataGrid({
 
     // If no result but we have override columns (fallback for empty table view)
     if (overrideColumns && overrideColumns.length > 0) {
-      return overrideColumns.map((col) => ({
-        title: col.name,
-        id: col.name,
-        width: 150,
-        hasMenu: true,
-      }));
+      const metaMap = new Map(tableColumns?.map((c) => [c.name, c]) || []);
+      return overrideColumns.map((col) => {
+        let title = col.name;
+        const meta = metaMap.get(col.name);
+        if (meta) {
+          let prefix = "";
+          if (meta.is_primary_key) prefix = "🔑 ";
+          else if (meta.is_unique) prefix = "⭐️ ";
+          else if (meta.is_indexed) prefix = "⚡️ ";
+          title = `${prefix}${col.name} (${meta.data_type})`;
+        }
+        return {
+          title,
+          id: col.name,
+          width: 150,
+          hasMenu: true,
+        };
+      });
     }
 
     return [];
@@ -548,6 +590,40 @@ export function DataGrid({
     [result, sortedIndices]
   );
 
+  const supplyEditor = useCallback((cell: GridCell) => {
+    if (cell.kind !== GridCellKind.Text) return undefined;
+
+    // Check if cell data looks like a date
+    const isDate =
+      typeof cell.data === "string" &&
+      /^\d{4}-\d{2}-\d{2}([T\s]\d{2}:\d{2}:\d{2})?/.test(cell.data);
+
+    if (isDate) {
+      return {
+        editor: (p: any) => (
+          <input
+            type="date"
+            autoFocus
+            className="w-full h-full p-2 bg-zinc-900 text-white border-none outline-none font-mono text-sm"
+            // Start with just the date part for input type=date
+            value={p.value.data.split("T")[0]}
+            onChange={(e) =>
+              p.onChange({
+                ...p.value,
+                data: e.target.value,
+                displayData: e.target.value,
+              })
+            }
+            onKeyDown={(e) => {
+              if (e.key === "Enter") p.onFinishedEditing(p.value);
+            }}
+          />
+        ),
+      };
+    }
+    return undefined;
+  }, []);
+
   // Handle right-click on grid overlay
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
@@ -724,6 +800,7 @@ export function DataGrid({
               onHeaderClicked={onHeaderClicked}
               onHeaderMenuClick={onHeaderMenuClick}
               onCellEdited={onCellEdited}
+              provideEditor={supplyEditor}
               onColumnResize={onColumnResize}
               onColumnMoved={onColumnMoved}
               smoothScrollX
