@@ -3,18 +3,16 @@ import { Minus, Square, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function WindowControls() {
-  const appWindow = getCurrentWindow();
-
   const handleMinimize = () => {
-    appWindow.minimize();
+    getCurrentWindow().minimize();
   };
 
   const handleMaximize = () => {
-    appWindow.toggleMaximize();
+    getCurrentWindow().toggleMaximize();
   };
 
   const handleClose = () => {
-    appWindow.close();
+    getCurrentWindow().close();
   };
 
   const baseButtonClass =
