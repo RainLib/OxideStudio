@@ -71,24 +71,28 @@ pub fn run() {
                                 .as_millis();
                             let window_label = format!("window_{}", timestamp);
 
-                            if let Ok(window) = tauri::WebviewWindowBuilder::new(
+                            // Build window with platform-specific configuration
+                            let mut builder = tauri::WebviewWindowBuilder::new(
                                 &handle_clone,
                                 window_label,
                                 tauri::WebviewUrl::App("index.html".into()),
                             )
                             .title("OxideStudio")
                             .inner_size(1400.0, 900.0)
-                            .build()
+                            .min_inner_size(1200.0, 800.0)
+                            .focused(true);
+
+                            // Apply platform-specific settings before building
+                            #[cfg(target_os = "windows")]
                             {
+                                builder = builder.decorations(false);
+                            }
+
+                            if let Ok(_window) = builder.build() {
                                 #[cfg(target_os = "macos")]
                                 {
                                     use tauri::TitleBarStyle;
-                                    let _ = window.set_title_bar_style(TitleBarStyle::Overlay);
-                                }
-
-                                #[cfg(target_os = "windows")]
-                                {
-                                    let _ = window.set_decorations(false);
+                                    let _ = _window.set_title_bar_style(TitleBarStyle::Overlay);
                                 }
                             }
                         });
