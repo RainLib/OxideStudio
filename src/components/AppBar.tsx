@@ -27,27 +27,28 @@ export function AppBar({ center, right, title }: AppBarProps) {
   return (
     <div
       data-tauri-drag-region
-      className="h-12 bg-muted border-b border-border flex items-center shrink-0"
+      className="h-12 bg-muted border-b border-border flex items-center shrink-0 relative"
     >
-      {/* Left: Space for macOS traffic lights + Optional Title */}
+      {/* Left: Space for macOS traffic lights (or empty space on Windows for symmetry) */}
       <div
         data-tauri-drag-region
-        className={`pr-4 flex items-center gap-3 shrink-0 ${
-          isMacOS ? "pl-20" : "pl-4"
-        }`}
-      >
-        {title && (
+        className={`flex items-center shrink-0 ${isMacOS ? "w-20" : "w-4"}`}
+      />
+
+      {/* Center: Title (absolute positioned for true centering) or custom content */}
+      {title ? (
+        <div
+          data-tauri-drag-region
+          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none"
+        >
           <span
             data-tauri-drag-region
             className="text-sm text-foreground font-medium whitespace-nowrap"
           >
             {title}
           </span>
-        )}
-      </div>
-
-      {/* Center: Custom content or draggable spacer */}
-      {center ? (
+        </div>
+      ) : center ? (
         <div
           data-tauri-drag-region
           className="flex-1 min-w-0 flex items-center justify-center px-4"
@@ -59,7 +60,10 @@ export function AppBar({ center, right, title }: AppBarProps) {
       )}
 
       {/* Right: Custom content + Window controls on Windows */}
-      <div data-tauri-drag-region className="flex items-center gap-2 shrink-0">
+      <div
+        data-tauri-drag-region
+        className="h-full flex items-center gap-2 shrink-0 ml-auto"
+      >
         {right && (
           <div data-tauri-drag-region className="pr-3">
             {right}
