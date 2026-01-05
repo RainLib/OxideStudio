@@ -11,10 +11,16 @@ use super::protocol::*;
 
 type ResponseSender = oneshot::Sender<Result<Value>>;
 
+/// Outgoing message type (Request or Notification)
+enum LspOutgoingMessage {
+    Request(LspRequest, ResponseSender),
+    Notification(LspNotification),
+}
+
 /// LSP Server Manager with bidirectional communication
 pub struct LspServerManager {
     process: Arc<Mutex<Option<Child>>>,
-    request_tx: mpsc::Sender<(LspRequest, ResponseSender)>,
+    message_tx: mpsc::Sender<LspOutgoingMessage>,
     binary_path: String,
 }
 
@@ -25,13 +31,13 @@ impl LspServerManager {
 
         Self {
             process: Arc::new(Mutex::new(None)),
-            request_tx: tx,
+            message_tx: tx,
             binary_path,
         }
     }
 
     /// Start the LSP server process with bidirectional communication
-    pub async fn start(&self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         let mut process_lock = self.process.lock().await;
 
         // Kill existing process if running
@@ -53,8 +59,9 @@ impl LspServerManager {
         let stdin = child.stdin.take().context("Failed to get stdin")?;
         let stdout = child.stdout.take().context("Failed to get stdout")?;
 
-        // Channel for sending requests to writer task
-        let (request_tx, mut request_rx) = mpsc::channel::<(LspRequest, ResponseSender)>(100);
+        // Channel for sending messages to writer task
+        let (message_tx, mut message_rx) = mpsc::channel::<LspOutgoingMessage>(100);
+        self.message_tx = message_tx;
 
         // Map to track pending responses by request ID
         let pending_responses = Arc::new(Mutex::new(HashMap::<u64, ResponseSender>::new()));
@@ -75,7 +82,6 @@ impl LspServerManager {
                 }
 
                 if !line.starts_with("Content-Length:") {
-                    tracing::warn!("Invalid LSP header: {}", line.trim());
                     continue;
                 }
 
@@ -87,7 +93,6 @@ impl LspServerManager {
                     .unwrap_or(0);
 
                 if content_length == 0 {
-                    tracing::warn!("Invalid content length");
                     continue;
                 }
 
@@ -105,8 +110,6 @@ impl LspServerManager {
                 // Parse JSON-RPC response
                 match serde_json::from_slice::<LspResponse>(&buffer) {
                     Ok(response) => {
-                        tracing::debug!("Received LSP response for ID: {}", response.id);
-
                         let mut pending = pending_responses_clone.lock().await;
                         if let Some(tx) = pending.remove(&response.id) {
                             let result = if let Some(error) = response.error {
@@ -115,8 +118,6 @@ impl LspServerManager {
                                 Ok(response.result.unwrap_or(Value::Null))
                             };
                             let _ = tx.send(result);
-                        } else {
-                            tracing::warn!("No pending request for ID: {}", response.id);
                         }
                     }
                     Err(e) => {
@@ -131,16 +132,24 @@ impl LspServerManager {
         tokio::spawn(async move {
             let mut stdin = stdin;
 
-            while let Some((request, response_tx)) = request_rx.recv().await {
-                let id = request.id;
+            while let Some(msg) = message_rx.recv().await {
+                // Serialize message
+                let (json, id_opt, response_tx_opt) = match msg {
+                    LspOutgoingMessage::Request(req, tx) => {
+                        (serde_json::to_string(&req), Some(req.id), Some(tx))
+                    }
+                    LspOutgoingMessage::Notification(notif) => {
+                        (serde_json::to_string(&notif), None, None)
+                    }
+                };
 
-                // Serialize request
-                let json = match serde_json::to_string(&request) {
+                let json = match json {
                     Ok(j) => j,
                     Err(e) => {
-                        tracing::error!("Failed to serialize request: {}", e);
-                        let _ =
-                            response_tx.send(Err(anyhow::anyhow!("Serialization error: {}", e)));
+                        tracing::error!("Failed to serialize message: {}", e);
+                        if let Some(tx) = response_tx_opt {
+                            let _ = tx.send(Err(anyhow::anyhow!("Serialization error: {}", e)));
+                        }
                         continue;
                     }
                 };
@@ -151,32 +160,38 @@ impl LspServerManager {
                 // Write to stdin
                 if let Err(e) = stdin.write_all(message.as_bytes()).await {
                     tracing::error!("Failed to write to LSP stdin: {}", e);
-                    let _ = response_tx.send(Err(anyhow::anyhow!("Write error: {}", e)));
+                    if let Some(tx) = response_tx_opt {
+                        let _ = tx.send(Err(anyhow::anyhow!("Write error: {}", e)));
+                    }
                     continue;
                 }
 
                 if let Err(e) = stdin.flush().await {
                     tracing::error!("Failed to flush LSP stdin: {}", e);
-                    let _ = response_tx.send(Err(anyhow::anyhow!("Flush error: {}", e)));
+                    if let Some(tx) = response_tx_opt {
+                        let _ = tx.send(Err(anyhow::anyhow!("Flush error: {}", e)));
+                    }
                     continue;
                 }
 
-                tracing::debug!("Sent LSP request ID: {}", id);
-
-                // Store response sender for later
-                let mut pending = pending_responses_for_writer.lock().await;
-                pending.insert(id, response_tx);
+                // If it's a request, store the response sender
+                if let (Some(id), Some(tx)) = (id_opt, response_tx_opt) {
+                    tracing::debug!("Sent LSP request ID: {}", id);
+                    let mut pending = pending_responses_for_writer.lock().await;
+                    pending.insert(id, tx);
+                } else {
+                    tracing::debug!("Sent LSP notification");
+                }
             }
         });
 
         // Store the new channel and process
         drop(process_lock);
-
-        // Update self with new sender (can't mutate self.request_tx directly, so this is a known limitation)
-        // In a production system, we'd use Arc<Mutex<Sender>> or similar
-        // For now, commands can still use the manager via send_request
-
         *self.process.lock().await = Some(child);
+
+        // Note: self.message_tx cannot be updated in-place easily without Arc<Mutex<Sender>>
+        // But for this implementation, we rely on the fact that start() is called once or handles re-init
+        // For complete correctness we'd wrap sender in mutex, but keeping it simple for now as per previous design
 
         Ok(())
     }
@@ -186,17 +201,14 @@ impl LspServerManager {
         let mut process_lock = self.process.lock().await;
 
         if let Some(mut child) = process_lock.take() {
-            // Send shutdown request (best effort)
-            drop(process_lock); // Release lock before sending request
+            drop(process_lock);
             let _ = self.send_request("shutdown".to_string(), Value::Null).await;
 
-            // Wait for graceful shutdown or kill after timeout
             tokio::select! {
                 _ = child.wait() => {
                     tracing::info!("LSP server shutdown gracefully");
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
-                    tracing::warn!("LSP server shutdown timeout, killing process");
                     let _ = child.kill().await;
                 }
             }
@@ -207,11 +219,9 @@ impl LspServerManager {
 
     /// Send a request to the LSP server and wait for response
     pub async fn send_request(&self, method: String, params: Value) -> Result<Value> {
-        // Generate unique request ID
         static REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-        // Create request
         let request = LspRequest {
             jsonrpc: "2.0".to_string(),
             id,
@@ -219,20 +229,34 @@ impl LspServerManager {
             params,
         };
 
-        // Create oneshot channel for response
         let (tx, rx) = oneshot::channel();
 
-        // Send request to writer task
-        self.request_tx
-            .send((request, tx))
+        // This effectively clones the sender
+        self.message_tx
+            .send(LspOutgoingMessage::Request(request, tx))
             .await
             .context("Failed to send request to LSP writer")?;
 
-        // Wait for response with timeout
         tokio::time::timeout(std::time::Duration::from_secs(5), rx)
             .await
             .context("LSP request timeout")?
             .context("Response channel closed")?
+    }
+
+    /// Send a notification to the LSP server
+    pub async fn send_notification(&self, method: String, params: Value) -> Result<()> {
+        let notification = LspNotification {
+            jsonrpc: "2.0".to_string(),
+            method,
+            params,
+        };
+
+        self.message_tx
+            .send(LspOutgoingMessage::Notification(notification))
+            .await
+            .context("Failed to send notification to LSP writer")?;
+
+        Ok(())
     }
 
     /// Check if LSP server is running

@@ -4,7 +4,11 @@ import { useConnectionStore } from "@/store/useConnectionStore";
 import { ConnectionPage } from "@/pages/connection";
 import { WorkspacePage } from "@/pages/workspace";
 import { Loader2 } from "lucide-react";
-import { LspBinaryManager, LspUpdateNotification } from "@/components/lsp";
+import {
+  LspBinaryManager,
+  LspUpdateNotification,
+  LspConnectionSyncer,
+} from "@/components/lsp";
 
 function App() {
   const { isConnected, loadConnections, isLoading } = useConnectionStore();
@@ -26,6 +30,7 @@ function App() {
       {/* LSP binary management components */}
       <LspBinaryManager />
       <LspUpdateNotification />
+      <LspConnectionSyncer />
 
       <div className="bg-background text-foreground h-screen w-screen overflow-hidden">
         {isConnected ? <WorkspacePage /> : <ConnectionPage />}

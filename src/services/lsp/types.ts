@@ -22,6 +22,16 @@ export interface CompletionResponse {
   items: CompletionItem[];
 }
 
+export interface LspConnectionConfig {
+  driver: string;
+  dataSourceName: string;
+  alias?: string;
+}
+
+export interface LspSqlsConfig {
+  connections: LspConnectionConfig[];
+}
+
 export interface Diagnostic {
   range: Range;
   severity?: DiagnosticSeverity;

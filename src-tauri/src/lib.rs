@@ -138,7 +138,10 @@ pub fn run() {
             commands::lsp::lsp_shutdown,
             commands::lsp::lsp_is_running,
             commands::lsp::lsp_get_completions,
-            commands::lsp::lsp_update_schema,
+            commands::lsp::lsp_did_change_configuration,
+            commands::lsp::lsp_did_open,
+            commands::lsp::lsp_did_change,
+            commands::lsp::lsp_did_close,
             // LSP binary management
             lsp::check_lsp_binary,
             lsp::download_lsp_binary,

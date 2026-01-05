@@ -9,6 +9,14 @@ pub struct LspRequest {
     pub params: serde_json::Value,
 }
 
+/// LSP JSON-RPC Notification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspNotification {
+    pub jsonrpc: String,
+    pub method: String,
+    pub params: serde_json::Value,
+}
+
 /// LSP JSON-RPC Response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LspResponse {

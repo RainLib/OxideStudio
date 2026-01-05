@@ -7,7 +7,7 @@ import { EditorActionBar } from "./EditorActionBar";
 import { ThemeContext } from "@/theme/ThemeProvider";
 import Editor, { useMonaco } from "@monaco-editor/react";
 import { useEffect, useRef, useState, useContext } from "react";
-import { queryService, schemaService } from "@/services/tauri";
+// import { queryService, schemaService } from "@/services/tauri";
 import { useLspClient } from "@/hooks/useLspClient";
 import {
   APP_EVENT_RUN_QUERY,
@@ -203,6 +203,29 @@ export function QueryEditor() {
             editorRef.current = editor;
             // Force theme update on mount
             monaco.editor.setTheme(mode === "light" ? "vs" : "vs-dark");
+
+            // Register model change listener for LSP
+            const model = editor.getModel();
+            if (model && lspReady) {
+              const uri = model.uri.toString();
+              // Notify didOpen
+              lspClient.didOpen(uri, model.getValue(), model.getVersionId());
+
+              // Notify didChange
+              const changeDisposable = model.onDidChangeContent((e) => {
+                lspClient.didChange(
+                  uri,
+                  model.getValue(),
+                  model.getVersionId()
+                );
+              });
+
+              // Cleanup on model dispose (tab close)
+              editor.onDidDispose(() => {
+                changeDisposable.dispose();
+                lspClient.didClose(uri);
+              });
+            }
           }}
           beforeMount={(monaco) => {
             // Optional: Define a custom theme that perfectly matches our app's background

@@ -1,5 +1,6 @@
 use crate::lsp::LspServerManager;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
 use tauri::State;
 use tokio::sync::Mutex;
@@ -45,7 +46,7 @@ pub async fn lsp_initialize(
     let mut lsp_lock = state.0.lock().await;
 
     // Create new LSP manager
-    let manager = LspServerManager::new(request.binary_path);
+    let mut manager = LspServerManager::new(request.binary_path);
 
     // Start the LSP server
     manager
@@ -156,23 +157,135 @@ pub async fn lsp_get_completions(
     }
 }
 
-/// Update database schema in LSP server
+/// LSP configuration (sqls settings)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LspSqlsConfig {
+    pub connections: Vec<LspConnectionConfig>,
+}
+
+/// LSP connection config
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LspConnectionConfig {
+    pub driver: String,
+    #[serde(rename = "dataSourceName")]
+    pub data_source_name: String,
+    pub alias: Option<String>,
+}
+
+/// Send workspace/didChangeConfiguration notification
 #[tauri::command]
-pub async fn lsp_update_schema(
-    schema_json: String,
+pub async fn lsp_did_change_configuration(
+    settings: Value,
     state: State<'_, LspState>,
 ) -> Result<String, String> {
     let lsp_lock = state.0.lock().await;
 
     if let Some(manager) = lsp_lock.as_ref() {
-        tracing::info!("Updating LSP schema, size: {} bytes", schema_json.len());
+        tracing::debug!("Sending workspace/didChangeConfiguration");
 
-        // TODO: Send schema update to LSP server via JSON-RPC
-        // This will be implemented in the next iteration
+        let params = serde_json::json!({
+            "settings": settings
+        });
 
-        Ok("Schema update accepted (placeholder)".to_string())
+        manager
+            .send_notification("workspace/didChangeConfiguration".to_string(), params)
+            .await
+            .map_err(|e| format!("Failed to send notification: {}", e))?;
+
+        Ok("Configuration updated".to_string())
     } else {
         Err("LSP server is not running".to_string())
+    }
+}
+
+/// Send textDocument/didOpen notification
+#[tauri::command]
+pub async fn lsp_did_open(
+    uri: String,
+    language_id: String,
+    version: i32,
+    text: String,
+    state: State<'_, LspState>,
+) -> Result<(), String> {
+    let lsp_lock = state.0.lock().await;
+
+    if let Some(manager) = lsp_lock.as_ref() {
+        let params = serde_json::json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": language_id,
+                "version": version,
+                "text": text
+            }
+        });
+
+        manager
+            .send_notification("textDocument/didOpen".to_string(), params)
+            .await
+            .map_err(|e| format!("Failed to send didOpen: {}", e))?;
+
+        Ok(())
+    } else {
+        // Silent failure if LSP not ready (common during startup)
+        Ok(())
+    }
+}
+
+/// Send textDocument/didChange notification
+#[tauri::command]
+pub async fn lsp_did_change(
+    uri: String,
+    version: i32,
+    text: String,
+    state: State<'_, LspState>,
+) -> Result<(), String> {
+    let lsp_lock = state.0.lock().await;
+
+    if let Some(manager) = lsp_lock.as_ref() {
+        // sending full text sync for simplicity
+        let params = serde_json::json!({
+            "textDocument": {
+                "uri": uri,
+                "version": version
+            },
+            "contentChanges": [
+                {
+                    "text": text
+                }
+            ]
+        });
+
+        manager
+            .send_notification("textDocument/didChange".to_string(), params)
+            .await
+            .map_err(|e| format!("Failed to send didChange: {}", e))?;
+
+        Ok(())
+    } else {
+        Ok(())
+    }
+}
+
+/// Send textDocument/didClose notification
+#[tauri::command]
+pub async fn lsp_did_close(uri: String, state: State<'_, LspState>) -> Result<(), String> {
+    let lsp_lock = state.0.lock().await;
+
+    if let Some(manager) = lsp_lock.as_ref() {
+        let params = serde_json::json!({
+            "textDocument": {
+                "uri": uri
+            }
+        });
+
+        manager
+            .send_notification("textDocument/didClose".to_string(), params)
+            .await
+            .map_err(|e| format!("Failed to send didClose: {}", e))?;
+
+        Ok(())
+    } else {
+        Ok(())
     }
 }
 

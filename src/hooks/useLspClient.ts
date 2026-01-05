@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { lspClient } from "@/services/lsp";
-import { resourceDir } from "@tauri-apps/api/path";
+import { invoke } from "@tauri-apps/api/core";
 
 /**
  * Hook to manage LSP client lifecycle
@@ -14,16 +14,29 @@ export function useLspClient() {
     let mounted = true;
 
     async function initializeLsp() {
+      // If already initialized in service, just update state
+      if (lspClient.isInitialized()) {
+        if (mounted) {
+          setIsReady(true);
+          setError(null);
+        }
+        return;
+      }
+
       try {
-        // Get binary path from Tauri resources
-        const resourceDirPath = await resourceDir();
-        const binaryPath = `${resourceDirPath}/binaries/sql-lsp${
-          process.platform === "win32" ? ".exe" : ""
-        }`;
+        // Get binary path from backend command
+        // This ensures match with what download manager used
+        const info = await invoke<{ path: string; exists: boolean }>(
+          "check_lsp_binary"
+        );
 
-        console.log("[useLspClient] Initializing with binary:", binaryPath);
+        if (!info.exists) {
+          throw new Error("LSP binary not found. Please wait for download.");
+        }
 
-        await lspClient.initialize(binaryPath);
+        console.log("[useLspClient] Initializing with binary:", info.path);
+
+        await lspClient.initialize(info.path);
 
         if (mounted) {
           setIsReady(true);
@@ -40,10 +53,10 @@ export function useLspClient() {
 
     initializeLsp();
 
+    // Do NOT shutdown on unmount, as other components might use it.
+    // Shutdown should be handled by app close or explicit user action if needed.
     return () => {
       mounted = false;
-      // Cleanup on unmount
-      lspClient.shutdown().catch(console.error);
     };
   }, []);
 

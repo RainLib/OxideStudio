@@ -1,10 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type {
-  CompletionItem,
-  CompletionResponse,
-  Diagnostic,
-  HoverInfo,
-} from "./types";
+import type { CompletionItem, CompletionResponse } from "./types";
 
 /**
  * LSP Client Service
@@ -19,6 +14,11 @@ class LspClient {
    * @param binaryPath Path to sql-lsp binary
    */
   async initialize(binaryPath: string): Promise<void> {
+    if (this.initialized) {
+      console.log("[LSP] Already initialized");
+      return;
+    }
+
     try {
       const result = await invoke<string>("lsp_initialize", {
         request: { binary_path: binaryPath },
@@ -89,24 +89,68 @@ class LspClient {
   }
 
   /**
-   * Update database schema in LSP server
-   * @param schemaJson JSON string of database schema
+   * Update LSP configuration (connections)
+   * Sends workspace/didChangeConfiguration notification
+   * @param config Connection configuration
    */
-  async updateSchema(schemaJson: string): Promise<void> {
+  async updateConfiguration(config: any): Promise<void> {
     if (!this.initialized) {
-      console.warn("[LSP] Not initialized, skipping schema update");
+      // console.warn("[LSP] Not initialized, skipping config update");
       return;
     }
 
     try {
-      const result = await invoke<string>("lsp_update_schema", {
-        schemaJson,
+      // Wrap in sqls settings object as expected by the server
+      const settings = {
+        sqls: config,
+      };
+
+      await invoke<string>("lsp_did_change_configuration", {
+        settings,
       });
 
-      console.log("[LSP] Schema updated:", result);
+      console.log("[LSP] Configuration updated");
     } catch (error) {
-      console.error("[LSP] Schema update failed:", error);
+      console.error("[LSP] Configuration update failed:", error);
       throw error;
+    }
+  }
+
+  /**
+   * Notify LSP that a document was opened
+   */
+  async didOpen(uri: string, text: string, version: number): Promise<void> {
+    if (!this.initialized) return;
+    try {
+      await invoke("lsp_did_open", { uri, languageId: "sql", version, text });
+      // console.log("[LSP] didOpen:", uri);
+    } catch (e) {
+      console.error("[LSP] didOpen failed:", e);
+    }
+  }
+
+  /**
+   * Notify LSP that a document changed
+   */
+  async didChange(uri: string, text: string, version: number): Promise<void> {
+    if (!this.initialized) return;
+    try {
+      await invoke("lsp_did_change", { uri, version, text });
+      // console.log("[LSP] didChange:", uri);
+    } catch (e) {
+      console.error("[LSP] didChange failed:", e);
+    }
+  }
+
+  /**
+   * Notify LSP that a document was closed
+   */
+  async didClose(uri: string): Promise<void> {
+    if (!this.initialized) return;
+    try {
+      await invoke("lsp_did_close", { uri });
+    } catch (e) {
+      console.error("[LSP] didClose failed:", e);
     }
   }
 
