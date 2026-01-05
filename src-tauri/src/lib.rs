@@ -139,6 +139,10 @@ pub fn run() {
             commands::lsp::lsp_is_running,
             commands::lsp::lsp_get_completions,
             commands::lsp::lsp_update_schema,
+            // LSP binary management
+            lsp::check_lsp_binary,
+            lsp::download_lsp_binary,
+            lsp::check_lsp_updates,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

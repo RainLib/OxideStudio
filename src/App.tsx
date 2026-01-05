@@ -1,12 +1,12 @@
 import { useEffect } from "react";
-import { ThemeProvider } from "@/theme";
+import { ThemeProvider } from "@/theme/ThemeProvider";
 import { useConnectionStore } from "@/store/useConnectionStore";
-import { ConnectionPage } from "@/pages/connection";
-import { WorkspacePage } from "@/pages/workspace";
-import { Loader2 } from "lucide-react";
+import { WorkspaceLayout } from "@/components/connection/WorkspaceLayout";
+import { LspBinaryManager, LspUpdateNotification } from "@/components/lsp";
 
 function App() {
-  const { isConnected, loadConnections, isLoading } = useConnectionStore();
+  const { activeConnectionId, loadConnections, isLoading } =
+    useConnectionStore();
 
   useEffect(() => {
     loadConnections();
