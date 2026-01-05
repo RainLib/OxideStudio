@@ -65,9 +65,6 @@ export function SchemaSidebar() {
   const [ddlViewerOpen, setDdlViewerOpen] = useState(false);
   const [activeTable, setActiveTable] = useState("");
   const [ddlContent, setDdlContent] = useState("");
-  const [contextMenuOpenTable, setContextMenuOpenTable] = useState<
-    string | null
-  >(null);
 
   const {
     truncateTable,

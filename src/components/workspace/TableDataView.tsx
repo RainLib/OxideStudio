@@ -84,6 +84,60 @@ export function TableDataView() {
   const visualFilters = activeTab.visualFilters || [];
   const sqlFilter = activeTab.sqlFilter || "";
 
+  const handleSearch = () => {
+    if (!activeTab || !activeTab.tableName || !activeTab.schemaName) return;
+    const quote = '"'; // Simple quoting for now, todo: use proper driver quoting
+
+    let whereClause = "";
+    if (filterMode === "sql") {
+      whereClause = sqlFilter;
+    } else {
+      if (visualFilters.length > 0) {
+        whereClause = visualFilters
+          .map((f, i) => {
+            const prefix = i > 0 ? (f.logic || "AND") + " " : "";
+            let val = f.value;
+            // Attempt to handle numbers vs strings roughly
+            // TODO: Robust typing based on column type
+            const isNum = !isNaN(Number(val)) && val.trim() !== "";
+            if (!isNum) {
+              // Escape single quotes
+              val = `'${val.replace(/'/g, "''")}'`;
+            }
+
+            let op = "";
+            switch (f.operator) {
+              case "contains":
+                op = "LIKE";
+                val = `'%${f.value.replace(/'/g, "''")}%'`;
+                break;
+              case "startsWith":
+                op = "LIKE";
+                val = `'${f.value.replace(/'/g, "''")}%'`;
+                break;
+              case "endsWith":
+                op = "LIKE";
+                val = `'%${f.value.replace(/'/g, "''")}'`;
+                break;
+              default:
+                op = f.operator === "equals" ? "=" : f.operator;
+            }
+
+            return `${prefix}${quote}${f.column}${quote} ${op} ${val}`;
+          })
+          .join(" ");
+      }
+    }
+
+    if (whereClause && !whereClause.trim().toUpperCase().startsWith("WHERE")) {
+      whereClause = "WHERE " + whereClause;
+    }
+
+    const sql = `SELECT * FROM ${quote}${activeTab.schemaName}${quote}.${quote}${activeTab.tableName}${quote} \n${whereClause} \nLIMIT 500`;
+    updateTabSql(activeTab.id, sql);
+    runTabQuery(activeTab.id, activeConnectionId || "", sql);
+  };
+
   return (
     <div className="flex flex-col h-full bg-background">
       {/* Query Builder Filter Row */}
@@ -98,6 +152,7 @@ export function TableDataView() {
             setVisualFilters(activeTab.id, filters)
           }
           onSqlFilterChange={(sql) => setSqlFilter(activeTab.id, sql)}
+          onSearch={handleSearch}
         />
       )}
 
