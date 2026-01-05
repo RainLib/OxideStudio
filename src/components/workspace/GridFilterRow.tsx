@@ -60,20 +60,40 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
   onSqlFilterChange,
   onSearch,
 }) => {
-  // Ensure we always have at least one filter in visual mode
+  // Ensure we always have at least one filter in visual mode, and that it has a valid column
   useEffect(() => {
-    if (mode === "visual" && visualFilters.length === 0 && columns.length > 0) {
-      const firstColumn = columns[0]?.id || columns[0]?.title || "";
-      onVisualFiltersChange([
-        {
-          column: firstColumn,
-          operator: "equals",
-          value: "",
-          logic: undefined, // First item has no logic prefix
-        },
-      ]);
+    if (mode === "visual") {
+      // 1. If we have no filters, and we have columns, add the first one default
+      if (visualFilters.length === 0 && columns.length > 0) {
+        const firstColumn = columns[0]?.id || columns[0]?.title || "";
+        onVisualFiltersChange([
+          {
+            column: firstColumn,
+            operator: "equals",
+            value: "",
+            logic: undefined,
+          },
+        ]);
+        return;
+      }
+
+      // 2. If existing filters have empty columns, but we have columns available, populate them
+      if (visualFilters.length > 0 && columns.length > 0) {
+        const firstColumn = columns[0]?.id || columns[0]?.title || "";
+        const needsUpdate = visualFilters.some((f) => !f.column);
+
+        if (needsUpdate) {
+          const updated = visualFilters.map((f) => {
+            if (!f.column) {
+              return { ...f, column: firstColumn };
+            }
+            return f;
+          });
+          onVisualFiltersChange(updated);
+        }
+      }
     }
-  }, [mode, visualFilters.length, columns, onVisualFiltersChange]);
+  }, [mode, visualFilters, columns, onVisualFiltersChange]);
 
   const handleAddFilter = useCallback(() => {
     const firstColumn = columns[0]?.id || columns[0]?.title || "";
