@@ -11,6 +11,7 @@ use core::manager::ConnectionManager;
 use core::parser::SqlParser;
 use std::sync::Mutex;
 use tauri::Manager;
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
