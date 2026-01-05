@@ -3,6 +3,7 @@
 pub mod commands;
 pub mod core;
 pub mod drivers;
+pub mod lsp;
 
 use commands::query::ParserState;
 use core::cache::CacheManager;

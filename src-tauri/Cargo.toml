@@ -42,6 +42,11 @@ thiserror = "2"
 async-trait = "0.1.89"
 tree-sitter = "0.21"
 tree-sitter-sql = { package = "devgen-tree-sitter-sql", version = "0.21.0" }
+tracing = "0.1"
 
 [dev-dependencies]
 dotenvy = "0.15.7"
+
+# LSP support
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
