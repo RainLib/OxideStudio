@@ -96,9 +96,6 @@ pub async fn lsp_get_completions(
     let lsp_lock = state.0.lock().await;
 
     if let Some(manager) = lsp_lock.as_ref() {
-        // TODO: Implement actual LSP completion request
-        // For now, return a placeholder response
-
         tracing::debug!(
             "Completion request for {}:{}:{}",
             request.uri,
@@ -106,8 +103,54 @@ pub async fn lsp_get_completions(
             request.character
         );
 
-        // Placeholder - will be implemented when bidirectional communication is ready
-        Ok(CompletionResponse { items: vec![] })
+        // Build LSP textDocument/completion params
+        let params = serde_json::json!({
+            "textDocument": {
+                "uri": request.uri
+            },
+            "position": {
+                "line": request.line,
+                "character": request.character
+            }
+        });
+
+        // Send LSP request
+        match manager
+            .send_request("textDocument/completion".to_string(), params)
+            .await
+        {
+            Ok(result) => {
+                // Parse completion items from response
+                if let Some(items_array) = result.get("items").and_then(|v| v.as_array()) {
+                    let items: Vec<CompletionItem> = items_array
+                        .iter()
+                        .filter_map(|item| {
+                            Some(CompletionItem {
+                                label: item.get("label")?.as_str()?.to_string(),
+                                kind: item.get("kind")?.as_u64().map(|v| v as u32),
+                                detail: item
+                                    .get("detail")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                                documentation: item
+                                    .get("documentation")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                            })
+                        })
+                        .collect();
+
+                    Ok(CompletionResponse { items })
+                } else {
+                    // Return empty if no items in response
+                    Ok(CompletionResponse { items: vec![] })
+                }
+            }
+            Err(e) => {
+                tracing::error!("LSP completion request failed: {}", e);
+                Err(format!("LSP error: {}", e))
+            }
+        }
     } else {
         Err("LSP server is not running".to_string())
     }
