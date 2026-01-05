@@ -1,12 +1,13 @@
 import { useEffect } from "react";
-import { ThemeProvider } from "@/theme/ThemeProvider";
+import { ThemeProvider } from "@/theme";
 import { useConnectionStore } from "@/store/useConnectionStore";
-import { WorkspaceLayout } from "@/components/connection/WorkspaceLayout";
+import { ConnectionPage } from "@/pages/connection";
+import { WorkspacePage } from "@/pages/workspace";
+import { Loader2 } from "lucide-react";
 import { LspBinaryManager, LspUpdateNotification } from "@/components/lsp";
 
 function App() {
-  const { activeConnectionId, loadConnections, isLoading } =
-    useConnectionStore();
+  const { isConnected, loadConnections, isLoading } = useConnectionStore();
 
   useEffect(() => {
     loadConnections();
@@ -22,6 +23,10 @@ function App() {
 
   return (
     <ThemeProvider>
+      {/* LSP binary management components */}
+      <LspBinaryManager />
+      <LspUpdateNotification />
+
       <div className="bg-background text-foreground h-screen w-screen overflow-hidden">
         {isConnected ? <WorkspacePage /> : <ConnectionPage />}
       </div>
