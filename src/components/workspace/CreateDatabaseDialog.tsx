@@ -105,7 +105,7 @@ export function CreateDatabaseDialog({
     // Auto-select default collation for the charset
     const collations = MYSQL_COLLATIONS[newCharset] || [];
     if (collations.length > 0) {
-      setCollation(collations[0]);
+      setCollation(collations[0]!);
     }
   };
 

@@ -405,7 +405,7 @@ export function WorkspaceSidebar() {
 
                 <ContextMenuItem
                   className="text-red-500 focus:bg-red-500/10 focus:text-red-400 cursor-pointer"
-                  onSelect={(e) => {
+                  onSelect={() => {
                     // Prevent closing immediately so we can handle state if needed,
                     // but for Dialog trigger, standard behavior is fine.
                     // We just call the handler.

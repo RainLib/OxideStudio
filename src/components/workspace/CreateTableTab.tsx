@@ -146,10 +146,10 @@ export function CreateTableTab({
     // Set smart defaults when type changes
     if (field === "type") {
       if (value === "DECIMAL") {
-        newColumns[index].length = "10,2";
+        newColumns[index]!.length = "10,2";
       } else if (value === "VARCHAR") {
         // Only set if empty or previous default
-        if (!newColumns[index].length) newColumns[index].length = "255";
+        if (!newColumns[index]!.length) newColumns[index]!.length = "255";
       }
     }
 

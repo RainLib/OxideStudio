@@ -1,5 +1,5 @@
 import { useConnectionStore } from "@/store/useConnectionStore";
-import { LogOut, ChevronDown, Slack } from "lucide-react";
+import { LogOut, Slack } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {

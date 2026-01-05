@@ -534,8 +534,8 @@ export const useTabStore = create<TabState>((set, get) => ({
     const editsByRow = new Map<number, Record<number, any>>();
     for (const [key, value] of currentTab.pendingEdits!.entries()) {
       const [rStr, cStr] = key.split(":");
-      const r = parseInt(rStr);
-      const c = parseInt(cStr);
+      const r = parseInt(rStr!);
+      const c = parseInt(cStr!);
       if (!editsByRow.has(r)) editsByRow.set(r, {});
       editsByRow.get(r)![c] = value;
     }

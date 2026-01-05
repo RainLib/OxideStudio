@@ -132,7 +132,7 @@ export function useTableOperations() {
         const res = await queryService.executeQuery(activeConnectionId, sql);
         // MySQL returns [Table, Create Table] usually
         if (res && res[0] && res[0].rows?.length > 0) {
-          return res[0].rows[0][1] || "-- DDL not found";
+          return res[0]!.rows![0]![1] || "-- DDL not found";
         }
       } catch (e) {
         console.error(e);

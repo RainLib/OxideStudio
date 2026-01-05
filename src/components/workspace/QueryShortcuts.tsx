@@ -1,4 +1,4 @@
-import { Play, Search, Terminal, Layout } from "lucide-react";
+import { Play, Search, Layout } from "lucide-react";
 
 interface ShortcutCardProps {
   icon: any;
