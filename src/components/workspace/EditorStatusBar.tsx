@@ -35,7 +35,7 @@ export function EditorStatusBar({
   return (
     <div
       className={cn(
-        "h-[28px] px-3 flex items-center gap-4 text-[10px] select-none shrink-0 transition-colors duration-200"
+        "h-full px-3 flex items-center gap-4 text-[10px] select-none shrink-0 transition-colors duration-200"
       )}
     >
       {isTable ? (
@@ -48,16 +48,14 @@ export function EditorStatusBar({
             >
               Structure
             </button>
-            <div className="h-3 w-px bg-border" />
-            <span className="text-muted-foreground/70 font-medium">
-              {lastRefresh}
-            </span>
+            <div className="h-3 w-px bg-current/20" />
+            <span className="text-inherit/70 font-medium">{lastRefresh}</span>
           </div>
 
-          <div className="h-3 w-px bg-border" />
+          <div className="h-3 w-px bg-current/20" />
 
           {/* Row Count */}
-          <div className="flex items-center gap-2 text-muted-foreground">
+          <div className="flex items-center gap-2 text-inherit/80">
             <AlignJustify size={12} strokeWidth={2} />
             <span>
               {rowCount !== undefined ? `${rowCount} rows` : "No results"}
@@ -72,10 +70,10 @@ export function EditorStatusBar({
                 <ChevronDown size={10} className="opacity-50" />
               </div>
               <div className="flex items-center gap-3 text-muted-foreground/50">
-                <button className="hover:text-foreground transition-colors">
+                <button className="hover:text-inherit transition-colors">
                   <ChevronDown className="rotate-90" size={10} />
                 </button>
-                <button className="hover:text-foreground transition-colors">
+                <button className="hover:text-inherit transition-colors">
                   <ChevronDown className="-rotate-90" size={10} />
                 </button>
               </div>
@@ -88,25 +86,25 @@ export function EditorStatusBar({
               variant="ghost"
               size="icon"
               onClick={onRefresh}
-              className="h-6 w-6 text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              className="h-8 w-8 text-inherit/70 hover:text-inherit hover:bg-current/10"
             >
-              <RefreshCw size={12} />
+              <RefreshCw size={14} />
             </Button>
             <Button
               variant="ghost"
               size="icon"
               onClick={onAdd}
-              className="h-6 w-6 text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              className="h-8 w-8 text-inherit/70 hover:text-inherit hover:bg-current/10"
             >
-              <Plus size={12} />
+              <Plus size={14} />
             </Button>
             <Button
               variant="ghost"
               size="icon"
               onClick={onSettings}
-              className="h-6 w-6 text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              className="h-8 w-8 text-inherit/70 hover:text-inherit hover:bg-current/10"
             >
-              <Settings2 size={12} />
+              <Settings2 size={14} />
             </Button>
           </div>
         </>
@@ -125,7 +123,7 @@ export function EditorStatusBar({
             </span>
           </div>
 
-          <div className="h-3 w-px bg-border" />
+          <div className="h-3 w-px bg-current/20" />
 
           {/* Editor Row Count */}
           <div className="flex items-center gap-2 text-inherit/80">
@@ -137,14 +135,13 @@ export function EditorStatusBar({
 
           <div className="flex-1" />
 
-          {/* Editor Right Actions */}
-          <div className="flex items-center gap-3 text-inherit/60">
-            <button className="flex items-center gap-1.5 hover:text-foreground transition-colors px-2 py-0.5 rounded hover:bg-muted/50">
-              <Download size={12} />
+          <div className="flex items-center gap-3 text-inherit/70">
+            <button className="flex items-center gap-1.5 hover:text-inherit transition-colors px-2 py-0.5 rounded hover:bg-current/10">
+              <Download size={14} />
               <span className="text-[10px] font-medium">CSV</span>
             </button>
-            <button className="flex items-center gap-1.5 hover:text-foreground transition-colors px-2 py-0.5 rounded hover:bg-muted/50">
-              <Download size={12} />
+            <button className="flex items-center gap-1.5 hover:text-inherit transition-colors px-2 py-0.5 rounded hover:bg-current/10">
+              <Download size={14} />
               <span className="text-[10px] font-medium">JSON</span>
             </button>
           </div>

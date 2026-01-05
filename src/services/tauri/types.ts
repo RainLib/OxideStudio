@@ -49,6 +49,9 @@ export interface SavedConnection {
   user?: string;
   password?: string;
   database?: string;
+  tags?: string[];
+  icon?: string;
+  color?: string;
 }
 
 /**
@@ -68,6 +71,9 @@ export interface ColumnInfo {
   name: string;
   data_type: string;
   is_nullable: boolean;
+  is_primary_key: boolean;
+  is_unique?: boolean;
+  is_indexed?: boolean;
   column_default?: string;
   character_maximum_length?: number;
   numeric_precision?: number;

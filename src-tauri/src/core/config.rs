@@ -9,6 +9,7 @@ pub struct AppConfig {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct SavedConnection {
     pub id: String,
     pub name: String,
@@ -19,6 +20,11 @@ pub struct SavedConnection {
     pub user: Option<String>,
     pub password: Option<String>,
     pub database: Option<String>,
+    pub connection_url: Option<String>,
+    pub ssl_mode: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub icon: Option<String>,
+    pub color: Option<String>,
 }
 
 pub struct ConfigManager {
@@ -27,7 +33,10 @@ pub struct ConfigManager {
 
 impl ConfigManager {
     pub fn new(app: &AppHandle) -> Self {
-        let config_dir = app.path().app_config_dir().expect("failed to get config dir");
+        let config_dir = app
+            .path()
+            .app_config_dir()
+            .expect("failed to get config dir");
         fs::create_dir_all(&config_dir).ok();
         Self {
             config_path: config_dir.join("config.json"),

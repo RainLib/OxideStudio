@@ -25,6 +25,8 @@ pub struct ColumnInfo {
     pub data_type: String,
     pub is_nullable: bool,
     pub is_primary_key: bool,
+    pub is_unique: bool,
+    pub is_indexed: bool,
     pub default_value: Option<String>,
     pub comment: Option<String>,
 }

@@ -1,8 +1,26 @@
 import { cn } from "@/lib/utils";
-import { Database, Table, Search } from "lucide-react";
+import {
+  Database,
+  Table,
+  Search,
+  RefreshCw,
+  Plus,
+  Pin,
+  PinOff,
+  Eraser,
+  Pencil,
+  Download,
+  TableProperties,
+  Code2,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useTabStore } from "@/store/useTabStore";
+import { CreateDatabaseDialog } from "./CreateDatabaseDialog";
+import { RenameTableDialog } from "./RenameTableDialog";
+import { DdlViewerDialog } from "./DdlViewerDialog";
+import { useTableOperations } from "@/hooks/useTableOperations";
 import { useEffect, useState } from "react";
 import {
   Select,
@@ -11,6 +29,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 
 export function SchemaSidebar() {
   const { activeConnectionId } = useConnectionStore();
@@ -21,6 +46,8 @@ export function SchemaSidebar() {
     loadSchemas,
     loadTables,
     tables,
+    pinnedTables,
+    togglePinTable,
     setCurrentSchema,
     selectTable,
     selectedTable,
@@ -30,6 +57,34 @@ export function SchemaSidebar() {
   const [databaseFilter, setDatabaseFilter] = useState("");
   const [isSelectOpen, setIsSelectOpen] = useState(false);
   const [focusedIndex, setFocusedIndex] = useState(0);
+  const [isCreateDbDialogOpen, setIsCreateDbDialogOpen] = useState(false);
+  const [isTablesHovered, setIsTablesHovered] = useState(false);
+
+  // Context Menu State
+  const [renameDialogOpen, setRenameDialogOpen] = useState(false);
+  const [ddlViewerOpen, setDdlViewerOpen] = useState(false);
+  const [activeTable, setActiveTable] = useState("");
+  const [ddlContent, setDdlContent] = useState("");
+
+  const {
+    truncateTable,
+    renameTable,
+    exportTableData,
+    getTableDdl,
+    editColumns,
+  } = useTableOperations();
+
+  const handleRenameClick = (table: string) => {
+    setActiveTable(table);
+    setRenameDialogOpen(true);
+  };
+
+  const handleDdlClick = async (table: string) => {
+    setActiveTable(table);
+    const ddl = await getTableDdl(table);
+    setDdlContent(ddl);
+    setDdlViewerOpen(true);
+  };
 
   useEffect(() => {
     if (activeConnectionId) {
@@ -56,8 +111,17 @@ export function SchemaSidebar() {
     setFocusedIndex(0);
   }, [databaseFilter]);
 
+  // Sort tables: pinned first, then alphabetical
+  const sortedTables = [...tables].sort((a, b) => {
+    const aPinned = pinnedTables.includes(a.name);
+    const bPinned = pinnedTables.includes(b.name);
+    if (aPinned && !bPinned) return -1;
+    if (!aPinned && bPinned) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
   // Filter tables based on search text
-  const filteredTables = tables.filter((table) =>
+  const filteredTables = sortedTables.filter((table) =>
     table.name.toLowerCase().includes(filterText.toLowerCase())
   );
 
@@ -123,11 +187,15 @@ export function SchemaSidebar() {
     setFilterText,
   ]);
 
-  const { findOrCreateTableTab, runTabQuery, updateTabSql } = useTabStore();
+  const { findOrCreateTableTab, runTabQuery, updateTabSql, createTableTab } =
+    useTabStore();
   const { connections } = useConnectionStore();
 
-  const handleTableClick = (tableName: string) => {
+  const handleTableSelect = (tableName: string) => {
     selectTable(tableName);
+  };
+
+  const handleTableDoubleClick = (tableName: string) => {
     if (!currentSchema || !activeConnectionId) return;
 
     // Use findOrCreateTableTab to reuse existing tabs
@@ -172,95 +240,132 @@ export function SchemaSidebar() {
     );
   };
 
+  const handleCreateTable = () => {
+    if (activeConnectionId && currentSchema) {
+      createTableTab(activeConnectionId, currentSchema);
+    }
+  };
+
+  const handleCreateDatabase = () => {
+    setIsCreateDbDialogOpen(true);
+  };
+
+  const handleRefresh = async () => {
+    if (activeConnectionId) {
+      // Force refresh schemas
+      await loadSchemas(activeConnectionId, true);
+      // If currentSchema is selected, force refresh tables too
+      if (currentSchema) {
+        await loadTables(activeConnectionId, currentSchema);
+      }
+    }
+  };
+
   return (
     <div className="flex flex-col h-full bg-background-tertiary">
-      {/* Top: Database Selector */}
-      <div className="p-2 border-b border-border bg-background-secondary shrink-0">
-        <div className="flex items-center gap-2 mb-1">
-          <Database size={13} className="text-primary shrink-0" />
-          <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-bold">
-            Database
-          </span>
-        </div>
-
-        <Select
-          value={currentSchema || ""}
-          onValueChange={(value: string) => {
-            setCurrentSchema(value);
-            setFilterText(""); // Clear table filter when switching database
-            setIsSelectOpen(false);
-          }}
-          open={isSelectOpen}
-          onOpenChange={setIsSelectOpen}
-        >
-          <SelectTrigger className="w-full h-7 text-[11px] bg-background-tertiary border-border focus:border-primary text-foreground">
-            <SelectValue placeholder="Select database..." />
-          </SelectTrigger>
-          <SelectContent className="bg-background-elevated border-border text-foreground">
-            {/* Filter indicator at top-right (no input box) */}
-            {databaseFilter && (
-              <div className="sticky top-0 z-10 bg-background-elevated px-2 py-1.5 border-b border-border flex items-center justify-between">
-                <span className="text-[10px] text-muted-foreground italic">
-                  Type to filter...
-                </span>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] px-2 py-0.5 rounded bg-background-tertiary text-primary font-mono border border-border">
-                    {databaseFilter}
+      {/* Top: Database Selector Group */}
+      <div className="p-2 border-b border-border bg-background-secondary/50 shrink-0">
+        <div className="flex items-center gap-2">
+          <Select
+            value={currentSchema || ""}
+            onValueChange={(value: string) => {
+              setCurrentSchema(value);
+              setFilterText(""); // Clear table filter when switching database
+              setIsSelectOpen(false);
+            }}
+            open={isSelectOpen}
+            onOpenChange={setIsSelectOpen}
+          >
+            <SelectTrigger className="w-full h-7 text-[11px] bg-background-tertiary border-border focus:border-primary text-foreground flex-1">
+              <SelectValue placeholder="Select database..." />
+            </SelectTrigger>
+            <SelectContent className="bg-background-elevated border-border text-foreground">
+              {/* Filter indicator at top-right (no input box) */}
+              {databaseFilter && (
+                <div className="sticky top-0 z-10 bg-background-elevated px-2 py-1.5 border-b border-border flex items-center justify-between">
+                  <span className="text-[10px] text-muted-foreground italic">
+                    Type to filter...
                   </span>
-                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-primary/20 text-primary border border-primary/30">
-                    {filteredSchemas.length}/{schemas.length}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-background-tertiary text-primary font-mono border border-border">
+                      {databaseFilter}
+                    </span>
+                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-primary/20 text-primary border border-primary/30">
+                      {filteredSchemas.length}/{schemas.length}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            )}
-
-            {/* Database list */}
-            <div className="max-h-[300px] overflow-auto">
-              {isLoading && schemas.length === 0 ? (
-                <div className="px-2 py-1.5 text-[11px] text-gray-500 italic">
-                  Loading...
-                </div>
-              ) : filteredSchemas.length === 0 ? (
-                <div className="px-2 py-1.5 text-[11px] text-gray-500 italic">
-                  {databaseFilter ? (
-                    <>
-                      No match for{" "}
-                      <span className="text-primary font-mono">
-                        "{databaseFilter}"
-                      </span>
-                      <div className="text-[9px] mt-1 opacity-60">
-                        Press Esc to clear
-                      </div>
-                    </>
-                  ) : (
-                    "No databases found"
-                  )}
-                </div>
-              ) : (
-                filteredSchemas.map((schema, index) => (
-                  <SelectItem
-                    key={schema}
-                    value={schema}
-                    className={cn(
-                      "text-[11px] focus:bg-background-tertiary focus:text-foreground",
-                      index === focusedIndex &&
-                        "bg-background-tertiary text-foreground"
-                    )}
-                  >
-                    <div className="flex items-center gap-2">
-                      <Database size={12} className="text-gray-500" />
-                      {highlightMatch(schema, databaseFilter)}
-                    </div>
-                  </SelectItem>
-                ))
               )}
-            </div>
-          </SelectContent>
-        </Select>
+
+              {/* Database list */}
+              <div className="max-h-[300px] overflow-auto">
+                {isLoading && schemas.length === 0 ? (
+                  <div className="px-2 py-1.5 text-[11px] text-gray-500 italic">
+                    Loading...
+                  </div>
+                ) : filteredSchemas.length === 0 ? (
+                  <div className="px-2 py-1.5 text-[11px] text-gray-500 italic">
+                    {databaseFilter ? (
+                      <>
+                        No match for{" "}
+                        <span className="text-primary font-mono">
+                          "{databaseFilter}"
+                        </span>
+                        <div className="text-[9px] mt-1 opacity-60">
+                          Press Esc to clear
+                        </div>
+                      </>
+                    ) : (
+                      "No databases found"
+                    )}
+                  </div>
+                ) : (
+                  filteredSchemas.map((schema, index) => (
+                    <SelectItem
+                      key={schema}
+                      value={schema}
+                      className={cn(
+                        "text-[11px] focus:bg-background-tertiary focus:text-foreground",
+                        index === focusedIndex &&
+                          "bg-background-tertiary text-foreground"
+                      )}
+                    >
+                      <div className="flex items-center gap-2">
+                        <Database size={12} className="text-gray-500" />
+                        {highlightMatch(schema, databaseFilter)}
+                      </div>
+                    </SelectItem>
+                  ))
+                )}
+              </div>
+            </SelectContent>
+          </Select>
+
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground hover:bg-background-tertiary rounded-sm"
+            onClick={handleRefresh}
+            title="Refresh Schemas"
+            disabled={isLoading}
+          >
+            <RefreshCw size={12} className={cn(isLoading && "animate-spin")} />
+          </Button>
+
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground hover:bg-background-tertiary rounded-sm"
+            onClick={handleCreateDatabase}
+            title="Create New Database"
+          >
+            <Plus size={12} />
+          </Button>
+        </div>
       </div>
 
       {/* Middle: Filter Input for Tables */}
-      <div className="p-2 border-b border-border bg-background-secondary shrink-0">
+      <div className="p-2 border-b border-border bg-background-secondary/30 shrink-0">
         <div className="relative">
           <Search
             size={12}
@@ -277,8 +382,64 @@ export function SchemaSidebar() {
         </div>
       </div>
 
+      {/* Tables Section Header - Contextual */}
+      <div
+        className="flex items-center justify-between px-2 py-1.5 bg-background-tertiary shrink-0"
+        onMouseEnter={() => setIsTablesHovered(true)}
+        onMouseLeave={() => setIsTablesHovered(false)}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-bold text-muted-foreground tracking-wider uppercase">
+            Tables
+          </span>
+          {currentSchema && (
+            <span className="text-[9px] bg-background-secondary px-1.5 py-0.5 rounded text-muted-foreground border border-border">
+              {filteredTables.length}
+            </span>
+          )}
+        </div>
+
+        {/* Action buttons - only show on hover of tables area */}
+        {isTablesHovered && currentSchema && (
+          <div
+            className={cn(
+              "flex items-center gap-1 transition-opacity duration-200",
+              isTablesHovered ? "opacity-100" : "opacity-0"
+            )}
+          >
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-5 w-5 text-muted-foreground hover:text-primary rounded-sm"
+              onClick={handleRefresh}
+              title="Refresh Tables"
+              disabled={isLoading}
+            >
+              <RefreshCw
+                size={10}
+                className={cn(isLoading && "animate-spin")}
+              />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-5 w-5 text-muted-foreground hover:text-primary rounded-sm"
+              onClick={handleCreateTable}
+              title="Create New Table"
+              disabled={!currentSchema}
+            >
+              <Plus size={10} />
+            </Button>
+          </div>
+        )}
+      </div>
+
       {/* Bottom: Tables List */}
-      <div className="flex-1 overflow-auto bg-background-tertiary py-1 custom-scrollbar">
+      <div
+        className="flex-1 overflow-auto bg-background-tertiary py-0 custom-scrollbar"
+        onMouseEnter={() => setIsTablesHovered(true)}
+        onMouseLeave={() => setIsTablesHovered(false)}
+      >
         {!currentSchema ? (
           <div className="p-4 text-xs text-center text-gray-500 italic">
             Select a database to view tables
@@ -293,36 +454,122 @@ export function SchemaSidebar() {
           </div>
         ) : (
           <div className="px-1">
-            {filteredTables.map((table) => (
-              <div
-                key={table.name}
-                className={cn(
-                  "flex items-center gap-2 px-2 py-1.5 cursor-pointer text-[11px] group transition-all select-none rounded-sm",
-                  selectedTable === table.name
-                    ? "bg-background-secondary text-primary"
-                    : "text-muted-foreground hover:text-foreground hover:bg-background-tertiary"
-                )}
-                onClick={() => handleTableClick(table.name)}
-                title={table.name}
-              >
-                <Table
-                  size={12}
-                  className={cn(
-                    "shrink-0 opacity-70",
-                    selectedTable === table.name && "opacity-100"
-                  )}
-                />
-                <span className="truncate flex-1">{table.name}</span>
-                {table.type && (
-                  <span className="text-[9px] uppercase opacity-50 shrink-0">
-                    {table.type}
-                  </span>
-                )}
-              </div>
-            ))}
+            {filteredTables.map((table) => {
+              const isPinned = pinnedTables.includes(table.name);
+              return (
+                <ContextMenu
+                  key={table.name}
+                  onOpenChange={(open) => {
+                    if (open) handleTableSelect(table.name);
+                  }}
+                >
+                  <ContextMenuTrigger>
+                    <div
+                      className={cn(
+                        "flex items-center gap-2 px-2 py-1.5 cursor-pointer text-[11px] group transition-all select-none rounded-sm relative",
+                        selectedTable === table.name
+                          ? "bg-background-secondary text-primary"
+                          : "text-muted-foreground hover:text-foreground hover:bg-background-secondary/50"
+                      )}
+                      onClick={() => handleTableSelect(table.name)}
+                      onDoubleClick={() => handleTableDoubleClick(table.name)}
+                      title={table.name}
+                    >
+                      <Table
+                        size={12}
+                        className={cn(
+                          "shrink-0 opacity-70",
+                          selectedTable === table.name && "opacity-100",
+                          isPinned && "text-primary opacity-100"
+                        )}
+                      />
+                      <span
+                        className={cn(
+                          "truncate flex-1",
+                          isPinned && "font-bold text-foreground"
+                        )}
+                      >
+                        {table.name}
+                      </span>
+
+                      {/* Pin/Unpin Button - Visible on Hover */}
+                      <div className="flex items-center gap-1">
+                        {table.type && !isPinned && (
+                          <span className="text-[9px] uppercase opacity-50 shrink-0 group-hover:hidden">
+                            {table.type}
+                          </span>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={cn(
+                            "h-4 w-4 shrink-0 transition-all duration-200",
+                            isPinned
+                              ? "text-primary opacity-100"
+                              : "text-muted-foreground opacity-0 group-hover:opacity-60 hover:opacity-100"
+                          )}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            togglePinTable(table.name);
+                          }}
+                          title={isPinned ? "Unpin Table" : "Pin Table"}
+                        >
+                          {isPinned ? <PinOff size={10} /> : <Pin size={10} />}
+                        </Button>
+                      </div>
+                    </div>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent className="w-48">
+                    <ContextMenuItem onClick={() => truncateTable(table.name)}>
+                      <Eraser className="mr-2 h-3.5 w-3.5" />
+                      Empty Table
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      onClick={() => handleRenameClick(table.name)}
+                    >
+                      <Pencil className="mr-2 h-3.5 w-3.5" />
+                      Rename Table
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      onClick={() => exportTableData(table.name)}
+                    >
+                      <Download className="mr-2 h-3.5 w-3.5" />
+                      Export Data
+                    </ContextMenuItem>
+                    <ContextMenuSeparator />
+                    <ContextMenuItem onClick={() => editColumns(table.name)}>
+                      <TableProperties className="mr-2 h-3.5 w-3.5" />
+                      Edit Columns
+                    </ContextMenuItem>
+                    <ContextMenuItem onClick={() => handleDdlClick(table.name)}>
+                      <Code2 className="mr-2 h-3.5 w-3.5" />
+                      View DSL
+                    </ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
+              );
+            })}
           </div>
         )}
       </div>
+
+      <CreateDatabaseDialog
+        isOpen={isCreateDbDialogOpen}
+        onClose={() => setIsCreateDbDialogOpen(false)}
+        activeConnectionId={activeConnectionId || ""}
+      />
+      <RenameTableDialog
+        isOpen={renameDialogOpen}
+        onClose={() => setRenameDialogOpen(false)}
+        tableName={activeTable}
+        onRename={renameTable}
+      />
+      <DdlViewerDialog
+        isOpen={ddlViewerOpen}
+        onClose={() => setDdlViewerOpen(false)}
+        tableName={activeTable}
+        ddl={ddlContent}
+      />
     </div>
   );
 }

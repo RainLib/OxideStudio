@@ -1,7 +1,15 @@
-import React, { useCallback } from "react";
+import React, { useCallback, useEffect } from "react";
 import { GridColumn } from "@glideapps/glide-data-grid";
-import { Plus, Code, Table } from "lucide-react";
+import { Plus, Code, Table, Search, Trash2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 export type FilterOperator =
   | "equals"
@@ -28,10 +36,11 @@ interface GridFilterRowProps {
   onModeChange: (mode: "visual" | "sql") => void;
   onVisualFiltersChange: (filters: ColumnFilter[]) => void;
   onSqlFilterChange: (sql: string) => void;
+  onSearch?: () => void;
 }
 
 const operatorLabels: Record<FilterOperator, string> = {
-  equals: "equals",
+  equals: "=",
   contains: "contains",
   startsWith: "starts with",
   endsWith: "ends with",
@@ -49,31 +58,59 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
   onModeChange,
   onVisualFiltersChange,
   onSqlFilterChange,
+  onSearch,
 }) => {
+  // Ensure we always have at least one filter in visual mode, and that it has a valid column
+  useEffect(() => {
+    if (mode === "visual") {
+      // 1. If we have no filters, and we have columns, add the first one default
+      if (visualFilters.length === 0 && columns.length > 0) {
+        const firstColumn = columns[0]?.id || columns[0]?.title || "";
+        onVisualFiltersChange([
+          {
+            column: firstColumn,
+            operator: "equals",
+            value: "",
+            logic: undefined,
+          },
+        ]);
+        return;
+      }
+
+      // 2. If existing filters have empty columns, but we have columns available, populate them
+      if (visualFilters.length > 0 && columns.length > 0) {
+        const firstColumn = columns[0]?.id || columns[0]?.title || "";
+        const needsUpdate = visualFilters.some((f) => !f.column);
+
+        if (needsUpdate) {
+          const updated = visualFilters.map((f) => {
+            if (!f.column) {
+              return { ...f, column: firstColumn };
+            }
+            return f;
+          });
+          onVisualFiltersChange(updated);
+        }
+      }
+    }
+  }, [mode, visualFilters, columns, onVisualFiltersChange]);
+
   const handleAddFilter = useCallback(() => {
     const firstColumn = columns[0]?.id || columns[0]?.title || "";
     const newFilter: ColumnFilter = {
       column: firstColumn,
       operator: "equals",
       value: "",
-      logic: visualFilters.length > 0 ? "AND" : undefined,
+      logic: "AND",
     };
     onVisualFiltersChange([...visualFilters, newFilter]);
   }, [columns, visualFilters, onVisualFiltersChange]);
 
   const handleRemoveFilter = useCallback(
     (index: number) => {
+      // Don't allow removing the first filter
+      if (index === 0) return;
       const updated = visualFilters.filter((_, i) => i !== index);
-      // Remove logic from first item if it exists
-      if (updated.length > 0 && updated[0]?.logic) {
-        const first = updated[0];
-        updated[0] = {
-          column: first.column,
-          operator: first.operator,
-          value: first.value,
-          logic: undefined,
-        };
-      }
       onVisualFiltersChange(updated);
     },
     [visualFilters, onVisualFiltersChange]
@@ -81,13 +118,14 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
 
   const handleToggleLogic = useCallback(
     (index: number) => {
+      // First filter logic cannot be toggled
+      if (index === 0) return;
+
       const updated = [...visualFilters];
       const current = updated[index];
       if (current) {
         updated[index] = {
-          column: current.column,
-          operator: current.operator,
-          value: current.value,
+          ...current,
           logic: current.logic === "AND" ? "OR" : "AND",
         };
       }
@@ -102,10 +140,8 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
       const current = updated[index];
       if (current) {
         updated[index] = {
+          ...current,
           column,
-          operator: current.operator,
-          value: current.value,
-          logic: current.logic,
         };
       }
       onVisualFiltersChange(updated);
@@ -119,10 +155,8 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
       const current = updated[index];
       if (current) {
         updated[index] = {
-          column: current.column,
+          ...current,
           operator,
-          value: current.value,
-          logic: current.logic,
         };
       }
       onVisualFiltersChange(updated);
@@ -136,10 +170,8 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
       const current = updated[index];
       if (current) {
         updated[index] = {
-          column: current.column,
-          operator: current.operator,
+          ...current,
           value,
-          logic: current.logic,
         };
       }
       onVisualFiltersChange(updated);
@@ -148,120 +180,154 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
   );
 
   return (
-    <div className="border-b border-border bg-background-primary px-2 py-1.5">
-      <div className="flex items-center gap-2">
-        {/* Mode Toggle Button */}
-        <button
-          onClick={() => onModeChange(mode === "visual" ? "sql" : "visual")}
-          className="h-6 w-6 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background-elevated rounded transition-colors"
-          title={
-            mode === "visual" ? "Switch to SQL mode" : "Switch to Visual mode"
-          }
-        >
-          {mode === "visual" ? <Code size={14} /> : <Table size={14} />}
-        </button>
-
-        {/* SQL Mode */}
+    <div className="border-b border-border bg-background-primary px-2 py-2">
+      <div className="flex flex-col gap-2">
+        {/* Row 1: Mode/Logic + Filter Inputs */}
         {mode === "sql" ? (
-          <Input
-            type="text"
-            placeholder="WHERE clause (e.g., id > 10 AND name LIKE '%test%')"
-            value={sqlFilter}
-            onChange={(e) => onSqlFilterChange(e.target.value)}
-            className="h-6 flex-1 text-xs bg-background-tertiary border-border text-foreground placeholder:text-muted-foreground/40 focus-visible:ring-1 focus-visible:ring-primary focus-visible:border-primary"
-          />
-        ) : (
-          /* Visual Mode */
-          <div className="flex-1 flex flex-col gap-1">
-            {visualFilters.map((filter, index) => (
-              <div key={index} className="flex items-center gap-1.5">
-                {/* AND/OR Toggle */}
-                {filter.logic && (
-                  <button
-                    onClick={() => handleToggleLogic(index)}
-                    className="px-1.5 h-6 text-[10px] font-mono bg-background-elevated text-foreground border border-border hover:bg-background-tertiary rounded uppercase"
-                  >
-                    {filter.logic}
-                  </button>
-                )}
-
-                {/* Column Selector */}
-                <select
-                  value={filter.column}
-                  onChange={(e) => handleColumnChange(index, e.target.value)}
-                  className="h-6 px-1.5 text-[11px] bg-background-tertiary text-foreground border border-border hover:border-border-divider rounded focus:outline-none focus:border-primary"
-                >
-                  {columns.map((col) => {
-                    const colId = col.id || col.title;
-                    return (
-                      <option key={colId} value={colId}>
-                        {col.title}
-                      </option>
-                    );
-                  })}
-                </select>
-
-                {/* Operator Selector */}
-                <select
-                  value={filter.operator}
-                  onChange={(e) =>
-                    handleOperatorChange(
-                      index,
-                      e.target.value as FilterOperator
-                    )
-                  }
-                  className="h-6 px-1.5 text-[11px] bg-background-tertiary text-foreground border border-border hover:border-border-divider rounded focus:outline-none focus:border-primary"
-                >
-                  {Object.entries(operatorLabels).map(([op, label]) => (
-                    <option key={op} value={op}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-
-                {/* Value Input */}
-                <Input
-                  type="text"
-                  placeholder="Enter Value"
-                  value={filter.value}
-                  onChange={(e) => handleValueChange(index, e.target.value)}
-                  className="h-6 flex-1 text-[11px] bg-background-tertiary border-border text-foreground placeholder:text-muted-foreground/40 focus-visible:ring-1 focus-visible:ring-primary focus-visible:border-primary"
-                />
-
-                {/* Remove Button */}
-                <button
-                  onClick={() => handleRemoveFilter(index)}
-                  className="h-6 w-6 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background-elevated rounded"
-                >
-                  <span className="text-sm">−</span>
-                </button>
-              </div>
-            ))}
-
-            {/* Add Filter Button Row */}
-            {visualFilters.length === 0 || (
-              <div className="flex items-center gap-1.5">
-                <button
-                  onClick={handleAddFilter}
-                  className="h-6 w-6 flex items-center justify-center text-primary hover:text-primary/80 hover:bg-background-elevated rounded transition-colors"
-                  title="Add filter"
-                >
-                  <Plus size={14} />
-                </button>
-              </div>
-            )}
+          <div className="flex items-center gap-2">
+            <div className="w-[48px] shrink-0">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => onModeChange("visual")}
+                className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                title="Switch to Visual mode"
+              >
+                <Code size={16} />
+              </Button>
+            </div>
+            <Input
+              type="text"
+              placeholder="WHERE clause (e.g. id > 10)"
+              value={sqlFilter}
+              onChange={(e) => onSqlFilterChange(e.target.value)}
+              className="h-7 flex-1 text-xs font-mono bg-background-tertiary border-border"
+            />
+            <Button
+              variant="default"
+              size="icon"
+              onClick={onSearch}
+              className="h-7 w-7 bg-primary text-primary-foreground hover:bg-primary/90"
+              title="Search"
+            >
+              <Search size={14} />
+            </Button>
           </div>
-        )}
+        ) : (
+          <div className="flex flex-col gap-2">
+            {visualFilters.map((filter, index) => {
+              const isFirst = index === 0;
+              return (
+                <div key={index} className="flex items-center gap-2">
+                  {/* Left Column: Mode Toggle (Row 0) or Logic Toggle (Row > 0) */}
+                  <div className="w-[48px] shrink-0 flex items-center justify-start">
+                    {isFirst ? (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => onModeChange("sql")}
+                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                        title="Switch to SQL mode"
+                      >
+                        <Table size={16} />
+                      </Button>
+                    ) : (
+                      <button
+                        onClick={() => handleToggleLogic(index)}
+                        className="text-[10px] font-bold font-mono px-1.5 py-0.5 rounded bg-background-elevated text-muted-foreground hover:text-foreground hover:bg-background-tertiary border border-border uppercase w-8 text-center transition-colors"
+                      >
+                        {filter.logic || "AND"}
+                      </button>
+                    )}
+                  </div>
 
-        {/* Add button for empty state in visual mode */}
-        {mode === "visual" && visualFilters.length === 0 && (
-          <button
-            onClick={handleAddFilter}
-            className="h-6 w-6 flex items-center justify-center text-primary hover:text-primary/80 hover:bg-background-elevated rounded transition-colors ml-auto"
-            title="Add filter"
-          >
-            <Plus size={14} />
-          </button>
+                  {/* Filter Inputs Group */}
+                  <div className="flex-1 flex items-center gap-2 bg-background-tertiary/30 p-1 rounded-md border border-transparent hover:border-border/50 transition-colors">
+                    <div className="min-w-[120px]">
+                      <Select
+                        value={filter.column}
+                        onValueChange={(val) => handleColumnChange(index, val)}
+                      >
+                        <SelectTrigger className="h-7 text-xs bg-background-tertiary border-border px-2">
+                          <SelectValue placeholder="Column" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {columns.map((col) => {
+                            const colId = col.id || col.title;
+                            return (
+                              <SelectItem key={colId} value={colId}>
+                                {col.title}
+                              </SelectItem>
+                            );
+                          })}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="w-[100px]">
+                      <Select
+                        value={filter.operator}
+                        onValueChange={(val) =>
+                          handleOperatorChange(index, val as FilterOperator)
+                        }
+                      >
+                        <SelectTrigger className="h-7 text-xs bg-background-tertiary border-border px-2">
+                          <SelectValue placeholder="Op" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {Object.entries(operatorLabels).map(([op, label]) => (
+                            <SelectItem key={op} value={op}>
+                              {label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <Input
+                      type="text"
+                      placeholder="Value"
+                      value={filter.value}
+                      onChange={(e) => handleValueChange(index, e.target.value)}
+                      className="h-7 flex-1 text-xs bg-background-tertiary border-border text-foreground placeholder:text-muted-foreground/40 min-w-[100px]"
+                    />
+
+                    {/* Right Action: Delete (if >0) OR Add+Search (if 0) */}
+                    {isFirst ? (
+                      <div className="flex items-center gap-1 ml-1">
+                        <Button
+                          variant="secondary"
+                          size="icon"
+                          onClick={handleAddFilter}
+                          className="h-7 w-7"
+                          title="Add Filter"
+                        >
+                          <Plus size={14} />
+                        </Button>
+                        <Button
+                          variant="default"
+                          size="icon"
+                          onClick={onSearch}
+                          className="h-7 w-7 bg-primary text-primary-foreground hover:bg-primary/90"
+                          title="Search"
+                        >
+                          <Search size={14} />
+                        </Button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => handleRemoveFilter(index)}
+                        className="h-7 w-7 flex items-center justify-center text-muted-foreground hover:text-red-400 hover:bg-background-elevated rounded transition-colors ml-1"
+                        title="Remove filter"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
     </div>

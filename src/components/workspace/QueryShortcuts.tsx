@@ -8,29 +8,29 @@ interface ShortcutCardProps {
 
 function ShortcutCard({ icon: Icon, title, shortcuts }: ShortcutCardProps) {
   return (
-    <div className="flex flex-col p-5 rounded-2xl bg-white/5 border border-white/10 shadow-sm hover:shadow-md hover:bg-white/10 transition-all duration-300 group">
+    <div className="flex flex-col p-4 sm:p-5 rounded-2xl bg-white/3 border border-white/5 shadow-inner hover:bg-white/5 hover:border-white/10 transition-all duration-300 group">
       <div className="flex items-center gap-3 mb-4">
-        <div className="p-2 rounded-lg bg-primary/10 text-primary group-hover:scale-110 transition-transform">
-          <Icon size={18} strokeWidth={2.5} />
+        <div className="p-2 rounded-xl bg-primary/10 text-primary group-hover:scale-110 transition-transform duration-500 shadow-sm border border-primary/5">
+          <Icon size={16} strokeWidth={2.5} />
         </div>
-        <h3 className="font-semibold text-sm tracking-wide text-foreground/90">
+        <h3 className="font-bold text-xs tracking-wider uppercase text-foreground/70 group-hover:text-foreground transition-colors">
           {title}
         </h3>
       </div>
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-2.5">
         {shortcuts.map((s) => (
           <div
             key={s.lab}
-            className="flex items-center justify-between text-xs"
+            className="flex items-center justify-between text-[11px]"
           >
-            <span className="text-muted-foreground group-hover:text-muted-foreground/80 transition-colors">
+            <span className="text-muted-foreground/60 group-hover:text-muted-foreground transition-colors">
               {s.lab}
             </span>
-            <div className="flex gap-1.5">
+            <div className="flex gap-1">
               {s.keys.map((k) => (
                 <kbd
                   key={k}
-                  className="h-5 px-1.5 flex items-center justify-center bg-muted/50 border border-border rounded-[4px] font-mono text-[10px] text-muted-foreground min-w-[20px]"
+                  className="h-5 px-1.5 flex items-center justify-center bg-muted/30 border border-white/5 rounded-md font-mono text-[9px] text-muted-foreground/50 min-w-[18px] shadow-sm select-none"
                 >
                   {k}
                 </kbd>
@@ -75,33 +75,13 @@ export function QueryShortcuts() {
   ];
 
   return (
-    <div className="h-full w-full bg-[#09090b] flex flex-col items-center justify-center p-8 animate-in fade-in duration-500">
-      <div className="mb-12 flex flex-col items-center gap-3">
-        <div className="h-12 w-12 bg-primary rounded-2xl flex items-center justify-center shadow-lg shadow-primary/20 mb-2">
-          <Terminal
-            className="text-primary-foreground"
-            size={24}
-            strokeWidth={2.5}
-          />
+    <div className="h-full w-full bg-[#09090b] overflow-y-auto custom-scrollbar">
+      <div className="min-h-full flex flex-col items-center justify-center p-6 sm:p-10 py-16 animate-in fade-in zoom-in-95 duration-700 text-center">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 w-full max-w-5xl px-4 text-left">
+          {categories.map((cat) => (
+            <ShortcutCard key={cat.title} {...cat} />
+          ))}
         </div>
-        <h1 className="text-2xl font-bold tracking-tight text-foreground">
-          Oxide Studio
-        </h1>
-        <p className="text-muted-foreground text-sm">
-          Keyboard shortcuts to supercharge your workflow
-        </p>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 w-full max-w-4xl">
-        {categories.map((cat) => (
-          <ShortcutCard key={cat.title} {...cat} />
-        ))}
-      </div>
-
-      <div className="mt-12 text-center">
-        <p className="text-xs text-muted-foreground/40 font-mono">
-          v0.1.0 • Built with Rust & Tauri
-        </p>
       </div>
     </div>
   );

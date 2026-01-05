@@ -1,19 +1,79 @@
+import { useEffect, useState } from "react";
 import { useTabStore } from "@/store/useTabStore";
+import { useConnectionStore } from "@/store/useConnectionStore";
+import { schemaService } from "@/services/tauri";
 import { DataGrid } from "./DataGrid";
 import { GridFilterRow } from "./GridFilterRow";
 
 export function TableDataView() {
-  const { tabs, activeTabId, setFilterMode, setVisualFilters, setSqlFilter } =
-    useTabStore();
+  const {
+    tabs,
+    activeTabId,
+    setFilterMode,
+    setVisualFilters,
+    setSqlFilter,
+    updateTabSql,
+    runTabQuery,
+  } = useTabStore();
+  const { activeConnectionId } = useConnectionStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
+  const [fallbackColumns, setFallbackColumns] = useState<
+    Array<{ name: string; type?: string }>
+  >([]);
+
+  // Auto-fetch data on mount if no results
+  useEffect(() => {
+    if (
+      activeTab &&
+      activeTab.type === "table" &&
+      !activeTab.results &&
+      !activeTab.isExecuting &&
+      !activeTab.error &&
+      activeConnectionId &&
+      activeTab.tableName &&
+      activeTab.schemaName
+    ) {
+      const sql = `SELECT * FROM "${activeTab.schemaName}"."${activeTab.tableName}" LIMIT 500`;
+      updateTabSql(activeTab.id, sql);
+      runTabQuery(activeTab.id, activeConnectionId, sql);
+    }
+  }, [activeTab, activeConnectionId, runTabQuery, updateTabSql]);
+
+  // Fetch columns metadata if results are missing (for empty state headers)
+  useEffect(() => {
+    if (
+      activeTab?.type === "table" &&
+      !activeTab.results &&
+      activeConnectionId &&
+      activeTab.schemaName &&
+      activeTab.tableName
+    ) {
+      schemaService
+        .getColumns(
+          activeConnectionId,
+          activeTab.schemaName,
+          activeTab.tableName
+        )
+        .then((cols) => {
+          if (cols) {
+            setFallbackColumns(
+              cols.map((c) => ({ name: c.name, type: c.data_type }))
+            );
+          }
+        })
+        .catch((err) =>
+          console.error("Failed to fetch fallback columns:", err)
+        );
+    }
+  }, [activeTab, activeConnectionId]);
 
   if (!activeTab || activeTab.type !== "table") return null;
 
   const result = activeTab?.results?.[0];
 
-  // Get columns from result
+  // Get columns from result or fallback
   const columns =
-    result?.columns.map((col) => ({
+    (result?.columns || fallbackColumns).map((col) => ({
       title: col.name,
       id: col.name,
       width: 150,
@@ -24,10 +84,64 @@ export function TableDataView() {
   const visualFilters = activeTab.visualFilters || [];
   const sqlFilter = activeTab.sqlFilter || "";
 
+  const handleSearch = () => {
+    if (!activeTab || !activeTab.tableName || !activeTab.schemaName) return;
+    const quote = '"'; // Simple quoting for now, todo: use proper driver quoting
+
+    let whereClause = "";
+    if (filterMode === "sql") {
+      whereClause = sqlFilter;
+    } else {
+      if (visualFilters.length > 0) {
+        whereClause = visualFilters
+          .map((f, i) => {
+            const prefix = i > 0 ? (f.logic || "AND") + " " : "";
+            let val = f.value;
+            // Attempt to handle numbers vs strings roughly
+            // TODO: Robust typing based on column type
+            const isNum = !isNaN(Number(val)) && val.trim() !== "";
+            if (!isNum) {
+              // Escape single quotes
+              val = `'${val.replace(/'/g, "''")}'`;
+            }
+
+            let op = "";
+            switch (f.operator) {
+              case "contains":
+                op = "LIKE";
+                val = `'%${f.value.replace(/'/g, "''")}%'`;
+                break;
+              case "startsWith":
+                op = "LIKE";
+                val = `'${f.value.replace(/'/g, "''")}%'`;
+                break;
+              case "endsWith":
+                op = "LIKE";
+                val = `'%${f.value.replace(/'/g, "''")}'`;
+                break;
+              default:
+                op = f.operator === "equals" ? "=" : f.operator;
+            }
+
+            return `${prefix}${quote}${f.column}${quote} ${op} ${val}`;
+          })
+          .join(" ");
+      }
+    }
+
+    if (whereClause && !whereClause.trim().toUpperCase().startsWith("WHERE")) {
+      whereClause = "WHERE " + whereClause;
+    }
+
+    const sql = `SELECT * FROM ${quote}${activeTab.schemaName}${quote}.${quote}${activeTab.tableName}${quote} \n${whereClause} \nLIMIT 500`;
+    updateTabSql(activeTab.id, sql);
+    runTabQuery(activeTab.id, activeConnectionId || "", sql);
+  };
+
   return (
-    <div className="flex flex-col h-full bg-background-tertiary">
+    <div className="flex flex-col h-full bg-background">
       {/* Query Builder Filter Row */}
-      {result && (
+      {(result || fallbackColumns.length > 0) && (
         <GridFilterRow
           columns={columns}
           mode={filterMode}
@@ -38,12 +152,16 @@ export function TableDataView() {
             setVisualFilters(activeTab.id, filters)
           }
           onSqlFilterChange={(sql) => setSqlFilter(activeTab.id, sql)}
+          onSearch={handleSearch}
         />
       )}
 
       {/* Main Grid View */}
       <div className="flex-1 min-h-0 bg-background-tertiary">
-        <DataGrid columnFilters={visualFilters} />
+        <DataGrid
+          columnFilters={visualFilters}
+          overrideColumns={fallbackColumns}
+        />
       </div>
     </div>
   );

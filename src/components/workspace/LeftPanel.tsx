@@ -2,11 +2,12 @@ import React from "react";
 import { Button } from "@/components/ui/button";
 import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { cn } from "@/lib/utils";
-import { Database, Clock, Settings, Code, Hexagon } from "lucide-react";
+import { Database, Clock, Code } from "lucide-react";
 import { SchemaSidebar } from "./SchemaSidebar";
 import { HistorySidebar } from "./HistorySidebar";
 import { SavedQueriesSidebar } from "./SavedQueriesSidebar";
 import { SidebarStatusBar } from "./SidebarStatusBar";
+import { StatusBarLeftPortal } from "./StatusBarPortal";
 
 export type SidebarTab = "tables" | "history" | "saved" | "settings";
 
@@ -43,19 +44,12 @@ export function LeftPanel({
       <div className="flex flex-1 min-h-0">
         {/* ActivityBar */}
         <div className="w-[50px] flex flex-col items-center py-4 gap-4 shrink-0 z-20 bg-transparent">
-          {/* App Logo */}
-          <div className="mb-2 shrink-0">
-            <div className="h-8 w-8 bg-primary/10 rounded-xl flex items-center justify-center text-primary shadow-sm ring-1 ring-primary/20">
-              <Database size={18} strokeWidth={2.5} />
-            </div>
-          </div>
-
           {/* Navigation Items */}
           <div className="flex flex-col gap-3 w-full px-2">
             <ActivityBarButton
               active={activeTab === "tables" && isDrawerOpen}
               onClick={() => onTabClick("tables")}
-              icon={Hexagon}
+              icon={Database}
               title="Entities (Tables)"
             />
             <ActivityBarButton
@@ -69,16 +63,6 @@ export function LeftPanel({
               onClick={() => onTabClick("saved")}
               icon={Code}
               title="Saved Queries"
-            />
-          </div>
-
-          {/* Bottom Items */}
-          <div className="mt-auto flex flex-col gap-3 w-full px-2">
-            <ActivityBarButton
-              active={showSettings}
-              onClick={() => setShowSettings(true)}
-              icon={Settings}
-              title="Settings"
             />
           </div>
         </div>
@@ -112,13 +96,10 @@ export function LeftPanel({
         )}
       </div>
 
-      {/* Bottom: Unified Status Bar spanning entire width */}
-      <div
-        style={{ width: `${totalWidth}px` }}
-        className="border-t border-border/40 bg-background/50 backdrop-blur-sm"
-      >
-        <SidebarStatusBar isDrawerOpen={isDrawerOpen} />
-      </div>
+      {/* Status Bar via Portal to unified bottom bar */}
+      <StatusBarLeftPortal>
+        <SidebarStatusBar isDrawerOpen={isDrawerOpen} width={totalWidth} />
+      </StatusBarLeftPortal>
     </div>
   );
 }

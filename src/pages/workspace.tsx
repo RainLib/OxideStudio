@@ -1,30 +1,28 @@
-import { useState, useEffect } from "react";
-import { cn } from "@/lib/utils";
-import { useTheme } from "@/theme/useTheme";
-import { TabBar } from "@/components/workspace/TabBar";
-import { QueryEditor } from "@/components/workspace/QueryEditor";
-import { DataGrid } from "@/components/workspace/DataGrid";
-import { EditorStatusBar } from "@/components/workspace/EditorStatusBar";
-import { LeftPanel, SidebarTab } from "@/components/workspace/LeftPanel";
-import { TableDataView } from "@/components/workspace/TableDataView";
-import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
 import { AppBar } from "@/components/AppBar";
-import { useTabStore } from "@/store/useTabStore";
-import {
-  ResizableHandle,
-  ResizablePanelGroup,
-  ResizablePanel,
-} from "@/components/ui/resizable";
 import { Button } from "@/components/ui/button";
+import { DataGrid } from "@/components/workspace/DataGrid";
+import { LeftPanel, SidebarTab } from "@/components/workspace/LeftPanel";
+import { QueryEditor } from "@/components/workspace/QueryEditor";
+import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
+import { TabBar } from "@/components/workspace/TabBar";
+import { TableDataView } from "@/components/workspace/TableDataView";
+import { CreateTableTab } from "@/components/workspace/CreateTableTab";
+import { cn } from "@/lib/utils";
+import { useTabStore } from "@/store/useTabStore";
+import { useTheme } from "@/theme/useTheme";
+import { useShortcuts } from "@/hooks/useShortcuts";
+import { CommandPalette } from "@/components/workspace/CommandPalette";
 import {
   PanelLeft,
-  PanelRight,
   PanelLeftClose,
+  PanelRight,
   PanelRightClose,
   Settings2,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 
 export function WorkspacePage() {
+  useShortcuts();
   const { mode } = useTheme();
   // const { activeConnectionId } = useConnectionStore(); // Removed unused
   const { tabs, activeTabId, createTab } = useTabStore();
@@ -39,6 +37,7 @@ export function WorkspacePage() {
     useState<SidebarTab>("tables");
   const [isLeftDrawerOpen, setIsLeftDrawerOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(280); // Fixed pixel width
+  const [editorHeight, setEditorHeight] = useState(400); // Default pixel height for editor
 
   const [isRightCollapsed, setIsRightCollapsed] = useState(true);
 
@@ -85,6 +84,32 @@ export function WorkspacePage() {
 
     document.addEventListener("mousemove", handleDrag);
     document.addEventListener("mouseup", handleDragEnd);
+  };
+
+  const handleVerticalDragStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = editorHeight;
+
+    const handleDrag = (moveEvent: MouseEvent) => {
+      const deltaY = moveEvent.clientY - startY;
+      // Constraint: min 100px, max window height - 200px
+      const newHeight = Math.max(
+        100,
+        Math.min(startHeight + deltaY, window.innerHeight - 200)
+      );
+      setEditorHeight(newHeight);
+    };
+
+    const handleDragEnd = () => {
+      document.removeEventListener("mousemove", handleDrag);
+      document.removeEventListener("mouseup", handleDragEnd);
+      document.body.style.cursor = "default";
+    };
+
+    document.addEventListener("mousemove", handleDrag);
+    document.addEventListener("mouseup", handleDragEnd);
+    document.body.style.cursor = "row-resize";
   };
 
   return (
@@ -149,14 +174,32 @@ export function WorkspacePage() {
 
                   {activeTab?.type === "table" ? (
                     <TableDataView />
+                  ) : activeTab?.type === "create_table" ? (
+                    <CreateTableTab
+                      tabId={activeTab.id}
+                      connectionId={activeTab.connectionId || ""}
+                      schemaName={activeTab.schemaName || ""}
+                    />
                   ) : (
                     <div className="flex flex-col h-full min-h-0 relative">
                       {/* Top: Editor */}
-                      <div className="h-1/2 min-h-0 border-b border-border/40 flex flex-col">
+                      <div
+                        style={{ height: `${editorHeight}px` }}
+                        className="min-h-[100px] border-b border-border/40 flex flex-col shrink-0 overflow-hidden"
+                      >
                         <QueryEditor />
                       </div>
+
+                      {/* Resizer Handle */}
+                      <div
+                        className="h-1.5 w-full hover:bg-primary/30 cursor-row-resize z-50 transition-colors relative group shrink-0"
+                        onMouseDown={handleVerticalDragStart}
+                      >
+                        <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-px bg-border/50 group-hover:bg-primary/40 transition-colors" />
+                      </div>
+
                       {/* Bottom: Results or Shortcuts */}
-                      <div className="h-1/2 min-h-0 flex flex-col bg-muted/5 z-0">
+                      <div className="flex-1 min-h-0 flex flex-col bg-muted/5 z-0">
                         {currentResult ? <DataGrid /> : <QueryShortcuts />}
                       </div>
                     </div>
@@ -189,28 +232,32 @@ export function WorkspacePage() {
               </div>
             </div>
           </div>
-
-          {/* Bottom: Unified EditorStatusBar */}
-          <div
-            className={cn(
-              "h-8 w-full flex items-center border-t z-30 transition-colors duration-300",
-              mode === "dark"
-                ? "bg-orange-500/10 text-orange-500 border-orange-500/20"
-                : "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
-            )}
-          >
-            <EditorStatusBar
-              type={activeTab?.type === "table" ? "table" : "editor"}
-              rowCount={currentResult?.rows?.length}
-              executionTime={activeTab?.type === "table" ? undefined : 124}
-              onRefresh={() => console.log("Refresh table")}
-              onAdd={() => console.log("Add row")}
-              onSettings={() => console.log("Table settings")}
-              onStructure={() => console.log("View structure")}
-            />
-          </div>
         </div>
       </div>
+
+      {/* Bottom: Unified Status Bar spanning full width - content rendered via Portal from components */}
+      <div
+        className={cn(
+          "h-12 w-full flex items-center border-t z-30 transition-colors duration-300 shrink-0",
+          mode === "dark"
+            ? "bg-orange-500/10 text-orange-500 border-orange-500/20"
+            : "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
+        )}
+      >
+        {/* Left slot - for sidebar status (connection info, etc.) - lighter bg */}
+        <div
+          id="status-bar-left"
+          className={cn(
+            "h-full flex items-center shrink-0",
+            mode === "dark" ? "bg-orange-500/5" : "bg-emerald-500/5"
+          )}
+        />
+
+        {/* Right slot - for tab status bar content */}
+        <div id="status-bar-slot" className="flex-1 h-full flex items-center" />
+      </div>
+
+      <CommandPalette />
     </div>
   );
 }

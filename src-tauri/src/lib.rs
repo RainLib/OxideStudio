@@ -24,9 +24,15 @@ pub fn run() {
             let config_manager = ConfigManager::new(app.handle());
             app.manage(config_manager);
 
-            // Initialize cache manager
+            // Initialize cache manager (legacy JSON cache)
             let cache_manager = CacheManager::new(app.handle());
             app.manage(cache_manager);
+
+            // Initialize MetaStore (SQLite based)
+            use tauri::async_runtime::block_on;
+            let meta_store = block_on(core::store::MetaStore::new(app.handle()))
+                .expect("failed to initialize metadata store");
+            app.manage(meta_store);
 
             // Initialize SQL Parser state
             app.manage(ParserState(Mutex::new(SqlParser::new())));
@@ -65,6 +71,13 @@ pub fn run() {
             commands::cache::refresh_schemas,
             commands::cache::get_cached_tables,
             commands::cache::refresh_tables,
+            // Store commands (SQLite MetaStore)
+            commands::store::save_connection,
+            commands::store::get_connections,
+            commands::store::delete_connection,
+            commands::store::save_resources,
+            commands::store::get_resources,
+            commands::store::search_resources,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

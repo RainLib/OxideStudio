@@ -1,10 +1,16 @@
 import { create } from "zustand";
-import { schemaService, TableInfo } from "@/services/tauri";
+import {
+  schemaService,
+  storeService,
+  TableInfo,
+  Resource,
+} from "@/services/tauri";
 import { useConnectionStore } from "./useConnectionStore";
 
 interface SchemaState {
   schemas: string[];
   tables: TableInfo[];
+  pinnedTables: string[];
   currentSchema: string | null;
   defaultSchema: string | null; // User's preferred default
   selectedTable: string | null;
@@ -13,21 +19,38 @@ interface SchemaState {
 
   loadSchemas: (connectionId: string, force?: boolean) => Promise<void>;
   loadTables: (connectionId: string, schema: string) => Promise<void>;
+  togglePinTable: (tableName: string) => void;
   setCurrentSchema: (schema: string) => void;
   setDefaultSchema: (schema: string) => void; // Persist user's choice
   selectTable: (table: string | null) => void;
+  reset: () => void;
 }
 
 const STORAGE_KEY = "oxide-studio-default-schema";
+const getPinnedTablesKey = (connId: string, schema: string) =>
+  `oxide-studio-pinned-tables:${connId}:${schema}`;
 
 export const useSchemaStore = create<SchemaState>((set, get) => ({
   schemas: [],
   tables: [],
+  pinnedTables: [],
   currentSchema: null,
   defaultSchema: localStorage.getItem(STORAGE_KEY),
   selectedTable: null,
   lastLoadedConnectionId: null,
   isLoading: false,
+
+  reset: () => {
+    set({
+      schemas: [],
+      tables: [],
+      pinnedTables: [],
+      currentSchema: null,
+      selectedTable: null,
+      lastLoadedConnectionId: null,
+      isLoading: false,
+    });
+  },
 
   loadSchemas: async (connectionId: string, force = false) => {
     const { lastLoadedConnectionId, isLoading } = get();
@@ -38,14 +61,23 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       return;
     }
 
-    console.log("Store: loadSchemas called with SWR for:", connectionId);
-    set({ isLoading: true, lastLoadedConnectionId: connectionId });
+    console.log(
+      "Store: loadSchemas called (MetaStore aware) for:",
+      connectionId
+    );
+    set({ lastLoadedConnectionId: connectionId }); // Mark as loading for this ID to prevent re-entry
 
-    // 1. Try Cache First
+    // 1. Try MetaStore Cache First (SQLite)
     try {
-      const cachedSchemas = await schemaService.getCachedSchemas(connectionId);
+      // Fetch DB resources (parent_id = null)
+      const cachedResources = await storeService.getResources(connectionId);
+      const cachedSchemas = cachedResources.map((r) => r.name);
+
       if (cachedSchemas && cachedSchemas.length > 0) {
-        console.log("Store: Loaded schemas from cache", cachedSchemas.length);
+        console.log(
+          "Store: Loaded schemas from MetaStore",
+          cachedSchemas.length
+        );
         const { defaultSchema: savedDefault } = get();
 
         const connections = useConnectionStore.getState().connections;
@@ -66,19 +98,25 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
           currentSchema: schemaToSelect,
           isLoading: false, // Show cached data immediately
         });
-        // Continue to refresh in background...
+
+        // If we found data, we rely on user to trigger explicit refresh if needed
+        // OR we could background refresh. User requirement: "Update only when triggered".
+        // So we STOP here if cache hit.
+        if (!force) return;
       }
     } catch (e) {
-      console.warn("Store: Schema cache miss or error", e);
+      console.warn("Store: MetaStore cache miss or error", e);
     }
 
-    // 2. Refresh from DB (Background Sync)
-    console.log("Store: Refreshing schemas from DB...");
+    // 2. Refresh from Driver & Update MetaStore (Only if cache miss or forced)
+    set({ isLoading: true });
+    console.log("Store: Refreshing schemas from Driver...");
     try {
       const schemas = await schemaService.refreshSchemas(connectionId);
       console.log("Store: loadSchemas Refresh result:", schemas);
 
       if (schemas) {
+        // Optimistically update UI first
         const { defaultSchema: savedDefault } = get();
         const connections = useConnectionStore.getState().connections;
         const activeConn = connections.find((c) => c.id === connectionId);
@@ -99,6 +137,20 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
           currentSchema: get().currentSchema || schemaToSelect,
           isLoading: false,
         });
+
+        // Save to MetaStore in background
+        const newResources: Resource[] = schemas.map((name) => ({
+          id: `${connectionId}:${name}`, // Simple ID generation
+          connection_id: connectionId,
+          kind: "DATABASE",
+          name: name,
+          metadata: {},
+          last_updated: Date.now(),
+        }));
+
+        storeService.saveResources(newResources).catch((err) => {
+          console.warn("Store: Failed to cache schemas to MetaStore", err);
+        });
       }
     } catch (e) {
       console.warn("Store: loadSchemas refresh failed", e);
@@ -110,28 +162,62 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
   },
 
   loadTables: async (connectionId: string, schema: string) => {
-    console.log("Store: loadTables called SWR", { connectionId, schema });
-    set({ isLoading: true });
+    console.log("Store: loadTables called (MetaStore aware)", {
+      connectionId,
+      schema,
+    });
 
-    // 1. Try Cache First
+    // Load pinned tables for this context
+    const pinKey = getPinnedTablesKey(connectionId, schema);
+    const savedPins = JSON.parse(localStorage.getItem(pinKey) || "[]");
+    set({ pinnedTables: savedPins });
+
+    // Parent ID for tables is the schema resource ID: connectionId:schema
+    const schemaResourceId = `${connectionId}:${schema}`;
+
+    // 1. Try MetaStore Cache First
     try {
-      const cachedTables = await schemaService.getCachedTables(
+      const cachedResources = await storeService.getResources(
         connectionId,
-        schema
+        schemaResourceId
       );
-      if (cachedTables && cachedTables.length > 0) {
-        console.log("Store: Loaded tables from cache", cachedTables.length);
+
+      if (cachedResources && cachedResources.length > 0) {
+        const cachedTables: TableInfo[] = cachedResources.map((r) => ({
+          name: r.name,
+          schema: schema,
+          type: r.metadata?.type,
+          comment: r.metadata?.comment,
+        }));
+
+        console.log("Store: Loaded tables from MetaStore", cachedTables.length);
         set({ tables: cachedTables, isLoading: false });
+        return;
       }
     } catch (e) {
-      console.warn("Store: Table cache miss or error", e);
+      console.warn("Store: Table MetaStore miss or error", e);
     }
 
-    // 2. Refresh from DB
+    // 2. Refresh from Driver & Update MetaStore
+    set({ isLoading: true });
     try {
       const tables = await schemaService.refreshTables(connectionId, schema);
-      console.log("Store: loadTables refresh result", tables);
       set({ tables: tables, isLoading: false });
+
+      // Save to MetaStore in background
+      const newResources: Resource[] = tables.map((t) => ({
+        id: `${schemaResourceId}:${t.name}`,
+        connection_id: connectionId,
+        parent_id: schemaResourceId,
+        kind: "TABLE",
+        name: t.name,
+        metadata: { type: t.type, comment: t.comment },
+        last_updated: Date.now(),
+      }));
+
+      storeService.saveResources(newResources).catch((err) => {
+        console.warn("Store: Failed to cache tables to MetaStore", err);
+      });
     } catch (e) {
       console.warn("Store: loadTables refresh failed", e);
       if (get().tables.length === 0) {
@@ -140,9 +226,25 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     }
   },
 
+  togglePinTable: (tableName: string) => {
+    const { activeConnectionId } = useConnectionStore.getState();
+    const { currentSchema, pinnedTables } = get();
+    if (!activeConnectionId || !currentSchema) return;
+
+    const pinKey = getPinnedTablesKey(activeConnectionId, currentSchema);
+    const isPinned = pinnedTables.includes(tableName);
+    const newPinned = isPinned
+      ? pinnedTables.filter((t) => t !== tableName)
+      : [...pinnedTables, tableName];
+
+    localStorage.setItem(pinKey, JSON.stringify(newPinned));
+    set({ pinnedTables: newPinned });
+  },
+
   setCurrentSchema: async (schema: string) => {
     const { activeConnectionId } = useConnectionStore.getState();
-    set({ currentSchema: schema, selectedTable: null });
+    // Clear tables immediately to prevent showing stale data from previous schema
+    set({ currentSchema: schema, selectedTable: null, tables: [] });
 
     if (activeConnectionId && schema) {
       await schemaService.setCurrentSchema(activeConnectionId, schema);

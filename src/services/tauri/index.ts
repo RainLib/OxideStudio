@@ -20,6 +20,7 @@
 export * from "./connection.service";
 export * from "./query.service";
 export * from "./schema.service";
+export * from "./store.service";
 
 // 类型导出
 export * from "./types";

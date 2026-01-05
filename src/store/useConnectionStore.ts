@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
 import { connectionService, SavedConnection } from "@/services/tauri";
+import { useSchemaStore } from "./useSchemaStore";
 
 export interface ConnectionConfig extends SavedConnection {
   host?: string;
@@ -10,6 +11,7 @@ export interface ConnectionConfig extends SavedConnection {
   database?: string;
   connectionUrl?: string;
   sslMode?: string;
+  tags?: string[];
 }
 
 interface ConnectionState {
@@ -60,7 +62,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   createNewConnection: () => {
-    const newConn = {
+    const newConn: ConnectionConfig = {
       id: uuidv4(),
       name: "New Connection",
       driver: "postgres",
@@ -70,12 +72,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       user: "",
       password: "",
       database: "postgres",
-    } as const; // literal types help inference if needed, but not strictly necessary here
+      tags: [],
+    };
 
     set({
-      selectedConnection: { ...newConn, driver: "postgres" }, // Ensure type compatibility
+      selectedConnection: { ...newConn },
     });
-    return { ...newConn, driver: "postgres" as const };
+    return newConn;
   },
 
   updateConnectionConfig: (updates) => {
@@ -111,6 +114,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   connect: async (config) => {
+    // Reset schema state before connecting to ensure clean slate
+    useSchemaStore.getState().reset();
+
     // Use connectionUrl if provided, otherwise build from individual fields
     let url: string;
 
@@ -170,6 +176,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   disconnect: () => {
+    useSchemaStore.getState().reset();
     set({ activeConnectionId: null, isConnected: false });
   },
 }));
