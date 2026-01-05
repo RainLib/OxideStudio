@@ -1,5 +1,7 @@
 # OxideStudio 🚀
 
+![Release Build](https://github.com/LikeRainDay/OxideStudio/actions/workflows/release.yml/badge.svg)
+
 **OxideStudio** 是一个基于 Rust 和 Tauri 重构的高性能、低内存占用的开源数据库客户端。
 
 受到 **Beekeeper Studio** 的启发，我们旨在利用 Rust 的性能优势和 Web 技术的灵活性，打造一个极速、漂亮且功能强大的开发者工具。
@@ -20,12 +22,14 @@
 ## 🛠️ 技术栈
 
 ### 后端 (Rust Process)
+
 - **Tauri v2**: 跨平台应用框架。
 - **SQLx**: 异步数据库访问层，支持 PostgreSQL, MySQL, SQLite, SQL Server。
 - **Tokio**: 高性能异步运行时。
 - **Anyhow/Thiserror**: 严谨的错误处理。
 
 ### 前端 (Webview Process)
+
 - **React 19**: 最新的 UI 开发框架。
 - **Glide Data Grid**: 帆布级的超高性能数据表格。
 - **Monaco Editor**: 业界标杆的代码编辑器。
@@ -38,12 +42,15 @@
 ## 🚀 快速开始
 
 ### 开发环境准备
+
 确保你的电脑上已安装：
+
 1. [Rust](https://www.rust-lang.org/) (cargo, rustc)
 2. [Node.js](https://nodejs.org/) (建议 v20+)
 3. 系统依赖 (macOS: Xcode Command Line Tools)
 
 ### 运行开发模式
+
 ```bash
 # 安装依赖
 npm install
@@ -53,9 +60,52 @@ npm run tauri dev
 ```
 
 ### 调试配置
+
 本项目已预配置好 VS Code 调试环境：
+
 - `F5`: 启动调试 (Launch Tauri Dev)。
 - `Ctrl+Shift+B`: 运行默认构建任务。
+
+### 构建生产版本
+
+```bash
+# 本地构建
+npm run tauri build
+```
+
+---
+
+## 📦 自动化构建与发布
+
+本项目配置了 GitHub Actions 自动化工作流，支持在 **Windows**、**macOS** 和 **Linux** 三个平台上自动构建。
+
+### 触发条件
+
+工作流会在以下情况下自动运行：
+
+- 推送代码到 `main` 或 `develop` 分支
+- 创建新的版本标签（如 `v0.1.0`）
+- 手动触发（在 GitHub Actions 页面）
+
+### 下载构建产物
+
+1. 访问仓库的 **Actions** 页面
+2. 选择最新的 **Release Build** 工作流
+3. 在 **Artifacts** 部分下载对应平台的安装包：
+   - **Windows**: `.msi` 或 `.exe` 安装程序
+   - **macOS**: `.dmg` 磁盘镜像
+   - **Linux**: `.deb` 或 `.AppImage`
+
+### 发布新版本
+
+创建并推送版本标签来触发发布流程：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+工作流会自动创建 GitHub Release 草稿，并附带所有平台的构建产物。
 
 ---
 
