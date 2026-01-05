@@ -322,7 +322,6 @@ export function QueryEditor() {
             quickSuggestions: { other: true, comments: true, strings: true },
             suggestOnTriggerCharacters: true,
             acceptSuggestionOnCommitCharacter: false,
-            "suggest.filterGraceful": false,
           }}
         />
       </div>

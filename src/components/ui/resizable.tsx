@@ -1,20 +1,20 @@
 import { GripVertical } from "lucide-react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Group, Panel, Separator } from "react-resizable-panels";
 
 import { cn } from "@/lib/utils";
 
 const ResizablePanelGroup = ({
   className,
-  direction,
+  orientation,
   ...props
-}: React.ComponentProps<typeof PanelGroup> & {
+}: React.ComponentProps<typeof Group> & {
   direction?: "horizontal" | "vertical";
 }) => {
   return (
-    <PanelGroup
-      direction={direction}
+    <Group
+      orientation={orientation}
       className={cn(
-        "flex h-full w-full data-[panel-group-direction=vertical]:flex-col",
+        "flex h-full w-full data-[orientation=vertical]:flex-col",
         className
       )}
       {...props}
@@ -28,18 +28,18 @@ const ResizableHandle = ({
   withHandle,
   className,
   ...props
-}: React.ComponentProps<typeof PanelResizeHandle> & {
+}: React.ComponentProps<typeof Separator> & {
   withHandle?: boolean;
 }) => (
-  <PanelResizeHandle
+  <Separator
     className={cn(
       "relative flex w-px items-center justify-center bg-border focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-offset-1",
-      // Vertical rules (when parent is data-panel-group-direction="vertical")
-      "[&[data-panel-group-direction=vertical]]:h-px [&[data-panel-group-direction=vertical]]:w-full",
-      "[&[data-panel-group-direction=vertical]>div]:rotate-90",
+      // Vertical rules (when parent is data-orientation="vertical")
+      "[&[data-orientation=vertical]]:h-px [&[data-orientation=vertical]]:w-full",
+      "[&[data-orientation=vertical]>div]:rotate-90",
       // Handle Bar (Pseudo-element)
       "after:absolute after:inset-y-0 after:left-1/2 after:w-1 after:-translate-x-1/2",
-      "[&[data-panel-group-direction=vertical]]:after:left-0 [&[data-panel-group-direction=vertical]]:after:h-1 [&[data-panel-group-direction=vertical]]:after:w-full [&[data-panel-group-direction=vertical]]:after:-translate-y-1/2 [&[data-panel-group-direction=vertical]]:after:translate-x-0",
+      "[&[data-orientation=vertical]]:after:left-0 [&[data-orientation=vertical]]:after:h-1 [&[data-orientation=vertical]]:after:w-full [&[data-orientation=vertical]]:after:-translate-y-1/2 [&[data-orientation=vertical]]:after:translate-x-0",
       className
     )}
     {...props}
@@ -49,7 +49,7 @@ const ResizableHandle = ({
         <GripVertical className="h-2.5 w-2.5" />
       </div>
     )}
-  </PanelResizeHandle>
+  </Separator>
 );
 
 export { ResizablePanelGroup, ResizablePanel, ResizableHandle };

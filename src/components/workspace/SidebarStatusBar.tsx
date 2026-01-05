@@ -11,12 +11,12 @@ import { useState } from "react";
 
 interface SidebarStatusBarProps {
   isDrawerOpen: boolean;
-  width: number;
+  width?: number;
 }
 
 export function SidebarStatusBar({
   isDrawerOpen,
-  width,
+  width = 50,
 }: SidebarStatusBarProps) {
   const { activeConnectionId, connections, disconnect, setActiveConnection } =
     useConnectionStore();

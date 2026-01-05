@@ -60,7 +60,7 @@ export function ActivityBar({
       </div>
 
       {/* Bottom Status Bar - only shows when sidebar is closed */}
-      {!isDrawerOpen && <SidebarStatusBar isDrawerOpen={false} />}
+      {!isDrawerOpen && <SidebarStatusBar isDrawerOpen={false} width={50} />}
     </div>
   );
 }
