@@ -81,9 +81,7 @@ export function QueryEditor() {
           return { suggestions };
         } catch (error) {
           console.error("[LSP] Completion failed:", error);
-
-          // Fallback to tree-sitter if LSP fails
-          return fallbackTreeSitterCompletion(model, position, monaco);
+          return { suggestions: [] };
         }
       },
     });
@@ -93,98 +91,6 @@ export function QueryEditor() {
       disposable.dispose();
     };
   }, [monaco, lspReady, lspClient]);
-
-  // Fallback tree-sitter completion when LSP is unavailable
-  const fallbackTreeSitterCompletion = async (
-    model: any,
-    position: any,
-    monaco: any
-  ) => {
-    console.log("[FALLBACK] Using tree-sitter completion");
-
-    const fullText = model.getValue();
-    const offset = model.getOffsetAt(position);
-
-    const word = model.getWordUntilPosition(position);
-    const range = new monaco.Range(
-      position.lineNumber,
-      word.startColumn,
-      position.lineNumber,
-      word.endColumn
-    );
-
-    // Get state from stores
-    const { activeConnectionId } = useConnectionStore.getState();
-    const { currentSchema, tables } = useSchemaStore.getState();
-
-    try {
-      // Call Rust backend for context analysis
-      const response = await queryService.getSqlCompletion(fullText, offset);
-
-      if (!response) {
-        return { suggestions: [] };
-      }
-
-      const { suggestionType, relevantTable, candidates } = response;
-      const suggestions: any[] = [];
-
-      // Handle different suggestion types based on backend analysis
-      switch (suggestionType.toLowerCase()) {
-        case "table":
-          // Suggest tables from schema store (requires connection)
-          if (activeConnectionId && tables.length > 0) {
-            tables.forEach((table) => {
-              suggestions.push({
-                label: table.name,
-                kind: monaco.languages.CompletionItemKind.Class,
-                detail: `Table in ${currentSchema || "database"}`,
-                insertText: table.name,
-                range,
-              });
-            });
-          }
-          break;
-
-        case "column":
-          // Suggest columns for the relevant table
-          if (relevantTable && tables.length > 0) {
-            const table = tables.find((t) => t.name === relevantTable);
-            if (table?.columns) {
-              table.columns.forEach((col: any) => {
-                suggestions.push({
-                  label: col.name,
-                  kind: monaco.languages.CompletionItemKind.Field,
-                  detail: `${col.type}${col.nullable ? " (nullable)" : ""}`,
-                  documentation: col.comment || undefined,
-                  insertText: col.name,
-                  range,
-                });
-              });
-            }
-          }
-          break;
-
-        case "keyword":
-          // Suggest SQL keywords from backend
-          if (candidates && candidates.length > 0) {
-            candidates.forEach((kw: string) => {
-              suggestions.push({
-                label: kw,
-                kind: monaco.languages.CompletionItemKind.Keyword,
-                insertText: kw,
-                range,
-              });
-            });
-          }
-          break;
-      }
-
-      return { suggestions };
-    } catch (error) {
-      console.error("[FALLBACK] Tree-sitter completion failed:", error);
-      return { suggestions: [] };
-    }
-  };
 
   // Initialize targetSchema from currentSchema if not set
   useEffect(() => {
