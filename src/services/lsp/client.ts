@@ -77,8 +77,9 @@ class LspClient {
     }
 
     try {
+      const normalized = this.normalizeUri(uri);
       const response = await invoke<CompletionResponse>("lsp_get_completions", {
-        request: { uri, line, character },
+        request: { uri: normalized, line, character },
       });
 
       return response.items;
@@ -122,8 +123,14 @@ class LspClient {
   async didOpen(uri: string, text: string, version: number): Promise<void> {
     if (!this.initialized) return;
     try {
-      await invoke("lsp_did_open", { uri, languageId: "sql", version, text });
-      // console.log("[LSP] didOpen:", uri);
+      const normalized = this.normalizeUri(uri);
+      await invoke("lsp_did_open", {
+        uri: normalized,
+        languageId: "sql",
+        version,
+        text,
+      });
+      // console.log("[LSP] didOpen:", normalized);
     } catch (e) {
       console.error("[LSP] didOpen failed:", e);
     }
@@ -135,8 +142,9 @@ class LspClient {
   async didChange(uri: string, text: string, version: number): Promise<void> {
     if (!this.initialized) return;
     try {
-      await invoke("lsp_did_change", { uri, version, text });
-      // console.log("[LSP] didChange:", uri);
+      const normalized = this.normalizeUri(uri);
+      await invoke("lsp_did_change", { uri: normalized, version, text });
+      // console.log("[LSP] didChange:", normalized);
     } catch (e) {
       console.error("[LSP] didChange failed:", e);
     }
@@ -148,10 +156,25 @@ class LspClient {
   async didClose(uri: string): Promise<void> {
     if (!this.initialized) return;
     try {
-      await invoke("lsp_did_close", { uri });
+      const normalized = this.normalizeUri(uri);
+      await invoke("lsp_did_close", { uri: normalized });
     } catch (e) {
       console.error("[LSP] didClose failed:", e);
     }
+  }
+
+  /**
+   * Helper to normalize URI for 'sqls'
+   * Converts inmemory:// schemes to file:// to ensure compatibility
+   */
+  private normalizeUri(uri: string): string {
+    if (uri.startsWith("inmemory://")) {
+      // Convert "inmemory://model/1" to "file:///virtual/1.sql"
+      // Ensure it looks like a valid file path with sql extension
+      const path = uri.replace("inmemory://model/", "");
+      return `file:///virtual/${path}.sql`;
+    }
+    return uri;
   }
 
   /**
