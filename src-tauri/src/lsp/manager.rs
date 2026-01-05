@@ -193,6 +193,83 @@ impl LspServerManager {
         // But for this implementation, we rely on the fact that start() is called once or handles re-init
         // For complete correctness we'd wrap sender in mutex, but keeping it simple for now as per previous design
 
+        // --- LSP Handshake ---
+
+        // 1. Send 'initialize' request
+        let init_params = serde_json::json!({
+            "processId": std::process::id(),
+            "rootUri": Value::Null,
+            "capabilities": {
+                "textDocument": {
+                    "completion": {
+                        "completionItem": {
+                            "snippetSupport": true
+                        }
+                    },
+                    "synchronization": {
+                        "didSave": true,
+                        "didChange": true,
+                        "didOpen": true,
+                        "didClose": true
+                    }
+                },
+                "workspace": {
+                    "configuration": true
+                }
+            }
+        });
+
+        // We can't use self.send_request here easily because we are holding a mutable borrow
+        // but we can use the message_tx clone we just created or the one in self.
+        // Wait, send_request takes &self. We have &mut self.
+        // We can downgrade, or just implement the send logic inline for the handshake.
+
+        // Actually, we can clone the sender before assigning it to self for the handshake usage.
+        // But send_request logic is complex (oneshot channel setup).
+        // Let's rely on self.send_request AFTER we release the borrow?
+        // No, start() holds &mut self for the whole duration.
+        // We can split the function or just duplicate the send_request logic here using the local tx.
+
+        tracing::info!("Sending LSP initialize request...");
+
+        static REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+
+        let request = LspRequest {
+            jsonrpc: "2.0".to_string(),
+            id,
+            method: "initialize".to_string(),
+            params: init_params,
+        };
+
+        // Send using local message_tx (which is connected to the writer task we just spawned)
+        self.message_tx
+            .send(LspOutgoingMessage::Request(request, tx))
+            .await
+            .context("Failed to send initialize request")?;
+
+        // Wait for initialize response
+        let _init_result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .context("LSP initialize timeout")?
+            .context("Response channel closed")?
+            .context("LSP initialize failed")?;
+
+        tracing::info!("LSP initialized successfully");
+
+        // 2. Send 'initialized' notification
+        let notif = LspNotification {
+            jsonrpc: "2.0".to_string(),
+            method: "initialized".to_string(),
+            params: serde_json::json!({}),
+        };
+
+        self.message_tx
+            .send(LspOutgoingMessage::Notification(notif))
+            .await
+            .context("Failed to send initialized notification")?;
+
         Ok(())
     }
 
