@@ -18,6 +18,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(manager)
         .setup(|app| {
             // Initialize config manager
@@ -50,6 +51,49 @@ pub fn run() {
                     let _ = window.set_decorations(false);
                 }
             }
+
+            // Register global shortcuts
+            use tauri_plugin_global_shortcut::ShortcutState;
+
+            let handle = app.handle().clone();
+            app.global_shortcut().on_shortcut(
+                "CommandOrControl+Shift+N",
+                move |_app, _shortcut, event| {
+                    if event.state == ShortcutState::Pressed {
+                        // Create new window
+                        let handle_clone = handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            use std::time::{SystemTime, UNIX_EPOCH};
+                            let timestamp = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis();
+                            let window_label = format!("window_{}", timestamp);
+
+                            if let Ok(window) = tauri::WebviewWindowBuilder::new(
+                                &handle_clone,
+                                window_label,
+                                tauri::WebviewUrl::App("index.html".into()),
+                            )
+                            .title("OxideStudio")
+                            .inner_size(1400.0, 900.0)
+                            .build()
+                            {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    use tauri::TitleBarStyle;
+                                    let _ = window.set_title_bar_style(TitleBarStyle::Overlay);
+                                }
+
+                                #[cfg(target_os = "windows")]
+                                {
+                                    let _ = window.set_decorations(false);
+                                }
+                            }
+                        });
+                    }
+                },
+            )?;
 
             Ok(())
         })
