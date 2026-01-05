@@ -7,12 +7,20 @@ import {
   Plus,
   Pin,
   PinOff,
+  Eraser,
+  Pencil,
+  Download,
+  TableProperties,
+  Code2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useTabStore } from "@/store/useTabStore";
 import { CreateDatabaseDialog } from "./CreateDatabaseDialog";
+import { RenameTableDialog } from "./RenameTableDialog";
+import { DdlViewerDialog } from "./DdlViewerDialog";
+import { useTableOperations } from "@/hooks/useTableOperations";
 import { useEffect, useState } from "react";
 import {
   Select,
@@ -21,6 +29,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 
 export function SchemaSidebar() {
   const { activeConnectionId } = useConnectionStore();
@@ -44,6 +59,35 @@ export function SchemaSidebar() {
   const [focusedIndex, setFocusedIndex] = useState(0);
   const [isCreateDbDialogOpen, setIsCreateDbDialogOpen] = useState(false);
   const [isTablesHovered, setIsTablesHovered] = useState(false);
+
+  // Context Menu State
+  const [renameDialogOpen, setRenameDialogOpen] = useState(false);
+  const [ddlViewerOpen, setDdlViewerOpen] = useState(false);
+  const [activeTable, setActiveTable] = useState("");
+  const [ddlContent, setDdlContent] = useState("");
+  const [contextMenuOpenTable, setContextMenuOpenTable] = useState<
+    string | null
+  >(null);
+
+  const {
+    truncateTable,
+    renameTable,
+    exportTableData,
+    getTableDdl,
+    editColumns,
+  } = useTableOperations();
+
+  const handleRenameClick = (table: string) => {
+    setActiveTable(table);
+    setRenameDialogOpen(true);
+  };
+
+  const handleDdlClick = async (table: string) => {
+    setActiveTable(table);
+    const ddl = await getTableDdl(table);
+    setDdlContent(ddl);
+    setDdlViewerOpen(true);
+  };
 
   useEffect(() => {
     if (activeConnectionId) {
@@ -150,8 +194,11 @@ export function SchemaSidebar() {
     useTabStore();
   const { connections } = useConnectionStore();
 
-  const handleTableClick = (tableName: string) => {
+  const handleTableSelect = (tableName: string) => {
     selectTable(tableName);
+  };
+
+  const handleTableDoubleClick = (tableName: string) => {
     if (!currentSchema || !activeConnectionId) return;
 
     // Use findOrCreateTableTab to reuse existing tabs
@@ -194,12 +241,6 @@ export function SchemaSidebar() {
         {after}
       </span>
     );
-  };
-
-  const handleTableContextMenu = (e: React.MouseEvent, tableName: string) => {
-    e.preventDefault();
-    // TODO: Implement context menu for tables (Rename, Delete, etc.)
-    console.log("Context menu for:", tableName);
   };
 
   const handleCreateTable = () => {
@@ -419,70 +460,118 @@ export function SchemaSidebar() {
             {filteredTables.map((table) => {
               const isPinned = pinnedTables.includes(table.name);
               return (
-                <div
+                <ContextMenu
                   key={table.name}
-                  className={cn(
-                    "flex items-center gap-2 px-2 py-1.5 cursor-pointer text-[11px] group transition-all select-none rounded-sm relative",
-                    selectedTable === table.name
-                      ? "bg-background-secondary text-primary"
-                      : "text-muted-foreground hover:text-foreground hover:bg-background-secondary/50"
-                  )}
-                  onClick={() => handleTableClick(table.name)}
-                  onContextMenu={(e) => handleTableContextMenu(e, table.name)}
-                  title={table.name}
+                  onOpenChange={(open) => {
+                    if (open) handleTableSelect(table.name);
+                  }}
                 >
-                  <Table
-                    size={12}
-                    className={cn(
-                      "shrink-0 opacity-70",
-                      selectedTable === table.name && "opacity-100",
-                      isPinned && "text-primary opacity-100"
-                    )}
-                  />
-                  <span
-                    className={cn(
-                      "truncate flex-1",
-                      isPinned && "font-bold text-foreground"
-                    )}
-                  >
-                    {table.name}
-                  </span>
-
-                  {/* Pin/Unpin Button - Visible on Hover */}
-                  <div className="flex items-center gap-1">
-                    {table.type && !isPinned && (
-                      <span className="text-[9px] uppercase opacity-50 shrink-0 group-hover:hidden">
-                        {table.type}
-                      </span>
-                    )}
-                    <Button
-                      variant="ghost"
-                      size="icon"
+                  <ContextMenuTrigger>
+                    <div
                       className={cn(
-                        "h-4 w-4 shrink-0 transition-all duration-200",
-                        isPinned
-                          ? "text-primary opacity-100"
-                          : "text-muted-foreground opacity-0 group-hover:opacity-60 hover:opacity-100"
+                        "flex items-center gap-2 px-2 py-1.5 cursor-pointer text-[11px] group transition-all select-none rounded-sm relative",
+                        selectedTable === table.name
+                          ? "bg-background-secondary text-primary"
+                          : "text-muted-foreground hover:text-foreground hover:bg-background-secondary/50"
                       )}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        togglePinTable(table.name);
-                      }}
-                      title={isPinned ? "Unpin Table" : "Pin Table"}
+                      onClick={() => handleTableSelect(table.name)}
+                      onDoubleClick={() => handleTableDoubleClick(table.name)}
+                      title={table.name}
                     >
-                      {isPinned ? <PinOff size={10} /> : <Pin size={10} />}
-                    </Button>
-                  </div>
-                </div>
+                      <Table
+                        size={12}
+                        className={cn(
+                          "shrink-0 opacity-70",
+                          selectedTable === table.name && "opacity-100",
+                          isPinned && "text-primary opacity-100"
+                        )}
+                      />
+                      <span
+                        className={cn(
+                          "truncate flex-1",
+                          isPinned && "font-bold text-foreground"
+                        )}
+                      >
+                        {table.name}
+                      </span>
+
+                      {/* Pin/Unpin Button - Visible on Hover */}
+                      <div className="flex items-center gap-1">
+                        {table.type && !isPinned && (
+                          <span className="text-[9px] uppercase opacity-50 shrink-0 group-hover:hidden">
+                            {table.type}
+                          </span>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={cn(
+                            "h-4 w-4 shrink-0 transition-all duration-200",
+                            isPinned
+                              ? "text-primary opacity-100"
+                              : "text-muted-foreground opacity-0 group-hover:opacity-60 hover:opacity-100"
+                          )}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            togglePinTable(table.name);
+                          }}
+                          title={isPinned ? "Unpin Table" : "Pin Table"}
+                        >
+                          {isPinned ? <PinOff size={10} /> : <Pin size={10} />}
+                        </Button>
+                      </div>
+                    </div>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent className="w-48">
+                    <ContextMenuItem onClick={() => truncateTable(table.name)}>
+                      <Eraser className="mr-2 h-3.5 w-3.5" />
+                      Empty Table
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      onClick={() => handleRenameClick(table.name)}
+                    >
+                      <Pencil className="mr-2 h-3.5 w-3.5" />
+                      Rename Table
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      onClick={() => exportTableData(table.name)}
+                    >
+                      <Download className="mr-2 h-3.5 w-3.5" />
+                      Export Data
+                    </ContextMenuItem>
+                    <ContextMenuSeparator />
+                    <ContextMenuItem onClick={() => editColumns(table.name)}>
+                      <TableProperties className="mr-2 h-3.5 w-3.5" />
+                      Edit Columns
+                    </ContextMenuItem>
+                    <ContextMenuItem onClick={() => handleDdlClick(table.name)}>
+                      <Code2 className="mr-2 h-3.5 w-3.5" />
+                      View DSL
+                    </ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
               );
             })}
           </div>
         )}
       </div>
+
       <CreateDatabaseDialog
         isOpen={isCreateDbDialogOpen}
         onClose={() => setIsCreateDbDialogOpen(false)}
         activeConnectionId={activeConnectionId || ""}
+      />
+      <RenameTableDialog
+        isOpen={renameDialogOpen}
+        onClose={() => setRenameDialogOpen(false)}
+        tableName={activeTable}
+        onRename={renameTable}
+      />
+      <DdlViewerDialog
+        isOpen={ddlViewerOpen}
+        onClose={() => setDdlViewerOpen(false)}
+        tableName={activeTable}
+        ddl={ddlContent}
       />
     </div>
   );
