@@ -10,6 +10,7 @@ use core::cache::CacheManager;
 use core::config::ConfigManager;
 use core::manager::ConnectionManager;
 use core::parser::SqlParser;
+use std::sync::Arc;
 use std::sync::Mutex;
 use tauri::Manager;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -18,10 +19,14 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 pub fn run() {
     let manager = ConnectionManager::new();
 
+    // Initialize LSP state
+    let lsp_state = commands::lsp::LspState(Arc::new(tokio::sync::Mutex::new(None)));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(manager)
+        .manage(lsp_state)
         .setup(|app| {
             // Initialize config manager
             let config_manager = ConfigManager::new(app.handle());
@@ -128,6 +133,12 @@ pub fn run() {
             commands::store::save_resources,
             commands::store::get_resources,
             commands::store::search_resources,
+            // LSP commands
+            commands::lsp::lsp_initialize,
+            commands::lsp::lsp_shutdown,
+            commands::lsp::lsp_is_running,
+            commands::lsp::lsp_get_completions,
+            commands::lsp::lsp_update_schema,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
