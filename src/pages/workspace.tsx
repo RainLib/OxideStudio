@@ -10,7 +10,6 @@ import { CreateTableTab } from "@/components/workspace/CreateTableTab";
 import { cn } from "@/lib/utils";
 import { useTabStore } from "@/store/useTabStore";
 import { useTheme } from "@/theme/useTheme";
-import { useShortcuts } from "@/hooks/useShortcuts";
 import { CommandPalette } from "@/components/workspace/CommandPalette";
 import {
   PanelLeft,
@@ -22,7 +21,6 @@ import {
 import { useEffect, useState } from "react";
 
 export function WorkspacePage() {
-  useShortcuts();
   const { mode } = useTheme();
   // const { activeConnectionId } = useConnectionStore(); // Removed unused
   const { tabs, activeTabId, createTab } = useTabStore();
