@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useLspClient } from "@/hooks/useLspClient";
 import { lspClient } from "@/services/lsp";
@@ -6,15 +6,23 @@ import { lspClient } from "@/services/lsp";
 export function LspConnectionSyncer() {
   const { activeConnectionId, connections } = useConnectionStore();
   const { isReady } = useLspClient();
+  const [lastSyncedConnection, setLastSyncedConnection] = useState<
+    string | null
+  >(null);
 
   useEffect(() => {
     if (!isReady || !activeConnectionId) return;
+
+    // Avoid redundant syncs for the same connection
+    if (lastSyncedConnection === activeConnectionId) {
+      console.log("[LSP Syncer] ℹ️  Connection already synced, skipping");
+      return;
+    }
 
     const connection = connections.find((c) => c.id === activeConnectionId);
     if (!connection) return;
 
     // Construct Data Source Name (DSN)
-    // format: user:pass@tcp(host:port)/db_name
     let driver = "postgresql";
     let dsn = "";
 
@@ -26,10 +34,9 @@ export function LspConnectionSyncer() {
       dsn = `${connection.user}:${connection.password}@tcp(${host}:${port})/${connection.database}`;
     } else {
       // Postgres DSN: postgres://user:password@host:port/dbname
-      // TODO: Handle SSL and other params if needed
       const host = connection.host || "localhost";
       const port = connection.port || 5432;
-      dsn = `postgresql://${connection.user}:${connection.password}@${host}:${port}/${connection.database}`;
+      dsn = `postgresql://${connection.user}:${connection.password}@${host}:${port})/${connection.database}`;
 
       // Disable SSL for now if not configured (common dev issue)
       if (!dsn.includes("sslmode")) {
@@ -47,11 +54,23 @@ export function LspConnectionSyncer() {
       ],
     };
 
-    console.log("[LSP] Syncing connection:", connection.name);
-    lspClient.updateConfiguration(config).catch((err) => {
-      console.error("[LSP] Failed to sync connection:", err);
-    });
-  }, [activeConnectionId, connections, isReady]);
+    console.log("[LSP Syncer] 🔄 Syncing connection config:", connection.name);
+    lspClient
+      .updateConfiguration(config)
+      .then(() => {
+        console.log("[LSP Syncer] ✓ Configuration synced successfully");
+        setLastSyncedConnection(activeConnectionId);
+
+        // Wait for LSP to load schema (give it sufficient time)
+        return new Promise((resolve) => setTimeout(resolve, 1000));
+      })
+      .then(() => {
+        console.log("[LSP Syncer] ✓ Ready for document operations");
+      })
+      .catch((err) => {
+        console.error("[LSP Syncer] ❌ Failed to sync connection:", err);
+      });
+  }, [activeConnectionId, connections, isReady, lastSyncedConnection]);
 
   return null;
 }

@@ -8,14 +8,17 @@ import type { CompletionItem, CompletionResponse } from "./types";
 class LspClient {
   private initialized = false;
   private binaryPath: string | null = null;
+  private pendingDocuments: Map<string, { text: string; version: number }> =
+    new Map();
 
   /**
    * Initialize the LSP server
    * @param binaryPath Path to sql-lsp binary
    */
   async initialize(binaryPath: string): Promise<void> {
+    console.log("[LSP Client] 🚀 Starting initialization...", { binaryPath });
     if (this.initialized) {
-      console.log("[LSP] Already initialized");
+      console.log("[LSP Client] ℹ️ Already initialized");
       return;
     }
 
@@ -27,7 +30,20 @@ class LspClient {
       this.initialized = true;
       this.binaryPath = binaryPath;
 
-      console.log("[LSP] Initialized:", result);
+      console.log("[LSP Client] ✓ Initialization complete", { result });
+
+      // Sync any pending documents that were queued before initialization
+      if (this.pendingDocuments.size > 0) {
+        console.log(
+          `[LSP Client] 📚 Syncing ${this.pendingDocuments.size} pending documents...`
+        );
+        for (const [uri, doc] of this.pendingDocuments.entries()) {
+          console.log(`[LSP Client] 🔄 Syncing document: ${uri}`);
+          await this._sendDidOpen(uri, doc.text, doc.version);
+        }
+        this.pendingDocuments.clear();
+        console.log("[LSP Client] ✓ All pending documents synced");
+      }
     } catch (error) {
       console.error("[LSP] Initialization failed:", error);
       throw error;
@@ -71,17 +87,34 @@ class LspClient {
     line: number,
     character: number
   ): Promise<CompletionItem[]> {
+    console.log("[LSP Client] 💡 getCompletions called", {
+      uri,
+      line,
+      character,
+      initialized: this.initialized,
+      timestamp: new Date().toISOString(),
+    });
     if (!this.initialized) {
-      console.warn("[LSP] Not initialized, returning empty completions");
+      console.warn(
+        "[LSP Client] ⚠️ Not initialized, returning empty completions"
+      );
       return [];
     }
 
     try {
       const normalized = this.normalizeUri(uri);
+      console.log("[LSP Client] 📤 Requesting completions", {
+        normalized,
+        line,
+        character,
+      });
       const response = await invoke<CompletionResponse>("lsp_get_completions", {
         request: { uri: normalized, line, character },
       });
 
+      console.log("[LSP Client] ✓ Received completions", {
+        count: response.items.length,
+      });
       return response.items;
     } catch (error) {
       console.error("[LSP] Get completions failed:", error);
@@ -95,8 +128,12 @@ class LspClient {
    * @param config Connection configuration
    */
   async updateConfiguration(config: any): Promise<void> {
+    console.log("[LSP Client] ⚙️ updateConfiguration called", {
+      config,
+      initialized: this.initialized,
+    });
     if (!this.initialized) {
-      // console.warn("[LSP] Not initialized, skipping config update");
+      console.warn("[LSP Client] ⚠️ Not initialized, skipping config update");
       return;
     }
 
@@ -106,11 +143,12 @@ class LspClient {
         sqls: config,
       };
 
+      console.log("[LSP Client] 📤 Sending configuration", { settings });
       await invoke<string>("lsp_did_change_configuration", {
         settings,
       });
 
-      console.log("[LSP] Configuration updated");
+      console.log("[LSP Client] ✓ Configuration updated successfully");
     } catch (error) {
       console.error("[LSP] Configuration update failed:", error);
       throw error;
@@ -118,19 +156,44 @@ class LspClient {
   }
 
   /**
+   * Private method to actually send didOpen to LSP
+   */
+  private async _sendDidOpen(
+    uri: string,
+    text: string,
+    version: number
+  ): Promise<void> {
+    const normalized = this.normalizeUri(uri);
+    await invoke("lsp_did_open", {
+      uri: normalized,
+      languageId: "sql",
+      version,
+      text,
+    });
+    console.log("[LSP Client] ✓ didOpen sent successfully", { normalized });
+  }
+
+  /**
    * Notify LSP that a document was opened
+   * If LSP is not ready, queue the document for later sync
    */
   async didOpen(uri: string, text: string, version: number): Promise<void> {
-    if (!this.initialized) return;
+    console.log("[LSP Client] 📄 didOpen called", {
+      uri,
+      textLength: text.length,
+      version,
+      initialized: this.initialized,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (!this.initialized) {
+      console.warn("[LSP Client] ⏸️ LSP not ready, queuing document:", uri);
+      this.pendingDocuments.set(uri, { text, version });
+      return;
+    }
+
     try {
-      const normalized = this.normalizeUri(uri);
-      await invoke("lsp_did_open", {
-        uri: normalized,
-        languageId: "sql",
-        version,
-        text,
-      });
-      // console.log("[LSP] didOpen:", normalized);
+      await this._sendDidOpen(uri, text, version);
     } catch (e) {
       console.error("[LSP] didOpen failed:", e);
     }

@@ -43,6 +43,8 @@ pub async fn lsp_initialize(
     request: InitializeLspRequest,
     state: State<'_, LspState>,
 ) -> Result<String, String> {
+    tracing::info!("🚀 LSP initialize command called");
+    tracing::debug!("Binary path: {}", request.binary_path);
     let mut lsp_lock = state.0.lock().await;
 
     // Create new LSP manager
@@ -56,6 +58,7 @@ pub async fn lsp_initialize(
 
     *lsp_lock = Some(manager);
 
+    tracing::info!("✓ LSP server initialized successfully");
     Ok("LSP server initialized successfully".to_string())
 }
 
@@ -94,6 +97,12 @@ pub async fn lsp_get_completions(
     request: CompletionRequest,
     state: State<'_, LspState>,
 ) -> Result<CompletionResponse, String> {
+    tracing::info!(
+        "💡 LSP completion request: uri={}, pos={}:{}",
+        request.uri,
+        request.line,
+        request.character
+    );
     let lsp_lock = state.0.lock().await;
 
     if let Some(manager) = lsp_lock.as_ref() {
@@ -141,9 +150,11 @@ pub async fn lsp_get_completions(
                         })
                         .collect();
 
+                    tracing::info!("✓ Returned {} completion items", items.len());
                     Ok(CompletionResponse { items })
                 } else {
                     // Return empty if no items in response
+                    tracing::warn!("No completion items in response");
                     Ok(CompletionResponse { items: vec![] })
                 }
             }
@@ -153,6 +164,7 @@ pub async fn lsp_get_completions(
             }
         }
     } else {
+        tracing::error!("LSP server is not running");
         Err("LSP server is not running".to_string())
     }
 }
@@ -207,6 +219,16 @@ pub async fn lsp_did_open(
     text: String,
     state: State<'_, LspState>,
 ) -> Result<(), String> {
+    tracing::info!(
+        "📄 LSP didOpen command called: uri={}, version={}",
+        uri,
+        version
+    );
+    tracing::debug!(
+        "Text length: {} bytes, language: {}",
+        text.len(),
+        language_id
+    );
     let lsp_lock = state.0.lock().await;
 
     if let Some(manager) = lsp_lock.as_ref() {
@@ -224,9 +246,11 @@ pub async fn lsp_did_open(
             .await
             .map_err(|e| format!("Failed to send didOpen: {}", e))?;
 
+        tracing::debug!("✓ didOpen notification sent to LSP");
         Ok(())
     } else {
         // Silent failure if LSP not ready (common during startup)
+        tracing::warn!("LSP not running, skipping didOpen");
         Ok(())
     }
 }
