@@ -5,11 +5,7 @@ import { useShortcuts } from "@/hooks/useShortcuts";
 import { ConnectionPage } from "@/pages/connection";
 import { WorkspacePage } from "@/pages/workspace";
 import { Loader2 } from "lucide-react";
-import {
-  LspBinaryManager,
-  LspUpdateNotification,
-  LspConnectionSyncer,
-} from "@/components/lsp";
+import { LspConnectionSyncer } from "@/components/lsp";
 
 function App() {
   // All hooks must be called before any conditional returns
@@ -33,9 +29,7 @@ function App() {
 
   return (
     <ThemeProvider>
-      {/* LSP binary management components */}
-      <LspBinaryManager />
-      <LspUpdateNotification />
+      {/* LSP connection syncer - syncs active connection to LSP */}
       <LspConnectionSyncer />
 
       <div className="bg-background text-foreground h-screen w-screen overflow-hidden">

@@ -95,8 +95,6 @@ pub fn run() {
             commands::lsp::lsp_did_close,
             // LSP binary management
             lsp::check_lsp_binary,
-            lsp::download_lsp_binary,
-            lsp::check_lsp_updates,
             // Window commands
             commands::window::create_new_window,
         ])

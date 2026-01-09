@@ -38,12 +38,31 @@ impl LspServerManager {
 
     /// Start the LSP server process with bidirectional communication
     pub async fn start(&mut self) -> Result<()> {
+        println!("🚀 [MANAGER] start() called");
+
         let mut process_lock = self.process.lock().await;
 
         // Kill existing process if running
         if let Some(mut child) = process_lock.take() {
+            println!("🔄 [MANAGER] Killing existing process");
+            tracing::info!("🔄 [LSP] Killing existing LSP process");
             let _ = child.kill().await;
         }
+
+        println!("🚀 [MANAGER] Binary path: {}", self.binary_path);
+        tracing::info!("🚀 [LSP] Starting LSP server: {}", self.binary_path);
+
+        // Check if binary exists and is executable
+        let binary_path = std::path::Path::new(&self.binary_path);
+        if !binary_path.exists() {
+            println!("❌ [MANAGER] Binary not found at: {}", self.binary_path);
+            return Err(anyhow::anyhow!(
+                "LSP binary not found at: {}",
+                self.binary_path
+            ));
+        }
+
+        println!("✅ [MANAGER] Binary exists, spawning process...");
 
         // Spawn new LSP server process
         let mut child = Command::new(&self.binary_path)
@@ -51,9 +70,30 @@ impl LspServerManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .context("Failed to spawn LSP server process")?;
+            .context(format!(
+                "Failed to spawn LSP server process: {}",
+                self.binary_path
+            ))?;
 
-        tracing::info!("LSP server started with PID: {:?}", child.id());
+        println!("✅ [MANAGER] Process spawned with PID: {:?}", child.id());
+        tracing::info!(
+            "✅ [LSP] LSP server process started with PID: {:?}",
+            child.id()
+        );
+
+        // Capture stderr for debugging
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut reader = BufReader::new(stderr);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    println!("🔴 [LSP stderr] {}", line.trim());
+                    tracing::warn!("🔴 [LSP stderr] {}", line.trim());
+                    line.clear();
+                }
+            });
+        }
 
         // Take stdin/stdout
         let stdin = child.stdin.take().context("Failed to get stdin")?;
@@ -159,9 +199,19 @@ impl LspServerManager {
 
                 // Write to stdin
                 if let Err(e) = stdin.write_all(message.as_bytes()).await {
-                    tracing::error!("Failed to write to LSP stdin: {}", e);
+                    println!(
+                        "🔴 [LSP] Write to stdin failed: {} - Process may have crashed!",
+                        e
+                    );
+                    tracing::error!(
+                        "Failed to write to LSP stdin: {} - Process may have exited",
+                        e
+                    );
                     if let Some(tx) = response_tx_opt {
-                        let _ = tx.send(Err(anyhow::anyhow!("Write error: {}", e)));
+                        let _ = tx.send(Err(anyhow::anyhow!(
+                            "Write error (LSP process may have crashed): {}",
+                            e
+                        )));
                     }
                     continue;
                 }
@@ -230,6 +280,7 @@ impl LspServerManager {
         // No, start() holds &mut self for the whole duration.
         // We can split the function or just duplicate the send_request logic here using the local tx.
 
+        println!("🤝 [HANDSHAKE] Sending LSP initialize request...");
         tracing::info!("Sending LSP initialize request...");
 
         static REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -243,19 +294,39 @@ impl LspServerManager {
             params: init_params,
         };
 
+        println!("🤝 [HANDSHAKE] Request ID: {}", id);
+
         // Send using local message_tx (which is connected to the writer task we just spawned)
         self.message_tx
             .send(LspOutgoingMessage::Request(request, tx))
             .await
             .context("Failed to send initialize request")?;
 
+        println!("🤝 [HANDSHAKE] Initialize request sent, waiting for response...");
+
         // Wait for initialize response
-        let _init_result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+        let init_result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
             .await
             .context("LSP initialize timeout")?
-            .context("Response channel closed")?
-            .context("LSP initialize failed")?;
+            .context("Response channel closed")?;
 
+        match &init_result {
+            Ok(value) => {
+                println!("✅ [HANDSHAKE] Initialize response received!");
+                println!(
+                    "✅ [HANDSHAKE] Response: {}",
+                    serde_json::to_string_pretty(value).unwrap_or_default()
+                );
+            }
+            Err(e) => {
+                println!("❌ [HANDSHAKE] Initialize failed: {}", e);
+                return Err(anyhow::anyhow!("LSP initialize failed: {}", e));
+            }
+        }
+
+        let _init_result = init_result?;
+
+        println!("🤝 [HANDSHAKE] Sending initialized notification...");
         tracing::info!("LSP initialized successfully");
 
         // 2. Send 'initialized' notification

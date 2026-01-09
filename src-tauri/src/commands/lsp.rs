@@ -130,33 +130,56 @@ pub async fn lsp_get_completions(
             .await
         {
             Ok(result) => {
-                // Parse completion items from response
-                if let Some(items_array) = result.get("items").and_then(|v| v.as_array()) {
-                    let items: Vec<CompletionItem> = items_array
-                        .iter()
-                        .filter_map(|item| {
-                            Some(CompletionItem {
-                                label: item.get("label")?.as_str()?.to_string(),
-                                kind: item.get("kind")?.as_u64().map(|v| v as u32),
-                                detail: item
-                                    .get("detail")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string()),
-                                documentation: item
-                                    .get("documentation")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string()),
-                            })
-                        })
-                        .collect();
+                println!(
+                    "💡 [BACKEND] LSP returned: {}",
+                    serde_json::to_string_pretty(&result).unwrap_or_default()
+                );
 
-                    tracing::info!("✓ Returned {} completion items", items.len());
-                    Ok(CompletionResponse { items })
-                } else {
-                    // Return empty if no items in response
-                    tracing::warn!("No completion items in response");
-                    Ok(CompletionResponse { items: vec![] })
+                // LSP spec allows two response formats:
+                // 1. CompletionList: {"items": [...], "isIncomplete": false}
+                // 2. CompletionItem[]: [{...}, {...}] (direct array)
+
+                let items_array =
+                    if let Some(items) = result.get("items").and_then(|v| v.as_array()) {
+                        println!(
+                            "💡 [BACKEND] Found CompletionList with {} items",
+                            items.len()
+                        );
+                        items.clone()
+                    } else if let Some(items) = result.as_array() {
+                        println!("💡 [BACKEND] Found direct array with {} items", items.len());
+                        items.clone()
+                    } else {
+                        println!("⚠️  [BACKEND] Unexpected LSP response format");
+                        vec![]
+                    };
+
+                let items: Vec<CompletionItem> = items_array
+                    .iter()
+                    .filter_map(|item| {
+                        Some(CompletionItem {
+                            label: item.get("label")?.as_str()?.to_string(),
+                            kind: item.get("kind").and_then(|v| v.as_i64()).map(|v| v as u32),
+                            detail: item
+                                .get("detail")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            documentation: item
+                                .get("documentation")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                        })
+                    })
+                    .collect();
+
+                println!(
+                    "💡 [BACKEND] Parsed {} items, returning to frontend",
+                    items.len()
+                );
+                if !items.is_empty() {
+                    println!("💡 [BACKEND] First item: {:?}", items[0]);
                 }
+                Ok(CompletionResponse { items })
             }
             Err(e) => {
                 tracing::error!("LSP completion request failed: {}", e);

@@ -46,13 +46,30 @@ export function QueryEditor() {
 
     console.log("[QueryEditor] Registering LSP completion provider");
 
+    // Track which documents have been opened with LSP
+    const openedDocuments = new Set<string>();
+
     const disposable = monaco.languages.registerCompletionItemProvider("sql", {
       triggerCharacters: [" ", ".", "(", ","],
       provideCompletionItems: async (model: any, position: any) => {
         try {
-          // Get completions from LSP server
+          const uri = model.uri.toString();
+          const currentText = model.getValue();
+          const version = model.getVersionId();
+
+          // CRITICAL: Ensure document is opened with LSP before any operations
+          if (!openedDocuments.has(uri)) {
+            console.log(`[LSP] Opening document: ${uri}`);
+            await lspClient.didOpen(uri, currentText, version);
+            openedDocuments.add(uri);
+          }
+
+          // Sync document state before requesting completions
+          await lspClient.didChange(uri, currentText, version);
+
+          // Now request completions with synchronized state
           const items = await lspClient.getCompletions(
-            model.uri.toString(),
+            uri,
             position.lineNumber - 1, // LSP uses 0-indexed lines
             position.column - 1 // LSP uses 0-indexed columns
           );
@@ -88,6 +105,14 @@ export function QueryEditor() {
 
     return () => {
       console.log("[QueryEditor] Disposing LSP completion provider");
+
+      // Close all opened documents
+      for (const uri of openedDocuments) {
+        lspClient.didClose(uri).catch((err) => {
+          console.error(`[LSP] Failed to close ${uri}:`, err);
+        });
+      }
+
       disposable.dispose();
     };
   }, [monaco, lspReady, lspClient]);
@@ -212,7 +237,7 @@ export function QueryEditor() {
               lspClient.didOpen(uri, model.getValue(), model.getVersionId());
 
               // Notify didChange
-              const changeDisposable = model.onDidChangeContent((e) => {
+              const changeDisposable = model.onDidChangeContent(() => {
                 lspClient.didChange(
                   uri,
                   model.getValue(),

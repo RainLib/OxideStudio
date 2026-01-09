@@ -14,8 +14,11 @@ export function useLspClient() {
     let mounted = true;
 
     async function initializeLsp() {
+      console.log("[useLspClient] 🚀 Starting LSP initialization...");
+
       // If already initialized in service, just update state
       if (lspClient.isInitialized()) {
+        console.log("[useLspClient] ✓ LSP already initialized");
         if (mounted) {
           setIsReady(true);
           setError(null);
@@ -24,26 +27,38 @@ export function useLspClient() {
       }
 
       try {
+        console.log("[useLspClient] 📞 Calling check_lsp_binary...");
+
         // Get binary path from backend command
-        // This ensures match with what download manager used
         const info = await invoke<{ path: string; exists: boolean }>(
           "check_lsp_binary"
         );
 
+        console.log("[useLspClient] 📋 Binary info:", info);
+
         if (!info.exists) {
-          throw new Error("LSP binary not found. Please wait for download.");
+          const errorMsg = "LSP binary not found at: " + info.path;
+          console.error("[useLspClient] ❌", errorMsg);
+          throw new Error(errorMsg);
         }
 
-        console.log("[useLspClient] Initializing with binary:", info.path);
+        console.log("[useLspClient] ✓ Binary found, initializing client...");
+        console.log("[useLspClient] Binary path:", info.path);
 
         await lspClient.initialize(info.path);
+
+        console.log("[useLspClient] ✅ LSP client initialized successfully!");
 
         if (mounted) {
           setIsReady(true);
           setError(null);
         }
       } catch (err) {
-        console.error("[useLspClient] Initialization failed:", err);
+        console.error("[useLspClient] ❌ Initialization failed:", err);
+        console.error("[useLspClient] Error details:", {
+          message: err instanceof Error ? err.message : String(err),
+          stack: err instanceof Error ? err.stack : undefined,
+        });
         if (mounted) {
           setError(err instanceof Error ? err.message : String(err));
           setIsReady(false);
@@ -51,11 +66,12 @@ export function useLspClient() {
       }
     }
 
+    console.log("[useLspClient] Hook mounted, starting initialization");
     initializeLsp();
 
     // Do NOT shutdown on unmount, as other components might use it.
-    // Shutdown should be handled by app close or explicit user action if needed.
     return () => {
+      console.log("[useLspClient] Hook unmounting");
       mounted = false;
     };
   }, []);
