@@ -3,12 +3,14 @@
 pub mod commands;
 pub mod core;
 pub mod drivers;
+pub mod lsp;
 
 use commands::query::ParserState;
 use core::cache::CacheManager;
 use core::config::ConfigManager;
 use core::manager::ConnectionManager;
 use core::parser::SqlParser;
+use std::sync::Arc;
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -16,9 +18,13 @@ use tauri::Manager;
 pub fn run() {
     let manager = ConnectionManager::new();
 
+    // Initialize LSP state
+    let lsp_state = commands::lsp::LspState(Arc::new(tokio::sync::Mutex::new(None)));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(manager)
+        .manage(lsp_state)
         .setup(|app| {
             // Initialize config manager
             let config_manager = ConfigManager::new(app.handle());
@@ -78,6 +84,19 @@ pub fn run() {
             commands::store::save_resources,
             commands::store::get_resources,
             commands::store::search_resources,
+            // LSP commands
+            commands::lsp::lsp_initialize,
+            commands::lsp::lsp_shutdown,
+            commands::lsp::lsp_is_running,
+            commands::lsp::lsp_get_completions,
+            commands::lsp::lsp_did_change_configuration,
+            commands::lsp::lsp_did_open,
+            commands::lsp::lsp_did_change,
+            commands::lsp::lsp_did_close,
+            // LSP binary management
+            lsp::check_lsp_binary,
+            // Window commands
+            commands::window::create_new_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

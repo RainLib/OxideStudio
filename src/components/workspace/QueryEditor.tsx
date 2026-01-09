@@ -7,7 +7,8 @@ import { EditorActionBar } from "./EditorActionBar";
 import { ThemeContext } from "@/theme/ThemeProvider";
 import Editor, { useMonaco } from "@monaco-editor/react";
 import { useEffect, useRef, useState, useContext } from "react";
-import { queryService, schemaService } from "@/services/tauri";
+// import { queryService, schemaService } from "@/services/tauri";
+import { useLspClient } from "@/hooks/useLspClient";
 import {
   APP_EVENT_RUN_QUERY,
   APP_EVENT_RUN_CURRENT,
@@ -37,152 +38,84 @@ export function QueryEditor() {
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const monaco = useMonaco();
+  const { isReady: lspReady, client: lspClient } = useLspClient(); // Added LSP client state
 
-  // Register SQL completion provider
+  // Register LSP completion provider (replacing tree-sitter)
   useEffect(() => {
-    if (!monaco) return;
+    if (!monaco || !lspReady) return;
 
-    console.log("[SETUP] Registering SQL completion provider");
+    console.log("[QueryEditor] Registering LSP completion provider");
+
+    // Track which documents have been opened with LSP
+    const openedDocuments = new Set<string>();
 
     const disposable = monaco.languages.registerCompletionItemProvider("sql", {
       triggerCharacters: [" ", ".", "(", ","],
       provideCompletionItems: async (model: any, position: any) => {
-        console.log("[PROVIDER] Called at position:", position);
-
-        const fullText = model.getValue();
-        const offset = model.getOffsetAt(position);
-
-        // Get the word being typed for range calculation
-        const word = model.getWordUntilPosition(position);
-        const range = new monaco.Range(
-          position.lineNumber,
-          word.startColumn,
-          position.lineNumber,
-          word.endColumn
-        );
-
-        // Get state from stores
-        const { activeConnectionId } = useConnectionStore.getState();
-        const { currentSchema, tables } = useSchemaStore.getState();
-
-        console.log("[PROVIDER] Connection state:", {
-          activeConnectionId,
-          currentSchema,
-          tablesCount: tables.length,
-        });
-
         try {
-          // Call Rust backend for context analysis
-          // Note: SQL parsing doesn't require a DB connection
-          const response = await queryService.getSqlCompletion(
-            fullText,
-            offset
-          );
-          console.log("[PROVIDER] Backend response:", response);
+          const uri = model.uri.toString();
+          const currentText = model.getValue();
+          const version = model.getVersionId();
 
-          if (!response) {
-            console.warn("[PROVIDER] Backend failed");
-            return { suggestions: [] };
+          // CRITICAL: Ensure document is opened with LSP before any operations
+          if (!openedDocuments.has(uri)) {
+            console.log(`[LSP] Opening document: ${uri}`);
+            await lspClient.didOpen(uri, currentText, version);
+            openedDocuments.add(uri);
           }
 
-          const { suggestionType, relevantTable, candidates } = response;
-          const suggestions: any[] = [];
+          // Sync document state before requesting completions
+          await lspClient.didChange(uri, currentText, version);
 
-          console.log(
-            `[PROVIDER] Type: ${suggestionType}, Candidates: ${
-              candidates?.length || 0
-            }`
+          // Now request completions with synchronized state
+          const items = await lspClient.getCompletions(
+            uri,
+            position.lineNumber - 1, // LSP uses 0-indexed lines
+            position.column - 1 // LSP uses 0-indexed columns
           );
 
-          // Handle different suggestion types based on backend analysis
-          switch (suggestionType.toLowerCase()) {
-            case "table":
-              // Suggest tables from schema store (requires connection)
-              console.log(`[PROVIDER] Suggesting tables from schema`);
-              if (activeConnectionId && tables.length > 0) {
-                tables.forEach((t) => {
-                  suggestions.push({
-                    label: t.name,
-                    kind: monaco.languages.CompletionItemKind.Class,
-                    insertText: t.name,
-                    detail: `Table (${t.schema || currentSchema})`,
-                    range,
-                  });
-                });
-              } else {
-                console.log(`[PROVIDER] No connection or tables available`);
-              }
-              break;
+          console.log(`[LSP] Got ${items.length} completion items`);
 
-            case "column":
-              // Suggest columns from the relevant table
-              console.log(
-                `[PROVIDER] Suggesting columns for table: ${relevantTable}`
-              );
-              if (relevantTable) {
-                const targetSchema = currentSchema || "public";
-                if (activeConnectionId) {
-                  try {
-                    const cols = await schemaService.getColumns(
-                      activeConnectionId,
-                      targetSchema,
-                      relevantTable
-                    );
-                    if (cols) {
-                      cols.forEach((col: any) => {
-                        suggestions.push({
-                          label: col.name,
-                          kind: monaco.languages.CompletionItemKind.Field,
-                          insertText: col.name,
-                          detail: `${col.data_type} (${relevantTable})`,
-                          range,
-                        });
-                      });
-                    }
-                  } catch (err) {
-                    console.error("[PROVIDER] Failed to fetch columns:", err);
-                  }
-                }
-              }
-              break;
+          // Get the word being typed for range calculation
+          const word = model.getWordUntilPosition(position);
+          const range = new monaco.Range(
+            position.lineNumber,
+            word.startColumn,
+            position.lineNumber,
+            word.endColumn
+          );
 
-            case "keyword":
-            case "none":
-            default:
-              // Use keywords from backend (already filtered by prefix)
-              console.log(
-                `[PROVIDER] Using ${
-                  candidates?.length || 0
-                } keywords from backend`
-              );
-              if (candidates && candidates.length > 0) {
-                candidates.forEach((keyword) => {
-                  suggestions.push({
-                    label: keyword,
-                    kind: monaco.languages.CompletionItemKind.Keyword,
-                    insertText: keyword,
-                    detail: "SQL Keyword",
-                    range,
-                  });
-                });
-              }
-              break;
-          }
+          // Convert LSP completion items to Monaco format
+          const suggestions = items.map((item) => ({
+            label: item.label,
+            kind: item.kind || monaco.languages.CompletionItemKind.Field,
+            detail: item.detail,
+            documentation: item.documentation,
+            insertText: item.label,
+            range: range,
+          }));
 
-          console.log(`[PROVIDER] Returning ${suggestions.length} suggestions`);
           return { suggestions };
-        } catch (e) {
-          console.error("[PROVIDER] Error:", e);
+        } catch (error) {
+          console.error("[LSP] Completion failed:", error);
           return { suggestions: [] };
         }
       },
     });
 
     return () => {
-      console.log("[SETUP] Disposing SQL completion provider");
+      console.log("[QueryEditor] Disposing LSP completion provider");
+
+      // Close all opened documents
+      for (const uri of openedDocuments) {
+        lspClient.didClose(uri).catch((err) => {
+          console.error(`[LSP] Failed to close ${uri}:`, err);
+        });
+      }
+
       disposable.dispose();
     };
-  }, [monaco]);
+  }, [monaco, lspReady, lspClient]);
 
   // Initialize targetSchema from currentSchema if not set
   useEffect(() => {
@@ -295,6 +228,29 @@ export function QueryEditor() {
             editorRef.current = editor;
             // Force theme update on mount
             monaco.editor.setTheme(mode === "light" ? "vs" : "vs-dark");
+
+            // Register model change listener for LSP
+            const model = editor.getModel();
+            if (model && lspReady) {
+              const uri = model.uri.toString();
+              // Notify didOpen
+              lspClient.didOpen(uri, model.getValue(), model.getVersionId());
+
+              // Notify didChange
+              const changeDisposable = model.onDidChangeContent(() => {
+                lspClient.didChange(
+                  uri,
+                  model.getValue(),
+                  model.getVersionId()
+                );
+              });
+
+              // Cleanup on model dispose (tab close)
+              editor.onDidDispose(() => {
+                changeDisposable.dispose();
+                lspClient.didClose(uri);
+              });
+            }
           }}
           beforeMount={(monaco) => {
             // Optional: Define a custom theme that perfectly matches our app's background
