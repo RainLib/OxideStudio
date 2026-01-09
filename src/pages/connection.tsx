@@ -36,7 +36,7 @@ export function ConnectionPage() {
 
   if (isLoading) {
     return (
-      <div className="h-screen w-full flex items-center justify-center">
+      <div className="h-screen w-full flex items-center justify-center bg-[#09090b]">
         <Loader2 className="animate-spin" />
       </div>
     );

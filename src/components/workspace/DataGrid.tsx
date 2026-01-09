@@ -711,8 +711,8 @@ export function DataGrid({
   const gridTheme: Partial<Theme> = useMemo(
     () => ({
       // Premium Dark Palette (Zinc based)
-      accentColor: "#3b82f6", // Bright Blue for selection border
-      accentLight: "rgba(59, 130, 246, 0.2)", // Blue tint (Used for selected Row/Column Headers)
+      accentColor: "#f97316", // Orange for selection border (text-orange-500)
+      accentLight: "rgba(249, 115, 22, 0.2)", // Orange tint (Used for selected Row/Column Headers)
 
       // Deep background for cells
       bgCell: mode === "dark" ? "#09090b" : "#ffffff",

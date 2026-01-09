@@ -22,7 +22,7 @@ import { useEffect, useRef, useState } from "react";
 
 const TabIcon = ({ type }: { type: TabType }) => {
   if (type === "table") return <TableIcon size={12} className="text-primary" />;
-  return <Terminal size={12} className="text-blue-500" />;
+  return <Terminal size={12} className="text-orange-500" />;
 };
 
 export function TabBar() {
