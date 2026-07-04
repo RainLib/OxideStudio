@@ -123,9 +123,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   connect: async (config) => {
-    // Reset schema state before connecting to ensure clean slate
-    useSchemaStore.getState().reset();
-
     // Use connectionUrl if provided, otherwise build from individual fields
     let url: string;
 
@@ -145,6 +142,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     try {
       await connectionService.connect(config.id, config.driver, url);
+      // Reset only after the backend connection is ready so a failed switch
+      // does not wipe the currently usable workspace metadata.
+      useSchemaStore.getState().reset();
       set({ activeConnectionId: config.id, isConnected: true });
       return null; // No error
     } catch (e: any) {
