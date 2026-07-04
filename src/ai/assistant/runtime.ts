@@ -10,6 +10,8 @@ import type {
   AssistantIntent,
   AssistantPlanStep,
   AssistantPreparedTurn,
+  AssistantToolCall,
+  AssistantToolCallResult,
   AssistantTurnInput,
 } from "./types";
 
@@ -70,6 +72,54 @@ export class AssistantRuntime {
       context,
       policy
     );
+  }
+
+  async executeToolCalls(
+    calls: AssistantToolCall[],
+    context = this.createContext()
+  ): Promise<AssistantToolCallResult[]> {
+    const results: AssistantToolCallResult[] = [];
+
+    for (const call of calls) {
+      const policy = call.approved
+        ? approveToolForPolicy(this.policy, call.toolName)
+        : this.policy;
+      const decision = this.registry.evaluate(call.toolName, policy);
+
+      if (!decision.allowed) {
+        results.push({
+          id: call.id,
+          toolName: call.toolName,
+          status: decision.requiresApproval ? "requiresApproval" : "error",
+          error: decision.reason,
+        });
+        continue;
+      }
+
+      try {
+        const output = await this.registry.executeWithPolicy(
+          call.toolName,
+          call.input ?? {},
+          context,
+          policy
+        );
+        results.push({
+          id: call.id,
+          toolName: call.toolName,
+          status: "success",
+          output,
+        });
+      } catch (err: any) {
+        results.push({
+          id: call.id,
+          toolName: call.toolName,
+          status: "error",
+          error: err?.message || String(err),
+        });
+      }
+    }
+
+    return results;
   }
 }
 
@@ -155,4 +205,14 @@ function buildSuggestedPlan(
   }
 
   return steps;
+}
+
+function approveToolForPolicy(
+  policy: AiToolExecutionPolicy,
+  toolName: string
+): AiToolExecutionPolicy {
+  return {
+    ...policy,
+    approvedTools: Array.from(new Set([...(policy.approvedTools ?? []), toolName])),
+  };
 }

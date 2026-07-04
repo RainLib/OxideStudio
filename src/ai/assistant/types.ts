@@ -20,6 +20,22 @@ export type AssistantPlanStep = {
   requiresApproval: boolean;
 };
 
+export type AssistantToolCall = {
+  id: string;
+  toolName: string;
+  input?: unknown;
+  approved?: boolean;
+  reason?: string;
+};
+
+export type AssistantToolCallResult = {
+  id: string;
+  toolName: string;
+  status: "success" | "requiresApproval" | "error";
+  output?: unknown;
+  error?: string;
+};
+
 export type AssistantPreparedTurn = {
   requestId: string;
   intent: AssistantIntent;
