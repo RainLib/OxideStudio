@@ -21,6 +21,14 @@ AiToolRegistry  ---->  Tauri service clients  ---->  Rust commands/drivers
 
 This keeps the editor integration direct and state-aware while allowing external agents to call the same tools through MCP. The CLI should be an automation/debug adapter, not the primary editor integration path.
 
+## Current Implementation
+
+- `src/ai/tools` defines the shared registry, read-only core tools, result limits, and permission policy.
+- `src/ai/assistant` prepares editor-aware plans and can execute AI-proposed tool calls with approval-aware results.
+- `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
+- `src/ai/cli` provides a dependency-light command adapter for `tools list` and `tools call`.
+- The assistant panel is an editor entry point; real model/provider integration should call the runtime APIs rather than bypassing the registry.
+
 ## LangGraph Usage
 
 Use TypeScript LangGraph for the in-app assistant orchestration because the editor state, connection metadata, tabs, and approval UI already live in the frontend. Recommended graph nodes:
@@ -60,6 +68,8 @@ oxide tools list
 oxide tools call query.runReadOnly --json payload.json
 ```
 
+For the editor itself, prefer direct TypeScript orchestration over MCP. The editor already owns state, selection, tabs, connection ids, and approval UI; routing those through an external protocol would add latency and lose context.
+
 ## Safety Requirements
 
 - Never expose raw credentials or connection URLs to model context.
@@ -70,8 +80,9 @@ oxide tools call query.runReadOnly --json payload.json
 
 ## Implementation Phases
 
-1. Add `src/ai/tools` with registry types, schemas, and read-only database tools.
-2. Add an assistant panel backed by LangGraph and the registry executor.
-3. Add MCP and CLI adapters over the same registry.
+1. Add `src/ai/tools` with registry types, schemas, and read-only database tools. Done.
+2. Add an assistant panel backed by the registry executor. Done.
+3. Add MCP and CLI adapters over the same registry. Done.
 4. Add write tools with approval gates and audit logging.
-5. Add provider/plugin hooks so new databases register tools by capability, not by UI rewrites.
+5. Add a LangGraph-backed planner that chooses tool calls, pauses for approval, and feeds results back into the model.
+6. Add provider/plugin hooks so new databases register tools by capability, not by UI rewrites.
