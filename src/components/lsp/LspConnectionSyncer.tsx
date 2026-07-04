@@ -13,6 +13,7 @@ import {
   defaultDatabaseCapabilities,
   normalizeLspDialect,
   selectPreferredNamespace,
+  supportsTableWorkspace,
 } from "@/lib/databaseDialect";
 import { extractRelationReferences } from "@/lib/sqlAnalysis";
 import { v4 as uuidv4 } from "uuid";
@@ -436,6 +437,7 @@ export function LspConnectionSyncer() {
       // tables is an ARRAY: TableInfo[]
       const buildTableDefinitions = async () => {
         const capabilities = await capabilitiesPromise;
+        const canSyncTableMetadata = supportsTableWorkspace(capabilities);
         const lspDialect = normalizeLspDialect(
           capabilities.lspLanguageId || connection.driver
         );
@@ -448,8 +450,10 @@ export function LspConnectionSyncer() {
         const schemaDefinitions: LspSchemaDefinition[] = await Promise.all(
           targetSchemas.map(async (schemaName) => {
             const [schemaTables, schemaFunctions] = await Promise.all([
-              schemaService.getTables(activeConnectionId, schemaName),
-              capabilities.supportsFunctions
+              canSyncTableMetadata
+                ? schemaService.getTables(activeConnectionId, schemaName)
+                : Promise.resolve([]),
+              canSyncTableMetadata && capabilities.supportsFunctions
                 ? schemaService
                     .getFunctions(activeConnectionId, schemaName)
                     .catch((error) => {

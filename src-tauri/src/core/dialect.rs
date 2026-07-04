@@ -2,15 +2,29 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DatabaseDataModel {
+    Relational,
+    Document,
+    KeyValue,
+    Search,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseCapabilities {
     pub driver: String,
     pub display_name: String,
+    pub data_model: DatabaseDataModel,
     pub lsp_language_id: String,
     pub namespace_label: String,
     pub identifier_quote: String,
     pub default_port: u16,
+    pub supports_sql_query: bool,
+    pub supports_table_browsing: bool,
+    pub supports_collection_browsing: bool,
+    pub supports_key_value_browsing: bool,
     pub supports_schemas: bool,
     pub supports_create_database: bool,
     pub supports_create_database_charset: bool,
@@ -36,10 +50,15 @@ pub struct DatabaseCapabilities {
 pub struct DatabaseSpec {
     pub driver: &'static str,
     pub display_name: &'static str,
+    pub data_model: DatabaseDataModel,
     pub lsp_language_id: &'static str,
     pub namespace_label: &'static str,
     pub identifier_quote: char,
     pub default_port: u16,
+    pub supports_sql_query: bool,
+    pub supports_table_browsing: bool,
+    pub supports_collection_browsing: bool,
+    pub supports_key_value_browsing: bool,
     pub supports_schemas: bool,
     pub supports_create_database: bool,
     pub supports_create_database_charset: bool,
@@ -86,10 +105,15 @@ const MYSQL_COMMON_DATA_TYPES: &[&str] = &[
 const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "postgres",
     display_name: "PostgreSQL",
+    data_model: DatabaseDataModel::Relational,
     lsp_language_id: "postgres",
     namespace_label: "schema",
     identifier_quote: '"',
     default_port: 5432,
+    supports_sql_query: true,
+    supports_table_browsing: true,
+    supports_collection_browsing: false,
+    supports_key_value_browsing: false,
     supports_schemas: true,
     supports_create_database: true,
     supports_create_database_charset: false,
@@ -114,10 +138,15 @@ const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
 const MYSQL_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "mysql",
     display_name: "MySQL",
+    data_model: DatabaseDataModel::Relational,
     lsp_language_id: "mysql",
     namespace_label: "database",
     identifier_quote: '`',
     default_port: 3306,
+    supports_sql_query: true,
+    supports_table_browsing: true,
+    supports_collection_browsing: false,
+    supports_key_value_browsing: false,
     supports_schemas: true,
     supports_create_database: true,
     supports_create_database_charset: true,
@@ -183,10 +212,15 @@ impl DatabaseKind {
         DatabaseCapabilities {
             driver: spec.driver.to_string(),
             display_name: spec.display_name.to_string(),
+            data_model: spec.data_model,
             lsp_language_id: spec.lsp_language_id.to_string(),
             namespace_label: spec.namespace_label.to_string(),
             identifier_quote: spec.identifier_quote.to_string(),
             default_port: spec.default_port,
+            supports_sql_query: spec.supports_sql_query,
+            supports_table_browsing: spec.supports_table_browsing,
+            supports_collection_browsing: spec.supports_collection_browsing,
+            supports_key_value_browsing: spec.supports_key_value_browsing,
             supports_schemas: spec.supports_schemas,
             supports_create_database: spec.supports_create_database,
             supports_create_database_charset: spec.supports_create_database_charset,
@@ -1324,9 +1358,14 @@ WITH NO DATA;"#
         assert_eq!(DatabaseKind::Mysql.spec().driver, "mysql");
 
         let postgres = DatabaseKind::Postgres.capabilities();
+        assert_eq!(postgres.data_model, DatabaseDataModel::Relational);
         assert_eq!(postgres.namespace_label, "schema");
         assert_eq!(postgres.identifier_quote, "\"");
         assert_eq!(postgres.default_port, 5432);
+        assert!(postgres.supports_sql_query);
+        assert!(postgres.supports_table_browsing);
+        assert!(!postgres.supports_collection_browsing);
+        assert!(!postgres.supports_key_value_browsing);
         assert_eq!(
             postgres.display_name,
             DatabaseKind::Postgres.spec().display_name
@@ -1357,9 +1396,14 @@ WITH NO DATA;"#
         assert_eq!(postgres.default_primary_key_type, "SERIAL");
 
         let mysql = DatabaseKind::Mysql.capabilities();
+        assert_eq!(mysql.data_model, DatabaseDataModel::Relational);
         assert_eq!(mysql.namespace_label, "database");
         assert_eq!(mysql.identifier_quote, "`");
         assert_eq!(mysql.default_port, 3306);
+        assert!(mysql.supports_sql_query);
+        assert!(mysql.supports_table_browsing);
+        assert!(!mysql.supports_collection_browsing);
+        assert!(!mysql.supports_key_value_browsing);
         assert_eq!(mysql.display_name, DatabaseKind::Mysql.spec().display_name);
         assert_eq!(
             mysql.common_data_types,

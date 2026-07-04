@@ -50,10 +50,15 @@ const DATABASE_DRIVER_PROFILES: Record<
       "bg-blue-500/10 text-blue-600 dark:text-blue-400 group-hover:bg-blue-500/20",
     capabilities: {
       displayName: "PostgreSQL",
+      dataModel: "relational",
       lspLanguageId: "postgres",
       namespaceLabel: "schema",
       identifierQuote: '"',
       defaultPort: 5432,
+      supportsSqlQuery: true,
+      supportsTableBrowsing: true,
+      supportsCollectionBrowsing: false,
+      supportsKeyValueBrowsing: false,
       supportsSchemas: true,
       supportsCreateDatabase: true,
       supportsCreateDatabaseCharset: false,
@@ -104,10 +109,15 @@ const DATABASE_DRIVER_PROFILES: Record<
       "bg-orange-500/10 text-orange-600 dark:text-orange-400 group-hover:bg-orange-500/20",
     capabilities: {
       displayName: "MySQL",
+      dataModel: "relational",
       lspLanguageId: "mysql",
       namespaceLabel: "database",
       identifierQuote: "`",
       defaultPort: 3306,
+      supportsSqlQuery: true,
+      supportsTableBrowsing: true,
+      supportsCollectionBrowsing: false,
+      supportsKeyValueBrowsing: false,
       supportsSchemas: true,
       supportsCreateDatabase: true,
       supportsCreateDatabaseCharset: true,
@@ -157,6 +167,11 @@ function cloneCapabilities(
 ): DatabaseCapabilities {
   return {
     ...capabilities,
+    dataModel: capabilities.dataModel || "relational",
+    supportsSqlQuery: capabilities.supportsSqlQuery ?? true,
+    supportsTableBrowsing: capabilities.supportsTableBrowsing ?? true,
+    supportsCollectionBrowsing: capabilities.supportsCollectionBrowsing ?? false,
+    supportsKeyValueBrowsing: capabilities.supportsKeyValueBrowsing ?? false,
     commonDataTypes: [...capabilities.commonDataTypes],
   };
 }
@@ -218,10 +233,15 @@ function fallbackDatabaseDriverProfile(
       "bg-muted text-muted-foreground group-hover:bg-muted/80",
     capabilities: {
       displayName,
+      dataModel: "relational",
       lspLanguageId: "sql",
       namespaceLabel: "schema",
       identifierQuote: '"',
       defaultPort: 0,
+      supportsSqlQuery: true,
+      supportsTableBrowsing: true,
+      supportsCollectionBrowsing: false,
+      supportsKeyValueBrowsing: false,
       supportsSchemas: true,
       supportsCreateDatabase: false,
       supportsCreateDatabaseCharset: false,
@@ -324,6 +344,27 @@ export function defaultDatabaseCapabilities(
     ...capabilities,
     commonDataTypes: [...capabilities.commonDataTypes],
   };
+}
+
+export function isRelationalDataModel(
+  capabilities: Pick<DatabaseCapabilities, "dataModel">
+) {
+  return capabilities.dataModel === "relational";
+}
+
+export function supportsSqlWorkspace(
+  capabilities: Pick<DatabaseCapabilities, "supportsSqlQuery">
+) {
+  return capabilities.supportsSqlQuery;
+}
+
+export function supportsTableWorkspace(
+  capabilities: Pick<
+    DatabaseCapabilities,
+    "dataModel" | "supportsTableBrowsing"
+  >
+) {
+  return isRelationalDataModel(capabilities) && capabilities.supportsTableBrowsing;
 }
 
 export function pluralizeNamespaceLabel(label: string | null | undefined) {

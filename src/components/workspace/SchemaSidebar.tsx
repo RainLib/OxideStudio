@@ -34,6 +34,7 @@ import {
   isViewObject,
   pluralizeNamespaceLabel,
   relationObjectLabel,
+  supportsTableWorkspace,
 } from "@/lib/databaseDialect";
 import { useEffect, useState } from "react";
 import {
@@ -133,6 +134,7 @@ export function SchemaSidebar() {
     capabilities.driver === activeDriver
       ? capabilities
       : defaultDatabaseCapabilities(activeDriver);
+  const canBrowseTables = supportsTableWorkspace(activeCapabilities);
   const namespaceLabel = activeCapabilities.namespaceLabel || "database";
   const namespaceLabelPlural = pluralizeNamespaceLabel(namespaceLabel);
 
@@ -227,21 +229,23 @@ export function SchemaSidebar() {
   }, [activeDriver]);
 
   useEffect(() => {
-    if (activeConnectionId && currentSchema) {
+    if (activeConnectionId && currentSchema && canBrowseTables) {
       loadTables(activeConnectionId, currentSchema);
     }
-  }, [activeConnectionId, currentSchema, loadTables]);
+  }, [activeConnectionId, canBrowseTables, currentSchema, loadTables]);
 
   useEffect(() => {
     if (
       activeConnectionId &&
       currentSchema &&
+      canBrowseTables &&
       activeCapabilities.supportsFunctions
     ) {
       loadFunctions(activeConnectionId, currentSchema);
     }
   }, [
     activeConnectionId,
+    canBrowseTables,
     currentSchema,
     activeCapabilities.supportsFunctions,
     loadFunctions,
@@ -261,7 +265,7 @@ export function SchemaSidebar() {
   }, [databaseFilter]);
 
   // Sort tables: pinned first, then alphabetical
-  const sortedTables = [...tables].sort((a, b) => {
+  const sortedTables = (canBrowseTables ? [...tables] : []).sort((a, b) => {
     const aPinned = pinnedTables.includes(a.name);
     const bPinned = pinnedTables.includes(b.name);
     if (aPinned && !bPinned) return -1;
@@ -395,13 +399,13 @@ export function SchemaSidebar() {
     routine.routine_type?.toLowerCase() === "procedure" ? "proc" : "fn";
 
   const handleCreateTable = () => {
-    if (activeConnectionId && currentSchema) {
+    if (activeConnectionId && currentSchema && canBrowseTables) {
       createTableTab(activeConnectionId, currentSchema);
     }
   };
 
   const handleCreateView = () => {
-    if (activeConnectionId && currentSchema) {
+    if (activeConnectionId && currentSchema && activeCapabilities.supportsViews) {
       setViewDialogMode("create");
       setViewDialogKind("view");
       setViewDialogInitialName("");
@@ -414,6 +418,7 @@ export function SchemaSidebar() {
     if (
       activeConnectionId &&
       currentSchema &&
+      canBrowseTables &&
       activeCapabilities.supportsMaterializedViews
     ) {
       setViewDialogMode("create");
@@ -492,7 +497,7 @@ export function SchemaSidebar() {
       // Force refresh schemas
       await loadSchemas(activeConnectionId, true);
       // If currentSchema is selected, force refresh tables too
-      if (currentSchema) {
+      if (currentSchema && canBrowseTables) {
         await loadTables(activeConnectionId, currentSchema, true);
         if (activeCapabilities.supportsFunctions) {
           await loadFunctions(activeConnectionId, currentSchema, true);
@@ -676,7 +681,7 @@ export function SchemaSidebar() {
         </div>
 
         {/* Action buttons - only show on hover of tables area */}
-        {isTablesHovered && currentSchema && (
+        {isTablesHovered && currentSchema && canBrowseTables && (
           <div
             className={cn(
               "flex items-center gap-1 transition-opacity duration-200",
@@ -702,7 +707,7 @@ export function SchemaSidebar() {
               className="h-5 w-5 text-muted-foreground hover:text-primary rounded-sm"
               onClick={handleCreateTable}
               title="Create New Table"
-              disabled={!currentSchema}
+              disabled={!currentSchema || !canBrowseTables}
             >
               <Plus size={10} />
             </Button>
@@ -712,7 +717,7 @@ export function SchemaSidebar() {
               className="h-5 w-5 text-muted-foreground hover:text-primary rounded-sm"
               onClick={handleCreateView}
               title="Create New View"
-              disabled={!currentSchema}
+              disabled={!currentSchema || !activeCapabilities.supportsViews}
             >
               <Code2 size={10} />
             </Button>
@@ -738,9 +743,13 @@ export function SchemaSidebar() {
         onMouseEnter={() => setIsTablesHovered(true)}
         onMouseLeave={() => setIsTablesHovered(false)}
       >
-        {!currentSchema ? (
+       {!currentSchema ? (
           <div className="p-4 text-xs text-center text-gray-500 italic">
             Select a {namespaceLabel} to view tables
+          </div>
+        ) : !canBrowseTables ? (
+          <div className="p-4 text-xs text-center text-gray-500 italic">
+            Object browsing is not supported by this driver
           </div>
         ) : isLoading && tables.length === 0 ? (
           <div className="p-4 text-xs text-center text-gray-500 italic">

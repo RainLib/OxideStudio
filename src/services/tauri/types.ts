@@ -20,14 +20,20 @@ export interface ApiResponse<T> {
  */
 export type KnownDatabaseDriver = "postgres" | "mysql";
 export type DatabaseDriver = KnownDatabaseDriver | (string & {});
+export type DatabaseDataModel = "relational" | "document" | "keyValue" | "search";
 
 export interface DatabaseCapabilities {
   driver: DatabaseDriver;
   displayName: string;
+  dataModel: DatabaseDataModel;
   lspLanguageId: string;
   namespaceLabel: string;
   identifierQuote: string;
   defaultPort: number;
+  supportsSqlQuery: boolean;
+  supportsTableBrowsing: boolean;
+  supportsCollectionBrowsing: boolean;
+  supportsKeyValueBrowsing: boolean;
   supportsSchemas: boolean;
   supportsCreateDatabase: boolean;
   supportsCreateDatabaseCharset: boolean;
