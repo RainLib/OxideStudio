@@ -1,8 +1,10 @@
 import type {
   AiToolDefinition,
+  AiToolExecutionPolicy,
   AiToolExecutionContext,
   AiToolSummary,
 } from "./types";
+import { evaluateAiToolPolicy } from "./policy";
 
 export class AiToolRegistry {
   private readonly tools = new Map<string, AiToolDefinition>();
@@ -49,6 +51,29 @@ export class AiToolRegistry {
       tool.timeoutMs,
       tool.name
     );
+  }
+
+  evaluate(name: string, policy?: AiToolExecutionPolicy) {
+    const tool = this.get(name);
+    if (!tool) {
+      throw new Error(`AI tool not found: ${name}`);
+    }
+    return evaluateAiToolPolicy(tool, policy);
+  }
+
+  async executeWithPolicy<TOutput = unknown>(
+    name: string,
+    input: unknown,
+    context: AiToolExecutionContext,
+    policy?: AiToolExecutionPolicy
+  ): Promise<TOutput> {
+    const decision = this.evaluate(name, policy);
+    if (!decision.allowed) {
+      throw new Error(
+        decision.reason || `AI tool is not allowed by policy: ${name}`
+      );
+    }
+    return this.execute<TOutput>(name, input, context);
   }
 }
 

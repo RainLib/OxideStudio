@@ -1,8 +1,11 @@
 import {
   AiToolRegistry,
+  DEFAULT_AI_TOOL_POLICY,
+  evaluateAiToolPolicy,
   createWorkspaceAiToolContext,
   createWorkspaceAiToolRegistry,
 } from "@/ai/tools";
+import type { AiToolExecutionPolicy, AiToolSummary } from "@/ai/tools";
 import type {
   AssistantIntent,
   AssistantPlanStep,
@@ -13,15 +16,18 @@ import type {
 export type AssistantRuntimeOptions = {
   registry?: AiToolRegistry;
   createContext?: () => ReturnType<typeof createWorkspaceAiToolContext>;
+  policy?: AiToolExecutionPolicy;
 };
 
 export class AssistantRuntime {
   private readonly registry: AiToolRegistry;
   private readonly createContext: () => ReturnType<typeof createWorkspaceAiToolContext>;
+  private readonly policy: AiToolExecutionPolicy;
 
   constructor(options: AssistantRuntimeOptions = {}) {
     this.registry = options.registry ?? createWorkspaceAiToolRegistry();
     this.createContext = options.createContext ?? createWorkspaceAiToolContext;
+    this.policy = options.policy ?? DEFAULT_AI_TOOL_POLICY;
   }
 
   prepareTurn(input: AssistantTurnInput): AssistantPreparedTurn {
@@ -42,7 +48,12 @@ export class AssistantRuntime {
       intent,
       context,
       availableTools,
-      suggestedPlan: buildSuggestedPlan(intent, input, availableTools),
+      suggestedPlan: buildSuggestedPlan(
+        intent,
+        input,
+        availableTools,
+        this.policy
+      ),
       warnings,
     };
   }
@@ -50,9 +61,15 @@ export class AssistantRuntime {
   async executeTool<TOutput = unknown>(
     toolName: string,
     input: unknown,
-    context = this.createContext()
+    context = this.createContext(),
+    policy = this.policy
   ) {
-    return this.registry.execute<TOutput>(toolName, input, context);
+    return this.registry.executeWithPolicy<TOutput>(
+      toolName,
+      input,
+      context,
+      policy
+    );
   }
 }
 
@@ -83,9 +100,15 @@ function classifyIntent(input: AssistantTurnInput): AssistantIntent {
 function buildSuggestedPlan(
   intent: AssistantIntent,
   input: AssistantTurnInput,
-  tools: Array<{ name: string }>
+  tools: AiToolSummary[],
+  policy: AiToolExecutionPolicy
 ): AssistantPlanStep[] {
   const hasTool = (name: string) => tools.some((tool) => tool.name === name);
+  const requiresApproval = (name: string) => {
+    const tool = tools.find((candidate) => candidate.name === name);
+    if (!tool) return false;
+    return evaluateAiToolPolicy(tool, policy).requiresApproval;
+  };
   const steps: AssistantPlanStep[] = [];
 
   if (hasTool("workspace.getActiveTab")) {
@@ -94,7 +117,7 @@ function buildSuggestedPlan(
       title: "Read the active editor context",
       toolName: "workspace.getActiveTab",
       input: {},
-      requiresApproval: false,
+      requiresApproval: requiresApproval("workspace.getActiveTab"),
     });
   }
 
@@ -104,7 +127,7 @@ function buildSuggestedPlan(
       title: "Inspect available database connections",
       toolName: "connection.list",
       input: {},
-      requiresApproval: false,
+      requiresApproval: requiresApproval("connection.list"),
     });
   }
 
@@ -114,7 +137,7 @@ function buildSuggestedPlan(
       title: "List collections, keys, or indexes for the active namespace",
       toolName: "metadata.listCollections",
       input: {},
-      requiresApproval: false,
+      requiresApproval: requiresApproval("metadata.listCollections"),
     });
   }
 
@@ -127,7 +150,7 @@ function buildSuggestedPlan(
         : "Prepare a bounded read-only query",
       toolName: query ? "query.runReadOnly" : undefined,
       input: query ? { query } : undefined,
-      requiresApproval: false,
+      requiresApproval: query ? requiresApproval("query.runReadOnly") : false,
     });
   }
 

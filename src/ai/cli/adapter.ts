@@ -1,15 +1,17 @@
 import {
   AiToolRegistry,
+  DEFAULT_AI_TOOL_POLICY,
   createWorkspaceAiToolContext,
   createWorkspaceAiToolRegistry,
 } from "@/ai/tools";
-import type { AiToolExecutionContext } from "@/ai/tools";
+import type { AiToolExecutionContext, AiToolExecutionPolicy } from "@/ai/tools";
 import type { CliInputReader, CliToolCommandResult } from "./types";
 
 export type CliToolAdapterOptions = {
   registry?: AiToolRegistry;
   createContext?: () => AiToolExecutionContext;
   readFile?: CliInputReader;
+  policy?: AiToolExecutionPolicy;
 };
 
 type ParsedCommand =
@@ -21,11 +23,13 @@ export class CliToolAdapter {
   private readonly registry: AiToolRegistry;
   private readonly createContext: () => AiToolExecutionContext;
   private readonly readFile?: CliInputReader;
+  private readonly policy: AiToolExecutionPolicy;
 
   constructor(options: CliToolAdapterOptions = {}) {
     this.registry = options.registry ?? createWorkspaceAiToolRegistry();
     this.createContext = options.createContext ?? createWorkspaceAiToolContext;
     this.readFile = options.readFile;
+    this.policy = options.policy ?? DEFAULT_AI_TOOL_POLICY;
   }
 
   async run(argv: string[]): Promise<CliToolCommandResult> {
@@ -37,10 +41,11 @@ export class CliToolAdapter {
         case "list":
           return okJson(this.registry.list());
         case "call": {
-          const result = await this.registry.execute(
+          const result = await this.registry.executeWithPolicy(
             command.toolName,
             command.input,
-            this.createContext()
+            this.createContext(),
+            this.policy
           );
           return okJson(result);
         }
@@ -150,4 +155,3 @@ function helpText() {
     "",
   ].join("\n");
 }
-

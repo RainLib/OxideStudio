@@ -29,6 +29,21 @@ export type AiToolResultLimit = {
   maxBytes?: number;
 };
 
+export type AiToolExecutionPolicy = {
+  allowPermissions?: AiToolPermission[];
+  requireApprovalFor?: AiToolPermission[];
+  approvedTools?: string[];
+  deniedTools?: string[];
+};
+
+export type AiToolPolicyDecision = {
+  toolName: string;
+  allowed: boolean;
+  requiresApproval: boolean;
+  permissions: AiToolPermission[];
+  reason?: string;
+};
+
 export type AiToolExecutionContext = {
   requestId: string;
   activeConnectionId?: string | null;

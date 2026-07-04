@@ -1,23 +1,27 @@
 import {
   AiToolRegistry,
+  DEFAULT_AI_TOOL_POLICY,
   createWorkspaceAiToolContext,
   createWorkspaceAiToolRegistry,
 } from "@/ai/tools";
-import type { AiToolExecutionContext } from "@/ai/tools";
+import type { AiToolExecutionContext, AiToolExecutionPolicy } from "@/ai/tools";
 import type { McpTool, McpToolCallResult } from "./types";
 
 export type McpToolAdapterOptions = {
   registry?: AiToolRegistry;
   createContext?: () => AiToolExecutionContext;
+  policy?: AiToolExecutionPolicy;
 };
 
 export class McpToolAdapter {
   private readonly registry: AiToolRegistry;
   private readonly createContext: () => AiToolExecutionContext;
+  private readonly policy: AiToolExecutionPolicy;
 
   constructor(options: McpToolAdapterOptions = {}) {
     this.registry = options.registry ?? createWorkspaceAiToolRegistry();
     this.createContext = options.createContext ?? createWorkspaceAiToolContext;
+    this.policy = options.policy ?? DEFAULT_AI_TOOL_POLICY;
   }
 
   listTools(): McpTool[] {
@@ -30,7 +34,12 @@ export class McpToolAdapter {
 
   async callTool(name: string, input: unknown): Promise<McpToolCallResult> {
     try {
-      const result = await this.registry.execute(name, input, this.createContext());
+      const result = await this.registry.executeWithPolicy(
+        name,
+        input,
+        this.createContext(),
+        this.policy
+      );
       return {
         content: [
           {
