@@ -45,6 +45,7 @@ interface EditorActionBarProps {
   onLoadQuery: (sql: string) => void;
   onSaveQuery: (name: string, sql: string) => void;
   onDeleteQuery: (id: string) => void;
+  supportsTransactions: boolean;
 }
 
 export function EditorActionBar({
@@ -66,6 +67,7 @@ export function EditorActionBar({
   onLoadQuery,
   onSaveQuery,
   onDeleteQuery,
+  supportsTransactions,
 }: EditorActionBarProps) {
   const [isSaveOpen, setIsSaveOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
@@ -84,14 +86,16 @@ export function EditorActionBar({
     <div className="h-10 shrink-0 bg-background-primary border-t border-border flex items-center justify-between px-3">
       {/* Left Side - Transaction Control */}
       <div className="flex items-center gap-3">
-        <TransactionControl
-          mode={transactionMode}
-          state={transactionState}
-          onModeChange={onTransactionModeChange}
-          onBegin={onBeginTransaction}
-          onCommit={onCommitTransaction}
-          onRollback={onRollbackTransaction}
-        />
+        {supportsTransactions && (
+          <TransactionControl
+            mode={transactionMode}
+            state={transactionState}
+            onModeChange={onTransactionModeChange}
+            onBegin={onBeginTransaction}
+            onCommit={onCommitTransaction}
+            onRollback={onRollbackTransaction}
+          />
+        )}
       </div>
 
       {/* Right Side - Action Buttons */}

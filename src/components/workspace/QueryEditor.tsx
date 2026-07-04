@@ -12,6 +12,7 @@ import { useEffect, useRef, useState, useContext } from "react";
 import { useLspClient } from "@/hooks/useLspClient";
 import {
   DEFAULT_DATABASE_DRIVER,
+  defaultDatabaseCapabilities,
   lspLanguageId,
   queryEditorLanguageId,
   supportsLspLanguageId,
@@ -138,6 +139,8 @@ export function QueryEditor() {
   const documentLanguageId = lspLanguageId(driver);
   const editorLanguageId = queryEditorLanguageId(driver);
   const canUseLsp = supportsLspLanguageId(driver);
+  const capabilities = defaultDatabaseCapabilities(driver);
+  const supportsTransactions = capabilities.supportsTransactions;
   const activeDocumentSql = activeTab?.sql || "";
   const monaco = useMonaco();
   const { isReady: lspReady, client: lspClient } = useLspClient(); // Added LSP client state
@@ -457,7 +460,9 @@ export function QueryEditor() {
   const handleRun = () => {
     if (effectiveConnectionId && activeTab) {
       const transactionId =
-        transactionMode === "manual" && activeTransactionState === "active"
+        supportsTransactions &&
+        transactionMode === "manual" &&
+        activeTransactionState === "active"
           ? getTransactionId() || undefined
           : undefined;
       runTabQuery(activeTab.id, effectiveConnectionId, undefined, transactionId);
@@ -479,7 +484,9 @@ export function QueryEditor() {
 
     const selectedText = model.getValueInRange(selection);
     const transactionId =
-      transactionMode === "manual" && activeTransactionState === "active"
+      supportsTransactions &&
+      transactionMode === "manual" &&
+      activeTransactionState === "active"
         ? getTransactionId() || undefined
         : undefined;
 
@@ -521,6 +528,7 @@ export function QueryEditor() {
   };
 
   const handleTransactionModeChange = (mode: TransactionMode) => {
+    if (!supportsTransactions) return;
     setTransactionMode(mode);
     if (mode === "auto" && activeTransactionState === "active") {
       void handleCommitTransaction();
@@ -528,7 +536,7 @@ export function QueryEditor() {
   };
 
   const handleBeginTransaction = async () => {
-    if (!activeTab || !effectiveConnectionId) return;
+    if (!supportsTransactions || !activeTab || !effectiveConnectionId) return;
     const transactionId = getTransactionId();
     if (!transactionId) return;
 
@@ -552,6 +560,7 @@ export function QueryEditor() {
   };
 
   const handleCommitTransaction = async () => {
+    if (!supportsTransactions) return;
     if (!activeTab) return;
     const session = activeTransactionsRef.current.get(activeTab.id);
     if (!session) return;
@@ -580,6 +589,7 @@ export function QueryEditor() {
   };
 
   const handleRollbackTransaction = async () => {
+    if (!supportsTransactions) return;
     if (!activeTab) return;
     const session = activeTransactionsRef.current.get(activeTab.id);
     if (!session) return;
@@ -678,6 +688,7 @@ export function QueryEditor() {
           saveQuery(_name, activeTab.sql)
         }
         onDeleteQuery={deleteQuery}
+        supportsTransactions={supportsTransactions}
       />
     </div>
   );
