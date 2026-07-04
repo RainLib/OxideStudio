@@ -3,6 +3,7 @@ import {
   schemaService,
   storeService,
   TableInfo,
+  CollectionInfo,
   FunctionInfo,
   Resource,
 } from "@/services/tauri";
@@ -12,6 +13,7 @@ import { selectPreferredNamespace } from "@/lib/databaseDialect";
 interface SchemaState {
   schemas: string[];
   tables: TableInfo[];
+  collections: CollectionInfo[];
   functions: FunctionInfo[];
   pinnedTables: string[];
   currentSchema: string | null;
@@ -19,6 +21,7 @@ interface SchemaState {
   selectedTable: string | null;
   lastLoadedConnectionId: string | null; // Guard for duplicate calls
   isLoading: boolean;
+  isCollectionsLoading: boolean;
   isFunctionsLoading: boolean;
   metadataVersion: number;
 
@@ -26,6 +29,11 @@ interface SchemaState {
   loadTables: (
     connectionId: string,
     schema: string,
+    force?: boolean
+  ) => Promise<void>;
+  loadCollections: (
+    connectionId: string,
+    namespace: string,
     force?: boolean
   ) => Promise<void>;
   loadFunctions: (
@@ -75,6 +83,7 @@ const getSavedDefaultSchema = (
 export const useSchemaStore = create<SchemaState>((set, get) => ({
   schemas: [],
   tables: [],
+  collections: [],
   functions: [],
   pinnedTables: [],
   currentSchema: null,
@@ -82,6 +91,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
   selectedTable: null,
   lastLoadedConnectionId: null,
   isLoading: false,
+  isCollectionsLoading: false,
   isFunctionsLoading: false,
   metadataVersion: 0,
 
@@ -89,12 +99,14 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     set({
       schemas: [],
       tables: [],
+      collections: [],
       functions: [],
       pinnedTables: [],
       currentSchema: null,
       selectedTable: null,
       lastLoadedConnectionId: null,
       isLoading: false,
+      isCollectionsLoading: false,
       isFunctionsLoading: false,
       metadataVersion: 0,
     });
@@ -179,6 +191,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
           defaultSchema: savedDefault,
           isLoading: false,
           selectedTable: null,
+          collections: [],
           tables: currentSchema && schemas.includes(currentSchema) ? get().tables : [],
         });
 
@@ -320,6 +333,39 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     }
   },
 
+  loadCollections: async (
+    connectionId: string,
+    namespace: string,
+    _force = false
+  ) => {
+    if (!connectionId) {
+      set({ collections: [], isCollectionsLoading: false });
+      return;
+    }
+
+    set({ isCollectionsLoading: true });
+    try {
+      const collections = await schemaService.getCollections(
+        connectionId,
+        namespace || ""
+      );
+      const activeConnectionId = useConnectionStore.getState().activeConnectionId;
+      const currentSchema = get().currentSchema;
+      if (activeConnectionId !== connectionId || currentSchema !== namespace) {
+        return;
+      }
+      set({ collections, isCollectionsLoading: false });
+    } catch (e) {
+      console.warn("Store: loadCollections failed", e);
+      const activeConnectionId = useConnectionStore.getState().activeConnectionId;
+      const currentSchema = get().currentSchema;
+      if (activeConnectionId !== connectionId || currentSchema !== namespace) {
+        return;
+      }
+      set({ collections: [], isCollectionsLoading: false });
+    }
+  },
+
   bumpMetadataVersion: () => {
     set((state) => ({ metadataVersion: state.metadataVersion + 1 }));
   },
@@ -351,7 +397,9 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       currentSchema: schema,
       selectedTable: null,
       tables: [],
+      collections: [],
       functions: [],
+      isCollectionsLoading: false,
       isFunctionsLoading: false,
     });
 

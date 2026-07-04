@@ -2,6 +2,7 @@ import { cn } from "@/lib/utils";
 import {
   Database,
   Table,
+  Braces,
   Search,
   RefreshCw,
   Plus,
@@ -25,7 +26,12 @@ import { EditColumnsDialog } from "./EditColumnsDialog";
 import { CreateViewDialog } from "./CreateViewDialog";
 import { useTableOperations } from "@/hooks/useTableOperations";
 import { databaseService } from "@/services/tauri";
-import type { FunctionInfo, TableInfo } from "@/services/tauri/types";
+import type {
+  CollectionInfo,
+  DatabaseDriver,
+  FunctionInfo,
+  TableInfo,
+} from "@/services/tauri/types";
 import {
   DEFAULT_DATABASE_DRIVER,
   defaultDatabaseCapabilities,
@@ -70,6 +76,41 @@ function routineMatchesFilter(routine: FunctionInfo, filter: string) {
     .some((value) => String(value).toLowerCase().includes(normalizedFilter));
 }
 
+function collectionObjectLabel(driver: DatabaseDriver) {
+  const normalized = String(driver).toLowerCase();
+  if (normalized === "elasticsearch" || normalized === "elastic") return "Index";
+  return "Collection";
+}
+
+function collectionQueryTemplate(
+  driver: DatabaseDriver,
+  namespace: string | null,
+  collection: string
+) {
+  const normalized = String(driver).toLowerCase();
+  if (normalized === "elasticsearch" || normalized === "elastic") {
+    return `GET /${encodeURIComponent(collection)}/_search\n${JSON.stringify(
+      {
+        query: { match_all: {} },
+        size: 100,
+      },
+      null,
+      2
+    )}`;
+  }
+
+  return JSON.stringify(
+    {
+      ...(namespace ? { database: namespace } : {}),
+      collection,
+      find: {},
+      limit: 100,
+    },
+    null,
+    2
+  );
+}
+
 export function SchemaSidebar() {
   const { activeConnectionId, connections } = useConnectionStore();
   const {
@@ -78,8 +119,10 @@ export function SchemaSidebar() {
     currentSchema,
     loadSchemas,
     loadTables,
+    loadCollections,
     loadFunctions,
     tables,
+    collections,
     functions,
     pinnedTables,
     togglePinTable,
@@ -87,6 +130,7 @@ export function SchemaSidebar() {
     selectTable,
     selectedTable,
     bumpMetadataVersion,
+    isCollectionsLoading,
     isFunctionsLoading,
   } = useSchemaStore();
 
@@ -135,6 +179,15 @@ export function SchemaSidebar() {
       ? capabilities
       : defaultDatabaseCapabilities(activeDriver);
   const canBrowseTables = supportsTableWorkspace(activeCapabilities);
+  const canBrowseCollections = activeCapabilities.supportsCollectionBrowsing;
+  const collectionLabel = collectionObjectLabel(activeDriver);
+  const collectionLabelPlural =
+    collectionLabel === "Index" ? "Indices" : `${collectionLabel}s`;
+  const objectSectionLabel = canBrowseTables
+    ? "Tables"
+    : canBrowseCollections
+      ? collectionLabelPlural
+      : "Objects";
   const namespaceLabel = activeCapabilities.namespaceLabel || "database";
   const namespaceLabelPlural = pluralizeNamespaceLabel(namespaceLabel);
 
@@ -235,6 +288,17 @@ export function SchemaSidebar() {
   }, [activeConnectionId, canBrowseTables, currentSchema, loadTables]);
 
   useEffect(() => {
+    if (activeConnectionId && currentSchema && canBrowseCollections) {
+      loadCollections(activeConnectionId, currentSchema);
+    }
+  }, [
+    activeConnectionId,
+    canBrowseCollections,
+    currentSchema,
+    loadCollections,
+  ]);
+
+  useEffect(() => {
     if (
       activeConnectionId &&
       currentSchema &&
@@ -277,6 +341,11 @@ export function SchemaSidebar() {
   const filteredTables = sortedTables.filter((table) =>
     table.name.toLowerCase().includes(filterText.toLowerCase())
   );
+  const filteredCollections = (canBrowseCollections ? [...collections] : [])
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .filter((collection) =>
+      collection.name.toLowerCase().includes(filterText.toLowerCase())
+    );
   const filteredFunctions = functions.filter((routine) =>
     routineMatchesFilter(routine, filterText)
   );
@@ -343,8 +412,13 @@ export function SchemaSidebar() {
     setFilterText,
   ]);
 
-  const { findOrCreateTableTab, loadTablePage, createTableTab } =
-    useTabStore();
+  const {
+    findOrCreateTableTab,
+    loadTablePage,
+    createTableTab,
+    createTab,
+    runTabQuery,
+  } = useTabStore();
 
   const handleTableSelect = (tableName: string) => {
     selectTable(tableName);
@@ -362,6 +436,24 @@ export function SchemaSidebar() {
     );
 
     void loadTablePage(tabId, 0);
+  };
+
+  const handleCollectionSelect = (collectionName: string) => {
+    selectTable(collectionName);
+  };
+
+  const handleCollectionDoubleClick = (collection: CollectionInfo) => {
+    if (!activeConnectionId) return;
+
+    const sql = collectionQueryTemplate(
+      activeDriver,
+      currentSchema,
+      collection.name
+    );
+    const tabId = createTab("query", collection.name, sql, {
+      connectionId: activeConnectionId,
+    });
+    void runTabQuery(tabId, activeConnectionId, sql);
   };
 
   // Highlight matching text
@@ -502,6 +594,9 @@ export function SchemaSidebar() {
         if (activeCapabilities.supportsFunctions) {
           await loadFunctions(activeConnectionId, currentSchema, true);
         }
+      }
+      if (currentSchema && canBrowseCollections) {
+        await loadCollections(activeConnectionId, currentSchema, true);
       }
     }
   };
@@ -671,11 +766,15 @@ export function SchemaSidebar() {
       >
         <div className="flex items-center gap-2">
           <span className="text-[10px] font-bold text-muted-foreground tracking-wider uppercase">
-            Tables
+            {objectSectionLabel}
           </span>
           {currentSchema && (
             <span className="text-[9px] bg-background-secondary px-1.5 py-0.5 rounded text-muted-foreground border border-border">
-              {filteredTables.length}
+              {canBrowseTables
+                ? filteredTables.length
+                : canBrowseCollections
+                  ? filteredCollections.length
+                  : 0}
             </span>
           )}
         </div>
@@ -735,6 +834,31 @@ export function SchemaSidebar() {
             )}
           </div>
         )}
+        {isTablesHovered &&
+          currentSchema &&
+          !canBrowseTables &&
+          canBrowseCollections && (
+            <div
+              className={cn(
+                "flex items-center gap-1 transition-opacity duration-200",
+                isTablesHovered ? "opacity-100" : "opacity-0"
+              )}
+            >
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5 text-muted-foreground hover:text-primary rounded-sm"
+                onClick={handleRefresh}
+                title={`Refresh ${collectionLabelPlural}`}
+                disabled={isCollectionsLoading}
+              >
+                <RefreshCw
+                  size={10}
+                  className={cn(isCollectionsLoading && "animate-spin")}
+                />
+              </Button>
+            </div>
+          )}
       </div>
 
       {/* Bottom: Tables List */}
@@ -745,8 +869,54 @@ export function SchemaSidebar() {
       >
        {!currentSchema ? (
           <div className="p-4 text-xs text-center text-gray-500 italic">
-            Select a {namespaceLabel} to view tables
+            Select a {namespaceLabel} to view objects
           </div>
+        ) : canBrowseCollections ? (
+          isCollectionsLoading && collections.length === 0 ? (
+            <div className="p-4 text-xs text-center text-gray-500 italic">
+              Loading {collectionLabelPlural.toLowerCase()}...
+            </div>
+          ) : filteredCollections.length === 0 ? (
+            <div className="p-4 text-xs text-center text-gray-500 italic">
+              {filterText
+                ? `No ${collectionLabelPlural.toLowerCase()} match "${filterText}"`
+                : `No ${collectionLabelPlural.toLowerCase()} found`}
+            </div>
+          ) : (
+            <div className="px-1">
+              {filteredCollections.map((collection) => (
+                <div
+                  key={`${collection.namespace || currentSchema}:${collection.name}`}
+                  className={cn(
+                    "flex items-center gap-2 px-2 py-1.5 cursor-pointer text-[11px] group transition-all select-none rounded-sm relative",
+                    selectedTable === collection.name
+                      ? "bg-background-secondary text-primary"
+                      : "text-muted-foreground hover:text-foreground hover:bg-background-secondary/50"
+                  )}
+                  onClick={() => handleCollectionSelect(collection.name)}
+                  onDoubleClick={() => handleCollectionDoubleClick(collection)}
+                  title={collection.name}
+                >
+                  <Braces
+                    size={12}
+                    className={cn(
+                      "shrink-0 opacity-70",
+                      selectedTable === collection.name && "opacity-100"
+                    )}
+                  />
+                  <span className="truncate flex-1">
+                    {highlightMatch(collection.name, filterText)}
+                  </span>
+                  {collection.documentCount !== null &&
+                    collection.documentCount !== undefined && (
+                      <span className="text-[9px] opacity-50 shrink-0 tabular-nums">
+                        {collection.documentCount}
+                      </span>
+                    )}
+                </div>
+              ))}
+            </div>
+          )
         ) : !canBrowseTables ? (
           <div className="p-4 text-xs text-center text-gray-500 italic">
             Object browsing is not supported by this driver
