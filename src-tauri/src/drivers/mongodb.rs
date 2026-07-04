@@ -1,0 +1,627 @@
+use crate::core::{
+    driver::DatabaseDriver,
+    protocol::{ColumnDef, QueryResult},
+};
+use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
+use mongodb::{
+    bson::{self, doc, Bson, Document},
+    Client,
+};
+use serde::Deserialize;
+use serde_json::Value;
+use tokio::sync::Mutex;
+
+pub struct MongoDbDriver {
+    url: String,
+    default_database: String,
+    client: Mutex<Option<Client>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MongoCommandInput {
+    database: Option<String>,
+    collection: Option<String>,
+    command: Option<Value>,
+    find: Option<Value>,
+    aggregate: Option<Vec<Value>>,
+    count_documents: Option<Value>,
+    insert_one: Option<Value>,
+    insert_many: Option<Vec<Value>>,
+    update_one: Option<MongoUpdateInput>,
+    update_many: Option<MongoUpdateInput>,
+    delete_one: Option<Value>,
+    delete_many: Option<Value>,
+    limit: Option<i64>,
+    skip: Option<i64>,
+    sort: Option<Value>,
+    projection: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MongoUpdateInput {
+    filter: Value,
+    update: Value,
+    upsert: Option<bool>,
+}
+
+impl MongoDbDriver {
+    pub fn new(url: &str) -> Self {
+        Self {
+            url: url.to_string(),
+            default_database: mongodb_default_database(url),
+            client: Mutex::new(None),
+        }
+    }
+
+    async fn client(&self) -> Result<Client> {
+        self.client
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow!("MongoDB connection is not established"))
+    }
+
+    async fn execute_command(&self, input: MongoCommandInput) -> Result<QueryResult> {
+        let client = self.client().await?;
+        let database_name = input
+            .database
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&self.default_database);
+        let database = client.database(database_name);
+
+        if let Some(command) = input.command.as_ref() {
+            let result = database
+                .run_command(json_to_document(command, "command")?)
+                .await
+                .context("MongoDB command failed")?;
+            return Ok(command_result(database_name, "command", None, result));
+        }
+
+        let collection = input
+            .collection
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("MongoDB collection is required"))?;
+
+        if input.find.is_some() || input.has_no_operation() {
+            let result = database
+                .run_command(build_find_command(collection, &input)?)
+                .await
+                .context("MongoDB find command failed")?;
+            return Ok(documents_result(extract_cursor_batch(result)?));
+        }
+
+        if let Some(pipeline) = input.aggregate.as_ref() {
+            let result = database
+                .run_command(build_aggregate_command(collection, pipeline)?)
+                .await
+                .context("MongoDB aggregate command failed")?;
+            return Ok(documents_result(extract_cursor_batch(result)?));
+        }
+
+        if let Some(filter) = input.count_documents.as_ref() {
+            let result = database
+                .run_command(doc! {
+                    "count": collection,
+                    "query": json_to_document(filter, "countDocuments")?,
+                })
+                .await
+                .context("MongoDB count command failed")?;
+            return Ok(command_result(
+                database_name,
+                "countDocuments",
+                Some(collection),
+                result,
+            ));
+        }
+
+        if let Some(document) = input.insert_one.as_ref() {
+            let document = json_to_document(document, "insertOne")?;
+            let result = database
+                .run_command(doc! {
+                    "insert": collection,
+                    "documents": [document],
+                })
+                .await
+                .context("MongoDB insertOne command failed")?;
+            return Ok(command_result(
+                database_name,
+                "insertOne",
+                Some(collection),
+                result,
+            ));
+        }
+
+        if let Some(documents) = input.insert_many.as_ref() {
+            let documents = documents
+                .iter()
+                .map(|value| json_to_document(value, "insertMany document"))
+                .collect::<Result<Vec<_>>>()?;
+            let result = database
+                .run_command(doc! {
+                    "insert": collection,
+                    "documents": documents,
+                })
+                .await
+                .context("MongoDB insertMany command failed")?;
+            return Ok(command_result(
+                database_name,
+                "insertMany",
+                Some(collection),
+                result,
+            ));
+        }
+
+        if let Some(update) = input.update_one.as_ref() {
+            let result = database
+                .run_command(build_update_command(collection, update, false)?)
+                .await
+                .context("MongoDB updateOne command failed")?;
+            return Ok(command_result(
+                database_name,
+                "updateOne",
+                Some(collection),
+                result,
+            ));
+        }
+
+        if let Some(update) = input.update_many.as_ref() {
+            let result = database
+                .run_command(build_update_command(collection, update, true)?)
+                .await
+                .context("MongoDB updateMany command failed")?;
+            return Ok(command_result(
+                database_name,
+                "updateMany",
+                Some(collection),
+                result,
+            ));
+        }
+
+        if let Some(filter) = input.delete_one.as_ref() {
+            let result = database
+                .run_command(build_delete_command(collection, filter, 1)?)
+                .await
+                .context("MongoDB deleteOne command failed")?;
+            return Ok(command_result(
+                database_name,
+                "deleteOne",
+                Some(collection),
+                result,
+            ));
+        }
+
+        if let Some(filter) = input.delete_many.as_ref() {
+            let result = database
+                .run_command(build_delete_command(collection, filter, 0)?)
+                .await
+                .context("MongoDB deleteMany command failed")?;
+            return Ok(command_result(
+                database_name,
+                "deleteMany",
+                Some(collection),
+                result,
+            ));
+        }
+
+        Err(anyhow!("Unsupported MongoDB command"))
+    }
+}
+
+#[async_trait]
+impl DatabaseDriver for MongoDbDriver {
+    async fn connect(&mut self) -> Result<()> {
+        let client = Client::with_uri_str(&self.url)
+            .await
+            .with_context(|| format!("Failed to connect to MongoDB at {}", self.url))?;
+        client
+            .database("admin")
+            .run_command(doc! { "ping": 1 })
+            .await
+            .context("MongoDB ping failed")?;
+
+        *self.client.lock().await = Some(client);
+        Ok(())
+    }
+
+    async fn disconnect(&self) -> Result<()> {
+        *self.client.lock().await = None;
+        Ok(())
+    }
+
+    async fn ping(&self) -> Result<()> {
+        self.client()
+            .await?
+            .database("admin")
+            .run_command(doc! { "ping": 1 })
+            .await
+            .context("MongoDB ping failed")?;
+        Ok(())
+    }
+
+    async fn query(&self, sql: &str) -> Result<Vec<QueryResult>> {
+        let commands = parse_mongodb_commands(sql)?;
+        if commands.is_empty() {
+            return Err(anyhow!("MongoDB command is required"));
+        }
+
+        let mut results = Vec::with_capacity(commands.len());
+        for command in commands {
+            results.push(self.execute_command(command).await?);
+        }
+        Ok(results)
+    }
+
+    async fn get_schemas(&self) -> Result<Vec<String>> {
+        let names = self
+            .client()
+            .await?
+            .list_database_names()
+            .await
+            .context("Failed to list MongoDB databases")?;
+        Ok(names)
+    }
+}
+
+impl MongoCommandInput {
+    fn operation_count(&self) -> usize {
+        [
+            self.command.is_some(),
+            self.find.is_some(),
+            self.aggregate.is_some(),
+            self.count_documents.is_some(),
+            self.insert_one.is_some(),
+            self.insert_many.is_some(),
+            self.update_one.is_some(),
+            self.update_many.is_some(),
+            self.delete_one.is_some(),
+            self.delete_many.is_some(),
+        ]
+        .into_iter()
+        .filter(|value| *value)
+        .count()
+    }
+
+    fn has_no_operation(&self) -> bool {
+        self.operation_count() == 0
+    }
+
+    fn validate(&self) -> Result<()> {
+        let operation_count = self.operation_count();
+        if operation_count > 1 {
+            return Err(anyhow!(
+                "MongoDB command must contain exactly one operation"
+            ));
+        }
+        if self.command.is_none() && self.collection.is_none() {
+            return Err(anyhow!("MongoDB collection is required"));
+        }
+        Ok(())
+    }
+}
+
+fn parse_mongodb_commands(input: &str) -> Result<Vec<MongoCommandInput>> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let value: Value = serde_json::from_str(input).context("MongoDB commands must be JSON")?;
+    let values = match value {
+        Value::Array(values) => values,
+        value => vec![value],
+    };
+
+    values
+        .into_iter()
+        .map(|value| {
+            let command: MongoCommandInput =
+                serde_json::from_value(value).context("Invalid MongoDB command shape")?;
+            command.validate()?;
+            Ok(command)
+        })
+        .collect()
+}
+
+fn build_find_command(collection: &str, input: &MongoCommandInput) -> Result<Document> {
+    let filter = input
+        .find
+        .as_ref()
+        .map(|value| json_to_document(value, "find"))
+        .transpose()?
+        .unwrap_or_default();
+    let mut command = doc! {
+        "find": collection,
+        "filter": filter,
+    };
+
+    if let Some(limit) = input.limit {
+        command.insert("limit", limit);
+    }
+    if let Some(skip) = input.skip {
+        command.insert("skip", skip);
+    }
+    if let Some(sort) = input.sort.as_ref() {
+        command.insert("sort", json_to_document(sort, "sort")?);
+    }
+    if let Some(projection) = input.projection.as_ref() {
+        command.insert("projection", json_to_document(projection, "projection")?);
+    }
+
+    Ok(command)
+}
+
+fn build_aggregate_command(collection: &str, pipeline: &[Value]) -> Result<Document> {
+    let pipeline = pipeline
+        .iter()
+        .map(|value| json_to_bson(value, "aggregate pipeline stage"))
+        .collect::<Result<Vec<_>>>()?;
+    let cursor = Document::new();
+    Ok(doc! {
+        "aggregate": collection,
+        "pipeline": pipeline,
+        "cursor": cursor,
+    })
+}
+
+fn build_update_command(
+    collection: &str,
+    update: &MongoUpdateInput,
+    multi: bool,
+) -> Result<Document> {
+    let filter = json_to_document(&update.filter, "update filter")?;
+    let update_document = json_to_document(&update.update, "update document")?;
+    let update_spec = doc! {
+        "q": filter,
+        "u": update_document,
+        "multi": multi,
+        "upsert": update.upsert.unwrap_or(false),
+    };
+
+    Ok(doc! {
+        "update": collection,
+        "updates": [update_spec],
+    })
+}
+
+fn build_delete_command(collection: &str, filter: &Value, limit: i32) -> Result<Document> {
+    let filter = json_to_document(filter, "delete filter")?;
+    let delete_spec = doc! {
+        "q": filter,
+        "limit": limit,
+    };
+
+    Ok(doc! {
+        "delete": collection,
+        "deletes": [delete_spec],
+    })
+}
+
+fn json_to_bson(value: &Value, label: &str) -> Result<Bson> {
+    bson::to_bson(value).with_context(|| format!("{label} is not valid BSON"))
+}
+
+fn json_to_document(value: &Value, label: &str) -> Result<Document> {
+    match json_to_bson(value, label)? {
+        Bson::Document(document) => Ok(document),
+        _ => Err(anyhow!("{label} must be a JSON object")),
+    }
+}
+
+fn extract_cursor_batch(result: Document) -> Result<Vec<Document>> {
+    let cursor = result
+        .get_document("cursor")
+        .context("MongoDB response did not include a cursor")?;
+    let batch = cursor
+        .get_array("firstBatch")
+        .or_else(|_| cursor.get_array("nextBatch"))
+        .context("MongoDB cursor response did not include a batch")?;
+
+    batch
+        .iter()
+        .map(|value| match value {
+            Bson::Document(document) => Ok(document.clone()),
+            _ => Err(anyhow!(
+                "MongoDB cursor batch contained a non-document value"
+            )),
+        })
+        .collect()
+}
+
+fn documents_result(documents: Vec<Document>) -> QueryResult {
+    let mut column_names = Vec::<String>::new();
+    for document in &documents {
+        for (name, _) in document {
+            if !column_names.contains(name) {
+                column_names.push(name.to_string());
+            }
+        }
+    }
+    if let Some(position) = column_names.iter().position(|name| name == "_id") {
+        let id = column_names.remove(position);
+        column_names.insert(0, id);
+    }
+
+    let columns = column_names
+        .iter()
+        .map(|name| ColumnDef {
+            name: name.to_string(),
+            data_type: "json".to_string(),
+        })
+        .collect::<Vec<_>>();
+    let rows = documents
+        .into_iter()
+        .map(|document| {
+            column_names
+                .iter()
+                .map(|name| {
+                    document
+                        .get(name)
+                        .cloned()
+                        .map(bson_to_json)
+                        .unwrap_or(Value::Null)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    QueryResult::rows(columns, rows)
+}
+
+fn command_result(
+    database: &str,
+    operation: &str,
+    collection: Option<&str>,
+    result: Document,
+) -> QueryResult {
+    QueryResult::rows(
+        vec![
+            ColumnDef {
+                name: "database".to_string(),
+                data_type: "text".to_string(),
+            },
+            ColumnDef {
+                name: "operation".to_string(),
+                data_type: "text".to_string(),
+            },
+            ColumnDef {
+                name: "collection".to_string(),
+                data_type: "text".to_string(),
+            },
+            ColumnDef {
+                name: "result".to_string(),
+                data_type: "json".to_string(),
+            },
+        ],
+        vec![vec![
+            Value::String(database.to_string()),
+            Value::String(operation.to_string()),
+            collection
+                .map(|value| Value::String(value.to_string()))
+                .unwrap_or(Value::Null),
+            bson_to_json(Bson::Document(result)),
+        ]],
+    )
+}
+
+fn bson_to_json(value: Bson) -> Value {
+    serde_json::to_value(value).unwrap_or(Value::Null)
+}
+
+fn mongodb_default_database(url: &str) -> String {
+    let without_query = url.split(['?', '#']).next().unwrap_or(url);
+    without_query
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/').map(|(_, path)| path))
+        .and_then(|path| path.split('/').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("admin")
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_default_database_from_url() {
+        assert_eq!(
+            mongodb_default_database("mongodb://user:pw@localhost:27017/app?retryWrites=true"),
+            "app"
+        );
+        assert_eq!(
+            mongodb_default_database("mongodb://localhost:27017"),
+            "admin"
+        );
+    }
+
+    #[test]
+    fn parses_single_find_command() {
+        let commands = parse_mongodb_commands(
+            r#"{"database":"app","collection":"users","find":{"active":true},"limit":10}"#,
+        )
+        .unwrap();
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].database.as_deref(), Some("app"));
+        assert_eq!(commands[0].collection.as_deref(), Some("users"));
+        assert_eq!(commands[0].limit, Some(10));
+    }
+
+    #[test]
+    fn parses_multiple_json_commands() {
+        let commands = parse_mongodb_commands(
+            r#"[
+                {"collection":"users","find":{}},
+                {"collection":"users","countDocuments":{"active":true}}
+            ]"#,
+        )
+        .unwrap();
+
+        assert_eq!(commands.len(), 2);
+        assert!(commands[0].find.is_some());
+        assert!(commands[1].count_documents.is_some());
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_collectionless_commands() {
+        assert!(parse_mongodb_commands(r#"{"find":{}}"#).is_err());
+        assert!(
+            parse_mongodb_commands(r#"{"collection":"users","find":{},"deleteMany":{}}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn builds_find_command_with_options() {
+        let input = parse_mongodb_commands(
+            r#"{
+                "collection":"users",
+                "find":{"active":true},
+                "sort":{"createdAt":-1},
+                "projection":{"email":1},
+                "skip":5,
+                "limit":20
+            }"#,
+        )
+        .unwrap()
+        .remove(0);
+
+        let command = build_find_command("users", &input).unwrap();
+        assert_eq!(command.get_str("find").unwrap(), "users");
+        assert_eq!(command.get_i64("limit").unwrap(), 20);
+        assert_eq!(command.get_i64("skip").unwrap(), 5);
+        assert!(command
+            .get_document("filter")
+            .unwrap()
+            .contains_key("active"));
+        assert!(command
+            .get_document("sort")
+            .unwrap()
+            .contains_key("createdAt"));
+        assert!(command
+            .get_document("projection")
+            .unwrap()
+            .contains_key("email"));
+    }
+
+    #[test]
+    fn converts_documents_to_tabular_result() {
+        let result = documents_result(vec![
+            doc! {"name": "Ada", "_id": 1, "active": true},
+            doc! {"_id": 2, "name": "Grace"},
+        ]);
+
+        assert_eq!(result.columns[0].name, "_id");
+        assert_eq!(result.columns[1].name, "name");
+        assert_eq!(result.columns[2].name, "active");
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[1][2], Value::Null);
+    }
+}

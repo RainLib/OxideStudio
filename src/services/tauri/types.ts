@@ -22,7 +22,8 @@ export type KnownDatabaseDriver =
   | "postgres"
   | "mysql"
   | "redis"
-  | "elasticsearch";
+  | "elasticsearch"
+  | "mongodb";
 export type DatabaseDriver = KnownDatabaseDriver | (string & {});
 export type DatabaseDataModel = "relational" | "document" | "keyValue" | "search";
 

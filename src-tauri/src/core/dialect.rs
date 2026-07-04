@@ -117,6 +117,11 @@ const ELASTICSEARCH_COMMON_DATA_TYPES: &[&str] = &[
     "geo_point",
 ];
 
+const MONGODB_COMMON_DATA_TYPES: &[&str] = &[
+    "objectId", "string", "int", "long", "double", "decimal", "bool", "date", "object", "array",
+    "null",
+];
+
 const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "postgres",
     display_name: "PostgreSQL",
@@ -259,15 +264,61 @@ pub fn elasticsearch_capabilities() -> DatabaseCapabilities {
     }
 }
 
+pub fn mongodb_capabilities() -> DatabaseCapabilities {
+    DatabaseCapabilities {
+        driver: "mongodb".to_string(),
+        display_name: "MongoDB".to_string(),
+        data_model: DatabaseDataModel::Document,
+        lsp_language_id: "json".to_string(),
+        namespace_label: "database".to_string(),
+        identifier_quote: String::new(),
+        default_port: 27017,
+        supports_sql_query: false,
+        supports_table_browsing: false,
+        supports_collection_browsing: true,
+        supports_key_value_browsing: false,
+        supports_schemas: true,
+        supports_create_database: false,
+        supports_create_database_charset: false,
+        supports_column_comments: false,
+        supports_inline_column_comments: false,
+        supports_rename_database: false,
+        supports_views: false,
+        supports_replace_view: false,
+        supports_materialized_views: false,
+        supports_table_indexes: false,
+        supports_table_constraints: false,
+        supports_foreign_keys: false,
+        supports_check_constraints: false,
+        supports_functions: false,
+        supports_transactions: false,
+        supports_query_cancellation: false,
+        auto_increment_keyword: None,
+        default_primary_key_type: String::new(),
+        common_data_types: MONGODB_COMMON_DATA_TYPES
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+    }
+}
+
 pub fn all_database_capabilities() -> Vec<DatabaseCapabilities> {
     DatabaseKind::all()
         .iter()
         .map(|kind| kind.capabilities())
-        .chain([elasticsearch_capabilities(), redis_capabilities()])
+        .chain([
+            elasticsearch_capabilities(),
+            mongodb_capabilities(),
+            redis_capabilities(),
+        ])
         .collect()
 }
 
 pub fn database_capabilities_for_driver(driver: &str) -> Result<DatabaseCapabilities> {
+    if driver.eq_ignore_ascii_case("mongodb") || driver.eq_ignore_ascii_case("mongo") {
+        return Ok(mongodb_capabilities());
+    }
+
     if driver.eq_ignore_ascii_case("elasticsearch") || driver.eq_ignore_ascii_case("elastic") {
         return Ok(elasticsearch_capabilities());
     }
@@ -1586,6 +1637,28 @@ WITH NO DATA;"#
         assert!(all_database_capabilities()
             .iter()
             .any(|capabilities| capabilities.driver == "elasticsearch"));
+    }
+
+    #[test]
+    fn mongodb_capabilities_describe_document_driver() {
+        let mongodb = database_capabilities_for_driver("mongo").unwrap();
+
+        assert_eq!(mongodb.driver, "mongodb");
+        assert_eq!(mongodb.display_name, "MongoDB");
+        assert_eq!(mongodb.data_model, DatabaseDataModel::Document);
+        assert_eq!(mongodb.lsp_language_id, "json");
+        assert_eq!(mongodb.namespace_label, "database");
+        assert_eq!(mongodb.default_port, 27017);
+        assert!(mongodb.supports_collection_browsing);
+        assert!(mongodb.supports_schemas);
+        assert!(!mongodb.supports_sql_query);
+        assert!(!mongodb.supports_table_browsing);
+        assert!(!mongodb.supports_key_value_browsing);
+        assert!(!mongodb.supports_create_database);
+        assert!(!mongodb.supports_transactions);
+        assert!(all_database_capabilities()
+            .iter()
+            .any(|capabilities| capabilities.driver == "mongodb"));
     }
 
     #[test]
