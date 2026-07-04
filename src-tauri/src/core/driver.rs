@@ -1,6 +1,6 @@
 use super::protocol::{
-    ColumnInfo, ConstraintInfo, FunctionInfo, IndexInfo, ParameterizedStatement, QueryParameter,
-    QueryResult, TableInfo,
+    CollectionInfo, ColumnInfo, ConstraintInfo, FunctionInfo, IndexInfo, ParameterizedStatement,
+    QueryParameter, QueryResult, TableInfo,
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -117,6 +117,11 @@ pub trait DatabaseDriver: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Get collections, indexes, or analogous document/search objects in a namespace.
+    async fn get_collections(&self, _namespace: &str) -> Result<Vec<CollectionInfo>> {
+        Ok(Vec::new())
+    }
+
     /// Get columns for a specific table
     async fn get_columns(&self, _schema: &str, _table: &str) -> Result<Vec<ColumnInfo>> {
         Ok(Vec::new())
@@ -179,6 +184,7 @@ mod tests {
 
         assert_eq!(driver.get_schemas().await.unwrap(), Vec::<String>::new());
         assert!(driver.get_tables("default").await.unwrap().is_empty());
+        assert!(driver.get_collections("default").await.unwrap().is_empty());
         assert!(driver
             .get_columns("default", "items")
             .await

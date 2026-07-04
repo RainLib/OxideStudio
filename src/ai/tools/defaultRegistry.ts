@@ -1,6 +1,7 @@
-import { databaseService, queryService } from "@/services/tauri";
+import { databaseService, queryService, schemaService } from "@/services/tauri";
 import type { QueryResult } from "@/services/tauri/types";
 import { useConnectionStore } from "@/store/useConnectionStore";
+import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
 import { registerCoreAiTools } from "./coreTools";
 import { createAiToolRegistry } from "./registry";
@@ -55,6 +56,16 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
         sql: activeTab.sql,
         connectionId: activeTab.connectionId ?? null,
       } satisfies AiWorkspaceTabSummary;
+    },
+
+    listCollections: async (input, context) => {
+      const connectionId = input.connectionId || context.activeConnectionId;
+      if (!connectionId) {
+        throw new Error("No active connection is available for metadata.listCollections");
+      }
+      const namespace =
+        input.namespace || useSchemaStore.getState().currentSchema || "";
+      return schemaService.getCollections(connectionId, namespace);
     },
 
     runReadOnlyQuery: async (input, context) => {

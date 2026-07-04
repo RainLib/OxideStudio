@@ -1,6 +1,7 @@
 import type {
   DatabaseCapabilities,
   DatabaseDriver,
+  CollectionInfo,
   QueryResult,
 } from "@/services/tauri/types";
 
@@ -78,6 +79,10 @@ export type AiToolAdapters = {
     driver: DatabaseDriver
   ) => Promise<DatabaseCapabilities> | DatabaseCapabilities;
   getActiveTab?: () => Promise<AiWorkspaceTabSummary | null> | AiWorkspaceTabSummary | null;
+  listCollections?: (
+    input: { connectionId?: string | null; namespace?: string | null },
+    context: AiToolExecutionContext
+  ) => Promise<CollectionInfo[]> | CollectionInfo[];
   runReadOnlyQuery?: (
     input: AiReadOnlyQueryInput,
     context: AiToolExecutionContext

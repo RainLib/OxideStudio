@@ -1,7 +1,9 @@
 /// Schema 元数据相关 commands
 use crate::core::{
     manager::ConnectionManager,
-    protocol::{ColumnInfo, ConstraintInfo, FunctionInfo, IndexInfo, Response, TableInfo},
+    protocol::{
+        CollectionInfo, ColumnInfo, ConstraintInfo, FunctionInfo, IndexInfo, Response, TableInfo,
+    },
 };
 use tauri::State;
 
@@ -33,6 +35,20 @@ pub async fn get_tables(
         .get_tables(&connection_id, &schema)
         .await
         .map(|tables| Response::ok(tables))
+        .map_err(|e| e.to_string())
+}
+
+/// 获取指定 namespace 下的 collections/indexes
+#[tauri::command]
+pub async fn get_collections(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    namespace: String,
+) -> Result<Response<Vec<CollectionInfo>>, String> {
+    manager
+        .get_collections(&connection_id, &namespace)
+        .await
+        .map(Response::ok)
         .map_err(|e| e.to_string())
 }
 

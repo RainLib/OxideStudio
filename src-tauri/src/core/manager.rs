@@ -211,6 +211,15 @@ impl ConnectionManager {
         driver.get_tables(schema).await
     }
 
+    pub async fn get_collections(
+        &self,
+        id: &str,
+        namespace: &str,
+    ) -> Result<Vec<super::protocol::CollectionInfo>> {
+        let driver = self.get_driver(id).await?;
+        driver.get_collections(namespace).await
+    }
+
     /// Get columns
     pub async fn get_columns(
         &self,

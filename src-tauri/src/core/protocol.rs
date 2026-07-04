@@ -75,6 +75,20 @@ pub struct TableInfo {
     pub comment: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct CollectionInfo {
+    pub name: String,
+    pub namespace: Option<String>,
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub collection_type: Option<String>,
+    #[serde(
+        default,
+        rename = "documentCount",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub document_count: Option<u64>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ColumnInfo {
     pub name: String,

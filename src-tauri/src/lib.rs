@@ -78,6 +78,7 @@ pub fn run() {
             commands::database::rename_database,
             commands::schema::get_schemas,
             commands::schema::get_tables,
+            commands::schema::get_collections,
             commands::schema::get_columns,
             commands::schema::get_indexes,
             commands::schema::get_constraints,

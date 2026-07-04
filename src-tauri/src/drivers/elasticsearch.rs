@@ -1,6 +1,6 @@
 use crate::core::{
     driver::DatabaseDriver,
-    protocol::{ColumnDef, QueryResult},
+    protocol::{CollectionInfo, ColumnDef, QueryResult},
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -138,6 +138,16 @@ impl DatabaseDriver for ElasticsearchDriver {
     async fn get_schemas(&self) -> Result<Vec<String>> {
         Ok(vec!["default".to_string()])
     }
+
+    async fn get_collections(&self, _namespace: &str) -> Result<Vec<CollectionInfo>> {
+        let request = ElasticsearchRequest {
+            method: Method::GET,
+            path: "/_cat/indices?format=json&h=index,docs.count".to_string(),
+            body: None,
+        };
+        let (_, body) = self.send_request(&request).await?;
+        Ok(elasticsearch_indices_to_collections(body))
+    }
 }
 
 fn extract_basic_auth(url: &mut Url) -> Option<(String, String)> {
@@ -265,6 +275,30 @@ fn normalize_elasticsearch_response(value: Value) -> Value {
     )
 }
 
+fn elasticsearch_indices_to_collections(value: Value) -> Vec<CollectionInfo> {
+    value
+        .as_array()
+        .map(|indices| {
+            indices
+                .iter()
+                .filter_map(|index| {
+                    let name = index.get("index").and_then(Value::as_str)?.to_string();
+                    let document_count = index
+                        .get("docs.count")
+                        .and_then(Value::as_str)
+                        .and_then(|value| value.parse::<u64>().ok());
+                    Some(CollectionInfo {
+                        name,
+                        namespace: Some("default".to_string()),
+                        collection_type: Some("index".to_string()),
+                        document_count,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,5 +369,18 @@ mod tests {
                 "source": {"name": "Ada"}
             }])
         );
+    }
+
+    #[test]
+    fn maps_cat_indices_to_collections() {
+        let collections = elasticsearch_indices_to_collections(json!([
+            {"index": "users", "docs.count": "42"},
+            {"index": "orders", "docs.count": "7"}
+        ]));
+
+        assert_eq!(collections.len(), 2);
+        assert_eq!(collections[0].name, "users");
+        assert_eq!(collections[0].collection_type.as_deref(), Some("index"));
+        assert_eq!(collections[0].document_count, Some(42));
     }
 }

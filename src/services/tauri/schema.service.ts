@@ -1,6 +1,7 @@
 import { invokeWithInterceptors } from "./client";
 import type {
   TableInfo,
+  CollectionInfo,
   ColumnInfo,
   ConstraintInfo,
   FunctionInfo,
@@ -36,6 +37,16 @@ export async function getTables(
   return invokeWithInterceptors<TableInfo[]>("get_tables", {
     connectionId,
     schema,
+  });
+}
+
+export async function getCollections(
+  connectionId: string,
+  namespace: string
+): Promise<CollectionInfo[]> {
+  return invokeWithInterceptors<CollectionInfo[]>("get_collections", {
+    connectionId,
+    namespace,
   });
 }
 
@@ -170,6 +181,7 @@ export async function refreshTables(
 export const schemaService = {
   getSchemas,
   getTables,
+  getCollections,
   getColumns,
   getIndexes,
   getConstraints,

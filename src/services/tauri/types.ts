@@ -216,6 +216,16 @@ export interface TableInfo {
 }
 
 /**
+ * 文档/搜索集合信息
+ */
+export interface CollectionInfo {
+  name: string;
+  namespace?: string | null;
+  type?: string | null;
+  documentCount?: number | null;
+}
+
+/**
  * 列信息
  */
 export interface ColumnInfo {

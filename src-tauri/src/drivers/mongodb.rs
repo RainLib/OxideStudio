@@ -1,6 +1,6 @@
 use crate::core::{
     driver::DatabaseDriver,
-    protocol::{ColumnDef, QueryResult},
+    protocol::{CollectionInfo, ColumnDef, QueryResult},
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -266,6 +266,32 @@ impl DatabaseDriver for MongoDbDriver {
             .await
             .context("Failed to list MongoDB databases")?;
         Ok(names)
+    }
+
+    async fn get_collections(&self, namespace: &str) -> Result<Vec<CollectionInfo>> {
+        let namespace = namespace.trim();
+        let database_name = if namespace.is_empty() {
+            &self.default_database
+        } else {
+            namespace
+        };
+        let names = self
+            .client()
+            .await?
+            .database(database_name)
+            .list_collection_names()
+            .await
+            .with_context(|| format!("Failed to list MongoDB collections for {database_name}"))?;
+
+        Ok(names
+            .into_iter()
+            .map(|name| CollectionInfo {
+                name,
+                namespace: Some(database_name.to_string()),
+                collection_type: Some("collection".to_string()),
+                document_count: None,
+            })
+            .collect())
     }
 }
 

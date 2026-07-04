@@ -14,6 +14,10 @@ export function registerCoreAiTools(
     registry.register(activeTabTool(adapters));
   }
 
+  if (adapters.listCollections) {
+    registry.register(listCollectionsTool(adapters));
+  }
+
   if (adapters.runReadOnlyQuery) {
     registry.register(readOnlyQueryTool(adapters));
   }
@@ -76,6 +80,41 @@ function activeTabTool(adapters: AiToolAdapters): AiToolDefinition {
     capabilities: ["workspace"],
     timeoutMs: 5_000,
     execute: async () => adapters.getActiveTab?.() ?? null,
+  };
+}
+
+function listCollectionsTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "metadata.listCollections",
+    description: "List document collections, search indexes, or analogous objects.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        connectionId: {
+          type: "string",
+          description: "Connection id. Defaults to the active connection.",
+        },
+        namespace: {
+          type: "string",
+          description: "Database, schema, or namespace. Defaults to the active namespace.",
+        },
+      },
+      additionalProperties: false,
+    },
+    permissions: ["read"],
+    capabilities: ["metadata"],
+    timeoutMs: 10_000,
+    execute: async (input, context) => {
+      const payload = assertObject(input);
+      return adapters.listCollections?.(
+        {
+          connectionId:
+            typeof payload.connectionId === "string" ? payload.connectionId : null,
+          namespace: typeof payload.namespace === "string" ? payload.namespace : null,
+        },
+        context
+      );
+    },
   };
 }
 
