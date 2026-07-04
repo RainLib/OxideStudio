@@ -102,6 +102,8 @@ const MYSQL_COMMON_DATA_TYPES: &[&str] = &[
     "DOUBLE", "TINYINT", "SMALLINT", "BLOB", "JSON",
 ];
 
+const REDIS_COMMON_DATA_TYPES: &[&str] = &["string", "list", "set", "zset", "hash", "stream"];
+
 const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "postgres",
     display_name: "PostgreSQL",
@@ -167,6 +169,60 @@ const MYSQL_SPEC: DatabaseSpec = DatabaseSpec {
     default_primary_key_type: "INT",
     common_data_types: MYSQL_COMMON_DATA_TYPES,
 };
+
+pub fn redis_capabilities() -> DatabaseCapabilities {
+    DatabaseCapabilities {
+        driver: "redis".to_string(),
+        display_name: "Redis".to_string(),
+        data_model: DatabaseDataModel::KeyValue,
+        lsp_language_id: "redis".to_string(),
+        namespace_label: "database".to_string(),
+        identifier_quote: String::new(),
+        default_port: 6379,
+        supports_sql_query: false,
+        supports_table_browsing: false,
+        supports_collection_browsing: false,
+        supports_key_value_browsing: true,
+        supports_schemas: true,
+        supports_create_database: false,
+        supports_create_database_charset: false,
+        supports_column_comments: false,
+        supports_inline_column_comments: false,
+        supports_rename_database: false,
+        supports_views: false,
+        supports_replace_view: false,
+        supports_materialized_views: false,
+        supports_table_indexes: false,
+        supports_table_constraints: false,
+        supports_foreign_keys: false,
+        supports_check_constraints: false,
+        supports_functions: false,
+        supports_transactions: false,
+        supports_query_cancellation: false,
+        auto_increment_keyword: None,
+        default_primary_key_type: String::new(),
+        common_data_types: REDIS_COMMON_DATA_TYPES
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+    }
+}
+
+pub fn all_database_capabilities() -> Vec<DatabaseCapabilities> {
+    DatabaseKind::all()
+        .iter()
+        .map(|kind| kind.capabilities())
+        .chain(std::iter::once(redis_capabilities()))
+        .collect()
+}
+
+pub fn database_capabilities_for_driver(driver: &str) -> Result<DatabaseCapabilities> {
+    if driver.eq_ignore_ascii_case("redis") {
+        return Ok(redis_capabilities());
+    }
+
+    DatabaseKind::from_str(driver).map(DatabaseKind::capabilities)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1432,6 +1488,27 @@ WITH NO DATA;"#
         );
         assert!(mysql.supports_inline_column_comments);
         assert_eq!(mysql.default_primary_key_type, "INT");
+    }
+
+    #[test]
+    fn redis_capabilities_describe_key_value_driver() {
+        let redis = database_capabilities_for_driver("redis").unwrap();
+
+        assert_eq!(redis.driver, "redis");
+        assert_eq!(redis.display_name, "Redis");
+        assert_eq!(redis.data_model, DatabaseDataModel::KeyValue);
+        assert_eq!(redis.lsp_language_id, "redis");
+        assert_eq!(redis.default_port, 6379);
+        assert!(redis.supports_key_value_browsing);
+        assert!(redis.supports_schemas);
+        assert!(!redis.supports_sql_query);
+        assert!(!redis.supports_table_browsing);
+        assert!(!redis.supports_collection_browsing);
+        assert!(!redis.supports_create_database);
+        assert!(!redis.supports_transactions);
+        assert!(all_database_capabilities()
+            .iter()
+            .any(|capabilities| capabilities.driver == "redis"));
     }
 
     #[test]

@@ -61,7 +61,7 @@ async fn manager_with_connection(
     connection_id: &str,
 ) -> Result<ConnectionManager> {
     let manager = ConnectionManager::new();
-    let driver = connect_driver(kind, url).await?;
+    let driver = connect_driver(kind.as_str(), url).await?;
     manager
         .add_connection(connection_id.to_string(), driver)
         .await;

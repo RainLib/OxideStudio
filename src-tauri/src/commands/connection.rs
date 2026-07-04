@@ -1,13 +1,12 @@
 /// 连接管理相关 commands
 use crate::core::{
     config::{AppConfig, ConfigManager, SavedConnection},
-    dialect::DatabaseKind,
+    dialect::database_capabilities_for_driver,
     manager::ConnectionManager,
     protocol::Response,
     redaction::redact_connection_url,
 };
 use crate::drivers::connect_driver;
-use std::str::FromStr;
 use tauri::State;
 
 /// 连接数据库
@@ -25,9 +24,10 @@ pub async fn connect_db(
             redact_connection_url(&url)
         );
 
-        let database_kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+        let capabilities =
+            database_capabilities_for_driver(&driver).map_err(|error| error.to_string())?;
 
-        let db_driver = connect_driver(database_kind, &url)
+        let db_driver = connect_driver(&driver, &url)
             .await
             .map_err(|error| error.to_string())?;
 
@@ -44,7 +44,7 @@ pub async fn connect_db(
 
         Ok(format!(
             "Connected to {} successfully",
-            database_kind.as_str()
+            capabilities.display_name
         ))
     }
     .await;

@@ -1,10 +1,22 @@
 use crate::core::{dialect::DatabaseKind, driver::DatabaseDriver};
 use anyhow::{Context, Result};
+use std::str::FromStr;
 
 pub mod mysql;
 pub mod postgres;
+pub mod redis;
 
-pub async fn connect_driver(kind: DatabaseKind, url: &str) -> Result<Box<dyn DatabaseDriver>> {
+pub async fn connect_driver(driver: &str, url: &str) -> Result<Box<dyn DatabaseDriver>> {
+    if driver.eq_ignore_ascii_case("redis") {
+        let mut driver = redis::RedisDriver::new(url)?;
+        driver
+            .connect()
+            .await
+            .context("Failed to connect to Redis")?;
+        return Ok(Box::new(driver));
+    }
+
+    let kind = DatabaseKind::from_str(driver)?;
     match kind {
         DatabaseKind::Postgres => {
             let mut driver = postgres::PostgresDriver::new(url);

@@ -1,5 +1,8 @@
 use crate::core::{
-    dialect::{DatabaseCapabilities, DatabaseKind},
+    dialect::{
+        all_database_capabilities, database_capabilities_for_driver, DatabaseCapabilities,
+        DatabaseKind,
+    },
     manager::ConnectionManager,
     protocol::Response,
 };
@@ -134,6 +137,7 @@ pub async fn get_database_capabilities(
 ) -> Result<Response<DatabaseCapabilities>, String> {
     let result = DatabaseKind::from_str(&driver)
         .map(DatabaseKind::capabilities)
+        .or_else(|_| database_capabilities_for_driver(&driver))
         .map_err(|error| error.to_string());
 
     match result {
@@ -144,12 +148,7 @@ pub async fn get_database_capabilities(
 
 #[tauri::command]
 pub async fn list_database_capabilities() -> Result<Response<Vec<DatabaseCapabilities>>, String> {
-    Ok(Response::ok(
-        DatabaseKind::all()
-            .iter()
-            .map(|kind| kind.capabilities())
-            .collect(),
-    ))
+    Ok(Response::ok(all_database_capabilities()))
 }
 
 #[tauri::command]
