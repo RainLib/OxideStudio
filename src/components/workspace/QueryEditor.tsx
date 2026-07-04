@@ -18,6 +18,7 @@ import {
 } from "@/lib/databaseDialect";
 import { getSqlDocumentUri, LSP_NOTIFICATION_EVENT } from "@/services/lsp";
 import { transactionService } from "@/services/tauri";
+import type { DatabaseDriver } from "@/services/tauri/types";
 import type {
   Diagnostic,
   LspServerNotification,
@@ -32,6 +33,18 @@ import {
 
 type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
+const LSP_PROVIDER_LANGUAGES = ["sql", "json", "plaintext"] as const;
+
+function extractDriverFromLspDocumentUri(uri: string): DatabaseDriver | null {
+  const match = uri.match(/^oxide:\/\/query\/.+\.([^./?#]+)\.sql(?:[?#].*)?$/);
+  const driver = match?.[1];
+  return driver ? (decodeURIComponent(driver) as DatabaseDriver) : null;
+}
+
+function isSupportedLspModelUri(uri: string) {
+  const driver = extractDriverFromLspDocumentUri(uri);
+  return Boolean(driver && supportsLspLanguageId(driver));
+}
 
 function isPublishDiagnosticsParams(
   value: unknown
@@ -255,104 +268,125 @@ export function QueryEditor() {
 
     console.log("[QueryEditor] Registering LSP providers");
 
-    const completionDisposable = monaco.languages.registerCompletionItemProvider("sql", {
-      triggerCharacters: [" ", ".", "(", ","],
-      provideCompletionItems: async (model: any, position: any) => {
-        try {
+    const completionDisposables = LSP_PROVIDER_LANGUAGES.map((language) =>
+      monaco.languages.registerCompletionItemProvider(language, {
+        triggerCharacters: [" ", ".", "(", ",", '"', "@"],
+        provideCompletionItems: async (model: any, position: any) => {
+          try {
+            const uri = model.uri.toString();
+            if (!isSupportedLspModelUri(uri)) return { suggestions: [] };
+
+            // Now request completions with synchronized state
+            const items = await lspClient.getCompletions(
+              uri,
+              position.lineNumber - 1, // LSP uses 0-indexed lines
+              position.column - 1 // LSP uses 0-indexed columns
+            );
+
+            console.log(`[LSP] Got ${items.length} completion items`);
+
+            // Get the word being typed for range calculation
+            const word = model.getWordUntilPosition(position);
+            const range = new monaco.Range(
+              position.lineNumber,
+              word.startColumn,
+              position.lineNumber,
+              word.endColumn
+            );
+
+            // Convert LSP completion items to Monaco format
+            const suggestions = items.map((item) => ({
+              label: item.label,
+              kind: item.kind || monaco.languages.CompletionItemKind.Field,
+              detail: item.detail,
+              documentation: item.documentation,
+              insertText: item.insertText || item.label,
+              insertTextRules:
+                item.insertTextFormat === 2
+                  ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+                  : undefined,
+              range: range,
+            }));
+
+            return { suggestions };
+          } catch (error) {
+            console.error("[LSP] Completion failed:", error);
+            return { suggestions: [] };
+          }
+        },
+      })
+    );
+
+    const hoverDisposables = LSP_PROVIDER_LANGUAGES.map((language) =>
+      monaco.languages.registerHoverProvider(language, {
+        provideHover: async (model: any, position: any) => {
           const uri = model.uri.toString();
+          if (!isSupportedLspModelUri(uri)) return null;
 
-          // Now request completions with synchronized state
-          const items = await lspClient.getCompletions(
+          const hover = await lspClient.getHover(
             uri,
-            position.lineNumber - 1, // LSP uses 0-indexed lines
-            position.column - 1 // LSP uses 0-indexed columns
+            position.lineNumber - 1,
+            position.column - 1
           );
 
-          console.log(`[LSP] Got ${items.length} completion items`);
+          if (!hover) return null;
 
-          // Get the word being typed for range calculation
-          const word = model.getWordUntilPosition(position);
-          const range = new monaco.Range(
-            position.lineNumber,
-            word.startColumn,
-            position.lineNumber,
-            word.endColumn
+          return {
+            contents: [{ value: hover.contents }],
+            range: hover.range ? toMonacoRange(monaco, hover.range) : undefined,
+          };
+        },
+      })
+    );
+
+    const definitionDisposables = LSP_PROVIDER_LANGUAGES.map((language) =>
+      monaco.languages.registerDefinitionProvider(language, {
+        provideDefinition: async (model: any, position: any) => {
+          const uri = model.uri.toString();
+          if (!isSupportedLspModelUri(uri)) return [];
+
+          const locations = await lspClient.getDefinitions(
+            uri,
+            position.lineNumber - 1,
+            position.column - 1
           );
 
-          // Convert LSP completion items to Monaco format
-          const suggestions = items.map((item) => ({
-            label: item.label,
-            kind: item.kind || monaco.languages.CompletionItemKind.Field,
-            detail: item.detail,
-            documentation: item.documentation,
-            insertText: item.insertText || item.label,
-            insertTextRules:
-              item.insertTextFormat === 2
-                ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
-                : undefined,
-            range: range,
+          return locations.map((location) => ({
+            uri: monaco.Uri.parse(location.uri),
+            range: toMonacoRange(monaco, location.range),
           }));
+        },
+      })
+    );
 
-          return { suggestions };
-        } catch (error) {
-          console.error("[LSP] Completion failed:", error);
-          return { suggestions: [] };
-        }
-      },
-    });
+    const referencesDisposables = LSP_PROVIDER_LANGUAGES.map((language) =>
+      monaco.languages.registerReferenceProvider(language, {
+        provideReferences: async (model: any, position: any) => {
+          const uri = model.uri.toString();
+          if (!isSupportedLspModelUri(uri)) return [];
 
-    const hoverDisposable = monaco.languages.registerHoverProvider("sql", {
-      provideHover: async (model: any, position: any) => {
-        const hover = await lspClient.getHover(
-          model.uri.toString(),
-          position.lineNumber - 1,
-          position.column - 1
-        );
+          const locations = await lspClient.getReferences(
+            uri,
+            position.lineNumber - 1,
+            position.column - 1
+          );
 
-        if (!hover) return null;
+          return locations.map((location) => ({
+            uri: monaco.Uri.parse(location.uri),
+            range: toMonacoRange(monaco, location.range),
+          }));
+        },
+      })
+    );
 
-        return {
-          contents: [{ value: hover.contents }],
-          range: hover.range ? toMonacoRange(monaco, hover.range) : undefined,
-        };
-      },
-    });
-
-    const definitionDisposable = monaco.languages.registerDefinitionProvider("sql", {
-      provideDefinition: async (model: any, position: any) => {
-        const locations = await lspClient.getDefinitions(
-          model.uri.toString(),
-          position.lineNumber - 1,
-          position.column - 1
-        );
-
-        return locations.map((location) => ({
-          uri: monaco.Uri.parse(location.uri),
-          range: toMonacoRange(monaco, location.range),
-        }));
-      },
-    });
-
-    const referencesDisposable = monaco.languages.registerReferenceProvider("sql", {
-      provideReferences: async (model: any, position: any) => {
-        const locations = await lspClient.getReferences(
-          model.uri.toString(),
-          position.lineNumber - 1,
-          position.column - 1
-        );
-
-        return locations.map((location) => ({
-          uri: monaco.Uri.parse(location.uri),
-          range: toMonacoRange(monaco, location.range),
-        }));
-      },
-    });
-
-    const formattingDisposable =
-      monaco.languages.registerDocumentFormattingEditProvider("sql", {
+    const formattingDisposables = LSP_PROVIDER_LANGUAGES.map((language) =>
+      monaco.languages.registerDocumentFormattingEditProvider(language, {
         provideDocumentFormattingEdits: async (model: any, options: any) => {
+          const uri = model.uri.toString();
+          if (!isSupportedLspModelUri(uri)) return [];
+
           const edits = await lspClient.formatDocument(
-            model.uri.toString(),
+            uri,
             options.tabSize || 2,
             options.insertSpaces !== false
           );
@@ -362,15 +396,18 @@ export function QueryEditor() {
             text: edit.newText,
           }));
         },
-      });
+      })
+    );
 
     return () => {
       console.log("[QueryEditor] Disposing LSP providers");
-      completionDisposable.dispose();
-      hoverDisposable.dispose();
-      definitionDisposable.dispose();
-      referencesDisposable.dispose();
-      formattingDisposable.dispose();
+      [
+        ...completionDisposables,
+        ...hoverDisposables,
+        ...definitionDisposables,
+        ...referencesDisposables,
+        ...formattingDisposables,
+      ].forEach((disposable) => disposable.dispose());
     };
   }, [monaco, lspReady, lspClient]);
 
