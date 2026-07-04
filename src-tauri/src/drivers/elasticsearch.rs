@@ -102,37 +102,19 @@ impl DatabaseDriver for ElasticsearchDriver {
             return Err(anyhow!("Elasticsearch query is required"));
         }
 
-        let columns = vec![
-            ColumnDef {
-                name: "method".to_string(),
-                data_type: "text".to_string(),
-            },
-            ColumnDef {
-                name: "path".to_string(),
-                data_type: "text".to_string(),
-            },
-            ColumnDef {
-                name: "status".to_string(),
-                data_type: "integer".to_string(),
-            },
-            ColumnDef {
-                name: "result".to_string(),
-                data_type: "json".to_string(),
-            },
-        ];
-        let mut rows = Vec::new();
+        let mut results = Vec::new();
 
         for request in requests {
             let (status, body) = self.send_request(&request).await?;
-            rows.push(vec![
-                Value::String(request.method.as_str().to_string()),
-                Value::String(request.path),
-                json!(status),
-                normalize_elasticsearch_response(body),
-            ]);
+            let normalized = normalize_elasticsearch_response(body);
+            if let Some(result) = elasticsearch_table_result(&normalized) {
+                results.push(result);
+            } else {
+                results.push(elasticsearch_request_result(&request, status, normalized));
+            }
         }
 
-        Ok(vec![QueryResult::rows(columns, rows)])
+        Ok(results)
     }
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
@@ -275,6 +257,85 @@ fn normalize_elasticsearch_response(value: Value) -> Value {
     )
 }
 
+fn elasticsearch_request_result(
+    request: &ElasticsearchRequest,
+    status: u16,
+    body: Value,
+) -> QueryResult {
+    QueryResult::rows(
+        vec![
+            ColumnDef {
+                name: "method".to_string(),
+                data_type: "text".to_string(),
+            },
+            ColumnDef {
+                name: "path".to_string(),
+                data_type: "text".to_string(),
+            },
+            ColumnDef {
+                name: "status".to_string(),
+                data_type: "integer".to_string(),
+            },
+            ColumnDef {
+                name: "result".to_string(),
+                data_type: "json".to_string(),
+            },
+        ],
+        vec![vec![
+            Value::String(request.method.as_str().to_string()),
+            Value::String(request.path.clone()),
+            json!(status),
+            body,
+        ]],
+    )
+}
+
+fn elasticsearch_table_result(value: &Value) -> Option<QueryResult> {
+    let documents = value.as_array()?;
+    if !documents
+        .iter()
+        .all(|document| document.as_object().is_some())
+    {
+        return None;
+    }
+
+    let mut column_names = Vec::<String>::new();
+    for document in documents {
+        for name in document.as_object()?.keys() {
+            if !column_names.contains(name) {
+                column_names.push(name.to_string());
+            }
+        }
+    }
+
+    for preferred in ["index", "id", "score", "source"].iter().rev() {
+        if let Some(position) = column_names.iter().position(|name| name == preferred) {
+            let value = column_names.remove(position);
+            column_names.insert(0, value);
+        }
+    }
+
+    let columns = column_names
+        .iter()
+        .map(|name| ColumnDef {
+            name: name.to_string(),
+            data_type: "json".to_string(),
+        })
+        .collect::<Vec<_>>();
+    let rows = documents
+        .iter()
+        .map(|document| {
+            let object = document.as_object().expect("validated document object");
+            column_names
+                .iter()
+                .map(|name| object.get(name).cloned().unwrap_or(Value::Null))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    Some(QueryResult::rows(columns, rows))
+}
+
 fn elasticsearch_indices_to_collections(value: Value) -> Vec<CollectionInfo> {
     value
         .as_array()
@@ -369,6 +430,31 @@ mod tests {
                 "source": {"name": "Ada"}
             }])
         );
+    }
+
+    #[test]
+    fn converts_search_hits_to_tabular_result() {
+        let value = normalize_elasticsearch_response(json!({
+            "hits": {
+                "hits": [
+                    {"_index": "users", "_id": "1", "_score": 1.0, "_source": {"name": "Ada"}},
+                    {"_index": "users", "_id": "2", "_score": 0.8, "_source": {"name": "Grace"}}
+                ]
+            }
+        }));
+        let result = elasticsearch_table_result(&value).unwrap();
+
+        assert_eq!(
+            result
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["index", "id", "score", "source"]
+        );
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0][0], json!("users"));
+        assert_eq!(result.rows[1][3], json!({"name": "Grace"}));
     }
 
     #[test]
