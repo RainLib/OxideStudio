@@ -1,4 +1,5 @@
 import type {
+  AiToolAuditEntry,
   AiToolDefinition,
   AiToolExecutionPolicy,
   AiToolExecutionContext,
@@ -67,18 +68,62 @@ export class AiToolRegistry {
     context: AiToolExecutionContext,
     policy?: AiToolExecutionPolicy
   ): Promise<TOutput> {
+    const startedAt = Date.now();
     const decision = this.evaluate(name, policy);
     if (!decision.allowed) {
+      await recordAudit(context, {
+        requestId: context.requestId,
+        toolName: name,
+        permissions: decision.permissions,
+        status: "blocked",
+        startedAt,
+        durationMs: Date.now() - startedAt,
+        reason: decision.reason,
+      });
       throw new Error(
         decision.reason || `AI tool is not allowed by policy: ${name}`
       );
     }
-    return this.execute<TOutput>(name, input, context);
+
+    try {
+      const result = await this.execute<TOutput>(name, input, context);
+      await recordAudit(context, {
+        requestId: context.requestId,
+        toolName: name,
+        permissions: decision.permissions,
+        status: "success",
+        startedAt,
+        durationMs: Date.now() - startedAt,
+      });
+      return result;
+    } catch (err: any) {
+      await recordAudit(context, {
+        requestId: context.requestId,
+        toolName: name,
+        permissions: decision.permissions,
+        status: "error",
+        startedAt,
+        durationMs: Date.now() - startedAt,
+        reason: err?.message || String(err),
+      });
+      throw err;
+    }
   }
 }
 
 export function createAiToolRegistry() {
   return new AiToolRegistry();
+}
+
+async function recordAudit(
+  context: AiToolExecutionContext,
+  entry: AiToolAuditEntry
+) {
+  try {
+    await context.audit?.(entry);
+  } catch (err) {
+    console.warn("[AI tools] Audit sink failed:", err);
+  }
 }
 
 async function withTimeout<T>(

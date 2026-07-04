@@ -44,11 +44,26 @@ export type AiToolPolicyDecision = {
   reason?: string;
 };
 
+export type AiToolAuditEntry = {
+  requestId: string;
+  toolName: string;
+  permissions: AiToolPermission[];
+  status: "success" | "error" | "blocked";
+  startedAt: number;
+  durationMs: number;
+  reason?: string;
+};
+
+export type AiToolAuditSink = (
+  entry: AiToolAuditEntry
+) => Promise<void> | void;
+
 export type AiToolExecutionContext = {
   requestId: string;
   activeConnectionId?: string | null;
   activeDriver?: DatabaseDriver | null;
   abortSignal?: AbortSignal;
+  audit?: AiToolAuditSink;
 };
 
 export type AiToolDefinition<TInput = unknown, TOutput = unknown> = {
