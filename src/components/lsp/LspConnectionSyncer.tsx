@@ -13,6 +13,7 @@ import {
   defaultDatabaseCapabilities,
   normalizeLspDialect,
   selectPreferredNamespace,
+  supportsLspLanguageId,
   supportsTableWorkspace,
 } from "@/lib/databaseDialect";
 import { extractRelationReferences } from "@/lib/sqlAnalysis";
@@ -220,6 +221,12 @@ export function LspConnectionSyncer() {
 
     const connection = connections.find((c) => c.id === activeConnectionId);
     if (!connection) return;
+
+    if (!supportsLspLanguageId(connection.driver)) {
+      lastConfigRef.current = null;
+      console.log(`[LSP] Skipping unsupported driver: ${connection.driver}`);
+      return;
+    }
 
     // Wait for schemas to be loaded
     if (!schemas || schemas.length === 0) {
