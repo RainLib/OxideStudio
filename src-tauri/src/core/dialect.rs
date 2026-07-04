@@ -104,6 +104,19 @@ const MYSQL_COMMON_DATA_TYPES: &[&str] = &[
 
 const REDIS_COMMON_DATA_TYPES: &[&str] = &["string", "list", "set", "zset", "hash", "stream"];
 
+const ELASTICSEARCH_COMMON_DATA_TYPES: &[&str] = &[
+    "object",
+    "keyword",
+    "text",
+    "long",
+    "integer",
+    "double",
+    "boolean",
+    "date",
+    "nested",
+    "geo_point",
+];
+
 const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "postgres",
     display_name: "PostgreSQL",
@@ -208,15 +221,57 @@ pub fn redis_capabilities() -> DatabaseCapabilities {
     }
 }
 
+pub fn elasticsearch_capabilities() -> DatabaseCapabilities {
+    DatabaseCapabilities {
+        driver: "elasticsearch".to_string(),
+        display_name: "Elasticsearch".to_string(),
+        data_model: DatabaseDataModel::Search,
+        lsp_language_id: "elasticsearch-dsl".to_string(),
+        namespace_label: "index".to_string(),
+        identifier_quote: String::new(),
+        default_port: 9200,
+        supports_sql_query: false,
+        supports_table_browsing: false,
+        supports_collection_browsing: true,
+        supports_key_value_browsing: false,
+        supports_schemas: false,
+        supports_create_database: false,
+        supports_create_database_charset: false,
+        supports_column_comments: false,
+        supports_inline_column_comments: false,
+        supports_rename_database: false,
+        supports_views: false,
+        supports_replace_view: false,
+        supports_materialized_views: false,
+        supports_table_indexes: false,
+        supports_table_constraints: false,
+        supports_foreign_keys: false,
+        supports_check_constraints: false,
+        supports_functions: false,
+        supports_transactions: false,
+        supports_query_cancellation: false,
+        auto_increment_keyword: None,
+        default_primary_key_type: String::new(),
+        common_data_types: ELASTICSEARCH_COMMON_DATA_TYPES
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+    }
+}
+
 pub fn all_database_capabilities() -> Vec<DatabaseCapabilities> {
     DatabaseKind::all()
         .iter()
         .map(|kind| kind.capabilities())
-        .chain(std::iter::once(redis_capabilities()))
+        .chain([elasticsearch_capabilities(), redis_capabilities()])
         .collect()
 }
 
 pub fn database_capabilities_for_driver(driver: &str) -> Result<DatabaseCapabilities> {
+    if driver.eq_ignore_ascii_case("elasticsearch") || driver.eq_ignore_ascii_case("elastic") {
+        return Ok(elasticsearch_capabilities());
+    }
+
     if driver.eq_ignore_ascii_case("redis") {
         return Ok(redis_capabilities());
     }
@@ -1509,6 +1564,28 @@ WITH NO DATA;"#
         assert!(all_database_capabilities()
             .iter()
             .any(|capabilities| capabilities.driver == "redis"));
+    }
+
+    #[test]
+    fn elasticsearch_capabilities_describe_search_driver() {
+        let elasticsearch = database_capabilities_for_driver("elastic").unwrap();
+
+        assert_eq!(elasticsearch.driver, "elasticsearch");
+        assert_eq!(elasticsearch.display_name, "Elasticsearch");
+        assert_eq!(elasticsearch.data_model, DatabaseDataModel::Search);
+        assert_eq!(elasticsearch.lsp_language_id, "elasticsearch-dsl");
+        assert_eq!(elasticsearch.namespace_label, "index");
+        assert_eq!(elasticsearch.default_port, 9200);
+        assert!(elasticsearch.supports_collection_browsing);
+        assert!(!elasticsearch.supports_schemas);
+        assert!(!elasticsearch.supports_sql_query);
+        assert!(!elasticsearch.supports_table_browsing);
+        assert!(!elasticsearch.supports_key_value_browsing);
+        assert!(!elasticsearch.supports_create_database);
+        assert!(!elasticsearch.supports_transactions);
+        assert!(all_database_capabilities()
+            .iter()
+            .any(|capabilities| capabilities.driver == "elasticsearch"));
     }
 
     #[test]

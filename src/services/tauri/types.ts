@@ -18,7 +18,11 @@ export interface ApiResponse<T> {
 /**
  * 数据库驱动类型
  */
-export type KnownDatabaseDriver = "postgres" | "mysql" | "redis";
+export type KnownDatabaseDriver =
+  | "postgres"
+  | "mysql"
+  | "redis"
+  | "elasticsearch";
 export type DatabaseDriver = KnownDatabaseDriver | (string & {});
 export type DatabaseDataModel = "relational" | "document" | "keyValue" | "search";
 
