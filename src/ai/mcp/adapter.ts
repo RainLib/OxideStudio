@@ -4,8 +4,14 @@ import {
   createWorkspaceAiToolContext,
   createWorkspaceAiToolRegistry,
 } from "@/ai/tools";
-import type { AiToolExecutionContext, AiToolExecutionPolicy } from "@/ai/tools";
-import type { McpTool, McpToolCallResult } from "./types";
+import type {
+  AiToolCapability,
+  AiToolExecutionContext,
+  AiToolExecutionPolicy,
+  AiToolPermission,
+  AiToolSummary,
+} from "@/ai/tools";
+import type { McpTool, McpToolAnnotations, McpToolCallResult } from "./types";
 
 export type McpToolAdapterOptions = {
   registry?: AiToolRegistry;
@@ -29,6 +35,7 @@ export class McpToolAdapter {
       name: tool.name,
       description: tool.description,
       inputSchema: tool.inputSchema as Record<string, unknown>,
+      annotations: toMcpAnnotations(tool),
     }));
   }
 
@@ -64,4 +71,25 @@ export class McpToolAdapter {
 
 export function createMcpToolAdapter(options?: McpToolAdapterOptions) {
   return new McpToolAdapter(options);
+}
+
+function toMcpAnnotations(tool: AiToolSummary): McpToolAnnotations {
+  const readOnly = isReadOnly(tool.permissions);
+  return {
+    title: tool.name,
+    readOnlyHint: readOnly,
+    destructiveHint: tool.permissions.includes("destructive"),
+    idempotentHint: readOnly,
+    openWorldHint: touchesExternalState(tool.capabilities),
+  };
+}
+
+function isReadOnly(permissions: AiToolPermission[]) {
+  return permissions.length > 0 && permissions.every((permission) => permission === "read");
+}
+
+function touchesExternalState(capabilities: AiToolCapability[]) {
+  return capabilities.some((capability) =>
+    ["connection", "metadata", "query"].includes(capability)
+  );
 }
