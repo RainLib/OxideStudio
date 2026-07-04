@@ -10,7 +10,12 @@ import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState, useContext } from "react";
 // import { queryService, schemaService } from "@/services/tauri";
 import { useLspClient } from "@/hooks/useLspClient";
-import { DEFAULT_DATABASE_DRIVER, lspLanguageId } from "@/lib/databaseDialect";
+import {
+  DEFAULT_DATABASE_DRIVER,
+  lspLanguageId,
+  queryEditorLanguageId,
+  supportsLspLanguageId,
+} from "@/lib/databaseDialect";
 import { getSqlDocumentUri, LSP_NOTIFICATION_EVENT } from "@/services/lsp";
 import { transactionService } from "@/services/tauri";
 import type {
@@ -118,6 +123,8 @@ export function QueryEditor() {
   const driver = activeConnection?.driver || DEFAULT_DATABASE_DRIVER;
   const documentUri = activeTab ? getSqlDocumentUri(activeTab.id, driver) : "";
   const documentLanguageId = lspLanguageId(driver);
+  const editorLanguageId = queryEditorLanguageId(driver);
+  const canUseLsp = supportsLspLanguageId(driver);
   const activeDocumentSql = activeTab?.sql || "";
   const monaco = useMonaco();
   const { isReady: lspReady, client: lspClient } = useLspClient(); // Added LSP client state
@@ -131,7 +138,7 @@ export function QueryEditor() {
   };
 
   useEffect(() => {
-    if (!lspReady || !activeTab || !documentUri) return;
+    if (!lspReady || !activeTab || !documentUri || !canUseLsp) return;
 
     const previousVersion = documentVersionsRef.current.get(documentUri) || 0;
     const version = previousVersion + 1;
@@ -151,6 +158,7 @@ export function QueryEditor() {
   }, [
     activeTab?.id,
     activeDocumentSql,
+    canUseLsp,
     documentLanguageId,
     documentUri,
     lspClient,
@@ -571,6 +579,7 @@ export function QueryEditor() {
         <Editor
           height="100%"
           defaultLanguage="sql"
+          language={editorLanguageId}
           path={documentUri}
           value={activeTab.sql}
           onChange={(value) => updateTabSql(activeTab.id, value || "")}

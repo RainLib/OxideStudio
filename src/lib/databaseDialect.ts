@@ -30,7 +30,6 @@ const SUPPORTED_LSP_DIALECTS = new Set([
   "elasticsearch-dsl",
   "clickhouse",
   "redis",
-  "json",
 ]);
 
 const DATABASE_DRIVER_PROFILES: Record<
@@ -687,7 +686,26 @@ export function previewTableQuery(
 }
 
 export function lspLanguageId(driver: DatabaseDriver) {
-  return normalizeLspDialect(databaseDriverProfile(driver).capabilities.lspLanguageId);
+  return normalizeLspDialect(configuredLspLanguageId(driver));
+}
+
+export function configuredLspLanguageId(driver: DatabaseDriver) {
+  return databaseDriverProfile(driver).capabilities.lspLanguageId.trim().toLowerCase();
+}
+
+export function supportsLspLanguageId(driver: DatabaseDriver) {
+  return SUPPORTED_LSP_DIALECTS.has(configuredLspLanguageId(driver));
+}
+
+export function queryEditorLanguageId(driver: DatabaseDriver) {
+  const capabilities = databaseDriverProfile(driver).capabilities;
+  if (capabilities.dataModel === "document" || capabilities.dataModel === "search") {
+    return "json";
+  }
+  if (capabilities.dataModel === "keyValue") {
+    return "plaintext";
+  }
+  return "sql";
 }
 
 export function normalizeLspDialect(
