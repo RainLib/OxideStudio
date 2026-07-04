@@ -79,13 +79,15 @@ function routineMatchesFilter(routine: FunctionInfo, filter: string) {
 function collectionObjectLabel(driver: DatabaseDriver) {
   const normalized = String(driver).toLowerCase();
   if (normalized === "elasticsearch" || normalized === "elastic") return "Index";
+  if (normalized === "redis") return "Key";
   return "Collection";
 }
 
 function collectionQueryTemplate(
   driver: DatabaseDriver,
   namespace: string | null,
-  collection: string
+  collection: string,
+  collectionType?: string | null
 ) {
   const normalized = String(driver).toLowerCase();
   if (normalized === "elasticsearch" || normalized === "elastic") {
@@ -97,6 +99,26 @@ function collectionQueryTemplate(
       null,
       2
     )}`;
+  }
+
+  if (normalized === "redis") {
+    const key = JSON.stringify(collection);
+    switch ((collectionType || "").toLowerCase()) {
+      case "string":
+        return `GET ${key}`;
+      case "hash":
+        return `HGETALL ${key}`;
+      case "list":
+        return `LRANGE ${key} 0 99`;
+      case "set":
+        return `SMEMBERS ${key}`;
+      case "zset":
+        return `ZRANGE ${key} 0 99 WITHSCORES`;
+      case "stream":
+        return `XRANGE ${key} - + COUNT 100`;
+      default:
+        return `TYPE ${key}`;
+    }
   }
 
   return JSON.stringify(
@@ -179,7 +201,9 @@ export function SchemaSidebar() {
       ? capabilities
       : defaultDatabaseCapabilities(activeDriver);
   const canBrowseTables = supportsTableWorkspace(activeCapabilities);
-  const canBrowseCollections = activeCapabilities.supportsCollectionBrowsing;
+  const canBrowseCollections =
+    activeCapabilities.supportsCollectionBrowsing ||
+    activeCapabilities.supportsKeyValueBrowsing;
   const collectionLabel = collectionObjectLabel(activeDriver);
   const collectionLabelPlural =
     collectionLabel === "Index" ? "Indices" : `${collectionLabel}s`;
@@ -448,7 +472,8 @@ export function SchemaSidebar() {
     const sql = collectionQueryTemplate(
       activeDriver,
       currentSchema,
-      collection.name
+      collection.name,
+      collection.type
     );
     const tabId = createTab("query", collection.name, sql, {
       connectionId: activeConnectionId,
@@ -907,6 +932,11 @@ export function SchemaSidebar() {
                   <span className="truncate flex-1">
                     {highlightMatch(collection.name, filterText)}
                   </span>
+                  {collection.type && (
+                    <span className="text-[9px] uppercase opacity-50 shrink-0">
+                      {collection.type}
+                    </span>
+                  )}
                   {collection.documentCount !== null &&
                     collection.documentCount !== undefined && (
                       <span className="text-[9px] opacity-50 shrink-0 tabular-nums">

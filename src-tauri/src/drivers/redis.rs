@@ -1,6 +1,6 @@
 use crate::core::{
     driver::DatabaseDriver,
-    protocol::{ColumnDef, QueryResult},
+    protocol::{CollectionInfo, ColumnDef, QueryResult},
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -116,6 +116,48 @@ impl DatabaseDriver for RedisDriver {
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
         Ok(vec![self.database_label.clone()])
+    }
+
+    async fn get_collections(&self, _namespace: &str) -> Result<Vec<CollectionInfo>> {
+        let mut connection = self.connection().await?;
+        let mut cursor = 0_u64;
+        let mut keys = Vec::new();
+
+        loop {
+            let (next_cursor, mut batch) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("COUNT")
+                .arg(500)
+                .query_async::<(u64, Vec<String>)>(&mut connection)
+                .await
+                .context("Redis SCAN failed")?;
+
+            keys.append(&mut batch);
+            if next_cursor == 0 || keys.len() >= 1_000 {
+                break;
+            }
+            cursor = next_cursor;
+        }
+
+        keys.truncate(1_000);
+        keys.sort();
+
+        let mut collections = Vec::with_capacity(keys.len());
+        for key in keys {
+            let key_type = redis::cmd("TYPE")
+                .arg(&key)
+                .query_async::<String>(&mut connection)
+                .await
+                .unwrap_or_else(|_| "unknown".to_string());
+            collections.push(CollectionInfo {
+                name: key,
+                namespace: Some(self.database_label.clone()),
+                collection_type: Some(key_type),
+                document_count: None,
+            });
+        }
+
+        Ok(collections)
     }
 }
 
