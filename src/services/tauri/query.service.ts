@@ -16,12 +16,22 @@ import type { QueryResult, CompletionContext } from "./types";
 export async function executeQuery(
   connectionId: string,
   sql: string,
-  schema?: string
+  schema?: string,
+  transactionId?: string,
+  queryId?: string
 ): Promise<QueryResult[]> {
   return invokeWithInterceptors<QueryResult[]>("execute_query", {
     connectionId,
     sql,
     schema,
+    transactionId,
+    queryId,
+  });
+}
+
+export async function cancelQuery(queryId: string): Promise<string> {
+  return invokeWithInterceptors<string>("cancel_query", {
+    queryId,
   });
 }
 
@@ -46,5 +56,6 @@ export async function getSqlCompletion(
  */
 export const queryService = {
   executeQuery,
+  cancelQuery,
   getSqlCompletion,
 };

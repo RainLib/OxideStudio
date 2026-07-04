@@ -11,10 +11,18 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { Plus, Trash2, GripVertical } from "lucide-react";
 import { useConnectionStore } from "@/store/useConnectionStore";
-import { queryService } from "@/services/tauri/query.service";
+import { databaseService, tableService } from "@/services/tauri";
+import type { DatabaseCapabilities } from "@/services/tauri";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
 import { StatusBarPortal } from "./StatusBarPortal";
+import {
+  DEFAULT_DATABASE_DRIVER,
+  defaultLengthForDataType,
+  defaultDatabaseCapabilities,
+  defaultStringDataType,
+  supportsAutoIncrementForDataType,
+} from "@/lib/databaseDialect";
 
 interface CreateTableTabProps {
   tabId: string;
@@ -31,39 +39,6 @@ interface ColumnDefinition {
   isAutoIncrement: boolean;
   comment: string;
 }
-
-const COMMON_TYPES = [
-  "INT",
-  "VARCHAR",
-  "TEXT",
-  "DATE",
-  "DATETIME",
-  "BOOLEAN",
-  "DECIMAL",
-  "FLOAT",
-];
-
-const MYSQL_TYPES = [
-  ...COMMON_TYPES,
-  "TINYINT",
-  "SMALLINT",
-  "BIGINT",
-  "DOUBLE",
-  "BLOB",
-  "JSON",
-];
-
-const POSTGRES_TYPES = [
-  ...COMMON_TYPES,
-  "INTEGER",
-  "BIGINT",
-  "SERIAL",
-  "BIGSERIAL",
-  "REAL",
-  "DOUBLE PRECISION",
-  "JSONB",
-  "UUID",
-];
 
 export function CreateTableTab({
   tabId,
@@ -85,6 +60,9 @@ export function CreateTableTab({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [capabilities, setCapabilities] = useState<DatabaseCapabilities | null>(
+    null
+  );
   const [dragState, setDragState] = useState<{
     isDragging: boolean;
     dragIndex: number | null;
@@ -96,15 +74,37 @@ export function CreateTableTab({
   const { closeTab, updateTabTitle } = useTabStore();
 
   const connection = connections.find((c) => c.id === connectionId);
-  const driver = connection?.driver || "postgres";
-  const typeOptions = driver === "mysql" ? MYSQL_TYPES : POSTGRES_TYPES;
+  const driver = connection?.driver || DEFAULT_DATABASE_DRIVER;
+  const activeCapabilities =
+    capabilities || defaultDatabaseCapabilities(driver);
+  const typeOptions = activeCapabilities.commonDataTypes;
+  const namespaceLabel = activeCapabilities.namespaceLabel || "database";
+
+  useEffect(() => {
+    let cancelled = false;
+    setCapabilities(null);
+
+    databaseService
+      .getDatabaseCapabilities(driver)
+      .then((value) => {
+        if (!cancelled) setCapabilities(value);
+      })
+      .catch((err) => {
+        console.error("Failed to load database capabilities:", err);
+        if (!cancelled) setCapabilities(defaultDatabaseCapabilities(driver));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [driver]);
 
   // Update default type based on driver
   useEffect(() => {
     setColumns([
       {
         name: "id",
-        type: driver === "mysql" ? "INT" : "SERIAL",
+        type: activeCapabilities.defaultPrimaryKeyType,
         length: "",
         isPrimaryKey: true,
         isNotNull: true,
@@ -112,15 +112,16 @@ export function CreateTableTab({
         comment: "",
       },
     ]);
-  }, [driver]);
+  }, [activeCapabilities.defaultPrimaryKeyType]);
 
   const addColumn = () => {
+    const dataType = defaultStringDataType(activeCapabilities);
     setColumns([
       ...columns,
       {
         name: "",
-        type: "VARCHAR",
-        length: "255",
+        type: dataType,
+        length: defaultLengthForDataType(dataType),
         isPrimaryKey: false,
         isNotNull: false,
         isAutoIncrement: false,
@@ -145,11 +146,18 @@ export function CreateTableTab({
 
     // Set smart defaults when type changes
     if (field === "type") {
-      if (value === "DECIMAL") {
-        newColumns[index]!.length = "10,2";
-      } else if (value === "VARCHAR") {
-        // Only set if empty or previous default
-        if (!newColumns[index]!.length) newColumns[index]!.length = "255";
+      const nextLength = defaultLengthForDataType(String(value));
+      if (!nextLength) {
+        newColumns[index]!.length = "";
+      } else if (
+        !newColumns[index]!.length ||
+        newColumns[index]!.length === "255" ||
+        newColumns[index]!.length === "10,2"
+      ) {
+        newColumns[index]!.length = nextLength;
+      }
+      if (!supportsAutoIncrementForDataType(activeCapabilities, String(value))) {
+        newColumns[index]!.isAutoIncrement = false;
       }
     }
 
@@ -188,67 +196,6 @@ export function CreateTableTab({
     setDragState({ isDragging: false, dragIndex: null, hoverIndex: null });
   };
 
-  const generateSQL = () => {
-    const quote = driver === "mysql" ? "`" : '"';
-
-    const lines = [];
-    const pkColumns = [];
-
-    for (const col of columns) {
-      let line = `${quote}${col.name}${quote} ${col.type}`;
-
-      if (col.length && ["VARCHAR", "CHAR", "DECIMAL"].includes(col.type)) {
-        line += `(${col.length})`;
-      }
-
-      if (col.isAutoIncrement && driver === "mysql") {
-        line += " AUTO_INCREMENT";
-      }
-
-      if (col.isNotNull) {
-        line += " NOT NULL";
-      }
-
-      if (col.comment && driver === "mysql") {
-        line += ` COMMENT '${col.comment.replace(/'/g, "\\'")}'`;
-      }
-
-      if (col.isPrimaryKey) {
-        pkColumns.push(col.name);
-      }
-
-      lines.push(line);
-    }
-
-    if (pkColumns.length > 0) {
-      lines.push(
-        `PRIMARY KEY (${pkColumns
-          .map((c) => `${quote}${c}${quote}`)
-          .join(", ")})`
-      );
-    }
-
-    let sql = `CREATE TABLE ${quote}${tableName}${quote} (\n  ${lines.join(
-      ",\n  "
-    )}\n);`;
-
-    if (driver === "postgres") {
-      const comments = columns
-        .filter((c) => c.comment)
-        .map(
-          (c) =>
-            `COMMENT ON COLUMN "${tableName}"."${
-              c.name
-            }" IS '${c.comment.replace(/'/g, "''")}';`
-        );
-      if (comments.length > 0) {
-        sql += "\n\n" + comments.join("\n");
-      }
-    }
-
-    return sql;
-  };
-
   const handleCreate = async () => {
     if (!tableName.trim()) {
       setError("Table name is required");
@@ -264,13 +211,24 @@ export function CreateTableTab({
     setSuccess(false);
 
     try {
-      const sql = generateSQL();
-      console.log("Creating table with SQL:", sql);
-
-      await queryService.executeQuery(connectionId, sql, schemaName);
+      await tableService.createTable(
+        connectionId,
+        driver,
+        schemaName,
+        tableName,
+        columns.map((column) => ({
+          name: column.name,
+          dataType: column.type,
+          length: column.length || null,
+          isPrimaryKey: column.isPrimaryKey,
+          isNotNull: column.isNotNull,
+          isAutoIncrement: column.isAutoIncrement,
+          comment: column.comment || null,
+        }))
+      );
 
       // Refresh tables
-      await loadTables(connectionId, schemaName);
+      await loadTables(connectionId, schemaName, true);
 
       setSuccess(true);
       updateTabTitle(tabId, `✓ ${tableName}`);
@@ -292,7 +250,7 @@ export function CreateTableTab({
       <div className="p-4 border-b border-white/5">
         <h2 className="text-lg font-medium">Create New Table</h2>
         <p className="text-xs text-muted-foreground mt-1">
-          Creating in database:{" "}
+          Creating in {namespaceLabel}:{" "}
           <span className="font-mono text-primary">{schemaName}</span>
         </p>
       </div>
@@ -331,8 +289,13 @@ export function CreateTableTab({
           </label>
 
           <div className="space-y-2">
-            {columns.map((col, idx) => (
-              <div
+            {columns.map((col, idx) => {
+              const autoIncrementSupported = supportsAutoIncrementForDataType(
+                activeCapabilities,
+                col.type
+              );
+              return (
+                <div
                 key={idx}
                 onMouseEnter={() => handleDragEnter(idx)}
                 onMouseUp={handleDragEnd}
@@ -442,14 +405,23 @@ export function CreateTableTab({
                       <Checkbox
                         id={`ai-${idx}`}
                         checked={col.isAutoIncrement}
+                        disabled={!autoIncrementSupported}
                         onCheckedChange={(c) =>
                           updateColumn(idx, "isAutoIncrement", !!c)
                         }
                       />
                       <label
                         htmlFor={`ai-${idx}`}
-                        className="text-xs cursor-pointer"
-                        title="Auto Increment"
+                        className={`text-xs ${
+                          autoIncrementSupported
+                            ? "cursor-pointer"
+                            : "cursor-not-allowed opacity-50"
+                        }`}
+                        title={
+                          autoIncrementSupported
+                            ? "Auto Increment"
+                            : "Auto increment requires an integer-compatible type"
+                        }
                       >
                         AI
                       </label>
@@ -466,7 +438,8 @@ export function CreateTableTab({
                   <Trash2 size={14} />
                 </Button>
               </div>
-            ))}
+              );
+            })}
           </div>
 
           <Button

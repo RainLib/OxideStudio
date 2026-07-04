@@ -101,7 +101,7 @@ export function SidebarStatusBar({
                       : "text-muted-foreground hover:text-foreground hover:bg-background-tertiary/50"
                   )}
                   onClick={() => {
-                    setActiveConnection(conn.id);
+                    void setActiveConnection(conn.id);
                     setOpen(false);
                   }}
                 >
@@ -130,7 +130,7 @@ export function SidebarStatusBar({
                 variant="ghost"
                 className="w-full justify-start text-xs h-8 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10"
                 onClick={() => {
-                  disconnect();
+                  void disconnect();
                   setOpen(false);
                 }}
               >

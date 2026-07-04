@@ -26,13 +26,20 @@ export const GridToolbar: React.FC<GridToolbarProps> = ({
   onToggleFilters,
 }) => {
   const rowCount = result?.rows.length || 0;
+  const resultSummary =
+    result?.message ||
+    (typeof result?.rowsAffected === "number"
+      ? `${result.rowsAffected.toLocaleString()} row${
+          result.rowsAffected === 1 ? "" : "s"
+        } affected`
+      : `${rowCount.toLocaleString()} row${rowCount !== 1 ? "s" : ""}`);
 
   return (
     <div className="flex items-center gap-2 px-3 py-2 border-b bg-background">
       {/* Row count */}
       {result && (
         <div className="text-xs text-muted-foreground min-w-fit">
-          {rowCount.toLocaleString()} row{rowCount !== 1 ? "s" : ""}
+          {resultSummary}
         </div>
       )}
 

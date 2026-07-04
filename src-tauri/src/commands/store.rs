@@ -1,6 +1,6 @@
 use crate::core::store::{MetaStore, Resource, SavedConnection};
 use anyhow::Result;
-use tauri::{AppHandle, State};
+use tauri::State;
 
 #[tauri::command]
 pub async fn save_connection(
@@ -38,6 +38,20 @@ pub async fn save_resources(
 ) -> Result<(), String> {
     meta_store
         .save_resources(&resources)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn replace_resources(
+    meta_store: State<'_, MetaStore>,
+    connection_id: String,
+    parent_id: Option<String>,
+    kind: String,
+    resources: Vec<Resource>,
+) -> Result<(), String> {
+    meta_store
+        .replace_resources(&connection_id, parent_id.as_deref(), &kind, &resources)
         .await
         .map_err(|e| e.to_string())
 }

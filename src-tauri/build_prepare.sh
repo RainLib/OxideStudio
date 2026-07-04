@@ -1,75 +1,51 @@
 #!/bin/bash
-# Build preparation script - Downloads LSP binary for bundling
-set -e
+# Build preparation script - builds or copies the SQL LSP binary for bundling.
+set -euo pipefail
 
-LSP_VERSION="0.1.3"
-LSP_REPO="LikeRainDay/lsp_sqls"
-BINARIES_DIR="$(dirname "$0")/binaries"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+LSP_SOURCE_DIR="${REPO_ROOT}/vendor/sql-lsp"
+BINARIES_DIR="${SCRIPT_DIR}/binaries"
 
-# Detect platform
-OS=$(uname -s)
-ARCH=$(uname -m)
+if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
+    BINARY_NAME="sql-lsp.exe"
+else
+    BINARY_NAME="sql-lsp"
+fi
 
-case "$OS-$ARCH" in
-    Linux-x86_64)
-        PLATFORM="x86_64-unknown-linux-gnu"
-        BINARY_NAME="sql-lsp"
-        ;;
-    Linux-aarch64)
-        PLATFORM="aarch64-unknown-linux-gnu"
-        BINARY_NAME="sql-lsp"
-        ;;
-    Darwin-x86_64)
-        PLATFORM="x86_64-apple-darwin"
-        BINARY_NAME="sql-lsp"
-        ;;
-    Darwin-arm64)
-        PLATFORM="aarch64-apple-darwin"
-        BINARY_NAME="sql-lsp"
-        ;;
-    MINGW*-x86_64|MSYS*-x86_64)
-        PLATFORM="x86_64-pc-windows-msvc"
-        BINARY_NAME="sql-lsp.exe"
-        ;;
-    *)
-        echo "Unsupported platform: $OS-$ARCH"
+TARGET_BINARY="${BINARIES_DIR}/${BINARY_NAME}"
+
+echo "=== SQL LSP Build Preparation ==="
+echo "Target: ${TARGET_BINARY}"
+
+mkdir -p "${BINARIES_DIR}"
+
+if [[ -n "${OXIDE_SQL_LSP_BINARY:-}" ]]; then
+    if [[ ! -f "${OXIDE_SQL_LSP_BINARY}" ]]; then
+        echo "OXIDE_SQL_LSP_BINARY does not exist: ${OXIDE_SQL_LSP_BINARY}" >&2
         exit 1
-        ;;
-esac
+    fi
 
-DOWNLOAD_URL="https://github.com/${LSP_REPO}/releases/download/v${LSP_VERSION}/sql-lsp-${PLATFORM}-v${LSP_VERSION}.tar.gz"
-BINARY_PATH="${BINARIES_DIR}/${BINARY_NAME}"
+    echo "Using override binary: ${OXIDE_SQL_LSP_BINARY}"
+    cp "${OXIDE_SQL_LSP_BINARY}" "${TARGET_BINARY}"
+else
+    if [[ ! -f "${LSP_SOURCE_DIR}/Cargo.toml" ]]; then
+        echo "SQL LSP submodule is missing at ${LSP_SOURCE_DIR}" >&2
+        echo "Run: git submodule update --init --recursive" >&2
+        exit 1
+    fi
 
-echo "=== LSP Binary Download Script ==="
-echo "Platform: $PLATFORM"
-echo "Version: $LSP_VERSION"
-echo "URL: $DOWNLOAD_URL"
-echo "Target: $BINARY_PATH"
+    echo "Building SQL LSP from submodule: ${LSP_SOURCE_DIR}"
+    cargo build --release --manifest-path "${LSP_SOURCE_DIR}/Cargo.toml"
 
-# Check if binary already exists
-if [ -f "$BINARY_PATH" ]; then
-    echo "✓ Binary already exists at $BINARY_PATH"
-    exit 0
+    BUILT_BINARY="${LSP_SOURCE_DIR}/target/release/${BINARY_NAME}"
+    if [[ ! -f "${BUILT_BINARY}" ]]; then
+        echo "Built SQL LSP binary not found: ${BUILT_BINARY}" >&2
+        exit 1
+    fi
+
+    cp "${BUILT_BINARY}" "${TARGET_BINARY}"
 fi
 
-# Create binaries directory
-mkdir -p "$BINARIES_DIR"
-
-# Download archive
-echo "Downloading LSP binary..."
-TEMP_ARCHIVE="${BINARIES_DIR}/sql-lsp-${PLATFORM}-v${LSP_VERSION}.tar.gz"
-curl -L -o "$TEMP_ARCHIVE" "$DOWNLOAD_URL"
-
-# Extract binary
-echo "Extracting binary..."
-tar -xzf "$TEMP_ARCHIVE" -C "$BINARIES_DIR"
-
-# Set executable permissions (Unix-like systems)
-if [ "$OS" != "MINGW"* ] && [ "$OS" != "MSYS"* ]; then
-    chmod +x "$BINARY_PATH"
-fi
-
-# Clean up
-rm "$TEMP_ARCHIVE"
-
-echo "✓ LSP binary downloaded successfully to $BINARY_PATH"
+chmod +x "${TARGET_BINARY}" 2>/dev/null || true
+echo "SQL LSP binary ready at ${TARGET_BINARY}"

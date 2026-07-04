@@ -1,18 +1,213 @@
 import { useEffect, useRef } from "react";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
+import { useTabStore } from "@/store/useTabStore";
 import { useLspClient } from "@/hooks/useLspClient";
-import { lspClient } from "@/services/lsp";
-import { schemaService } from "@/services/tauri";
+import { getSqlDocumentUri, lspClient } from "@/services/lsp";
+import {
+  databaseService,
+  schemaService,
+  type DatabaseCapabilities,
+} from "@/services/tauri";
+import {
+  defaultDatabaseCapabilities,
+  normalizeLspDialect,
+  selectPreferredNamespace,
+} from "@/lib/databaseDialect";
+import { extractRelationReferences } from "@/lib/sqlAnalysis";
+import { v4 as uuidv4 } from "uuid";
+
+const MAX_LSP_TABLES_PER_SCHEMA = 200;
+const LSP_METADATA_CONCURRENCY = 8;
+const LSP_METADATA_CACHE_TTL_MS = 60_000;
+
+type LspTableDefinition = {
+  name: string;
+  object_type: string | null;
+  comment: string | null;
+  source_location: null;
+  indexes: Array<{
+    name: string;
+    columns: string[];
+    is_unique: boolean;
+    is_primary: boolean;
+    index_type: string | null;
+    definition: string | null;
+  }>;
+  constraints: Array<{
+    name: string;
+    constraint_type: string;
+    columns: string[];
+    referenced_schema: string | null;
+    referenced_table: string | null;
+    referenced_columns: string[];
+    definition: string | null;
+  }>;
+  columns: Array<{
+    name: string;
+    data_type: string;
+    nullable: boolean;
+    primary_key: boolean;
+    unique: boolean;
+    indexed: boolean;
+    comment: string | null;
+    source_location: null;
+  }>;
+};
+
+type CachedLspTableDefinition = {
+  expiresAt: number;
+  promise: Promise<LspTableDefinition>;
+};
+
+type LspFunctionDefinition = {
+  name: string;
+  routine_type: string | null;
+  parameters: Array<{
+    name: string;
+    data_type: string;
+    optional: boolean;
+  }>;
+  return_type: string;
+  description: string | null;
+};
+
+type LspSchemaDefinition = {
+  id: string;
+  database: string;
+  source_uri: null;
+  tables: LspTableDefinition[];
+  functions: LspFunctionDefinition[];
+};
+
+function findKnownSchemaName(schemaNames: string[], schemaName?: string | null) {
+  const normalized = schemaName?.trim().toLowerCase();
+  if (!normalized) return null;
+  return (
+    schemaNames.find((candidate) => candidate.toLowerCase() === normalized) ||
+    null
+  );
+}
+
+function lspSchemaSignature(schemaDefinitions: LspSchemaDefinition[]) {
+  return schemaDefinitions
+    .map((schema) => {
+      const tableSignature = schema.tables
+        .map((table) => {
+          const columnSignature = table.columns
+            .map(
+              (column) =>
+                `${column.name}:${column.data_type}:${column.nullable ? "1" : "0"}:${
+                  column.primary_key ? "1" : "0"
+                }:${column.indexed ? "1" : "0"}`
+            )
+            .join(",");
+          return `${table.name}:${table.object_type || ""}:${columnSignature}:${
+            table.indexes.length
+          }:${table.constraints.length}`;
+        })
+        .join("|");
+      const functionSignature = schema.functions
+        .map(
+          (fn) =>
+            `${fn.name}:${fn.routine_type || ""}:${fn.parameters.length}:${
+              fn.return_type
+            }`
+        )
+        .join("|");
+      return `${schema.id}:${schema.database}:${tableSignature}:${functionSignature}`;
+    })
+    .join(";");
+}
+
+function addPreferredTable(
+  preferredTablesBySchema: Map<string, Set<string>>,
+  schemaName: string | null,
+  tableName: string | null | undefined
+) {
+  const schema = schemaName?.trim();
+  const table = tableName?.trim();
+  if (!schema || !table) return;
+
+  const tables = preferredTablesBySchema.get(schema) || new Set<string>();
+  tables.add(table);
+  preferredTablesBySchema.set(schema, tables);
+}
+
+function selectLspTablesForSchema<T extends { name: string }>(
+  schemaTables: T[],
+  preferredTableNames: Iterable<string> | undefined,
+  maxTables: number
+) {
+  const selected: T[] = [];
+  const selectedNames = new Set<string>();
+  const byExactName = new Map(schemaTables.map((table) => [table.name, table]));
+  const byLowerName = new Map(
+    schemaTables.map((table) => [table.name.toLowerCase(), table])
+  );
+
+  const pushTable = (table: T | undefined) => {
+    if (!table || selectedNames.has(table.name)) return;
+    selected.push(table);
+    selectedNames.add(table.name);
+  };
+
+  for (const preferredName of preferredTableNames || []) {
+    if (selected.length >= maxTables) break;
+    pushTable(
+      byExactName.get(preferredName) || byLowerName.get(preferredName.toLowerCase())
+    );
+  }
+
+  for (const table of schemaTables) {
+    if (selected.length >= maxTables) break;
+    pushTable(table);
+  }
+
+  return selected;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  mapper: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        results[currentIndex] = await mapper(items[currentIndex]!);
+      }
+    }
+  );
+
+  await Promise.all(workers);
+  return results;
+}
 
 export function LspConnectionSyncer() {
   const { activeConnectionId, connections } = useConnectionStore();
-  const { schemas, tables, currentSchema } = useSchemaStore();
+  const { schemas, tables, currentSchema, metadataVersion } = useSchemaStore();
+  const { tabs } = useTabStore();
   const { isReady } = useLspClient();
 
   // Track if we've already sent config for this connection+schema
   const lastConfigRef = useRef<string | null>(null);
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const syncGenerationRef = useRef(0);
+  const tableMetadataCacheRef = useRef<Map<string, CachedLspTableDefinition>>(
+    new Map()
+  );
+
+  useEffect(() => {
+    tableMetadataCacheRef.current.clear();
+    lastConfigRef.current = null;
+  }, [activeConnectionId, metadataVersion]);
 
   useEffect(() => {
     // Clear any pending debounce timer
@@ -31,104 +226,310 @@ export function LspConnectionSyncer() {
       return;
     }
 
-    // Wait for tables to be loaded
-    if (!tables || tables.length === 0) {
-      console.log("[LSP] Waiting for tables to load...");
-      return;
+    const defaultSchema = selectPreferredNamespace(connection.driver, schemas, [
+      currentSchema,
+      connection.database,
+    ]);
+    if (!defaultSchema) return;
+
+    const syncGeneration = syncGenerationRef.current + 1;
+    syncGenerationRef.current = syncGeneration;
+    let cancelled = false;
+    const capabilitiesPromise: Promise<DatabaseCapabilities> = databaseService
+      .getDatabaseCapabilities(connection.driver)
+      .catch((error) => {
+        console.warn(
+          `[LSP] Failed to load capabilities for ${connection.driver}:`,
+          error
+        );
+        return defaultDatabaseCapabilities(connection.driver);
+      });
+
+    const getSchemaId = (schemaName: string) => {
+      const schemaKey = `oxide-lsp-schema-id:${activeConnectionId}:${connection.driver}:${schemaName}`;
+      let schemaId = localStorage.getItem(schemaKey);
+      if (!schemaId) {
+        schemaId = uuidv4();
+        localStorage.setItem(schemaKey, schemaId);
+      }
+      return schemaId;
+    };
+
+    const buildTableDefinition = async (
+      schemaName: string,
+      table: { name: string; type?: string | null; comment?: string | null }
+    ): Promise<LspTableDefinition> => {
+      try {
+        const capabilities = await capabilitiesPromise;
+        const [columns, indexes, constraints] = await Promise.all([
+          schemaService
+            .getColumns(activeConnectionId, schemaName, table.name)
+            .catch((error) => {
+              console.error(
+                `[LSP] Failed to fetch columns for ${schemaName}.${table.name}:`,
+                error
+              );
+              return [];
+            }),
+          capabilities.supportsTableIndexes
+            ? schemaService
+                .getIndexes(activeConnectionId, schemaName, table.name)
+                .catch((error) => {
+                  console.error(
+                    `[LSP] Failed to fetch indexes for ${schemaName}.${table.name}:`,
+                    error
+                  );
+                  return [];
+                })
+            : Promise.resolve([]),
+          capabilities.supportsTableConstraints
+            ? schemaService
+                .getConstraints(activeConnectionId, schemaName, table.name)
+                .catch((error) => {
+                  console.error(
+                    `[LSP] Failed to fetch constraints for ${schemaName}.${table.name}:`,
+                    error
+                  );
+                  return [];
+                })
+            : Promise.resolve([]),
+        ]);
+
+        return {
+          name: table.name,
+          object_type: table.type || null,
+          comment: table.comment || null,
+          source_location: null,
+          indexes: indexes.map((index) => ({
+            name: index.name,
+            columns: index.columns || [],
+            is_unique: index.is_unique,
+            is_primary: index.is_primary,
+            index_type: index.index_type || null,
+            definition: index.definition || null,
+          })),
+          constraints: constraints.map((constraint) => ({
+            name: constraint.name,
+            constraint_type: constraint.constraint_type,
+            columns: constraint.columns || [],
+            referenced_schema: constraint.referenced_schema || null,
+            referenced_table: constraint.referenced_table || null,
+            referenced_columns: constraint.referenced_columns || [],
+            definition: constraint.definition || null,
+          })),
+          columns: columns.map((col) => ({
+            name: col.name,
+            data_type: col.data_type || "VARCHAR",
+            nullable: col.is_nullable,
+            primary_key: !!col.is_primary_key,
+            unique: !!col.is_unique,
+            indexed: !!col.is_indexed,
+            comment: col.comment || null,
+            source_location: null,
+          })),
+        };
+      } catch (error) {
+        console.error(
+          `[LSP] Failed to fetch metadata for ${schemaName}.${table.name}:`,
+          error
+        );
+        return {
+          name: table.name,
+          object_type: table.type || null,
+          comment: table.comment || null,
+          source_location: null,
+          indexes: [],
+          constraints: [],
+          columns: [],
+        };
+      }
+    };
+
+    const getCachedTableDefinition = (
+      schemaName: string,
+      table: { name: string; type?: string | null; comment?: string | null }
+    ) => {
+      const now = Date.now();
+      const cache = tableMetadataCacheRef.current;
+      const cacheKey = `${activeConnectionId}:${connection.driver}:${schemaName}:${table.name}`;
+
+      for (const [key, cached] of cache) {
+        if (cached.expiresAt <= now) {
+          cache.delete(key);
+        }
+      }
+
+      const cached = cache.get(cacheKey);
+      if (cached && cached.expiresAt > now) {
+        return cached.promise;
+      }
+
+      const promise = buildTableDefinition(schemaName, table);
+      cache.set(cacheKey, {
+        expiresAt: now + LSP_METADATA_CACHE_TTL_MS,
+        promise,
+      });
+      return promise;
+    };
+
+    const connectionTabs = tabs.filter(
+      (tab) => (tab.connectionId || activeConnectionId) === activeConnectionId
+    );
+    const queryTabs = connectionTabs.filter((tab) => tab.type === "query");
+    const schemaForTab = (tab: (typeof queryTabs)[number]) =>
+      tab.targetSchema || defaultSchema;
+    const normalizeSchemaName = (schemaName: string | null | undefined) => {
+      const trimmed = schemaName?.trim();
+      return trimmed ? trimmed : null;
+    };
+    const preferredTablesBySchema = new Map<string, Set<string>>();
+    const referencedSchemas = new Set<string>();
+
+    for (const tab of connectionTabs) {
+      addPreferredTable(
+        preferredTablesBySchema,
+        normalizeSchemaName(tab.schemaName || tab.targetSchema || defaultSchema),
+        tab.tableName
+      );
     }
 
-    // Create a unique key for this configuration
-    const configKey = `${activeConnectionId}:${currentSchema}:${tables.length}`;
-
-    // Skip if we've already sent this exact configuration
-    if (lastConfigRef.current === configKey) {
-      console.log("[LSP] Skipping duplicate configuration send");
-      return;
+    for (const tab of queryTabs) {
+      const tabSchema = normalizeSchemaName(schemaForTab(tab)) || defaultSchema;
+      for (const reference of extractRelationReferences(
+        tab.sql || "",
+        connection.driver
+      )) {
+        const qualifiedSchema = findKnownSchemaName(schemas, reference.schema);
+        const schemaName = qualifiedSchema || tabSchema;
+        referencedSchemas.add(schemaName);
+        addPreferredTable(preferredTablesBySchema, schemaName, reference.table);
+      }
     }
 
+    const targetSchemas = Array.from(
+      new Set(
+        [
+          defaultSchema,
+          ...referencedSchemas,
+          ...connectionTabs.flatMap((tab) => [
+            tab.targetSchema || null,
+            tab.schemaName || null,
+          ]),
+        ]
+          .map(normalizeSchemaName)
+          .filter((schemaName): schemaName is string => Boolean(schemaName))
+      )
+    );
+
+    const fileSchemas = Object.fromEntries(
+      queryTabs.map((tab) => [
+        getSqlDocumentUri(tab.id, connection.driver),
+        getSchemaId(schemaForTab(tab)),
+      ])
+    );
     // Debounce: wait 500ms before sending
     debounceTimerRef.current = setTimeout(() => {
       console.log("[LSP] Building schema configuration for:", connection.name);
-      console.log("[LSP] Current schema:", currentSchema);
-      console.log("[LSP] Tables available:", tables.length);
-
-      // Build full schema structure like Python script
-      const schemaId = connection.id; // Use connection ID as schema ID
+      console.log("[LSP] Target schemas:", targetSchemas.join(", "));
 
       // Build tables array with columns
       // tables is an ARRAY: TableInfo[]
       const buildTableDefinitions = async () => {
-        const tablePromises = tables.map(async (table) => {
-          try {
-            // Fetch columns for each table
-            const columns = await schemaService.getColumns(
-              activeConnectionId,
-              currentSchema || "",
-              table.name
+        const capabilities = await capabilitiesPromise;
+        const lspDialect = normalizeLspDialect(
+          capabilities.lspLanguageId || connection.driver
+        );
+        const fileDialects = Object.fromEntries(
+          queryTabs.map((tab) => [
+            getSqlDocumentUri(tab.id, connection.driver),
+            lspDialect,
+          ])
+        );
+        const schemaDefinitions: LspSchemaDefinition[] = await Promise.all(
+          targetSchemas.map(async (schemaName) => {
+            const [schemaTables, schemaFunctions] = await Promise.all([
+              schemaService.getTables(activeConnectionId, schemaName),
+              capabilities.supportsFunctions
+                ? schemaService
+                    .getFunctions(activeConnectionId, schemaName)
+                    .catch((error) => {
+                      console.error(
+                        `[LSP] Failed to fetch functions for ${schemaName}:`,
+                        error
+                      );
+                      return [];
+                    })
+                : Promise.resolve([]),
+            ]);
+            const boundedTables = selectLspTablesForSchema(
+              schemaTables,
+              preferredTablesBySchema.get(schemaName),
+              MAX_LSP_TABLES_PER_SCHEMA
+            );
+            const lspTables = await mapWithConcurrency(
+              boundedTables,
+              LSP_METADATA_CONCURRENCY,
+              async (table) => getCachedTableDefinition(schemaName, table)
+            );
+            const lspFunctions: LspFunctionDefinition[] = schemaFunctions.map(
+              (func) => ({
+                name: func.name,
+                routine_type: func.routine_type || null,
+                parameters: (func.parameters || []).map((parameter) => ({
+                  name: parameter.name,
+                  data_type: parameter.data_type || "unknown",
+                  optional: !!parameter.optional,
+                })),
+                return_type: func.return_type || "unknown",
+                description: func.description || null,
+              })
+            );
+            console.log(
+              `[LSP] Built ${lspTables.length}/${schemaTables.length} tables and ${lspFunctions.length} functions for ${schemaName}`
             );
 
             return {
-              name: table.name,
-              comment: table.comment || null,
-              source_location: null,
-              columns: columns.map((col: any) => ({
-                name: col.name,
-                data_type: col.type || "VARCHAR",
-                nullable: col.nullable !== false,
-                comment: col.comment || null,
-                source_location: null,
-              })),
+              id: getSchemaId(schemaName),
+              database: schemaName,
+              source_uri: null,
+              tables: lspTables,
+              functions: lspFunctions,
             };
-          } catch (error) {
-            console.error(
-              `[LSP] Failed to fetch columns for ${table.name}:`,
-              error
-            );
-            // Return table without columns if fetch fails
-            return {
-              name: table.name,
-              comment: table.comment || null,
-              source_location: null,
-              columns: [],
-            };
-          }
-        });
-
-        const lspTables = await Promise.all(tablePromises);
-
-        console.log("[LSP] Built tables with columns:", lspTables.length);
-        console.log(
-          "[LSP] Table names:",
-          lspTables.map((t) => t.name).join(", ")
+          })
         );
 
         // Build configuration matching Python script format
         const config = {
-          schemas: [
-            {
-              id: schemaId,
-              database: currentSchema || connection.database,
-              source_uri: null,
-              tables: lspTables,
-              functions: [],
-            },
-          ],
+          defaultDialect: lspDialect,
+          schemas: schemaDefinitions,
           // Map document URIs to schema ID
-          fileSchemas: {
-            "inmemory://model/1": schemaId,
-            "inmemory://model/2": schemaId,
-            "inmemory://model/3": schemaId,
-            "inmemory://model/4": schemaId,
-            "inmemory://model/5": schemaId,
-          },
+          fileSchemas,
+          fileDialects,
         };
 
         console.log("[LSP] Sending schema configuration:");
-        console.log("[LSP] - Schema ID:", schemaId);
-        console.log("[LSP] - Database:", currentSchema || connection.database);
-        console.log("[LSP] - Tables:", lspTables.map((t) => t.name).join(", "));
+        console.log("[LSP] - Schemas:", targetSchemas.join(", "));
+        console.log("[LSP] - Files:", Object.keys(fileSchemas).length);
 
         try {
+          if (cancelled || syncGeneration !== syncGenerationRef.current) {
+            console.log("[LSP] Skipping stale schema configuration");
+            return;
+          }
+
+          const configKey = JSON.stringify({
+            connectionId: activeConnectionId,
+            driver: connection.driver,
+            lspDialect,
+            fileSchemas,
+            fileDialects,
+            schemaSignature: lspSchemaSignature(schemaDefinitions),
+          });
+          if (lastConfigRef.current === configKey) {
+            console.log("[LSP] Skipping duplicate configuration send");
+            return;
+          }
+
           await lspClient.updateConfiguration(config);
           // Mark this configuration as sent
           lastConfigRef.current = configKey;
@@ -143,6 +544,7 @@ export function LspConnectionSyncer() {
 
     // Cleanup function
     return () => {
+      cancelled = true;
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
       }
@@ -150,10 +552,12 @@ export function LspConnectionSyncer() {
   }, [
     activeConnectionId,
     connections,
+    tabs,
     isReady,
     schemas,
     tables,
     currentSchema,
+    metadataVersion,
   ]);
 
   return null;

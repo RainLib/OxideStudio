@@ -17,7 +17,7 @@ import {
   Plus,
   Upload,
 } from "lucide-react";
-import { useState, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -44,6 +44,21 @@ import {
 } from "@/components/ui/popover";
 import * as LucideIcons from "lucide-react";
 import React from "react";
+import { parseConnectionUrl } from "@/lib/connectionUrlParser";
+import {
+  connectionUrlScheme,
+  databaseDriverProfile,
+  defaultConnectionIcon,
+  defaultDatabaseCapabilities,
+  defaultDatabaseName,
+  defaultDatabasePort,
+  supportedDatabaseDriverProfiles,
+} from "@/lib/databaseDialect";
+import {
+  databaseService,
+  type DatabaseCapabilities,
+  type DatabaseDriver,
+} from "@/services/tauri";
 
 import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
 
@@ -75,6 +90,12 @@ const ICONS = [
   "Activity",
 ];
 
+function fallbackDriverCapabilities() {
+  return supportedDatabaseDriverProfiles().map((profile) =>
+    defaultDatabaseCapabilities(profile.driver)
+  );
+}
+
 export function ConnectionForm() {
   const {
     selectedConnection,
@@ -93,7 +114,45 @@ export function ConnectionForm() {
   const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [tagInput, setTagInput] = useState("");
+  const [driverCapabilities, setDriverCapabilities] =
+    useState<DatabaseCapabilities[]>(fallbackDriverCapabilities);
   const uploadIconRef = useRef<HTMLInputElement>(null);
+  const driverOptions = useMemo(() => {
+    const seenDrivers = new Set<string>();
+    return [...driverCapabilities, ...fallbackDriverCapabilities()]
+      .filter((capabilities) => {
+        const driver = String(capabilities.driver);
+        if (seenDrivers.has(driver)) return false;
+        seenDrivers.add(driver);
+        return true;
+      })
+      .map((capabilities) => ({
+        capabilities,
+        profile: databaseDriverProfile(capabilities.driver),
+      }));
+  }, [driverCapabilities]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    databaseService
+      .listDatabaseCapabilities()
+      .then((capabilities) => {
+        if (!cancelled && capabilities.length > 0) {
+          setDriverCapabilities(capabilities);
+        }
+      })
+      .catch((error) => {
+        console.warn("Failed to load database capabilities:", error);
+        if (!cancelled) {
+          setDriverCapabilities(fallbackDriverCapabilities());
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const PREDEFINED_TAGS = [
     "Production",
@@ -108,46 +167,34 @@ export function ConnectionForm() {
     return <QueryShortcuts />;
   }
 
+  const selectedDriverDefaultPort = defaultDatabasePort(
+    selectedConnection.driver
+  );
+  const selectedDriverDefaultDatabase =
+    defaultDatabaseName(selectedConnection.driver) || "database";
+  const importExampleUrl = `${connectionUrlScheme(
+    selectedConnection.driver
+  )}://user:pass@host${
+    selectedDriverDefaultPort ? `:${selectedDriverDefaultPort}` : ""
+  }/${selectedDriverDefaultDatabase}`;
+
   const parseConnectionString = (url: string): Partial<ConnectionConfig> => {
-    try {
-      let workingUrl = url.trim();
-      if (workingUrl.startsWith("jdbc:")) {
-        workingUrl = workingUrl.substring(5);
-      }
-
-      const parsed = new URL(workingUrl);
-      const protocol = parsed.protocol.replace(":", "");
-      const host = parsed.hostname;
-
-      // Map protocol to driver
-      const driver =
-        protocol === "postgresql" || protocol === "postgres"
-          ? "postgres"
-          : "mysql";
-
-      const port = parsed.port
-        ? parseInt(parsed.port)
-        : driver === "postgres"
-        ? 5432
-        : 3306;
-
-      const user = decodeURIComponent(parsed.username);
-      const password = decodeURIComponent(parsed.password);
-      const database = decodeURIComponent(parsed.pathname.split("/")[1] || "");
-
-      return {
-        driver,
-        host,
-        port,
-        user,
-        password,
-        database,
-        connectionUrl: url,
-      };
-    } catch (e) {
-      console.error("Failed to parse connection string:", e);
+    const parsed = parseConnectionUrl(url);
+    if (!parsed) {
+      console.error("Failed to parse connection string");
       return {};
     }
+
+    return {
+      driver: parsed.driver,
+      host: parsed.host,
+      port: parsed.port,
+      user: parsed.user || "",
+      password: parsed.password || "",
+      database: parsed.database || "",
+      sslMode: parsed.sslMode,
+      connectionUrl: url,
+    };
   };
 
   const handleImport = () => {
@@ -162,6 +209,38 @@ export function ConnectionForm() {
 
   const handleChange = (field: keyof ConnectionConfig, value: any) => {
     updateConnectionConfig({ [field]: value });
+  };
+
+  const handleDriverChange = (driver: DatabaseDriver) => {
+    const previousDriver = selectedConnection.driver;
+    const previousDefaultPort = defaultDatabasePort(previousDriver);
+    const previousDefaultDatabase = defaultDatabaseName(previousDriver);
+    const previousDefaultIcon = defaultConnectionIcon(previousDriver);
+    const nextDefaultPort = defaultDatabasePort(driver);
+    const nextDefaultDatabase = defaultDatabaseName(driver);
+    const nextDefaultIcon = databaseDriverProfile(driver).defaultIcon;
+
+    const updates: Partial<ConnectionConfig> = { driver };
+    if (
+      !selectedConnection.port ||
+      selectedConnection.port === previousDefaultPort
+    ) {
+      updates.port = nextDefaultPort || undefined;
+    }
+    if (
+      selectedConnection.database === undefined ||
+      selectedConnection.database === previousDefaultDatabase
+    ) {
+      updates.database = nextDefaultDatabase;
+    }
+    if (
+      !selectedConnection.icon ||
+      selectedConnection.icon === previousDefaultIcon
+    ) {
+      updates.icon = nextDefaultIcon;
+    }
+
+    updateConnectionConfig(updates);
   };
 
   const handleAddTag = (tag: string) => {
@@ -404,10 +483,11 @@ export function ConnectionForm() {
                   </DialogHeader>
                   <div className="space-y-4 py-4">
                     <p className="text-sm text-muted-foreground">
-                      Paste your connection URL (e.g. postgres://...)
+                      Paste your connection URL (e.g.{" "}
+                      {connectionUrlScheme(selectedConnection.driver)}://...)
                     </p>
                     <Input
-                      placeholder="postgres://user:pass@host:5432/db"
+                      placeholder={importExampleUrl}
                       value={importUrl}
                       onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                         setImportUrl(e.target.value)
@@ -441,24 +521,31 @@ export function ConnectionForm() {
                 </h3>
                 <Select
                   value={selectedConnection?.driver || ""}
-                  onValueChange={(value) => handleChange("driver", value)}
+                  onValueChange={(value) =>
+                    handleDriverChange(value as DatabaseDriver)
+                  }
                 >
                   <SelectTrigger className="w-full bg-background/50 border-input/60 focus:border-primary/50 h-10">
                     <SelectValue placeholder="Select type" />
                   </SelectTrigger>
                   <SelectContent className="bg-background-elevated border-border text-foreground">
-                    <SelectItem value="postgres">
-                      <div className="flex items-center gap-2">
-                        <Database size={14} className="text-blue-400" />
-                        <span>PostgreSQL</span>
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="mysql">
-                      <div className="flex items-center gap-2">
-                        <Database size={14} className="text-orange-400" />
-                        <span>MySQL / MariaDB</span>
-                      </div>
-                    </SelectItem>
+                    {driverOptions.map(({ capabilities, profile }) => (
+                      <SelectItem
+                        key={capabilities.driver}
+                        value={capabilities.driver}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={cn("inline-flex", profile.iconClassName)}
+                          >
+                            {renderIcon(profile.defaultIcon, 14)}
+                          </span>
+                          <span>
+                            {capabilities.displayName || profile.menuLabel}
+                          </span>
+                        </div>
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
 
@@ -593,7 +680,9 @@ export function ConnectionForm() {
                         <Input
                           className="bg-background/50 border-input/60 focus:border-primary/50 font-mono h-9"
                           type="number"
-                          placeholder="5432"
+                          placeholder={String(
+                            defaultDatabasePort(selectedConnection.driver) || ""
+                          )}
                           value={selectedConnection?.port || ""}
                           onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                             handleChange("port", parseInt(e.target.value))
@@ -608,7 +697,10 @@ export function ConnectionForm() {
                       </label>
                       <Input
                         className="bg-background/50 border-input/60 focus:border-primary/50 h-9"
-                        placeholder="postgres"
+                        placeholder={
+                          defaultDatabaseName(selectedConnection.driver) ||
+                          "database"
+                        }
                         value={selectedConnection?.database || ""}
                         onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                           handleChange("database", e.target.value)
@@ -632,7 +724,7 @@ export function ConnectionForm() {
                       </label>
                       <Input
                         className="bg-background/50 border-input/60 focus:border-primary/50 h-9"
-                        placeholder="postgres"
+	                        placeholder="user"
                         value={selectedConnection?.user || ""}
                         onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                           handleChange("user", e.target.value)

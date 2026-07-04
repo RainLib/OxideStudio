@@ -1,5 +1,11 @@
 import { invokeWithInterceptors } from "./client";
-import type { TableInfo, ColumnInfo } from "./types";
+import type {
+  TableInfo,
+  ColumnInfo,
+  ConstraintInfo,
+  FunctionInfo,
+  IndexInfo,
+} from "./types";
 
 /**
  * Schema 和表结构服务
@@ -49,6 +55,40 @@ export async function getColumns(
     connectionId,
     schema,
     table,
+  });
+}
+
+export async function getIndexes(
+  connectionId: string,
+  schema: string,
+  table: string
+): Promise<IndexInfo[]> {
+  return invokeWithInterceptors<IndexInfo[]>("get_indexes", {
+    connectionId,
+    schema,
+    table,
+  });
+}
+
+export async function getConstraints(
+  connectionId: string,
+  schema: string,
+  table: string
+): Promise<ConstraintInfo[]> {
+  return invokeWithInterceptors<ConstraintInfo[]>("get_constraints", {
+    connectionId,
+    schema,
+    table,
+  });
+}
+
+export async function getFunctions(
+  connectionId: string,
+  schema: string
+): Promise<FunctionInfo[]> {
+  return invokeWithInterceptors<FunctionInfo[]>("get_functions", {
+    connectionId,
+    schema,
   });
 }
 
@@ -131,6 +171,9 @@ export const schemaService = {
   getSchemas,
   getTables,
   getColumns,
+  getIndexes,
+  getConstraints,
+  getFunctions,
   setCurrentSchema,
   getCachedSchemas,
   refreshSchemas,

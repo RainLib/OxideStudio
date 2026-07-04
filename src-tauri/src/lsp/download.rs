@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::Manager;
 
-const LSP_VERSION: &str = "0.1.3";
+const LSP_VERSION: &str = "submodule";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LspBinaryInfo {
@@ -24,6 +24,16 @@ fn get_binary_name() -> String {
 #[tauri::command]
 pub async fn check_lsp_binary(app: tauri::AppHandle) -> Result<LspBinaryInfo, String> {
     let binary_name = get_binary_name();
+
+    if let Ok(path) = std::env::var("OXIDE_SQL_LSP_BINARY") {
+        let binary_path = PathBuf::from(path);
+        let exists = binary_path.exists();
+        return Ok(LspBinaryInfo {
+            version: LSP_VERSION.to_string(),
+            path: binary_path,
+            exists,
+        });
+    }
 
     // In development mode, look in binaries/ relative to current dir (src-tauri)
     // In production mode, look in bundled resources

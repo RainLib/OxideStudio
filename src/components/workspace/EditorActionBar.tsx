@@ -15,9 +15,9 @@ import { format } from "date-fns";
 import {
   ChevronDown,
   History,
-  Loader2,
   Paintbrush,
   Play,
+  Square,
   Star,
   Trash2,
 } from "lucide-react";
@@ -37,6 +37,7 @@ interface EditorActionBarProps {
   onRollbackTransaction: () => void;
   onFormat: () => void;
   onRun: () => void;
+  onCancelRun: () => void;
   isExecuting: boolean;
   isConnected: boolean;
   history: Array<{ id: string; sql: string; timestamp: number }>;
@@ -57,6 +58,7 @@ export function EditorActionBar({
   onRollbackTransaction,
   onFormat,
   onRun,
+  onCancelRun,
   isExecuting,
   isConnected,
   history,
@@ -234,17 +236,17 @@ export function EditorActionBar({
         {/* Run Split Button */}
         <div className="relative flex items-center shadow-sm" ref={dropdownRef}>
           <Button
-            onClick={onRun}
-            disabled={isExecuting || !isConnected}
+            onClick={isExecuting ? onCancelRun : onRun}
+            disabled={!isConnected}
             className={cn(
               "h-8 px-3 bg-foreground text-background hover:bg-foreground/90 text-xs font-bold rounded-l-md rounded-r-none border-r border-background/20 transition-all flex items-center gap-1.5 min-w-[70px]",
-              isExecuting && "opacity-80 disabled:opacity-80 cursor-not-allowed"
+              isExecuting && "bg-destructive text-destructive-foreground hover:bg-destructive/90"
             )}
           >
             {isExecuting ? (
               <>
-                <Loader2 className="animate-spin h-3.5 w-3.5 text-primary" />
-                <span>RUNNING</span>
+                <Square className="h-3.5 w-3.5 fill-current" />
+                <span>CANCEL</span>
               </>
             ) : (
               <>

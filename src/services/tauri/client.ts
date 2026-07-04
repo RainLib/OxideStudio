@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { redactSecrets } from "@/lib/redaction";
 import type { ApiResponse, ApiError } from "./types";
 
 /**
@@ -155,7 +156,7 @@ export async function invokeWithInterceptors<T>(
  */
 if (import.meta.env.DEV) {
   interceptors.addRequestInterceptor((command, args) => {
-    console.log(`[API Request] ${command}`, args);
+    console.log(`[API Request] ${command}`, redactSecrets(args));
   });
 
   interceptors.addResponseInterceptor((command, response) => {

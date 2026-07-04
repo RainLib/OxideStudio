@@ -1,5 +1,7 @@
 // LSP Protocol Types
 
+export const LSP_NOTIFICATION_EVENT = "lsp-notification";
+
 export interface Position {
   line: number;
   character: number;
@@ -10,12 +12,30 @@ export interface Range {
   end: Position;
 }
 
+export interface Location {
+  uri: string;
+  range: Range;
+}
+
+export interface LocationLink {
+  targetUri: string;
+  targetRange: Range;
+  targetSelectionRange?: Range;
+  originSelectionRange?: Range;
+}
+
+export interface TextEdit {
+  range: Range;
+  newText: string;
+}
+
 export interface CompletionItem {
   label: string;
   kind?: number;
   detail?: string;
   documentation?: string;
   insertText?: string;
+  insertTextFormat?: number;
 }
 
 export interface CompletionResponse {
@@ -49,6 +69,16 @@ export enum DiagnosticSeverity {
 export interface HoverInfo {
   contents: string;
   range?: Range;
+}
+
+export interface LspServerNotification {
+  method: string;
+  params: unknown;
+}
+
+export interface PublishDiagnosticsParams {
+  uri: string;
+  diagnostics: Diagnostic[];
 }
 
 // LSP Completion Kind constants (following LSP spec)

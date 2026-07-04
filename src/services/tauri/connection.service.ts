@@ -26,6 +26,17 @@ export async function connect(
 }
 
 /**
+ * 断开数据库连接
+ * @param connectionId - 连接 ID
+ * @returns Promise<string> - 断开成功消息
+ */
+export async function disconnect(connectionId: string): Promise<string> {
+  return invokeWithInterceptors<string>("disconnect_db", {
+    connectionId,
+  });
+}
+
+/**
  * 加载保存的连接列表
  * @returns Promise<SavedConnection[]> - 连接列表
  */
@@ -52,6 +63,7 @@ export async function saveConnections(
  */
 export const connectionService = {
   connect,
+  disconnect,
   loadConnections,
   saveConnections,
 };

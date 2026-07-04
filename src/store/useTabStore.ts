@@ -1,19 +1,49 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
-import { queryService, QueryResult } from "@/services/tauri";
+import { queryService, QueryResult, tableService } from "@/services/tauri";
 import { schemaService } from "@/services/tauri/schema.service";
-import type { ColumnInfo } from "@/services/tauri/types";
+import type { ColumnInfo, TableFilter, TableSort } from "@/services/tauri/types";
 import { useHistoryStore } from "./useHistoryStore";
 import { useConnectionStore } from "./useConnectionStore";
 import { useSchemaStore } from "./useSchemaStore";
 import type { FilterOperator } from "@/components/workspace/GridFilterRow";
+import { DEFAULT_DATABASE_DRIVER } from "@/lib/databaseDialect";
+import {
+  extractSchemaContextChange,
+  queryMayChangeMetadata,
+} from "@/lib/sqlAnalysis";
 
-function formatSqlValue(val: any): string {
-  if (val === null || val === undefined) return "NULL";
-  if (typeof val === "number") return val.toString();
-  if (typeof val === "boolean") return val ? "TRUE" : "FALSE";
-  // Escape single quotes for SQL string
-  return `'${String(val).replace(/'/g, "''")}'`;
+async function refreshMetadataAfterQuery(
+  connectionId: string,
+  schemaContext: string | undefined,
+  sql: string,
+  results: QueryResult[] | null | undefined
+) {
+  const schemaStore = useSchemaStore.getState();
+  const selectedSchema = extractSchemaContextChange(sql);
+
+  if (selectedSchema) {
+    await schemaStore.setCurrentSchema(selectedSchema);
+    await Promise.all([
+      schemaStore.loadTables(connectionId, selectedSchema, true),
+      schemaStore.loadFunctions(connectionId, selectedSchema, true),
+    ]);
+    schemaStore.bumpMetadataVersion();
+    return;
+  }
+
+  if (!queryMayChangeMetadata(sql, results)) return;
+
+  await schemaStore.loadSchemas(connectionId, true);
+  const schemaToRefresh =
+    useSchemaStore.getState().currentSchema || schemaContext || undefined;
+  if (schemaToRefresh) {
+    await Promise.all([
+      schemaStore.loadTables(connectionId, schemaToRefresh, true),
+      schemaStore.loadFunctions(connectionId, schemaToRefresh, true),
+    ]);
+  }
+  schemaStore.bumpMetadataVersion();
 }
 
 export type TabType = "query" | "table" | "create_table";
@@ -26,9 +56,11 @@ export interface TabData {
   connectionId?: string;
   tableName?: string;
   schemaName?: string;
+  objectType?: string | null;
   filters?: any[];
   results: QueryResult[] | null;
   isExecuting: boolean;
+  runningQueryId?: string | null;
   error: string | null;
   isPinned: boolean;
   gridState?: {
@@ -54,6 +86,11 @@ export interface TabData {
   targetSchema?: string | null;
   tableColumns?: ColumnInfo[];
   isFetchingColumns?: boolean;
+  tablePage?: number;
+  tablePageSize?: number;
+  tableTotalRows?: number | null;
+  tableFilterSql?: string | null;
+  tableFilters?: TableFilter[] | null;
 }
 
 interface TabState {
@@ -65,12 +102,18 @@ interface TabState {
     type?: TabType,
     title?: string,
     initialSql?: string,
-    metadata?: Partial<Pick<TabData, "tableName" | "schemaName" | "filters">>
+    metadata?: Partial<
+      Pick<
+        TabData,
+        "connectionId" | "tableName" | "schemaName" | "objectType" | "filters"
+      >
+    >
   ) => string;
   findOrCreateTableTab: (
     connectionId: string,
     schemaName: string,
-    tableName: string
+    tableName: string,
+    objectType?: string | null
   ) => string;
   createTableTab: (connectionId: string, schemaName: string) => string;
   updateTabTitle: (id: string, title: string) => void;
@@ -87,8 +130,10 @@ interface TabState {
   runTabQuery: (
     id: string,
     connectionId: string,
-    sqlOverride?: string
+    sqlOverride?: string,
+    transactionId?: string
   ) => Promise<void>;
+  cancelTabQuery: (id: string) => Promise<void>;
   setGridFilter: (
     tabId: string,
     column: string,
@@ -110,6 +155,7 @@ interface TabState {
     edits: Array<{ rowIndex: number; colIndex: number; value: any }>
   ) => void;
   commitEdits: (tabId: string) => Promise<void>;
+  deleteRows: (tabId: string, rowIndexes: number[]) => Promise<void>;
   cancelEdits: (tabId: string) => void;
   // Filter UI methods
   addNewRow: (tabId: string) => void;
@@ -130,6 +176,12 @@ interface TabState {
   // Schema selection method
   setTargetSchema: (tabId: string, schema: string | null) => void;
   fetchTableColumns: (tabId: string) => Promise<void>;
+  loadTablePage: (
+    tabId: string,
+    page?: number,
+    filterSql?: string | null,
+    filters?: TableFilter[] | null
+  ) => Promise<void>;
 }
 
 export const useTabStore = create<TabState>((set, get) => ({
@@ -164,9 +216,10 @@ export const useTabStore = create<TabState>((set, get) => ({
   },
 
   findOrCreateTableTab: (
-    _connectionId: string, // Reserved for future use
+    connectionId: string,
     schemaName: string,
-    tableName: string
+    tableName: string,
+    objectType?: string | null
   ) => {
     const { tabs } = get();
 
@@ -174,23 +227,30 @@ export const useTabStore = create<TabState>((set, get) => ({
     const existingTab = tabs.find(
       (tab) =>
         tab.type === "table" &&
+        tab.connectionId === connectionId &&
         tab.tableName === tableName &&
         tab.schemaName === schemaName
-      // Note: We don't store connectionId in tab, but in practice
-      // if schema+table match, it's likely the same tab
-      // You could add connectionId to TabData if needed
     );
 
     if (existingTab) {
       // Reuse existing tab
-      set({ activeTabId: existingTab.id });
+      set((state) => ({
+        activeTabId: existingTab.id,
+        tabs: state.tabs.map((tab) =>
+          tab.id === existingTab.id && objectType
+            ? { ...tab, objectType }
+            : tab
+        ),
+      }));
       return existingTab.id;
     }
 
     // Create new tab if no match found
     return get().createTab("table", tableName, "", {
+      connectionId,
       tableName,
       schemaName,
+      objectType: objectType || null,
     });
   },
 
@@ -363,19 +423,27 @@ export const useTabStore = create<TabState>((set, get) => ({
   runTabQuery: async (
     id: string,
     connectionId: string,
-    sqlOverride?: string
+    sqlOverride?: string,
+    transactionId?: string
   ) => {
     const tab = get().tabs.find((t) => t.id === id);
     if (!tab) return;
 
     const sqlToRun = sqlOverride || tab.sql;
     if (!sqlToRun.trim()) return;
+    const queryId = `${id}:${uuidv4()}`;
 
     // Update state to executing
     set((state) => ({
       tabs: state.tabs.map((t) =>
         t.id === id
-          ? { ...t, isExecuting: true, error: null, results: null }
+          ? {
+              ...t,
+              isExecuting: true,
+              runningQueryId: queryId,
+              error: null,
+              results: null,
+            }
           : t
       ),
     }));
@@ -398,7 +466,9 @@ export const useTabStore = create<TabState>((set, get) => ({
       const results = await queryService.executeQuery(
         connectionId,
         sqlToRun,
-        schemaContext || undefined
+        schemaContext || undefined,
+        transactionId,
+        queryId
       );
 
       // Add to history if it's the full tab SQL and successful
@@ -410,19 +480,51 @@ export const useTabStore = create<TabState>((set, get) => ({
 
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === id
-            ? { ...t, isExecuting: false, results: results || null }
+          t.id === id && t.runningQueryId === queryId
+            ? {
+                ...t,
+                isExecuting: false,
+                runningQueryId: null,
+                results: results || null,
+              }
             : t
         ),
       }));
+
+      if (!transactionId) {
+        void refreshMetadataAfterQuery(
+          connectionId,
+          schemaContext || undefined,
+          sqlToRun,
+          results
+        ).catch((error) => {
+          console.warn("[TabStore] Metadata refresh after query failed", error);
+        });
+      }
     } catch (e: any) {
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === id
-            ? { ...t, isExecuting: false, error: e.message || String(e) }
+          t.id === id && t.runningQueryId === queryId
+            ? {
+                ...t,
+                isExecuting: false,
+                runningQueryId: null,
+                error: e.message || String(e),
+              }
             : t
         ),
       }));
+    }
+  },
+
+  cancelTabQuery: async (id) => {
+    const tab = get().tabs.find((t) => t.id === id);
+    if (!tab?.runningQueryId) return;
+
+    try {
+      await queryService.cancelQuery(tab.runningQueryId);
+    } catch (e) {
+      console.error("Failed to cancel query:", e);
     }
   },
 
@@ -465,6 +567,11 @@ export const useTabStore = create<TabState>((set, get) => ({
         };
       }),
     }));
+
+    const tab = get().tabs.find((t) => t.id === tabId);
+    if (tab?.type === "table") {
+      void get().loadTablePage(tabId, 0);
+    }
   },
 
   setCellEdit: (tabId, rowIndex, colIndex, value) => {
@@ -500,9 +607,9 @@ export const useTabStore = create<TabState>((set, get) => ({
     const tab = state.tabs.find((t) => t.id === tabId);
     if (!tab || !tab.pendingEdits || tab.pendingEdits.size === 0) return;
 
-    const schema = tab.schemaName || "public";
+    const schema = tab.schemaName;
     const table = tab.tableName;
-    if (!table) return;
+    if (!schema || !table) return;
 
     // Use metadata if available, otherwise we can't save safely
     const columnsMetadata = tab.tableColumns;
@@ -524,13 +631,6 @@ export const useTabStore = create<TabState>((set, get) => ({
     const currentTab = get().tabs.find((t) => t.id === tabId)!;
     const pks = currentTab.tableColumns?.filter((c) => c.is_primary_key) || [];
 
-    if (pks.length === 0) {
-      console.warn("No Primary Key found for table:", table);
-      // We could allow INSERTs but UPDATEs are risky.
-      // For now, proceed but UPDATEs might fail or require full row match (not implemented).
-      // Let's block UPDATEs if no PK.
-    }
-
     const editsByRow = new Map<number, Record<number, any>>();
     for (const [key, value] of currentTab.pendingEdits!.entries()) {
       const [rStr, cStr] = key.split(":");
@@ -540,94 +640,105 @@ export const useTabStore = create<TabState>((set, get) => ({
       editsByRow.get(r)![c] = value;
     }
 
-    const sqlStatements: string[] = [];
+    const connId =
+      tab.connectionId || useConnectionStore.getState().activeConnectionId;
+    const connection = useConnectionStore
+      .getState()
+      .connections.find((c) => c.id === connId);
+    const driver = connection?.driver || DEFAULT_DATABASE_DRIVER;
+    const resultColumns = currentTab.results?.[0]?.columns || [];
+    const metadataColumns =
+      currentTab.tableColumns?.map((column) => ({
+        name: column.name,
+        data_type: column.data_type,
+      })) || [];
+    const colDefs = resultColumns.length > 0 ? resultColumns : metadataColumns;
+    const inserts: Array<Record<string, unknown>> = [];
+    const updates: Array<{
+      key: Record<string, unknown>;
+      values: Record<string, unknown>;
+    }> = [];
 
     for (const [rowIndex, rowEdits] of editsByRow.entries()) {
-      const colDefs = currentTab.results?.[0]?.columns;
-      if (!colDefs) continue;
+      if (colDefs.length === 0) continue;
 
       if (rowIndex < 0) {
-        // INSERT
-        const cols: string[] = [];
-        const vals: string[] = [];
+        const values: Record<string, unknown> = {};
 
         for (const [cIdx, val] of Object.entries(rowEdits)) {
           const colName = colDefs[parseInt(cIdx)]?.name;
           if (colName) {
-            cols.push(`"${colName}"`);
-            vals.push(formatSqlValue(val));
+            values[colName] = val;
           }
         }
 
-        if (cols.length > 0) {
-          sqlStatements.push(
-            `INSERT INTO "${schema}"."${table}" (${cols.join(
-              ", "
-            )}) VALUES (${vals.join(", ")});`
-          );
+        if (Object.keys(values).length > 0) {
+          inserts.push(values);
         }
       } else {
-        // UPDATE
-        if (pks.length === 0) continue; // Skip updates if no PK
+        if (pks.length === 0) {
+          console.warn("No Primary Key found for table:", table);
+          continue;
+        }
 
         const originalRow = currentTab.results?.[0]?.rows[rowIndex];
-        if (!originalRow) continue;
+        if (!originalRow || resultColumns.length === 0) continue;
 
-        const updates: string[] = [];
+        const values: Record<string, unknown> = {};
         for (const [cIdx, val] of Object.entries(rowEdits)) {
           const colName = colDefs[parseInt(cIdx)]?.name;
           if (colName) {
-            updates.push(`"${colName}" = ${formatSqlValue(val)}`);
+            values[colName] = val;
           }
         }
 
-        // Build WHERE clause
-        const whereParts: string[] = [];
+        const key: Record<string, unknown> = {};
         for (const pk of pks) {
-          const pkIdx = colDefs.findIndex((c) => c.name === pk.name);
+          const pkIdx = resultColumns.findIndex((c) => c.name === pk.name);
           if (pkIdx !== -1) {
-            const pkVal = originalRow[pkIdx];
-            whereParts.push(`"${pk.name}" = ${formatSqlValue(pkVal)}`);
+            key[pk.name] = originalRow[pkIdx];
           }
         }
 
-        if (updates.length > 0 && whereParts.length > 0) {
-          sqlStatements.push(
-            `UPDATE "${schema}"."${table}" SET ${updates.join(
-              ", "
-            )} WHERE ${whereParts.join(" AND ")};`
-          );
+        if (Object.keys(values).length > 0 && Object.keys(key).length === pks.length) {
+          updates.push({ key, values });
         }
       }
     }
 
-    if (sqlStatements.length === 0) {
+    if (inserts.length === 0 && updates.length === 0) {
       // Nothing to do or failed to generate
-      console.log("No statements generated");
+      console.log("No table mutations generated");
       return;
     }
 
-    console.log("Executing Save SQL:", sqlStatements);
-
-    // Execute
     try {
-      // Get connection ID. currently not stored in tab explicitly for tables,
-      // but `results` usually comes from a connection.
-      // We stored `connectionId` in `createTableTab`!
-      const connId =
-        currentTab.connectionId ||
-        useConnectionStore.getState().activeConnectionId;
-
       if (!connId) {
         console.error("No connection ID found");
         return;
       }
 
-      await queryService.executeQuery(connId, sqlStatements.join("\n"));
+      await tableService.mutateTableRows(
+        connId,
+        driver,
+        schema,
+        table,
+        inserts,
+        updates,
+        []
+      );
 
-      // Success - clear edits and refresh data (re-run implicit query)
-      // We'll just runTabQuery with empty override to re-fetch
-      await state.runTabQuery(tabId, connId);
+      // Success - clear edits and refresh the current table page.
+      if (tab.type === "table") {
+        await state.loadTablePage(
+          tabId,
+          tab.tablePage ?? 0,
+          tab.tableFilterSql ?? null,
+          tab.tableFilters ?? null
+        );
+      } else {
+        await state.runTabQuery(tabId, connId);
+      }
 
       // Clear edits
       set((state) => ({
@@ -640,6 +751,83 @@ export const useTabStore = create<TabState>((set, get) => ({
     } catch (e) {
       console.error("Save failed:", e);
       // Don't clear edits on error
+    }
+  },
+
+  deleteRows: async (tabId, rowIndexes) => {
+    const state = get();
+    const tab = state.tabs.find((t) => t.id === tabId);
+    if (!tab || tab.type !== "table" || rowIndexes.length === 0) return;
+
+    const schema = tab.schemaName;
+    const table = tab.tableName;
+    const result = tab.results?.[0];
+    if (!schema || !table || !result || result.columns.length === 0) return;
+
+    if (!tab.tableColumns) {
+      await state.fetchTableColumns(tabId);
+    }
+
+    const currentTab = get().tabs.find((t) => t.id === tabId);
+    if (!currentTab) return;
+
+    const pks = currentTab.tableColumns?.filter((c) => c.is_primary_key) || [];
+    if (pks.length === 0) {
+      console.warn("No Primary Key found for table:", table);
+      return;
+    }
+
+    const connId =
+      currentTab.connectionId || useConnectionStore.getState().activeConnectionId;
+    if (!connId) {
+      console.error("No connection ID found");
+      return;
+    }
+
+    const connection = useConnectionStore
+      .getState()
+      .connections.find((c) => c.id === connId);
+    const driver = connection?.driver || DEFAULT_DATABASE_DRIVER;
+    const uniqueRowIndexes = Array.from(new Set(rowIndexes)).sort((a, b) => a - b);
+    const deletes: Array<{ key: Record<string, unknown> }> = [];
+
+    for (const rowIndex of uniqueRowIndexes) {
+      const row = result.rows[rowIndex];
+      if (!row) continue;
+
+      const key: Record<string, unknown> = {};
+      for (const pk of pks) {
+        const pkIdx = result.columns.findIndex((column) => column.name === pk.name);
+        if (pkIdx !== -1) {
+          key[pk.name] = row[pkIdx];
+        }
+      }
+
+      if (Object.keys(key).length === pks.length) {
+        deletes.push({ key });
+      }
+    }
+
+    if (deletes.length === 0) return;
+
+    try {
+      await tableService.mutateTableRows(
+        connId,
+        driver,
+        schema,
+        table,
+        [],
+        [],
+        deletes
+      );
+      await state.loadTablePage(
+        tabId,
+        currentTab.tablePage ?? 0,
+        currentTab.tableFilterSql ?? null,
+        currentTab.tableFilters ?? null
+      );
+    } catch (e) {
+      console.error("Delete rows failed:", e);
     }
   },
 
@@ -695,10 +883,78 @@ export const useTabStore = create<TabState>((set, get) => ({
     }
   },
 
+  loadTablePage: async (tabId, page, filterSql, filters) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
+    if (!tab || tab.type !== "table" || !tab.connectionId || !tab.schemaName || !tab.tableName) {
+      return;
+    }
+
+    const connection = useConnectionStore
+      .getState()
+      .connections.find((conn) => conn.id === tab.connectionId);
+    const driver = connection?.driver || DEFAULT_DATABASE_DRIVER;
+    const nextPage = Math.max(0, page ?? tab.tablePage ?? 0);
+    const pageSize = tab.tablePageSize || 500;
+    const nextFilterSql = filterSql === undefined ? tab.tableFilterSql : filterSql;
+    const nextFilters = filters === undefined ? tab.tableFilters : filters;
+    const tableSort: TableSort | undefined =
+      tab.gridState?.sortColumn && tab.gridState?.sortDirection
+        ? {
+            column: tab.gridState.sortColumn,
+            direction: tab.gridState.sortDirection,
+          }
+        : undefined;
+
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === tabId ? { ...t, isExecuting: true, error: null } : t
+      ),
+    }));
+
+    try {
+      const pageResult = await tableService.previewTablePage(
+        tab.connectionId,
+        driver,
+        tab.schemaName,
+        tab.tableName,
+        nextPage,
+        pageSize,
+        nextFilterSql || undefined,
+        nextFilters || undefined,
+        tableSort
+      );
+
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId
+            ? {
+                ...t,
+                isExecuting: false,
+                results: [pageResult.result],
+                tablePage: pageResult.page,
+                tablePageSize: pageResult.pageSize,
+                tableTotalRows: pageResult.totalRows ?? null,
+                tableFilterSql: nextFilterSql || null,
+                tableFilters: nextFilters || null,
+              }
+            : t
+        ),
+      }));
+    } catch (e: any) {
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId
+            ? { ...t, isExecuting: false, error: e.message || String(e) }
+            : t
+        ),
+      }));
+    }
+  },
+
   cancelEdits: (tabId) => {
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.id === tabId ? { ...t, pendingEdits: new Map() } : t
+        t.id === tabId ? { ...t, pendingEdits: new Map(), newRowsCount: 0 } : t
       ),
     }));
   },

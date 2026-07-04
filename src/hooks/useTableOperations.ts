@@ -1,29 +1,30 @@
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
-import { queryService } from "@/services/tauri";
-import { useTabStore } from "@/store/useTabStore";
+import { tableService } from "@/services/tauri";
+import type { TableExportFormat } from "@/services/tauri/types";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { DEFAULT_DATABASE_DRIVER } from "@/lib/databaseDialect";
 
 export function useTableOperations() {
   const { activeConnectionId, connections } = useConnectionStore();
   const { currentSchema, loadTables } = useSchemaStore();
-  const { createTab } = useTabStore();
 
   const getDriver = () => {
     const conn = connections.find((c) => c.id === activeConnectionId);
-    return conn?.driver || "postgres";
-  };
-
-  const getQuote = () => {
-    return getDriver() === "mysql" ? "`" : '"';
+    return conn?.driver || DEFAULT_DATABASE_DRIVER;
   };
 
   const truncateTable = async (tableName: string) => {
     if (!activeConnectionId || !currentSchema) return;
-    const quote = getQuote();
-    const sql = `TRUNCATE TABLE ${quote}${currentSchema}${quote}.${quote}${tableName}${quote};`;
+    const driver = getDriver();
 
     try {
-      await queryService.executeQuery(activeConnectionId, sql);
+      await tableService.truncateTable(
+        activeConnectionId,
+        driver,
+        currentSchema,
+        tableName
+      );
       // toast.success(`Table ${tableName} truncated successfully`);
       console.log(`Table ${tableName} truncated successfully`);
     } catch (e: any) {
@@ -32,134 +33,135 @@ export function useTableOperations() {
     }
   };
 
-  const renameTable = async (oldName: string, newName: string) => {
+  const renameTable = async (
+    oldName: string,
+    newName: string,
+    objectType?: string | null
+  ) => {
     if (!activeConnectionId || !currentSchema) return;
-    const quote = getQuote();
     const driver = getDriver();
 
-    let sql = "";
-    if (driver === "postgres") {
-      sql = `ALTER TABLE ${quote}${currentSchema}${quote}.${quote}${oldName}${quote} RENAME TO ${quote}${newName}${quote};`;
-    } else {
-      // MySQL
-      sql = `RENAME TABLE ${quote}${currentSchema}${quote}.${quote}${oldName}${quote} TO ${quote}${currentSchema}${quote}.${quote}${newName}${quote};`;
-    }
-
     try {
-      await queryService.executeQuery(activeConnectionId, sql);
+      await tableService.renameTable(
+        activeConnectionId,
+        driver,
+        currentSchema,
+        oldName,
+        newName,
+        objectType
+      );
       console.log(`Table renamed from ${oldName} to ${newName}`);
-      // Refresh list
-      await loadTables(activeConnectionId, currentSchema);
+      await loadTables(activeConnectionId, currentSchema, true);
     } catch (e: any) {
       console.error(e);
       throw e; // Let dialog handle error
     }
   };
 
-  const exportTableData = async (
-    tableName: string,
-    format: "csv" | "json" = "csv"
-  ) => {
+  const dropTable = async (tableName: string, objectType?: string | null) => {
     if (!activeConnectionId || !currentSchema) return;
-    const quote = getQuote();
-    // Limit export to 10000 rows for safety for now
-    const sql = `SELECT * FROM ${quote}${currentSchema}${quote}.${quote}${tableName}${quote} LIMIT 10000;`;
+    const driver = getDriver();
 
     try {
-      const results = await queryService.executeQuery(activeConnectionId, sql);
-      if (!results || results.length === 0 || !results[0]?.rows) {
-        console.warn("No data to export");
-        return;
-      }
+      await tableService.dropTable(
+        activeConnectionId,
+        driver,
+        currentSchema,
+        tableName,
+        true,
+        objectType
+      );
+      await loadTables(activeConnectionId, currentSchema, true);
+      console.log(`Table ${tableName} dropped successfully`);
+    } catch (e: any) {
+      console.error(e);
+    }
+  };
 
-      const columns = results[0].columns?.map((c) => c.name) || [];
-      const rows = results[0].rows || [];
+  const exportTableData = async (
+    tableName: string,
+    format: TableExportFormat = "csv"
+  ) => {
+    if (!activeConnectionId || !currentSchema) return;
+    const driver = getDriver();
 
-      let content = "";
-      let mimeType = "";
-
-      if (format === "csv") {
-        mimeType = "text/csv;charset=utf-8;";
-        // Header
-        content += columns.join(",") + "\n";
-        // Rows
-        rows.forEach((row) => {
-          const processedRow = row.map((val) => {
-            if (val === null) return "NULL";
-            const str = String(val);
-            // Escape quotes
-            if (str.includes(",") || str.includes('"') || str.includes("\n")) {
-              return `"${str.replace(/"/g, '""')}"`;
-            }
-            return str;
-          });
-          content += processedRow.join(",") + "\n";
-        });
-      } else {
-        mimeType = "application/json;charset=utf-8;";
-        const checkData = rows.map((row) => {
-          const obj: any = {};
-          columns.forEach((col, idx) => {
-            obj[col] = row[idx];
-          });
-          return obj;
-        });
-        content = JSON.stringify(checkData, null, 2);
-      }
-
-      // Trigger Download
-      const blob = new Blob([content], { type: mimeType });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.setAttribute("href", url);
-      link.setAttribute("download", `${tableName}_export.${format}`);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+    try {
+      const exported = await tableService.exportTableData(
+        activeConnectionId,
+        driver,
+        currentSchema,
+        tableName,
+        format
+      );
+      console.log(
+        `Exported ${exported.rowsExported} rows from ${tableName} to ${exported.filePath}`
+      );
+      await revealItemInDir(exported.filePath);
     } catch (e: any) {
       console.error("Export failed:", e);
     }
   };
 
-  const getTableDdl = async (tableName: string): Promise<string> => {
+  const getTableDdl = async (
+    tableName: string,
+    objectType?: string | null
+  ): Promise<string> => {
     if (!activeConnectionId || !currentSchema) return "";
     const driver = getDriver();
-    const quote = getQuote();
 
-    if (driver === "mysql") {
-      try {
-        const sql = `SHOW CREATE TABLE ${quote}${currentSchema}${quote}.${quote}${tableName}${quote};`;
-        const res = await queryService.executeQuery(activeConnectionId, sql);
-        // MySQL returns [Table, Create Table] usually
-        if (res && res[0] && res[0].rows?.length > 0) {
-          return res[0]!.rows![0]![1] || "-- DDL not found";
-        }
-      } catch (e) {
-        console.error(e);
-        return `-- Failed to fetch DDL: ${e}`;
-      }
-    } else {
-      // Postgres - Simplified attempt
-      // TODO: Use pg_dump or advanced query if needed
-      return `-- Postgres DDL generation is not fully supported yet.\n-- You can view columns in the structure tab.`;
+    try {
+      return await tableService.getTableDdl(
+        activeConnectionId,
+        driver,
+        currentSchema,
+        tableName,
+        objectType
+      );
+    } catch (e) {
+      console.error(e);
+      return `-- Failed to fetch DDL: ${e}`;
     }
-    return "-- DDL not supported for this driver";
   };
 
-  const editColumns = (tableName: string) => {
-    // Just open a tab with ALTER TABLE template for now?
-    // Or maybe there's a dedicated view?
-    // For now, let's open a query tab with a helpful comment
-    const quote = getQuote();
-    const sql = `-- Edit columns for ${tableName}\nALTER TABLE ${quote}${currentSchema}${quote}.${quote}${tableName}${quote}\n  ADD COLUMN new_column VARCHAR(255);\n`;
-    createTab("query", `Edit ${tableName}`, sql);
+  const getViewDefinition = async (
+    viewName: string,
+    objectType?: string | null
+  ): Promise<string> => {
+    if (!activeConnectionId || !currentSchema) return "";
+    const driver = getDriver();
+
+    return tableService.getViewDefinition(
+      activeConnectionId,
+      driver,
+      currentSchema,
+      viewName,
+      objectType
+    );
+  };
+
+  const refreshMaterializedView = async (
+    viewName: string,
+    objectType?: string | null
+  ) => {
+    if (!activeConnectionId || !currentSchema) return;
+    const driver = getDriver();
+
+    await tableService.refreshMaterializedView(
+      activeConnectionId,
+      driver,
+      currentSchema,
+      viewName,
+      objectType
+    );
   };
 
   return {
     truncateTable,
+    dropTable,
     renameTable,
     exportTableData,
     getTableDdl,
-    editColumns,
+    getViewDefinition,
+    refreshMaterializedView,
   };
 }

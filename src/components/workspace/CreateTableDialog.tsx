@@ -18,8 +18,16 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { Plus, Trash2 } from "lucide-react";
 import { useConnectionStore } from "@/store/useConnectionStore";
-import { queryService } from "@/services/tauri/query.service";
+import { databaseService, tableService } from "@/services/tauri";
+import type { DatabaseCapabilities } from "@/services/tauri";
 import { useSchemaStore } from "@/store/useSchemaStore";
+import {
+  DEFAULT_DATABASE_DRIVER,
+  defaultLengthForDataType,
+  defaultDatabaseCapabilities,
+  defaultStringDataType,
+  supportsAutoIncrementForDataType,
+} from "@/lib/databaseDialect";
 
 interface CreateTableDialogProps {
   isOpen: boolean;
@@ -36,39 +44,6 @@ interface ColumnDefinition {
   isNotNull: boolean;
   isAutoIncrement: boolean;
 }
-
-const COMMON_TYPES = [
-  "INT",
-  "VARCHAR",
-  "TEXT",
-  "DATE",
-  "DATETIME",
-  "BOOLEAN",
-  "DECIMAL",
-  "FLOAT",
-];
-
-const MYSQL_TYPES = [
-  ...COMMON_TYPES,
-  "TINYINT",
-  "SMALLINT",
-  "BIGINT",
-  "DOUBLE",
-  "BLOB",
-  "JSON",
-];
-
-const POSTGRES_TYPES = [
-  ...COMMON_TYPES,
-  "INTEGER",
-  "BIGINT",
-  "SERIAL",
-  "BIGSERIAL",
-  "REAL",
-  "DOUBLE PRECISION",
-  "JSONB",
-  "UUID",
-];
 
 export function CreateTableDialog({
   isOpen,
@@ -89,13 +64,37 @@ export function CreateTableDialog({
   ]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [capabilities, setCapabilities] = useState<DatabaseCapabilities | null>(
+    null
+  );
 
   const { connections } = useConnectionStore();
   const { loadTables } = useSchemaStore();
 
   const connection = connections.find((c) => c.id === activeConnectionId);
-  const driver = connection?.driver || "postgres";
-  const typeOptions = driver === "mysql" ? MYSQL_TYPES : POSTGRES_TYPES;
+  const driver = connection?.driver || DEFAULT_DATABASE_DRIVER;
+  const activeCapabilities =
+    capabilities || defaultDatabaseCapabilities(driver);
+  const typeOptions = activeCapabilities.commonDataTypes;
+
+  useEffect(() => {
+    let cancelled = false;
+    setCapabilities(null);
+
+    databaseService
+      .getDatabaseCapabilities(driver)
+      .then((value) => {
+        if (!cancelled) setCapabilities(value);
+      })
+      .catch((err) => {
+        console.error("Failed to load database capabilities:", err);
+        if (!cancelled) setCapabilities(defaultDatabaseCapabilities(driver));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [driver]);
 
   // Reset state on open
   useEffect(() => {
@@ -104,7 +103,7 @@ export function CreateTableDialog({
       setColumns([
         {
           name: "id",
-          type: driver === "mysql" ? "INT" : "SERIAL",
+          type: activeCapabilities.defaultPrimaryKeyType,
           length: "",
           isPrimaryKey: true,
           isNotNull: true,
@@ -113,15 +112,16 @@ export function CreateTableDialog({
       ]);
       setError(null);
     }
-  }, [isOpen, driver]);
+  }, [isOpen, activeCapabilities.defaultPrimaryKeyType]);
 
   const addColumn = () => {
+    const dataType = defaultStringDataType(activeCapabilities);
     setColumns([
       ...columns,
       {
         name: "",
-        type: "VARCHAR",
-        length: "255",
+        type: dataType,
+        length: defaultLengthForDataType(dataType),
         isPrimaryKey: false,
         isNotNull: false,
         isAutoIncrement: false,
@@ -143,63 +143,22 @@ export function CreateTableDialog({
     const newColumns = [...columns];
     // Cast value to any to satisfy the index signature valid for this specific update logic
     (newColumns[index] as any)[field] = value;
+    if (field === "type") {
+      const nextLength = defaultLengthForDataType(String(value));
+      if (!nextLength) {
+        newColumns[index]!.length = "";
+      } else if (
+        !newColumns[index]!.length ||
+        newColumns[index]!.length === "255" ||
+        newColumns[index]!.length === "10,2"
+      ) {
+        newColumns[index]!.length = nextLength;
+      }
+      if (!supportsAutoIncrementForDataType(activeCapabilities, String(value))) {
+        newColumns[index]!.isAutoIncrement = false;
+      }
+    }
     setColumns(newColumns);
-  };
-
-  const generateSQL = () => {
-    const quote = driver === "mysql" ? "`" : '"';
-    // const schemaPrefix = currentSchema ? `${quote}${currentSchema}${quote}.` : "";
-
-    const lines = [];
-    const pkColumns = [];
-
-    for (const col of columns) {
-      let line = `${quote}${col.name}${quote} ${col.type}`;
-
-      if (col.length && ["VARCHAR", "CHAR", "DECIMAL"].includes(col.type)) {
-        line += `(${col.length})`;
-      }
-
-      // Auto Increment handling
-      if (col.isAutoIncrement) {
-        if (driver === "mysql") {
-          line += " AUTO_INCREMENT";
-        } else if (driver === "postgres") {
-          // For Postgres, usually use SERIAL type instead of AUTO_INCREMENT, handled in defaults?
-          // If user explicitly selected INT and checked AI, might be tricky in standard SQL.
-          // Simplest for Postgres is usually SERIAL.
-          // If user kept INT + AI, we might ignore AI or change type to SERIAL?
-          // Let's assuming UI guides them to SERIAL for now or we map it.
-          if (col.type === "INT" || col.type === "INTEGER") {
-            // Replace type with SERIAL for simple AI logic logic if we wanted strictly AI
-            // But let's stick to what user selected.
-            // Postgres 'GENERATED ALWAYS AS IDENTITY' is modern way for others.
-          }
-        }
-      }
-
-      if (col.isNotNull) {
-        line += " NOT NULL";
-      }
-
-      if (col.isPrimaryKey) {
-        pkColumns.push(col.name);
-      }
-
-      lines.push(line);
-    }
-
-    if (pkColumns.length > 0) {
-      lines.push(
-        `PRIMARY KEY (${pkColumns
-          .map((c) => `${quote}${c}${quote}`)
-          .join(", ")})`
-      );
-    }
-
-    return `CREATE TABLE ${quote}${tableName}${quote} (\n  ${lines.join(
-      ",\n  "
-    )}\n);`;
   };
 
   const handleCreate = async () => {
@@ -216,18 +175,25 @@ export function CreateTableDialog({
     setError(null);
 
     try {
-      const sql = generateSQL();
-      console.log("Creating table with SQL:", sql);
-
-      await queryService.executeQuery(
+      await tableService.createTable(
         activeConnectionId,
-        sql,
-        currentSchema || undefined
+        driver,
+        currentSchema || "",
+        tableName,
+        columns.map((column) => ({
+          name: column.name,
+          dataType: column.type,
+          length: column.length || null,
+          isPrimaryKey: column.isPrimaryKey,
+          isNotNull: column.isNotNull,
+          isAutoIncrement: column.isAutoIncrement,
+          comment: null,
+        }))
       );
 
       // Refresh tables
       if (currentSchema) {
-        await loadTables(activeConnectionId, currentSchema);
+        await loadTables(activeConnectionId, currentSchema, true);
       }
 
       onClose();
@@ -272,8 +238,13 @@ export function CreateTableDialog({
             </div>
 
             <div className="space-y-2">
-              {columns.map((col, idx) => (
-                <div
+              {columns.map((col, idx) => {
+                const autoIncrementSupported = supportsAutoIncrementForDataType(
+                  activeCapabilities,
+                  col.type
+                );
+                return (
+                  <div
                   key={idx}
                   className="flex items-start gap-2 bg-[#27272a]/50 p-2 rounded border border-white/5"
                 >
@@ -356,14 +327,23 @@ export function CreateTableDialog({
                         <Checkbox
                           id={`ai-${idx}`}
                           checked={col.isAutoIncrement}
+                          disabled={!autoIncrementSupported}
                           onCheckedChange={(c) =>
                             updateColumn(idx, "isAutoIncrement", !!c)
                           }
                         />
                         <label
                           htmlFor={`ai-${idx}`}
-                          className="text-[10px] cursor-pointer"
-                          title="Auto Increment"
+                          className={`text-[10px] ${
+                            autoIncrementSupported
+                              ? "cursor-pointer"
+                              : "cursor-not-allowed opacity-50"
+                          }`}
+                          title={
+                            autoIncrementSupported
+                              ? "Auto Increment"
+                              : "Auto increment requires an integer-compatible type"
+                          }
                         >
                           AI
                         </label>
@@ -380,7 +360,8 @@ export function CreateTableDialog({
                     <Trash2 size={14} />
                   </Button>
                 </div>
-              ))}
+                );
+              })}
             </div>
             <Button
               variant="outline"

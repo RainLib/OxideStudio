@@ -12,6 +12,7 @@ import {
   Download,
   TableProperties,
   Code2,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useSchemaStore } from "@/store/useSchemaStore";
@@ -20,7 +21,20 @@ import { useTabStore } from "@/store/useTabStore";
 import { CreateDatabaseDialog } from "./CreateDatabaseDialog";
 import { RenameTableDialog } from "./RenameTableDialog";
 import { DdlViewerDialog } from "./DdlViewerDialog";
+import { EditColumnsDialog } from "./EditColumnsDialog";
+import { CreateViewDialog } from "./CreateViewDialog";
 import { useTableOperations } from "@/hooks/useTableOperations";
+import { databaseService } from "@/services/tauri";
+import type { FunctionInfo, TableInfo } from "@/services/tauri/types";
+import {
+  DEFAULT_DATABASE_DRIVER,
+  defaultDatabaseCapabilities,
+  isMaterializedViewObject,
+  isReadOnlyRelationObject,
+  isViewObject,
+  pluralizeNamespaceLabel,
+  relationObjectLabel,
+} from "@/lib/databaseDialect";
 import { useEffect, useState } from "react";
 import {
   Select,
@@ -37,20 +51,42 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 
+function routineMatchesFilter(routine: FunctionInfo, filter: string) {
+  const normalizedFilter = filter.trim().toLowerCase();
+  if (!normalizedFilter) return true;
+
+  return [
+    routine.name,
+    routine.routine_type,
+    routine.return_type,
+    routine.description,
+    ...(routine.parameters || []).flatMap((parameter) => [
+      parameter.name,
+      parameter.data_type,
+    ]),
+  ]
+    .filter(Boolean)
+    .some((value) => String(value).toLowerCase().includes(normalizedFilter));
+}
+
 export function SchemaSidebar() {
-  const { activeConnectionId } = useConnectionStore();
+  const { activeConnectionId, connections } = useConnectionStore();
   const {
     isLoading,
     schemas,
     currentSchema,
     loadSchemas,
     loadTables,
+    loadFunctions,
     tables,
+    functions,
     pinnedTables,
     togglePinTable,
     setCurrentSchema,
     selectTable,
     selectedTable,
+    bumpMetadataVersion,
+    isFunctionsLoading,
   } = useSchemaStore();
 
   const [filterText, setFilterText] = useState("");
@@ -58,32 +94,110 @@ export function SchemaSidebar() {
   const [isSelectOpen, setIsSelectOpen] = useState(false);
   const [focusedIndex, setFocusedIndex] = useState(0);
   const [isCreateDbDialogOpen, setIsCreateDbDialogOpen] = useState(false);
+  const [isCreateViewDialogOpen, setIsCreateViewDialogOpen] = useState(false);
+  const [viewDialogMode, setViewDialogMode] = useState<"create" | "edit">(
+    "create"
+  );
+  const [viewDialogKind, setViewDialogKind] = useState<
+    "view" | "materializedView"
+  >("view");
+  const [viewDialogInitialName, setViewDialogInitialName] = useState("");
+  const [viewDialogInitialSql, setViewDialogInitialSql] = useState("");
   const [isTablesHovered, setIsTablesHovered] = useState(false);
 
   // Context Menu State
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [ddlViewerOpen, setDdlViewerOpen] = useState(false);
+  const [columnsDialogOpen, setColumnsDialogOpen] = useState(false);
   const [activeTable, setActiveTable] = useState("");
+  const [activeTableType, setActiveTableType] = useState<string | null>(null);
   const [ddlContent, setDdlContent] = useState("");
+  const [namespaceError, setNamespaceError] = useState<string | null>(null);
+  const [capabilities, setCapabilities] = useState(() =>
+    defaultDatabaseCapabilities(DEFAULT_DATABASE_DRIVER)
+  );
 
   const {
     truncateTable,
+    dropTable,
     renameTable,
     exportTableData,
     getTableDdl,
-    editColumns,
+    getViewDefinition,
+    refreshMaterializedView,
   } = useTableOperations();
 
-  const handleRenameClick = (table: string) => {
-    setActiveTable(table);
+  const activeConnection = connections.find((c) => c.id === activeConnectionId);
+  const activeDriver = activeConnection?.driver || DEFAULT_DATABASE_DRIVER;
+  const activeCapabilities =
+    capabilities.driver === activeDriver
+      ? capabilities
+      : defaultDatabaseCapabilities(activeDriver);
+  const namespaceLabel = activeCapabilities.namespaceLabel || "database";
+  const namespaceLabelPlural = pluralizeNamespaceLabel(namespaceLabel);
+
+  const handleRenameClick = (table: TableInfo) => {
+    setActiveTable(table.name);
+    setActiveTableType(table.type || null);
     setRenameDialogOpen(true);
   };
 
-  const handleDdlClick = async (table: string) => {
-    setActiveTable(table);
-    const ddl = await getTableDdl(table);
+  const handleDdlClick = async (table: TableInfo) => {
+    setActiveTable(table.name);
+    setActiveTableType(table.type || null);
+    const ddl = await getTableDdl(table.name, table.type);
     setDdlContent(ddl);
     setDdlViewerOpen(true);
+  };
+
+  const handleEditColumnsClick = (table: TableInfo) => {
+    setActiveTable(table.name);
+    setActiveTableType(table.type || null);
+    setColumnsDialogOpen(true);
+  };
+
+  const handleEditViewClick = async (table: TableInfo) => {
+    if (!isViewObject(table.type) || isMaterializedViewObject(table.type)) return;
+    setActiveTable(table.name);
+    setActiveTableType(table.type || null);
+
+    try {
+      const definition = await getViewDefinition(table.name, table.type);
+      setViewDialogMode("edit");
+      setViewDialogKind("view");
+      setViewDialogInitialName(table.name);
+      setViewDialogInitialSql(definition);
+      setIsCreateViewDialogOpen(true);
+    } catch (e: any) {
+      window.alert(`Failed to load view definition: ${e}`);
+    }
+  };
+
+  const handleTruncateClick = async (table: TableInfo) => {
+    if (isReadOnlyRelationObject(table.type)) return;
+    const confirmed = window.confirm(
+      `Empty all rows from "${table.name}"? This cannot be undone.`
+    );
+    if (!confirmed) return;
+    await truncateTable(table.name);
+  };
+
+  const handleDropClick = async (table: TableInfo) => {
+    const label = relationObjectLabel(table.type).toLowerCase();
+    const confirmed = window.confirm(
+      `Drop ${label} "${table.name}"? This will remove the ${label}.`
+    );
+    if (!confirmed) return;
+    await dropTable(table.name, table.type);
+  };
+
+  const handleRefreshMaterializedViewClick = async (table: TableInfo) => {
+    if (!isMaterializedViewObject(table.type)) return;
+    try {
+      await refreshMaterializedView(table.name, table.type);
+    } catch (e: any) {
+      window.alert(`Failed to refresh materialized view: ${e}`);
+    }
   };
 
   useEffect(() => {
@@ -93,10 +207,45 @@ export function SchemaSidebar() {
   }, [activeConnectionId, loadSchemas]);
 
   useEffect(() => {
+    let cancelled = false;
+    const fallback = defaultDatabaseCapabilities(activeDriver);
+    setCapabilities(fallback);
+
+    databaseService
+      .getDatabaseCapabilities(activeDriver)
+      .then((nextCapabilities) => {
+        if (!cancelled) setCapabilities(nextCapabilities);
+      })
+      .catch((error) => {
+        console.error("Failed to load database capabilities:", error);
+        if (!cancelled) setCapabilities(fallback);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDriver]);
+
+  useEffect(() => {
     if (activeConnectionId && currentSchema) {
       loadTables(activeConnectionId, currentSchema);
     }
   }, [activeConnectionId, currentSchema, loadTables]);
+
+  useEffect(() => {
+    if (
+      activeConnectionId &&
+      currentSchema &&
+      activeCapabilities.supportsFunctions
+    ) {
+      loadFunctions(activeConnectionId, currentSchema);
+    }
+  }, [
+    activeConnectionId,
+    currentSchema,
+    activeCapabilities.supportsFunctions,
+    loadFunctions,
+  ]);
 
   // Clear database filter when select closes
   useEffect(() => {
@@ -124,8 +273,11 @@ export function SchemaSidebar() {
   const filteredTables = sortedTables.filter((table) =>
     table.name.toLowerCase().includes(filterText.toLowerCase())
   );
+  const filteredFunctions = functions.filter((routine) =>
+    routineMatchesFilter(routine, filterText)
+  );
 
-  // Filter databases based on search text
+  // Filter namespaces based on search text
   const filteredSchemas = schemas.filter((schema) =>
     schema.toLowerCase().includes(databaseFilter.toLowerCase())
   );
@@ -187,35 +339,25 @@ export function SchemaSidebar() {
     setFilterText,
   ]);
 
-  const { findOrCreateTableTab, runTabQuery, updateTabSql, createTableTab } =
+  const { findOrCreateTableTab, loadTablePage, createTableTab } =
     useTabStore();
-  const { connections } = useConnectionStore();
 
   const handleTableSelect = (tableName: string) => {
     selectTable(tableName);
   };
 
-  const handleTableDoubleClick = (tableName: string) => {
+  const handleTableDoubleClick = (table: TableInfo) => {
     if (!currentSchema || !activeConnectionId) return;
 
     // Use findOrCreateTableTab to reuse existing tabs
     const tabId = findOrCreateTableTab(
       activeConnectionId,
       currentSchema,
-      tableName
+      table.name,
+      table.type
     );
 
-    // Get current connection to check driver
-    const connection = connections.find((c) => c.id === activeConnectionId);
-    const driver = connection?.driver || "postgres";
-
-    // Use driver-aware quoting
-    // We strictly rely on backend context switching now, so no schema prefix needed.
-    const quote = driver === "mysql" ? "`" : '"';
-    const sql = `SELECT * FROM ${quote}${tableName}${quote} LIMIT 100;`;
-
-    updateTabSql(tabId, sql);
-    runTabQuery(tabId, activeConnectionId);
+    void loadTablePage(tabId, 0);
   };
 
   // Highlight matching text
@@ -240,14 +382,109 @@ export function SchemaSidebar() {
     );
   };
 
+  const routineSignature = (routine: FunctionInfo) => {
+    const parameters = (routine.parameters || [])
+      .map((parameter) =>
+        [parameter.name, parameter.data_type].filter(Boolean).join(" ")
+      )
+      .join(", ");
+    return `${routine.name}(${parameters})`;
+  };
+
+  const routineKindLabel = (routine: FunctionInfo) =>
+    routine.routine_type?.toLowerCase() === "procedure" ? "proc" : "fn";
+
   const handleCreateTable = () => {
     if (activeConnectionId && currentSchema) {
       createTableTab(activeConnectionId, currentSchema);
     }
   };
 
+  const handleCreateView = () => {
+    if (activeConnectionId && currentSchema) {
+      setViewDialogMode("create");
+      setViewDialogKind("view");
+      setViewDialogInitialName("");
+      setViewDialogInitialSql("");
+      setIsCreateViewDialogOpen(true);
+    }
+  };
+
+  const handleCreateMaterializedView = () => {
+    if (
+      activeConnectionId &&
+      currentSchema &&
+      activeCapabilities.supportsMaterializedViews
+    ) {
+      setViewDialogMode("create");
+      setViewDialogKind("materializedView");
+      setViewDialogInitialName("");
+      setViewDialogInitialSql("");
+      setIsCreateViewDialogOpen(true);
+    }
+  };
+
   const handleCreateDatabase = () => {
+    if (!activeCapabilities.supportsCreateDatabase) {
+      setNamespaceError(
+        `${activeCapabilities.displayName} ${namespaceLabel} creation is not supported.`
+      );
+      return;
+    }
     setIsCreateDbDialogOpen(true);
+  };
+
+  const handleRenameDatabase = async () => {
+    if (!activeConnectionId || !currentSchema) return;
+    if (!activeCapabilities.supportsRenameDatabase) {
+      setNamespaceError(
+        `${activeCapabilities.displayName} ${namespaceLabel} rename is not supported safely.`
+      );
+      return;
+    }
+
+    const nextName = window.prompt(`Rename ${namespaceLabel} to:`, currentSchema);
+    if (nextName === null) return;
+
+    const trimmedName = nextName.trim();
+    if (!trimmedName || trimmedName === currentSchema) return;
+
+    setNamespaceError(null);
+    try {
+      await databaseService.renameDatabase(
+        activeConnectionId,
+        activeDriver,
+        currentSchema,
+        trimmedName
+      );
+      await loadSchemas(activeConnectionId, true);
+      await setCurrentSchema(trimmedName);
+      bumpMetadataVersion();
+    } catch (err: any) {
+      setNamespaceError(err?.message || String(err));
+    }
+  };
+
+  const handleDropDatabase = async () => {
+    if (!activeConnectionId || !currentSchema) return;
+    const confirmed = window.confirm(
+      `Drop ${namespaceLabel} "${currentSchema}" and all contained objects? This cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    setNamespaceError(null);
+    try {
+      await databaseService.dropDatabase(
+        activeConnectionId,
+        activeDriver,
+        currentSchema,
+        true
+      );
+      await loadSchemas(activeConnectionId, true);
+      bumpMetadataVersion();
+    } catch (err: any) {
+      setNamespaceError(err?.message || String(err));
+    }
   };
 
   const handleRefresh = async () => {
@@ -256,7 +493,10 @@ export function SchemaSidebar() {
       await loadSchemas(activeConnectionId, true);
       // If currentSchema is selected, force refresh tables too
       if (currentSchema) {
-        await loadTables(activeConnectionId, currentSchema);
+        await loadTables(activeConnectionId, currentSchema, true);
+        if (activeCapabilities.supportsFunctions) {
+          await loadFunctions(activeConnectionId, currentSchema, true);
+        }
       }
     }
   };
@@ -277,7 +517,7 @@ export function SchemaSidebar() {
             onOpenChange={setIsSelectOpen}
           >
             <SelectTrigger className="w-full h-7 text-[11px] bg-background-tertiary border-border focus:border-primary text-foreground flex-1">
-              <SelectValue placeholder="Select database..." />
+              <SelectValue placeholder={`Select ${namespaceLabel}...`} />
             </SelectTrigger>
             <SelectContent className="bg-background-elevated border-border text-foreground">
               {/* Filter indicator at top-right (no input box) */}
@@ -297,7 +537,7 @@ export function SchemaSidebar() {
                 </div>
               )}
 
-              {/* Database list */}
+              {/* Namespace list */}
               <div className="max-h-[300px] overflow-auto">
                 {isLoading && schemas.length === 0 ? (
                   <div className="px-2 py-1.5 text-[11px] text-gray-500 italic">
@@ -316,7 +556,7 @@ export function SchemaSidebar() {
                         </div>
                       </>
                     ) : (
-                      "No databases found"
+                      `No ${namespaceLabelPlural} found`
                     )}
                   </div>
                 ) : (
@@ -346,7 +586,7 @@ export function SchemaSidebar() {
             size="icon"
             className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground hover:bg-background-tertiary rounded-sm"
             onClick={handleRefresh}
-            title="Refresh Schemas"
+            title={`Refresh ${namespaceLabelPlural}`}
             disabled={isLoading}
           >
             <RefreshCw size={12} className={cn(isLoading && "animate-spin")} />
@@ -357,11 +597,47 @@ export function SchemaSidebar() {
             size="icon"
             className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground hover:bg-background-tertiary rounded-sm"
             onClick={handleCreateDatabase}
-            title="Create New Database"
+            title={
+              activeCapabilities.supportsCreateDatabase
+                ? `Create new ${namespaceLabel}`
+                : `${activeCapabilities.displayName} ${namespaceLabel} creation is not supported`
+            }
+            disabled={!activeCapabilities.supportsCreateDatabase}
           >
             <Plus size={12} />
           </Button>
+
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground hover:bg-background-tertiary rounded-sm"
+            onClick={handleRenameDatabase}
+            title={
+              !activeCapabilities.supportsRenameDatabase
+                ? `${activeCapabilities.displayName} ${namespaceLabel} rename is not supported`
+                : `Rename ${namespaceLabel}`
+            }
+            disabled={!currentSchema || !activeCapabilities.supportsRenameDatabase}
+          >
+            <Pencil size={12} />
+          </Button>
+
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive hover:bg-background-tertiary rounded-sm"
+            onClick={handleDropDatabase}
+            title={`Drop ${namespaceLabel}`}
+            disabled={!currentSchema}
+          >
+            <Trash2 size={12} />
+          </Button>
         </div>
+        {namespaceError && (
+          <div className="mt-1 text-[10px] text-destructive truncate">
+            {namespaceError}
+          </div>
+        )}
       </div>
 
       {/* Middle: Filter Input for Tables */}
@@ -373,7 +649,7 @@ export function SchemaSidebar() {
           />
           <input
             type="text"
-            placeholder="Filter tables..."
+            placeholder="Filter objects..."
             className="w-full bg-background-tertiary text-foreground text-[11px] h-7 pl-7 pr-2 rounded-sm border border-border focus:border-primary focus:outline-none transition-colors placeholder:text-muted-foreground/50"
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
@@ -430,6 +706,28 @@ export function SchemaSidebar() {
             >
               <Plus size={10} />
             </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-5 w-5 text-muted-foreground hover:text-primary rounded-sm"
+              onClick={handleCreateView}
+              title="Create New View"
+              disabled={!currentSchema}
+            >
+              <Code2 size={10} />
+            </Button>
+            {activeCapabilities.supportsMaterializedViews && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5 text-muted-foreground hover:text-primary rounded-sm"
+                onClick={handleCreateMaterializedView}
+                title="Create New Materialized View"
+                disabled={!currentSchema}
+              >
+                <TableProperties size={10} />
+              </Button>
+            )}
           </div>
         )}
       </div>
@@ -442,7 +740,7 @@ export function SchemaSidebar() {
       >
         {!currentSchema ? (
           <div className="p-4 text-xs text-center text-gray-500 italic">
-            Select a database to view tables
+            Select a {namespaceLabel} to view tables
           </div>
         ) : isLoading && tables.length === 0 ? (
           <div className="p-4 text-xs text-center text-gray-500 italic">
@@ -456,6 +754,9 @@ export function SchemaSidebar() {
           <div className="px-1">
             {filteredTables.map((table) => {
               const isPinned = pinnedTables.includes(table.name);
+              const isView = isViewObject(table.type);
+              const isMaterializedView = isMaterializedViewObject(table.type);
+              const isReadOnlyRelation = isReadOnlyRelationObject(table.type);
               return (
                 <ContextMenu
                   key={table.name}
@@ -472,7 +773,7 @@ export function SchemaSidebar() {
                           : "text-muted-foreground hover:text-foreground hover:bg-background-secondary/50"
                       )}
                       onClick={() => handleTableSelect(table.name)}
-                      onDoubleClick={() => handleTableDoubleClick(table.name)}
+                      onDoubleClick={() => handleTableDoubleClick(table)}
                       title={table.name}
                     >
                       <Table
@@ -496,7 +797,7 @@ export function SchemaSidebar() {
                       <div className="flex items-center gap-1">
                         {table.type && !isPinned && (
                           <span className="text-[9px] uppercase opacity-50 shrink-0 group-hover:hidden">
-                            {table.type}
+                            {isView ? "view" : table.type}
                           </span>
                         )}
                         <Button
@@ -520,35 +821,118 @@ export function SchemaSidebar() {
                     </div>
                   </ContextMenuTrigger>
                   <ContextMenuContent className="w-48">
-                    <ContextMenuItem onClick={() => truncateTable(table.name)}>
+                    <ContextMenuItem
+                      onClick={() => handleTruncateClick(table)}
+                      disabled={isReadOnlyRelation}
+                    >
                       <Eraser className="mr-2 h-3.5 w-3.5" />
                       Empty Table
                     </ContextMenuItem>
                     <ContextMenuItem
-                      onClick={() => handleRenameClick(table.name)}
+                      onClick={() => handleRenameClick(table)}
                     >
                       <Pencil className="mr-2 h-3.5 w-3.5" />
-                      Rename Table
+                      Rename {relationObjectLabel(table.type)}
                     </ContextMenuItem>
                     <ContextMenuItem
-                      onClick={() => exportTableData(table.name)}
+                      onClick={() => exportTableData(table.name, "csv")}
                     >
                       <Download className="mr-2 h-3.5 w-3.5" />
-                      Export Data
+                      Export CSV
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      onClick={() => exportTableData(table.name, "json")}
+                    >
+                      <Download className="mr-2 h-3.5 w-3.5" />
+                      Export JSON
                     </ContextMenuItem>
                     <ContextMenuSeparator />
-                    <ContextMenuItem onClick={() => editColumns(table.name)}>
+                    <ContextMenuItem
+                      onClick={() => handleEditColumnsClick(table)}
+                      disabled={isReadOnlyRelation}
+                    >
                       <TableProperties className="mr-2 h-3.5 w-3.5" />
                       Edit Columns
                     </ContextMenuItem>
-                    <ContextMenuItem onClick={() => handleDdlClick(table.name)}>
+                    {isView && !isMaterializedView && (
+                      <ContextMenuItem onClick={() => handleEditViewClick(table)}>
+                        <Code2 className="mr-2 h-3.5 w-3.5" />
+                        Edit View
+                      </ContextMenuItem>
+                    )}
+                    {isMaterializedView && (
+                      <ContextMenuItem
+                        onClick={() => handleRefreshMaterializedViewClick(table)}
+                      >
+                        <RefreshCw className="mr-2 h-3.5 w-3.5" />
+                        Refresh Materialized View
+                      </ContextMenuItem>
+                    )}
+                    <ContextMenuItem onClick={() => handleDdlClick(table)}>
                       <Code2 className="mr-2 h-3.5 w-3.5" />
-                      View DSL
+                      View DDL
+                    </ContextMenuItem>
+                    <ContextMenuSeparator />
+                    <ContextMenuItem
+                      onClick={() => handleDropClick(table)}
+                      className="text-destructive focus:text-destructive"
+                    >
+                      <Trash2 className="mr-2 h-3.5 w-3.5" />
+                      Drop {relationObjectLabel(table.type)}
                     </ContextMenuItem>
                   </ContextMenuContent>
                 </ContextMenu>
               );
             })}
+          </div>
+        )}
+        {currentSchema && activeCapabilities.supportsFunctions && (
+          <div className="mt-2 border-t border-border/60 px-1 pt-1 pb-2">
+            <div className="flex items-center gap-2 px-2 py-1.5">
+              <span className="text-[10px] font-bold text-muted-foreground tracking-wider uppercase">
+                Routines
+              </span>
+              <span className="text-[9px] bg-background-secondary px-1.5 py-0.5 rounded text-muted-foreground border border-border">
+                {filteredFunctions.length}
+              </span>
+            </div>
+            {isFunctionsLoading && functions.length === 0 ? (
+              <div className="px-2 py-1.5 text-[11px] text-gray-500 italic">
+                Loading routines...
+              </div>
+            ) : filteredFunctions.length === 0 ? (
+              <div className="px-2 py-1.5 text-[11px] text-gray-500 italic">
+                {filterText
+                  ? `No routines match "${filterText}"`
+                  : "No routines found"}
+              </div>
+            ) : (
+              filteredFunctions.map((routine, index) => {
+                const signature = routineSignature(routine);
+                const returnType = routine.return_type || "unknown";
+                return (
+                  <div
+                    key={`${routine.name}:${signature}:${index}`}
+                    className="group px-2 py-1.5 rounded-sm text-[11px] text-muted-foreground hover:text-foreground hover:bg-background-secondary/50"
+                    title={`${signature} -> ${returnType}`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Code2 size={12} className="shrink-0 opacity-70" />
+                      <span className="truncate flex-1">
+                        {highlightMatch(routine.name, filterText)}
+                      </span>
+                      <span className="text-[9px] uppercase opacity-50 shrink-0">
+                        {routineKindLabel(routine)}
+                      </span>
+                    </div>
+                    <div className="ml-5 mt-0.5 truncate text-[10px] text-muted-foreground/70 font-mono">
+                      {signature}
+                      {returnType && ` -> ${returnType}`}
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
         )}
       </div>
@@ -562,13 +946,35 @@ export function SchemaSidebar() {
         isOpen={renameDialogOpen}
         onClose={() => setRenameDialogOpen(false)}
         tableName={activeTable}
-        onRename={renameTable}
+        objectLabel={relationObjectLabel(activeTableType)}
+        onRename={(oldName, newName) =>
+          renameTable(oldName, newName, activeTableType)
+        }
       />
       <DdlViewerDialog
         isOpen={ddlViewerOpen}
         onClose={() => setDdlViewerOpen(false)}
         tableName={activeTable}
         ddl={ddlContent}
+      />
+      <EditColumnsDialog
+        isOpen={columnsDialogOpen}
+        onClose={() => setColumnsDialogOpen(false)}
+        connectionId={activeConnectionId || ""}
+        driver={activeDriver}
+        schema={currentSchema || ""}
+        tableName={activeTable}
+      />
+      <CreateViewDialog
+        isOpen={isCreateViewDialogOpen}
+        onClose={() => setIsCreateViewDialogOpen(false)}
+        connectionId={activeConnectionId || ""}
+        driver={activeDriver}
+        schema={currentSchema || ""}
+        mode={viewDialogMode}
+        viewKind={viewDialogKind}
+        initialViewName={viewDialogInitialName}
+        initialSelectSql={viewDialogInitialSql}
       />
     </div>
   );

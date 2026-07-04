@@ -82,16 +82,16 @@ pub struct SqlParser {
 
 impl SqlParser {
     pub fn new() -> Self {
-        println!("[SqlParser] Initializing parser...");
+        tracing::debug!("Initializing SQL parser");
         let mut parser = Parser::new();
 
         match parser.set_language(&tree_sitter_sql::language()) {
             Ok(_) => {
-                println!("[SqlParser] SQL grammar loaded successfully");
+                tracing::debug!("SQL grammar loaded successfully");
                 Self { parser }
             }
             Err(e) => {
-                eprintln!("[SqlParser] FATAL: Failed to load SQL grammar: {:?}", e);
+                tracing::error!(error = ?e, "Failed to load SQL grammar");
                 panic!("Error loading SQL grammar: {:?}", e);
             }
         }
@@ -101,32 +101,28 @@ impl SqlParser {
 // Revised implementation with source code access
 impl SqlParser {
     pub fn parse_and_get_context(&mut self, sql: &str, cursor_idx: usize) -> CompletionContext {
-        let tree = self.parser.parse(sql, None).unwrap();
-        let root_node = tree.root_node();
-
-        let search_pos = if cursor_idx > 0 { cursor_idx - 1 } else { 0 };
-        let node = root_node
-            .descendant_for_byte_range(search_pos, cursor_idx)
-            .unwrap_or(root_node);
-
         let chars: Vec<char> = sql.chars().collect();
         let prefix = self.get_prefix(&chars, cursor_idx);
+        let candidates = Self::keyword_candidates(&prefix);
 
-        let mut candidates = vec![];
+        let Some(tree) = self.parser.parse(sql, None) else {
+            return CompletionContext {
+                suggestion_type: SuggestionType::Keyword,
+                relevant_table: None,
+                candidates,
+                match_string: Some(prefix),
+            };
+        };
+
+        let root_node = tree.root_node();
+
+        let cursor_byte = cursor_idx.min(sql.len());
+        let search_pos = cursor_byte.saturating_sub(1);
+        let node = root_node
+            .descendant_for_byte_range(search_pos, cursor_byte)
+            .unwrap_or(root_node);
 
         // If we are in a keyword context (or generic), filter specific keywords
-        if !prefix.is_empty() {
-            candidates = KEYWORDS
-                .iter()
-                .filter(|k| k.starts_with(&prefix.to_uppercase()))
-                .map(|s| s.to_string())
-                .collect();
-        } else {
-            // If no prefix, maybe don't suggest all keywords? Or do?
-            // Usually completion on empty space suggests keywords appropriate for context.
-            // But for now, let's just return all if empty - user complained about unrelated when typing 's'.
-            candidates = KEYWORDS.iter().map(|s| s.to_string()).collect();
-        }
 
         // Basic heuristics
         // 1. Check if we are in a place expecting a table
@@ -156,6 +152,20 @@ impl SqlParser {
             candidates,
             match_string: Some(prefix),
         }
+    }
+
+    fn keyword_candidates(prefix: &str) -> Vec<String> {
+        if !prefix.is_empty() {
+            return KEYWORDS
+                .iter()
+                .filter(|keyword| keyword.starts_with(&prefix.to_uppercase()))
+                .map(|keyword| keyword.to_string())
+                .collect();
+        }
+
+        // Empty-prefix completion intentionally returns the broad keyword set.
+        // Prefix filtering above prevents unrelated suggestions while typing.
+        KEYWORDS.iter().map(|keyword| keyword.to_string()).collect()
     }
 
     fn get_prefix(&self, chars: &[char], cursor_idx: usize) -> String {
@@ -275,5 +285,27 @@ impl SqlParser {
             curr = n.parent();
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyword_candidates_are_filtered_by_prefix() {
+        let candidates = SqlParser::keyword_candidates("SEL");
+        assert!(candidates.contains(&"SELECT".to_string()));
+        assert!(!candidates.contains(&"FROM".to_string()));
+    }
+
+    #[test]
+    fn parser_clamps_out_of_range_cursor_positions() {
+        let mut parser = SqlParser::new();
+        let context = parser.parse_and_get_context("SEL", 10_000);
+
+        assert_eq!(context.suggestion_type, SuggestionType::Keyword);
+        assert_eq!(context.match_string.as_deref(), Some("SEL"));
+        assert!(context.candidates.contains(&"SELECT".to_string()));
     }
 }

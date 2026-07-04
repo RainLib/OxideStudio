@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub const LSP_NOTIFICATION_EVENT: &str = "lsp-notification";
+
 /// LSP JSON-RPC Request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LspRequest {
@@ -13,6 +15,14 @@ pub struct LspRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LspNotification {
     pub jsonrpc: String,
+    pub method: String,
+    pub params: serde_json::Value,
+}
+
+/// Notification emitted by the embedded LSP server to the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspServerNotification {
     pub method: String,
     pub params: serde_json::Value,
 }

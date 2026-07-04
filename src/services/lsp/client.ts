@@ -1,5 +1,89 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CompletionItem, CompletionResponse } from "./types";
+import { redactSecrets } from "@/lib/redaction";
+import type {
+  CompletionItem,
+  CompletionResponse,
+  HoverInfo,
+  Location,
+  Range,
+  TextEdit,
+} from "./types";
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function normalizeMarkup(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map(normalizeMarkup).filter(Boolean).join("\n\n");
+  }
+  if (isObject(value)) {
+    if (typeof value.language === "string" && typeof value.value === "string") {
+      return "```" + value.language + "\n" + value.value + "\n```";
+    }
+    if (typeof value.value === "string") return value.value;
+  }
+  return "";
+}
+
+function parseRange(value: unknown): Range | undefined {
+  if (!isObject(value) || !isObject(value.start) || !isObject(value.end)) {
+    return undefined;
+  }
+
+  const startLine = Number(value.start.line);
+  const startCharacter = Number(value.start.character);
+  const endLine = Number(value.end.line);
+  const endCharacter = Number(value.end.character);
+
+  if (
+    !Number.isFinite(startLine) ||
+    !Number.isFinite(startCharacter) ||
+    !Number.isFinite(endLine) ||
+    !Number.isFinite(endCharacter)
+  ) {
+    return undefined;
+  }
+
+  return {
+    start: { line: startLine, character: startCharacter },
+    end: { line: endLine, character: endCharacter },
+  };
+}
+
+function parseLocation(value: unknown): Location | null {
+  if (!isObject(value) || typeof value.uri !== "string") return null;
+  const range = parseRange(value.range);
+  if (!range) return null;
+  return { uri: value.uri, range };
+}
+
+function parseLocationLink(value: unknown): Location | null {
+  if (!isObject(value) || typeof value.targetUri !== "string") return null;
+  const range = parseRange(value.targetSelectionRange) || parseRange(value.targetRange);
+  if (!range) return null;
+  return { uri: value.targetUri, range };
+}
+
+function parseLocations(value: unknown): Location[] {
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  return values
+    .map((item) => parseLocation(item) || parseLocationLink(item))
+    .filter((item): item is Location => Boolean(item));
+}
+
+function parseTextEdits(value: unknown): TextEdit[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!isObject(item) || typeof item.newText !== "string") return null;
+      const range = parseRange(item.range);
+      if (!range) return null;
+      return { range, newText: item.newText };
+    })
+    .filter((item): item is TextEdit => Boolean(item));
+}
 
 /**
  * LSP Client Service
@@ -8,17 +92,37 @@ import type { CompletionItem, CompletionResponse } from "./types";
 class LspClient {
   private initialized = false;
   private binaryPath: string | null = null;
+  private initializationPromise: Promise<void> | null = null;
 
   /**
    * Initialize the LSP server
    * @param binaryPath Path to sql-lsp binary
    */
   async initialize(binaryPath: string): Promise<void> {
-    if (this.initialized) {
-      console.log("[LSP] Already initialized");
-      return;
+    if (this.initializationPromise) {
+      return this.initializationPromise;
     }
 
+    if (this.initialized) {
+      const running = await this.isRunning();
+      if (running) {
+        console.log("[LSP] Already initialized");
+        return;
+      }
+
+      console.warn("[LSP] Local state was initialized, but backend process is not running");
+      this.initialized = false;
+      this.binaryPath = null;
+    }
+
+    this.initializationPromise = this.initializeServer(binaryPath).finally(() => {
+      this.initializationPromise = null;
+    });
+
+    return this.initializationPromise;
+  }
+
+  private async initializeServer(binaryPath: string): Promise<void> {
     try {
       const result = await invoke<string>("lsp_initialize", {
         request: { binary_path: binaryPath },
@@ -41,6 +145,7 @@ class LspClient {
     try {
       const result = await invoke<string>("lsp_shutdown");
       this.initialized = false;
+      this.initializationPromise = null;
       console.log("[LSP] Shutdown:", result);
     } catch (error) {
       console.error("[LSP] Shutdown failed:", error);
@@ -98,6 +203,90 @@ class LspClient {
     }
   }
 
+  async getHover(
+    uri: string,
+    line: number,
+    character: number
+  ): Promise<HoverInfo | null> {
+    if (!this.initialized) return null;
+
+    try {
+      const response = await invoke<unknown>("lsp_hover", {
+        request: { uri, line, character },
+      });
+      if (!isObject(response)) return null;
+
+      const contents = normalizeMarkup(response.contents);
+      if (!contents) return null;
+
+      return {
+        contents,
+        range: parseRange(response.range),
+      };
+    } catch (error) {
+      console.error("[LSP] ✗ Hover failed:", error);
+      return null;
+    }
+  }
+
+  async getDefinitions(
+    uri: string,
+    line: number,
+    character: number
+  ): Promise<Location[]> {
+    if (!this.initialized) return [];
+
+    try {
+      const response = await invoke<unknown>("lsp_goto_definition", {
+        request: { uri, line, character },
+      });
+      return parseLocations(response);
+    } catch (error) {
+      console.error("[LSP] ✗ Definition failed:", error);
+      return [];
+    }
+  }
+
+  async getReferences(
+    uri: string,
+    line: number,
+    character: number
+  ): Promise<Location[]> {
+    if (!this.initialized) return [];
+
+    try {
+      const response = await invoke<unknown>("lsp_references", {
+        request: { uri, line, character },
+      });
+      return parseLocations(response);
+    } catch (error) {
+      console.error("[LSP] ✗ References failed:", error);
+      return [];
+    }
+  }
+
+  async formatDocument(
+    uri: string,
+    tabSize: number,
+    insertSpaces: boolean
+  ): Promise<TextEdit[]> {
+    if (!this.initialized) return [];
+
+    try {
+      const response = await invoke<unknown>("lsp_formatting", {
+        request: {
+          uri,
+          tab_size: tabSize,
+          insert_spaces: insertSpaces,
+        },
+      });
+      return parseTextEdits(response);
+    } catch (error) {
+      console.error("[LSP] ✗ Formatting failed:", error);
+      return [];
+    }
+  }
+
   /**
    * Update LSP configuration (connections)
    * Sends workspace/didChangeConfiguration notification
@@ -136,8 +325,28 @@ class LspClient {
         settings: config, // Don't wrap in sqls - send directly
       });
 
-      console.log("[LSP] Configuration updated");
-      console.log("[LSP] Sent config:", JSON.stringify(config, null, 2));
+      const schemas = Array.isArray(config?.schemas) ? config.schemas : [];
+      const tableCount = schemas.reduce(
+        (count: number, schema: any) =>
+          count + (Array.isArray(schema?.tables) ? schema.tables.length : 0),
+        0
+      );
+      const functionCount = schemas.reduce(
+        (count: number, schema: any) =>
+          count +
+          (Array.isArray(schema?.functions) ? schema.functions.length : 0),
+        0
+      );
+      console.log(
+        "[LSP] Configuration updated",
+        redactSecrets({
+          defaultDialect: config?.defaultDialect,
+          schemas: schemas.length,
+          tables: tableCount,
+          functions: functionCount,
+          files: Object.keys(config?.fileSchemas || {}).length,
+        })
+      );
     } catch (error) {
       console.error("[LSP] Configuration update failed:", error);
       throw error;
@@ -156,8 +365,14 @@ class LspClient {
    * @param uri Document URI (any scheme)
    * @param text Full document text
    * @param version Document version (increment on each change)
+   * @param languageId LSP language id used for dialect inference
    */
-  async didOpen(uri: string, text: string, version: number): Promise<void> {
+  async didOpen(
+    uri: string,
+    text: string,
+    version: number,
+    languageId = "sql"
+  ): Promise<void> {
     if (!this.initialized) return;
     try {
       console.log(`[LSP] → Notification: textDocument/didOpen`, {
@@ -169,7 +384,7 @@ class LspClient {
 
       await invoke("lsp_did_open", {
         uri,
-        languageId: "sql",
+        languageId,
         version,
         text,
       });
@@ -213,13 +428,11 @@ class LspClient {
   }
 
   /**
-   * Update schema from current connection
-   * Fetches schema from active database connection and sends to LSP
+   * Schema synchronization is owned by <LspConnectionSyncer /> so it can read
+   * React store state and debounce metadata fetches in one place.
    */
   async syncSchemaFromConnection(): Promise<void> {
-    // TODO: Implement schema fetching from useSchemaStore
-    // This will be implemented when integrating with Monaco Editor
-    console.log("[LSP] Schema sync placeholder");
+    console.warn("[LSP] syncSchemaFromConnection is handled by LspConnectionSyncer");
   }
 
   /**

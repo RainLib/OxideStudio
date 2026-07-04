@@ -1,26 +1,106 @@
 use crate::core::driver::DatabaseDriver;
-use crate::core::protocol::{ColumnDef, ColumnInfo, QueryResult, TableInfo};
+use crate::core::protocol::{
+    ColumnDef, ColumnInfo, ConstraintInfo, FunctionInfo, FunctionParameterInfo, IndexInfo,
+    ParameterizedStatement, QueryParameter, QueryResult, TableInfo,
+};
+use crate::core::statement::{
+    classify_statement, execution_mode, has_multiple_statements, QueryExecutionMode, StatementKind,
+    StatementScanDialect,
+};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlRow};
-use sqlx::{Column, ConnectOptions, MySql, Pool, Row, TypeInfo};
+use sqlx::mysql::{MySqlArguments, MySqlConnectOptions, MySqlPoolOptions, MySqlRow};
+use sqlx::pool::PoolConnection;
+use sqlx::query::Query;
+use sqlx::{Column, ConnectOptions, Executor, MySql, Pool, Row, TypeInfo};
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::Mutex;
+
+type MysqlTransactionSession = Arc<Mutex<PoolConnection<MySql>>>;
 
 pub struct MysqlDriver {
     // Map of schema name -> Pool. Empty string key "" represents the default/base connection.
     pub pools: Mutex<HashMap<String, Pool<MySql>>>,
-    pub base_options: Option<MySqlConnectOptions>,
+    pub transaction_sessions: Mutex<HashMap<String, MysqlTransactionSession>>,
+    pub active_queries: StdMutex<HashMap<String, u64>>,
+    pub base_options: Mutex<Option<MySqlConnectOptions>>,
     pub connection_string: String,
+}
+
+struct MysqlTrackedQueryGuard<'a> {
+    active_queries: &'a StdMutex<HashMap<String, u64>>,
+    query_id: Option<String>,
+}
+
+impl Drop for MysqlTrackedQueryGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(query_id) = self.query_id.take() {
+            let mut active_queries = self
+                .active_queries
+                .lock()
+                .expect("MySQL active query map mutex poisoned");
+            active_queries.remove(&query_id);
+        }
+    }
+}
+
+fn mysql_string_by_index(row: &MySqlRow, index: usize) -> Option<String> {
+    if let Ok(value) = row.try_get::<String, _>(index) {
+        Some(value)
+    } else if let Ok(bytes) = row.try_get::<Vec<u8>, _>(index) {
+        Some(String::from_utf8_lossy(&bytes).to_string())
+    } else {
+        None
+    }
+}
+
+fn mysql_string_by_name(row: &MySqlRow, name: &str) -> Option<String> {
+    if let Ok(value) = row.try_get::<String, _>(name) {
+        Some(value)
+    } else if let Ok(bytes) = row.try_get::<Vec<u8>, _>(name) {
+        Some(String::from_utf8_lossy(&bytes).to_string())
+    } else {
+        None
+    }
+}
+
+fn mysql_requires_unprepared(sql: &str) -> bool {
+    if has_multiple_statements(sql, StatementScanDialect::Mysql) {
+        return true;
+    }
+
+    match classify_statement(sql) {
+        StatementKind::Create
+        | StatementKind::Alter
+        | StatementKind::Drop
+        | StatementKind::Truncate
+        | StatementKind::Comment
+        | StatementKind::Rename
+        | StatementKind::Set
+        | StatementKind::Use
+        | StatementKind::Show
+        | StatementKind::Explain
+        | StatementKind::Describe => true,
+        _ => {
+            let normalized = sql.trim_start().to_ascii_uppercase();
+            normalized.starts_with("BEGIN")
+                || normalized.starts_with("START TRANSACTION")
+                || normalized.starts_with("COMMIT")
+                || normalized.starts_with("ROLLBACK")
+        }
+    }
 }
 
 impl MysqlDriver {
     pub fn new(connection_string: &str) -> Self {
         Self {
             pools: Mutex::new(HashMap::new()),
-            base_options: None,
+            transaction_sessions: Mutex::new(HashMap::new()),
+            active_queries: StdMutex::new(HashMap::new()),
+            base_options: Mutex::new(None),
             connection_string: connection_string.to_string(),
         }
     }
@@ -43,10 +123,12 @@ impl MysqlDriver {
         }
 
         // Pool not found, create it
-        let mut options = self
-            .base_options
-            .clone()
-            .ok_or_else(|| anyhow!("Driver not connected (no base options)"))?;
+        let mut options = {
+            let base_options = self.base_options.lock().await;
+            base_options
+                .clone()
+                .ok_or_else(|| anyhow!("Driver not connected (no base options)"))?
+        };
 
         if !schema_key.is_empty() {
             options = options.database(&schema_key);
@@ -94,10 +176,100 @@ impl MysqlDriver {
             data_rows.push(row_values);
         }
 
-        Ok(vec![QueryResult {
-            columns,
-            rows: data_rows,
-        }])
+        Ok(vec![QueryResult::rows(columns, data_rows)])
+    }
+
+    async fn query_on_pool(&self, sql: &str, pool: &Pool<MySql>) -> Result<Vec<QueryResult>> {
+        match execution_mode(sql) {
+            QueryExecutionMode::ReturnsRows => {
+                let rows = sqlx::raw_sql(sql).fetch_all(pool).await?;
+                self.process_rows(rows)
+            }
+            QueryExecutionMode::AffectsRows => {
+                let result = sqlx::raw_sql(sql).execute(pool).await?;
+                Ok(vec![QueryResult::execution(
+                    classify_statement(sql).as_str(),
+                    result.rows_affected(),
+                )])
+            }
+        }
+    }
+
+    async fn query_on_connection(
+        &self,
+        sql: &str,
+        conn: &mut sqlx::MySqlConnection,
+    ) -> Result<Vec<QueryResult>> {
+        if mysql_requires_unprepared(sql) {
+            return match execution_mode(sql) {
+                QueryExecutionMode::ReturnsRows => {
+                    let rows = (&mut *conn).fetch_all(sql).await?;
+                    self.process_rows(rows)
+                }
+                QueryExecutionMode::AffectsRows => {
+                    let result = (&mut *conn).execute(sql).await?;
+                    Ok(vec![QueryResult::execution(
+                        classify_statement(sql).as_str(),
+                        result.rows_affected(),
+                    )])
+                }
+            };
+        }
+
+        match execution_mode(sql) {
+            QueryExecutionMode::ReturnsRows => {
+                let rows = sqlx::query(sql)
+                    .persistent(false)
+                    .fetch_all(&mut *conn)
+                    .await?;
+                self.process_rows(rows)
+            }
+            QueryExecutionMode::AffectsRows => {
+                let result = sqlx::query(sql)
+                    .persistent(false)
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(vec![QueryResult::execution(
+                    classify_statement(sql).as_str(),
+                    result.rows_affected(),
+                )])
+            }
+        }
+    }
+
+    async fn track_query_on_connection<'a>(
+        &'a self,
+        query_id: Option<&str>,
+        conn: &mut sqlx::MySqlConnection,
+    ) -> Result<MysqlTrackedQueryGuard<'a>> {
+        let tracked_query_id = if let Some(query_id) = query_id {
+            let thread_id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
+                .persistent(false)
+                .fetch_one(&mut *conn)
+                .await?;
+            let mut active_queries = self
+                .active_queries
+                .lock()
+                .expect("MySQL active query map mutex poisoned");
+            active_queries.insert(query_id.to_string(), thread_id);
+            Some(query_id.to_string())
+        } else {
+            None
+        };
+
+        Ok(MysqlTrackedQueryGuard {
+            active_queries: &self.active_queries,
+            query_id: tracked_query_id,
+        })
+    }
+
+    async fn get_transaction_session(&self, session_id: &str) -> Result<MysqlTransactionSession> {
+        self.transaction_sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("Transaction not found: {}", session_id))
     }
 }
 
@@ -108,7 +280,10 @@ impl DatabaseDriver for MysqlDriver {
             .disable_statement_logging()
             .to_owned();
 
-        self.base_options = Some(options.clone());
+        {
+            let mut base_options = self.base_options.lock().await;
+            *base_options = Some(options.clone());
+        }
 
         // Initialize default pool
         let pool = MySqlPoolOptions::new()
@@ -123,11 +298,36 @@ impl DatabaseDriver for MysqlDriver {
         Ok(())
     }
 
-    async fn disconnect(&mut self) -> Result<()> {
-        let pools = self.pools.get_mut();
-        for (_, pool) in pools.drain() {
+    async fn disconnect(&self) -> Result<()> {
+        self.active_queries
+            .lock()
+            .expect("MySQL active query map mutex poisoned")
+            .clear();
+
+        let mut sessions = self.transaction_sessions.lock().await;
+        let drained_sessions: Vec<_> = sessions.drain().map(|(_, conn)| conn).collect();
+        drop(sessions);
+
+        for session in drained_sessions {
+            let mut conn = session.lock().await;
+            if let Err(error) = (&mut **conn).execute("ROLLBACK").await {
+                tracing::warn!(
+                    "Failed to rollback MySQL transaction on disconnect: {}",
+                    error
+                );
+            }
+        }
+
+        let drained_pools = {
+            let mut pools = self.pools.lock().await;
+            pools.drain().map(|(_, pool)| pool).collect::<Vec<_>>()
+        };
+        for pool in drained_pools {
             pool.close().await;
         }
+
+        let mut base_options = self.base_options.lock().await;
+        *base_options = None;
         Ok(())
     }
 
@@ -143,8 +343,96 @@ impl DatabaseDriver for MysqlDriver {
     async fn query(&self, sql: &str) -> Result<Vec<QueryResult>> {
         // Use default pool
         let pool = self.get_pool(None).await?;
-        let rows = sqlx::query(sql).persistent(false).fetch_all(&pool).await?;
-        self.process_rows(rows)
+        self.query_on_pool(sql, &pool).await
+    }
+
+    async fn execute_parameterized(&self, sql: &str, params: &[QueryParameter]) -> Result<u64> {
+        let pool = self.get_pool(None).await?;
+        let mut query = sqlx::query(sql).persistent(false);
+        for param in params {
+            query = bind_mysql_parameter(query, param);
+        }
+        let result = query.execute(&pool).await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn query_parameterized(
+        &self,
+        sql: &str,
+        params: &[QueryParameter],
+    ) -> Result<Vec<QueryResult>> {
+        let pool = self.get_pool(None).await?;
+        match execution_mode(sql) {
+            QueryExecutionMode::ReturnsRows => {
+                let mut query = sqlx::query(sql).persistent(false);
+                for param in params {
+                    query = bind_mysql_parameter(query, param);
+                }
+                let rows = query.fetch_all(&pool).await?;
+                self.process_rows(rows)
+            }
+            QueryExecutionMode::AffectsRows => {
+                let mut query = sqlx::query(sql).persistent(false);
+                for param in params {
+                    query = bind_mysql_parameter(query, param);
+                }
+                let result = query.execute(&pool).await?;
+                Ok(vec![QueryResult::execution(
+                    classify_statement(sql).as_str(),
+                    result.rows_affected(),
+                )])
+            }
+        }
+    }
+
+    async fn execute_parameterized_batch(
+        &self,
+        statements: &[ParameterizedStatement],
+    ) -> Result<Vec<u64>> {
+        if statements.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let pool = self.get_pool(None).await?;
+        let mut conn = pool.acquire().await?;
+        (&mut *conn).execute("BEGIN").await?;
+
+        let mut rows_affected = Vec::with_capacity(statements.len());
+        for statement in statements {
+            let mut query = sqlx::query(&statement.sql).persistent(false);
+            for param in &statement.params {
+                query = bind_mysql_parameter(query, param);
+            }
+
+            match query.execute(&mut *conn).await {
+                Ok(result) => rows_affected.push(result.rows_affected()),
+                Err(error) => {
+                    if let Err(rollback_error) = (&mut *conn).execute("ROLLBACK").await {
+                        tracing::warn!(
+                            "Failed to rollback MySQL mutation batch: {}",
+                            rollback_error
+                        );
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+
+        (&mut *conn).execute("COMMIT").await?;
+        Ok(rows_affected)
+    }
+
+    async fn query_tracked(&self, query_id: Option<&str>, sql: &str) -> Result<Vec<QueryResult>> {
+        if query_id.is_none() {
+            return self.query(sql).await;
+        }
+
+        let pool = self.get_pool(None).await?;
+        let mut conn = pool.acquire().await?;
+        let tracked_query = self.track_query_on_connection(query_id, &mut conn).await?;
+        let result = self.query_on_connection(sql, &mut conn).await;
+        drop(tracked_query);
+        result
     }
 
     async fn query_with_context(&self, sql: &str, schema: &str) -> Result<Vec<QueryResult>> {
@@ -152,8 +440,122 @@ impl DatabaseDriver for MysqlDriver {
         let pool = self.get_pool(Some(schema)).await?;
 
         // Execute query on that pool directly, no USE needed
-        let rows = sqlx::query(sql).persistent(false).fetch_all(&pool).await?;
-        self.process_rows(rows)
+        self.query_on_pool(sql, &pool).await
+    }
+
+    async fn query_with_context_tracked(
+        &self,
+        query_id: Option<&str>,
+        sql: &str,
+        schema: &str,
+    ) -> Result<Vec<QueryResult>> {
+        if query_id.is_none() {
+            return self.query_with_context(sql, schema).await;
+        }
+
+        let pool = self.get_pool(Some(schema)).await?;
+        let mut conn = pool.acquire().await?;
+        let tracked_query = self.track_query_on_connection(query_id, &mut conn).await?;
+        let result = self.query_on_connection(sql, &mut conn).await;
+        drop(tracked_query);
+        result
+    }
+
+    async fn begin_transaction(&self, session_id: &str, schema: Option<&str>) -> Result<()> {
+        {
+            let sessions = self.transaction_sessions.lock().await;
+            if sessions.contains_key(session_id) {
+                return Err(anyhow!("Transaction already active: {}", session_id));
+            }
+        }
+
+        let pool = self
+            .get_pool(schema.filter(|schema| !schema.trim().is_empty()))
+            .await?;
+        let mut conn = pool.acquire().await?;
+
+        (&mut *conn).execute("BEGIN").await?;
+
+        let mut sessions = self.transaction_sessions.lock().await;
+        if sessions.contains_key(session_id) {
+            drop(sessions);
+            (&mut *conn).execute("ROLLBACK").await?;
+            return Err(anyhow!("Transaction already active: {}", session_id));
+        }
+
+        sessions.insert(session_id.to_string(), Arc::new(Mutex::new(conn)));
+        Ok(())
+    }
+
+    async fn query_transaction(&self, session_id: &str, sql: &str) -> Result<Vec<QueryResult>> {
+        let session = self.get_transaction_session(session_id).await?;
+        let mut conn = session.lock().await;
+
+        self.query_on_connection(sql, &mut **conn).await
+    }
+
+    async fn query_transaction_tracked(
+        &self,
+        query_id: Option<&str>,
+        session_id: &str,
+        sql: &str,
+    ) -> Result<Vec<QueryResult>> {
+        if query_id.is_none() {
+            return self.query_transaction(session_id, sql).await;
+        }
+
+        let session = self.get_transaction_session(session_id).await?;
+        let mut conn = session.lock().await;
+
+        let tracked_query = self
+            .track_query_on_connection(query_id, &mut **conn)
+            .await?;
+        let result = self.query_on_connection(sql, &mut **conn).await;
+        drop(tracked_query);
+        result
+    }
+
+    async fn cancel_query(&self, query_id: &str) -> Result<bool> {
+        let thread_id = self
+            .active_queries
+            .lock()
+            .expect("MySQL active query map mutex poisoned")
+            .remove(query_id);
+
+        if let Some(thread_id) = thread_id {
+            let pool = self.get_pool(None).await?;
+            let sql = format!("KILL QUERY {thread_id}");
+            sqlx::raw_sql(&sql).execute(&pool).await?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn commit_transaction(&self, session_id: &str) -> Result<()> {
+        let session = {
+            let mut sessions = self.transaction_sessions.lock().await;
+            sessions
+                .remove(session_id)
+                .ok_or_else(|| anyhow!("Transaction not found: {}", session_id))?
+        };
+        let mut conn = session.lock().await;
+
+        (&mut **conn).execute("COMMIT").await?;
+        Ok(())
+    }
+
+    async fn rollback_transaction(&self, session_id: &str) -> Result<()> {
+        let session = {
+            let mut sessions = self.transaction_sessions.lock().await;
+            sessions
+                .remove(session_id)
+                .ok_or_else(|| anyhow!("Transaction not found: {}", session_id))?
+        };
+        let mut conn = session.lock().await;
+
+        (&mut **conn).execute("ROLLBACK").await?;
+        Ok(())
     }
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
@@ -165,15 +567,7 @@ impl DatabaseDriver for MysqlDriver {
 
         let mut schemas: Vec<String> = rows
             .iter()
-            .map(|r| {
-                if let Ok(name) = r.try_get::<String, _>(0) {
-                    name
-                } else if let Ok(bytes) = r.try_get::<Vec<u8>, _>(0) {
-                    String::from_utf8_lossy(&bytes).to_string()
-                } else {
-                    "".to_string()
-                }
-            })
+            .map(|r| mysql_string_by_index(r, 0).unwrap_or_default())
             .filter(|s| !s.is_empty())
             .collect();
 
@@ -198,17 +592,13 @@ impl DatabaseDriver for MysqlDriver {
         let tables = rows
             .iter()
             .map(|r| {
-                let name = if let Ok(name) = r.try_get::<String, _>(0) {
-                    name
-                } else if let Ok(bytes) = r.try_get::<Vec<u8>, _>(0) {
-                    String::from_utf8_lossy(&bytes).to_string()
-                } else {
-                    "".to_string()
-                };
+                let name = mysql_string_by_index(r, 0).unwrap_or_default();
+                let table_type = mysql_string_by_index(r, 1);
 
                 TableInfo {
                     name,
                     schema: Some(schema.to_string()),
+                    table_type,
                     comment: None,
                 }
             })
@@ -224,10 +614,12 @@ impl DatabaseDriver for MysqlDriver {
             r#"
             SELECT
                 column_name AS cn,
-                data_type AS dt,
+                column_type AS dt,
                 is_nullable AS inl,
                 column_default AS cd,
-                column_key AS ck
+                column_key AS ck,
+                extra AS ex,
+                column_comment AS cc
             FROM information_schema.columns
             WHERE table_schema = ? AND table_name = ?
             ORDER BY ordinal_position
@@ -242,22 +634,26 @@ impl DatabaseDriver for MysqlDriver {
             .iter()
             .map(|r| {
                 let is_nullable =
-                    r.try_get::<String, _>("inl").unwrap_or("YES".to_string()) == "YES";
+                    mysql_string_by_name(r, "inl").unwrap_or_else(|| "YES".to_string()) == "YES";
 
-                let column_key = r.try_get::<String, _>("ck").unwrap_or_default();
+                let column_key = mysql_string_by_name(r, "ck").unwrap_or_default();
                 let is_primary_key = column_key == "PRI";
                 let is_unique = column_key == "PRI" || column_key == "UNI";
                 let is_indexed = !column_key.is_empty();
+                let extra = mysql_string_by_name(r, "ex").unwrap_or_default();
+                let comment = mysql_string_by_name(r, "cc")
+                    .and_then(|value| (!value.trim().is_empty()).then_some(value));
 
                 ColumnInfo {
-                    name: r.try_get("cn").unwrap_or_default(),
-                    data_type: r.try_get("dt").unwrap_or_default(),
+                    name: mysql_string_by_name(r, "cn").unwrap_or_default(),
+                    data_type: mysql_string_by_name(r, "dt").unwrap_or_default(),
                     is_nullable,
                     is_primary_key,
                     is_unique,
                     is_indexed,
-                    default_value: r.try_get("cd").ok(),
-                    comment: None,
+                    is_auto_increment: extra.to_ascii_lowercase().contains("auto_increment"),
+                    default_value: mysql_string_by_name(r, "cd"),
+                    comment,
                 }
             })
             .collect();
@@ -265,10 +661,210 @@ impl DatabaseDriver for MysqlDriver {
         Ok(cols)
     }
 
+    async fn get_indexes(&self, schema: &str, table: &str) -> Result<Vec<IndexInfo>> {
+        let pool = self.get_pool(None).await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                index_name,
+                MAX(non_unique) AS non_unique,
+                MAX(index_type) AS index_type,
+                GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',') AS columns
+            FROM information_schema.statistics
+            WHERE table_schema = ? AND table_name = ?
+            GROUP BY index_name
+            ORDER BY index_name = 'PRIMARY' DESC, non_unique ASC, index_name
+            "#,
+        )
+        .bind(schema)
+        .bind(table)
+        .persistent(false)
+        .fetch_all(&pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let name = mysql_string_by_index(row, 0).unwrap_or_default();
+                let non_unique: i64 = row.try_get(1).unwrap_or(1);
+                let columns = mysql_string_by_index(row, 3)
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|column| !column.is_empty())
+                    .map(ToString::to_string)
+                    .collect();
+
+                IndexInfo {
+                    is_primary: name == "PRIMARY",
+                    is_unique: non_unique == 0,
+                    name,
+                    columns,
+                    index_type: mysql_string_by_index(row, 2),
+                    definition: None,
+                }
+            })
+            .collect())
+    }
+
+    async fn get_constraints(&self, schema: &str, table: &str) -> Result<Vec<ConstraintInfo>> {
+        let pool = self.get_pool(None).await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                tc.constraint_name,
+                tc.constraint_type,
+                GROUP_CONCAT(kcu.column_name ORDER BY kcu.ordinal_position SEPARATOR ',') AS columns,
+                MAX(kcu.referenced_table_schema) AS referenced_schema,
+                MAX(kcu.referenced_table_name) AS referenced_table,
+                GROUP_CONCAT(kcu.referenced_column_name ORDER BY kcu.position_in_unique_constraint SEPARATOR ',') AS referenced_columns,
+                MAX(cc.check_clause) AS check_clause
+            FROM information_schema.table_constraints tc
+            LEFT JOIN information_schema.key_column_usage kcu
+              ON kcu.constraint_schema = tc.constraint_schema
+             AND kcu.table_schema = tc.table_schema
+             AND kcu.table_name = tc.table_name
+             AND kcu.constraint_name = tc.constraint_name
+            LEFT JOIN information_schema.check_constraints cc
+              ON cc.constraint_schema = tc.constraint_schema
+             AND cc.constraint_name = tc.constraint_name
+            WHERE tc.table_schema = ? AND tc.table_name = ?
+            GROUP BY tc.constraint_name, tc.constraint_type
+            ORDER BY tc.constraint_type, tc.constraint_name
+            "#,
+        )
+        .bind(schema)
+        .bind(table)
+        .persistent(false)
+        .fetch_all(&pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let columns = mysql_string_by_index(row, 2)
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|column| !column.is_empty())
+                    .map(ToString::to_string)
+                    .collect();
+                let referenced_columns = mysql_string_by_index(row, 5)
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|column| !column.is_empty())
+                    .map(ToString::to_string)
+                    .collect();
+
+                ConstraintInfo {
+                    name: mysql_string_by_index(row, 0).unwrap_or_default(),
+                    constraint_type: mysql_string_by_index(row, 1).unwrap_or_default(),
+                    columns,
+                    referenced_schema: mysql_string_by_index(row, 3),
+                    referenced_table: mysql_string_by_index(row, 4),
+                    referenced_columns,
+                    definition: mysql_string_by_index(row, 6),
+                }
+            })
+            .collect())
+    }
+
+    async fn get_functions(&self, schema: &str) -> Result<Vec<FunctionInfo>> {
+        let pool = self.get_pool(None).await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                r.routine_name,
+                r.specific_name,
+                LOWER(r.routine_type) AS routine_type,
+                CASE
+                    WHEN r.routine_type = 'PROCEDURE' THEN 'void'
+                    ELSE COALESCE(r.dtd_identifier, r.data_type, 'unknown')
+                END AS return_type,
+                NULLIF(r.routine_comment, '') AS description,
+                p.parameter_name,
+                p.dtd_identifier AS parameter_type,
+                p.parameter_mode,
+                p.ordinal_position
+            FROM information_schema.routines r
+            LEFT JOIN information_schema.parameters p
+              ON p.specific_schema = r.routine_schema
+             AND p.specific_name = r.specific_name
+            WHERE r.routine_schema = ?
+              AND r.routine_type IN ('FUNCTION', 'PROCEDURE')
+            ORDER BY r.routine_name, r.specific_name, p.ordinal_position
+            "#,
+        )
+        .bind(schema)
+        .persistent(false)
+        .fetch_all(&pool)
+        .await?;
+
+        let mut functions = Vec::<FunctionInfo>::new();
+        let mut function_indexes = HashMap::<String, usize>::new();
+
+        for row in rows {
+            let specific_name = mysql_string_by_index(&row, 1)
+                .unwrap_or_else(|| mysql_string_by_index(&row, 0).unwrap_or_default());
+            let function_index = if let Some(index) = function_indexes.get(&specific_name) {
+                *index
+            } else {
+                let index = functions.len();
+                function_indexes.insert(specific_name.clone(), index);
+                functions.push(FunctionInfo {
+                    name: mysql_string_by_index(&row, 0).unwrap_or_default(),
+                    routine_type: mysql_string_by_index(&row, 2),
+                    parameters: Vec::new(),
+                    return_type: mysql_string_by_index(&row, 3)
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    description: mysql_string_by_index(&row, 4),
+                });
+                index
+            };
+
+            let parameter_name =
+                mysql_string_by_index(&row, 5).filter(|value| !value.trim().is_empty());
+            let parameter_mode = mysql_string_by_index(&row, 7)
+                .unwrap_or_default()
+                .to_ascii_uppercase();
+            if parameter_name.is_none() || parameter_mode == "RETURN" {
+                continue;
+            }
+
+            let position = row.try_get::<i32, _>(8).unwrap_or(0);
+            functions[function_index]
+                .parameters
+                .push(FunctionParameterInfo {
+                    name: parameter_name.unwrap_or_else(|| format!("arg{position}")),
+                    data_type: mysql_string_by_index(&row, 6)
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    optional: false,
+                });
+        }
+
+        Ok(functions)
+    }
+
     async fn set_current_schema(&self, _schema: &str) -> Result<()> {
         // With multi-pool, we don't strictly need to "set" it on the connection.
         // But we could pre-warm the pool here.
         self.get_pool(Some(_schema)).await?;
+        Ok(())
+    }
+
+    async fn invalidate_schema(&self, schema: &str) -> Result<()> {
+        let schema = schema.trim();
+        if schema.is_empty() {
+            return Ok(());
+        }
+
+        let pool = {
+            let mut pools = self.pools.lock().await;
+            pools.remove(schema)
+        };
+
+        if let Some(pool) = pool {
+            pool.close().await;
+        }
+
         Ok(())
     }
 }
@@ -305,13 +901,101 @@ fn decode_mysql_value(row: &MySqlRow, index: usize) -> serde_json::Value {
     }
 }
 
+fn bind_mysql_parameter<'q>(
+    query: Query<'q, MySql, MySqlArguments>,
+    param: &QueryParameter,
+) -> Query<'q, MySql, MySqlArguments> {
+    match &param.value {
+        serde_json::Value::Null => query.bind(Option::<String>::None),
+        serde_json::Value::Bool(value) => query.bind(*value),
+        serde_json::Value::Number(value) => {
+            if is_integral_type(param.data_type.as_deref()) {
+                if let Some(value) = value.as_i64() {
+                    query.bind(value)
+                } else if let Some(value) =
+                    value.as_u64().and_then(|value| i64::try_from(value).ok())
+                {
+                    query.bind(value)
+                } else {
+                    query.bind(value.to_string())
+                }
+            } else if let Some(value) = value.as_f64() {
+                query.bind(value)
+            } else {
+                query.bind(value.to_string())
+            }
+        }
+        serde_json::Value::String(value) => query.bind(value.clone()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            query.bind(serde_json::to_string(&param.value).unwrap_or_default())
+        }
+    }
+}
+
+fn is_integral_type(data_type: Option<&str>) -> bool {
+    let Some(data_type) = data_type else {
+        return false;
+    };
+    let normalized = data_type.to_ascii_lowercase();
+    let base_type = normalized
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .split('(')
+        .next()
+        .unwrap_or("")
+        .trim();
+    matches!(
+        base_type,
+        "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "serial"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use dotenvy::dotenv;
     use std::env;
 
+    #[test]
+    fn tracked_query_guard_removes_active_query_on_drop() {
+        let active_queries = StdMutex::new(HashMap::from([("q1".to_string(), 42)]));
+
+        {
+            let _guard = MysqlTrackedQueryGuard {
+                active_queries: &active_queries,
+                query_id: Some("q1".to_string()),
+            };
+        }
+
+        assert!(!active_queries
+            .lock()
+            .expect("active query map mutex poisoned")
+            .contains_key("q1"));
+    }
+
+    #[test]
+    fn mysql_unprepared_routing_covers_ddl_and_mysql_commands() {
+        assert!(mysql_requires_unprepared("CREATE DATABASE app"));
+        assert!(mysql_requires_unprepared("show tables"));
+        assert!(mysql_requires_unprepared("DESCRIBE users"));
+        assert!(mysql_requires_unprepared("BEGIN"));
+        assert!(mysql_requires_unprepared(
+            "SELECT 1; CREATE TABLE users(id INT)"
+        ));
+        assert!(mysql_requires_unprepared(
+            "SELECT ';' AS semicolon; UPDATE users SET name = 'a'"
+        ));
+        assert!(!mysql_requires_unprepared("SELECT * FROM users"));
+        assert!(!mysql_requires_unprepared("SELECT ';' AS semicolon;"));
+        assert!(!mysql_requires_unprepared("SELECT 1 /* ; */ -- ;\n;"));
+        assert!(!mysql_requires_unprepared(
+            "UPDATE users SET name = 'a' WHERE id = 1"
+        ));
+    }
+
     #[tokio::test]
+    #[ignore = "requires a live TEST_MYSQL_URL database"]
     async fn test_get_schemas() {
         dotenv().ok();
         let database_url = env::var("TEST_MYSQL_URL").expect("TEST_MYSQL_URL must be set");

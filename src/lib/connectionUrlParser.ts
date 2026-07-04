@@ -2,8 +2,17 @@
  * Utility functions for parsing and building database connection URLs
  */
 
+import {
+  connectionUrlScheme,
+  defaultDatabasePort,
+  normalizeDatabaseDriverName,
+  sslModeParamAliases,
+  sslModeParamName,
+} from "@/lib/databaseDialect";
+import type { DatabaseDriver } from "@/services/tauri/types";
+
 export interface ParsedConnectionUrl {
-  driver: "postgres" | "mysql";
+  driver: DatabaseDriver;
   host?: string;
   port?: number;
   user?: string;
@@ -11,6 +20,53 @@ export interface ParsedConnectionUrl {
   database?: string;
   sslMode?: string;
   queryParams?: Record<string, string>;
+}
+
+export function stripJdbcPrefix(url: string) {
+  return url.toLowerCase().startsWith("jdbc:") ? url.slice(5) : url;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function normalizeConnectionUrlForDriver(
+  driver: DatabaseDriver,
+  connectionUrl: string
+) {
+  let url = stripJdbcPrefix(connectionUrl.trim());
+  const profileSslParamName = sslModeParamName(driver);
+
+  for (const alias of sslModeParamAliases(driver)) {
+    if (alias === profileSslParamName) continue;
+    const pattern = new RegExp(`([?&])${escapeRegExp(alias)}=([^&]+)`, "i");
+    const match = url.match(pattern);
+    if (!match || !match[1] || !match[2]) continue;
+
+    const separator = match[1];
+    const value = match[2].toLowerCase();
+    url = url.replace(pattern, `${separator}${profileSslParamName}=${value}`);
+    break;
+  }
+
+  return url;
+}
+
+function getQueryParam(
+  queryParams: Record<string, string>,
+  names: readonly string[]
+) {
+  for (const name of names) {
+    const value = queryParams[name];
+    if (value !== undefined) return value;
+
+    const lowerName = name.toLowerCase();
+    const matchedKey = Object.keys(queryParams).find(
+      (key) => key.toLowerCase() === lowerName
+    );
+    if (matchedKey) return queryParams[matchedKey];
+  }
+  return undefined;
 }
 
 /**
@@ -26,14 +82,16 @@ export function parseConnectionUrl(url: string): ParsedConnectionUrl | null {
   }
 
   try {
-    // Handle postgres:// and postgresql:// as postgres
-    // Handle mysql:// as mysql
-    const urlObj = new URL(url.replace("postgresql://", "postgres://"));
-
-    const protocol = urlObj.protocol.replace(":", "");
-    if (protocol !== "postgres" && protocol !== "mysql") {
+    const input = stripJdbcPrefix(url.trim());
+    const rawProtocol = input.match(/^([a-z][a-z0-9+.-]*):/i)?.[1] || "";
+    const driver = normalizeDatabaseDriverName(rawProtocol);
+    if (!driver) {
       return null;
     }
+    const protocolPattern = new RegExp(`^${escapeRegExp(rawProtocol)}:`, "i");
+    const urlObj = new URL(
+      input.replace(protocolPattern, `${connectionUrlScheme(driver)}:`)
+    );
 
     // URL.username and URL.password are automatically decoded
     const user = urlObj.username
@@ -56,10 +114,10 @@ export function parseConnectionUrl(url: string): ParsedConnectionUrl | null {
       queryParams[key] = value;
     });
 
-    const sslMode = queryParams["sslmode"] || queryParams["ssl"];
+    const sslMode = getQueryParam(queryParams, sslModeParamAliases(driver));
 
     return {
-      driver: protocol as "postgres" | "mysql",
+      driver,
       host,
       port,
       user,
@@ -82,7 +140,7 @@ export function parseConnectionUrl(url: string): ParsedConnectionUrl | null {
  * @returns Formatted connection URL
  */
 export function buildConnectionUrl(config: {
-  driver: "postgres" | "mysql";
+  driver: DatabaseDriver;
   host?: string;
   port?: number;
   user?: string;
@@ -100,22 +158,23 @@ export function buildConnectionUrl(config: {
     sslMode,
   } = config;
 
-  // Determine default port
-  const defaultPort = driver === "postgres" ? 5432 : 3306;
-  const actualPort = port || defaultPort;
+  const actualPort = port || defaultDatabasePort(driver);
 
   // Encode username and password to handle special characters
   const encodedUser = encodeURIComponent(user);
   const encodedPassword = encodeURIComponent(password);
 
   // Build base URL
-  let url = `${driver}://`;
+  let url = `${connectionUrlScheme(driver)}://`;
 
   if (encodedUser || encodedPassword) {
     url += `${encodedUser}:${encodedPassword}@`;
   }
 
-  url += `${host}:${actualPort}`;
+  url += host;
+  if (actualPort) {
+    url += `:${actualPort}`;
+  }
 
   if (database) {
     url += `/${encodeURIComponent(database)}`;
@@ -123,7 +182,7 @@ export function buildConnectionUrl(config: {
 
   // Add SSL mode if specified
   if (sslMode && sslMode !== "disable") {
-    url += `?sslmode=${sslMode}`;
+    url += `?${sslModeParamName(driver)}=${sslMode.toLowerCase()}`;
   }
 
   return url;

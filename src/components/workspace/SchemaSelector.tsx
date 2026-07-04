@@ -3,6 +3,11 @@ import { useConnectionStore } from "@/store/useConnectionStore";
 import { Database, ChevronDown, Search } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { cn } from "@/lib/utils";
+import {
+  DEFAULT_DATABASE_DRIVER,
+  defaultDatabaseCapabilities,
+  pluralizeNamespaceLabel,
+} from "@/lib/databaseDialect";
 
 interface SchemaSelectorProps {
   currentSchema: string | null;
@@ -14,10 +19,16 @@ export function SchemaSelector({
   onSchemaChange,
 }: SchemaSelectorProps) {
   const { schemas } = useSchemaStore();
-  const { activeConnectionId } = useConnectionStore();
+  const { activeConnectionId, connections } = useConnectionStore();
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const activeConnection = connections.find((c) => c.id === activeConnectionId);
+  const capabilities = defaultDatabaseCapabilities(
+    activeConnection?.driver || DEFAULT_DATABASE_DRIVER
+  );
+  const namespaceLabel = capabilities.namespaceLabel || "schema";
+  const namespaceLabelPlural = pluralizeNamespaceLabel(namespaceLabel);
 
   // Close dropdown on click outside
   useEffect(() => {
@@ -49,7 +60,7 @@ export function SchemaSelector({
     return (
       <div className="flex items-center px-3 py-1.5 text-xs text-muted-foreground/50">
         <Database size={14} className="mr-2" />
-        <span>No schemas available</span>
+        <span>No {namespaceLabelPlural} available</span>
       </div>
     );
   }
@@ -67,7 +78,7 @@ export function SchemaSelector({
       >
         <Database size={14} className="text-primary shrink-0" />
         <span className="text-foreground font-medium truncate max-w-[200px]">
-          {currentSchema || "Select schema"}
+          {currentSchema || `Select ${namespaceLabel}`}
         </span>
         <ChevronDown
           size={14}
@@ -91,7 +102,7 @@ export function SchemaSelector({
                 />
                 <input
                   type="text"
-                  placeholder="Search schemas..."
+                  placeholder={`Search ${namespaceLabelPlural}...`}
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="w-full pl-8 pr-3 py-1.5 bg-background-tertiary border border-border rounded text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:border-primary"
@@ -105,7 +116,7 @@ export function SchemaSelector({
           <div className="max-h-64 overflow-y-auto">
             {filteredSchemas.length === 0 ? (
               <div className="px-4 py-3 text-xs text-muted-foreground/50 text-center">
-                No schemas found
+                No {namespaceLabelPlural} found
               </div>
             ) : (
               filteredSchemas.map((schema) => (
@@ -133,8 +144,8 @@ export function SchemaSelector({
           {/* Footer Info */}
           {schemas.length > 0 && (
             <div className="px-3 py-1.5 border-t border-border text-[10px] text-muted-foreground/40 text-right">
-              {filteredSchemas.length} of {schemas.length} schema
-              {schemas.length !== 1 ? "s" : ""}
+              {filteredSchemas.length} of {schemas.length}{" "}
+              {schemas.length === 1 ? namespaceLabel : namespaceLabelPlural}
             </div>
           )}
         </div>

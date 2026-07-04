@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
+use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -22,17 +23,19 @@ pub struct LspServerManager {
     process: Arc<Mutex<Option<Child>>>,
     message_tx: mpsc::Sender<LspOutgoingMessage>,
     binary_path: String,
+    app_handle: AppHandle,
 }
 
 impl LspServerManager {
     /// Create a new LSP server manager
-    pub fn new(binary_path: String) -> Self {
+    pub fn new(binary_path: String, app_handle: AppHandle) -> Self {
         let (tx, _rx) = mpsc::channel(100);
 
         Self {
             process: Arc::new(Mutex::new(None)),
             message_tx: tx,
             binary_path,
+            app_handle,
         }
     }
 
@@ -108,6 +111,7 @@ impl LspServerManager {
 
         // Spawn stdout reader task
         let pending_responses_clone = pending_responses.clone();
+        let app_handle = self.app_handle.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
@@ -147,21 +151,49 @@ impl LspServerManager {
                     break;
                 }
 
-                // Parse JSON-RPC response
-                match serde_json::from_slice::<LspResponse>(&buffer) {
-                    Ok(response) => {
-                        let mut pending = pending_responses_clone.lock().await;
-                        if let Some(tx) = pending.remove(&response.id) {
-                            let result = if let Some(error) = response.error {
-                                Err(anyhow::anyhow!("LSP error: {}", error.message))
-                            } else {
-                                Ok(response.result.unwrap_or(Value::Null))
+                match serde_json::from_slice::<Value>(&buffer) {
+                    Ok(message) => {
+                        if let Some(id) = message.get("id").and_then(|v| v.as_u64()) {
+                            if message.get("method").is_some()
+                                && message.get("result").is_none()
+                                && message.get("error").is_none()
+                            {
+                                tracing::debug!(
+                                    "Ignoring unsupported LSP server request: {}",
+                                    message
+                                );
+                                continue;
+                            }
+
+                            let mut pending = pending_responses_clone.lock().await;
+                            if let Some(tx) = pending.remove(&id) {
+                                let result = if let Some(error) = message.get("error") {
+                                    let message = error
+                                        .get("message")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown error");
+                                    Err(anyhow::anyhow!("LSP error: {}", message))
+                                } else {
+                                    Ok(message.get("result").cloned().unwrap_or(Value::Null))
+                                };
+                                let _ = tx.send(result);
+                            }
+                        } else if let Some(method) = message.get("method").and_then(|v| v.as_str())
+                        {
+                            tracing::debug!("Received LSP notification: {}", method);
+                            let notification = LspServerNotification {
+                                method: method.to_string(),
+                                params: message.get("params").cloned().unwrap_or(Value::Null),
                             };
-                            let _ = tx.send(result);
+                            if let Err(error) =
+                                app_handle.emit(LSP_NOTIFICATION_EVENT, notification)
+                            {
+                                tracing::warn!("Failed to emit LSP notification: {}", error);
+                            }
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Failed to parse LSP response: {}", e);
+                        tracing::error!("Failed to parse LSP message: {}", e);
                     }
                 }
             }
@@ -197,6 +229,12 @@ impl LspServerManager {
                 // Format LSP message with Content-Length header
                 let message = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
 
+                if let (Some(id), Some(tx)) = (id_opt, response_tx_opt) {
+                    tracing::debug!("Sending LSP request ID: {}", id);
+                    let mut pending = pending_responses_for_writer.lock().await;
+                    pending.insert(id, tx);
+                }
+
                 // Write to stdin
                 if let Err(e) = stdin.write_all(message.as_bytes()).await {
                     println!(
@@ -207,29 +245,33 @@ impl LspServerManager {
                         "Failed to write to LSP stdin: {} - Process may have exited",
                         e
                     );
-                    if let Some(tx) = response_tx_opt {
-                        let _ = tx.send(Err(anyhow::anyhow!(
-                            "Write error (LSP process may have crashed): {}",
-                            e
-                        )));
+                    if let Some(id) = id_opt {
+                        let mut pending = pending_responses_for_writer.lock().await;
+                        if let Some(tx) = pending.remove(&id) {
+                            let _ = tx.send(Err(anyhow::anyhow!(
+                                "Write error (LSP process may have crashed): {}",
+                                e
+                            )));
+                        }
+                    }
+                    if id_opt.is_none() {
+                        tracing::debug!("Failed LSP notification write: {}", e);
                     }
                     continue;
                 }
 
                 if let Err(e) = stdin.flush().await {
                     tracing::error!("Failed to flush LSP stdin: {}", e);
-                    if let Some(tx) = response_tx_opt {
-                        let _ = tx.send(Err(anyhow::anyhow!("Flush error: {}", e)));
+                    if let Some(id) = id_opt {
+                        let mut pending = pending_responses_for_writer.lock().await;
+                        if let Some(tx) = pending.remove(&id) {
+                            let _ = tx.send(Err(anyhow::anyhow!("Flush error: {}", e)));
+                        }
                     }
                     continue;
                 }
 
-                // If it's a request, store the response sender
-                if let (Some(id), Some(tx)) = (id_opt, response_tx_opt) {
-                    tracing::debug!("Sent LSP request ID: {}", id);
-                    let mut pending = pending_responses_for_writer.lock().await;
-                    pending.insert(id, tx);
-                } else {
+                if id_opt.is_none() {
                     tracing::debug!("Sent LSP notification");
                 }
             }
@@ -238,10 +280,6 @@ impl LspServerManager {
         // Store the new channel and process
         drop(process_lock);
         *self.process.lock().await = Some(child);
-
-        // Note: self.message_tx cannot be updated in-place easily without Arc<Mutex<Sender>>
-        // But for this implementation, we rely on the fact that start() is called once or handles re-init
-        // For complete correctness we'd wrap sender in mutex, but keeping it simple for now as per previous design
 
         // --- LSP Handshake ---
 
@@ -256,6 +294,13 @@ impl LspServerManager {
                             "snippetSupport": true
                         }
                     },
+                    "hover": {
+                        "contentFormat": ["markdown", "plaintext"]
+                    },
+                    "definition": {},
+                    "references": {},
+                    "formatting": {},
+                    "publishDiagnostics": {},
                     "synchronization": {
                         "didSave": true,
                         "didChange": true,
@@ -351,6 +396,9 @@ impl LspServerManager {
         if let Some(mut child) = process_lock.take() {
             drop(process_lock);
             let _ = self.send_request("shutdown".to_string(), Value::Null).await;
+            let _ = self
+                .send_notification("exit".to_string(), Value::Null)
+                .await;
 
             tokio::select! {
                 _ = child.wait() => {
@@ -409,8 +457,23 @@ impl LspServerManager {
 
     /// Check if LSP server is running
     pub async fn is_running(&self) -> bool {
-        let process_lock = self.process.lock().await;
-        process_lock.is_some()
+        let mut process_lock = self.process.lock().await;
+        let Some(child) = process_lock.as_mut() else {
+            return false;
+        };
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                tracing::warn!("LSP server process exited: {}", status);
+                *process_lock = None;
+                false
+            }
+            Ok(None) => true,
+            Err(error) => {
+                tracing::warn!("Failed to inspect LSP server process: {}", error);
+                false
+            }
+        }
     }
 
     /// Get binary path

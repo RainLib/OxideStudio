@@ -18,9 +18,12 @@
 
 // 服务导出
 export * from "./connection.service";
+export * from "./database.service";
 export * from "./query.service";
 export * from "./schema.service";
 export * from "./store.service";
+export * from "./table.service";
+export * from "./transaction.service";
 
 // 类型导出
 export * from "./types";

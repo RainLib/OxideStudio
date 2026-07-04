@@ -30,6 +30,20 @@ export const storeService = {
     return await invoke("save_resources", { resources });
   },
 
+  replaceResources: async (
+    connectionId: string,
+    parentId: string | undefined,
+    kind: string,
+    resources: Resource[]
+  ): Promise<void> => {
+    return await invoke("replace_resources", {
+      connectionId,
+      parentId,
+      kind,
+      resources,
+    });
+  },
+
   getResources: async (
     connectionId: string,
     parentId?: string

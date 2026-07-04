@@ -15,6 +15,7 @@ interface RenameTableDialogProps {
   isOpen: boolean;
   onClose: () => void;
   tableName: string;
+  objectLabel?: string;
   onRename: (oldName: string, newName: string) => Promise<void>;
 }
 
@@ -22,6 +23,7 @@ export function RenameTableDialog({
   isOpen,
   onClose,
   tableName,
+  objectLabel = "Table",
   onRename,
 }: RenameTableDialogProps) {
   const [newName, setNewName] = useState(tableName);
@@ -58,9 +60,10 @@ export function RenameTableDialog({
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
-          <DialogTitle>Rename Table</DialogTitle>
+          <DialogTitle>Rename {objectLabel}</DialogTitle>
           <DialogDescription>
-            Enter a new name for table <strong>{tableName}</strong>.
+            Enter a new name for {objectLabel.toLowerCase()}{" "}
+            <strong>{tableName}</strong>.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit}>

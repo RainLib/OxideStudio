@@ -5,7 +5,7 @@ pub mod core;
 pub mod drivers;
 pub mod lsp;
 
-use commands::query::ParserState;
+use commands::query::{ParserState, QueryCancellationState};
 use core::cache::CacheManager;
 use core::config::ConfigManager;
 use core::manager::ConnectionManager;
@@ -42,6 +42,7 @@ pub fn run() {
 
             // Initialize SQL Parser state
             app.manage(ParserState(Mutex::new(SqlParser::new())));
+            app.manage(QueryCancellationState::default());
 
             // Platform-specific window configuration
             if let Some(window) = app.get_webview_window("main") {
@@ -62,16 +63,55 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Connection commands
             commands::connection::connect_db,
+            commands::connection::disconnect_db,
             commands::connection::save_connections,
             commands::connection::load_connections,
             // Query commands
             commands::query::execute_query,
+            commands::query::cancel_query,
             commands::query::get_sql_completion,
             // Schema commands
+            commands::database::get_database_capabilities,
+            commands::database::list_database_capabilities,
+            commands::database::create_database,
+            commands::database::drop_database,
+            commands::database::rename_database,
             commands::schema::get_schemas,
             commands::schema::get_tables,
             commands::schema::get_columns,
+            commands::schema::get_indexes,
+            commands::schema::get_constraints,
+            commands::schema::get_functions,
             commands::schema::set_current_schema,
+            // Table commands
+            commands::table::preview_table_page,
+            commands::table::export_table_data,
+            commands::table::mutate_table_rows,
+            commands::table::create_table,
+            commands::table::create_view,
+            commands::table::create_materialized_view,
+            commands::table::add_table_column,
+            commands::table::drop_table_column,
+            commands::table::rename_table_column,
+            commands::table::alter_table_column,
+            commands::table::create_table_index,
+            commands::table::drop_table_index,
+            commands::table::rename_table_index,
+            commands::table::create_table_unique_constraint,
+            commands::table::create_table_primary_key,
+            commands::table::create_table_check_constraint,
+            commands::table::create_table_foreign_key,
+            commands::table::drop_table_constraint,
+            commands::table::truncate_table,
+            commands::table::drop_table,
+            commands::table::rename_table,
+            commands::table::get_view_definition,
+            commands::table::refresh_materialized_view,
+            commands::table::get_table_ddl,
+            // Transaction commands
+            commands::transaction::begin_transaction,
+            commands::transaction::commit_transaction,
+            commands::transaction::rollback_transaction,
             // Cache commands
             commands::cache::get_cached_schemas,
             commands::cache::refresh_schemas,
@@ -82,6 +122,7 @@ pub fn run() {
             commands::store::get_connections,
             commands::store::delete_connection,
             commands::store::save_resources,
+            commands::store::replace_resources,
             commands::store::get_resources,
             commands::store::search_resources,
             // LSP commands
@@ -89,6 +130,10 @@ pub fn run() {
             commands::lsp::lsp_shutdown,
             commands::lsp::lsp_is_running,
             commands::lsp::lsp_get_completions,
+            commands::lsp::lsp_hover,
+            commands::lsp::lsp_goto_definition,
+            commands::lsp::lsp_references,
+            commands::lsp::lsp_formatting,
             commands::lsp::lsp_did_change_configuration,
             commands::lsp::lsp_did_open,
             commands::lsp::lsp_did_change,

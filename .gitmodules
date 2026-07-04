@@ -1,0 +1,3 @@
+[submodule "vendor/sql-lsp"]
+	path = vendor/sql-lsp
+	url = git@github.com:RainLib/lsp_sqls.git

@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
-use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,10 +151,7 @@ impl MetaStore {
 
     // --- Metadata/Resource Operations ---
 
-    /// Sync internal cache with authoritative list from driver for a given parent.
-    /// This is an "Upsert" style sync. Items not in 'resources' list but in DB might need deleting?
-    /// User requirement: "Update only when triggered".
-    /// So this function is called when a "Refresh" happens.
+    /// Upsert resources without deleting siblings. Kept for callers that append metadata.
     pub async fn save_resources(&self, resources: &[Resource]) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
@@ -186,12 +182,63 @@ impl MetaStore {
         Ok(())
     }
 
+    /// Replace one authoritative resource group, deleting stale siblings first.
+    pub async fn replace_resources(
+        &self,
+        connection_id: &str,
+        parent_id: Option<&str>,
+        kind: &str,
+        resources: &[Resource],
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+
+        if let Some(parent_id) = parent_id {
+            sqlx::query(
+                "DELETE FROM resources WHERE connection_id = ? AND parent_id = ? AND kind = ?",
+            )
+            .bind(connection_id)
+            .bind(parent_id)
+            .bind(kind)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                "DELETE FROM resources WHERE connection_id = ? AND parent_id IS NULL AND kind = ?",
+            )
+            .bind(connection_id)
+            .bind(kind)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        for res in resources {
+            sqlx::query(
+                r#"
+                INSERT INTO resources (id, connection_id, parent_id, kind, name, metadata, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                "#
+            )
+            .bind(&res.id)
+            .bind(&res.connection_id)
+            .bind(&res.parent_id)
+            .bind(&res.kind)
+            .bind(&res.name)
+            .bind(&res.metadata)
+            .bind(res.last_updated)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn get_children(
         &self,
         parent_id: Option<&str>,
         connection_id: &str,
     ) -> Result<Vec<Resource>> {
-        let sql = if let Some(pid) = parent_id {
+        let sql = if parent_id.is_some() {
             "SELECT * FROM resources WHERE connection_id = ? AND parent_id = ? ORDER BY name"
         } else {
             // Root resources (databases usually) for this connection

@@ -3,11 +3,22 @@ import { useSchemaStore } from "@/store/useSchemaStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import {
+  DEFAULT_DATABASE_DRIVER,
+  defaultDatabaseCapabilities,
+  pluralizeNamespaceLabel,
+} from "@/lib/databaseDialect";
 
 export function DatabaseSelector() {
-  const { activeConnectionId } = useConnectionStore();
+  const { activeConnectionId, connections } = useConnectionStore();
   const { schemas, currentSchema, setDefaultSchema, loadSchemas, isLoading } =
     useSchemaStore();
+  const activeConnection = connections.find((c) => c.id === activeConnectionId);
+  const capabilities = defaultDatabaseCapabilities(
+    activeConnection?.driver || DEFAULT_DATABASE_DRIVER
+  );
+  const namespaceLabel = capabilities.namespaceLabel || "database";
+  const namespaceLabelPlural = pluralizeNamespaceLabel(namespaceLabel);
 
   const handleSchemaChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newSchema = e.target.value;
@@ -41,7 +52,7 @@ export function DatabaseSelector() {
           disabled={isLoading || schemas.length === 0}
         >
           {schemas.length === 0 ? (
-            <option value="">No databases</option>
+            <option value="">No {namespaceLabelPlural}</option>
           ) : (
             schemas.map((s, idx) => (
               <option key={`${s}-${idx}`} value={s}>
@@ -61,7 +72,7 @@ export function DatabaseSelector() {
         className="h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-background-elevated transition-colors"
         onClick={handleRefresh}
         disabled={isLoading}
-        title="Refresh databases"
+        title={`Refresh ${namespaceLabelPlural}`}
       >
         <RefreshCw size={13} className={cn(isLoading && "animate-spin")} />
       </Button>

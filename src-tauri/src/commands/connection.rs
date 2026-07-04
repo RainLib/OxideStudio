@@ -1,11 +1,13 @@
 /// 连接管理相关 commands
 use crate::core::{
     config::{AppConfig, ConfigManager, SavedConnection},
-    driver::DatabaseDriver,
+    dialect::DatabaseKind,
     manager::ConnectionManager,
     protocol::Response,
+    redaction::redact_connection_url,
 };
-use crate::drivers::{mysql::MysqlDriver, postgres::PostgresDriver};
+use crate::drivers::connect_driver;
+use std::str::FromStr;
 use tauri::State;
 
 /// 连接数据库
@@ -16,48 +18,52 @@ pub async fn connect_db(
     driver: String,
     url: String,
 ) -> Result<Response<String>, String> {
-    let result = async {
-        println!("Connecting to database: driver={}, url={}", driver, url);
+    let result: Result<String, String> = async {
+        tracing::info!(
+            "Connecting to database: driver={}, url={}",
+            driver,
+            redact_connection_url(&url)
+        );
 
-        // 创建 driver 实例并连接
-        let db_driver: Box<dyn DatabaseDriver> = match driver.as_str() {
-            "postgres" => {
-                let mut pg_driver = PostgresDriver::new(&url);
-                pg_driver
-                    .connect()
-                    .await
-                    .map_err(|e| format!("Failed to connect to PostgreSQL: {}", e))?;
-                Box::new(pg_driver)
-            }
-            "mysql" => {
-                let mut mysql_driver = MysqlDriver::new(&url);
-                mysql_driver
-                    .connect()
-                    .await
-                    .map_err(|e| format!("Failed to connect to MySQL: {}", e))?;
-                Box::new(mysql_driver)
-            }
-            _ => return Err(format!("Unsupported database driver: {}", driver)),
-        };
+        let database_kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
 
-        // 添加到连接管理器
-        manager
-            .add_connection(connection_id.clone(), db_driver)
-            .await;
+        let db_driver = connect_driver(database_kind, &url)
+            .await
+            .map_err(|error| error.to_string())?;
 
-        // 测试连接
-        manager
-            .ping(&connection_id)
+        db_driver
+            .ping()
             .await
             .map_err(|e| format!("Connection test failed: {}", e))?;
 
-        Ok(format!("Connected to {} successfully", driver))
+        // Replace existing connection with the same ID and close the old driver.
+        manager
+            .replace_connection(connection_id.clone(), db_driver)
+            .await
+            .map_err(|e| format!("Failed to replace connection: {}", e))?;
+
+        Ok(format!(
+            "Connected to {} successfully",
+            database_kind.as_str()
+        ))
     }
     .await;
 
     match result {
         Ok(msg) => Ok(Response::ok(msg)),
         Err(e) => Ok(Response::err("CONNECTION_ERROR", &e)),
+    }
+}
+
+/// 断开数据库连接
+#[tauri::command]
+pub async fn disconnect_db(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+) -> Result<Response<String>, String> {
+    match manager.disconnect_connection(&connection_id).await {
+        Ok(_) => Ok(Response::ok("Connection disconnected".to_string())),
+        Err(e) => Ok(Response::err("DISCONNECT_ERROR", &e.to_string())),
     }
 }
 

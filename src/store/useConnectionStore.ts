@@ -2,6 +2,15 @@ import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
 import { connectionService, SavedConnection } from "@/services/tauri";
 import { useSchemaStore } from "./useSchemaStore";
+import {
+  buildConnectionUrl,
+  normalizeConnectionUrlForDriver,
+} from "@/lib/connectionUrlParser";
+import {
+  DEFAULT_DATABASE_DRIVER,
+  defaultDatabaseName,
+  defaultDatabasePort,
+} from "@/lib/databaseDialect";
 
 export interface ConnectionConfig extends SavedConnection {
   host?: string;
@@ -29,8 +38,8 @@ interface ConnectionState {
   saveConnection: (config: ConnectionConfig) => Promise<void>;
   addConnection: (config: Omit<ConnectionConfig, "id">) => Promise<void>;
   connect: (config: ConnectionConfig) => Promise<string | null>;
-  setActiveConnection: (id: string) => void;
-  disconnect: () => void;
+  setActiveConnection: (id: string) => Promise<string | null>;
+  disconnect: () => Promise<void>;
 }
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
@@ -65,13 +74,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const newConn: ConnectionConfig = {
       id: uuidv4(),
       name: "New Connection",
-      driver: "postgres",
+      driver: DEFAULT_DATABASE_DRIVER,
       url: "",
       host: "localhost",
-      port: 5432,
+      port: defaultDatabasePort(DEFAULT_DATABASE_DRIVER),
       user: "",
       password: "",
-      database: "postgres",
+      database: defaultDatabaseName(DEFAULT_DATABASE_DRIVER),
       tags: [],
     };
 
@@ -121,44 +130,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     let url: string;
 
     if (config.connectionUrl && config.connectionUrl.trim()) {
-      // Use the provided connection URL directly, but strip jdbc: if present
-      url = config.connectionUrl.trim();
-      if (url.toLowerCase().startsWith("jdbc:")) {
-        url = url.substring(5);
-      }
-
-      // Robust mapping for MySQL SSL parameters
-      if (config.driver === "mysql") {
-        // Map sslMode=... to ssl-mode=... and use lowercase for the value
-        const sslModeMatch = url.match(/[?&]sslMode=([^&]+)/i);
-        if (sslModeMatch && sslModeMatch[1]) {
-          const originalParam = sslModeMatch[0].substring(1); // e.g. "sslMode=VERIFY_IDENTITY"
-          const value = sslModeMatch[1].toLowerCase();
-          url = url.replace(originalParam, `ssl-mode=${value}`);
-        }
-      }
+      url = normalizeConnectionUrlForDriver(config.driver, config.connectionUrl);
     } else {
-      // Construct URL with encoded components to handle special characters
-      const user = encodeURIComponent(config.user || "");
-      const password = encodeURIComponent(config.password || "");
-      const host = config.host || "localhost";
-      const port = config.port || (config.driver === "postgres" ? 5432 : 3306);
-      const db = encodeURIComponent(config.database || "");
-
-      const sslParamName =
-        config.driver === "postgres" ? "sslmode" : "ssl-mode";
-      const sslMode = (config.sslMode || "disable").toLowerCase();
-      const sslValue = sslMode;
-
-      url =
-        config.driver === "postgres"
-          ? `postgres://${user}:${password}@${host}:${port}/${db}`
-          : `mysql://${user}:${password}@${host}:${port}/${db}`;
-
-      // Add SSL mode if specified
-      if (sslMode !== "disable") {
-        url += `?${sslParamName}=${sslValue}`;
-      }
+      url = buildConnectionUrl({
+        driver: config.driver,
+        host: config.host,
+        port: config.port,
+        user: config.user,
+        password: config.password,
+        database: config.database,
+        sslMode: config.sslMode || "disable",
+      });
     }
 
     try {
@@ -171,11 +153,33 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  setActiveConnection: (id: string) => {
-    set({ activeConnectionId: id, isConnected: true });
+  setActiveConnection: async (id: string) => {
+    const { activeConnectionId, isConnected, connections } = get();
+    if (activeConnectionId === id && isConnected) {
+      return null;
+    }
+
+    const connection = connections.find((conn) => conn.id === id);
+    if (!connection) {
+      const message = `Connection not found: ${id}`;
+      console.warn(message);
+      return message;
+    }
+
+    return get().connect(connection);
   },
 
-  disconnect: () => {
+  disconnect: async () => {
+    const connectionId = get().activeConnectionId;
+
+    if (connectionId) {
+      try {
+        await connectionService.disconnect(connectionId);
+      } catch (e) {
+        console.warn("Failed to disconnect backend connection:", e);
+      }
+    }
+
     useSchemaStore.getState().reset();
     set({ activeConnectionId: null, isConnected: false });
   },

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -16,8 +16,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useConnectionStore } from "@/store/useConnectionStore";
-import { queryService } from "@/services/tauri/query.service";
+import { databaseService } from "@/services/tauri";
+import type { DatabaseCapabilities } from "@/services/tauri";
 import { useSchemaStore } from "@/store/useSchemaStore";
+import {
+  DEFAULT_DATABASE_DRIVER,
+  defaultDatabaseCapabilities,
+} from "@/lib/databaseDialect";
 
 interface CreateDatabaseDialogProps {
   isOpen: boolean;
@@ -46,14 +51,48 @@ export function CreateDatabaseDialog({
   const [collation, setCollation] = useState("utf8mb4_general_ci");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [capabilities, setCapabilities] = useState<DatabaseCapabilities | null>(
+    null
+  );
 
   const { connections } = useConnectionStore();
-  const { loadSchemas } = useSchemaStore();
+  const { loadSchemas, setCurrentSchema } = useSchemaStore();
 
   const connection = connections.find((c) => c.id === activeConnectionId);
-  const driver = connection?.driver || "postgres";
+  const driver = connection?.driver || DEFAULT_DATABASE_DRIVER;
+  const activeCapabilities =
+    capabilities || defaultDatabaseCapabilities(driver);
+  const namespaceLabel = activeCapabilities.namespaceLabel || "database";
+  const titleNamespaceLabel =
+    namespaceLabel.charAt(0).toUpperCase() + namespaceLabel.slice(1);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCapabilities(null);
+
+    databaseService
+      .getDatabaseCapabilities(driver)
+      .then((value) => {
+        if (!cancelled) setCapabilities(value);
+      })
+      .catch((err) => {
+        console.error("Failed to load database capabilities:", err);
+        if (!cancelled) setCapabilities(defaultDatabaseCapabilities(driver));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [driver]);
 
   const handleCreate = async () => {
+    if (!activeCapabilities.supportsCreateDatabase) {
+      setError(
+        `${activeCapabilities.displayName} ${namespaceLabel} creation is not supported.`
+      );
+      return;
+    }
+
     if (!databaseName.trim()) {
       setError("Database name is required");
       return;
@@ -71,22 +110,17 @@ export function CreateDatabaseDialog({
     setError(null);
 
     try {
-      let sql: string;
-      const quote = driver === "mysql" ? "`" : '"';
-
-      if (driver === "mysql") {
-        sql = `CREATE DATABASE ${quote}${databaseName}${quote} CHARACTER SET ${charset} COLLATE ${collation};`;
-      } else {
-        // PostgreSQL
-        sql = `CREATE DATABASE ${quote}${databaseName}${quote};`;
-      }
-
-      console.log("Creating database with SQL:", sql);
-
-      await queryService.executeQuery(activeConnectionId, sql);
+      await databaseService.createDatabase(
+        activeConnectionId,
+        driver,
+        databaseName,
+        activeCapabilities.supportsCreateDatabaseCharset ? charset : undefined,
+        activeCapabilities.supportsCreateDatabaseCharset ? collation : undefined
+      );
 
       // Refresh schemas to show the new database
       await loadSchemas(activeConnectionId, true);
+      await setCurrentSchema(databaseName.trim());
 
       // Reset form and close
       setDatabaseName("");
@@ -113,7 +147,7 @@ export function CreateDatabaseDialog({
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-[400px] bg-[#18181b] text-foreground border-white/10">
         <DialogHeader>
-          <DialogTitle>Create New Database</DialogTitle>
+          <DialogTitle>Create New {titleNamespaceLabel}</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4 py-4">
@@ -125,18 +159,20 @@ export function CreateDatabaseDialog({
 
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">
-              Database Name
+              {titleNamespaceLabel} Name
             </label>
             <Input
               value={databaseName}
               onChange={(e) => setDatabaseName(e.target.value)}
-              placeholder="e.g. my_database"
+              placeholder={`e.g. ${
+                namespaceLabel === "schema" ? "app_schema" : "my_database"
+              }`}
               className="bg-[#27272a] border-white/10"
               autoFocus
             />
           </div>
 
-          {driver === "mysql" && (
+          {activeCapabilities.supportsCreateDatabaseCharset && (
             <>
               <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">
@@ -182,7 +218,7 @@ export function CreateDatabaseDialog({
             Cancel
           </Button>
           <Button onClick={handleCreate} disabled={isSubmitting}>
-            {isSubmitting ? "Creating..." : "Create Database"}
+            {isSubmitting ? "Creating..." : `Create ${titleNamespaceLabel}`}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -8,6 +8,10 @@ import { Plus, Search, X, Filter } from "lucide-react";
 import * as LucideIcons from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState, useMemo } from "react";
+import {
+  defaultConnectionAccentClassName,
+  defaultConnectionIcon,
+} from "@/lib/databaseDialect";
 
 interface ConnectionSidebarProps {
   width?: number;
@@ -94,7 +98,8 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
 
     // Default Fallback
     const DefaultIcon =
-      conn.driver === "postgres" ? LucideIcons.Database : LucideIcons.Monitor;
+      (LucideIcons as any)[defaultConnectionIcon(conn.driver)] ||
+      LucideIcons.Database;
     return <DefaultIcon size={22} strokeWidth={1.5} />;
   };
 
@@ -218,7 +223,9 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
               activeConnectionId === conn.id && "bg-secondary/30"
             )}
             onClick={() => selectConnection(conn.id)}
-            onDoubleClick={() => connect(conn)}
+            onDoubleClick={() => {
+              void connect(conn);
+            }}
           >
             {/* Status Indicator */}
             <div
@@ -236,9 +243,7 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
                 "w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 transition-all duration-300 shadow-sm",
                 !conn.icon &&
                   !conn.color &&
-                  (conn.driver === "postgres"
-                    ? "bg-blue-500/10 text-blue-600 dark:text-blue-400 group-hover:bg-blue-500/20"
-                    : "bg-orange-500/10 text-orange-600 dark:text-orange-400 group-hover:bg-orange-500/20"),
+                  defaultConnectionAccentClassName(conn.driver),
                 selectedConnection?.id === conn.id && "scale-105 shadow-md"
               )}
               style={{

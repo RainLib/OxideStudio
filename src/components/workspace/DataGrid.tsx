@@ -14,7 +14,7 @@ import "@glideapps/glide-data-grid/dist/index.css";
 import { useTabStore } from "@/store/useTabStore";
 import { useTheme } from "@/theme/useTheme";
 import { createTypedCell, applyFilter, compareValues } from "@/lib/gridUtils";
-import { Check, X as XIcon, Loader2, Plus } from "lucide-react";
+import { Check, X as XIcon, Loader2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ColumnFilter } from "./GridFilterRow";
 import { StatusBarPortal } from "./StatusBarPortal";
@@ -24,16 +24,19 @@ interface DataGridProps {
   globalFilter?: string;
   columnFilters?: ColumnFilter[];
   overrideColumns?: Array<{ name: string; type?: string }>;
+  readOnly?: boolean;
 }
 
 export function DataGrid({
   globalFilter = "",
   columnFilters = [],
   overrideColumns,
+  readOnly = false,
 }: DataGridProps) {
   const {
     tabs,
     activeTabId,
+    setGridFilter,
     setGridSort,
     setCellEdit,
     setBulkCellEdit,
@@ -42,6 +45,7 @@ export function DataGrid({
     setColumnWidth,
     setColumnOrder,
     addNewRow,
+    deleteRows,
     fetchTableColumns,
   } = useTabStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
@@ -67,7 +71,7 @@ export function DataGrid({
   const error = activeTab?.error;
   const gridState = activeTab?.gridState;
   const pendingEdits = activeTab?.pendingEdits || new Map();
-  const hasEdits = pendingEdits.size > 0;
+  const hasEdits = !readOnly && pendingEdits.size > 0;
   const columnWidths = activeTab?.columnWidths || {};
   const columnOrder = activeTab?.columnOrder || [];
   const newRowsCount = activeTab?.newRowsCount || 0;
@@ -95,7 +99,7 @@ export function DataGrid({
   // Column definitions
   const columns = useMemo<GridColumn[]>(() => {
     // If we have a result, use its columns
-    if (result) {
+    if (result && result.columns.length > 0) {
       const allColumns = result.columns.map((col) => {
         const isSorted = gridState?.sortColumn === col.name;
         const sortDir = gridState?.sortDirection;
@@ -180,7 +184,14 @@ export function DataGrid({
     }
 
     return [];
-  }, [result, gridState, columnWidths, columnOrder, overrideColumns]);
+  }, [
+    result,
+    gridState,
+    columnWidths,
+    columnOrder,
+    overrideColumns,
+    tableColumns,
+  ]);
 
   // Apply filters and sorting
   const { filteredRows, sortedIndices } = useMemo(() => {
@@ -235,8 +246,31 @@ export function DataGrid({
       );
     }
 
+    const localColumnFilters = gridState?.columnFilters || {};
+    const localFilterEntries = Object.entries(localColumnFilters).filter(
+      ([, filter]) => filter?.value
+    );
+    if (localFilterEntries.length > 0) {
+      indices = indices.filter((rowIndex) =>
+        localFilterEntries.every(([column, filter]) => {
+          const colIndex = result.columns.findIndex((c) => c.name === column);
+          if (colIndex === -1) return true;
+
+          return applyFilter(result.rows[rowIndex]?.[colIndex], {
+            operator: filter.operator as ColumnFilter["operator"],
+            value: filter.value,
+          });
+        })
+      );
+    }
+
     // Apply sorting
-    if (gridState?.sortColumn && gridState?.sortDirection && result) {
+    if (
+      activeTab?.type !== "table" &&
+      gridState?.sortColumn &&
+      gridState?.sortDirection &&
+      result
+    ) {
       const colIndex = result.columns.findIndex(
         (c) => c.name === gridState.sortColumn
       );
@@ -253,7 +287,16 @@ export function DataGrid({
       filteredRows: indices.map((i) => result.rows[i]),
       sortedIndices: indices,
     };
-  }, [result, gridState, globalFilter, columnFilters]);
+  }, [result, gridState, globalFilter, columnFilters, activeTab?.type]);
+
+  const selectedRowIndexes = useMemo(
+    () =>
+      gridSelection.rows
+        .toArray()
+        .map((row) => sortedIndices[row])
+        .filter((rowIndex): rowIndex is number => rowIndex !== undefined),
+    [gridSelection.rows, sortedIndices]
+  );
 
   // Update getCellContent to handle missing result & new rows
   const getCellContent = useCallback(
@@ -321,7 +364,7 @@ export function DataGrid({
 
       // Determine original column index
       let originalColIndex = -1;
-      if (result) {
+      if (result && result.columns.length > 0) {
         originalColIndex = result.columns.findIndex(
           (c) => c.name === visualColumn.id
         );
@@ -353,13 +396,13 @@ export function DataGrid({
         }
       }
 
-      const baseCell = createTypedCell(val !== null ? val : "", true);
+      const baseCell = createTypedCell(val !== null ? val : "", !readOnly);
       const gridCell = { ...baseCell };
 
       // Force editable for compatible types
       if (gridCell.kind !== GridCellKind.Boolean) {
-        (gridCell as any).allowOverlay = true;
-        (gridCell as any).readonly = false;
+        (gridCell as any).allowOverlay = !readOnly;
+        (gridCell as any).readonly = readOnly;
       }
 
       // Apply theme override for new rows
@@ -378,6 +421,7 @@ export function DataGrid({
       pendingEdits,
       columns,
       overrideColumns,
+      readOnly,
     ]
   );
 
@@ -429,7 +473,7 @@ export function DataGrid({
   // Handle cell edit
   const onCellEdited = useCallback(
     (cell: Item, newValue: EditableGridCell): void => {
-      if (!activeTab) return;
+      if (!activeTab || readOnly) return;
 
       const [col, row] = cell;
 
@@ -454,7 +498,7 @@ export function DataGrid({
         if (!vCol) return null;
 
         let origColIdx = -1;
-        if (result) {
+        if (result && result.columns.length > 0) {
           origColIdx = result.columns.findIndex((col) => col.name === vCol.id);
         } else if (overrideColumns) {
           origColIdx = overrideColumns.findIndex((col) => col.name === vCol.id);
@@ -514,6 +558,7 @@ export function DataGrid({
       filteredRows,
       overrideColumns,
       gridSelection,
+      readOnly,
     ]
   );
 
@@ -704,6 +749,46 @@ export function DataGrid({
     closeContextMenu();
   }, [activeTab, result, contextMenu, setGridSort, closeContextMenu]);
 
+  const handleOpenColumnFilter = useCallback(() => {
+    if (!activeTab || !contextMenu.columnName) return;
+
+    const currentValue =
+      activeTab.gridState?.columnFilters?.[contextMenu.columnName]?.value || "";
+    const nextValue = window.prompt(
+      `Filter "${contextMenu.columnName}" contains:`,
+      currentValue
+    );
+
+    if (nextValue === null) {
+      closeContextMenu();
+      return;
+    }
+
+    const value = nextValue.trim();
+    setGridFilter(
+      activeTab.id,
+      contextMenu.columnName,
+      value ? { operator: "contains", value } : undefined
+    );
+    closeContextMenu();
+  }, [activeTab, contextMenu.columnName, setGridFilter, closeContextMenu]);
+
+  const handleDeleteSelectedRows = useCallback(async () => {
+    if (!activeTab || selectedRowIndexes.length === 0) return;
+    const confirmed = window.confirm(
+      `Delete ${selectedRowIndexes.length} selected row${
+        selectedRowIndexes.length === 1 ? "" : "s"
+      }?`
+    );
+    if (!confirmed) return;
+
+    await deleteRows(activeTab.id, selectedRowIndexes);
+    setGridSelection({
+      columns: CompactSelection.empty(),
+      rows: CompactSelection.empty(),
+    });
+  }, [activeTab, deleteRows, selectedRowIndexes]);
+
   // Draw borders after cells are rendered
 
   const { mode } = useTheme();
@@ -799,7 +884,7 @@ export function DataGrid({
               rows={filteredRows.length + newRowsCount}
               onHeaderClicked={onHeaderClicked}
               onHeaderMenuClick={onHeaderMenuClick}
-              onCellEdited={onCellEdited}
+              onCellEdited={readOnly ? undefined : onCellEdited}
               provideEditor={supplyEditor}
               onColumnResize={onColumnResize}
               onColumnMoved={onColumnMoved}
@@ -818,7 +903,9 @@ export function DataGrid({
             {filteredRows.length === 0 && newRowsCount === 0 && (
               <div className="absolute inset-x-0 top-12 bottom-0 flex items-center justify-center pointer-events-none">
                 <div className="flex flex-col items-center gap-2 text-muted-foreground/50">
-                  <span className="text-sm">No rows returned</span>
+                  <span className="text-sm">
+                    {result?.message || "No rows returned"}
+                  </span>
                 </div>
               </div>
             )}
@@ -866,14 +953,7 @@ export function DataGrid({
               </button>
               <div className="h-px bg-border my-1" />
               <button
-                onClick={() => {
-                  // TODO: Implement column filter
-                  console.log(
-                    "Open filter for column:",
-                    contextMenu.columnName
-                  );
-                  closeContextMenu();
-                }}
+                onClick={handleOpenColumnFilter}
                 className="w-full text-left px-2 py-1.5 text-sm text-foreground hover:bg-accent rounded"
               >
                 Open Column Filter
@@ -939,16 +1019,34 @@ export function DataGrid({
             <span>{filteredRows.length + newRowsCount} rows</span>
           </div>
 
-          <div className="h-4 w-px bg-border/50" />
+          {!readOnly && (
+            <>
+              <div className="h-4 w-px bg-border/50" />
 
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => activeTab && addNewRow(activeTab.id)}
-            className="h-7 px-3 text-xs rounded-full hover:bg-accent"
-          >
-            <Plus size={14} className="mr-1.5" /> Add Row
-          </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => activeTab && addNewRow(activeTab.id)}
+                className="h-7 px-3 text-xs rounded-full hover:bg-accent"
+              >
+                <Plus size={14} className="mr-1.5" /> Add Row
+              </Button>
+            </>
+          )}
+
+          {!readOnly && selectedRowIndexes.length > 0 && (
+            <>
+              <div className="h-4 w-px bg-border/50" />
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => void handleDeleteSelectedRows()}
+                className="h-7 px-3 text-xs rounded-full text-destructive hover:bg-destructive/10 hover:text-destructive"
+              >
+                <Trash2 size={14} className="mr-1.5" /> Delete
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
