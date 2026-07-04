@@ -42,6 +42,8 @@ graph TD
     Protocol <== JSON/IPC ==> TauriCmd
 ```
 
+AI 助手和外部 Agent 接入设计见 [AI_AGENT_INTEGRATION.md](AI_AGENT_INTEGRATION.md)。核心原则是先在前端建立 `AiToolRegistry`，再通过同一注册表适配 LangGraph、MCP 和 CLI，避免为不同入口复制数据库工具逻辑。
+
 ## 2. 核心抽象层 (Core Abstraction)
 
 为了支持多种数据库（甚至是非关系型数据库），我们需要一个足够通用的 Trait 系统。

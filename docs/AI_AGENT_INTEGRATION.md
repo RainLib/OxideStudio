@@ -1,0 +1,77 @@
+# AI Agent Integration Design
+
+## Goal
+
+OxideStudio should expose database, metadata, LSP, and workspace actions to an AI assistant without coupling the assistant to UI components or a single database type. The core design should support the in-app assistant first, then reuse the same capability surface for MCP and CLI adapters.
+
+## Recommended Architecture
+
+Use a TypeScript `AiToolRegistry` as the stable boundary for all AI-callable capabilities. The registry should describe every tool with a name, JSON schema, capability flags, permission level, timeout, result limits, and executor.
+
+```text
+Assistant UI / LangGraph
+        |
+        v
+AiToolRegistry  ---->  Tauri service clients  ---->  Rust commands/drivers
+        |
+        +---- MCP adapter
+        |
+        +---- CLI adapter
+```
+
+This keeps the editor integration direct and state-aware while allowing external agents to call the same tools through MCP. The CLI should be an automation/debug adapter, not the primary editor integration path.
+
+## LangGraph Usage
+
+Use TypeScript LangGraph for the in-app assistant orchestration because the editor state, connection metadata, tabs, and approval UI already live in the frontend. Recommended graph nodes:
+
+- `classify_intent`: detect explain/query/debug/schema/edit/export tasks.
+- `collect_context`: gather active connection, selected text, schema, tab, and driver capabilities.
+- `plan_tools`: choose tools from `AiToolRegistry`.
+- `safety_review`: require user approval for writes, destructive operations, exports, and cross-database actions.
+- `execute_tools`: run bounded tool calls through Tauri services.
+- `summarize_result`: return concise answers with queries, row limits, and caveats.
+
+## Tool Categories
+
+Start with read-only tools:
+
+- `connection.list`, `connection.current`, `connection.capabilities`
+- `metadata.listNamespaces`, `metadata.listRelations`, `metadata.describeObject`
+- `query.runReadOnly` with row/time limits and driver-aware syntax
+- `lsp.complete`, `lsp.explainDiagnostics`
+- `workspace.getActiveTab`, `workspace.getSelection`
+
+Add write tools only behind explicit approvals:
+
+- `query.runMutation`
+- `table.updateRows`, `table.deleteRows`
+- `database.createNamespace`, `database.dropNamespace`
+- document/key/search mutations for MongoDB, Redis, and Elasticsearch
+
+## MCP vs CLI
+
+MCP is the better external integration because it gives other AI clients a structured tool protocol with schemas, permissions, and discoverability. Implement MCP as an adapter over `AiToolRegistry`; do not duplicate tool logic in the MCP server.
+
+CLI is useful for local automation, tests, and scripting. It can share the same registry by running commands such as:
+
+```bash
+oxide tools list
+oxide tools call query.runReadOnly --json payload.json
+```
+
+## Safety Requirements
+
+- Never expose raw credentials or connection URLs to model context.
+- Default all result sets to bounded row, byte, and time limits.
+- Require approval for mutations, exports, drops, and external network access.
+- Store an audit entry for tool name, connection id, redacted input, status, and duration.
+- Prefer capability checks over driver name checks so new backends do not require broad rewrites.
+
+## Implementation Phases
+
+1. Add `src/ai/tools` with registry types, schemas, and read-only database tools.
+2. Add an assistant panel backed by LangGraph and the registry executor.
+3. Add MCP and CLI adapters over the same registry.
+4. Add write tools with approval gates and audit logging.
+5. Add provider/plugin hooks so new databases register tools by capability, not by UI rewrites.
