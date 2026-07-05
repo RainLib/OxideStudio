@@ -64,7 +64,13 @@ describe("AI query safety classification", () => {
     expect(classifyAiQuerySafety('TYPE "user:1"\nHGETALL "user:1"', "redis")).toBe(
       "read"
     );
+    expect(classifyAiQuerySafety('GET "user;1"; TYPE "user;1"', "redis")).toBe(
+      "read"
+    );
     expect(classifyAiQuerySafety('SET "user:1" "{}"', "redis")).toBe("write");
+    expect(classifyAiQuerySafety('GET "user:1"; DEL "user:1"', "redis")).toBe(
+      "destructive"
+    );
     expect(classifyAiQuerySafety('DEL "user:1"', "redis")).toBe("destructive");
   });
 

@@ -290,12 +290,70 @@ async fn redis_database_count(connection: &mut ConnectionManager) -> Option<usiz
 }
 
 fn split_redis_commands(input: &str) -> Result<Vec<Vec<String>>> {
-    input
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| tokenize_redis_command(line.trim_end_matches(';').trim()))
+    split_redis_command_segments(input)
+        .into_iter()
+        .map(|line| tokenize_redis_command(line.trim()))
         .collect()
+}
+
+fn split_redis_command_segments(input: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escape = false;
+    let mut line_comment = false;
+
+    let push_current = |segments: &mut Vec<String>, current: &mut String| {
+        let trimmed = current.trim();
+        if !trimmed.is_empty() {
+            segments.push(trimmed.to_string());
+        }
+        current.clear();
+    };
+
+    for ch in input.chars() {
+        if line_comment {
+            if ch == '\n' || ch == '\r' {
+                line_comment = false;
+                push_current(&mut segments, &mut current);
+            }
+            continue;
+        }
+
+        if escape {
+            current.push(ch);
+            escape = false;
+            continue;
+        }
+
+        if quote.is_some() && ch == '\\' {
+            current.push(ch);
+            escape = true;
+            continue;
+        }
+
+        match quote {
+            Some(end_quote) if ch == end_quote => {
+                quote = None;
+                current.push(ch);
+            }
+            Some(_) => current.push(ch),
+            None if ch == '\'' || ch == '"' => {
+                quote = Some(ch);
+                current.push(ch);
+            }
+            None if ch == '#' && current.trim().is_empty() => {
+                line_comment = true;
+            }
+            None if ch == ';' || ch == '\n' || ch == '\r' => {
+                push_current(&mut segments, &mut current);
+            }
+            None => current.push(ch),
+        }
+    }
+
+    push_current(&mut segments, &mut current);
+    segments
 }
 
 fn tokenize_redis_command(input: &str) -> Result<Vec<String>> {
@@ -432,12 +490,16 @@ mod tests {
                 # comment
                 SET user:1 Ada;
                 GET user:1
+                SET note "a;b"; TYPE note; DEL old
                 "#
             )
             .unwrap(),
             vec![
                 vec!["SET".to_string(), "user:1".to_string(), "Ada".to_string()],
-                vec!["GET".to_string(), "user:1".to_string()]
+                vec!["GET".to_string(), "user:1".to_string()],
+                vec!["SET".to_string(), "note".to_string(), "a;b".to_string()],
+                vec!["TYPE".to_string(), "note".to_string()],
+                vec!["DEL".to_string(), "old".to_string()]
             ]
         );
     }

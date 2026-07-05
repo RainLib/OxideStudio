@@ -490,10 +490,66 @@ function looksDestructiveRedisCommands(query: string) {
 }
 
 function parseRedisCommandLines(query: string) {
-  return query
-    .split(/\r?\n/)
-    .map((line) => line.trim().replace(/;$/, ""))
-    .filter((line) => line && !line.startsWith("#"));
+  const commands: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escape = false;
+  let lineComment = false;
+
+  const pushCurrent = () => {
+    const trimmed = current.trim();
+    if (trimmed) commands.push(trimmed);
+    current = "";
+  };
+
+  for (const char of query) {
+    if (lineComment) {
+      if (char === "\n" || char === "\r") {
+        lineComment = false;
+        pushCurrent();
+      }
+      continue;
+    }
+
+    if (escape) {
+      current += char;
+      escape = false;
+      continue;
+    }
+
+    if (quote && char === "\\") {
+      current += char;
+      escape = true;
+      continue;
+    }
+
+    if (quote) {
+      if (char === quote) quote = null;
+      current += char;
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      current += char;
+      continue;
+    }
+
+    if (char === "#" && !current.trim()) {
+      lineComment = true;
+      continue;
+    }
+
+    if (char === ";" || char === "\n" || char === "\r") {
+      pushCurrent();
+      continue;
+    }
+
+    current += char;
+  }
+
+  pushCurrent();
+  return commands;
 }
 
 const READ_ONLY_REDIS_COMMANDS = new Set([
