@@ -1,13 +1,23 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
-import { queryService, QueryResult, tableService } from "@/services/tauri";
+import {
+  databaseService,
+  queryService,
+  QueryResult,
+  tableService,
+} from "@/services/tauri";
 import { schemaService } from "@/services/tauri/schema.service";
 import type { ColumnInfo, TableFilter, TableSort } from "@/services/tauri/types";
 import { useHistoryStore } from "./useHistoryStore";
 import { useConnectionStore } from "./useConnectionStore";
 import { useSchemaStore } from "./useSchemaStore";
 import type { FilterOperator } from "@/components/workspace/GridFilterRow";
-import { DEFAULT_DATABASE_DRIVER } from "@/lib/databaseDialect";
+import {
+  DEFAULT_DATABASE_DRIVER,
+  defaultDatabaseCapabilities,
+  supportsTableWorkspace,
+} from "@/lib/databaseDialect";
+import { classifyAiQuerySafety } from "@/lib/querySafety";
 import type { Diagnostic } from "@/services/lsp/types";
 import {
   extractSchemaContextChange,
@@ -21,29 +31,54 @@ async function refreshMetadataAfterQuery(
   results: QueryResult[] | null | undefined
 ) {
   const schemaStore = useSchemaStore.getState();
+  const connection = useConnectionStore
+    .getState()
+    .connections.find((item) => item.id === connectionId);
+  const driver = connection?.driver || DEFAULT_DATABASE_DRIVER;
+  const fallbackCapabilities = defaultDatabaseCapabilities(driver);
+  const capabilities = await databaseService
+    .getDatabaseCapabilities(driver)
+    .catch(() => fallbackCapabilities);
+  const canBrowseTables = supportsTableWorkspace(capabilities);
+  const canBrowseCollections =
+    capabilities.supportsCollectionBrowsing ||
+    capabilities.supportsKeyValueBrowsing;
+  const safety = classifyAiQuerySafety(sql, driver);
+  const shouldRefreshObjects =
+    queryMayChangeMetadata(sql, results) ||
+    (capabilities.dataModel !== "relational" && safety !== "read");
+
+  const refreshNamespaceObjects = async (namespace: string | undefined) => {
+    if (!namespace) return;
+
+    const tasks: Promise<void>[] = [];
+    if (canBrowseTables) {
+      tasks.push(schemaStore.loadTables(connectionId, namespace, true));
+      if (capabilities.supportsFunctions) {
+        tasks.push(schemaStore.loadFunctions(connectionId, namespace, true));
+      }
+    }
+    if (canBrowseCollections) {
+      tasks.push(schemaStore.loadCollections(connectionId, namespace, true));
+    }
+    await Promise.all(tasks);
+  };
+
   const selectedSchema = extractSchemaContextChange(sql);
 
   if (selectedSchema) {
     await schemaStore.setCurrentSchema(selectedSchema);
-    await Promise.all([
-      schemaStore.loadTables(connectionId, selectedSchema, true),
-      schemaStore.loadFunctions(connectionId, selectedSchema, true),
-    ]);
+    await refreshNamespaceObjects(selectedSchema);
     schemaStore.bumpMetadataVersion();
     return;
   }
 
-  if (!queryMayChangeMetadata(sql, results)) return;
+  if (!shouldRefreshObjects) return;
 
   await schemaStore.loadSchemas(connectionId, true);
   const schemaToRefresh =
     useSchemaStore.getState().currentSchema || schemaContext || undefined;
-  if (schemaToRefresh) {
-    await Promise.all([
-      schemaStore.loadTables(connectionId, schemaToRefresh, true),
-      schemaStore.loadFunctions(connectionId, schemaToRefresh, true),
-    ]);
-  }
+  await refreshNamespaceObjects(schemaToRefresh);
   schemaStore.bumpMetadataVersion();
 }
 

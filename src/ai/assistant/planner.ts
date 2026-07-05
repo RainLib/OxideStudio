@@ -1,4 +1,5 @@
-import { classifyAiQuerySafety, evaluateAiToolPolicy } from "@/ai/tools";
+import { evaluateAiToolPolicy } from "@/ai/tools";
+import { classifyAiQuerySafety } from "@/lib/querySafety";
 import type { AiToolExecutionPolicy, AiToolSummary } from "@/ai/tools";
 import type {
   AssistantIntent,

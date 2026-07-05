@@ -14,7 +14,7 @@ import type {
 import {
   classifyAiQuerySafety,
   looksAiQueryReadOnly,
-} from "./querySafety";
+} from "@/lib/querySafety";
 
 const DEFAULT_QUERY_LIMIT = 200;
 
