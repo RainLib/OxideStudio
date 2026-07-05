@@ -19,8 +19,10 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 
 type PostgresTransactionSession = Arc<Mutex<PoolConnection<Postgres>>>;
+const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct PostgresDriver {
     pub pool: Mutex<Option<Pool<Postgres>>>,
@@ -230,6 +232,15 @@ impl PostgresDriver {
         }
     }
 
+    async fn close_pool_with_timeout(pool: Pool<Postgres>) {
+        if timeout(POOL_CLOSE_TIMEOUT, pool.close()).await.is_err() {
+            tracing::warn!(
+                "Timed out waiting for PostgreSQL pool to close after {:?}",
+                POOL_CLOSE_TIMEOUT
+            );
+        }
+    }
+
     async fn get_transaction_session(
         &self,
         session_id: &str,
@@ -387,7 +398,7 @@ impl DatabaseDriver for PostgresDriver {
             pool.take()
         };
         if let Some(pool) = pool {
-            pool.close().await;
+            Self::close_pool_with_timeout(pool).await;
         }
         Ok(())
     }

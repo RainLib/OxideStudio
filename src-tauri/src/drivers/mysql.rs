@@ -18,8 +18,10 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 
 type MysqlTransactionSession = Arc<Mutex<PoolConnection<MySql>>>;
+const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct MysqlDriver {
     // Map of schema name -> Pool. Empty string key "" represents the default/base connection.
@@ -288,6 +290,15 @@ impl MysqlDriver {
         }
     }
 
+    async fn close_pool_with_timeout(pool: Pool<MySql>) {
+        if timeout(POOL_CLOSE_TIMEOUT, pool.close()).await.is_err() {
+            tracing::warn!(
+                "Timed out waiting for MySQL pool to close after {:?}",
+                POOL_CLOSE_TIMEOUT
+            );
+        }
+    }
+
     async fn get_transaction_session(&self, session_id: &str) -> Result<MysqlTransactionSession> {
         self.transaction_sessions
             .lock()
@@ -364,7 +375,7 @@ impl DatabaseDriver for MysqlDriver {
             pools.drain().map(|(_, pool)| pool).collect::<Vec<_>>()
         };
         for pool in drained_pools {
-            pool.close().await;
+            Self::close_pool_with_timeout(pool).await;
         }
 
         let mut base_options = self.base_options.lock().await;
