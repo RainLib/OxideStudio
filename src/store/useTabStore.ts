@@ -7,7 +7,13 @@ import {
   tableService,
 } from "@/services/tauri";
 import { schemaService } from "@/services/tauri/schema.service";
-import type { ColumnInfo, TableFilter, TableSort } from "@/services/tauri/types";
+import type {
+  ColumnDef,
+  ColumnInfo,
+  IndexInfo,
+  TableFilter,
+  TableSort,
+} from "@/services/tauri/types";
 import { useHistoryStore } from "./useHistoryStore";
 import { useConnectionStore } from "./useConnectionStore";
 import { useSchemaStore } from "./useSchemaStore";
@@ -135,6 +141,7 @@ export interface TabData {
   // Target schema for query execution
   targetSchema?: string | null;
   tableColumns?: ColumnInfo[];
+  tableIndexes?: IndexInfo[];
   isFetchingColumns?: boolean;
   tablePage?: number;
   tablePageSize?: number;
@@ -164,6 +171,79 @@ export function querySchemaContextForTab(
   }
 
   return tab.targetSchema || tab.schemaName || currentSchema || undefined;
+}
+
+function mutationKeyColumns(
+  columns: ColumnInfo[] | undefined,
+  indexes: IndexInfo[] | undefined,
+  resultColumns: ColumnDef[]
+) {
+  const tableColumns = columns || [];
+  const resultColumnNames = new Set(resultColumns.map((column) => column.name));
+  const byName = new Map(tableColumns.map((column) => [column.name, column]));
+  const primaryKeyColumns = tableColumns.filter(
+    (column) => column.is_primary_key && resultColumnNames.has(column.name)
+  );
+
+  if (primaryKeyColumns.length > 0) {
+    return primaryKeyColumns;
+  }
+
+  const usableUniqueIndexes = (indexes || [])
+    .filter((index) => index.is_unique && index.columns.length > 0)
+    .map((index) => ({
+      index,
+      columns: index.columns
+        .map((columnName) => byName.get(columnName))
+        .filter((column): column is ColumnInfo => Boolean(column)),
+    }))
+    .filter(
+      ({ index, columns }) =>
+        columns.length === index.columns.length &&
+        columns.every((column) => resultColumnNames.has(column.name))
+    )
+    .map(({ columns }) => columns)
+    .sort((left, right) => left.length - right.length);
+
+  if (usableUniqueIndexes[0]) {
+    return usableUniqueIndexes[0];
+  }
+
+  const uniqueColumns = tableColumns.filter(
+    (column) =>
+      !column.is_primary_key &&
+      column.is_unique &&
+      resultColumnNames.has(column.name)
+  );
+
+  // Column-level uniqueness is ambiguous for composite unique constraints.
+  return uniqueColumns.length === 1 ? uniqueColumns : [];
+}
+
+function rowMutationKey(
+  row: unknown[],
+  resultColumns: ColumnDef[],
+  keyColumns: ColumnInfo[]
+) {
+  const key: Record<string, unknown> = {};
+
+  for (const keyColumn of keyColumns) {
+    const keyIndex = resultColumns.findIndex(
+      (column) => column.name === keyColumn.name
+    );
+    if (keyIndex === -1) return null;
+
+    const value = row[keyIndex];
+    if (value === null || value === undefined) return null;
+    key[keyColumn.name] = value;
+  }
+
+  return Object.keys(key).length === keyColumns.length ? key : null;
+}
+
+function missingMutationKeyMessage(action: "update" | "delete", table: string) {
+  const operation = action === "update" ? "update rows in" : "delete rows from";
+  return `Cannot ${operation} "${table}" because no primary key or usable unique index is available.`;
 }
 
 interface TabState {
@@ -822,9 +902,14 @@ export const useTabStore = create<TabState>((set, get) => ({
       }
     }
 
-    // Check PKs (using refreshed state)
+    // Check row identity columns (using refreshed state)
     const currentTab = get().tabs.find((t) => t.id === tabId)!;
-    const pks = currentTab.tableColumns?.filter((c) => c.is_primary_key) || [];
+    const resultColumns = currentTab.results?.[0]?.columns || [];
+    const keyColumns = mutationKeyColumns(
+      currentTab.tableColumns,
+      currentTab.tableIndexes,
+      resultColumns
+    );
 
     const editsByRow = new Map<number, Record<number, any>>();
     for (const [key, value] of currentTab.pendingEdits!.entries()) {
@@ -838,8 +923,8 @@ export const useTabStore = create<TabState>((set, get) => ({
     const hasExistingRowEdits = Array.from(editsByRow.keys()).some(
       (rowIndex) => rowIndex >= 0
     );
-    if (hasExistingRowEdits && pks.length === 0) {
-      const message = `Cannot update rows in "${table}" because no primary key is available.`;
+    if (hasExistingRowEdits && keyColumns.length === 0) {
+      const message = missingMutationKeyMessage("update", table);
       console.warn(message);
       set((state) => ({
         tabs: state.tabs.map((t) =>
@@ -855,7 +940,6 @@ export const useTabStore = create<TabState>((set, get) => ({
       .getState()
       .connections.find((c) => c.id === connId);
     const driver = connection?.driver || DEFAULT_DATABASE_DRIVER;
-    const resultColumns = currentTab.results?.[0]?.columns || [];
     const metadataColumns =
       currentTab.tableColumns?.map((column) => ({
         name: column.name,
@@ -885,8 +969,8 @@ export const useTabStore = create<TabState>((set, get) => ({
           inserts.push(values);
         }
       } else {
-        if (pks.length === 0) {
-          console.warn("No Primary Key found for table:", table);
+        if (keyColumns.length === 0) {
+          console.warn("No row mutation key found for table:", table);
           continue;
         }
 
@@ -901,15 +985,9 @@ export const useTabStore = create<TabState>((set, get) => ({
           }
         }
 
-        const key: Record<string, unknown> = {};
-        for (const pk of pks) {
-          const pkIdx = resultColumns.findIndex((c) => c.name === pk.name);
-          if (pkIdx !== -1) {
-            key[pk.name] = originalRow[pkIdx];
-          }
-        }
+        const key = rowMutationKey(originalRow, resultColumns, keyColumns);
 
-        if (Object.keys(values).length > 0 && Object.keys(key).length === pks.length) {
+        if (Object.keys(values).length > 0 && key) {
           updates.push({ key, values });
         }
       }
@@ -998,9 +1076,13 @@ export const useTabStore = create<TabState>((set, get) => ({
     const currentTab = get().tabs.find((t) => t.id === tabId);
     if (!currentTab) return;
 
-    const pks = currentTab.tableColumns?.filter((c) => c.is_primary_key) || [];
-    if (pks.length === 0) {
-      const message = `Cannot delete rows from "${table}" because no primary key is available.`;
+    const keyColumns = mutationKeyColumns(
+      currentTab.tableColumns,
+      currentTab.tableIndexes,
+      result.columns
+    );
+    if (keyColumns.length === 0) {
+      const message = missingMutationKeyMessage("delete", table);
       console.warn(message);
       set((state) => ({
         tabs: state.tabs.map((t) =>
@@ -1028,15 +1110,9 @@ export const useTabStore = create<TabState>((set, get) => ({
       const row = result.rows[rowIndex];
       if (!row) continue;
 
-      const key: Record<string, unknown> = {};
-      for (const pk of pks) {
-        const pkIdx = result.columns.findIndex((column) => column.name === pk.name);
-        if (pkIdx !== -1) {
-          key[pk.name] = row[pkIdx];
-        }
-      }
+      const key = rowMutationKey(row, result.columns, keyColumns);
 
-      if (Object.keys(key).length === pks.length) {
+      if (key) {
         deletes.push({ key });
       }
     }
@@ -1106,17 +1182,26 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
 
     try {
-      const cols = await schemaService.getColumns(
-        connId,
-        tab.schemaName,
-        tab.tableName
-      );
-      console.log("[fetchTableColumns] Received metadata:", cols);
+      const [cols, indexes] = await Promise.all([
+        schemaService.getColumns(connId, tab.schemaName, tab.tableName),
+        schemaService
+          .getIndexes(connId, tab.schemaName, tab.tableName)
+          .catch((error) => {
+            console.warn("[fetchTableColumns] Failed to fetch indexes:", error);
+            return [] as IndexInfo[];
+          }),
+      ]);
+      console.log("[fetchTableColumns] Received metadata:", cols, indexes);
 
       set((state) => ({
         tabs: state.tabs.map((t) =>
           t.id === tabId
-            ? { ...t, tableColumns: cols, isFetchingColumns: false }
+            ? {
+                ...t,
+                tableColumns: cols,
+                tableIndexes: indexes,
+                isFetchingColumns: false,
+              }
             : t
         ),
       }));
