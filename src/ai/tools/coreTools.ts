@@ -19,6 +19,10 @@ export function registerCoreAiTools(
     registry.register(listCollectionsTool(adapters));
   }
 
+  if (adapters.listObjects) {
+    registry.register(listObjectsTool(adapters));
+  }
+
   if (adapters.describeObject) {
     registry.register(describeObjectTool(adapters));
   }
@@ -112,6 +116,41 @@ function listCollectionsTool(adapters: AiToolAdapters): AiToolDefinition {
     execute: async (input, context) => {
       const payload = assertObject(input);
       return adapters.listCollections?.(
+        {
+          connectionId:
+            typeof payload.connectionId === "string" ? payload.connectionId : null,
+          namespace: typeof payload.namespace === "string" ? payload.namespace : null,
+        },
+        context
+      );
+    },
+  };
+}
+
+function listObjectsTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "metadata.listObjects",
+    description: "List tables, collections, indexes, keys, or analogous objects.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        connectionId: {
+          type: "string",
+          description: "Connection id. Defaults to the active connection.",
+        },
+        namespace: {
+          type: "string",
+          description: "Database, schema, or namespace. Defaults to the active namespace.",
+        },
+      },
+      additionalProperties: false,
+    },
+    permissions: ["read"],
+    capabilities: ["metadata"],
+    timeoutMs: 10_000,
+    execute: async (input, context) => {
+      const payload = assertObject(input);
+      return adapters.listObjects?.(
         {
           connectionId:
             typeof payload.connectionId === "string" ? payload.connectionId : null,

@@ -181,9 +181,17 @@ function buildSuggestedPlan(
     });
   }
 
-  if (intent === "metadata" && hasTool("metadata.listCollections")) {
+  if (intent === "metadata" && hasTool("metadata.listObjects")) {
     steps.push({
       id: "metadata-objects",
+      title: "List objects for the active namespace",
+      toolName: "metadata.listObjects",
+      input: {},
+      requiresApproval: requiresApproval("metadata.listObjects"),
+    });
+  } else if (intent === "metadata" && hasTool("metadata.listCollections")) {
+    steps.push({
+      id: "metadata-collections",
       title: "List collections, keys, or indexes for the active namespace",
       toolName: "metadata.listCollections",
       input: {},

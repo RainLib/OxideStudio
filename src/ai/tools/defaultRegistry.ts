@@ -7,7 +7,10 @@ import { registerCoreAiTools } from "./coreTools";
 import { createAiToolRegistry } from "./registry";
 import type {
   AiDescribeObjectInput,
+  AiListObjectsInput,
   AiObjectDescription,
+  AiObjectKind,
+  AiObjectSummary,
   AiToolAdapters,
   AiToolExecutionContext,
   AiWorkspaceTabSummary,
@@ -70,6 +73,8 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
       return schemaService.getCollections(connectionId, namespace);
     },
 
+    listObjects: async (input, context) => listObjects(input, context),
+
     describeObject: async (input, context) => describeObject(input, context),
 
     runReadOnlyQuery: async (input, context) => {
@@ -84,25 +89,59 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
   };
 }
 
+async function listObjects(
+  input: AiListObjectsInput,
+  context: AiToolExecutionContext
+): Promise<AiObjectSummary[]> {
+  const { connectionId, namespace, capabilities } = await resolveMetadataTarget(
+    input.connectionId,
+    input.namespace,
+    context,
+    "metadata.listObjects"
+  );
+
+  if (capabilities.supportsTableBrowsing) {
+    const tables = await schemaService.getTables(connectionId, namespace);
+    return tables.map((table) => ({
+      name: table.name,
+      namespace: table.schema || namespace,
+      kind: "relation",
+      type: table.type || null,
+      comment: table.comment || null,
+      table,
+    }));
+  }
+
+  if (
+    capabilities.supportsCollectionBrowsing ||
+    capabilities.supportsKeyValueBrowsing
+  ) {
+    const collections = await schemaService.getCollections(connectionId, namespace);
+    const kind = collectionKind(capabilities.dataModel);
+    return collections.map((collection) => ({
+      name: collection.name,
+      namespace: collection.namespace || namespace,
+      kind,
+      type: collection.type || null,
+      documentCount: collection.documentCount ?? null,
+      collection,
+    }));
+  }
+
+  return [];
+}
+
 async function describeObject(
   input: AiDescribeObjectInput,
   context: AiToolExecutionContext
 ): Promise<AiObjectDescription> {
-  const connectionId = input.connectionId || context.activeConnectionId;
-  if (!connectionId) {
-    throw new Error("No active connection is available for metadata.describeObject");
-  }
-
-  const connection = useConnectionStore
-    .getState()
-    .connections.find((candidate) => candidate.id === connectionId);
-  const driver = connection?.driver ?? context.activeDriver ?? null;
-  if (!driver) {
-    throw new Error(`Connection driver is not available for ${connectionId}`);
-  }
-
-  const namespace = input.namespace || useSchemaStore.getState().currentSchema || "";
-  const capabilities = await databaseService.getDatabaseCapabilities(driver);
+  const { connectionId, namespace, driver, capabilities } =
+    await resolveMetadataTarget(
+      input.connectionId,
+      input.namespace,
+      context,
+      "metadata.describeObject"
+    );
   if (capabilities.supportsTableBrowsing) {
     const [columns, indexes, constraints] = await Promise.all([
       schemaService.getColumns(connectionId, namespace, input.name),
@@ -153,11 +192,35 @@ async function describeObject(
 
 function collectionKind(
   dataModel: "relational" | "document" | "keyValue" | "search"
-): AiObjectDescription["kind"] {
+): AiObjectKind {
   if (dataModel === "keyValue") return "key";
   if (dataModel === "search") return "index";
   if (dataModel === "document") return "collection";
   return "object";
+}
+
+async function resolveMetadataTarget(
+  requestedConnectionId: string | null | undefined,
+  requestedNamespace: string | null | undefined,
+  context: AiToolExecutionContext,
+  toolName: string
+) {
+  const connectionId = requestedConnectionId || context.activeConnectionId;
+  if (!connectionId) {
+    throw new Error(`No active connection is available for ${toolName}`);
+  }
+
+  const connection = useConnectionStore
+    .getState()
+    .connections.find((candidate) => candidate.id === connectionId);
+  const driver = connection?.driver ?? context.activeDriver ?? null;
+  if (!driver) {
+    throw new Error(`Connection driver is not available for ${connectionId}`);
+  }
+
+  const namespace = requestedNamespace || useSchemaStore.getState().currentSchema || "";
+  const capabilities = await databaseService.getDatabaseCapabilities(driver);
+  return { connectionId, namespace, driver, capabilities };
 }
 
 function limitQueryResults(results: QueryResult[], limit: number) {

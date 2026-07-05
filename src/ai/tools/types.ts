@@ -6,6 +6,7 @@ import type {
   ConstraintInfo,
   IndexInfo,
   QueryResult,
+  TableInfo,
 } from "@/services/tauri/types";
 
 export type AiToolPermission = "read" | "write" | "destructive" | "external";
@@ -112,12 +113,30 @@ export type AiDescribeObjectInput = {
   name: string;
 };
 
+export type AiListObjectsInput = {
+  connectionId?: string | null;
+  namespace?: string | null;
+};
+
+export type AiObjectKind = "relation" | "collection" | "key" | "index" | "object";
+
+export type AiObjectSummary = {
+  name: string;
+  namespace?: string | null;
+  kind: AiObjectKind;
+  type?: string | null;
+  comment?: string | null;
+  documentCount?: number | null;
+  table?: TableInfo;
+  collection?: CollectionInfo;
+};
+
 export type AiObjectDescription = {
   connectionId: string;
   namespace: string;
   name: string;
   driver?: DatabaseDriver | null;
-  kind: "relation" | "collection" | "key" | "index" | "object";
+  kind: AiObjectKind;
   collection?: CollectionInfo | null;
   columns?: ColumnInfo[];
   indexes?: IndexInfo[];
@@ -134,6 +153,10 @@ export type AiToolAdapters = {
     input: { connectionId?: string | null; namespace?: string | null },
     context: AiToolExecutionContext
   ) => Promise<CollectionInfo[]> | CollectionInfo[];
+  listObjects?: (
+    input: AiListObjectsInput,
+    context: AiToolExecutionContext
+  ) => Promise<AiObjectSummary[]> | AiObjectSummary[];
   describeObject?: (
     input: AiDescribeObjectInput,
     context: AiToolExecutionContext
