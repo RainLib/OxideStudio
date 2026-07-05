@@ -42,9 +42,9 @@ import {
   supportsTableWorkspace,
 } from "@/lib/databaseDialect";
 import {
-  collectionObjectPluralLabel,
-  collectionPreviewQueryTemplate,
-  collectionPreviewTabTitle,
+  databaseObjectPreviewProvider,
+  collectionPreviewQueryTemplateForCapabilities,
+  collectionPreviewTabTitleForCapabilities,
 } from "@/lib/databaseObjectPreview";
 import { useEffect, useState } from "react";
 import {
@@ -151,7 +151,11 @@ export function SchemaSidebar() {
   const canBrowseCollections =
     activeCapabilities.supportsCollectionBrowsing ||
     activeCapabilities.supportsKeyValueBrowsing;
-  const collectionLabelPlural = collectionObjectPluralLabel(activeDriver);
+  const collectionPreviewProvider =
+    databaseObjectPreviewProvider(activeCapabilities);
+  const collectionLabelPlural =
+    collectionPreviewProvider.objectPluralLabel ||
+    `${collectionPreviewProvider.objectLabel}s`;
   const objectSectionLabel = canBrowseTables
     ? "Tables"
     : canBrowseCollections
@@ -415,8 +419,8 @@ export function SchemaSidebar() {
   const handleCollectionDoubleClick = (collection: CollectionInfo) => {
     if (!activeConnectionId) return;
 
-    const sql = collectionPreviewQueryTemplate(
-      activeDriver,
+    const sql = collectionPreviewQueryTemplateForCapabilities(
+      activeCapabilities,
       currentSchema,
       collection
     );
@@ -426,7 +430,11 @@ export function SchemaSidebar() {
       collection.name,
       collection.type,
       sql,
-      collectionPreviewTabTitle(activeDriver, collection)
+      collectionPreviewTabTitleForCapabilities(
+        activeCapabilities,
+        collection,
+        currentSchema
+      )
     );
     void runTabQuery(tabId, activeConnectionId, sql);
   };
