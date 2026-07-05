@@ -44,6 +44,8 @@ graph TD
 
 AI 助手和外部 Agent 接入设计见 [AI_AGENT_INTEGRATION.md](AI_AGENT_INTEGRATION.md)。核心原则是先在前端建立 `AiToolRegistry`，再通过同一注册表适配 LangGraph、MCP 和 CLI，避免为不同入口复制数据库工具逻辑。
 
+前端数据库类型通过 `src/lib/databaseDialect.ts` 的 driver profile 描述。内置驱动提供默认 profile，外部 provider 可以用 `registerDatabaseDriverProfile` 注册图标、URL scheme、协议别名、默认数据库和 capability 默认值；后端返回的 runtime capabilities 会通过 `registerDatabaseCapabilities` 覆盖同名 driver 的运行时能力。
+
 ## 2. 核心抽象层 (Core Abstraction)
 
 为了支持多种数据库（甚至是非关系型数据库），我们需要一个足够通用的 Trait 系统。

@@ -312,6 +312,7 @@ const DATABASE_DRIVER_PROFILES: Record<
 };
 
 const runtimeCapabilities = new Map<string, DatabaseCapabilities>();
+const runtimeDriverProfiles = new Map<string, DatabaseDriverProfile>();
 
 function capabilitiesKey(driver: DatabaseDriver | string) {
   return String(driver).trim().toLowerCase();
@@ -328,6 +329,25 @@ function cloneCapabilities(
     supportsCollectionBrowsing: capabilities.supportsCollectionBrowsing ?? false,
     supportsKeyValueBrowsing: capabilities.supportsKeyValueBrowsing ?? false,
     commonDataTypes: [...capabilities.commonDataTypes],
+  };
+}
+
+function cloneDriverProfile(profile: DatabaseDriverProfile): DatabaseDriverProfile {
+  return {
+    ...profile,
+    protocolAliases: [...profile.protocolAliases],
+    sslModeParamAliases: [...profile.sslModeParamAliases],
+    capabilities: {
+      ...profile.capabilities,
+      dataModel: profile.capabilities.dataModel || "relational",
+      supportsSqlQuery: profile.capabilities.supportsSqlQuery ?? true,
+      supportsTableBrowsing: profile.capabilities.supportsTableBrowsing ?? true,
+      supportsCollectionBrowsing:
+        profile.capabilities.supportsCollectionBrowsing ?? false,
+      supportsKeyValueBrowsing:
+        profile.capabilities.supportsKeyValueBrowsing ?? false,
+      commonDataTypes: [...profile.capabilities.commonDataTypes],
+    },
   };
 }
 
@@ -357,6 +377,16 @@ export function registerDatabaseCapabilities(
   const values = Array.isArray(capabilities) ? capabilities : [capabilities];
   for (const value of values) {
     runtimeCapabilities.set(capabilitiesKey(value.driver), cloneCapabilities(value));
+  }
+}
+
+export function registerDatabaseDriverProfile(
+  profile: DatabaseDriverProfile | DatabaseDriverProfile[]
+) {
+  const values = Array.isArray(profile) ? profile : [profile];
+  for (const value of values) {
+    const cloned = cloneDriverProfile(value);
+    runtimeDriverProfiles.set(capabilitiesKey(cloned.driver), cloned);
   }
 }
 
@@ -432,13 +462,22 @@ function fallbackDatabaseDriverProfile(
 export function databaseDriverProfile(driver: DatabaseDriver) {
   const key = capabilitiesKey(driver);
   const profile =
+    runtimeDriverProfiles.get(key) ??
     DATABASE_DRIVER_PROFILES[key as KnownDatabaseDriver] ??
     fallbackDatabaseDriverProfile(driver);
   return withRuntimeCapabilities(profile, runtimeCapabilities.get(key));
 }
 
 export function supportedDatabaseDriverProfiles() {
-  return Object.values(DATABASE_DRIVER_PROFILES).map((profile) =>
+  const profiles = new Map<string, DatabaseDriverProfile>();
+  for (const profile of Object.values(DATABASE_DRIVER_PROFILES)) {
+    profiles.set(capabilitiesKey(profile.driver), profile);
+  }
+  for (const [key, profile] of runtimeDriverProfiles) {
+    profiles.set(key, profile);
+  }
+
+  return Array.from(profiles.values()).map((profile) =>
     databaseDriverProfile(profile.driver)
   );
 }
@@ -451,7 +490,7 @@ export function normalizeDatabaseDriverName(value: string): DatabaseDriver | nul
   const normalized = value.trim().toLowerCase();
   if (!normalized) return null;
 
-  for (const profile of Object.values(DATABASE_DRIVER_PROFILES)) {
+  for (const profile of supportedDatabaseDriverProfiles()) {
     if (
       profile.driver === normalized ||
       profile.protocolAliases.some((alias) => alias.toLowerCase() === normalized)
