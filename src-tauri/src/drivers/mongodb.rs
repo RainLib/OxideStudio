@@ -275,23 +275,36 @@ impl DatabaseDriver for MongoDbDriver {
         } else {
             namespace
         };
-        let names = self
-            .client()
-            .await?
-            .database(database_name)
+        let database = self.client().await?.database(database_name);
+        let names = database
             .list_collection_names()
             .await
             .with_context(|| format!("Failed to list MongoDB collections for {database_name}"))?;
 
-        Ok(names
-            .into_iter()
-            .map(|name| CollectionInfo {
-                name,
-                namespace: Some(database_name.to_string()),
-                collection_type: Some("collection".to_string()),
-                document_count: None,
-            })
-            .collect())
+        let mut collections = Vec::with_capacity(names.len());
+        for name in names {
+            let document_count = database
+                .collection::<Document>(&name)
+                .estimated_document_count()
+                .await
+                .ok();
+            collections.push(mongodb_collection_info(database_name, name, document_count));
+        }
+
+        Ok(collections)
+    }
+}
+
+fn mongodb_collection_info(
+    database_name: &str,
+    name: String,
+    document_count: Option<u64>,
+) -> CollectionInfo {
+    CollectionInfo {
+        name,
+        namespace: Some(database_name.to_string()),
+        collection_type: Some("collection".to_string()),
+        document_count,
     }
 }
 
@@ -649,5 +662,15 @@ mod tests {
         assert_eq!(result.columns[2].name, "active");
         assert_eq!(result.rows.len(), 2);
         assert_eq!(result.rows[1][2], Value::Null);
+    }
+
+    #[test]
+    fn builds_collection_info_with_estimated_count() {
+        let collection = mongodb_collection_info("app", "users".to_string(), Some(42));
+
+        assert_eq!(collection.name, "users");
+        assert_eq!(collection.namespace.as_deref(), Some("app"));
+        assert_eq!(collection.collection_type.as_deref(), Some("collection"));
+        assert_eq!(collection.document_count, Some(42));
     }
 }
