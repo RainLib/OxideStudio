@@ -693,6 +693,12 @@ async function describeObject(
   ) {
     const collections = await schemaService.getCollections(connectionId, namespace);
     const collection = collections.find((candidate) => candidate.name === input.name);
+    const columns =
+      capabilities.dataModel === "document"
+        ? await schemaService
+            .getColumns(connectionId, namespace, input.name)
+            .catch(() => [])
+        : [];
     return {
       connectionId,
       namespace,
@@ -700,6 +706,7 @@ async function describeObject(
       driver,
       kind: collectionKind(capabilities.dataModel),
       collection: collection ?? null,
+      columns,
     };
   }
 
