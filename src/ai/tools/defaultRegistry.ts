@@ -6,6 +6,8 @@ import { useTabStore } from "@/store/useTabStore";
 import { registerCoreAiTools } from "./coreTools";
 import { createAiToolRegistry } from "./registry";
 import type {
+  AiDescribeObjectInput,
+  AiObjectDescription,
   AiToolAdapters,
   AiToolExecutionContext,
   AiWorkspaceTabSummary,
@@ -68,6 +70,8 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
       return schemaService.getCollections(connectionId, namespace);
     },
 
+    describeObject: async (input, context) => describeObject(input, context),
+
     runReadOnlyQuery: async (input, context) => {
       const connectionId = input.connectionId || context.activeConnectionId;
       if (!connectionId) {
@@ -78,6 +82,82 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
       return limitQueryResults(results, input.limit ?? 200);
     },
   };
+}
+
+async function describeObject(
+  input: AiDescribeObjectInput,
+  context: AiToolExecutionContext
+): Promise<AiObjectDescription> {
+  const connectionId = input.connectionId || context.activeConnectionId;
+  if (!connectionId) {
+    throw new Error("No active connection is available for metadata.describeObject");
+  }
+
+  const connection = useConnectionStore
+    .getState()
+    .connections.find((candidate) => candidate.id === connectionId);
+  const driver = connection?.driver ?? context.activeDriver ?? null;
+  if (!driver) {
+    throw new Error(`Connection driver is not available for ${connectionId}`);
+  }
+
+  const namespace = input.namespace || useSchemaStore.getState().currentSchema || "";
+  const capabilities = await databaseService.getDatabaseCapabilities(driver);
+  if (capabilities.supportsTableBrowsing) {
+    const [columns, indexes, constraints] = await Promise.all([
+      schemaService.getColumns(connectionId, namespace, input.name),
+      capabilities.supportsTableIndexes
+        ? schemaService.getIndexes(connectionId, namespace, input.name)
+        : Promise.resolve([]),
+      capabilities.supportsTableConstraints
+        ? schemaService.getConstraints(connectionId, namespace, input.name)
+        : Promise.resolve([]),
+    ]);
+
+    return {
+      connectionId,
+      namespace,
+      name: input.name,
+      driver,
+      kind: "relation",
+      columns,
+      indexes,
+      constraints,
+    };
+  }
+
+  if (
+    capabilities.supportsCollectionBrowsing ||
+    capabilities.supportsKeyValueBrowsing
+  ) {
+    const collections = await schemaService.getCollections(connectionId, namespace);
+    const collection = collections.find((candidate) => candidate.name === input.name);
+    return {
+      connectionId,
+      namespace,
+      name: input.name,
+      driver,
+      kind: collectionKind(capabilities.dataModel),
+      collection: collection ?? null,
+    };
+  }
+
+  return {
+    connectionId,
+    namespace,
+    name: input.name,
+    driver,
+    kind: "object",
+  };
+}
+
+function collectionKind(
+  dataModel: "relational" | "document" | "keyValue" | "search"
+): AiObjectDescription["kind"] {
+  if (dataModel === "keyValue") return "key";
+  if (dataModel === "search") return "index";
+  if (dataModel === "document") return "collection";
+  return "object";
 }
 
 function limitQueryResults(results: QueryResult[], limit: number) {

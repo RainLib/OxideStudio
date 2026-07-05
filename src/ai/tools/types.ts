@@ -2,6 +2,9 @@ import type {
   DatabaseCapabilities,
   DatabaseDriver,
   CollectionInfo,
+  ColumnInfo,
+  ConstraintInfo,
+  IndexInfo,
   QueryResult,
 } from "@/services/tauri/types";
 
@@ -103,6 +106,24 @@ export type AiReadOnlyQueryInput = {
   limit?: number;
 };
 
+export type AiDescribeObjectInput = {
+  connectionId?: string | null;
+  namespace?: string | null;
+  name: string;
+};
+
+export type AiObjectDescription = {
+  connectionId: string;
+  namespace: string;
+  name: string;
+  driver?: DatabaseDriver | null;
+  kind: "relation" | "collection" | "key" | "index" | "object";
+  collection?: CollectionInfo | null;
+  columns?: ColumnInfo[];
+  indexes?: IndexInfo[];
+  constraints?: ConstraintInfo[];
+};
+
 export type AiToolAdapters = {
   listConnections: () => Promise<AiConnectionSummary[]> | AiConnectionSummary[];
   getConnectionCapabilities: (
@@ -113,6 +134,10 @@ export type AiToolAdapters = {
     input: { connectionId?: string | null; namespace?: string | null },
     context: AiToolExecutionContext
   ) => Promise<CollectionInfo[]> | CollectionInfo[];
+  describeObject?: (
+    input: AiDescribeObjectInput,
+    context: AiToolExecutionContext
+  ) => Promise<AiObjectDescription> | AiObjectDescription;
   runReadOnlyQuery?: (
     input: AiReadOnlyQueryInput,
     context: AiToolExecutionContext
