@@ -1,5 +1,6 @@
 import type { AiToolAdapters, AiToolDefinition } from "./types";
 import type { AiToolRegistry } from "./registry";
+import type { DatabaseDriver } from "@/services/tauri/types";
 
 const DEFAULT_QUERY_LIMIT = 200;
 
@@ -154,16 +155,19 @@ function readOnlyQueryTool(adapters: AiToolAdapters): AiToolDefinition {
       if (typeof query !== "string" || !query.trim()) {
         throw new Error("query is required");
       }
-      if (!looksReadOnly(query)) {
+      const connectionId =
+        typeof payload.connectionId === "string"
+          ? payload.connectionId
+          : context.activeConnectionId ?? null;
+      const driver = await resolveQueryDriver(adapters, connectionId, context.activeDriver);
+
+      if (!looksReadOnly(query, driver)) {
         throw new Error("query.runReadOnly rejected a potentially mutating request");
       }
 
       return adapters.runReadOnlyQuery?.(
         {
-          connectionId:
-            typeof payload.connectionId === "string"
-              ? payload.connectionId
-              : context.activeConnectionId ?? null,
+          connectionId,
           query,
           limit:
             typeof payload.limit === "number"
@@ -183,40 +187,246 @@ function assertObject(input: unknown): Record<string, unknown> {
   return input as Record<string, unknown>;
 }
 
-function looksReadOnly(query: string) {
+async function resolveQueryDriver(
+  adapters: AiToolAdapters,
+  connectionId: string | null,
+  activeDriver?: DatabaseDriver | null
+) {
+  if (!connectionId) return activeDriver ?? null;
+
+  const connections = await adapters.listConnections();
+  return (
+    connections.find((connection) => connection.id === connectionId)?.driver ??
+    activeDriver ??
+    null
+  );
+}
+
+function looksReadOnly(query: string, driver?: DatabaseDriver | null) {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return false;
 
-  const mutatingJsonMarkers = [
-    '"collmod"',
-    '"create"',
-    '"createindexes"',
-    '"deleteone"',
-    '"deletemany"',
-    '"drop"',
-    '"dropdatabase"',
-    '"findandmodify"',
-    '"insertone"',
-    '"insertmany"',
-    '"renamecollection"',
-    '"updateone"',
-    '"updatemany"',
-  ];
+  const normalizedDriver = String(driver || "").trim().toLowerCase();
   if (normalized.startsWith("{") || normalized.startsWith("[")) {
-    return !mutatingJsonMarkers.some((marker) => normalized.includes(marker));
+    if (normalizedDriver === "mongodb" || normalizedDriver === "mongo") {
+      return looksReadOnlyMongoCommand(query);
+    }
+    return looksReadOnlyJsonSearchBody(query);
   }
 
-  const mutatingPrefixes = [
+  if (normalizedDriver === "redis") {
+    return looksReadOnlyRedisCommands(query);
+  }
+
+  if (normalizedDriver === "elasticsearch" || normalizedDriver === "elastic") {
+    return looksReadOnlyElasticsearchRequest(query);
+  }
+
+  const mutatingSqlPrefixes = [
     "alter",
+    "call",
+    "comment",
+    "copy",
     "create",
     "delete",
     "drop",
+    "grant",
     "insert",
+    "load",
     "merge",
     "replace",
+    "revoke",
+    "set",
     "truncate",
     "update",
+    "vacuum",
   ];
 
-  return !mutatingPrefixes.some((prefix) => normalized.startsWith(prefix));
+  return !mutatingSqlPrefixes.some((prefix) => normalized.startsWith(prefix));
 }
+
+function looksReadOnlyJsonSearchBody(query: string) {
+  const normalized = query.toLowerCase();
+  const mutatingMarkers = [
+    '"delete"',
+    '"delete_by_query"',
+    '"doc"',
+    '"index"',
+    '"scripted_upsert"',
+    '"update"',
+    '"upsert"',
+  ];
+  return !mutatingMarkers.some((marker) => normalized.includes(marker));
+}
+
+function looksReadOnlyMongoCommand(query: string) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(query);
+  } catch {
+    return false;
+  }
+
+  const commands = Array.isArray(parsed) ? parsed : [parsed];
+  return commands.every((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return false;
+    }
+
+    const payload = item as Record<string, unknown>;
+    const keys = Object.keys(payload).map((key) => key.toLowerCase());
+    const operations = keys.filter((key) =>
+      [
+        "aggregate",
+        "command",
+        "countdocuments",
+        "deletemany",
+        "deleteone",
+        "find",
+        "insertmany",
+        "insertone",
+        "updatemany",
+        "updateone",
+      ].includes(key)
+    );
+
+    if (operations.length === 0) {
+      return typeof payload.collection === "string";
+    }
+    if (operations.length > 1) return false;
+
+    const operation = operations[0];
+    if (!operation) return false;
+    if (["find", "aggregate", "countdocuments"].includes(operation)) {
+      return true;
+    }
+    if (operation !== "command") return false;
+
+    const commandBody = payload.command;
+    if (!commandBody || typeof commandBody !== "object" || Array.isArray(commandBody)) {
+      return false;
+    }
+    const [commandName] = Object.keys(commandBody);
+    return Boolean(commandName && READ_ONLY_MONGO_COMMANDS.has(commandName.toLowerCase()));
+  });
+}
+
+const READ_ONLY_MONGO_COMMANDS = new Set([
+  "aggregate",
+  "buildinfo",
+  "collstats",
+  "count",
+  "dbstats",
+  "distinct",
+  "explain",
+  "find",
+  "hello",
+  "ismaster",
+  "listcollections",
+  "listdatabases",
+  "listindexes",
+  "ping",
+  "serverstatus",
+]);
+
+function looksReadOnlyElasticsearchRequest(query: string) {
+  const requestLines = query
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+
+  if (requestLines.length === 0) return false;
+
+  const parsedRequests = requestLines
+    .map((line) => line.match(/^(GET|HEAD|POST|PUT|PATCH|DELETE)\s+(\S+)/i))
+    .filter((match): match is RegExpMatchArray => Boolean(match));
+  if (parsedRequests.length === 0) return false;
+
+  return parsedRequests.every((match) => {
+    const method = match[1]!.toUpperCase();
+    const path = match[2]!.toLowerCase();
+    if (method === "GET" || method === "HEAD") return true;
+    if (method !== "POST") return false;
+    return READ_ONLY_ELASTICSEARCH_POST_PATHS.some((pattern) => pattern.test(path));
+  });
+}
+
+const READ_ONLY_ELASTICSEARCH_POST_PATHS = [
+  /^\/_search(?:[/?#]|$)/,
+  /^\/_msearch(?:[/?#]|$)/,
+  /^\/_count(?:[/?#]|$)/,
+  /^\/_sql(?:[/?#]|$)/,
+  /^\/_eql\/search(?:[/?#]|$)/,
+  /^\/_async_search(?:[/?#]|$)/,
+  /^\/[^/]+\/_search(?:[/?#]|$)/,
+  /^\/[^/]+\/_msearch(?:[/?#]|$)/,
+  /^\/[^/]+\/_count(?:[/?#]|$)/,
+];
+
+function looksReadOnlyRedisCommands(query: string) {
+  const commands = query
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/;$/, ""))
+    .filter((line) => line && !line.startsWith("#"));
+
+  if (commands.length === 0) return false;
+
+  return commands.every((line) => {
+    const command = line.split(/\s+/)[0]?.toUpperCase();
+    return Boolean(command && READ_ONLY_REDIS_COMMANDS.has(command));
+  });
+}
+
+const READ_ONLY_REDIS_COMMANDS = new Set([
+  "DBSIZE",
+  "EXISTS",
+  "FT.INFO",
+  "FT.SEARCH",
+  "GET",
+  "GETRANGE",
+  "HGET",
+  "HGETALL",
+  "HEXISTS",
+  "HKEYS",
+  "HLEN",
+  "HMGET",
+  "HSCAN",
+  "HSTRLEN",
+  "HVALS",
+  "JSON.GET",
+  "JSON.MGET",
+  "KEYS",
+  "LINDEX",
+  "LLEN",
+  "LRANGE",
+  "MGET",
+  "PING",
+  "PTTL",
+  "SCAN",
+  "SCARD",
+  "SISMEMBER",
+  "SMEMBERS",
+  "SRANDMEMBER",
+  "SSCAN",
+  "STRLEN",
+  "TTL",
+  "TYPE",
+  "XINFO",
+  "XLEN",
+  "XRANGE",
+  "XREAD",
+  "XREVRANGE",
+  "ZCARD",
+  "ZCOUNT",
+  "ZLEXCOUNT",
+  "ZRANGE",
+  "ZRANGEBYLEX",
+  "ZRANGEBYSCORE",
+  "ZRANK",
+  "ZREVRANGE",
+  "ZREVRANGEBYLEX",
+  "ZREVRANGEBYSCORE",
+  "ZREVRANK",
+  "ZSCAN",
+  "ZSCORE",
+]);
