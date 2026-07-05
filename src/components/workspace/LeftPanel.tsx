@@ -2,17 +2,15 @@ import React from "react";
 import { Button } from "@/components/ui/button";
 import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { cn } from "@/lib/utils";
-import { Database, Clock, Code, Sparkles } from "lucide-react";
+import { Database, Clock, Code } from "lucide-react";
 import { SchemaSidebar } from "./SchemaSidebar";
 import { HistorySidebar } from "./HistorySidebar";
 import { SavedQueriesSidebar } from "./SavedQueriesSidebar";
-import { AssistantSidebar } from "./AssistantSidebar";
 import { SidebarStatusBar } from "./SidebarStatusBar";
 import { StatusBarLeftPortal } from "./StatusBarPortal";
 
 export type SidebarTab =
   | "tables"
-  | "assistant"
   | "history"
   | "saved"
   | "settings";
@@ -59,12 +57,6 @@ export function LeftPanel({
               title="Entities (Tables)"
             />
             <ActivityBarButton
-              active={activeTab === "assistant" && isDrawerOpen}
-              onClick={() => onTabClick("assistant")}
-              icon={Sparkles}
-              title="Assistant"
-            />
-            <ActivityBarButton
               active={activeTab === "history" && isDrawerOpen}
               onClick={() => onTabClick("history")}
               icon={Clock}
@@ -88,7 +80,6 @@ export function LeftPanel({
             {/* Sidebar Content Area */}
             <div className="flex-1 h-full min-w-0 flex flex-col">
               {activeTab === "tables" && <SchemaSidebar />}
-              {activeTab === "assistant" && <AssistantSidebar />}
               {activeTab === "history" && <HistorySidebar />}
               {activeTab === "saved" && <SavedQueriesSidebar />}
               {!activeTab && (

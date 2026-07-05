@@ -188,6 +188,8 @@ async fn bundled_sql_lsp_serves_nosql_schema_completions() -> Result<()> {
     let redis_uri = "file:///oxide/redis.redis";
     let mongodb_uri = "file:///oxide/mongodb.mongodb";
     let elasticsearch_uri = "file:///oxide/elasticsearch.es.dsl";
+    let postgres_uri = "file:///oxide/postgres.sql";
+    let postgres_where_uri = "file:///oxide/postgres-where.sql";
 
     let mut file_schemas = Map::new();
     file_schemas.insert(
@@ -202,11 +204,21 @@ async fn bundled_sql_lsp_serves_nosql_schema_completions() -> Result<()> {
         elasticsearch_uri.to_string(),
         json!("33333333-3333-4333-8333-333333333333"),
     );
+    file_schemas.insert(
+        postgres_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        postgres_where_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
 
     let mut file_dialects = Map::new();
     file_dialects.insert(redis_uri.to_string(), json!("redis"));
     file_dialects.insert(mongodb_uri.to_string(), json!("mongodb"));
     file_dialects.insert(elasticsearch_uri.to_string(), json!("elasticsearch-dsl"));
+    file_dialects.insert(postgres_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_where_uri.to_string(), json!("postgres"));
 
     lsp.notify(
         "workspace/didChangeConfiguration",
@@ -243,6 +255,16 @@ async fn bundled_sql_lsp_serves_nosql_schema_completions() -> Result<()> {
                             column("_id", "keyword"),
                             column("email", "keyword")
                         ]
+                    ),
+                    schema(
+                        "44444444-4444-4444-8444-444444444444",
+                        "public",
+                        "webhook",
+                        "table",
+                        vec![
+                            column("owner", "varchar"),
+                            column("name", "varchar")
+                        ]
                     )
                 ],
                 "fileSchemas": file_schemas,
@@ -255,10 +277,34 @@ async fn bundled_sql_lsp_serves_nosql_schema_completions() -> Result<()> {
     open_document(&mut lsp, redis_uri, "redis", "").await?;
     open_document(&mut lsp, mongodb_uri, "mongodb", "").await?;
     open_document(&mut lsp, elasticsearch_uri, "elasticsearch-dsl", "").await?;
+    open_document(&mut lsp, postgres_uri, "postgres", "SELECT * FROM").await?;
+    open_document(
+        &mut lsp,
+        postgres_where_uri,
+        "postgres",
+        "SELECT * FROM webhook WHERE",
+    )
+    .await?;
 
     assert_completion_contains(&mut lsp, redis_uri, &["GET", "user:1"]).await?;
     assert_completion_contains(&mut lsp, mongodb_uri, &["find", "users", "email"]).await?;
     assert_completion_contains(&mut lsp, elasticsearch_uri, &["match", "users", "email"]).await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_uri,
+        0,
+        "SELECT * FROM".len() as u32,
+        &["public.webhook"],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_where_uri,
+        0,
+        "SELECT * FROM webhook WHERE".len() as u32,
+        &["owner", "name"],
+    )
+    .await?;
 
     lsp.shutdown().await
 }
@@ -288,6 +334,16 @@ async fn assert_completion_contains(
     uri: &str,
     expected_labels: &[&str],
 ) -> Result<()> {
+    assert_completion_at_contains(lsp, uri, 0, 0, expected_labels).await
+}
+
+async fn assert_completion_at_contains(
+    lsp: &mut LspProcess,
+    uri: &str,
+    line: u32,
+    character: u32,
+    expected_labels: &[&str],
+) -> Result<()> {
     let result = lsp
         .request(
             "textDocument/completion",
@@ -296,8 +352,8 @@ async fn assert_completion_contains(
                     "uri": uri
                 },
                 "position": {
-                    "line": 0,
-                    "character": 0
+                    "line": line,
+                    "character": character
                 },
                 "context": {
                     "triggerKind": 1
