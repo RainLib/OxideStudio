@@ -35,6 +35,7 @@ Decision summary:
 - `src/providers` exposes `registerDatabaseProvider` to bundle driver profiles, object preview behavior, and AI tool families behind one provider registration call.
 - `provider.list` exposes registered providers, full driver capability summaries, and recommended AI tool hints so planners, MCP clients, and CLI scripts can discover backend support before choosing tools.
 - `src/ai/tools/manifest.ts` exports a portable tool manifest with schemas, permissions, capabilities, and approval status for MCP, CLI, and planner hosts.
+- `src/ai/tools/nativeMutationBuilders.ts` builds the exact MongoDB, Redis, and Elasticsearch native mutation requests used by workspace AI tools, keeping MCP, CLI, and planner execution paths aligned.
 - `metadata.describeObject` returns relational structure metadata, sampled MongoDB collection fields and indexes, Elasticsearch mapping fields, and provider-neutral preview/delete request templates so planners can reason about objects without hard-coding driver syntax.
 - `src/lib/querySafety.ts` centralizes read/write/destructive classification for SQL, MongoDB, Redis, and Elasticsearch so planners and executors make the same safety decision. MongoDB JSON is intentionally strict: implicit find templates only allow known read fields, and destructive command names cannot pass through read-only gates.
 - `src/ai/assistant` exposes an `AssistantPlanner` contract, a deterministic fallback planner, a provider-neutral model planner, and approval-aware execution for AI-proposed tool calls.
@@ -164,3 +165,4 @@ Recommended usage:
 6. Add provider/plugin hooks so new databases register tool families by capability, not by UI rewrites. Runtime provider registration is done with `registerDatabaseProvider`; dynamic package discovery/loading is still pending.
 7. Add live integration coverage for MongoDB, Redis, Elasticsearch, MySQL, and PostgreSQL tool paths. Driver-level connection, metadata, query, and mutation coverage is available through `scripts/test-live-databases.sh`; AI tool-specific live assertions are still pending.
 8. Add safety regression tests for SQL, MongoDB, Redis, and Elasticsearch request classification, and reject unknown MongoDB driver command fields before execution. Done.
+9. Extract and test native AI mutation request builders for MongoDB, Redis, and Elasticsearch. Done.
