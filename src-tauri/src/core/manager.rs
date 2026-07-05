@@ -271,6 +271,7 @@ mod tests {
     use anyhow::anyhow;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
     use tokio::sync::Notify;
     use tokio::time::{timeout, Duration};
 
@@ -373,13 +374,27 @@ mod tests {
     #[derive(Clone)]
     struct LifecycleDriver {
         disconnect_calls: Arc<AtomicUsize>,
+        invalidated_schemas: Arc<StdMutex<Vec<String>>>,
         fail_disconnect: bool,
     }
 
     impl LifecycleDriver {
         fn new(disconnect_calls: Arc<AtomicUsize>, fail_disconnect: bool) -> Self {
+            Self::with_invalidations(
+                disconnect_calls,
+                fail_disconnect,
+                Arc::new(StdMutex::new(Vec::new())),
+            )
+        }
+
+        fn with_invalidations(
+            disconnect_calls: Arc<AtomicUsize>,
+            fail_disconnect: bool,
+            invalidated_schemas: Arc<StdMutex<Vec<String>>>,
+        ) -> Self {
             Self {
                 disconnect_calls,
+                invalidated_schemas,
                 fail_disconnect,
             }
         }
@@ -461,6 +476,14 @@ mod tests {
         }
 
         async fn set_current_schema(&self, _schema: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn invalidate_schema(&self, schema: &str) -> Result<()> {
+            self.invalidated_schemas
+                .lock()
+                .expect("invalidated schema list mutex poisoned")
+                .push(schema.to_string());
             Ok(())
         }
     }
@@ -572,5 +595,54 @@ mod tests {
         assert_eq!(disconnect_calls.load(Ordering::SeqCst), 1);
         assert!(!manager.active_schemas.lock().await.contains_key("conn"));
         assert!(manager.ping("conn").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn invalidate_schema_clears_only_matching_active_context() {
+        let manager = ConnectionManager::new();
+        let disconnect_calls = Arc::new(AtomicUsize::new(0));
+        let invalidated_schemas = Arc::new(StdMutex::new(Vec::new()));
+
+        manager
+            .add_connection(
+                "conn".to_string(),
+                Box::new(LifecycleDriver::with_invalidations(
+                    disconnect_calls,
+                    false,
+                    invalidated_schemas.clone(),
+                )),
+            )
+            .await;
+        manager
+            .set_current_schema("conn", "public")
+            .await
+            .expect("schema context should be stored");
+
+        manager
+            .invalidate_schema("conn", "archive")
+            .await
+            .expect("non-active schema invalidation should succeed");
+        assert_eq!(
+            manager
+                .active_schemas
+                .lock()
+                .await
+                .get("conn")
+                .map(String::as_str),
+            Some("public")
+        );
+
+        manager
+            .invalidate_schema("conn", "public")
+            .await
+            .expect("active schema invalidation should succeed");
+        assert!(!manager.active_schemas.lock().await.contains_key("conn"));
+        assert_eq!(
+            invalidated_schemas
+                .lock()
+                .expect("invalidated schema list mutex poisoned")
+                .as_slice(),
+            ["archive", "public"]
+        );
     }
 }
