@@ -39,7 +39,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-5-g8bf2d40`.
+Current tracked revision is `v0.1.3-17-g790e397`.
 
 ### 2. Prepare the Binary
 
@@ -48,6 +48,8 @@ Current tracked revision is `v0.1.3-5-g8bf2d40`.
 ```bash
 bash src-tauri/build_prepare.sh
 ```
+
+`make dev` runs `lsp-build` first, then starts Tauri with `OXIDE_SKIP_SQL_LSP_PREPARE=1` so the `beforeDevCommand` does not rewrite the watched bundled binary during startup. After changing `vendor/sql-lsp`, run `make lsp-build` or the script above before starting dev mode.
 
 To use a prebuilt binary instead of building the submodule:
 

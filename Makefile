@@ -29,8 +29,8 @@ install: ## Install Node dependencies.
 submodules: ## Initialize and update git submodules.
 	git submodule update --init --recursive
 
-dev: ## Start the Tauri desktop app in development mode.
-	$(NPM) run tauri -- dev
+dev: lsp-build ## Start the Tauri desktop app in development mode.
+	OXIDE_SKIP_SQL_LSP_PREPARE=1 $(NPM) run tauri -- dev
 
 start: dev ## Alias for make dev.
 

@@ -32,6 +32,11 @@ echo "Target: ${TARGET_BINARY}"
 
 mkdir -p "${BINARIES_DIR}"
 
+if [[ "${OXIDE_SKIP_SQL_LSP_PREPARE:-}" == "1" && -f "${TARGET_BINARY}" ]]; then
+    echo "SQL LSP preparation skipped; existing target is present"
+    exit 0
+fi
+
 if [[ -n "${OXIDE_SQL_LSP_BINARY:-}" ]]; then
     if [[ ! -f "${OXIDE_SQL_LSP_BINARY}" ]]; then
         echo "OXIDE_SQL_LSP_BINARY does not exist: ${OXIDE_SQL_LSP_BINARY}" >&2
