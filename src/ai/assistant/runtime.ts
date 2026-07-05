@@ -1,6 +1,7 @@
 import {
   AiToolRegistry,
   DEFAULT_AI_TOOL_POLICY,
+  approveAiToolForPolicy,
   evaluateAiToolPolicy,
   createWorkspaceAiToolContext,
   createWorkspaceAiToolRegistry,
@@ -83,7 +84,7 @@ export class AssistantRuntime {
 
     for (const call of calls) {
       const policy = call.approved
-        ? approveToolForPolicy(this.policy, call.toolName)
+        ? approveAiToolForPolicy(this.policy, call.toolName)
         : this.policy;
       const decision = this.registry.evaluate(call.toolName, policy);
 
@@ -286,14 +287,4 @@ function looksDestructiveSelection(query: string, activeDriver?: string | null) 
   }
 
   return /^(delete|drop|truncate)\b/.test(normalized);
-}
-
-function approveToolForPolicy(
-  policy: AiToolExecutionPolicy,
-  toolName: string
-): AiToolExecutionPolicy {
-  return {
-    ...policy,
-    approvedTools: Array.from(new Set([...(policy.approvedTools ?? []), toolName])),
-  };
 }

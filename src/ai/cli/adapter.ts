@@ -1,6 +1,7 @@
 import {
   AiToolRegistry,
   DEFAULT_AI_TOOL_POLICY,
+  approveAiToolForPolicy,
   createWorkspaceAiToolContext,
   createWorkspaceAiToolRegistry,
 } from "@/ai/tools";
@@ -17,7 +18,7 @@ export type CliToolAdapterOptions = {
 type ParsedCommand =
   | { kind: "help" }
   | { kind: "list" }
-  | { kind: "call"; toolName: string; input: unknown };
+  | { kind: "call"; toolName: string; input: unknown; approved: boolean };
 
 export class CliToolAdapter {
   private readonly registry: AiToolRegistry;
@@ -41,11 +42,14 @@ export class CliToolAdapter {
         case "list":
           return okJson(this.registry.list());
         case "call": {
+          const policy = command.approved
+            ? approveAiToolForPolicy(this.policy, command.toolName)
+            : this.policy;
           const result = await this.registry.executeWithPolicy(
             command.toolName,
             command.input,
             this.createContext(),
-            this.policy
+            policy
           );
           return okJson(result);
         }
@@ -86,8 +90,13 @@ export class CliToolAdapter {
     }
 
     let input: unknown = {};
+    let approved = false;
     for (let index = 0; index < rest.length; index += 1) {
       const arg = rest[index];
+      if (arg === "--approve") {
+        approved = true;
+        continue;
+      }
       if (arg === "--json") {
         const value = rest[index + 1];
         if (value === undefined) {
@@ -112,7 +121,7 @@ export class CliToolAdapter {
       throw new Error(`Unknown call argument: ${arg}`);
     }
 
-    return { kind: "call", toolName, input };
+    return { kind: "call", toolName, input, approved };
   }
 }
 
@@ -152,6 +161,7 @@ function helpText() {
     "  tools list",
     "  tools call <toolName> [--json '{...}']",
     "  tools call <toolName> [--json-file payload.json]",
+    "  tools call <toolName> --approve [--json '{...}']",
     "",
   ].join("\n");
 }

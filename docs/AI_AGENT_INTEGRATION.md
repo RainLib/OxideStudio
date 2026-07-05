@@ -81,15 +81,17 @@ CLI is useful for local automation, tests, and scripting. It can share the same 
 ```bash
 oxide tools list
 oxide tools call query.runReadOnly --json payload.json
+oxide tools call key.setValue --approve --json '{"key":"demo","value":"ok"}'
 ```
 
-For the editor itself, prefer direct TypeScript orchestration over MCP. The editor already owns state, selection, tabs, connection ids, and approval UI; routing those through an external protocol would add latency and lose context.
+For the editor itself, prefer direct TypeScript orchestration over MCP. The editor already owns state, selection, tabs, connection ids, and approval UI; routing those through an external protocol would add latency and lose context. External MCP hosts should use tool annotations plus an explicit approval handoff before calling mutating tools.
 
 ## Safety Requirements
 
 - Never expose raw credentials or connection URLs to model context.
 - Default all result sets to bounded row, byte, and time limits.
 - Require approval for mutations, exports, drops, and external network access.
+- Do not auto-approve writes in MCP or CLI adapters; external callers must pass an explicit approval signal such as CLI `--approve`.
 - Store an audit entry for request id, tool name, permissions, status, duration, and failure reason without persisting raw query text by default.
 - Prefer capability checks over driver name checks so new backends do not require broad rewrites.
 

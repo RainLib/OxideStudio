@@ -59,6 +59,16 @@ export function evaluateAiToolPolicy(
   };
 }
 
+export function approveAiToolForPolicy(
+  policy: AiToolExecutionPolicy,
+  toolName: string
+): AiToolExecutionPolicy {
+  return {
+    ...policy,
+    approvedTools: Array.from(new Set([...(policy.approvedTools ?? []), toolName])),
+  };
+}
+
 function deny(
   tool: AiToolDefinition | AiToolSummary,
   requiresApproval: boolean,
@@ -72,4 +82,3 @@ function deny(
     permissions: [...tool.permissions] as AiToolPermission[],
   };
 }
-
