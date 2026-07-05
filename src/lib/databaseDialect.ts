@@ -733,7 +733,8 @@ export function configuredLspLanguageId(driver: DatabaseDriver) {
 }
 
 export function supportsLspLanguageId(driver: DatabaseDriver) {
-  return SUPPORTED_LSP_DIALECTS.has(configuredLspLanguageId(driver));
+  const dialect = configuredLspLanguageId(driver);
+  return dialect === "sql" || SUPPORTED_LSP_DIALECTS.has(dialect);
 }
 
 export function queryEditorLanguageId(driver: DatabaseDriver) {
