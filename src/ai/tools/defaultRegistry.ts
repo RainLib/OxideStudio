@@ -4,11 +4,16 @@ import {
   schemaService,
   tableService,
 } from "@/services/tauri";
-import { getSqlDocumentUri, lspClient } from "@/services/lsp";
+import {
+  extractSqlDocumentTabId,
+  getSqlDocumentUri,
+  lspClient,
+} from "@/services/lsp";
+import type { Diagnostic } from "@/services/lsp/types";
 import type { QueryResult } from "@/services/tauri/types";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
-import { useTabStore } from "@/store/useTabStore";
+import { useTabStore, type EditorSelectionState } from "@/store/useTabStore";
 import { lspLanguageId, supportsLspLanguageId } from "@/lib/databaseDialect";
 import { registerCoreAiTools } from "./coreTools";
 import { createAiToolRegistry } from "./registry";
@@ -18,6 +23,8 @@ import type {
   AiKeyValueMutationInput,
   AiListObjectsInput,
   AiLspCompletionInput,
+  AiLspDiagnosticsExplanation,
+  AiLspDiagnosticsInput,
   AiNamespaceMutationInput,
   AiObjectDescription,
   AiObjectKind,
@@ -26,6 +33,7 @@ import type {
   AiTableMutationInput,
   AiToolAdapters,
   AiToolExecutionContext,
+  AiExplainedDiagnostic,
   AiWorkspaceSelection,
   AiWorkspaceTabSummary,
 } from "./types";
@@ -128,6 +136,9 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
 
     getLspCompletions: async (input, context) =>
       getLspCompletions(input, context),
+
+    explainLspDiagnostics: async (input, context) =>
+      explainLspDiagnostics(input, context),
 
     mutateNamespace: async (input, context) => mutateNamespace(input, context),
   };
@@ -273,6 +284,160 @@ async function getLspCompletions(
 
   await lspClient.didOpen(uri, text, Date.now(), languageId);
   return lspClient.getCompletions(uri, input.line, input.character);
+}
+
+async function explainLspDiagnostics(
+  input: AiLspDiagnosticsInput,
+  _context: AiToolExecutionContext
+): Promise<AiLspDiagnosticsExplanation> {
+  const tabState = useTabStore.getState();
+  const tabId =
+    input.tabId ||
+    (input.uri ? extractSqlDocumentTabId(input.uri) : null) ||
+    tabState.activeTabId;
+  const tab = tabState.tabs.find((candidate) => candidate.id === tabId);
+  if (!tab) {
+    throw new Error("No active tab is available for lsp.explainDiagnostics");
+  }
+
+  const selection = input.onlySelection ? tab.editorSelection ?? null : null;
+  const diagnostics = (tab.lspDiagnostics ?? [])
+    .filter((diagnostic) =>
+      input.severity
+        ? diagnosticSeverityLabel(diagnostic.severity) === input.severity
+        : true
+    )
+    .filter((diagnostic) =>
+      selection ? diagnosticOverlapsSelection(diagnostic, selection) : true
+    );
+  const lines = tab.sql.split(/\r?\n/);
+  const explained = diagnostics.map((diagnostic) =>
+    explainDiagnostic(diagnostic, lines)
+  );
+
+  return {
+    tabId: tab.id,
+    tabTitle: tab.title,
+    uri: input.uri ?? null,
+    onlySelection: Boolean(selection),
+    summary: diagnosticsSummary(
+      explained,
+      Boolean(selection),
+      input.severity ?? null
+    ),
+    diagnostics: explained,
+  };
+}
+
+function explainDiagnostic(
+  diagnostic: Diagnostic,
+  lines: string[]
+): AiExplainedDiagnostic {
+  const severityLabel = diagnosticSeverityLabel(diagnostic.severity);
+  const lineNumber = diagnostic.range.start.line + 1;
+  const startColumn = diagnostic.range.start.character + 1;
+  const endLineNumber = diagnostic.range.end.line + 1;
+  const endColumn = diagnostic.range.end.character + 1;
+  const lineText = lines[lineNumber - 1] ?? null;
+
+  return {
+    ...diagnostic,
+    severityLabel,
+    location:
+      lineNumber === endLineNumber
+        ? `line ${lineNumber}, columns ${startColumn}-${endColumn}`
+        : `lines ${lineNumber}-${endLineNumber}`,
+    lineText,
+    explanation: diagnosticExplanation(diagnostic.message, severityLabel),
+  };
+}
+
+function diagnosticSeverityLabel(
+  severity: number | undefined
+): AiExplainedDiagnostic["severityLabel"] {
+  if (severity === 1) return "error";
+  if (severity === 2) return "warning";
+  if (severity === 3) return "information";
+  if (severity === 4) return "hint";
+  return "unknown";
+}
+
+function diagnosticExplanation(
+  message: string,
+  severity: ReturnType<typeof diagnosticSeverityLabel>
+) {
+  if (severity === "error") {
+    return `The LSP reported a blocking syntax or semantic problem: ${message}`;
+  }
+  if (severity === "warning") {
+    return `The LSP reported a likely issue that may still execute: ${message}`;
+  }
+  if (severity === "information") {
+    return `The LSP reported an informational note: ${message}`;
+  }
+  if (severity === "hint") {
+    return `The LSP suggested an editor hint: ${message}`;
+  }
+  return `The LSP reported: ${message}`;
+}
+
+function diagnosticsSummary(
+  diagnostics: AiExplainedDiagnostic[],
+  onlySelection: boolean,
+  severity: string | null
+) {
+  const scope = onlySelection ? "selection" : "active tab";
+  const filter = severity ? ` ${severity}` : "";
+  if (diagnostics.length === 0) {
+    return `No${filter} LSP diagnostics found for the ${scope}.`;
+  }
+
+  const counts = diagnostics.reduce<Record<string, number>>(
+    (acc, diagnostic) => {
+      acc[diagnostic.severityLabel] = (acc[diagnostic.severityLabel] ?? 0) + 1;
+      return acc;
+    },
+    {}
+  );
+  const countText = Object.entries(counts)
+    .map(([label, count]) => `${count} ${label}`)
+    .join(", ");
+  return `Found ${diagnostics.length} LSP diagnostic(s) for the ${scope}: ${countText}.`;
+}
+
+function diagnosticOverlapsSelection(
+  diagnostic: Diagnostic,
+  selection: EditorSelectionState
+) {
+  const diagnosticStart = {
+    line: diagnostic.range.start.line + 1,
+    column: diagnostic.range.start.character + 1,
+  };
+  const diagnosticEnd = {
+    line: diagnostic.range.end.line + 1,
+    column: diagnostic.range.end.character + 1,
+  };
+  const selectionStart = {
+    line: selection.startLineNumber,
+    column: selection.startColumn,
+  };
+  const selectionEnd = {
+    line: selection.endLineNumber,
+    column: selection.endColumn,
+  };
+
+  return (
+    comparePosition(diagnosticEnd, selectionStart) >= 0 &&
+    comparePosition(diagnosticStart, selectionEnd) <= 0
+  );
+}
+
+function comparePosition(
+  left: { line: number; column: number },
+  right: { line: number; column: number }
+) {
+  if (left.line !== right.line) return left.line - right.line;
+  return left.column - right.column;
 }
 
 async function mutateNamespace(

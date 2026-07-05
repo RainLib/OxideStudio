@@ -50,6 +50,7 @@ Read-only tools:
 - `query.runReadOnly` with row/time limits and driver-aware syntax
 - `workspace.getActiveTab`
 - `workspace.getSelection`
+- `lsp.getCompletions`, `lsp.explainDiagnostics`
 
 Write tools behind explicit approvals:
 
@@ -68,11 +69,10 @@ Write tools behind explicit approvals:
 - `search.indexDocument`
 - `search.updateDocument`
 - `search.deleteDocument`
-- `lsp.getCompletions`
 
 Future tool families:
 
-- `lsp.explainDiagnostics`
+- provider-loaded database-specific tool packs
 
 ## MCP vs CLI
 

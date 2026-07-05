@@ -219,6 +219,16 @@ function buildSuggestedPlan(
     });
   }
 
+  if (intent === "explain" && hasTool("lsp.explainDiagnostics")) {
+    steps.push({
+      id: "lsp-diagnostics",
+      title: "Explain current LSP diagnostics",
+      toolName: "lsp.explainDiagnostics",
+      input: { onlySelection: Boolean(input.selectedText?.trim()) },
+      requiresApproval: requiresApproval("lsp.explainDiagnostics"),
+    });
+  }
+
   if (intent === "query" && hasTool("query.runReadOnly")) {
     const query = input.selectedText?.trim() || "";
     const writeTool = selectedMutationTool(query, activeDriver, hasTool);

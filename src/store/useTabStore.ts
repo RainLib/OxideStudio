@@ -8,6 +8,7 @@ import { useConnectionStore } from "./useConnectionStore";
 import { useSchemaStore } from "./useSchemaStore";
 import type { FilterOperator } from "@/components/workspace/GridFilterRow";
 import { DEFAULT_DATABASE_DRIVER } from "@/lib/databaseDialect";
+import type { Diagnostic } from "@/services/lsp/types";
 import {
   extractSchemaContextChange,
   queryMayChangeMetadata,
@@ -100,6 +101,7 @@ export interface TabData {
   tableFilterSql?: string | null;
   tableFilters?: TableFilter[] | null;
   editorSelection?: EditorSelectionState | null;
+  lspDiagnostics?: Diagnostic[];
 }
 
 interface TabState {
@@ -140,6 +142,7 @@ interface TabState {
     id: string,
     selection: EditorSelectionState | null
   ) => void;
+  setLspDiagnostics: (id: string, diagnostics: Diagnostic[]) => void;
   runTabQuery: (
     id: string,
     connectionId: string,
@@ -437,6 +440,14 @@ export const useTabStore = create<TabState>((set, get) => ({
     set((state) => ({
       tabs: state.tabs.map((t) =>
         t.id === id ? { ...t, editorSelection: selection } : t
+      ),
+    }));
+  },
+
+  setLspDiagnostics: (id: string, diagnostics: Diagnostic[]) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === id ? { ...t, lspDiagnostics: diagnostics } : t
       ),
     }));
   },

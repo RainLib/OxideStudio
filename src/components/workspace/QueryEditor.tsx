@@ -17,7 +17,11 @@ import {
   queryEditorLanguageId,
   supportsLspLanguageId,
 } from "@/lib/databaseDialect";
-import { getSqlDocumentUri, LSP_NOTIFICATION_EVENT } from "@/services/lsp";
+import {
+  extractSqlDocumentTabId,
+  getSqlDocumentUri,
+  LSP_NOTIFICATION_EVENT,
+} from "@/services/lsp";
 import { transactionService } from "@/services/tauri";
 import type { DatabaseDriver } from "@/services/tauri/types";
 import type {
@@ -109,6 +113,7 @@ export function QueryEditor() {
     cancelTabQuery,
     setTargetSchema,
     setEditorSelection,
+    setLspDiagnostics,
   } = useTabStore(); // line 15...
   const { activeConnectionId, connections } = useConnectionStore();
   const { currentSchema, loadSchemas, loadTables, bumpMetadataVersion } =
@@ -439,6 +444,11 @@ export function QueryEditor() {
       if (!isPublishDiagnosticsParams(event.payload.params)) return;
 
       const { uri, diagnostics } = event.payload.params;
+      const tabId = extractSqlDocumentTabId(uri);
+      if (tabId) {
+        setLspDiagnostics(tabId, diagnostics);
+      }
+
       const model = monaco.editor.getModel(monaco.Uri.parse(uri));
       if (!model) return;
 
@@ -459,7 +469,7 @@ export function QueryEditor() {
       disposed = true;
       unlisten?.();
     };
-  }, [monaco, lspReady]);
+  }, [monaco, lspReady, setLspDiagnostics]);
 
   // Initialize targetSchema from currentSchema if not set
   useEffect(() => {

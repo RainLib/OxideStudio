@@ -11,7 +11,7 @@ import type {
   TableRowDelete,
   TableRowUpdate,
 } from "@/services/tauri/types";
-import type { CompletionItem } from "@/services/lsp/types";
+import type { CompletionItem, Diagnostic } from "@/services/lsp/types";
 
 export type AiToolPermission = "read" | "write" | "destructive" | "external";
 
@@ -176,6 +176,29 @@ export type AiLspCompletionInput = {
   languageId?: string | null;
 };
 
+export type AiLspDiagnosticsInput = {
+  tabId?: string | null;
+  uri?: string | null;
+  onlySelection?: boolean;
+  severity?: "error" | "warning" | "information" | "hint" | null;
+};
+
+export type AiExplainedDiagnostic = Diagnostic & {
+  severityLabel: "error" | "warning" | "information" | "hint" | "unknown";
+  location: string;
+  lineText?: string | null;
+  explanation: string;
+};
+
+export type AiLspDiagnosticsExplanation = {
+  tabId: string;
+  tabTitle: string;
+  uri?: string | null;
+  onlySelection: boolean;
+  summary: string;
+  diagnostics: AiExplainedDiagnostic[];
+};
+
 export type AiNamespaceMutationInput = {
   operation: "create" | "drop";
   connectionId?: string | null;
@@ -271,6 +294,10 @@ export type AiToolAdapters = {
     input: AiLspCompletionInput,
     context: AiToolExecutionContext
   ) => Promise<CompletionItem[]> | CompletionItem[];
+  explainLspDiagnostics?: (
+    input: AiLspDiagnosticsInput,
+    context: AiToolExecutionContext
+  ) => Promise<AiLspDiagnosticsExplanation> | AiLspDiagnosticsExplanation;
   mutateNamespace?: (
     input: AiNamespaceMutationInput,
     context: AiToolExecutionContext
