@@ -170,6 +170,13 @@ interface TabState {
     title?: string
   ) => string;
   createTableTab: (connectionId: string, schemaName: string) => string;
+  retargetTableTabs: (
+    connectionId: string,
+    schemaName: string,
+    oldTableName: string,
+    newTableName: string,
+    objectType?: string | null
+  ) => void;
   updateTabTitle: (id: string, title: string) => void;
   closeTab: (id: string) => void;
   forceCloseTab: (id: string) => void;
@@ -379,6 +386,36 @@ export const useTabStore = create<TabState>((set, get) => ({
       activeTabId: newTab.id,
     }));
     return newTab.id;
+  },
+
+  retargetTableTabs: (
+    connectionId: string,
+    schemaName: string,
+    oldTableName: string,
+    newTableName: string,
+    objectType?: string | null
+  ) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.type === "table" &&
+        tab.connectionId === connectionId &&
+        tab.schemaName === schemaName &&
+        tab.tableName === oldTableName
+          ? {
+              ...tab,
+              title: newTableName,
+              tableName: newTableName,
+              objectType: objectType ?? tab.objectType ?? null,
+              results: null,
+              error: null,
+              pendingEdits: new Map(),
+              newRowsCount: 0,
+              tablePage: 0,
+              tableTotalRows: null,
+            }
+          : tab
+      ),
+    }));
   },
 
   updateTabTitle: (id: string, title: string) => {

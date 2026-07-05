@@ -55,6 +55,16 @@ export function useTableOperations() {
       );
       console.log(`Table renamed from ${oldName} to ${newName}`);
       await loadTables(activeConnectionId, currentSchema, true);
+      useTabStore
+        .getState()
+        .retargetTableTabs(
+          activeConnectionId,
+          currentSchema,
+          oldName,
+          newName,
+          objectType
+        );
+      await refreshOpenTableTabs(activeConnectionId, currentSchema, newName);
     } catch (e: any) {
       console.error(e);
       throw e; // Let dialog handle error
@@ -75,6 +85,7 @@ export function useTableOperations() {
         objectType
       );
       await loadTables(activeConnectionId, currentSchema, true);
+      closeOpenTableTabs(activeConnectionId, currentSchema, tableName);
       console.log(`Table ${tableName} dropped successfully`);
     } catch (e: any) {
       console.error(e);
@@ -193,4 +204,22 @@ async function refreshOpenTableTabs(
       )
     )
   );
+}
+
+function closeOpenTableTabs(
+  connectionId: string,
+  schema: string,
+  tableName: string
+) {
+  const tabStore = useTabStore.getState();
+  for (const tab of tabStore.tabs) {
+    if (
+      tab.type === "table" &&
+      tab.connectionId === connectionId &&
+      tab.schemaName === schema &&
+      tab.tableName === tableName
+    ) {
+      tabStore.forceCloseTab(tab.id);
+    }
+  }
 }
