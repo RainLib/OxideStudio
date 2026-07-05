@@ -163,7 +163,11 @@ export function createLspConfigKey(input: LspConfigKeyInput) {
 }
 
 function schemaForLspTab(tab: LspSyncTab, defaultSchema: string) {
-  return normalizeSchemaName(tab.targetSchema) || defaultSchema;
+  return (
+    normalizeSchemaName(tab.targetSchema) ||
+    normalizeSchemaName(tab.schemaName) ||
+    defaultSchema
+  );
 }
 
 function findKnownSchemaName(schemaNames: string[], schemaName?: string | null) {

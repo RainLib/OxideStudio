@@ -117,6 +117,34 @@ describe("LSP sync plan", () => {
     });
   });
 
+  it("maps query tabs with object schema metadata to that schema when target schema is unset", () => {
+    const schemaIds: Record<string, string> = {
+      public: "schema-public",
+      audit: "schema-audit",
+    };
+    const getSchemaId = (schemaName: string) => schemaIds[schemaName] || schemaName;
+
+    const mappings = buildLspFileMappings({
+      queryTabs: [
+        {
+          id: "audit-query",
+          type: "query",
+          schemaName: "audit",
+          tableName: "events",
+        },
+      ],
+      schemaByTabId: {},
+      defaultSchema: "public",
+      driver: "postgres",
+      lspDialect: lspLanguageId("postgres"),
+      getSchemaId,
+    });
+
+    expect(mappings.fileSchemas).toEqual({
+      "oxide://query/audit-query.postgres.postgres": "schema-audit",
+    });
+  });
+
   it("changes duplicate-send keys when NoSQL schema fields change", () => {
     const base = {
       connectionId: "conn-main",
