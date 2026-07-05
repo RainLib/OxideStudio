@@ -1,0 +1,382 @@
+use anyhow::{anyhow, bail, Context, Result};
+use serde_json::{json, Map, Value};
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+
+struct LspProcess {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    next_id: u64,
+}
+
+impl LspProcess {
+    async fn spawn_bundled() -> Result<Option<Self>> {
+        let binary = bundled_lsp_binary();
+        if !binary.exists() {
+            eprintln!("skipping bundled LSP test; binary not found at {binary:?}");
+            return Ok(None);
+        }
+
+        let mut child = match Command::new(&binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) if error.raw_os_error() == Some(8) => {
+                eprintln!("skipping bundled LSP test; binary is not executable on this platform");
+                return Ok(None);
+            }
+            Err(error) => return Err(error).with_context(|| format!("spawn {binary:?}")),
+        };
+
+        let stdin = child.stdin.take().context("missing LSP stdin")?;
+        let stdout = child.stdout.take().context("missing LSP stdout")?;
+
+        Ok(Some(Self {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+            next_id: 1,
+        }))
+    }
+
+    async fn initialize(&mut self) -> Result<()> {
+        self.request(
+            "initialize",
+            json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {
+                    "textDocument": {
+                        "completion": {
+                            "completionItem": {
+                                "snippetSupport": true
+                            }
+                        },
+                        "hover": {
+                            "contentFormat": ["markdown", "plaintext"]
+                        },
+                        "definition": {},
+                        "references": {},
+                        "formatting": {},
+                        "publishDiagnostics": {},
+                        "synchronization": {
+                            "didSave": true,
+                            "didChange": true,
+                            "didOpen": true,
+                            "didClose": true
+                        }
+                    },
+                    "workspace": {
+                        "configuration": true
+                    }
+                }
+            }),
+        )
+        .await?;
+        self.notify("initialized", json!({})).await
+    }
+
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        self.write_message(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        }))
+        .await?;
+
+        loop {
+            let message = self.read_message().await?;
+            if message.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+
+            if let Some(error) = message.get("error") {
+                bail!("LSP request {method} failed: {error}");
+            }
+
+            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+
+    async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
+        self.write_message(&json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        }))
+        .await
+    }
+
+    async fn shutdown(mut self) -> Result<()> {
+        let _ = self.request("shutdown", Value::Null).await;
+        let _ = self.notify("exit", Value::Null).await;
+
+        tokio::select! {
+            status = self.child.wait() => {
+                status.context("wait for LSP shutdown")?;
+            }
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                let _ = self.child.kill().await;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn write_message(&mut self, message: &Value) -> Result<()> {
+        let body = serde_json::to_vec(message)?;
+        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+        self.stdin.write_all(header.as_bytes()).await?;
+        self.stdin.write_all(&body).await?;
+        self.stdin.flush().await?;
+        Ok(())
+    }
+
+    async fn read_message(&mut self) -> Result<Value> {
+        let mut content_length = None;
+
+        loop {
+            let mut line = String::new();
+            let read =
+                tokio::time::timeout(Duration::from_secs(5), self.stdout.read_line(&mut line))
+                    .await
+                    .context("timed out reading LSP header")??;
+
+            if read == 0 {
+                bail!("LSP stdout closed");
+            }
+
+            let header = line.trim_end_matches(['\r', '\n']);
+            if header.is_empty() {
+                break;
+            }
+
+            if let Some(value) = header.strip_prefix("Content-Length:") {
+                content_length = Some(value.trim().parse::<usize>()?);
+            }
+        }
+
+        let length = content_length.ok_or_else(|| anyhow!("missing Content-Length header"))?;
+        let mut body = vec![0u8; length];
+        tokio::time::timeout(Duration::from_secs(5), self.stdout.read_exact(&mut body))
+            .await
+            .context("timed out reading LSP body")??;
+
+        Ok(serde_json::from_slice(&body)?)
+    }
+}
+
+#[tokio::test]
+async fn bundled_sql_lsp_serves_nosql_schema_completions() -> Result<()> {
+    let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
+        return Ok(());
+    };
+
+    lsp.initialize().await?;
+
+    let redis_uri = "file:///oxide/redis.redis";
+    let mongodb_uri = "file:///oxide/mongodb.mongodb";
+    let elasticsearch_uri = "file:///oxide/elasticsearch.es.dsl";
+
+    let mut file_schemas = Map::new();
+    file_schemas.insert(
+        redis_uri.to_string(),
+        json!("11111111-1111-4111-8111-111111111111"),
+    );
+    file_schemas.insert(
+        mongodb_uri.to_string(),
+        json!("22222222-2222-4222-8222-222222222222"),
+    );
+    file_schemas.insert(
+        elasticsearch_uri.to_string(),
+        json!("33333333-3333-4333-8333-333333333333"),
+    );
+
+    let mut file_dialects = Map::new();
+    file_dialects.insert(redis_uri.to_string(), json!("redis"));
+    file_dialects.insert(mongodb_uri.to_string(), json!("mongodb"));
+    file_dialects.insert(elasticsearch_uri.to_string(), json!("elasticsearch-dsl"));
+
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "defaultDialect": "postgres",
+                "schemas": [
+                    schema(
+                        "11111111-1111-4111-8111-111111111111",
+                        "redis",
+                        "user:1",
+                        "hash",
+                        vec![
+                            column("name", "string"),
+                            column("email", "string")
+                        ]
+                    ),
+                    schema(
+                        "22222222-2222-4222-8222-222222222222",
+                        "app",
+                        "users",
+                        "collection",
+                        vec![
+                            column("_id", "objectId"),
+                            column("email", "string")
+                        ]
+                    ),
+                    schema(
+                        "33333333-3333-4333-8333-333333333333",
+                        "search",
+                        "users",
+                        "index",
+                        vec![
+                            column("_id", "keyword"),
+                            column("email", "keyword")
+                        ]
+                    )
+                ],
+                "fileSchemas": file_schemas,
+                "fileDialects": file_dialects
+            }
+        }),
+    )
+    .await?;
+
+    open_document(&mut lsp, redis_uri, "redis", "").await?;
+    open_document(&mut lsp, mongodb_uri, "mongodb", "").await?;
+    open_document(&mut lsp, elasticsearch_uri, "elasticsearch-dsl", "").await?;
+
+    assert_completion_contains(&mut lsp, redis_uri, &["GET", "user:1"]).await?;
+    assert_completion_contains(&mut lsp, mongodb_uri, &["find", "users", "email"]).await?;
+    assert_completion_contains(&mut lsp, elasticsearch_uri, &["match", "users", "email"]).await?;
+
+    lsp.shutdown().await
+}
+
+async fn open_document(
+    lsp: &mut LspProcess,
+    uri: &str,
+    language_id: &str,
+    text: &str,
+) -> Result<()> {
+    lsp.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": language_id,
+                "version": 1,
+                "text": text
+            }
+        }),
+    )
+    .await
+}
+
+async fn assert_completion_contains(
+    lsp: &mut LspProcess,
+    uri: &str,
+    expected_labels: &[&str],
+) -> Result<()> {
+    let result = lsp
+        .request(
+            "textDocument/completion",
+            json!({
+                "textDocument": {
+                    "uri": uri
+                },
+                "position": {
+                    "line": 0,
+                    "character": 0
+                },
+                "context": {
+                    "triggerKind": 1
+                }
+            }),
+        )
+        .await?;
+
+    let mut labels = completion_labels(&result);
+    labels.sort();
+
+    for expected in expected_labels {
+        if !labels.iter().any(|label| label == expected) {
+            bail!("missing completion label {expected:?} for {uri}; labels: {labels:?}");
+        }
+    }
+
+    Ok(())
+}
+
+fn completion_labels(result: &Value) -> Vec<String> {
+    let items = result
+        .as_array()
+        .or_else(|| result.get("items").and_then(Value::as_array));
+
+    items
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("label").and_then(Value::as_str))
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn schema(
+    id: &str,
+    database: &str,
+    table_name: &str,
+    object_type: &str,
+    columns: Vec<Value>,
+) -> Value {
+    json!({
+        "id": id,
+        "database": database,
+        "tables": [
+            {
+                "name": table_name,
+                "object_type": object_type,
+                "columns": columns,
+                "indexes": [],
+                "constraints": [],
+                "comment": null
+            }
+        ],
+        "functions": [],
+        "source_uri": null
+    })
+}
+
+fn column(name: &str, data_type: &str) -> Value {
+    json!({
+        "name": name,
+        "data_type": data_type,
+        "nullable": true,
+        "primary_key": false,
+        "unique": false,
+        "indexed": false,
+        "comment": null,
+        "source_location": null
+    })
+}
+
+fn bundled_lsp_binary() -> PathBuf {
+    let name = if cfg!(windows) {
+        "sql-lsp.exe"
+    } else {
+        "sql-lsp"
+    };
+
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join(name)
+}

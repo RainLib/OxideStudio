@@ -19,10 +19,12 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 9: MongoDB/JSON dialect support in `lsp_sqls` with bounded collection context synchronization
 - Phase 10: Live driver coverage for PostgreSQL, MySQL, Redis, MongoDB, and Elasticsearch via `scripts/test-live-databases.sh`
 - Phase 11: Schema-aware Redis, MongoDB, and Elasticsearch DSL LSP completion/hover/definition assertions in `lsp_sqls`
+- Phase 12: Bundled `sql-lsp` JSON-RPC integration test for Redis, MongoDB, and Elasticsearch schema completions
 
 ⏳ **Pending:**
 
-- Tauri/editor-level LSP synchronization assertions for Redis, MongoDB, and Elasticsearch paths
+- Tauri/editor-level command synchronization assertions for Redis, MongoDB, and Elasticsearch paths
+- AI assistant tool routing design for MCP, CLI, and in-process editor actions
 
 ## Setup Instructions
 
@@ -42,14 +44,13 @@ Current tracked revision is `v0.1.3-5-g8bf2d40`.
 `src-tauri/build_prepare.sh` builds the submodule and copies `sql-lsp` into `src-tauri/binaries/` during the Tauri build:
 
 ```bash
-cd src-tauri
-./build_prepare.sh
+bash src-tauri/build_prepare.sh
 ```
 
 To use a prebuilt binary instead of building the submodule:
 
 ```bash
-OXIDE_SQL_LSP_BINARY=/path/to/sql-lsp ./build_prepare.sh
+OXIDE_SQL_LSP_BINARY=/path/to/sql-lsp bash src-tauri/build_prepare.sh
 ```
 
 ### 3. Test LSP Server
@@ -132,6 +133,16 @@ scripts/test-live-databases.sh
 ```
 
 The script starts PostgreSQL, MySQL, Redis, MongoDB, and Elasticsearch, exports the corresponding `TEST_*_URL` variables, and runs `src-tauri/tests/live_database.rs`. To use existing services instead, set `OXIDE_LIVE_USE_EXISTING=1` plus `TEST_POSTGRES_URL`, `TEST_MYSQL_URL`, and optionally `TEST_REDIS_URL`, `TEST_MONGODB_URL`, and `TEST_ELASTICSEARCH_URL`.
+
+## Bundled LSP Tests
+
+Run the protocol-level bundled LSP test after rebuilding `src-tauri/binaries/sql-lsp`:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --test lsp_integration -- --nocapture
+```
+
+This spawns the packaged binary, performs a real LSP initialize/configuration/document/completion flow, and asserts schema-aware Redis key, MongoDB collection/field, and Elasticsearch index/field completions.
 
 ## Troubleshooting
 
