@@ -129,16 +129,20 @@ export function WorkspacePage() {
             </Button>
             <Button
               variant="ghost"
-              size="icon"
+              size="sm"
               className={cn(
-                "h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-accent/50",
+                "h-8 gap-1.5 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-accent/50",
                 !isRightCollapsed && "text-primary bg-primary/10"
               )}
               onClick={() => setIsRightCollapsed(!isRightCollapsed)}
-              title="AI Assistant"
-              aria-label="AI Assistant"
+              title={isRightCollapsed ? "Show AI Assistant" : "Hide AI Assistant"}
+              aria-label={
+                isRightCollapsed ? "Show AI Assistant" : "Hide AI Assistant"
+              }
+              aria-pressed={!isRightCollapsed}
             >
               <Sparkles size={16} />
+              <span>AI</span>
             </Button>
           </>
         }
