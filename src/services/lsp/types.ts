@@ -36,6 +36,7 @@ export interface CompletionItem {
   documentation?: string;
   insertText?: string;
   insertTextFormat?: number;
+  textEdit?: TextEdit;
   sortText?: string;
   filterText?: string;
   preselect?: boolean;

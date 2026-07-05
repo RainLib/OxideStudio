@@ -18,6 +18,7 @@ import {
   supportsLspLanguageId,
 } from "@/lib/databaseDialect";
 import {
+  completionFilterText,
   completionInsertText,
   completionSortText,
   isCompletedSqlContextKeyword,
@@ -343,15 +344,19 @@ export function QueryEditor() {
               documentation: item.documentation,
               insertText: completionInsertText(item, completedContextKeyword),
               sortText: completionSortText(item),
-              filterText: completedContextKeyword
-                ? typedWord
-                : item.filterText,
+              filterText: completionFilterText(
+                item,
+                typedWord,
+                completedContextKeyword
+              ),
               preselect: item.preselect,
               insertTextRules:
                 item.insertTextFormat === 2
                   ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
                   : undefined,
-              range: insertRange,
+              range: item.textEdit
+                ? toMonacoRange(monaco, item.textEdit.range)
+                : insertRange,
             }));
 
             return { suggestions };

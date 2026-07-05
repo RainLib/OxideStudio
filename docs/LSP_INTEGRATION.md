@@ -39,7 +39,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-20-g2fde3e8`.
+Current tracked revision is `v0.1.3-21-g00b8079`.
 
 ### 2. Prepare the Binary
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  completionFilterText,
   completionInsertText,
   completionSortText,
   isCompletedSqlContextKeyword,
@@ -33,6 +34,30 @@ describe("LSP completion adapter helpers", () => {
         true
       )
     ).toBe(" calculate_score()");
+  });
+
+  it("prefers server text edits and keeps completed keyword filtering stable", () => {
+    const withTextEdit = item({
+      label: "users",
+      insertText: "users",
+      textEdit: {
+        range: {
+          start: { line: 0, character: 14 },
+          end: { line: 0, character: 14 },
+        },
+        newText: " users",
+      },
+      filterText: "from",
+    });
+
+    expect(completionInsertText(withTextEdit, true)).toBe(" users");
+    expect(completionFilterText(withTextEdit, "from", true)).toBe("from");
+    expect(completionFilterText(item({ label: "users" }), "from", true)).toBe(
+      "from"
+    );
+    expect(
+      completionFilterText(item({ label: "users" }), "users", false)
+    ).toBeUndefined();
   });
 
   it("preserves server sortText and falls back to SQL-aware groups", () => {

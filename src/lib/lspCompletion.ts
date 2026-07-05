@@ -27,8 +27,19 @@ export function completionInsertText(
   item: CompletionItem,
   completedContextKeyword: boolean
 ) {
+  if (item.textEdit) return item.textEdit.newText;
+
   const insertText = item.insertText || item.label;
   return completedContextKeyword ? ` ${insertText}` : insertText;
+}
+
+export function completionFilterText(
+  item: CompletionItem,
+  typedWord: string,
+  completedContextKeyword: boolean
+) {
+  if (item.filterText) return item.filterText;
+  return completedContextKeyword ? typedWord : undefined;
 }
 
 export function completionSortText(item: CompletionItem) {
