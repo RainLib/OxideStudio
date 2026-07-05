@@ -65,6 +65,27 @@ describe("SQL analysis helpers", () => {
     ]);
   });
 
+  it("does not treat common table expressions as physical relations", () => {
+    expect(
+      extractRelationReferences(
+        `
+          WITH recent AS (
+            SELECT * FROM app.orders
+          ),
+          ranked AS NOT MATERIALIZED (
+            SELECT * FROM recent
+          )
+          SELECT * FROM ranked
+          JOIN public.users ON users.id = ranked.user_id;
+        `,
+        "postgres"
+      )
+    ).toEqual([
+      { schema: "app", table: "orders" },
+      { schema: "public", table: "users" },
+    ]);
+  });
+
   it("ignores relation-looking tokens inside comments and strings", () => {
     expect(
       extractRelationReferences(`

@@ -646,6 +646,73 @@ function splitIdentifierPath(identifier: string) {
     .filter(Boolean);
 }
 
+function skipBalancedParentheses(maskedSql: string, index: number) {
+  index = skipWhitespace(maskedSql, index);
+  if (maskedSql[index] !== "(") return null;
+
+  let depth = 0;
+  while (index < maskedSql.length) {
+    const char = maskedSql[index] || "";
+    if (char === "(") {
+      depth += 1;
+    } else if (char === ")") {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+    index += 1;
+  }
+
+  return null;
+}
+
+function skipOptionalCteMaterialization(maskedSql: string, index: number) {
+  const afterNot = consumeWord(maskedSql, index, "not");
+  if (afterNot !== null) {
+    return consumeWord(maskedSql, afterNot, "materialized") ?? index;
+  }
+
+  return consumeWord(maskedSql, index, "materialized") ?? index;
+}
+
+function collectCteNames(sql: string, dialect?: string | null) {
+  const names = new Set<string>();
+
+  for (const statement of splitSqlStatements(sql)) {
+    const source = stripLeadingSqlComments(statement);
+    const masked = maskSqlNoise(source, dialect);
+    let index = consumeWord(masked, 0, "with");
+    if (index === null) continue;
+
+    index = consumeWord(masked, index, "recursive") ?? index;
+
+    while (index < masked.length) {
+      const cteName = readIdentifierPart(source, index);
+      if (!cteName) break;
+      names.add(cteName[0].toLowerCase());
+      index = skipWhitespace(masked, cteName[1]);
+
+      if (masked[index] === "(") {
+        const afterColumns = skipBalancedParentheses(masked, index);
+        if (afterColumns === null) break;
+        index = afterColumns;
+      }
+
+      const afterAs = consumeWord(masked, index, "as");
+      if (afterAs === null) break;
+      index = skipOptionalCteMaterialization(masked, afterAs);
+
+      const afterBody = skipBalancedParentheses(masked, index);
+      if (afterBody === null) break;
+      index = skipWhitespace(masked, afterBody);
+
+      if (masked[index] !== ",") break;
+      index += 1;
+    }
+  }
+
+  return names;
+}
+
 export function extractRelationReferences(
   sql: string,
   dialect?: string | null
@@ -653,6 +720,7 @@ export function extractRelationReferences(
   const references: RelationReference[] = [];
   const seen = new Set<string>();
   const searchableSql = maskSqlNoise(sql, dialect).toLowerCase();
+  const cteNames = collectCteNames(sql, dialect);
   const pushReference = (identifier: string) => {
     const parts = splitIdentifierPath(identifier);
     const table = parts[parts.length - 1];
@@ -661,6 +729,10 @@ export function extractRelationReferences(
     }
 
     const schema = parts.length >= 2 ? parts[parts.length - 2] : undefined;
+    if (!schema && cteNames.has(table.toLowerCase())) {
+      return;
+    }
+
     const key = `${schema || ""}.${table}`.toLowerCase();
     if (seen.has(key)) return;
 
