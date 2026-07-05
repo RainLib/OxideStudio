@@ -1,6 +1,6 @@
 use crate::core::{
     driver::DatabaseDriver,
-    protocol::{CollectionInfo, ColumnDef, QueryResult},
+    protocol::{CollectionInfo, ColumnDef, ColumnInfo, QueryResult},
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -129,6 +129,21 @@ impl DatabaseDriver for ElasticsearchDriver {
         };
         let (_, body) = self.send_request(&request).await?;
         Ok(elasticsearch_indices_to_collections(body))
+    }
+
+    async fn get_columns(&self, _schema: &str, table: &str) -> Result<Vec<ColumnInfo>> {
+        let index = table.trim();
+        if index.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let request = ElasticsearchRequest {
+            method: Method::GET,
+            path: format!("/{index}/_mapping"),
+            body: None,
+        };
+        let (_, body) = self.send_request(&request).await?;
+        Ok(elasticsearch_mapping_to_columns(&body, index))
     }
 }
 
@@ -360,6 +375,86 @@ fn elasticsearch_indices_to_collections(value: Value) -> Vec<CollectionInfo> {
         .unwrap_or_default()
 }
 
+fn elasticsearch_mapping_to_columns(value: &Value, index: &str) -> Vec<ColumnInfo> {
+    let mut columns = vec![ColumnInfo {
+        name: "_id".to_string(),
+        data_type: "keyword".to_string(),
+        is_nullable: false,
+        is_primary_key: true,
+        is_unique: true,
+        is_indexed: true,
+        is_auto_increment: false,
+        default_value: None,
+        comment: Some("Elasticsearch document id".to_string()),
+    }];
+
+    let properties = value
+        .get(index)
+        .or_else(|| {
+            value
+                .as_object()
+                .and_then(|indices| indices.values().next())
+        })
+        .and_then(|index_mapping| index_mapping.get("mappings"))
+        .and_then(|mappings| mappings.get("properties"))
+        .and_then(Value::as_object);
+
+    if let Some(properties) = properties {
+        collect_mapping_properties("", properties, &mut columns);
+    }
+
+    columns
+}
+
+fn collect_mapping_properties(
+    prefix: &str,
+    properties: &serde_json::Map<String, Value>,
+    columns: &mut Vec<ColumnInfo>,
+) {
+    for (field, mapping) in properties {
+        let name = if prefix.is_empty() {
+            field.to_string()
+        } else {
+            format!("{prefix}.{field}")
+        };
+        let data_type = elasticsearch_mapping_type(mapping);
+        let is_indexed = mapping
+            .get("index")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+
+        columns.push(ColumnInfo {
+            name: name.clone(),
+            data_type,
+            is_nullable: true,
+            is_primary_key: false,
+            is_unique: false,
+            is_indexed,
+            is_auto_increment: false,
+            default_value: None,
+            comment: None,
+        });
+
+        if let Some(nested_properties) = mapping.get("properties").and_then(Value::as_object) {
+            collect_mapping_properties(&name, nested_properties, columns);
+        }
+    }
+}
+
+fn elasticsearch_mapping_type(mapping: &Value) -> String {
+    mapping
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            mapping
+                .get("properties")
+                .and_then(Value::as_object)
+                .map(|_| "object")
+        })
+        .unwrap_or("object")
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +563,53 @@ mod tests {
         assert_eq!(collections[0].name, "users");
         assert_eq!(collections[0].collection_type.as_deref(), Some("index"));
         assert_eq!(collections[0].document_count, Some(42));
+    }
+
+    #[test]
+    fn maps_index_mapping_to_columns() {
+        let columns = elasticsearch_mapping_to_columns(
+            &json!({
+                "users": {
+                    "mappings": {
+                        "properties": {
+                            "email": {"type": "keyword"},
+                            "active": {"type": "boolean"},
+                            "profile": {
+                                "properties": {
+                                    "age": {"type": "integer"},
+                                    "bio": {"type": "text", "index": false}
+                                }
+                            }
+                        }
+                    }
+                }
+            }),
+            "users",
+        );
+
+        let id = columns.iter().find(|column| column.name == "_id").unwrap();
+        assert_eq!(id.data_type, "keyword");
+        assert!(id.is_primary_key);
+        assert!(id.is_unique);
+
+        let email = columns
+            .iter()
+            .find(|column| column.name == "email")
+            .unwrap();
+        assert_eq!(email.data_type, "keyword");
+        assert!(email.is_indexed);
+
+        let profile = columns
+            .iter()
+            .find(|column| column.name == "profile")
+            .unwrap();
+        assert_eq!(profile.data_type, "object");
+
+        let bio = columns
+            .iter()
+            .find(|column| column.name == "profile.bio")
+            .unwrap();
+        assert_eq!(bio.data_type, "text");
+        assert!(!bio.is_indexed);
     }
 }

@@ -14,7 +14,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 4: Monaco Editor completion, hover, definition, references, formatting, and diagnostics integration
 - Phase 5: **Bidirectional IPC with async stdio** (JSON-RPC communication)
 - Phase 6: Relational schema synchronization through `LspConnectionSyncer`
-- Phase 7: Bounded Redis key and Elasticsearch index context synchronization through the LSP schema model
+- Phase 7: Bounded Redis key and Elasticsearch index context synchronization through the LSP schema model, including Elasticsearch mapping fields when available
 - Phase 8: Non-blocking Tauri command lifecycle; LSP requests clone the manager handle before awaiting server responses
 - Phase 9: MongoDB/JSON dialect support in `lsp_sqls` with bounded collection context synchronization
 - Phase 10: Live driver coverage for PostgreSQL, MySQL, Redis, MongoDB, and Elasticsearch via `scripts/test-live-databases.sh`
@@ -112,7 +112,7 @@ function QueryEditor() {
 
 ## Schema Synchronization
 
-`LspConnectionSyncer` sends bounded schema snapshots when the active connection, schema, metadata version, or open query tabs change. Relational databases sync tables, columns, indexes, constraints, and functions. Redis keys and Elasticsearch indices sync as LSP table objects with lightweight synthetic columns. MongoDB collections sync as LSP table objects and use sampled top-level document fields when available, falling back to `_id` and `document`.
+`LspConnectionSyncer` sends bounded schema snapshots when the active connection, schema, metadata version, or open query tabs change. Relational databases sync tables, columns, indexes, constraints, and functions. Redis keys sync as LSP table objects with lightweight synthetic columns. Elasticsearch indices sync mapping fields when available, falling back to `id`, `score`, and `source`. MongoDB collections sync as LSP table objects and use sampled top-level document fields when available, falling back to `_id` and `document`.
 
 ```typescript
 await lspClient.updateConfiguration({

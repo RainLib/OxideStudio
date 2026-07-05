@@ -916,6 +916,17 @@ async fn elasticsearch_live_index_metadata_and_search() -> Result<()> {
         assert_eq!(index_info.collection_type.as_deref(), Some("index"));
         assert!(index_info.document_count.unwrap_or_default() >= 1);
 
+        let columns = manager.get_columns(connection_id, "default", &index).await?;
+        assert!(columns.iter().any(|column| column.name == "_id"
+            && column.is_primary_key
+            && column.is_indexed));
+        assert!(columns.iter().any(|column| column.name == "email"
+            && column.data_type == "keyword"));
+        assert!(columns.iter().any(|column| column.name == "active"
+            && column.data_type == "boolean"));
+        assert!(columns.iter().any(|column| column.name == "score"
+            && column.data_type == "integer"));
+
         let search_results = manager
             .query(
                 connection_id,

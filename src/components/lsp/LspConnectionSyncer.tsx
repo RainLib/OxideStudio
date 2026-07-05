@@ -147,6 +147,19 @@ function lspColumnsForCollection(
   }
 
   if (capabilities.dataModel === "search") {
+    if (columns.length > 0) {
+      return columns.map((column) => ({
+        name: column.name,
+        data_type: column.data_type || "json",
+        nullable: column.is_nullable,
+        primary_key: column.is_primary_key,
+        unique: column.is_unique ?? false,
+        indexed: column.is_indexed ?? false,
+        comment: column.comment || null,
+        source_location: null,
+      }));
+    }
+
     return [
       lspColumn("id", "keyword", "Document id"),
       lspColumn("score", "double", "Search score"),
@@ -183,7 +196,10 @@ async function collectionToLspTableDefinitionWithMetadata(
   capabilities: DatabaseCapabilities,
   collection: CollectionInfo
 ): Promise<LspTableDefinition> {
-  if (capabilities.dataModel !== "document") {
+  if (
+    capabilities.dataModel !== "document" &&
+    capabilities.dataModel !== "search"
+  ) {
     return collectionToLspTableDefinition(capabilities, collection);
   }
 
@@ -196,7 +212,7 @@ async function collectionToLspTableDefinitionWithMetadata(
     return collectionToLspTableDefinition(capabilities, collection, columns);
   } catch (error) {
     console.error(
-      `[LSP] Failed to sample document fields for ${namespace}.${collection.name}:`,
+      `[LSP] Failed to fetch object fields for ${namespace}.${collection.name}:`,
       error
     );
     return collectionToLspTableDefinition(capabilities, collection);
