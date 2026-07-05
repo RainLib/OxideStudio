@@ -54,7 +54,8 @@ export class AssistantRuntime {
         intent,
         input,
         availableTools,
-        this.policy
+        this.policy,
+        context.activeDriver
       ),
       warnings,
     };
@@ -151,7 +152,8 @@ function buildSuggestedPlan(
   intent: AssistantIntent,
   input: AssistantTurnInput,
   tools: AiToolSummary[],
-  policy: AiToolExecutionPolicy
+  policy: AiToolExecutionPolicy,
+  activeDriver?: string | null
 ): AssistantPlanStep[] {
   const hasTool = (name: string) => tools.some((tool) => tool.name === name);
   const requiresApproval = (name: string) => {
@@ -201,18 +203,82 @@ function buildSuggestedPlan(
 
   if (intent === "query" && hasTool("query.runReadOnly")) {
     const query = input.selectedText?.trim() || "";
+    const writeTool = selectedMutationTool(query, activeDriver, hasTool);
     steps.push({
       id: "read-query",
-      title: query
+      title: writeTool
+        ? "Run the selected mutation with approval"
+        : query
         ? "Run the selected query with read-only safeguards"
         : "Prepare a bounded read-only query",
-      toolName: query ? "query.runReadOnly" : undefined,
+      toolName: query ? writeTool || "query.runReadOnly" : undefined,
       input: query ? { query } : undefined,
-      requiresApproval: query ? requiresApproval("query.runReadOnly") : false,
+      requiresApproval: query
+        ? requiresApproval(writeTool || "query.runReadOnly")
+        : false,
     });
   }
 
   return steps;
+}
+
+function selectedMutationTool(
+  query: string,
+  activeDriver: string | null | undefined,
+  hasTool: (name: string) => boolean
+) {
+  if (!query) return null;
+  if (looksDestructiveSelection(query, activeDriver)) {
+    return hasTool("query.runDestructive") ? "query.runDestructive" : null;
+  }
+  if (looksMutationSelection(query, activeDriver)) {
+    return hasTool("query.runMutation") ? "query.runMutation" : null;
+  }
+  return null;
+}
+
+function looksMutationSelection(query: string, activeDriver?: string | null) {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return false;
+
+  const driver = String(activeDriver || "").toLowerCase();
+  if (driver === "redis") {
+    return /^(append|decr|decrby|expire|hset|hmset|incr|incrby|json\.set|lpush|pfadd|rename|rpush|sadd|set|setex|setnx|xadd|zadd)\b/i.test(
+      query.trim()
+    );
+  }
+  if (driver === "mongodb" || driver === "mongo") {
+    return /"(insertOne|insertMany|updateOne|updateMany|command)"/i.test(query);
+  }
+  if (driver === "elasticsearch" || driver === "elastic") {
+    return /^(POST|PUT|PATCH)\s+\//i.test(query.trim());
+  }
+
+  return /^(alter|call|comment|copy|create|grant|insert|load|merge|replace|revoke|set|update|vacuum)\b/.test(
+    normalized
+  );
+}
+
+function looksDestructiveSelection(query: string, activeDriver?: string | null) {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return false;
+
+  const driver = String(activeDriver || "").toLowerCase();
+  if (driver === "redis") {
+    return /^(del|discard|eval|evalsha|flushall|flushdb|ft\.dropindex|hdel|json\.del|lpop|rpop|srem|unlink|xdel|zrem)\b/i.test(
+      query.trim()
+    );
+  }
+  if (driver === "mongodb" || driver === "mongo") {
+    return /"(collMod|deleteOne|deleteMany|drop|dropDatabase|renameCollection)"/i.test(
+      query
+    );
+  }
+  if (driver === "elasticsearch" || driver === "elastic") {
+    return /^DELETE\s+\//i.test(query.trim()) || query.includes("_delete_by_query");
+  }
+
+  return /^(delete|drop|truncate)\b/.test(normalized);
 }
 
 function approveToolForPolicy(
