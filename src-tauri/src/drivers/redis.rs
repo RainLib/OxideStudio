@@ -149,15 +149,41 @@ impl DatabaseDriver for RedisDriver {
                 .query_async::<String>(&mut connection)
                 .await
                 .unwrap_or_else(|_| "unknown".to_string());
+            let document_count = redis_key_cardinality(&mut connection, &key, &key_type).await;
             collections.push(CollectionInfo {
                 name: key,
                 namespace: Some(self.database_label.clone()),
                 collection_type: Some(key_type),
-                document_count: None,
+                document_count,
             });
         }
 
         Ok(collections)
+    }
+}
+
+async fn redis_key_cardinality(
+    connection: &mut ConnectionManager,
+    key: &str,
+    key_type: &str,
+) -> Option<u64> {
+    let command = redis_cardinality_command(key_type)?;
+    redis::cmd(command)
+        .arg(key)
+        .query_async::<u64>(connection)
+        .await
+        .ok()
+}
+
+fn redis_cardinality_command(key_type: &str) -> Option<&'static str> {
+    match key_type.to_ascii_lowercase().as_str() {
+        "string" => Some("STRLEN"),
+        "hash" => Some("HLEN"),
+        "list" => Some("LLEN"),
+        "set" => Some("SCARD"),
+        "zset" => Some("ZCARD"),
+        "stream" => Some("XLEN"),
+        _ => None,
     }
 }
 
@@ -350,5 +376,16 @@ mod tests {
             redis_database_label("redis://localhost:6379/3?protocol=resp3"),
             "3"
         );
+    }
+
+    #[test]
+    fn maps_key_types_to_cardinality_commands() {
+        assert_eq!(redis_cardinality_command("string"), Some("STRLEN"));
+        assert_eq!(redis_cardinality_command("hash"), Some("HLEN"));
+        assert_eq!(redis_cardinality_command("list"), Some("LLEN"));
+        assert_eq!(redis_cardinality_command("set"), Some("SCARD"));
+        assert_eq!(redis_cardinality_command("zset"), Some("ZCARD"));
+        assert_eq!(redis_cardinality_command("stream"), Some("XLEN"));
+        assert_eq!(redis_cardinality_command("none"), None);
     }
 }

@@ -748,8 +748,13 @@ async fn redis_live_key_value_metadata_and_commands() -> Result<()> {
             .find(|collection| collection.name == string_key)
             .context("Redis string key should be discoverable")?;
         assert_eq!(string_entry.collection_type.as_deref(), Some("string"));
-        assert!(collections.iter().any(|collection| collection.name == hash_key
-            && collection.collection_type.as_deref() == Some("hash")));
+        let hash_entry = collections
+            .iter()
+            .find(|collection| {
+                collection.name == hash_key && collection.collection_type.as_deref() == Some("hash")
+            })
+            .context("Redis hash key should be discoverable")?;
+        assert_eq!(hash_entry.document_count, Some(2));
 
         Ok(())
     }

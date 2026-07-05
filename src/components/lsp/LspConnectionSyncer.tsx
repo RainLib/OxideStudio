@@ -123,7 +123,7 @@ function collectionToLspTableDefinition(
   const objectType = collection.type || capabilities.dataModel;
   const countLabel =
     typeof collection.documentCount === "number"
-      ? `${collection.documentCount} document(s)`
+      ? collectionCountLabel(capabilities, collection.documentCount)
       : null;
 
   return {
@@ -134,6 +134,19 @@ function collectionToLspTableDefinition(
     indexes: indexes.map(lspIndex),
     columns: lspColumnsForCollection(capabilities, collection, columns),
   };
+}
+
+function collectionCountLabel(
+  capabilities: DatabaseCapabilities,
+  count: number
+) {
+  if (capabilities.dataModel === "keyValue") {
+    return `${count} value item(s)`;
+  }
+  if (capabilities.dataModel === "search") {
+    return `${count} indexed document(s)`;
+  }
+  return `${count} document(s)`;
 }
 
 function lspIndex(index: IndexInfo): LspTableDefinition["indexes"][number] {
