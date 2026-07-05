@@ -32,6 +32,19 @@ describe("database object operation templates", () => {
     ).toBe('DEL "session token"');
   });
 
+  it("builds RedisJSON preview commands from Redis module key types", () => {
+    const capabilities = defaultDatabaseCapabilities("redis");
+
+    expect(
+      collectionPreviewQueryTemplateForCapabilities(capabilities, "0", {
+        name: "profile:1",
+        type: "ReJSON-RL",
+        namespace: "0",
+        documentCount: null,
+      })
+    ).toBe('JSON.GET "profile:1"');
+  });
+
   it("builds MongoDB collection create, preview, and delete JSON", () => {
     const capabilities = defaultDatabaseCapabilities("mongodb");
     const collection = {

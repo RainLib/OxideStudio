@@ -255,6 +255,9 @@ function redisPreviewCommand(keyName: string, keyType?: string | null) {
       return `ZRANGE ${key} 0 99 WITHSCORES`;
     case "stream":
       return `XRANGE ${key} - + COUNT 100`;
+    case "json":
+    case "rejson-rl":
+      return `JSON.GET ${key}`;
     default:
       return `TYPE ${key}`;
   }
