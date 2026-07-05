@@ -1,6 +1,6 @@
 use crate::core::{
     driver::DatabaseDriver,
-    protocol::{CollectionInfo, ColumnDef, ColumnInfo, QueryResult},
+    protocol::{CollectionInfo, ColumnDef, ColumnInfo, IndexInfo, QueryResult},
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -322,6 +322,32 @@ impl DatabaseDriver for MongoDbDriver {
         let documents = extract_cursor_batch(result)?;
         Ok(infer_mongodb_columns(&documents))
     }
+
+    async fn get_indexes(&self, schema: &str, table: &str) -> Result<Vec<IndexInfo>> {
+        let schema = schema.trim();
+        let database_name = if schema.is_empty() {
+            &self.default_database
+        } else {
+            schema
+        };
+        let collection = table.trim();
+        if collection.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let result = self
+            .client()
+            .await?
+            .database(database_name)
+            .run_command(doc! {
+                "listIndexes": collection,
+            })
+            .await
+            .with_context(|| {
+                format!("Failed to list MongoDB indexes for {database_name}.{collection}")
+            })?;
+        Ok(mongodb_indexes_to_info(extract_cursor_batch(result)?))
+    }
 }
 
 fn mongodb_collection_info(
@@ -578,6 +604,55 @@ fn infer_mongodb_columns(documents: &[Document]) -> Vec<ColumnInfo> {
         .collect()
 }
 
+fn mongodb_indexes_to_info(indexes: Vec<Document>) -> Vec<IndexInfo> {
+    indexes
+        .into_iter()
+        .filter_map(|index| {
+            let name = index.get_str("name").ok()?.to_string();
+            let key = index.get_document("key").ok();
+            let columns = key
+                .map(|key| key.keys().map(ToString::to_string).collect())
+                .unwrap_or_default();
+            let is_primary = name == "_id_" || columns == ["_id"];
+            let is_unique = is_primary || index.get_bool("unique").unwrap_or(false);
+            let index_type = key.and_then(mongodb_index_type);
+            let definition = serde_json::to_string(&bson_to_json(Bson::Document(index))).ok();
+
+            Some(IndexInfo {
+                name,
+                columns,
+                is_unique,
+                is_primary,
+                index_type,
+                definition,
+            })
+        })
+        .collect()
+}
+
+fn mongodb_index_type(key: &Document) -> Option<String> {
+    let mut special_types = Vec::<String>::new();
+    let mut has_btree = false;
+
+    for (_, value) in key {
+        match value {
+            Bson::String(index_type) => special_types.push(index_type.to_string()),
+            Bson::Int32(_) | Bson::Int64(_) => has_btree = true,
+            _ => {}
+        }
+    }
+
+    if !special_types.is_empty() {
+        special_types.sort();
+        special_types.dedup();
+        Some(special_types.join(","))
+    } else if has_btree {
+        Some("btree".to_string())
+    } else {
+        None
+    }
+}
+
 fn bson_type_name(value: &Bson) -> &'static str {
     match value {
         Bson::Double(_) => "double",
@@ -795,6 +870,37 @@ mod tests {
         let tags = columns.iter().find(|column| column.name == "tags").unwrap();
         assert_eq!(tags.data_type, "array");
         assert!(tags.is_nullable);
+    }
+
+    #[test]
+    fn maps_mongodb_indexes_to_index_info() {
+        let indexes = mongodb_indexes_to_info(vec![
+            doc! {"name": "_id_", "key": {"_id": 1}},
+            doc! {"name": "email_1", "key": {"email": 1}, "unique": true},
+            doc! {"name": "profile_text", "key": {"profile.bio": "text"}},
+        ]);
+
+        let id = indexes.iter().find(|index| index.name == "_id_").unwrap();
+        assert_eq!(id.columns, ["_id"]);
+        assert!(id.is_primary);
+        assert!(id.is_unique);
+        assert_eq!(id.index_type.as_deref(), Some("btree"));
+
+        let email = indexes
+            .iter()
+            .find(|index| index.name == "email_1")
+            .unwrap();
+        assert_eq!(email.columns, ["email"]);
+        assert!(email.is_unique);
+        assert!(!email.is_primary);
+
+        let text = indexes
+            .iter()
+            .find(|index| index.name == "profile_text")
+            .unwrap();
+        assert_eq!(text.columns, ["profile.bio"]);
+        assert_eq!(text.index_type.as_deref(), Some("text"));
+        assert!(text.definition.as_deref().unwrap().contains("profile.bio"));
     }
 
     #[test]

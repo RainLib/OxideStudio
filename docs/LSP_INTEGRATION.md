@@ -112,7 +112,7 @@ function QueryEditor() {
 
 ## Schema Synchronization
 
-`LspConnectionSyncer` sends bounded schema snapshots when the active connection, schema, metadata version, or open query tabs change. Relational databases sync tables, columns, indexes, constraints, and functions. Redis keys sync as LSP table objects with lightweight synthetic columns. Elasticsearch indices sync mapping fields when available, falling back to `id`, `score`, and `source`. MongoDB collections sync as LSP table objects and use sampled top-level document fields when available, falling back to `_id` and `document`.
+`LspConnectionSyncer` sends bounded schema snapshots when the active connection, schema, metadata version, or open query tabs change. Relational databases sync tables, columns, indexes, constraints, and functions. Redis keys sync as LSP table objects with lightweight synthetic columns. Elasticsearch indices sync mapping fields when available, falling back to `id`, `score`, and `source`. MongoDB collections sync sampled top-level document fields and collection indexes when available, falling back to `_id` and `document`.
 
 ```typescript
 await lspClient.updateConfiguration({

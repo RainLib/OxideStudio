@@ -693,12 +693,14 @@ async function describeObject(
   ) {
     const collections = await schemaService.getCollections(connectionId, namespace);
     const collection = collections.find((candidate) => candidate.name === input.name);
-    const columns =
+    const [columns, indexes] = await Promise.all([
       capabilities.dataModel === "document" || capabilities.dataModel === "search"
-        ? await schemaService
-            .getColumns(connectionId, namespace, input.name)
-            .catch(() => [])
-        : [];
+        ? schemaService.getColumns(connectionId, namespace, input.name).catch(() => [])
+        : Promise.resolve([]),
+      capabilities.dataModel === "document"
+        ? schemaService.getIndexes(connectionId, namespace, input.name).catch(() => [])
+        : Promise.resolve([]),
+    ]);
     return {
       connectionId,
       namespace,
@@ -707,6 +709,7 @@ async function describeObject(
       kind: collectionKind(capabilities.dataModel),
       collection: collection ?? null,
       columns,
+      indexes,
     };
   }
 

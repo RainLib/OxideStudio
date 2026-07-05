@@ -806,6 +806,28 @@ async fn mongodb_live_document_metadata_and_commands() -> Result<()> {
             )
             .await?;
 
+        manager
+            .query(
+                connection_id,
+                &serde_json::to_string(&json!({
+                    "database": database,
+                    "command": {
+                        "createIndexes": collection,
+                        "indexes": [
+                            {
+                                "key": {"email": 1},
+                                "name": "email_1",
+                                "unique": true
+                            }
+                        ]
+                    }
+                }))?,
+                None,
+                None,
+                None,
+            )
+            .await?;
+
         let schemas = manager.get_schemas(connection_id).await?;
         assert!(schemas.iter().any(|schema| schema == &database));
 
@@ -831,6 +853,17 @@ async fn mongodb_live_document_metadata_and_commands() -> Result<()> {
         assert!(columns
             .iter()
             .any(|column| column.name == "tags" && column.is_nullable));
+
+        let indexes = manager
+            .get_indexes(connection_id, &database, collection)
+            .await?;
+        assert!(indexes.iter().any(|index| index.name == "_id_"
+            && index.is_primary
+            && index.is_unique
+            && index.columns == ["_id"]));
+        assert!(indexes
+            .iter()
+            .any(|index| index.name == "email_1" && index.is_unique && index.columns == ["email"]));
 
         let find_results = manager
             .query(

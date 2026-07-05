@@ -10,6 +10,7 @@ import {
   type ColumnInfo,
   type CollectionInfo,
   type DatabaseCapabilities,
+  type IndexInfo,
 } from "@/services/tauri";
 import {
   defaultDatabaseCapabilities,
@@ -116,7 +117,8 @@ function lspColumn(
 function collectionToLspTableDefinition(
   capabilities: DatabaseCapabilities,
   collection: CollectionInfo,
-  columns: ColumnInfo[] = []
+  columns: ColumnInfo[] = [],
+  indexes: IndexInfo[] = []
 ): LspTableDefinition {
   const objectType = collection.type || capabilities.dataModel;
   const countLabel =
@@ -129,7 +131,19 @@ function collectionToLspTableDefinition(
     object_type: objectType,
     comment: countLabel,
     ...emptyLspTableDetails(),
+    indexes: indexes.map(lspIndex),
     columns: lspColumnsForCollection(capabilities, collection, columns),
+  };
+}
+
+function lspIndex(index: IndexInfo): LspTableDefinition["indexes"][number] {
+  return {
+    name: index.name,
+    columns: index.columns || [],
+    is_unique: index.is_unique,
+    is_primary: index.is_primary,
+    index_type: index.index_type || null,
+    definition: index.definition || null,
   };
 }
 
@@ -204,12 +218,26 @@ async function collectionToLspTableDefinitionWithMetadata(
   }
 
   try {
-    const columns = await schemaService.getColumns(
-      connectionId,
-      namespace,
-      collection.name
+    const [columns, indexes] = await Promise.all([
+      schemaService.getColumns(connectionId, namespace, collection.name),
+      capabilities.dataModel === "document"
+        ? schemaService
+            .getIndexes(connectionId, namespace, collection.name)
+            .catch((error) => {
+              console.error(
+                `[LSP] Failed to fetch indexes for ${namespace}.${collection.name}:`,
+                error
+              );
+              return [];
+            })
+        : Promise.resolve([]),
+    ]);
+    return collectionToLspTableDefinition(
+      capabilities,
+      collection,
+      columns,
+      indexes
     );
-    return collectionToLspTableDefinition(capabilities, collection, columns);
   } catch (error) {
     console.error(
       `[LSP] Failed to fetch object fields for ${namespace}.${collection.name}:`,
