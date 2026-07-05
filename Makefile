@@ -1,4 +1,4 @@
-.PHONY: help setup install submodules dev start web preview build package test test-frontend test-rust test-lsp test-lsp-integration test-live-db check cargo-check lsp-build clean info
+.PHONY: help setup install submodules dev start web preview build package test test-frontend test-rust test-lsp test-lsp-integration test-live-db check cargo-check lsp-build ai ai-tools ai-manifest ai-mcp-smoke ai-plan clean info
 
 .DEFAULT_GOAL := help
 
@@ -8,6 +8,7 @@ CARGO ?= cargo
 ROOT_DIR := $(CURDIR)
 TAURI_MANIFEST := src-tauri/Cargo.toml
 LSP_MANIFEST := vendor/sql-lsp/Cargo.toml
+AI_MESSAGE ?= list available database providers
 
 COLOR_RESET := \033[0m
 COLOR_BOLD := \033[1m
@@ -68,6 +69,21 @@ cargo-check: ## Check the Tauri backend without producing final binaries.
 
 lsp-build: ## Build or copy the SQL LSP binary into src-tauri/binaries.
 	bash src-tauri/build_prepare.sh
+
+ai: ## Run the Oxide AI CLI. Usage: make ai ARGS="tools list"
+	$(NPM) run ai -- $(ARGS)
+
+ai-tools: ## List headless AI tools exposed to CLI and MCP clients.
+	$(NPM) run ai -- tools list
+
+ai-manifest: ## Print the policy-aware AI tool manifest.
+	$(NPM) run ai -- tools manifest
+
+ai-mcp-smoke: ## Verify the AI MCP JSON-RPC tools/list path.
+	$(NPM) run ai -- mcp request --json '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+ai-plan: ## Generate a deterministic AI plan. Usage: make ai-plan AI_MESSAGE="inspect metadata"
+	$(NPM) run ai -- assistant plan --message "$(AI_MESSAGE)"
 
 clean: ## Remove frontend and Rust build outputs.
 	rm -rf dist

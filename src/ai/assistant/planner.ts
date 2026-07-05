@@ -1,7 +1,10 @@
-import { evaluateAiToolPolicy } from "@/ai/tools";
+import { evaluateAiToolPolicy } from "@/ai/tools/policy";
 import { classifyAiQuerySafety } from "@/lib/querySafety";
 import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
-import type { AiToolExecutionPolicy, AiToolSummary } from "@/ai/tools";
+import type {
+  AiToolExecutionPolicy,
+  AiToolSummary,
+} from "@/ai/tools/types";
 import type {
   AssistantIntent,
   AssistantPlanner,

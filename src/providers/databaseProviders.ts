@@ -1,5 +1,5 @@
-import type { AiToolFamily } from "@/ai/tools";
-import { registerAiToolFamily } from "@/ai/tools";
+import type { AiToolFamily } from "@/ai/tools/families";
+import { registerAiToolFamily } from "@/ai/tools/families";
 import type { DatabaseDriverProfile } from "@/lib/databaseDialect";
 import { registerDatabaseDriverProfile } from "@/lib/databaseDialect";
 import type { DatabaseObjectPreviewProvider } from "@/lib/databaseObjectPreview";

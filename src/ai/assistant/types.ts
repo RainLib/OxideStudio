@@ -2,7 +2,7 @@ import type {
   AiToolExecutionContext,
   AiToolExecutionPolicy,
   AiToolSummary,
-} from "@/ai/tools";
+} from "@/ai/tools/types";
 
 export type AssistantIntent =
   | "metadata"

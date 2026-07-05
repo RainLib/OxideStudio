@@ -1,15 +1,19 @@
+import type { AiToolRegistry } from "@/ai/tools/registry";
 import {
-  AiToolRegistry,
   DEFAULT_AI_TOOL_POLICY,
   approveAiToolForPolicy,
-  createAiToolManifest,
-  createWorkspaceAiToolContext,
-  createWorkspaceAiToolRegistry,
-} from "@/ai/tools";
-import { createMcpProtocolAdapter } from "@/ai/mcp";
-import type { AiToolExecutionContext, AiToolExecutionPolicy } from "@/ai/tools";
-import { createAssistantRuntime } from "@/ai/assistant";
-import type { AssistantPlanner, AssistantTurnInput } from "@/ai/assistant";
+} from "@/ai/tools/policy";
+import { createAiToolManifest } from "@/ai/tools/manifest";
+import type {
+  AiToolExecutionContext,
+  AiToolExecutionPolicy,
+} from "@/ai/tools/types";
+import { createMcpProtocolAdapter } from "@/ai/mcp/protocol";
+import { createAssistantRuntime } from "@/ai/assistant/runtime";
+import type {
+  AssistantPlanner,
+  AssistantTurnInput,
+} from "@/ai/assistant/types";
 import type { CliInputReader, CliToolCommandResult } from "./types";
 
 export type CliToolAdapterOptions = {
@@ -36,8 +40,13 @@ export class CliToolAdapter {
   private readonly planner?: AssistantPlanner;
 
   constructor(options: CliToolAdapterOptions = {}) {
-    this.registry = options.registry ?? createWorkspaceAiToolRegistry();
-    this.createContext = options.createContext ?? createWorkspaceAiToolContext;
+    if (!options.registry || !options.createContext) {
+      throw new Error(
+        "CliToolAdapter requires registry and createContext options"
+      );
+    }
+    this.registry = options.registry;
+    this.createContext = options.createContext;
     this.readFile = options.readFile;
     this.policy = options.policy ?? DEFAULT_AI_TOOL_POLICY;
     this.planner = options.planner;

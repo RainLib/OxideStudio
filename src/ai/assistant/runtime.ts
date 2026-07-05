@@ -1,12 +1,13 @@
+import type { AiToolRegistry } from "@/ai/tools/registry";
 import {
-  AiToolRegistry,
   DEFAULT_AI_TOOL_POLICY,
   approveAiToolForPolicy,
-  createAiToolManifest,
-  createWorkspaceAiToolContext,
-  createWorkspaceAiToolRegistry,
-} from "@/ai/tools";
-import type { AiToolExecutionPolicy } from "@/ai/tools";
+} from "@/ai/tools/policy";
+import { createAiToolManifest } from "@/ai/tools/manifest";
+import type {
+  AiToolExecutionContext,
+  AiToolExecutionPolicy,
+} from "@/ai/tools/types";
 import { createDefaultAssistantPlanner } from "./planner";
 import type {
   AssistantPlanner,
@@ -22,8 +23,8 @@ import type {
 } from "./types";
 
 export type AssistantRuntimeOptions = {
-  registry?: AiToolRegistry;
-  createContext?: () => ReturnType<typeof createWorkspaceAiToolContext>;
+  registry: AiToolRegistry;
+  createContext: () => AiToolExecutionContext;
   policy?: AiToolExecutionPolicy;
   planner?: AssistantPlanner;
   summarizeToolResults?: AssistantToolResultSummarizer;
@@ -31,14 +32,14 @@ export type AssistantRuntimeOptions = {
 
 export class AssistantRuntime {
   private readonly registry: AiToolRegistry;
-  private readonly createContext: () => ReturnType<typeof createWorkspaceAiToolContext>;
+  private readonly createContext: () => AiToolExecutionContext;
   private readonly policy: AiToolExecutionPolicy;
   private readonly planner: AssistantPlanner;
   private readonly summarizeResults?: AssistantToolResultSummarizer;
 
-  constructor(options: AssistantRuntimeOptions = {}) {
-    this.registry = options.registry ?? createWorkspaceAiToolRegistry();
-    this.createContext = options.createContext ?? createWorkspaceAiToolContext;
+  constructor(options: AssistantRuntimeOptions) {
+    this.registry = options.registry;
+    this.createContext = options.createContext;
     this.policy = options.policy ?? DEFAULT_AI_TOOL_POLICY;
     this.planner = options.planner ?? createDefaultAssistantPlanner();
     this.summarizeResults = options.summarizeToolResults;
@@ -174,7 +175,7 @@ export class AssistantRuntime {
   }
 }
 
-export function createAssistantRuntime(options?: AssistantRuntimeOptions) {
+export function createAssistantRuntime(options: AssistantRuntimeOptions) {
   return new AssistantRuntime(options);
 }
 

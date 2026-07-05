@@ -1,8 +1,11 @@
 import {
   createAiToolManifest,
+  type AiToolManifest,
+} from "@/ai/tools/manifest";
+import {
   evaluateAiToolPolicy,
-} from "@/ai/tools";
-import type { AiToolExecutionContext, AiToolManifest } from "@/ai/tools";
+} from "@/ai/tools/policy";
+import type { AiToolExecutionContext } from "@/ai/tools/types";
 import { classifyAssistantIntent, createDefaultAssistantPlanner } from "./planner";
 import type {
   AssistantIntent,

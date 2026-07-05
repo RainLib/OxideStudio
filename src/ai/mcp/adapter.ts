@@ -1,18 +1,16 @@
+import type { AiToolRegistry } from "@/ai/tools/registry";
 import {
-  AiToolRegistry,
   DEFAULT_AI_TOOL_POLICY,
   approveAiToolForPolicy,
-  createAiToolManifest,
-  createWorkspaceAiToolContext,
-  createWorkspaceAiToolRegistry,
-} from "@/ai/tools";
+} from "@/ai/tools/policy";
+import { createAiToolManifest } from "@/ai/tools/manifest";
 import type {
   AiToolCapability,
   AiToolExecutionContext,
   AiToolExecutionPolicy,
   AiToolPermission,
   AiToolSummary,
-} from "@/ai/tools";
+} from "@/ai/tools/types";
 import type {
   McpTool,
   McpToolAnnotations,
@@ -36,8 +34,13 @@ export class McpToolAdapter {
   private readonly policy: AiToolExecutionPolicy;
 
   constructor(options: McpToolAdapterOptions = {}) {
-    this.registry = options.registry ?? createWorkspaceAiToolRegistry();
-    this.createContext = options.createContext ?? createWorkspaceAiToolContext;
+    if (!options.registry || !options.createContext) {
+      throw new Error(
+        "McpToolAdapter requires registry and createContext options"
+      );
+    }
+    this.registry = options.registry;
+    this.createContext = options.createContext;
     this.policy = options.policy ?? DEFAULT_AI_TOOL_POLICY;
   }
 

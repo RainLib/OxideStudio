@@ -156,6 +156,7 @@ describe("workspace AI tools", () => {
 
   it("plans metadata description for the active object before listing objects", async () => {
     const runtime = createAssistantRuntime({
+      registry: createWorkspaceAiToolRegistry(),
       createContext: () => createWorkspaceAiToolContext("workspace-ai-test"),
     });
 

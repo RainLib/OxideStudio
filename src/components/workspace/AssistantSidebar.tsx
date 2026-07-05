@@ -1,18 +1,29 @@
 import { Button } from "@/components/ui/button";
-import { createAssistantRuntime } from "@/ai";
+import { createAssistantRuntime } from "@/ai/assistant/runtime";
+import {
+  createWorkspaceAiToolContext,
+  createWorkspaceAiToolRegistry,
+} from "@/ai/tools/defaultRegistry";
 import { useTabStore } from "@/store/useTabStore";
 import type {
   AssistantPlanStep,
   AssistantPreparedTurn,
   AssistantToolCallResult,
   AssistantToolResultSummary,
-} from "@/ai";
+} from "@/ai/assistant/types";
 import { cn } from "@/lib/utils";
 import { ListChecks, Play, ShieldCheck, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
 
 export function AssistantSidebar() {
-  const runtime = useMemo(() => createAssistantRuntime(), []);
+  const runtime = useMemo(
+    () =>
+      createAssistantRuntime({
+        registry: createWorkspaceAiToolRegistry(),
+        createContext: createWorkspaceAiToolContext,
+      }),
+    []
+  );
   const { tabs, activeTabId } = useTabStore();
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
   const selectedText = activeTab?.editorSelection?.text || null;
