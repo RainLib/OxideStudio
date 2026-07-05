@@ -30,6 +30,8 @@ const SUPPORTED_LSP_DIALECTS = new Set([
   "elasticsearch-dsl",
   "clickhouse",
   "redis",
+  "mongodb",
+  "json",
 ]);
 
 const DATABASE_DRIVER_PROFILES: Record<
@@ -268,7 +270,7 @@ const DATABASE_DRIVER_PROFILES: Record<
     capabilities: {
       displayName: "MongoDB",
       dataModel: "document",
-      lspLanguageId: "json",
+      lspLanguageId: "mongodb",
       namespaceLabel: "database",
       identifierQuote: "",
       defaultPort: 27017,

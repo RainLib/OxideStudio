@@ -16,10 +16,10 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 6: Relational schema synchronization through `LspConnectionSyncer`
 - Phase 7: Bounded Redis key and Elasticsearch index context synchronization through the LSP schema model
 - Phase 8: Non-blocking Tauri command lifecycle; LSP requests clone the manager handle before awaiting server responses
+- Phase 9: MongoDB/JSON dialect support in `lsp_sqls` with bounded collection context synchronization
 
 ⏳ **Pending:**
 
-- MongoDB/JSON dialect support in `lsp_sqls`
 - Additional live integration coverage for Redis, MongoDB, and Elasticsearch LSP paths
 
 ## Setup Instructions
@@ -33,7 +33,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-3-g789e7d5`.
+Current tracked revision is `v0.1.3-4-g4971175`.
 
 ### 2. Prepare the Binary
 
@@ -111,7 +111,7 @@ function QueryEditor() {
 
 ## Schema Synchronization
 
-`LspConnectionSyncer` sends bounded schema snapshots when the active connection, schema, metadata version, or open query tabs change. Relational databases sync tables, columns, indexes, constraints, and functions. Redis and Elasticsearch sync keys/indices as LSP table objects with lightweight synthetic columns. MongoDB remains JSON-editor-only until `lsp_sqls` has a MongoDB or generic JSON dialect.
+`LspConnectionSyncer` sends bounded schema snapshots when the active connection, schema, metadata version, or open query tabs change. Relational databases sync tables, columns, indexes, constraints, and functions. Redis keys, Elasticsearch indices, and MongoDB collections sync as LSP table objects with lightweight synthetic columns.
 
 ```typescript
 await lspClient.updateConfiguration({
