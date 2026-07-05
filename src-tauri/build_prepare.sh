@@ -15,6 +15,18 @@ fi
 
 TARGET_BINARY="${BINARIES_DIR}/${BINARY_NAME}"
 
+copy_binary_if_changed() {
+    local source_binary="$1"
+    local target_binary="$2"
+
+    if [[ -f "${target_binary}" ]] && cmp -s "${source_binary}" "${target_binary}"; then
+        echo "SQL LSP binary unchanged; keeping existing target"
+        return
+    fi
+
+    cp "${source_binary}" "${target_binary}"
+}
+
 echo "=== SQL LSP Build Preparation ==="
 echo "Target: ${TARGET_BINARY}"
 
@@ -27,7 +39,7 @@ if [[ -n "${OXIDE_SQL_LSP_BINARY:-}" ]]; then
     fi
 
     echo "Using override binary: ${OXIDE_SQL_LSP_BINARY}"
-    cp "${OXIDE_SQL_LSP_BINARY}" "${TARGET_BINARY}"
+    copy_binary_if_changed "${OXIDE_SQL_LSP_BINARY}" "${TARGET_BINARY}"
 else
     if [[ ! -f "${LSP_SOURCE_DIR}/Cargo.toml" ]]; then
         echo "SQL LSP submodule is missing at ${LSP_SOURCE_DIR}" >&2
@@ -44,8 +56,10 @@ else
         exit 1
     fi
 
-    cp "${BUILT_BINARY}" "${TARGET_BINARY}"
+    copy_binary_if_changed "${BUILT_BINARY}" "${TARGET_BINARY}"
 fi
 
-chmod +x "${TARGET_BINARY}" 2>/dev/null || true
+if [[ ! -x "${TARGET_BINARY}" ]]; then
+    chmod +x "${TARGET_BINARY}" 2>/dev/null || true
+fi
 echo "SQL LSP binary ready at ${TARGET_BINARY}"
