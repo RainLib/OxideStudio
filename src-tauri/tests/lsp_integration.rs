@@ -178,7 +178,7 @@ impl LspProcess {
 }
 
 #[tokio::test]
-async fn bundled_sql_lsp_serves_nosql_schema_completions() -> Result<()> {
+async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
         return Ok(());
     };
@@ -256,14 +256,26 @@ async fn bundled_sql_lsp_serves_nosql_schema_completions() -> Result<()> {
                             column("email", "keyword")
                         ]
                     ),
-                    schema(
+                    schema_with_tables(
                         "44444444-4444-4444-8444-444444444444",
                         "public",
-                        "webhook",
-                        "table",
                         vec![
-                            column("owner", "varchar"),
-                            column("name", "varchar")
+                            table(
+                                "webhook",
+                                "table",
+                                vec![
+                                    column("owner", "varchar"),
+                                    column("name", "varchar")
+                                ]
+                            ),
+                            table(
+                                "form",
+                                "table",
+                                vec![
+                                    column("form_background_url", "varchar"),
+                                    column("form_css", "text")
+                                ]
+                            )
                         ]
                     )
                 ],
@@ -277,12 +289,12 @@ async fn bundled_sql_lsp_serves_nosql_schema_completions() -> Result<()> {
     open_document(&mut lsp, redis_uri, "redis", "").await?;
     open_document(&mut lsp, mongodb_uri, "mongodb", "").await?;
     open_document(&mut lsp, elasticsearch_uri, "elasticsearch-dsl", "").await?;
-    open_document(&mut lsp, postgres_uri, "postgres", "SELECT * FROM").await?;
+    open_document(&mut lsp, postgres_uri, "postgres", "SELECT * from").await?;
     open_document(
         &mut lsp,
         postgres_where_uri,
         "postgres",
-        "SELECT * FROM webhook WHERE",
+        "SELECT * from public.webhook where ",
     )
     .await?;
 
@@ -293,18 +305,54 @@ async fn bundled_sql_lsp_serves_nosql_schema_completions() -> Result<()> {
         &mut lsp,
         postgres_uri,
         0,
-        "SELECT * FROM".len() as u32,
-        &["public.webhook"],
+        "SELECT * from".len() as u32,
+        &["public.webhook", "public.form"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_uri,
+        0,
+        "SELECT * from".len() as u32,
+        &["owner", "name", "form_background_url"],
     )
     .await?;
     assert_completion_at_contains(
         &mut lsp,
         postgres_where_uri,
         0,
-        "SELECT * FROM webhook WHERE".len() as u32,
+        "SELECT * from public.webhook where ".len() as u32,
         &["owner", "name"],
     )
     .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_where_uri,
+        0,
+        "SELECT * from public.webhook where ".len() as u32,
+        &["form_background_url", "form_css"],
+    )
+    .await?;
+    let postgres_where_labels = completion_labels_at(
+        &mut lsp,
+        postgres_where_uri,
+        0,
+        "SELECT * from public.webhook where ".len() as u32,
+    )
+    .await?;
+    let first_two_where_labels = postgres_where_labels.iter().take(2).collect::<Vec<_>>();
+    if !first_two_where_labels
+        .iter()
+        .any(|label| label.as_str() == "owner")
+        || !first_two_where_labels
+            .iter()
+            .any(|label| label.as_str() == "name")
+    {
+        bail!(
+            "WHERE completion should prioritize current table columns; labels: {:?}",
+            postgres_where_labels
+        );
+    }
 
     lsp.shutdown().await
 }
@@ -344,6 +392,42 @@ async fn assert_completion_at_contains(
     character: u32,
     expected_labels: &[&str],
 ) -> Result<()> {
+    let mut labels = completion_labels_at(lsp, uri, line, character).await?;
+    labels.sort();
+
+    for expected in expected_labels {
+        if !labels.iter().any(|label| label == expected) {
+            bail!("missing completion label {expected:?} for {uri}; labels: {labels:?}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn assert_completion_at_excludes(
+    lsp: &mut LspProcess,
+    uri: &str,
+    line: u32,
+    character: u32,
+    excluded_labels: &[&str],
+) -> Result<()> {
+    let labels = completion_labels_at(lsp, uri, line, character).await?;
+
+    for excluded in excluded_labels {
+        if labels.iter().any(|label| label == excluded) {
+            bail!("unexpected completion label {excluded:?} for {uri}; labels: {labels:?}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn completion_labels_at(
+    lsp: &mut LspProcess,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> Result<Vec<String>> {
     let result = lsp
         .request(
             "textDocument/completion",
@@ -362,16 +446,7 @@ async fn assert_completion_at_contains(
         )
         .await?;
 
-    let mut labels = completion_labels(&result);
-    labels.sort();
-
-    for expected in expected_labels {
-        if !labels.iter().any(|label| label == expected) {
-            bail!("missing completion label {expected:?} for {uri}; labels: {labels:?}");
-        }
-    }
-
-    Ok(())
+    Ok(completion_labels(&result))
 }
 
 fn completion_labels(result: &Value) -> Vec<String> {
@@ -394,21 +469,27 @@ fn schema(
     object_type: &str,
     columns: Vec<Value>,
 ) -> Value {
+    schema_with_tables(id, database, vec![table(table_name, object_type, columns)])
+}
+
+fn schema_with_tables(id: &str, database: &str, tables: Vec<Value>) -> Value {
     json!({
         "id": id,
         "database": database,
-        "tables": [
-            {
-                "name": table_name,
-                "object_type": object_type,
-                "columns": columns,
-                "indexes": [],
-                "constraints": [],
-                "comment": null
-            }
-        ],
+        "tables": tables,
         "functions": [],
         "source_uri": null
+    })
+}
+
+fn table(name: &str, object_type: &str, columns: Vec<Value>) -> Value {
+    json!({
+        "name": name,
+        "object_type": object_type,
+        "columns": columns,
+        "indexes": [],
+        "constraints": [],
+        "comment": null
     })
 }
 
