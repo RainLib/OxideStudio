@@ -214,6 +214,7 @@ export function SchemaSidebar() {
       : "Objects";
   const namespaceLabel = activeCapabilities.namespaceLabel || "database";
   const namespaceLabelPlural = pluralizeNamespaceLabel(namespaceLabel);
+  const canMutateNamespaces = activeCapabilities.supportsCreateDatabase;
 
   const handleRenameClick = (table: TableInfo) => {
     setActiveTable(table.name);
@@ -589,6 +590,13 @@ export function SchemaSidebar() {
 
   const handleDropDatabase = async () => {
     if (!activeConnectionId || !currentSchema) return;
+    if (!canMutateNamespaces) {
+      setNamespaceError(
+        `${activeCapabilities.displayName} ${namespaceLabel} deletion is not supported.`
+      );
+      return;
+    }
+
     const confirmed = window.confirm(
       `Drop ${namespaceLabel} "${currentSchema}" and all contained objects? This cannot be undone.`
     );
@@ -752,8 +760,12 @@ export function SchemaSidebar() {
             size="icon"
             className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive hover:bg-background-tertiary rounded-sm"
             onClick={handleDropDatabase}
-            title={`Drop ${namespaceLabel}`}
-            disabled={!currentSchema}
+            title={
+              canMutateNamespaces
+                ? `Drop ${namespaceLabel}`
+                : `${activeCapabilities.displayName} ${namespaceLabel} deletion is not supported`
+            }
+            disabled={!currentSchema || !canMutateNamespaces}
           >
             <Trash2 size={12} />
           </Button>
