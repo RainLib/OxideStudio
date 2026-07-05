@@ -161,6 +161,51 @@ describe("AI CLI adapter", () => {
     expect(approved.exitCode).toBe(0);
     expect(JSON.parse(approved.stdout)).toMatchObject({ mode: "write" });
   });
+
+  it("passes MCP JSON-RPC requests through the CLI adapter", async () => {
+    const cli = createCliToolAdapter({
+      registry: createTestRegistry(),
+      createContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+      readFile: async (path) => {
+        if (path !== "tools-list.json") throw new Error(`unexpected path: ${path}`);
+        return '{"jsonrpc":"2.0","id":2,"method":"tools/list"}';
+      },
+    });
+
+    const initialize = await cli.run([
+      "mcp",
+      "request",
+      "--json",
+      '{"jsonrpc":"2.0","id":1,"method":"initialize"}',
+    ]);
+    const toolsList = await cli.run([
+      "mcp",
+      "request",
+      "--json-file",
+      "tools-list.json",
+    ]);
+
+    expect(initialize.exitCode).toBe(0);
+    expect(JSON.parse(initialize.stdout)).toMatchObject({
+      id: 1,
+      result: {
+        serverInfo: {
+          name: "oxide-studio",
+        },
+      },
+    });
+    expect(toolsList.exitCode).toBe(0);
+    expect(JSON.parse(toolsList.stdout)).toMatchObject({
+      id: 2,
+      result: {
+        tools: [
+          expect.objectContaining({ name: "demo.read" }),
+          expect.objectContaining({ name: "demo.write" }),
+        ],
+      },
+    });
+  });
 });
 
 describe("LangGraph planner bridge", () => {
