@@ -1,4 +1,4 @@
-import { evaluateAiToolPolicy } from "@/ai/tools";
+import { classifyAiQuerySafety, evaluateAiToolPolicy } from "@/ai/tools";
 import type { AiToolExecutionPolicy, AiToolSummary } from "@/ai/tools";
 import type {
   AssistantIntent,
@@ -165,55 +165,12 @@ function selectedMutationTool(
   hasTool: (name: string) => boolean
 ) {
   if (!query) return null;
-  if (looksDestructiveSelection(query, activeDriver)) {
+  const safety = classifyAiQuerySafety(query, activeDriver);
+  if (safety === "destructive") {
     return hasTool("query.runDestructive") ? "query.runDestructive" : null;
   }
-  if (looksMutationSelection(query, activeDriver)) {
+  if (safety === "write") {
     return hasTool("query.runMutation") ? "query.runMutation" : null;
   }
   return null;
-}
-
-function looksMutationSelection(query: string, activeDriver?: string | null) {
-  const normalized = query.trim().toLowerCase();
-  if (!normalized) return false;
-
-  const driver = String(activeDriver || "").toLowerCase();
-  if (driver === "redis") {
-    return /^(append|decr|decrby|expire|hset|hmset|incr|incrby|json\.set|lpush|pfadd|rename|rpush|sadd|set|setex|setnx|xadd|zadd)\b/i.test(
-      query.trim()
-    );
-  }
-  if (driver === "mongodb" || driver === "mongo") {
-    return /"(insertOne|insertMany|updateOne|updateMany|command)"/i.test(query);
-  }
-  if (driver === "elasticsearch" || driver === "elastic") {
-    return /^(POST|PUT|PATCH)\s+\//i.test(query.trim());
-  }
-
-  return /^(alter|call|comment|copy|create|grant|insert|load|merge|replace|revoke|set|update|vacuum)\b/.test(
-    normalized
-  );
-}
-
-function looksDestructiveSelection(query: string, activeDriver?: string | null) {
-  const normalized = query.trim().toLowerCase();
-  if (!normalized) return false;
-
-  const driver = String(activeDriver || "").toLowerCase();
-  if (driver === "redis") {
-    return /^(del|discard|eval|evalsha|flushall|flushdb|ft\.dropindex|hdel|json\.del|lpop|rpop|srem|unlink|xdel|zrem)\b/i.test(
-      query.trim()
-    );
-  }
-  if (driver === "mongodb" || driver === "mongo") {
-    return /"(collMod|deleteOne|deleteMany|drop|dropDatabase|renameCollection)"/i.test(
-      query
-    );
-  }
-  if (driver === "elasticsearch" || driver === "elastic") {
-    return /^DELETE\s+\//i.test(query.trim()) || query.includes("_delete_by_query");
-  }
-
-  return /^(delete|drop|truncate)\b/.test(normalized);
 }

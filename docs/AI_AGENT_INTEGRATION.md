@@ -26,6 +26,7 @@ This keeps the editor integration direct and state-aware while allowing external
 - `src/ai/tools` defines the shared registry, metadata/query tools, result limits, audit hooks, and permission policy.
 - `src/ai/tools/families.ts` provides the tool family extension point used by core database, table, document, key-value, and search tools.
 - `src/ai/tools/manifest.ts` exports a portable tool manifest with schemas, permissions, capabilities, and approval status for MCP, CLI, and planner hosts.
+- `src/ai/tools/querySafety.ts` centralizes read/write/destructive classification for SQL, MongoDB, Redis, and Elasticsearch so planners and executors make the same safety decision.
 - `src/ai/assistant` exposes an `AssistantPlanner` contract, a deterministic fallback planner, and approval-aware execution for AI-proposed tool calls.
 - `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
 - `src/ai/cli` provides a dependency-light command adapter for `tools list` and `tools call`.
