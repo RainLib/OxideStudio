@@ -442,6 +442,22 @@ export function SchemaSidebar() {
       name
     );
 
+  const refreshCollectionObjects = async () => {
+    if (!activeConnectionId || !currentSchema || !canBrowseCollections) return;
+    await loadCollections(activeConnectionId, currentSchema, true);
+    bumpMetadataVersion();
+  };
+
+  const runCollectionMutation = async (tabId: string, sql: string) => {
+    if (!activeConnectionId) return;
+
+    await runTabQuery(tabId, activeConnectionId, sql);
+    const tab = useTabStore.getState().tabs.find((item) => item.id === tabId);
+    if (!tab?.error) {
+      await refreshCollectionObjects();
+    }
+  };
+
   const handleCollectionDoubleClick = (collection: CollectionInfo) => {
     if (!activeConnectionId) return;
 
@@ -491,7 +507,7 @@ export function SchemaSidebar() {
       tableName: collection.name,
       objectType: collection.type || null,
     });
-    void runTabQuery(tabId, activeConnectionId, sql);
+    void runCollectionMutation(tabId, sql);
   };
 
   const handleCreateCollectionClick = () => {
@@ -511,12 +527,13 @@ export function SchemaSidebar() {
       return;
     }
 
-    createTab("query", `Create ${collectionLabel}: ${name}`, sql, {
+    const tabId = createTab("query", `Create ${collectionLabel}: ${name}`, sql, {
       connectionId: activeConnectionId,
       schemaName: currentSchema || undefined,
       tableName: name,
       objectType: collectionLabel.toLowerCase(),
     });
+    void runCollectionMutation(tabId, sql);
   };
 
   // Highlight matching text
