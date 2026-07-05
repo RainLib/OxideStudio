@@ -53,10 +53,12 @@ Write tools behind explicit approvals:
 
 - `query.runMutation`
 - `query.runDestructive`
+- `table.insertRows`
+- `table.updateRows`
+- `table.deleteRows`
 
 Future tool families:
 
-- `table.updateRows`, `table.deleteRows`
 - `database.createNamespace`, `database.dropNamespace`
 - structured document/key/search mutations for MongoDB, Redis, and Elasticsearch
 - `lsp.complete`, `lsp.explainDiagnostics`
@@ -88,7 +90,7 @@ For the editor itself, prefer direct TypeScript orchestration over MCP. The edit
 1. Add `src/ai/tools` with registry types, schemas, and read-only database tools. Done.
 2. Add an assistant panel backed by the registry executor. Done.
 3. Add MCP and CLI adapters over the same registry. Done.
-4. Add write tools with approval gates and audit logging. Done for query-level mutation/destructive tools.
+4. Add write tools with approval gates and audit logging. Done for query-level mutation/destructive tools and structured table row mutations.
 5. Add a LangGraph-backed planner that chooses tool calls, pauses for approval, and feeds results back into the model.
-6. Add structured write tools for tables, documents, keys, and search indexes.
+6. Add structured write tools for documents, keys, and search indexes.
 7. Add provider/plugin hooks so new databases register tools by capability, not by UI rewrites.

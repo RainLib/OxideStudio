@@ -7,6 +7,9 @@ import type {
   IndexInfo,
   QueryResult,
   TableInfo,
+  TableMutationResult,
+  TableRowDelete,
+  TableRowUpdate,
 } from "@/services/tauri/types";
 
 export type AiToolPermission = "read" | "write" | "destructive" | "external";
@@ -112,6 +115,15 @@ export type AiMutationQueryInput = {
   query: string;
 };
 
+export type AiTableMutationInput = {
+  connectionId?: string | null;
+  namespace?: string | null;
+  table: string;
+  inserts?: Array<Record<string, unknown>>;
+  updates?: TableRowUpdate[];
+  deletes?: TableRowDelete[];
+};
+
 export type AiDescribeObjectInput = {
   connectionId?: string | null;
   namespace?: string | null;
@@ -174,4 +186,8 @@ export type AiToolAdapters = {
     input: AiMutationQueryInput,
     context: AiToolExecutionContext
   ) => Promise<QueryResult[]> | QueryResult[];
+  mutateTableRows?: (
+    input: AiTableMutationInput,
+    context: AiToolExecutionContext
+  ) => Promise<TableMutationResult> | TableMutationResult;
 };

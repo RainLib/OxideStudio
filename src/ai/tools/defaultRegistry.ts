@@ -1,4 +1,9 @@
-import { databaseService, queryService, schemaService } from "@/services/tauri";
+import {
+  databaseService,
+  queryService,
+  schemaService,
+  tableService,
+} from "@/services/tauri";
 import type { QueryResult } from "@/services/tauri/types";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
@@ -11,6 +16,7 @@ import type {
   AiObjectDescription,
   AiObjectKind,
   AiObjectSummary,
+  AiTableMutationInput,
   AiToolAdapters,
   AiToolExecutionContext,
   AiWorkspaceTabSummary,
@@ -95,7 +101,35 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
 
       return queryService.executeQuery(connectionId, input.query);
     },
+
+    mutateTableRows: async (input, context) => mutateTableRows(input, context),
   };
+}
+
+async function mutateTableRows(
+  input: AiTableMutationInput,
+  context: AiToolExecutionContext
+) {
+  const { connectionId, namespace, driver, capabilities } =
+    await resolveMetadataTarget(
+      input.connectionId,
+      input.namespace,
+      context,
+      "table.mutateRows"
+    );
+  if (!capabilities.supportsTableBrowsing) {
+    throw new Error(`${capabilities.displayName} does not support table row mutation`);
+  }
+
+  return tableService.mutateTableRows(
+    connectionId,
+    driver,
+    namespace,
+    input.table,
+    input.inserts ?? [],
+    input.updates ?? [],
+    input.deletes ?? []
+  );
 }
 
 async function listObjects(
