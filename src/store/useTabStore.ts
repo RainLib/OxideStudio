@@ -800,6 +800,17 @@ export const useTabStore = create<TabState>((set, get) => ({
       if (!refreshedTab?.tableColumns) {
         // Still missing
         console.error("Failed to fetch metadata, cannot save.");
+        set((state) => ({
+          tabs: state.tabs.map((t) =>
+            t.id === tabId
+              ? {
+                  ...t,
+                  error:
+                    "Cannot save edits because column metadata is unavailable.",
+                }
+              : t
+          ),
+        }));
         // Clear edits to avoid stuck state? No, let user retry.
         return;
       }
@@ -816,6 +827,20 @@ export const useTabStore = create<TabState>((set, get) => ({
       const c = parseInt(cStr!);
       if (!editsByRow.has(r)) editsByRow.set(r, {});
       editsByRow.get(r)![c] = value;
+    }
+
+    const hasExistingRowEdits = Array.from(editsByRow.keys()).some(
+      (rowIndex) => rowIndex >= 0
+    );
+    if (hasExistingRowEdits && pks.length === 0) {
+      const message = `Cannot update rows in "${table}" because no primary key is available.`;
+      console.warn(message);
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId ? { ...t, error: message } : t
+        ),
+      }));
+      return;
     }
 
     const connId =
@@ -886,13 +911,25 @@ export const useTabStore = create<TabState>((set, get) => ({
 
     if (inserts.length === 0 && updates.length === 0) {
       // Nothing to do or failed to generate
-      console.log("No table mutations generated");
+      const message = "No saveable table mutations were generated.";
+      console.log(message);
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId ? { ...t, error: message } : t
+        ),
+      }));
       return;
     }
 
     try {
       if (!connId) {
-        console.error("No connection ID found");
+        const message = "No connection ID found for table mutation.";
+        console.error(message);
+        set((state) => ({
+          tabs: state.tabs.map((t) =>
+            t.id === tabId ? { ...t, error: message } : t
+          ),
+        }));
         return;
       }
 
@@ -922,12 +959,18 @@ export const useTabStore = create<TabState>((set, get) => ({
       set((state) => ({
         tabs: state.tabs.map((t) =>
           t.id === tabId
-            ? { ...t, pendingEdits: new Map(), newRowsCount: 0 }
+            ? { ...t, pendingEdits: new Map(), newRowsCount: 0, error: null }
             : t
         ),
       }));
     } catch (e) {
       console.error("Save failed:", e);
+      const message = e instanceof Error ? e.message : String(e);
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId ? { ...t, error: `Save failed: ${message}` } : t
+        ),
+      }));
       // Don't clear edits on error
     }
   },
@@ -951,7 +994,13 @@ export const useTabStore = create<TabState>((set, get) => ({
 
     const pks = currentTab.tableColumns?.filter((c) => c.is_primary_key) || [];
     if (pks.length === 0) {
-      console.warn("No Primary Key found for table:", table);
+      const message = `Cannot delete rows from "${table}" because no primary key is available.`;
+      console.warn(message);
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId ? { ...t, error: message } : t
+        ),
+      }));
       return;
     }
 
@@ -986,7 +1035,15 @@ export const useTabStore = create<TabState>((set, get) => ({
       }
     }
 
-    if (deletes.length === 0) return;
+    if (deletes.length === 0) {
+      const message = "No deleteable rows were generated from the selection.";
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId ? { ...t, error: message } : t
+        ),
+      }));
+      return;
+    }
 
     try {
       await tableService.mutateTableRows(
@@ -1006,6 +1063,12 @@ export const useTabStore = create<TabState>((set, get) => ({
       );
     } catch (e) {
       console.error("Delete rows failed:", e);
+      const message = e instanceof Error ? e.message : String(e);
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId ? { ...t, error: `Delete rows failed: ${message}` } : t
+        ),
+      }));
     }
   },
 
