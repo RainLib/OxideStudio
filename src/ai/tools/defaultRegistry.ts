@@ -17,6 +17,7 @@ import { useTabStore, type EditorSelectionState } from "@/store/useTabStore";
 import { lspLanguageId, supportsLspLanguageId } from "@/lib/databaseDialect";
 import { registerCoreAiTools } from "./coreTools";
 import { createAiToolRegistry } from "./registry";
+import type { AiToolFamily } from "./families";
 import type {
   AiDescribeObjectInput,
   AiDocumentMutationInput,
@@ -38,10 +39,17 @@ import type {
   AiWorkspaceTabSummary,
 } from "./types";
 
-export function createWorkspaceAiToolRegistry() {
+export type WorkspaceAiToolRegistryOptions = {
+  families?: AiToolFamily[];
+};
+
+export function createWorkspaceAiToolRegistry(
+  options: WorkspaceAiToolRegistryOptions = {}
+) {
   return registerCoreAiTools(
     createAiToolRegistry(),
-    createWorkspaceAiToolAdapters()
+    createWorkspaceAiToolAdapters(),
+    options.families
   );
 }
 

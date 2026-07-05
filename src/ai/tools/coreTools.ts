@@ -5,7 +5,7 @@ import type {
 } from "./types";
 import type { AiToolRegistry } from "./registry";
 import type { AiToolFamily } from "./families";
-import { registerAiToolFamilies } from "./families";
+import { mergeAiToolFamilies, registerAiToolFamilies } from "./families";
 import type {
   DatabaseDriver,
   TableRowDelete,
@@ -102,7 +102,7 @@ export const CORE_AI_TOOL_FAMILIES: AiToolFamily[] = [
 export function registerCoreAiTools(
   registry: AiToolRegistry,
   adapters: AiToolAdapters,
-  families: AiToolFamily[] = CORE_AI_TOOL_FAMILIES
+  families: AiToolFamily[] = mergeAiToolFamilies(CORE_AI_TOOL_FAMILIES)
 ) {
   return registerAiToolFamilies(registry, adapters, families);
 }
