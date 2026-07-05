@@ -7,6 +7,7 @@ import type { AiToolRegistry } from "./registry";
 import type { AiToolFamily } from "./families";
 import { mergeAiToolFamilies, registerAiToolFamilies } from "./families";
 import type {
+  DatabaseCapabilities,
   DatabaseDriver,
   TableRowDelete,
   TableRowUpdate,
@@ -15,7 +16,10 @@ import {
   classifyAiQuerySafety,
   looksAiQueryReadOnly,
 } from "@/lib/querySafety";
-import { supportedDatabaseDriverProfiles } from "@/lib/databaseDialect";
+import {
+  supportedDatabaseDriverProfiles,
+  supportsLspLanguageId,
+} from "@/lib/databaseDialect";
 import { listRegisteredDatabaseProviders } from "@/providers";
 
 const DEFAULT_QUERY_LIMIT = 200;
@@ -184,22 +188,84 @@ function providerListTool(): AiToolDefinition {
           (family) => family.name
         ),
       })),
-      driverProfiles: supportedDatabaseDriverProfiles().map((profile) => ({
-        driver: profile.driver,
-        menuLabel: profile.menuLabel,
-        displayName: profile.capabilities.displayName,
-        dataModel: profile.capabilities.dataModel,
-        lspLanguageId: profile.capabilities.lspLanguageId,
-        namespaceLabel: profile.capabilities.namespaceLabel,
-        defaultPort: profile.capabilities.defaultPort,
-        supportsSqlQuery: profile.capabilities.supportsSqlQuery,
-        supportsTableBrowsing: profile.capabilities.supportsTableBrowsing,
-        supportsCollectionBrowsing:
-          profile.capabilities.supportsCollectionBrowsing,
-        supportsKeyValueBrowsing: profile.capabilities.supportsKeyValueBrowsing,
-      })),
+      driverProfiles: supportedDatabaseDriverProfiles().map((profile) => {
+        const capabilities = {
+          driver: profile.driver,
+          ...profile.capabilities,
+        } satisfies DatabaseCapabilities;
+        return {
+          driver: profile.driver,
+          menuLabel: profile.menuLabel,
+          displayName: profile.capabilities.displayName,
+          dataModel: profile.capabilities.dataModel,
+          lspLanguageId: profile.capabilities.lspLanguageId,
+          namespaceLabel: profile.capabilities.namespaceLabel,
+          defaultPort: profile.capabilities.defaultPort,
+          capabilities,
+          aiToolHints: aiToolHintsForCapabilities(capabilities),
+        };
+      }),
     }),
   };
+}
+
+function aiToolHintsForCapabilities(capabilities: DatabaseCapabilities) {
+  const read = [
+    "connection.capabilities",
+    "metadata.listObjects",
+    "metadata.describeObject",
+    "query.runReadOnly",
+  ];
+  const metadata = ["metadata.listObjects", "metadata.describeObject"];
+  const write = ["query.runMutation"];
+  const destructive = ["query.runDestructive"];
+  const lsp: string[] = [];
+
+  if (
+    capabilities.supportsCollectionBrowsing ||
+    capabilities.supportsKeyValueBrowsing
+  ) {
+    read.push("metadata.listCollections");
+    metadata.push("metadata.listCollections");
+  }
+
+  if (capabilities.supportsCreateDatabase) {
+    write.push("database.createNamespace");
+    destructive.push("database.dropNamespace");
+  }
+
+  if (capabilities.supportsTableBrowsing) {
+    write.push("table.insertRows", "table.updateRows");
+    destructive.push("table.deleteRows");
+  }
+
+  if (capabilities.dataModel === "document") {
+    write.push("document.insertDocuments", "document.updateDocuments");
+    destructive.push("document.deleteDocuments");
+  } else if (capabilities.dataModel === "keyValue") {
+    write.push("key.setValue");
+    destructive.push("key.deleteKeys");
+  } else if (capabilities.dataModel === "search") {
+    write.push("search.indexDocument", "search.updateDocument");
+    destructive.push("search.deleteDocument");
+  }
+
+  if (supportsLspLanguageId(capabilities.driver)) {
+    lsp.push("lsp.getCompletions", "lsp.explainDiagnostics");
+    read.push(...lsp);
+  }
+
+  return {
+    read: uniqueToolNames(read),
+    metadata: uniqueToolNames(metadata),
+    write: uniqueToolNames(write),
+    destructive: uniqueToolNames(destructive),
+    lsp: uniqueToolNames(lsp),
+  };
+}
+
+function uniqueToolNames(names: string[]) {
+  return Array.from(new Set(names));
 }
 
 function activeTabTool(adapters: AiToolAdapters): AiToolDefinition {

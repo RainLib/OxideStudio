@@ -26,7 +26,7 @@ This keeps the editor integration direct and state-aware while allowing external
 - `src/ai/tools` defines the shared registry, metadata/query tools, result limits, audit hooks, and permission policy.
 - `src/ai/tools/families.ts` provides runtime `AiToolFamily` registration and merging, so database/provider packages can add tool families without editing the core registry.
 - `src/providers` exposes `registerDatabaseProvider` to bundle driver profiles, object preview behavior, and AI tool families behind one provider registration call.
-- `provider.list` exposes registered providers and driver capability summaries so planners, MCP clients, and CLI scripts can discover backend support before choosing tools.
+- `provider.list` exposes registered providers, full driver capability summaries, and recommended AI tool hints so planners, MCP clients, and CLI scripts can discover backend support before choosing tools.
 - `src/ai/tools/manifest.ts` exports a portable tool manifest with schemas, permissions, capabilities, and approval status for MCP, CLI, and planner hosts.
 - `src/lib/querySafety.ts` centralizes read/write/destructive classification for SQL, MongoDB, Redis, and Elasticsearch so planners and executors make the same safety decision.
 - `src/ai/assistant` exposes an `AssistantPlanner` contract, a deterministic fallback planner, a provider-neutral model planner, and approval-aware execution for AI-proposed tool calls.
@@ -129,7 +129,7 @@ Recommended usage:
 - Require approval for mutations, exports, drops, and external network access.
 - Do not auto-approve writes in MCP or CLI adapters; external callers must pass an explicit approval signal such as CLI `--approve`.
 - Store an audit entry for request id, tool name, permissions, status, duration, and failure reason without persisting raw query text by default.
-- Prefer capability checks over driver name checks so new backends do not require broad rewrites.
+- Prefer capability checks and `provider.list.aiToolHints` over driver name checks so new backends do not require broad rewrites.
 
 ## Implementation Phases
 
