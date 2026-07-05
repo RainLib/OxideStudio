@@ -9,7 +9,7 @@ OxideStudio should expose database, metadata, LSP, and workspace actions to an A
 Use a TypeScript `AiToolRegistry` as the stable boundary for all AI-callable capabilities. The registry should describe every tool with a name, JSON schema, capability flags, permission level, timeout, result limits, and executor.
 
 ```text
-Assistant UI / LangGraph
+Assistant UI / AssistantPlanner / LangGraph
         |
         v
 AiToolRegistry  ---->  Tauri service clients  ---->  Rust commands/drivers
@@ -26,14 +26,14 @@ This keeps the editor integration direct and state-aware while allowing external
 - `src/ai/tools` defines the shared registry, metadata/query tools, result limits, audit hooks, and permission policy.
 - `src/ai/tools/families.ts` provides the tool family extension point used by core database, table, document, key-value, and search tools.
 - `src/ai/tools/manifest.ts` exports a portable tool manifest with schemas, permissions, capabilities, and approval status for MCP, CLI, and planner hosts.
-- `src/ai/assistant` prepares editor-aware plans and can execute AI-proposed tool calls with approval-aware results, including approved mutation/destructive steps.
+- `src/ai/assistant` exposes an `AssistantPlanner` contract, a deterministic fallback planner, and approval-aware execution for AI-proposed tool calls.
 - `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
 - `src/ai/cli` provides a dependency-light command adapter for `tools list` and `tools call`.
 - The assistant panel is an editor entry point; real model/provider integration should call the runtime APIs rather than bypassing the registry.
 
 ## LangGraph Usage
 
-Use TypeScript LangGraph for the in-app assistant orchestration because the editor state, connection metadata, tabs, and approval UI already live in the frontend. Recommended graph nodes:
+Use TypeScript LangGraph as an optional implementation of `AssistantPlanner` for the in-app assistant orchestration. The editor should not call itself through MCP because editor state, connection metadata, tabs, and approval UI already live in the frontend. Recommended graph nodes:
 
 - `classify_intent`: detect explain/query/debug/schema/edit/export tasks.
 - `collect_context`: gather active connection, selected text, schema, tab, and driver capabilities.
@@ -41,6 +41,8 @@ Use TypeScript LangGraph for the in-app assistant orchestration because the edit
 - `safety_review`: require user approval for writes, destructive operations, exports, and cross-database actions.
 - `execute_tools`: run bounded tool calls through Tauri services.
 - `summarize_result`: return concise answers with queries, row limits, and caveats.
+
+The shipped default planner stays dependency-light and deterministic. A LangGraph planner can replace it by implementing `AssistantPlanner.plan`, returning the same `AssistantPlanStep[]`, and pausing before any step whose tool policy requires approval.
 
 ## Tool Categories
 
@@ -90,6 +92,12 @@ oxide tools call key.setValue --approve --json '{"key":"demo","value":"ok"}'
 
 For the editor itself, prefer direct TypeScript orchestration over MCP. The editor already owns state, selection, tabs, connection ids, and approval UI; routing those through an external protocol would add latency and lose context. External MCP hosts should use tool annotations plus an explicit approval handoff before calling mutating tools.
 
+Recommended usage:
+
+- In-app assistant: `AssistantRuntime` with the default planner, then LangGraph/model planner when provider integration is ready.
+- External AI clients: MCP adapter over the same `AiToolRegistry`.
+- Local automation and tests: CLI adapter.
+
 ## Safety Requirements
 
 - Never expose raw credentials or connection URLs to model context.
@@ -105,6 +113,6 @@ For the editor itself, prefer direct TypeScript orchestration over MCP. The edit
 2. Add an assistant panel backed by the registry executor. Done.
 3. Add MCP and CLI adapters over the same registry. Done.
 4. Add write tools with approval gates and audit logging. Done for query-level mutation/destructive tools, structured table row mutations, and structured document/key/search mutations.
-5. Add a LangGraph-backed planner that chooses tool calls, pauses for approval, and feeds results back into the model.
+5. Add a planner layer that chooses tool calls, pauses for approval, and feeds results back into the model. Foundation done with `AssistantPlanner`; LangGraph/model provider implementation is pending.
 6. Add provider/plugin hooks so new databases register tool families by capability, not by UI rewrites. Foundation done with `AiToolFamily`; external provider loading is still pending.
 7. Add live integration coverage for MongoDB, Redis, Elasticsearch, MySQL, and PostgreSQL tool paths.

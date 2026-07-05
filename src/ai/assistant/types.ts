@@ -1,4 +1,8 @@
-import type { AiToolExecutionContext, AiToolSummary } from "@/ai/tools";
+import type {
+  AiToolExecutionContext,
+  AiToolExecutionPolicy,
+  AiToolSummary,
+} from "@/ai/tools";
 
 export type AssistantIntent =
   | "metadata"
@@ -20,6 +24,35 @@ export type AssistantPlanStep = {
   requiresApproval: boolean;
 };
 
+export type AssistantPlannerMode = "deterministic" | "graph" | "model";
+
+export type AssistantPlannerInfo = {
+  id: string;
+  mode: AssistantPlannerMode;
+  description: string;
+  framework?: string;
+};
+
+export type AssistantPlannerInput = {
+  turn: AssistantTurnInput;
+  context: AiToolExecutionContext;
+  availableTools: AiToolSummary[];
+  policy: AiToolExecutionPolicy;
+};
+
+export type AssistantPlannerResult = {
+  intent: AssistantIntent;
+  steps: AssistantPlanStep[];
+  warnings?: string[];
+  notes?: string[];
+};
+
+export type AssistantPlanner = AssistantPlannerInfo & {
+  plan: (
+    input: AssistantPlannerInput
+  ) => AssistantPlannerResult | Promise<AssistantPlannerResult>;
+};
+
 export type AssistantToolCall = {
   id: string;
   toolName: string;
@@ -39,8 +72,10 @@ export type AssistantToolCallResult = {
 export type AssistantPreparedTurn = {
   requestId: string;
   intent: AssistantIntent;
+  planner: AssistantPlannerInfo;
   context: AiToolExecutionContext;
   availableTools: AiToolSummary[];
   suggestedPlan: AssistantPlanStep[];
   warnings: string[];
+  notes: string[];
 };

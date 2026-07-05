@@ -3,14 +3,16 @@ import {
   DEFAULT_AI_TOOL_POLICY,
   approveAiToolForPolicy,
   createAiToolManifest,
-  evaluateAiToolPolicy,
   createWorkspaceAiToolContext,
   createWorkspaceAiToolRegistry,
 } from "@/ai/tools";
-import type { AiToolExecutionPolicy, AiToolSummary } from "@/ai/tools";
+import type { AiToolExecutionPolicy } from "@/ai/tools";
+import { createDefaultAssistantPlanner } from "./planner";
 import type {
-  AssistantIntent,
-  AssistantPlanStep,
+  AssistantPlanner,
+  AssistantPlannerInfo,
+  AssistantPlannerInput,
+  AssistantPlannerResult,
   AssistantPreparedTurn,
   AssistantToolCall,
   AssistantToolCallResult,
@@ -21,46 +23,37 @@ export type AssistantRuntimeOptions = {
   registry?: AiToolRegistry;
   createContext?: () => ReturnType<typeof createWorkspaceAiToolContext>;
   policy?: AiToolExecutionPolicy;
+  planner?: AssistantPlanner;
 };
 
 export class AssistantRuntime {
   private readonly registry: AiToolRegistry;
   private readonly createContext: () => ReturnType<typeof createWorkspaceAiToolContext>;
   private readonly policy: AiToolExecutionPolicy;
+  private readonly planner: AssistantPlanner;
 
   constructor(options: AssistantRuntimeOptions = {}) {
     this.registry = options.registry ?? createWorkspaceAiToolRegistry();
     this.createContext = options.createContext ?? createWorkspaceAiToolContext;
     this.policy = options.policy ?? DEFAULT_AI_TOOL_POLICY;
+    this.planner = options.planner ?? createDefaultAssistantPlanner();
   }
 
   prepareTurn(input: AssistantTurnInput): AssistantPreparedTurn {
-    const context = this.createContext();
-    const availableTools = this.registry.list();
-    const intent = classifyIntent(input);
-    const warnings: string[] = [];
-
-    if (!context.activeConnectionId) {
-      warnings.push("No active connection is selected.");
+    const plannerInput = this.createPlannerInput(input);
+    const result = this.planner.plan(plannerInput);
+    if (isPromiseLike(result)) {
+      throw new Error(
+        "Assistant planner is asynchronous; call prepareTurnAsync instead."
+      );
     }
-    if (!input.message.trim()) {
-      warnings.push("Assistant message is empty.");
-    }
+    return this.createPreparedTurn(plannerInput, result);
+  }
 
-    return {
-      requestId: context.requestId,
-      intent,
-      context,
-      availableTools,
-      suggestedPlan: buildSuggestedPlan(
-        intent,
-        input,
-        availableTools,
-        this.policy,
-        context.activeDriver
-      ),
-      warnings,
-    };
+  async prepareTurnAsync(input: AssistantTurnInput): Promise<AssistantPreparedTurn> {
+    const plannerInput = this.createPlannerInput(input);
+    const result = await this.planner.plan(plannerInput);
+    return this.createPreparedTurn(plannerInput, result);
   }
 
   manifest() {
@@ -128,188 +121,65 @@ export class AssistantRuntime {
 
     return results;
   }
+
+  private createPlannerInput(input: AssistantTurnInput): AssistantPlannerInput {
+    return {
+      turn: input,
+      context: this.createContext(),
+      availableTools: this.registry.list(),
+      policy: this.policy,
+    };
+  }
+
+  private createPreparedTurn(
+    input: AssistantPlannerInput,
+    result: AssistantPlannerResult
+  ): AssistantPreparedTurn {
+    return {
+      requestId: input.context.requestId,
+      intent: result.intent,
+      planner: toPlannerInfo(this.planner),
+      context: input.context,
+      availableTools: input.availableTools,
+      suggestedPlan: result.steps,
+      warnings: uniqueStrings([
+        ...baseWarnings(input),
+        ...(result.warnings ?? []),
+      ]),
+      notes: uniqueStrings(result.notes ?? []),
+    };
+  }
 }
 
 export function createAssistantRuntime(options?: AssistantRuntimeOptions) {
   return new AssistantRuntime(options);
 }
 
-function classifyIntent(input: AssistantTurnInput): AssistantIntent {
-  const text = `${input.message} ${input.selectedText || ""}`.toLowerCase();
-  if (!text.trim()) return "unknown";
-
-  if (
-    /\b(create|delete|drop|insert|remove|replace|set|truncate|update|upsert|write)\b/.test(
-      text
-    )
-  ) {
-    return "query";
+function baseWarnings(input: AssistantPlannerInput) {
+  const warnings: string[] = [];
+  if (!input.context.activeConnectionId) {
+    warnings.push("No active connection is selected.");
   }
-  if (/\b(schema|table|collection|index|key|metadata|database|list)\b/.test(text)) {
-    return "metadata";
+  if (!input.turn.message.trim()) {
+    warnings.push("Assistant message is empty.");
   }
-  if (/\b(query|select|find|search|run|execute|count|aggregate)\b/.test(text)) {
-    return "query";
-  }
-  if (/\b(explain|diagnostic|error|fix|why|optimi[sz]e)\b/.test(text)) {
-    return "explain";
-  }
-  if (/\b(tab|selection|editor|workspace|current)\b/.test(text)) {
-    return "workspace";
-  }
-
-  return "unknown";
+  return warnings;
 }
 
-function buildSuggestedPlan(
-  intent: AssistantIntent,
-  input: AssistantTurnInput,
-  tools: AiToolSummary[],
-  policy: AiToolExecutionPolicy,
-  activeDriver?: string | null
-): AssistantPlanStep[] {
-  const hasTool = (name: string) => tools.some((tool) => tool.name === name);
-  const requiresApproval = (name: string) => {
-    const tool = tools.find((candidate) => candidate.name === name);
-    if (!tool) return false;
-    return evaluateAiToolPolicy(tool, policy).requiresApproval;
+function toPlannerInfo(planner: AssistantPlanner): AssistantPlannerInfo {
+  return {
+    id: planner.id,
+    mode: planner.mode,
+    description: planner.description,
+    framework: planner.framework,
   };
-  const steps: AssistantPlanStep[] = [];
-
-  if (hasTool("workspace.getActiveTab")) {
-    steps.push({
-      id: "workspace-context",
-      title: "Read the active editor context",
-      toolName: "workspace.getActiveTab",
-      input: {},
-      requiresApproval: requiresApproval("workspace.getActiveTab"),
-    });
-  }
-
-  if (hasTool("workspace.getSelection")) {
-    steps.push({
-      id: "workspace-selection",
-      title: "Read the current editor selection",
-      toolName: "workspace.getSelection",
-      input: {},
-      requiresApproval: requiresApproval("workspace.getSelection"),
-    });
-  }
-
-  if (hasTool("connection.list")) {
-    steps.push({
-      id: "connections",
-      title: "Inspect available database connections",
-      toolName: "connection.list",
-      input: {},
-      requiresApproval: requiresApproval("connection.list"),
-    });
-  }
-
-  if (intent === "metadata" && hasTool("metadata.listObjects")) {
-    steps.push({
-      id: "metadata-objects",
-      title: "List objects for the active namespace",
-      toolName: "metadata.listObjects",
-      input: {},
-      requiresApproval: requiresApproval("metadata.listObjects"),
-    });
-  } else if (intent === "metadata" && hasTool("metadata.listCollections")) {
-    steps.push({
-      id: "metadata-collections",
-      title: "List collections, keys, or indexes for the active namespace",
-      toolName: "metadata.listCollections",
-      input: {},
-      requiresApproval: requiresApproval("metadata.listCollections"),
-    });
-  }
-
-  if (intent === "explain" && hasTool("lsp.explainDiagnostics")) {
-    steps.push({
-      id: "lsp-diagnostics",
-      title: "Explain current LSP diagnostics",
-      toolName: "lsp.explainDiagnostics",
-      input: { onlySelection: Boolean(input.selectedText?.trim()) },
-      requiresApproval: requiresApproval("lsp.explainDiagnostics"),
-    });
-  }
-
-  if (intent === "query" && hasTool("query.runReadOnly")) {
-    const query = input.selectedText?.trim() || "";
-    const writeTool = selectedMutationTool(query, activeDriver, hasTool);
-    steps.push({
-      id: "read-query",
-      title: writeTool
-        ? "Run the selected mutation with approval"
-        : query
-        ? "Run the selected query with read-only safeguards"
-        : "Prepare a bounded read-only query",
-      toolName: query ? writeTool || "query.runReadOnly" : undefined,
-      input: query ? { query } : undefined,
-      requiresApproval: query
-        ? requiresApproval(writeTool || "query.runReadOnly")
-        : false,
-    });
-  }
-
-  return steps;
 }
 
-function selectedMutationTool(
-  query: string,
-  activeDriver: string | null | undefined,
-  hasTool: (name: string) => boolean
-) {
-  if (!query) return null;
-  if (looksDestructiveSelection(query, activeDriver)) {
-    return hasTool("query.runDestructive") ? "query.runDestructive" : null;
-  }
-  if (looksMutationSelection(query, activeDriver)) {
-    return hasTool("query.runMutation") ? "query.runMutation" : null;
-  }
-  return null;
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values.filter(Boolean)));
 }
 
-function looksMutationSelection(query: string, activeDriver?: string | null) {
-  const normalized = query.trim().toLowerCase();
-  if (!normalized) return false;
-
-  const driver = String(activeDriver || "").toLowerCase();
-  if (driver === "redis") {
-    return /^(append|decr|decrby|expire|hset|hmset|incr|incrby|json\.set|lpush|pfadd|rename|rpush|sadd|set|setex|setnx|xadd|zadd)\b/i.test(
-      query.trim()
-    );
-  }
-  if (driver === "mongodb" || driver === "mongo") {
-    return /"(insertOne|insertMany|updateOne|updateMany|command)"/i.test(query);
-  }
-  if (driver === "elasticsearch" || driver === "elastic") {
-    return /^(POST|PUT|PATCH)\s+\//i.test(query.trim());
-  }
-
-  return /^(alter|call|comment|copy|create|grant|insert|load|merge|replace|revoke|set|update|vacuum)\b/.test(
-    normalized
-  );
-}
-
-function looksDestructiveSelection(query: string, activeDriver?: string | null) {
-  const normalized = query.trim().toLowerCase();
-  if (!normalized) return false;
-
-  const driver = String(activeDriver || "").toLowerCase();
-  if (driver === "redis") {
-    return /^(del|discard|eval|evalsha|flushall|flushdb|ft\.dropindex|hdel|json\.del|lpop|rpop|srem|unlink|xdel|zrem)\b/i.test(
-      query.trim()
-    );
-  }
-  if (driver === "mongodb" || driver === "mongo") {
-    return /"(collMod|deleteOne|deleteMany|drop|dropDatabase|renameCollection)"/i.test(
-      query
-    );
-  }
-  if (driver === "elasticsearch" || driver === "elastic") {
-    return /^DELETE\s+\//i.test(query.trim()) || query.includes("_delete_by_query");
-  }
-
-  return /^(delete|drop|truncate)\b/.test(normalized);
+function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
+  const candidate = value as { then?: unknown } | null;
+  return Boolean(candidate && typeof candidate.then === "function");
 }

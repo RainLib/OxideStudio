@@ -23,12 +23,20 @@ export function AssistantSidebar() {
   const [toolResults, setToolResults] = useState<
     Record<string, AssistantToolCallResult>
   >({});
+  const [isPlanning, setIsPlanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handlePrepare = () => {
+  const handlePrepare = async () => {
     setError(null);
     setToolResults({});
-    setPreparedTurn(runtime.prepareTurn({ message, selectedText }));
+    setIsPlanning(true);
+    try {
+      setPreparedTurn(await runtime.prepareTurnAsync({ message, selectedText }));
+    } catch (err: any) {
+      setError(err?.message || String(err));
+    } finally {
+      setIsPlanning(false);
+    }
   };
 
   const handleRunStep = async (
@@ -86,9 +94,9 @@ export function AssistantSidebar() {
           size="sm"
           className="mt-2 h-7 w-full rounded-sm text-[11px]"
           onClick={handlePrepare}
-          disabled={!message.trim()}
+          disabled={!message.trim() || isPlanning}
         >
-          Plan
+          {isPlanning ? "Planning" : "Plan"}
         </Button>
       </div>
 
@@ -101,7 +109,7 @@ export function AssistantSidebar() {
                   {preparedTurn.intent}
                 </span>
                 <span className="text-[10px] text-muted-foreground">
-                  {preparedTurn.availableTools.length} tools
+                  {preparedTurn.availableTools.length} tools / {preparedTurn.planner.mode}
                 </span>
               </div>
               {preparedTurn.warnings.length > 0 && (
