@@ -15,6 +15,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 5: **Bidirectional IPC with async stdio** (JSON-RPC communication)
 - Phase 6: Relational schema synchronization through `LspConnectionSyncer`
 - Phase 7: Bounded Redis key and Elasticsearch index context synchronization through the LSP schema model
+- Phase 8: Non-blocking Tauri command lifecycle; LSP requests clone the manager handle before awaiting server responses
 
 ⏳ **Pending:**
 
@@ -80,6 +81,7 @@ To verify it's working, check the console logs:
 - `lsp_get_completions` - Get SQL completions (fully implemented)
 - `lsp_did_change_configuration` - Update LSP settings and schema context
 - `lsp_did_open`, `lsp_did_change`, `lsp_did_close` - Synchronize editor documents
+- Commands keep the global state lock only while cloning the manager handle; slow LSP requests do not block health checks or shutdown.
 
 ### Frontend (TypeScript)
 

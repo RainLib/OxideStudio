@@ -6,7 +6,7 @@ use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 /// LSP server state managed by Tauri
-pub struct LspState(pub Arc<Mutex<Option<LspServerManager>>>);
+pub struct LspState(pub Arc<Mutex<Option<Arc<LspServerManager>>>>);
 
 /// Initialize LSP request
 #[derive(Debug, Serialize, Deserialize)]
@@ -103,6 +103,14 @@ fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
     })
 }
 
+async fn current_manager(state: &State<'_, LspState>) -> Result<Arc<LspServerManager>, String> {
+    let lsp_lock = state.0.lock().await;
+    lsp_lock
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| "LSP server is not running".to_string())
+}
+
 /// Initialize the LSP server
 #[tauri::command]
 pub async fn lsp_initialize(
@@ -112,16 +120,20 @@ pub async fn lsp_initialize(
 ) -> Result<String, String> {
     tracing::info!("🚀 LSP initialize command called");
     tracing::debug!("Binary path: {}", request.binary_path);
-    let mut lsp_lock = state.0.lock().await;
+    let existing_manager = {
+        let mut lsp_lock = state.0.lock().await;
 
-    if let Some(manager) = lsp_lock.as_ref() {
-        if manager.is_running().await && manager.binary_path() == request.binary_path {
-            tracing::info!("LSP server already running for requested binary");
-            return Ok("LSP server already running".to_string());
+        if let Some(manager) = lsp_lock.as_ref() {
+            if manager.is_running().await && manager.binary_path() == request.binary_path {
+                tracing::info!("LSP server already running for requested binary");
+                return Ok("LSP server already running".to_string());
+            }
         }
-    }
 
-    if let Some(manager) = lsp_lock.take() {
+        lsp_lock.take()
+    };
+
+    if let Some(manager) = existing_manager {
         tracing::info!("Stopping existing LSP server before reinitialization");
         manager
             .stop()
@@ -138,7 +150,8 @@ pub async fn lsp_initialize(
         .await
         .map_err(|e| format!("Failed to start LSP server: {}", e))?;
 
-    *lsp_lock = Some(manager);
+    let mut lsp_lock = state.0.lock().await;
+    *lsp_lock = Some(Arc::new(manager));
 
     tracing::info!("✓ LSP server initialized successfully");
     Ok("LSP server initialized successfully".to_string())
@@ -149,34 +162,33 @@ async fn send_position_request(
     request: TextDocumentPositionRequest,
     state: State<'_, LspState>,
 ) -> Result<Value, String> {
-    let lsp_lock = state.0.lock().await;
+    let manager = current_manager(&state).await?;
 
-    if let Some(manager) = lsp_lock.as_ref() {
-        let params = serde_json::json!({
-            "textDocument": {
-                "uri": request.uri
-            },
-            "position": {
-                "line": request.line,
-                "character": request.character
-            }
-        });
+    let params = serde_json::json!({
+        "textDocument": {
+            "uri": request.uri
+        },
+        "position": {
+            "line": request.line,
+            "character": request.character
+        }
+    });
 
-        manager
-            .send_request(method.to_string(), params)
-            .await
-            .map_err(|e| format!("LSP error: {}", e))
-    } else {
-        Err("LSP server is not running".to_string())
-    }
+    manager
+        .send_request(method.to_string(), params)
+        .await
+        .map_err(|e| format!("LSP error: {}", e))
 }
 
 /// Stop the LSP server
 #[tauri::command]
 pub async fn lsp_shutdown(state: State<'_, LspState>) -> Result<String, String> {
-    let mut lsp_lock = state.0.lock().await;
+    let manager = {
+        let mut lsp_lock = state.0.lock().await;
+        lsp_lock.take()
+    };
 
-    if let Some(manager) = lsp_lock.take() {
+    if let Some(manager) = manager {
         manager
             .stop()
             .await
@@ -191,9 +203,12 @@ pub async fn lsp_shutdown(state: State<'_, LspState>) -> Result<String, String> 
 /// Check if LSP server is running
 #[tauri::command]
 pub async fn lsp_is_running(state: State<'_, LspState>) -> Result<bool, String> {
-    let lsp_lock = state.0.lock().await;
+    let manager = {
+        let lsp_lock = state.0.lock().await;
+        lsp_lock.as_ref().cloned()
+    };
 
-    if let Some(manager) = lsp_lock.as_ref() {
+    if let Some(manager) = manager {
         Ok(manager.is_running().await)
     } else {
         Ok(false)
@@ -212,68 +227,61 @@ pub async fn lsp_get_completions(
         request.line,
         request.character
     );
-    let lsp_lock = state.0.lock().await;
+    let manager = current_manager(&state).await?;
+    tracing::debug!(
+        "Completion request for {}:{}:{}",
+        request.uri,
+        request.line,
+        request.character
+    );
 
-    if let Some(manager) = lsp_lock.as_ref() {
-        tracing::debug!(
-            "Completion request for {}:{}:{}",
-            request.uri,
-            request.line,
-            request.character
-        );
-
-        // Build LSP textDocument/completion params
-        let params = serde_json::json!({
-            "textDocument": {
-                "uri": request.uri
-            },
-            "position": {
-                "line": request.line,
-                "character": request.character
-            }
-        });
-
-        // Send LSP request
-        match manager
-            .send_request("textDocument/completion".to_string(), params)
-            .await
-        {
-            Ok(result) => {
-                // LSP spec allows two response formats:
-                // 1. CompletionList: {"items": [...], "isIncomplete": false}
-                // 2. CompletionItem[]: [{...}, {...}] (direct array)
-
-                let items_array =
-                    if let Some(items) = result.get("items").and_then(|v| v.as_array()) {
-                        tracing::debug!("Found LSP CompletionList with {} items", items.len());
-                        items.clone()
-                    } else if let Some(items) = result.as_array() {
-                        tracing::debug!(
-                            "Found direct LSP completion array with {} items",
-                            items.len()
-                        );
-                        items.clone()
-                    } else {
-                        tracing::warn!("Unexpected LSP completion response format");
-                        vec![]
-                    };
-
-                let items: Vec<CompletionItem> = items_array
-                    .iter()
-                    .filter_map(parse_completion_item)
-                    .collect();
-
-                tracing::debug!("Parsed {} LSP completion items", items.len());
-                Ok(CompletionResponse { items })
-            }
-            Err(e) => {
-                tracing::error!("LSP completion request failed: {}", e);
-                Err(format!("LSP error: {}", e))
-            }
+    // Build LSP textDocument/completion params
+    let params = serde_json::json!({
+        "textDocument": {
+            "uri": request.uri
+        },
+        "position": {
+            "line": request.line,
+            "character": request.character
         }
-    } else {
-        tracing::error!("LSP server is not running");
-        Err("LSP server is not running".to_string())
+    });
+
+    // Send LSP request
+    match manager
+        .send_request("textDocument/completion".to_string(), params)
+        .await
+    {
+        Ok(result) => {
+            // LSP spec allows two response formats:
+            // 1. CompletionList: {"items": [...], "isIncomplete": false}
+            // 2. CompletionItem[]: [{...}, {...}] (direct array)
+
+            let items_array = if let Some(items) = result.get("items").and_then(|v| v.as_array()) {
+                tracing::debug!("Found LSP CompletionList with {} items", items.len());
+                items.clone()
+            } else if let Some(items) = result.as_array() {
+                tracing::debug!(
+                    "Found direct LSP completion array with {} items",
+                    items.len()
+                );
+                items.clone()
+            } else {
+                tracing::warn!("Unexpected LSP completion response format");
+                vec![]
+            };
+
+            let items: Vec<CompletionItem> = items_array
+                .iter()
+                .filter_map(parse_completion_item)
+                .collect();
+
+            tracing::debug!("Parsed {} LSP completion items", items.len());
+            Ok(CompletionResponse { items })
+        }
+        Err(e) => {
+            tracing::error!("LSP completion request failed: {}", e);
+            Err(format!("LSP error: {}", e))
+        }
     }
 }
 
@@ -298,29 +306,25 @@ pub async fn lsp_references(
     request: TextDocumentPositionRequest,
     state: State<'_, LspState>,
 ) -> Result<Value, String> {
-    let lsp_lock = state.0.lock().await;
+    let manager = current_manager(&state).await?;
 
-    if let Some(manager) = lsp_lock.as_ref() {
-        let params = serde_json::json!({
-            "textDocument": {
-                "uri": request.uri
-            },
-            "position": {
-                "line": request.line,
-                "character": request.character
-            },
-            "context": {
-                "includeDeclaration": true
-            }
-        });
+    let params = serde_json::json!({
+        "textDocument": {
+            "uri": request.uri
+        },
+        "position": {
+            "line": request.line,
+            "character": request.character
+        },
+        "context": {
+            "includeDeclaration": true
+        }
+    });
 
-        manager
-            .send_request("textDocument/references".to_string(), params)
-            .await
-            .map_err(|e| format!("LSP error: {}", e))
-    } else {
-        Err("LSP server is not running".to_string())
-    }
+    manager
+        .send_request("textDocument/references".to_string(), params)
+        .await
+        .map_err(|e| format!("LSP error: {}", e))
 }
 
 #[tauri::command]
@@ -328,26 +332,22 @@ pub async fn lsp_formatting(
     request: FormatDocumentRequest,
     state: State<'_, LspState>,
 ) -> Result<Value, String> {
-    let lsp_lock = state.0.lock().await;
+    let manager = current_manager(&state).await?;
 
-    if let Some(manager) = lsp_lock.as_ref() {
-        let params = serde_json::json!({
-            "textDocument": {
-                "uri": request.uri
-            },
-            "options": {
-                "tabSize": request.tab_size,
-                "insertSpaces": request.insert_spaces
-            }
-        });
+    let params = serde_json::json!({
+        "textDocument": {
+            "uri": request.uri
+        },
+        "options": {
+            "tabSize": request.tab_size,
+            "insertSpaces": request.insert_spaces
+        }
+    });
 
-        manager
-            .send_request("textDocument/formatting".to_string(), params)
-            .await
-            .map_err(|e| format!("LSP error: {}", e))
-    } else {
-        Err("LSP server is not running".to_string())
-    }
+    manager
+        .send_request("textDocument/formatting".to_string(), params)
+        .await
+        .map_err(|e| format!("LSP error: {}", e))
 }
 
 /// LSP configuration (sqls settings)
@@ -371,24 +371,20 @@ pub async fn lsp_did_change_configuration(
     settings: Value,
     state: State<'_, LspState>,
 ) -> Result<String, String> {
-    let lsp_lock = state.0.lock().await;
+    let manager = current_manager(&state).await?;
 
-    if let Some(manager) = lsp_lock.as_ref() {
-        tracing::debug!("Sending workspace/didChangeConfiguration");
+    tracing::debug!("Sending workspace/didChangeConfiguration");
 
-        let params = serde_json::json!({
-            "settings": settings
-        });
+    let params = serde_json::json!({
+        "settings": settings
+    });
 
-        manager
-            .send_notification("workspace/didChangeConfiguration".to_string(), params)
-            .await
-            .map_err(|e| format!("Failed to send notification: {}", e))?;
+    manager
+        .send_notification("workspace/didChangeConfiguration".to_string(), params)
+        .await
+        .map_err(|e| format!("Failed to send notification: {}", e))?;
 
-        Ok("Configuration updated".to_string())
-    } else {
-        Err("LSP server is not running".to_string())
-    }
+    Ok("Configuration updated".to_string())
 }
 
 /// Send textDocument/didOpen notification
@@ -410,9 +406,7 @@ pub async fn lsp_did_open(
         text.len(),
         language_id
     );
-    let lsp_lock = state.0.lock().await;
-
-    if let Some(manager) = lsp_lock.as_ref() {
+    if let Ok(manager) = current_manager(&state).await {
         let params = serde_json::json!({
             "textDocument": {
                 "uri": uri,
@@ -444,9 +438,7 @@ pub async fn lsp_did_change(
     text: String,
     state: State<'_, LspState>,
 ) -> Result<(), String> {
-    let lsp_lock = state.0.lock().await;
-
-    if let Some(manager) = lsp_lock.as_ref() {
+    if let Ok(manager) = current_manager(&state).await {
         // sending full text sync for simplicity
         let params = serde_json::json!({
             "textDocument": {
@@ -474,9 +466,7 @@ pub async fn lsp_did_change(
 /// Send textDocument/didClose notification
 #[tauri::command]
 pub async fn lsp_did_close(uri: String, state: State<'_, LspState>) -> Result<(), String> {
-    let lsp_lock = state.0.lock().await;
-
-    if let Some(manager) = lsp_lock.as_ref() {
+    if let Ok(manager) = current_manager(&state).await {
         let params = serde_json::json!({
             "textDocument": {
                 "uri": uri
