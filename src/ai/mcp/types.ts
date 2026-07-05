@@ -20,3 +20,10 @@ export type McpToolCallResult = {
   }>;
   isError?: boolean;
 };
+
+export type McpToolManifestResult = {
+  content: Array<{
+    type: "text";
+    text: string;
+  }>;
+};

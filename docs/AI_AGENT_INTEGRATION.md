@@ -25,6 +25,7 @@ This keeps the editor integration direct and state-aware while allowing external
 
 - `src/ai/tools` defines the shared registry, metadata/query tools, result limits, audit hooks, and permission policy.
 - `src/ai/tools/families.ts` provides the tool family extension point used by core database, table, document, key-value, and search tools.
+- `src/ai/tools/manifest.ts` exports a portable tool manifest with schemas, permissions, capabilities, and approval status for MCP, CLI, and planner hosts.
 - `src/ai/assistant` prepares editor-aware plans and can execute AI-proposed tool calls with approval-aware results, including approved mutation/destructive steps.
 - `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
 - `src/ai/cli` provides a dependency-light command adapter for `tools list` and `tools call`.
@@ -82,6 +83,7 @@ CLI is useful for local automation, tests, and scripting. It can share the same 
 
 ```bash
 oxide tools list
+oxide tools manifest
 oxide tools call query.runReadOnly --json payload.json
 oxide tools call key.setValue --approve --json '{"key":"demo","value":"ok"}'
 ```

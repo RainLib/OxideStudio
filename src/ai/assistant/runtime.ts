@@ -2,6 +2,7 @@ import {
   AiToolRegistry,
   DEFAULT_AI_TOOL_POLICY,
   approveAiToolForPolicy,
+  createAiToolManifest,
   evaluateAiToolPolicy,
   createWorkspaceAiToolContext,
   createWorkspaceAiToolRegistry,
@@ -60,6 +61,10 @@ export class AssistantRuntime {
       ),
       warnings,
     };
+  }
+
+  manifest() {
+    return createAiToolManifest(this.registry.list(), this.policy);
   }
 
   async executeTool<TOutput = unknown>(

@@ -2,6 +2,7 @@ import {
   AiToolRegistry,
   DEFAULT_AI_TOOL_POLICY,
   approveAiToolForPolicy,
+  createAiToolManifest,
   createWorkspaceAiToolContext,
   createWorkspaceAiToolRegistry,
 } from "@/ai/tools";
@@ -18,6 +19,7 @@ export type CliToolAdapterOptions = {
 type ParsedCommand =
   | { kind: "help" }
   | { kind: "list" }
+  | { kind: "manifest" }
   | { kind: "call"; toolName: string; input: unknown; approved: boolean };
 
 export class CliToolAdapter {
@@ -41,6 +43,8 @@ export class CliToolAdapter {
           return ok(helpText());
         case "list":
           return okJson(this.registry.list());
+        case "manifest":
+          return okJson(createAiToolManifest(this.registry.list(), this.policy));
         case "call": {
           const policy = command.approved
             ? approveAiToolForPolicy(this.policy, command.toolName)
@@ -73,6 +77,13 @@ export class CliToolAdapter {
 
     if (command === "list" || (command === "tools" && rest[0] === "list")) {
       return { kind: "list" };
+    }
+
+    if (
+      command === "manifest" ||
+      (command === "tools" && rest[0] === "manifest")
+    ) {
+      return { kind: "manifest" };
     }
 
     if (command === "call" || (command === "tools" && rest[0] === "call")) {
@@ -159,6 +170,7 @@ function helpText() {
     "",
     "Commands:",
     "  tools list",
+    "  tools manifest",
     "  tools call <toolName> [--json '{...}']",
     "  tools call <toolName> [--json-file payload.json]",
     "  tools call <toolName> --approve [--json '{...}']",

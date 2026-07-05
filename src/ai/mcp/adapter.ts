@@ -2,6 +2,7 @@ import {
   AiToolRegistry,
   DEFAULT_AI_TOOL_POLICY,
   approveAiToolForPolicy,
+  createAiToolManifest,
   createWorkspaceAiToolContext,
   createWorkspaceAiToolRegistry,
 } from "@/ai/tools";
@@ -12,7 +13,12 @@ import type {
   AiToolPermission,
   AiToolSummary,
 } from "@/ai/tools";
-import type { McpTool, McpToolAnnotations, McpToolCallResult } from "./types";
+import type {
+  McpTool,
+  McpToolAnnotations,
+  McpToolCallResult,
+  McpToolManifestResult,
+} from "./types";
 
 export type McpToolAdapterOptions = {
   registry?: AiToolRegistry;
@@ -42,6 +48,21 @@ export class McpToolAdapter {
       inputSchema: tool.inputSchema as Record<string, unknown>,
       annotations: toMcpAnnotations(tool),
     }));
+  }
+
+  manifest(): McpToolManifestResult {
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            createAiToolManifest(this.registry.list(), this.policy),
+            null,
+            2
+          ),
+        },
+      ],
+    };
   }
 
   async callTool(
