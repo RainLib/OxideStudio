@@ -111,6 +111,16 @@ function buildSuggestedPlan(
     });
   }
 
+  if (hasTool("provider.list")) {
+    steps.push({
+      id: "provider-capabilities",
+      title: "Inspect supported database providers and driver capabilities",
+      toolName: "provider.list",
+      input: {},
+      requiresApproval: requiresApproval("provider.list"),
+    });
+  }
+
   if (intent === "metadata" && hasTool("metadata.listObjects")) {
     steps.push({
       id: "metadata-objects",
