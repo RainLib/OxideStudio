@@ -291,23 +291,13 @@ function looksReadOnlyMongoCommand(query: string) {
 
     const payload = item as Record<string, unknown>;
     const keys = Object.keys(payload).map((key) => key.toLowerCase());
-    const operations = keys.filter((key) =>
-      [
-        "aggregate",
-        "command",
-        "countdocuments",
-        "deletemany",
-        "deleteone",
-        "find",
-        "insertmany",
-        "insertone",
-        "updatemany",
-        "updateone",
-      ].includes(key)
-    );
+    const operations = keys.filter((key) => MONGO_OPERATION_KEYS.has(key));
 
     if (operations.length === 0) {
-      return typeof payload.collection === "string";
+      return (
+        typeof payload.collection === "string" &&
+        keys.every((key) => READ_ONLY_MONGO_FIND_FIELDS.has(key))
+      );
     }
     if (operations.length > 1) return false;
 
@@ -347,10 +337,13 @@ function looksDestructiveMongoCommand(query: string) {
       keys.some((key) =>
         [
           "collmod",
+          "delete",
           "deleteone",
           "deletemany",
           "drop",
           "dropdatabase",
+          "dropindexes",
+          "findandmodify",
           "renamecollection",
         ].includes(key)
       )
@@ -394,6 +387,29 @@ const READ_ONLY_MONGO_COMMANDS = new Set([
   "listindexes",
   "ping",
   "serverstatus",
+]);
+
+const MONGO_OPERATION_KEYS = new Set([
+  "aggregate",
+  "command",
+  "countdocuments",
+  "deletemany",
+  "deleteone",
+  "find",
+  "insertmany",
+  "insertone",
+  "updatemany",
+  "updateone",
+]);
+
+const READ_ONLY_MONGO_FIND_FIELDS = new Set([
+  "collection",
+  "database",
+  "find",
+  "limit",
+  "projection",
+  "skip",
+  "sort",
 ]);
 
 function looksReadOnlyElasticsearchRequest(query: string) {

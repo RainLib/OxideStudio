@@ -19,7 +19,7 @@ pub struct MongoDbDriver {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MongoCommandInput {
     database: Option<String>,
     collection: Option<String>,
@@ -40,7 +40,7 @@ struct MongoCommandInput {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MongoUpdateInput {
     filter: Value,
     update: Value,
@@ -792,6 +792,11 @@ mod tests {
         assert!(
             parse_mongodb_commands(r#"{"collection":"users","find":{},"deleteMany":{}}"#).is_err()
         );
+        assert!(parse_mongodb_commands(r#"{"collection":"users","drop":true}"#).is_err());
+        assert!(parse_mongodb_commands(
+            r#"{"collection":"users","updateOne":{"filter":{},"update":{},"unknown":true}}"#
+        )
+        .is_err());
     }
 
     #[test]

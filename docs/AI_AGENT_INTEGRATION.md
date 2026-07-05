@@ -36,7 +36,7 @@ Decision summary:
 - `provider.list` exposes registered providers, full driver capability summaries, and recommended AI tool hints so planners, MCP clients, and CLI scripts can discover backend support before choosing tools.
 - `src/ai/tools/manifest.ts` exports a portable tool manifest with schemas, permissions, capabilities, and approval status for MCP, CLI, and planner hosts.
 - `metadata.describeObject` returns relational structure metadata, sampled MongoDB collection fields and indexes, Elasticsearch mapping fields, and provider-neutral preview/delete request templates so planners can reason about objects without hard-coding driver syntax.
-- `src/lib/querySafety.ts` centralizes read/write/destructive classification for SQL, MongoDB, Redis, and Elasticsearch so planners and executors make the same safety decision.
+- `src/lib/querySafety.ts` centralizes read/write/destructive classification for SQL, MongoDB, Redis, and Elasticsearch so planners and executors make the same safety decision. MongoDB JSON is intentionally strict: implicit find templates only allow known read fields, and destructive command names cannot pass through read-only gates.
 - `src/ai/assistant` exposes an `AssistantPlanner` contract, a deterministic fallback planner, a provider-neutral model planner, and approval-aware execution for AI-proposed tool calls.
 - `src/ai/assistant/langGraphPlanner.ts` provides a dependency-light LangGraph bridge. A real LangGraph graph can plug in by returning `AssistantPlannerResult` from the shared planner contract.
 - `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
@@ -148,6 +148,7 @@ Recommended usage:
 - Never expose raw credentials or connection URLs to model context.
 - Default all result sets to bounded row, byte, and time limits.
 - Treat multi-statement SQL conservatively; read-only gates must reject any statement with write or destructive operations.
+- Treat driver-native requests conservatively. MongoDB command JSON should reject unknown fields instead of silently degrading to collection reads; Redis and Elasticsearch requests should be classified by native command or HTTP method/path before execution.
 - Require approval for mutations, exports, drops, and external network access.
 - Do not auto-approve writes in MCP or CLI adapters; external callers must pass an explicit approval signal such as CLI `--approve`.
 - Store an audit entry for request id, tool name, permissions, status, duration, and failure reason without persisting raw query text by default.
@@ -162,3 +163,4 @@ Recommended usage:
 5. Add a planner layer that chooses tool calls, pauses for approval, and feeds results back into the model. Foundation done with `AssistantPlanner`, `createModelAssistantPlanner`, and `createModelToolResultSummarizer`; full LangGraph graph wiring is still pending.
 6. Add provider/plugin hooks so new databases register tool families by capability, not by UI rewrites. Runtime provider registration is done with `registerDatabaseProvider`; dynamic package discovery/loading is still pending.
 7. Add live integration coverage for MongoDB, Redis, Elasticsearch, MySQL, and PostgreSQL tool paths. Driver-level connection, metadata, query, and mutation coverage is available through `scripts/test-live-databases.sh`; AI tool-specific live assertions are still pending.
+8. Add safety regression tests for SQL, MongoDB, Redis, and Elasticsearch request classification, and reject unknown MongoDB driver command fields before execution. Done.
