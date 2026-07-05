@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { createAssistantRuntime } from "@/ai/assistant/runtime";
 import { createLangGraphAssistantPlanner } from "@/ai/assistant/langGraphPlanner";
+import {
+  createModelAssistantPlanner,
+  createModelToolResultSummarizer,
+  type AssistantModelPlannerRequest,
+  type AssistantModelResultSummaryRequest,
+} from "@/ai/assistant/modelPlanner";
 import { createCliToolAdapter } from "@/ai/cli/adapter";
 import { createMcpProtocolAdapter } from "@/ai/mcp/protocol";
 import { DEFAULT_AI_TOOL_POLICY } from "@/ai/tools/policy";
@@ -48,6 +54,34 @@ function createContext(): AiToolExecutionContext {
     requestId: "test-request",
     activeConnectionId: "connection-1",
     activeDriver: "postgres",
+  };
+}
+
+function createRichContext(): AiToolExecutionContext {
+  return {
+    ...createContext(),
+    activeNamespace: "public",
+    activeTab: {
+      id: "tab-1",
+      type: "query",
+      title: "Query #1",
+      sql: "SELECT * FROM public.users WHERE active = true",
+      connectionId: "connection-1",
+      targetSchema: "public",
+      schemaName: "public",
+      tableName: "users",
+      objectType: "table",
+      selection: {
+        tabId: "tab-1",
+        tabTitle: "Query #1",
+        text: "SELECT * FROM public.users",
+        startLineNumber: 1,
+        startColumn: 1,
+        endLineNumber: 1,
+        endColumn: 27,
+        connectionId: "connection-1",
+      },
+    },
   };
 }
 
@@ -316,5 +350,91 @@ describe("LangGraph planner bridge", () => {
         toolName: "demo.read",
       }),
     ]);
+  });
+});
+
+describe("model assistant planner", () => {
+  it("passes active workspace context to the model planner", async () => {
+    let captured: AssistantModelPlannerRequest | null = null;
+    const runtime = createAssistantRuntime({
+      registry: createTestRegistry(),
+      createContext: createRichContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+      planner: createModelAssistantPlanner({
+        invoke: async (request) => {
+          captured = request;
+          return {
+            intent: "metadata",
+            steps: [
+              {
+                id: "model-read",
+                title: "Read current table metadata",
+                toolName: "demo.read",
+                input: { value: "users" },
+              },
+            ],
+          };
+        },
+      }),
+    });
+
+    const turn = await runtime.prepareTurnAsync({
+      message: "describe the current table",
+    });
+
+    expect(turn.planner).toMatchObject({ mode: "model" });
+    expect(captured?.context).toMatchObject({
+      requestId: "test-request",
+      activeConnectionId: "connection-1",
+      activeDriver: "postgres",
+      activeNamespace: "public",
+      activeTab: {
+        id: "tab-1",
+        tableName: "users",
+        selection: {
+          text: "SELECT * FROM public.users",
+        },
+      },
+    });
+    expect(turn.suggestedPlan).toEqual([
+      expect.objectContaining({
+        id: "model-read",
+        toolName: "demo.read",
+        requiresApproval: false,
+      }),
+    ]);
+  });
+
+  it("passes active workspace context to model result summaries", async () => {
+    let captured: AssistantModelResultSummaryRequest | null = null;
+    const runtime = createAssistantRuntime({
+      registry: createTestRegistry(),
+      createContext: createRichContext,
+      summarizeToolResults: createModelToolResultSummarizer(async (request) => {
+        captured = request;
+        return { message: "summarized with workspace context" };
+      }),
+    });
+
+    const summary = await runtime.summarizeToolResults(
+      { message: "summarize this" },
+      [
+        {
+          id: "read",
+          toolName: "demo.read",
+          status: "success",
+          output: { ok: true },
+        },
+      ]
+    );
+
+    expect(summary.message).toBe("summarized with workspace context");
+    expect(captured?.context).toMatchObject({
+      activeNamespace: "public",
+      activeTab: {
+        id: "tab-1",
+        tableName: "users",
+      },
+    });
   });
 });

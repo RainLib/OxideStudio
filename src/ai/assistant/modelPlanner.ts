@@ -2,7 +2,7 @@ import {
   createAiToolManifest,
   evaluateAiToolPolicy,
 } from "@/ai/tools";
-import type { AiToolManifest } from "@/ai/tools";
+import type { AiToolExecutionContext, AiToolManifest } from "@/ai/tools";
 import { classifyAssistantIntent, createDefaultAssistantPlanner } from "./planner";
 import type {
   AssistantIntent,
@@ -18,14 +18,15 @@ import type {
 
 export type AssistantModelPlannerRequest = {
   turn: AssistantTurnInput;
-  context: {
-    requestId: string;
-    activeConnectionId?: string | null;
-    activeDriver?: string | null;
-  };
+  context: AssistantModelPlannerContext;
   manifest: AiToolManifest;
   instructions: string[];
 };
+
+export type AssistantModelPlannerContext = Pick<
+  AiToolExecutionContext,
+  "requestId" | "activeConnectionId" | "activeDriver" | "activeNamespace" | "activeTab"
+>;
 
 export type AssistantModelPlanStep = {
   id?: string;
@@ -91,11 +92,7 @@ export class ModelAssistantPlanner implements AssistantPlanner {
   async plan(input: AssistantPlannerInput): Promise<AssistantPlannerResult> {
     const response = await this.invoke({
       turn: input.turn,
-      context: {
-        requestId: input.context.requestId,
-        activeConnectionId: input.context.activeConnectionId ?? null,
-        activeDriver: input.context.activeDriver ?? null,
-      },
+      context: modelPlannerContext(input.context),
       manifest: createAiToolManifest(input.availableTools, input.policy),
       instructions: MODEL_PLANNER_INSTRUCTIONS,
     });
@@ -177,15 +174,23 @@ export function createModelToolResultSummarizer(
   return async (input) =>
     invoke({
       turn: input.turn,
-      context: {
-        requestId: input.context.requestId,
-        activeConnectionId: input.context.activeConnectionId ?? null,
-        activeDriver: input.context.activeDriver ?? null,
-      },
+      context: modelPlannerContext(input.context),
       manifest: createAiToolManifest(input.availableTools, input.policy),
       results: input.results,
       instructions: MODEL_RESULT_SUMMARY_INSTRUCTIONS,
     });
+}
+
+function modelPlannerContext(
+  context: AiToolExecutionContext
+): AssistantModelPlannerContext {
+  return {
+    requestId: context.requestId,
+    activeConnectionId: context.activeConnectionId ?? null,
+    activeDriver: context.activeDriver ?? null,
+    activeNamespace: context.activeNamespace ?? null,
+    activeTab: context.activeTab ?? null,
+  };
 }
 
 const MODEL_PLANNER_INSTRUCTIONS = [
