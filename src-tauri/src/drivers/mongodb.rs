@@ -1,6 +1,6 @@
 use crate::core::{
     driver::DatabaseDriver,
-    protocol::{CollectionInfo, ColumnDef, QueryResult},
+    protocol::{CollectionInfo, ColumnDef, ColumnInfo, QueryResult},
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -293,6 +293,35 @@ impl DatabaseDriver for MongoDbDriver {
 
         Ok(collections)
     }
+
+    async fn get_columns(&self, schema: &str, table: &str) -> Result<Vec<ColumnInfo>> {
+        let schema = schema.trim();
+        let database_name = if schema.is_empty() {
+            &self.default_database
+        } else {
+            schema
+        };
+        let collection = table.trim();
+        if collection.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let result = self
+            .client()
+            .await?
+            .database(database_name)
+            .run_command(doc! {
+                "find": collection,
+                "filter": {},
+                "limit": 20_i32,
+            })
+            .await
+            .with_context(|| {
+                format!("Failed to sample MongoDB documents for {database_name}.{collection}")
+            })?;
+        let documents = extract_cursor_batch(result)?;
+        Ok(infer_mongodb_columns(&documents))
+    }
 }
 
 fn mongodb_collection_info(
@@ -513,6 +542,79 @@ fn documents_result(documents: Vec<Document>) -> QueryResult {
     QueryResult::rows(columns, rows)
 }
 
+fn infer_mongodb_columns(documents: &[Document]) -> Vec<ColumnInfo> {
+    let mut fields = Vec::<(String, String, usize)>::new();
+    for document in documents {
+        for (name, value) in document {
+            if let Some((_, data_type, seen_count)) =
+                fields.iter_mut().find(|(field, _, _)| field == name)
+            {
+                *seen_count += 1;
+                *data_type = merge_bson_type(data_type, bson_type_name(value));
+            } else {
+                fields.push((name.to_string(), bson_type_name(value).to_string(), 1));
+            }
+        }
+    }
+
+    if let Some(position) = fields.iter().position(|(name, _, _)| name == "_id") {
+        let id = fields.remove(position);
+        fields.insert(0, id);
+    }
+
+    fields
+        .into_iter()
+        .map(|(name, data_type, seen_count)| ColumnInfo {
+            is_nullable: seen_count < documents.len(),
+            is_primary_key: name == "_id",
+            is_unique: name == "_id",
+            is_indexed: name == "_id",
+            is_auto_increment: false,
+            default_value: None,
+            comment: None,
+            name,
+            data_type,
+        })
+        .collect()
+}
+
+fn bson_type_name(value: &Bson) -> &'static str {
+    match value {
+        Bson::Double(_) => "double",
+        Bson::String(_) => "string",
+        Bson::Array(_) => "array",
+        Bson::Document(_) => "object",
+        Bson::Boolean(_) => "bool",
+        Bson::Null => "null",
+        Bson::RegularExpression(_) => "regex",
+        Bson::JavaScriptCode(_) | Bson::JavaScriptCodeWithScope(_) => "javascript",
+        Bson::Int32(_) => "int",
+        Bson::Int64(_) => "long",
+        Bson::Timestamp(_) => "timestamp",
+        Bson::Binary(_) => "binary",
+        Bson::ObjectId(_) => "objectId",
+        Bson::DateTime(_) => "date",
+        Bson::Symbol(_) => "symbol",
+        Bson::Decimal128(_) => "decimal",
+        Bson::Undefined => "undefined",
+        Bson::MinKey => "minKey",
+        Bson::MaxKey => "maxKey",
+        Bson::DbPointer(_) => "dbPointer",
+    }
+}
+
+fn merge_bson_type(current: &str, next: &str) -> String {
+    if current == next {
+        current.to_string()
+    } else if current == "null" {
+        next.to_string()
+    } else if next == "null" {
+        current.to_string()
+    } else {
+        "mixed".to_string()
+    }
+}
+
 fn command_result(
     database: &str,
     operation: &str,
@@ -662,6 +764,37 @@ mod tests {
         assert_eq!(result.columns[2].name, "active");
         assert_eq!(result.rows.len(), 2);
         assert_eq!(result.rows[1][2], Value::Null);
+    }
+
+    #[test]
+    fn infers_columns_from_sampled_documents() {
+        let columns = infer_mongodb_columns(&[
+            doc! {"name": "Ada", "_id": 1, "active": true, "profile": {"role": "admin"}},
+            doc! {"_id": 2, "name": "Grace", "active": "yes", "tags": ["db"]},
+        ]);
+
+        assert_eq!(columns[0].name, "_id");
+        assert_eq!(columns[0].data_type, "int");
+        assert!(columns[0].is_primary_key);
+        assert!(columns[0].is_indexed);
+
+        let active = columns
+            .iter()
+            .find(|column| column.name == "active")
+            .unwrap();
+        assert_eq!(active.data_type, "mixed");
+        assert!(!active.is_nullable);
+
+        let profile = columns
+            .iter()
+            .find(|column| column.name == "profile")
+            .unwrap();
+        assert_eq!(profile.data_type, "object");
+        assert!(profile.is_nullable);
+
+        let tags = columns.iter().find(|column| column.name == "tags").unwrap();
+        assert_eq!(tags.data_type, "array");
+        assert!(tags.is_nullable);
     }
 
     #[test]

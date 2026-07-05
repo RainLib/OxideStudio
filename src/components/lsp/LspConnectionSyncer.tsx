@@ -7,6 +7,7 @@ import { getLspDocumentUri, lspClient } from "@/services/lsp";
 import {
   databaseService,
   schemaService,
+  type ColumnInfo,
   type CollectionInfo,
   type DatabaseCapabilities,
 } from "@/services/tauri";
@@ -114,7 +115,8 @@ function lspColumn(
 
 function collectionToLspTableDefinition(
   capabilities: DatabaseCapabilities,
-  collection: CollectionInfo
+  collection: CollectionInfo,
+  columns: ColumnInfo[] = []
 ): LspTableDefinition {
   const objectType = collection.type || capabilities.dataModel;
   const countLabel =
@@ -127,13 +129,14 @@ function collectionToLspTableDefinition(
     object_type: objectType,
     comment: countLabel,
     ...emptyLspTableDetails(),
-    columns: lspColumnsForCollection(capabilities, collection),
+    columns: lspColumnsForCollection(capabilities, collection, columns),
   };
 }
 
 function lspColumnsForCollection(
   capabilities: DatabaseCapabilities,
-  collection: CollectionInfo
+  collection: CollectionInfo,
+  columns: ColumnInfo[] = []
 ): LspTableDefinition["columns"] {
   if (capabilities.dataModel === "keyValue") {
     return [
@@ -152,6 +155,19 @@ function lspColumnsForCollection(
   }
 
   if (capabilities.dataModel === "document") {
+    if (columns.length > 0) {
+      return columns.map((column) => ({
+        name: column.name,
+        data_type: column.data_type || "json",
+        nullable: column.is_nullable,
+        primary_key: column.is_primary_key,
+        unique: column.is_unique ?? false,
+        indexed: column.is_indexed ?? false,
+        comment: column.comment || null,
+        source_location: null,
+      }));
+    }
+
     return [
       lspColumn("_id", "objectId", "Document id"),
       lspColumn("document", "object", "Document body"),
@@ -159,6 +175,32 @@ function lspColumnsForCollection(
   }
 
   return [lspColumn("value", "json", "Object value")];
+}
+
+async function collectionToLspTableDefinitionWithMetadata(
+  connectionId: string,
+  namespace: string,
+  capabilities: DatabaseCapabilities,
+  collection: CollectionInfo
+): Promise<LspTableDefinition> {
+  if (capabilities.dataModel !== "document") {
+    return collectionToLspTableDefinition(capabilities, collection);
+  }
+
+  try {
+    const columns = await schemaService.getColumns(
+      connectionId,
+      namespace,
+      collection.name
+    );
+    return collectionToLspTableDefinition(capabilities, collection, columns);
+  } catch (error) {
+    console.error(
+      `[LSP] Failed to sample document fields for ${namespace}.${collection.name}:`,
+      error
+    );
+    return collectionToLspTableDefinition(capabilities, collection);
+  }
 }
 
 function findKnownSchemaName(schemaNames: string[], schemaName?: string | null) {
@@ -577,11 +619,21 @@ export function LspConnectionSyncer() {
               LSP_METADATA_CONCURRENCY,
               async (table) => getCachedTableDefinition(schemaName, table)
             );
-            const lspCollections = schemaCollections
-              .slice(0, MAX_LSP_COLLECTIONS_PER_SCHEMA)
-              .map((collection) =>
-                collectionToLspTableDefinition(capabilities, collection)
-              );
+            const boundedCollections = schemaCollections.slice(
+              0,
+              MAX_LSP_COLLECTIONS_PER_SCHEMA
+            );
+            const lspCollections = await mapWithConcurrency(
+              boundedCollections,
+              LSP_METADATA_CONCURRENCY,
+              async (collection) =>
+                collectionToLspTableDefinitionWithMetadata(
+                  activeConnectionId,
+                  schemaName,
+                  capabilities,
+                  collection
+                )
+            );
             const lspObjects = canSyncTableMetadata ? lspTables : lspCollections;
             const lspFunctions: LspFunctionDefinition[] = schemaFunctions.map(
               (func) => ({
