@@ -12,7 +12,7 @@ pub struct RedisDriver {
     url: String,
     client: redis::Client,
     connection: Mutex<Option<ConnectionManager>>,
-    database_label: String,
+    active_database: Mutex<String>,
 }
 
 impl RedisDriver {
@@ -22,7 +22,7 @@ impl RedisDriver {
             url: url.to_string(),
             client,
             connection: Mutex::new(None),
-            database_label: redis_database_label(url),
+            active_database: Mutex::new(redis_database_label(url)),
         })
     }
 
@@ -34,7 +34,11 @@ impl RedisDriver {
             .ok_or_else(|| anyhow!("Redis connection is not established"))
     }
 
-    async fn execute_tokens(&self, tokens: &[String]) -> Result<Value> {
+    async fn execute_tokens_on(
+        &self,
+        connection: &mut ConnectionManager,
+        tokens: &[String],
+    ) -> Result<Value> {
         let command = tokens
             .first()
             .map(|value| value.trim())
@@ -45,12 +49,62 @@ impl RedisDriver {
             redis_command.arg(arg);
         }
 
-        let mut connection = self.connection().await?;
         let value: RedisValue = redis_command
-            .query_async(&mut connection)
+            .query_async(connection)
             .await
             .with_context(|| format!("Redis command failed: {command}"))?;
+        if command.eq_ignore_ascii_case("SELECT") {
+            if let Some(database) = tokens.get(1) {
+                *self.active_database.lock().await = validate_redis_database_label(database)?;
+            }
+        }
         Ok(redis_value_to_json(value))
+    }
+
+    async fn select_database_on(
+        &self,
+        connection: &mut ConnectionManager,
+        database: &str,
+    ) -> Result<String> {
+        let database = validate_redis_database_label(database)?;
+        redis::cmd("SELECT")
+            .arg(&database)
+            .query_async::<String>(connection)
+            .await
+            .with_context(|| format!("Redis SELECT {database} failed"))?;
+        *self.active_database.lock().await = database.clone();
+        Ok(database)
+    }
+
+    async fn query_on_connection(
+        &self,
+        connection: &mut ConnectionManager,
+        sql: &str,
+    ) -> Result<Vec<QueryResult>> {
+        let commands = split_redis_commands(sql)?;
+        if commands.is_empty() {
+            return Err(anyhow!("Redis command is required"));
+        }
+
+        let columns = vec![
+            ColumnDef {
+                name: "command".to_string(),
+                data_type: "text".to_string(),
+            },
+            ColumnDef {
+                name: "result".to_string(),
+                data_type: "json".to_string(),
+            },
+        ];
+        let mut rows = Vec::new();
+
+        for tokens in commands {
+            let command_label = tokens.join(" ");
+            let result = self.execute_tokens_on(connection, &tokens).await?;
+            rows.push(vec![Value::String(command_label), result]);
+        }
+
+        Ok(vec![QueryResult::rows(columns, rows)])
     }
 }
 
@@ -88,38 +142,31 @@ impl DatabaseDriver for RedisDriver {
     }
 
     async fn query(&self, sql: &str) -> Result<Vec<QueryResult>> {
-        let commands = split_redis_commands(sql)?;
-        if commands.is_empty() {
-            return Err(anyhow!("Redis command is required"));
-        }
+        let mut connection = self.connection().await?;
+        self.query_on_connection(&mut connection, sql).await
+    }
 
-        let columns = vec![
-            ColumnDef {
-                name: "command".to_string(),
-                data_type: "text".to_string(),
-            },
-            ColumnDef {
-                name: "result".to_string(),
-                data_type: "json".to_string(),
-            },
-        ];
-        let mut rows = Vec::new();
-
-        for tokens in commands {
-            let command_label = tokens.join(" ");
-            let result = self.execute_tokens(&tokens).await?;
-            rows.push(vec![Value::String(command_label), result]);
-        }
-
-        Ok(vec![QueryResult::rows(columns, rows)])
+    async fn query_with_context(&self, sql: &str, schema: &str) -> Result<Vec<QueryResult>> {
+        let mut connection = self.connection().await?;
+        self.select_database_on(&mut connection, schema).await?;
+        self.query_on_connection(&mut connection, sql).await
     }
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
-        Ok(vec![self.database_label.clone()])
+        let mut connection = self.connection().await?;
+        let configured_count = redis_database_count(&mut connection).await.unwrap_or(16);
+        let active_database = self.active_database.lock().await.clone();
+        Ok(redis_database_labels(configured_count, &active_database))
     }
 
-    async fn get_collections(&self, _namespace: &str) -> Result<Vec<CollectionInfo>> {
+    async fn get_collections(&self, namespace: &str) -> Result<Vec<CollectionInfo>> {
         let mut connection = self.connection().await?;
+        let database = if namespace.trim().is_empty() {
+            self.active_database.lock().await.clone()
+        } else {
+            validate_redis_database_label(namespace)?
+        };
+        self.select_database_on(&mut connection, &database).await?;
         let mut cursor = 0_u64;
         let mut keys = Vec::new();
 
@@ -152,13 +199,19 @@ impl DatabaseDriver for RedisDriver {
             let document_count = redis_key_cardinality(&mut connection, &key, &key_type).await;
             collections.push(CollectionInfo {
                 name: key,
-                namespace: Some(self.database_label.clone()),
+                namespace: Some(database.clone()),
                 collection_type: Some(key_type),
                 document_count,
             });
         }
 
         Ok(collections)
+    }
+
+    async fn set_current_schema(&self, schema: &str) -> Result<()> {
+        let mut connection = self.connection().await?;
+        self.select_database_on(&mut connection, schema).await?;
+        Ok(())
     }
 }
 
@@ -196,6 +249,44 @@ fn redis_database_label(url: &str) -> String {
         .filter(|value| !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()))
         .unwrap_or("0")
         .to_string()
+}
+
+fn validate_redis_database_label(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(anyhow!("Redis database index is required"));
+    }
+    if !value.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(anyhow!("Redis database index must be numeric: {value}"));
+    }
+    Ok(value.to_string())
+}
+
+fn redis_database_labels(configured_count: usize, active_database: &str) -> Vec<String> {
+    let count = configured_count.clamp(1, 1024);
+    let mut labels = (0..count)
+        .map(|index| index.to_string())
+        .collect::<Vec<_>>();
+    if let Ok(active_index) = active_database.trim().parse::<usize>() {
+        if active_index >= count {
+            labels.push(active_index.to_string());
+        }
+    }
+    labels
+}
+
+async fn redis_database_count(connection: &mut ConnectionManager) -> Option<usize> {
+    let values = redis::cmd("CONFIG")
+        .arg("GET")
+        .arg("databases")
+        .query_async::<Vec<String>>(connection)
+        .await
+        .ok()?;
+    values
+        .windows(2)
+        .find(|window| window[0].eq_ignore_ascii_case("databases"))
+        .and_then(|window| window[1].parse::<usize>().ok())
+        .filter(|count| *count > 0)
 }
 
 fn split_redis_commands(input: &str) -> Result<Vec<Vec<String>>> {
@@ -375,6 +466,34 @@ mod tests {
         assert_eq!(
             redis_database_label("redis://localhost:6379/3?protocol=resp3"),
             "3"
+        );
+    }
+
+    #[test]
+    fn validates_and_lists_redis_database_labels() {
+        assert_eq!(validate_redis_database_label(" 12 ").unwrap(), "12");
+        assert!(validate_redis_database_label("").is_err());
+        assert!(validate_redis_database_label("app").is_err());
+        assert!(validate_redis_database_label("1;FLUSHDB").is_err());
+
+        assert_eq!(
+            redis_database_labels(4, "2"),
+            vec![
+                "0".to_string(),
+                "1".to_string(),
+                "2".to_string(),
+                "3".to_string()
+            ]
+        );
+        assert_eq!(
+            redis_database_labels(4, "8"),
+            vec![
+                "0".to_string(),
+                "1".to_string(),
+                "2".to_string(),
+                "3".to_string(),
+                "8".to_string()
+            ]
         );
     }
 
