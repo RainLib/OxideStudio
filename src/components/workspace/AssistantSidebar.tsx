@@ -8,7 +8,7 @@ import type {
   AssistantToolResultSummary,
 } from "@/ai";
 import { cn } from "@/lib/utils";
-import { Play, ShieldCheck, Sparkles } from "lucide-react";
+import { ListChecks, Play, ShieldCheck, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
 
 export function AssistantSidebar() {
@@ -28,7 +28,18 @@ export function AssistantSidebar() {
     Record<string, AssistantToolResultSummary>
   >({});
   const [isPlanning, setIsPlanning] = useState(false);
+  const [isRunningSafeSteps, setIsRunningSafeSteps] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const safeSteps =
+    preparedTurn?.suggestedPlan.filter(
+      (step) => step.toolName && !step.requiresApproval
+    ) ?? [];
+  const runnableSteps =
+    preparedTurn?.suggestedPlan.filter((step) => step.toolName) ?? [];
+  const isRunning = activeStepId !== null || isRunningSafeSteps;
+  const activeContextLabel = activeTab
+    ? `${activeTab.title}${selectedText ? " - selection" : ""}`
+    : "No active tab";
 
   const handlePrepare = async () => {
     setError(null);
@@ -44,6 +55,39 @@ export function AssistantSidebar() {
     }
   };
 
+  const executeStep = async (
+    turn: AssistantPreparedTurn,
+    step: AssistantPlanStep,
+    approved = false
+  ) => {
+    if (!step.toolName) return null;
+
+    const [result] = await runtime.executeToolCalls(
+      [
+        {
+          id: step.id,
+          toolName: step.toolName,
+          input: step.input || {},
+          approved,
+        },
+      ],
+      turn.context
+    );
+    if (!result) return null;
+
+    setToolResults((state) => ({ ...state, [step.id]: result }));
+    const summary = await runtime.summarizeToolResults(
+      { message, selectedText },
+      [result],
+      turn.context
+    );
+    setToolSummaries((state) => ({ ...state, [step.id]: summary }));
+    if (result.status !== "success") {
+      setError(result.error || "Tool execution did not complete");
+    }
+    return result;
+  };
+
   const handleRunStep = async (
     step: AssistantPlanStep,
     approved = false
@@ -54,28 +98,7 @@ export function AssistantSidebar() {
     setError(null);
     setActiveStepId(step.id);
     try {
-      const [result] = await runtime.executeToolCalls(
-        [
-          {
-            id: step.id,
-            toolName: step.toolName,
-            input: step.input || {},
-            approved,
-          },
-        ],
-        preparedTurn.context
-      );
-      if (!result) return;
-      setToolResults((state) => ({ ...state, [step.id]: result }));
-      const summary = await runtime.summarizeToolResults(
-        { message, selectedText },
-        [result],
-        preparedTurn.context
-      );
-      setToolSummaries((state) => ({ ...state, [step.id]: summary }));
-      if (result.status === "error") {
-        setError(result.error || "Tool execution failed");
-      }
+      await executeStep(preparedTurn, step, approved);
     } catch (err: any) {
       setError(err?.message || String(err));
     } finally {
@@ -83,14 +106,38 @@ export function AssistantSidebar() {
     }
   };
 
+  const handleRunSafeSteps = async () => {
+    if (!preparedTurn || safeSteps.length === 0) return;
+
+    setError(null);
+    setIsRunningSafeSteps(true);
+    try {
+      for (const step of safeSteps) {
+        setActiveStepId(step.id);
+        const result = await executeStep(preparedTurn, step, false);
+        if (result && result.status !== "success") break;
+      }
+    } catch (err: any) {
+      setError(err?.message || String(err));
+    } finally {
+      setActiveStepId(null);
+      setIsRunningSafeSteps(false);
+    }
+  };
+
   return (
     <div className="flex h-full flex-col bg-background-tertiary">
       <div className="border-b border-border bg-background-secondary/50 px-3 py-2">
-        <div className="flex items-center gap-2">
-          <Sparkles size={14} className="text-primary" />
-          <span className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-            Assistant
-          </span>
+        <div className="flex items-start gap-2">
+          <Sparkles size={14} className="mt-0.5 shrink-0 text-primary" />
+          <div className="min-w-0">
+            <div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+              Assistant
+            </div>
+            <div className="truncate text-[10px] text-muted-foreground/70">
+              {activeContextLabel}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -101,14 +148,31 @@ export function AssistantSidebar() {
           placeholder="Ask about this workspace"
           className="min-h-24 w-full resize-none rounded-sm border border-border bg-background-tertiary px-2 py-2 text-[11px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/50 focus:border-primary"
         />
-        <Button
-          size="sm"
-          className="mt-2 h-7 w-full rounded-sm text-[11px]"
-          onClick={handlePrepare}
-          disabled={!message.trim() || isPlanning}
-        >
-          {isPlanning ? "Planning" : "Plan"}
-        </Button>
+        <div className="mt-2 flex gap-2">
+          <Button
+            type="button"
+            size="sm"
+            className="h-7 flex-1 rounded-sm text-[11px]"
+            onClick={handlePrepare}
+            disabled={!message.trim() || isPlanning || isRunning}
+          >
+            {isPlanning ? "Planning" : "Plan"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 rounded-sm px-2 text-[11px]"
+            onClick={handleRunSafeSteps}
+            disabled={
+              !preparedTurn || safeSteps.length === 0 || isPlanning || isRunning
+            }
+            title="Run read-only steps"
+          >
+            <ListChecks size={12} className="mr-1" />
+            {isRunningSafeSteps ? "Running" : "Run Safe"}
+          </Button>
+        </div>
       </div>
 
       <div className="custom-scrollbar flex-1 overflow-auto p-2">
@@ -130,6 +194,11 @@ export function AssistantSidebar() {
                       {warning}
                     </div>
                   ))}
+                </div>
+              )}
+              {runnableSteps.length === 0 && (
+                <div className="mt-1 text-[10px] text-muted-foreground">
+                  No executable tool step was planned.
                 </div>
               )}
             </div>
@@ -163,7 +232,7 @@ export function AssistantSidebar() {
                           activeStepId === step.id && "animate-pulse"
                         )}
                         onClick={() => handleRunStep(step, step.requiresApproval)}
-                        disabled={activeStepId !== null}
+                        disabled={isRunning}
                         title={step.requiresApproval ? "Approve and run" : "Run"}
                       >
                         {step.requiresApproval ? (
@@ -186,6 +255,11 @@ export function AssistantSidebar() {
                       {summary && (
                         <div className="rounded-sm border border-border/60 bg-background-tertiary px-2 py-1.5 text-[10px] text-muted-foreground">
                           {summary.message}
+                          {summary.warnings?.map((warning) => (
+                            <div key={warning} className="mt-1 text-amber-500">
+                              {warning}
+                            </div>
+                          ))}
                         </div>
                       )}
                       <pre className="max-h-44 overflow-auto rounded-sm bg-background-tertiary p-2 text-[10px] text-muted-foreground">

@@ -26,6 +26,19 @@ export async function connect(
 }
 
 /**
+ * 测试数据库连接，不切换当前工作区连接
+ */
+export async function testConnection(
+  driver: string,
+  url: string
+): Promise<string> {
+  return invokeWithInterceptors<string>("test_db_connection", {
+    driver,
+    url,
+  });
+}
+
+/**
  * 断开数据库连接
  * @param connectionId - 连接 ID
  * @returns Promise<string> - 断开成功消息
@@ -63,6 +76,7 @@ export async function saveConnections(
  */
 export const connectionService = {
   connect,
+  testConnection,
   disconnect,
   loadConnections,
   saveConnections,

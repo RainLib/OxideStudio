@@ -7,6 +7,7 @@ import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
 import { TabBar } from "@/components/workspace/TabBar";
 import { TableDataView } from "@/components/workspace/TableDataView";
 import { CreateTableTab } from "@/components/workspace/CreateTableTab";
+import { AssistantSidebar } from "@/components/workspace/AssistantSidebar";
 import { cn } from "@/lib/utils";
 import { useTabStore } from "@/store/useTabStore";
 import { useTheme } from "@/theme/useTheme";
@@ -14,9 +15,7 @@ import { CommandPalette } from "@/components/workspace/CommandPalette";
 import {
   PanelLeft,
   PanelLeftClose,
-  PanelRight,
-  PanelRightClose,
-  Settings2,
+  Sparkles,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -37,7 +36,7 @@ export function WorkspacePage() {
   const [sidebarWidth, setSidebarWidth] = useState(280); // Fixed pixel width
   const [editorHeight, setEditorHeight] = useState(400); // Default pixel height for editor
 
-  const [isRightCollapsed, setIsRightCollapsed] = useState(true);
+  const [isRightCollapsed, setIsRightCollapsed] = useState(false);
 
   // Auto-create default SQL tab on first load
   useEffect(() => {
@@ -131,15 +130,15 @@ export function WorkspacePage() {
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-accent/50"
-              onClick={() => setIsRightCollapsed(!isRightCollapsed)}
-              title="Toggle Right Panel"
-            >
-              {isRightCollapsed ? (
-                <PanelRight size={16} />
-              ) : (
-                <PanelRightClose size={16} />
+              className={cn(
+                "h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-accent/50",
+                !isRightCollapsed && "text-primary bg-primary/10"
               )}
+              onClick={() => setIsRightCollapsed(!isRightCollapsed)}
+              title="AI Assistant"
+              aria-label="AI Assistant"
+            >
+              <Sparkles size={16} />
             </Button>
           </>
         }
@@ -212,21 +211,11 @@ export function WorkspacePage() {
                 "border-l border-border/40 bg-muted/10 shrink-0 transition-all duration-300 ease-in-out overflow-hidden flex flex-col",
                 isRightCollapsed
                   ? "w-0 opacity-0 border-l-0"
-                  : "w-[260px] opacity-100"
+                  : "w-[320px] opacity-100"
               )}
             >
-              <div className="h-full flex flex-col min-w-[260px]">
-                <div className="h-10 border-b border-border/40 flex items-center px-4 bg-muted/20">
-                  <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
-                    Item Details
-                  </span>
-                </div>
-                <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground/50 text-xs p-8 text-center leading-relaxed gap-3">
-                  <div className="p-4 rounded-full bg-muted/30 text-muted-foreground/40">
-                    <Settings2 size={24} strokeWidth={1.5} />
-                  </div>
-                  <p>Select an item to view its properties</p>
-                </div>
+              <div className="h-full min-w-[320px]">
+                <AssistantSidebar />
               </div>
             </div>
           </div>

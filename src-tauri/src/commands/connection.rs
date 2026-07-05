@@ -55,6 +55,44 @@ pub async fn connect_db(
     }
 }
 
+/// 测试数据库连接，不注册为当前工作区连接
+#[tauri::command]
+pub async fn test_db_connection(driver: String, url: String) -> Result<Response<String>, String> {
+    let result: Result<String, String> = async {
+        tracing::info!(
+            "Testing database connection: driver={}, url={}",
+            driver,
+            redact_connection_url(&url)
+        );
+
+        let capabilities =
+            database_capabilities_for_driver(&driver).map_err(|error| error.to_string())?;
+        let db_driver = connect_driver(&driver, &url)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        db_driver
+            .ping()
+            .await
+            .map_err(|e| format!("Connection test failed: {}", e))?;
+        db_driver
+            .disconnect()
+            .await
+            .map_err(|e| format!("Connection cleanup failed: {}", e))?;
+
+        Ok(format!(
+            "{} connection is available",
+            capabilities.display_name
+        ))
+    }
+    .await;
+
+    match result {
+        Ok(msg) => Ok(Response::ok(msg)),
+        Err(e) => Ok(Response::err("CONNECTION_TEST_ERROR", &e)),
+    }
+}
+
 /// 断开数据库连接
 #[tauri::command]
 pub async fn disconnect_db(

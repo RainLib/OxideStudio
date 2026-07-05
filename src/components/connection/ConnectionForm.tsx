@@ -101,6 +101,7 @@ export function ConnectionForm() {
     selectedConnection,
     saveConnection,
     connect,
+    testConnection,
     updateConnectionConfig,
   } = useConnectionStore();
 
@@ -311,12 +312,16 @@ export function ConnectionForm() {
 
   const handleTest = async () => {
     setTestStatus({ type: "loading", msg: "Testing connection..." });
-    const error = await connect(selectedConnection);
-    if (error) {
-      setTestStatus({ type: "error", msg: error });
-    } else {
-      setTestStatus({ type: "success", msg: "Connection successful" });
-      setTimeout(() => setTestStatus(null), 3000);
+    try {
+      const error = await testConnection(selectedConnection);
+      if (error) {
+        setTestStatus({ type: "error", msg: error });
+      } else {
+        setTestStatus({ type: "success", msg: "Connection available" });
+        setTimeout(() => setTestStatus(null), 3000);
+      }
+    } catch (error: any) {
+      setTestStatus({ type: "error", msg: error?.message || String(error) });
     }
   };
 
@@ -772,6 +777,7 @@ export function ConnectionForm() {
         <div className="w-full max-w-3xl flex items-center justify-between px-8">
           <div className="flex items-center gap-4">
             <Button
+              type="button"
               variant="ghost"
               onClick={handleTest}
               disabled={testStatus?.type === "loading"}

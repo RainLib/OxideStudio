@@ -37,9 +37,26 @@ interface ConnectionState {
   updateConnectionConfig: (updates: Partial<ConnectionConfig>) => void;
   saveConnection: (config: ConnectionConfig) => Promise<void>;
   addConnection: (config: Omit<ConnectionConfig, "id">) => Promise<void>;
+  testConnection: (config: ConnectionConfig) => Promise<string | null>;
   connect: (config: ConnectionConfig) => Promise<string | null>;
   setActiveConnection: (id: string) => Promise<string | null>;
   disconnect: () => Promise<void>;
+}
+
+function connectionUrlForConfig(config: ConnectionConfig) {
+  if (config.connectionUrl && config.connectionUrl.trim()) {
+    return normalizeConnectionUrlForDriver(config.driver, config.connectionUrl);
+  }
+
+  return buildConnectionUrl({
+    driver: config.driver,
+    host: config.host,
+    port: config.port,
+    user: config.user,
+    password: config.password,
+    database: config.database,
+    sslMode: config.sslMode || "disable",
+  });
 }
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
@@ -122,26 +139,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     await get().saveConnection(newConn);
   },
 
-  connect: async (config) => {
-    // Use connectionUrl if provided, otherwise build from individual fields
-    let url: string;
-
-    if (config.connectionUrl && config.connectionUrl.trim()) {
-      url = normalizeConnectionUrlForDriver(config.driver, config.connectionUrl);
-    } else {
-      url = buildConnectionUrl({
-        driver: config.driver,
-        host: config.host,
-        port: config.port,
-        user: config.user,
-        password: config.password,
-        database: config.database,
-        sslMode: config.sslMode || "disable",
-      });
-    }
-
+  testConnection: async (config) => {
     try {
-      await connectionService.connect(config.id, config.driver, url);
+      await connectionService.testConnection(
+        config.driver,
+        connectionUrlForConfig(config)
+      );
+      return null;
+    } catch (e: any) {
+      return e.message || String(e);
+    }
+  },
+
+  connect: async (config) => {
+    try {
+      await connectionService.connect(
+        config.id,
+        config.driver,
+        connectionUrlForConfig(config)
+      );
       // Reset only after the backend connection is ready so a failed switch
       // does not wipe the currently usable workspace metadata.
       useSchemaStore.getState().reset();
