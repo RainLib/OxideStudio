@@ -24,6 +24,7 @@ This keeps the editor integration direct and state-aware while allowing external
 ## Current Implementation
 
 - `src/ai/tools` defines the shared registry, metadata/query tools, result limits, audit hooks, and permission policy.
+- `src/ai/tools/families.ts` provides the tool family extension point used by core database, table, document, key-value, and search tools.
 - `src/ai/assistant` prepares editor-aware plans and can execute AI-proposed tool calls with approval-aware results, including approved mutation/destructive steps.
 - `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
 - `src/ai/cli` provides a dependency-light command adapter for `tools list` and `tools call`.
@@ -99,5 +100,5 @@ For the editor itself, prefer direct TypeScript orchestration over MCP. The edit
 3. Add MCP and CLI adapters over the same registry. Done.
 4. Add write tools with approval gates and audit logging. Done for query-level mutation/destructive tools, structured table row mutations, and structured document/key/search mutations.
 5. Add a LangGraph-backed planner that chooses tool calls, pauses for approval, and feeds results back into the model.
-6. Add provider/plugin hooks so new databases register tool families by capability, not by UI rewrites.
+6. Add provider/plugin hooks so new databases register tool families by capability, not by UI rewrites. Foundation done with `AiToolFamily`; external provider loading is still pending.
 7. Add live integration coverage for MongoDB, Redis, Elasticsearch, MySQL, and PostgreSQL tool paths.

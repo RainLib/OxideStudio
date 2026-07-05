@@ -4,6 +4,8 @@ import type {
   AiToolExecutionContext,
 } from "./types";
 import type { AiToolRegistry } from "./registry";
+import type { AiToolFamily } from "./families";
+import { registerAiToolFamilies } from "./families";
 import type {
   DatabaseDriver,
   TableRowDelete,
@@ -12,62 +14,73 @@ import type {
 
 const DEFAULT_QUERY_LIMIT = 200;
 
+export const CORE_AI_TOOL_FAMILIES: AiToolFamily[] = [
+  {
+    name: "connection",
+    tools: [connectionListTool, connectionCapabilitiesTool],
+  },
+  {
+    name: "workspace",
+    enabled: (adapters) => Boolean(adapters.getActiveTab),
+    tools: [activeTabTool],
+  },
+  {
+    name: "metadata.collections",
+    enabled: (adapters) => Boolean(adapters.listCollections),
+    tools: [listCollectionsTool],
+  },
+  {
+    name: "metadata.objects",
+    enabled: (adapters) => Boolean(adapters.listObjects),
+    tools: [listObjectsTool],
+  },
+  {
+    name: "metadata.describe",
+    enabled: (adapters) => Boolean(adapters.describeObject),
+    tools: [describeObjectTool],
+  },
+  {
+    name: "query.read",
+    enabled: (adapters) => Boolean(adapters.runReadOnlyQuery),
+    tools: [readOnlyQueryTool],
+  },
+  {
+    name: "query.write",
+    enabled: (adapters) => Boolean(adapters.runMutationQuery),
+    tools: [mutationQueryTool, destructiveQueryTool],
+  },
+  {
+    name: "table.rows",
+    enabled: (adapters) => Boolean(adapters.mutateTableRows),
+    tools: [insertTableRowsTool, updateTableRowsTool, deleteTableRowsTool],
+  },
+  {
+    name: "document.mutations",
+    enabled: (adapters) => Boolean(adapters.mutateDocuments),
+    tools: [insertDocumentsTool, updateDocumentsTool, deleteDocumentsTool],
+  },
+  {
+    name: "keyValue.mutations",
+    enabled: (adapters) => Boolean(adapters.mutateKeyValues),
+    tools: [setKeyValueTool, deleteKeysTool],
+  },
+  {
+    name: "search.mutations",
+    enabled: (adapters) => Boolean(adapters.mutateSearchDocuments),
+    tools: [
+      indexSearchDocumentTool,
+      updateSearchDocumentTool,
+      deleteSearchDocumentTool,
+    ],
+  },
+];
+
 export function registerCoreAiTools(
   registry: AiToolRegistry,
-  adapters: AiToolAdapters
+  adapters: AiToolAdapters,
+  families: AiToolFamily[] = CORE_AI_TOOL_FAMILIES
 ) {
-  registry.register(connectionListTool(adapters));
-  registry.register(connectionCapabilitiesTool(adapters));
-
-  if (adapters.getActiveTab) {
-    registry.register(activeTabTool(adapters));
-  }
-
-  if (adapters.listCollections) {
-    registry.register(listCollectionsTool(adapters));
-  }
-
-  if (adapters.listObjects) {
-    registry.register(listObjectsTool(adapters));
-  }
-
-  if (adapters.describeObject) {
-    registry.register(describeObjectTool(adapters));
-  }
-
-  if (adapters.runReadOnlyQuery) {
-    registry.register(readOnlyQueryTool(adapters));
-  }
-
-  if (adapters.runMutationQuery) {
-    registry.register(mutationQueryTool(adapters));
-    registry.register(destructiveQueryTool(adapters));
-  }
-
-  if (adapters.mutateTableRows) {
-    registry.register(insertTableRowsTool(adapters));
-    registry.register(updateTableRowsTool(adapters));
-    registry.register(deleteTableRowsTool(adapters));
-  }
-
-  if (adapters.mutateDocuments) {
-    registry.register(insertDocumentsTool(adapters));
-    registry.register(updateDocumentsTool(adapters));
-    registry.register(deleteDocumentsTool(adapters));
-  }
-
-  if (adapters.mutateKeyValues) {
-    registry.register(setKeyValueTool(adapters));
-    registry.register(deleteKeysTool(adapters));
-  }
-
-  if (adapters.mutateSearchDocuments) {
-    registry.register(indexSearchDocumentTool(adapters));
-    registry.register(updateSearchDocumentTool(adapters));
-    registry.register(deleteSearchDocumentTool(adapters));
-  }
-
-  return registry;
+  return registerAiToolFamilies(registry, adapters, families);
 }
 
 function connectionListTool(adapters: AiToolAdapters): AiToolDefinition {
