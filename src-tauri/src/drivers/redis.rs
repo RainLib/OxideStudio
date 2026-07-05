@@ -361,6 +361,7 @@ fn tokenize_redis_command(input: &str) -> Result<Vec<String>> {
     let mut current = String::new();
     let mut quote: Option<char> = None;
     let mut escape = false;
+    let mut token_started = false;
 
     for ch in input.chars() {
         if escape {
@@ -371,28 +372,39 @@ fn tokenize_redis_command(input: &str) -> Result<Vec<String>> {
                 other => other,
             });
             escape = false;
+            token_started = true;
             continue;
         }
 
         if ch == '\\' {
             escape = true;
+            token_started = true;
             continue;
         }
 
         match quote {
             Some(end_quote) if ch == end_quote => {
                 quote = None;
+                token_started = true;
             }
-            Some(_) => current.push(ch),
+            Some(_) => {
+                current.push(ch);
+                token_started = true;
+            }
             None if ch == '\'' || ch == '"' => {
                 quote = Some(ch);
+                token_started = true;
             }
             None if ch.is_whitespace() => {
-                if !current.is_empty() {
+                if token_started {
                     tokens.push(std::mem::take(&mut current));
+                    token_started = false;
                 }
             }
-            None => current.push(ch),
+            None => {
+                current.push(ch);
+                token_started = true;
+            }
         }
     }
 
@@ -402,7 +414,7 @@ fn tokenize_redis_command(input: &str) -> Result<Vec<String>> {
     if quote.is_some() {
         return Err(anyhow!("Redis command has an unterminated quoted argument"));
     }
-    if !current.is_empty() {
+    if token_started {
         tokens.push(current);
     }
 
@@ -478,6 +490,10 @@ mod tests {
         assert_eq!(
             tokenize_redis_command(r#"SET note 'line\nbreak'"#).unwrap(),
             vec!["SET", "note", "line\nbreak"]
+        );
+        assert_eq!(
+            tokenize_redis_command(r#"SET "empty:string" """#).unwrap(),
+            vec!["SET", "empty:string", ""]
         );
         assert!(tokenize_redis_command(r#"SET note "unterminated"#).is_err());
     }
