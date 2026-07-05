@@ -6,7 +6,7 @@ import {
 } from "@/services/tauri";
 import {
   extractSqlDocumentTabId,
-  getSqlDocumentUri,
+  getLspDocumentUri,
   lspClient,
 } from "@/services/lsp";
 import type { Diagnostic } from "@/services/lsp/types";
@@ -274,13 +274,13 @@ async function getLspCompletions(
 
   const tabState = useTabStore.getState();
   const activeTab = tabState.tabs.find((tab) => tab.id === tabState.activeTabId);
+  const languageId = input.languageId || lspLanguageId(driver);
   const uri =
     input.uri ||
     (activeTab
-      ? getSqlDocumentUri(activeTab.id, driver)
-      : getSqlDocumentUri(context.requestId, driver));
+      ? getLspDocumentUri(activeTab.id, driver, languageId)
+      : getLspDocumentUri(context.requestId, driver, languageId));
   const text = input.text ?? activeTab?.sql ?? "";
-  const languageId = input.languageId || lspLanguageId(driver);
 
   await lspClient.didOpen(uri, text, Date.now(), languageId);
   return lspClient.getCompletions(uri, input.line, input.character);

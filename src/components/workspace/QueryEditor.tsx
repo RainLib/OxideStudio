@@ -18,12 +18,12 @@ import {
   supportsLspLanguageId,
 } from "@/lib/databaseDialect";
 import {
+  extractLspDocumentIdentity,
   extractSqlDocumentTabId,
-  getSqlDocumentUri,
+  getLspDocumentUri,
   LSP_NOTIFICATION_EVENT,
 } from "@/services/lsp";
 import { transactionService } from "@/services/tauri";
-import type { DatabaseDriver } from "@/services/tauri/types";
 import type {
   Diagnostic,
   LspServerNotification,
@@ -40,15 +40,9 @@ type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
 const LSP_PROVIDER_LANGUAGES = ["sql", "json", "plaintext"] as const;
 
-function extractDriverFromLspDocumentUri(uri: string): DatabaseDriver | null {
-  const match = uri.match(/^oxide:\/\/query\/.+\.([^./?#]+)\.sql(?:[?#].*)?$/);
-  const driver = match?.[1];
-  return driver ? (decodeURIComponent(driver) as DatabaseDriver) : null;
-}
-
 function isSupportedLspModelUri(uri: string) {
-  const driver = extractDriverFromLspDocumentUri(uri);
-  return Boolean(driver && supportsLspLanguageId(driver));
+  const identity = extractLspDocumentIdentity(uri);
+  return Boolean(identity?.driver && supportsLspLanguageId(identity.driver));
 }
 
 function isPublishDiagnosticsParams(
@@ -143,8 +137,10 @@ export function QueryEditor() {
   const effectiveConnectionId = activeTab?.connectionId || activeConnectionId;
   const activeConnection = connections.find((c) => c.id === effectiveConnectionId);
   const driver = activeConnection?.driver || DEFAULT_DATABASE_DRIVER;
-  const documentUri = activeTab ? getSqlDocumentUri(activeTab.id, driver) : "";
   const documentLanguageId = lspLanguageId(driver);
+  const documentUri = activeTab
+    ? getLspDocumentUri(activeTab.id, driver, documentLanguageId)
+    : "";
   const editorLanguageId = queryEditorLanguageId(driver);
   const canUseLsp = supportsLspLanguageId(driver);
   const capabilities = defaultDatabaseCapabilities(driver);
@@ -212,7 +208,7 @@ export function QueryEditor() {
             (connection) => connection.id === tabConnectionId
           );
           const tabDriver = tabConnection?.driver || DEFAULT_DATABASE_DRIVER;
-          return getSqlDocumentUri(tab.id, tabDriver);
+          return getLspDocumentUri(tab.id, tabDriver, lspLanguageId(tabDriver));
         })
     );
 

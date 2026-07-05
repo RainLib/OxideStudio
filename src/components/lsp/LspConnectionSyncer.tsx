@@ -3,7 +3,7 @@ import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useLspClient } from "@/hooks/useLspClient";
-import { getSqlDocumentUri, lspClient } from "@/services/lsp";
+import { getLspDocumentUri, lspClient } from "@/services/lsp";
 import {
   databaseService,
   schemaService,
@@ -429,12 +429,6 @@ export function LspConnectionSyncer() {
       )
     );
 
-    const fileSchemas = Object.fromEntries(
-      queryTabs.map((tab) => [
-        getSqlDocumentUri(tab.id, connection.driver),
-        getSchemaId(schemaForTab(tab)),
-      ])
-    );
     // Debounce: wait 500ms before sending
     debounceTimerRef.current = setTimeout(() => {
       console.log("[LSP] Building schema configuration for:", connection.name);
@@ -448,9 +442,15 @@ export function LspConnectionSyncer() {
         const lspDialect = normalizeLspDialect(
           capabilities.lspLanguageId || connection.driver
         );
+        const fileSchemas = Object.fromEntries(
+          queryTabs.map((tab) => [
+            getLspDocumentUri(tab.id, connection.driver, lspDialect),
+            getSchemaId(schemaForTab(tab)),
+          ])
+        );
         const fileDialects = Object.fromEntries(
           queryTabs.map((tab) => [
-            getSqlDocumentUri(tab.id, connection.driver),
+            getLspDocumentUri(tab.id, connection.driver, lspDialect),
             lspDialect,
           ])
         );
