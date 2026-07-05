@@ -197,7 +197,7 @@ export function WorkspacePage() {
 
                       {/* Bottom: Results or Shortcuts */}
                       <div className="flex-1 min-h-0 flex flex-col bg-muted/5 z-0">
-                        {currentResult ? <DataGrid /> : <QueryShortcuts />}
+                        {currentResult ? <DataGrid readOnly /> : <QueryShortcuts />}
                       </div>
                     </div>
                   )}

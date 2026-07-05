@@ -14,10 +14,24 @@ import "@glideapps/glide-data-grid/dist/index.css";
 import { useTabStore } from "@/store/useTabStore";
 import { useTheme } from "@/theme/useTheme";
 import { createTypedCell, applyFilter, compareValues } from "@/lib/gridUtils";
-import { Check, X as XIcon, Loader2, Plus, Trash2 } from "lucide-react";
+import {
+  Check,
+  Copy,
+  Download,
+  FileJson,
+  X as XIcon,
+  Loader2,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ColumnFilter } from "./GridFilterRow";
 import { StatusBarPortal } from "./StatusBarPortal";
+import {
+  exportToCsv,
+  exportToJson,
+  serializeQueryResultSelectionToTsv,
+} from "@/lib/exportUtils";
 
 // In DataGridProps
 interface DataGridProps {
@@ -25,6 +39,19 @@ interface DataGridProps {
   columnFilters?: ColumnFilter[];
   overrideColumns?: Array<{ name: string; type?: string }>;
   readOnly?: boolean;
+}
+
+function rangeIndexes(start: number, length: number) {
+  return Array.from({ length }, (_, index) => start + index);
+}
+
+function exportFilename(title: string | undefined, extension: "csv" | "json") {
+  const safeTitle = (title || "query-result")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `${safeTitle || "query-result"}.${extension}`;
 }
 
 export function DataGrid({
@@ -71,7 +98,8 @@ export function DataGrid({
   const error = activeTab?.error;
   const gridState = activeTab?.gridState;
   const pendingEdits = activeTab?.pendingEdits || new Map();
-  const hasEdits = !readOnly && pendingEdits.size > 0;
+  const isEditable = activeTab?.type === "table" && !readOnly;
+  const hasEdits = isEditable && pendingEdits.size > 0;
   const columnWidths = activeTab?.columnWidths || {};
   const columnOrder = activeTab?.columnOrder || [];
   const newRowsCount = activeTab?.newRowsCount || 0;
@@ -396,13 +424,13 @@ export function DataGrid({
         }
       }
 
-      const baseCell = createTypedCell(val !== null ? val : "", !readOnly);
+      const baseCell = createTypedCell(val !== null ? val : "", isEditable);
       const gridCell = { ...baseCell };
 
       // Force editable for compatible types
       if (gridCell.kind !== GridCellKind.Boolean) {
-        (gridCell as any).allowOverlay = !readOnly;
-        (gridCell as any).readonly = readOnly;
+        (gridCell as any).allowOverlay = isEditable;
+        (gridCell as any).readonly = !isEditable;
       }
 
       // Apply theme override for new rows
@@ -421,7 +449,7 @@ export function DataGrid({
       pendingEdits,
       columns,
       overrideColumns,
-      readOnly,
+      isEditable,
     ]
   );
 
@@ -473,7 +501,7 @@ export function DataGrid({
   // Handle cell edit
   const onCellEdited = useCallback(
     (cell: Item, newValue: EditableGridCell): void => {
-      if (!activeTab || readOnly) return;
+      if (!activeTab || !isEditable) return;
 
       const [col, row] = cell;
 
@@ -558,7 +586,7 @@ export function DataGrid({
       filteredRows,
       overrideColumns,
       gridSelection,
-      readOnly,
+      isEditable,
     ]
   );
 
@@ -588,51 +616,92 @@ export function DataGrid({
     [activeTab, columns, setColumnOrder]
   );
 
+  const visualColumnIndexToResultIndex = useCallback(
+    (visualColumnIndex: number) => {
+      if (!result) return -1;
+      const visualColumn = columns[visualColumnIndex];
+      if (!visualColumn) return -1;
+      return result.columns.findIndex(
+        (column) => column.name === visualColumn.id
+      );
+    },
+    [columns, result]
+  );
+
+  const handleCopyAll = useCallback(async () => {
+    if (!result || result.rows.length === 0) return;
+
+    const rowIndexes = result.rows.map((_, index) => index);
+    const columnIndexes = result.columns.map((_, index) => index);
+    const text = serializeQueryResultSelectionToTsv(
+      result,
+      rowIndexes,
+      columnIndexes,
+      true
+    );
+
+    try {
+      await navigator.clipboard.writeText(text);
+      console.log("Copied query result to clipboard");
+    } catch (err) {
+      console.error("Failed to copy query result:", err);
+    }
+  }, [result]);
+
+  const handleExportCsv = useCallback(() => {
+    if (!result) return;
+    exportToCsv(result, exportFilename(activeTab?.title, "csv"));
+  }, [activeTab?.title, result]);
+
+  const handleExportJson = useCallback(() => {
+    if (!result) return;
+    exportToJson(result, exportFilename(activeTab?.title, "json"));
+  }, [activeTab?.title, result]);
+
   // Copy selected cells to clipboard
   const onCopy = useCallback(
     async (selection: GridSelection) => {
       if (!result) return;
 
-      const rows = selection.rows.toArray();
-      const cols = selection.columns.toArray();
+      const range = selection.current?.range;
+      let visualRows = selection.rows.toArray();
+      let visualColumns = selection.columns.toArray();
 
-      let text = "";
+      if (visualRows.length === 0 && range) {
+        visualRows = rangeIndexes(range.y, range.height);
+      }
+      if (visualColumns.length === 0 && range) {
+        visualColumns = rangeIndexes(range.x, range.width);
+      }
+      if (visualRows.length === 0 && visualColumns.length > 0) {
+        visualRows = filteredRows.map((_, index) => index);
+      }
 
-      // If specific cells are selected
-      if (cols.length > 0 && rows.length > 0) {
-        for (const row of rows) {
-          const rowData: string[] = [];
-          for (const col of cols) {
-            const actualRowIndex = sortedIndices[row] ?? row;
-            const value = result.rows[actualRowIndex]?.[col];
-            rowData.push(value != null ? String(value) : "");
-          }
-          text += rowData.join("\t") + "\n";
-        }
-      }
-      // If only rows are selected (clicked row markers)
-      else if (rows.length > 0) {
-        for (const row of rows) {
-          const actualRowIndex = sortedIndices[row] ?? row;
-          const rowData = result.rows[actualRowIndex];
-          if (rowData) {
-            text +=
-              rowData.map((v) => (v != null ? String(v) : "")).join("\t") +
-              "\n";
-          }
-        }
-      }
+      const rowIndexes = visualRows
+        .map((row) => sortedIndices[row] ?? row)
+        .filter((rowIndex) => rowIndex >= 0 && rowIndex < result.rows.length);
+      const columnIndexes =
+        visualColumns.length > 0
+          ? visualColumns
+              .map(visualColumnIndexToResultIndex)
+              .filter((columnIndex) => columnIndex >= 0)
+          : result.columns.map((_, index) => index);
+      const text = serializeQueryResultSelectionToTsv(
+        result,
+        rowIndexes,
+        columnIndexes
+      );
 
       if (text) {
         try {
-          await navigator.clipboard.writeText(text.trim());
+          await navigator.clipboard.writeText(text);
           console.log("Copied to clipboard");
         } catch (err) {
           console.error("Failed to copy:", err);
         }
       }
     },
-    [result, sortedIndices]
+    [filteredRows, result, sortedIndices, visualColumnIndexToResultIndex]
   );
 
   const supplyEditor = useCallback((cell: GridCell) => {
@@ -866,6 +935,49 @@ export function DataGrid({
 
   return (
     <div className="flex flex-col h-full bg-background">
+      {activeTab?.type !== "table" && result && (
+        <div className="h-9 shrink-0 border-b border-border bg-background flex items-center gap-2 px-3">
+          <div className="text-xs text-muted-foreground">
+            {result.rows.length.toLocaleString()} row
+            {result.rows.length === 1 ? "" : "s"}
+          </div>
+          <div className="flex-1" />
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs"
+            disabled={result.rows.length === 0}
+            onClick={() => void handleCopyAll()}
+            title="Copy result as TSV"
+          >
+            <Copy size={14} className="mr-1.5" />
+            Copy
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs"
+            disabled={result.rows.length === 0}
+            onClick={handleExportCsv}
+            title="Export result as CSV"
+          >
+            <Download size={14} className="mr-1.5" />
+            CSV
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs"
+            disabled={result.rows.length === 0}
+            onClick={handleExportJson}
+            title="Export result as JSON"
+          >
+            <FileJson size={14} className="mr-1.5" />
+            JSON
+          </Button>
+        </div>
+      )}
+
       {/* DataEditor container with overlay */}
       <div
         ref={gridContainerRef}
@@ -884,7 +996,7 @@ export function DataGrid({
               rows={filteredRows.length + newRowsCount}
               onHeaderClicked={onHeaderClicked}
               onHeaderMenuClick={onHeaderMenuClick}
-              onCellEdited={readOnly ? undefined : onCellEdited}
+              onCellEdited={isEditable ? onCellEdited : undefined}
               provideEditor={supplyEditor}
               onColumnResize={onColumnResize}
               onColumnMoved={onColumnMoved}
@@ -1013,41 +1125,42 @@ export function DataGrid({
             </div>
           </div>
         )}
-        {/* Floating Action Bar - Stats & Add Row */}
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 p-1.5 bg-background/80 backdrop-blur-md border border-border rounded-full shadow-xl transition-all animate-in slide-in-from-bottom-2">
-          <div className="px-3 text-xs font-medium text-muted-foreground flex items-center gap-2">
-            <span>{filteredRows.length + newRowsCount} rows</span>
+        {activeTab?.type === "table" && (
+          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 p-1.5 bg-background/80 backdrop-blur-md border border-border rounded-full shadow-xl transition-all animate-in slide-in-from-bottom-2">
+            <div className="px-3 text-xs font-medium text-muted-foreground flex items-center gap-2">
+              <span>{filteredRows.length + newRowsCount} rows</span>
+            </div>
+
+            {isEditable && (
+              <>
+                <div className="h-4 w-px bg-border/50" />
+
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => activeTab && addNewRow(activeTab.id)}
+                  className="h-7 px-3 text-xs rounded-full hover:bg-accent"
+                >
+                  <Plus size={14} className="mr-1.5" /> Add Row
+                </Button>
+              </>
+            )}
+
+            {isEditable && selectedRowIndexes.length > 0 && (
+              <>
+                <div className="h-4 w-px bg-border/50" />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => void handleDeleteSelectedRows()}
+                  className="h-7 px-3 text-xs rounded-full text-destructive hover:bg-destructive/10 hover:text-destructive"
+                >
+                  <Trash2 size={14} className="mr-1.5" /> Delete
+                </Button>
+              </>
+            )}
           </div>
-
-          {!readOnly && (
-            <>
-              <div className="h-4 w-px bg-border/50" />
-
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => activeTab && addNewRow(activeTab.id)}
-                className="h-7 px-3 text-xs rounded-full hover:bg-accent"
-              >
-                <Plus size={14} className="mr-1.5" /> Add Row
-              </Button>
-            </>
-          )}
-
-          {!readOnly && selectedRowIndexes.length > 0 && (
-            <>
-              <div className="h-4 w-px bg-border/50" />
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => void handleDeleteSelectedRows()}
-                className="h-7 px-3 text-xs rounded-full text-destructive hover:bg-destructive/10 hover:text-destructive"
-              >
-                <Trash2 size={14} className="mr-1.5" /> Delete
-              </Button>
-            </>
-          )}
-        </div>
+        )}
       </div>
 
       {/* Status Bar Portal - Save/Cancel Actions */}
