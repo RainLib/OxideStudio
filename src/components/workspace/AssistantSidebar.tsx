@@ -1,8 +1,12 @@
 import { Button } from "@/components/ui/button";
 import { createAssistantRuntime } from "@/ai";
-import type { AssistantPlanStep, AssistantPreparedTurn } from "@/ai";
+import type {
+  AssistantPlanStep,
+  AssistantPreparedTurn,
+  AssistantToolCallResult,
+} from "@/ai";
 import { cn } from "@/lib/utils";
-import { Play, Sparkles } from "lucide-react";
+import { Play, ShieldCheck, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
 
 export function AssistantSidebar() {
@@ -12,7 +16,9 @@ export function AssistantSidebar() {
     null
   );
   const [activeStepId, setActiveStepId] = useState<string | null>(null);
-  const [toolResults, setToolResults] = useState<Record<string, unknown>>({});
+  const [toolResults, setToolResults] = useState<
+    Record<string, AssistantToolCallResult>
+  >({});
   const [error, setError] = useState<string | null>(null);
 
   const handlePrepare = () => {
@@ -21,18 +27,32 @@ export function AssistantSidebar() {
     setPreparedTurn(runtime.prepareTurn({ message }));
   };
 
-  const handleRunStep = async (step: AssistantPlanStep) => {
-    if (!preparedTurn || !step.toolName || step.requiresApproval) return;
+  const handleRunStep = async (
+    step: AssistantPlanStep,
+    approved = false
+  ) => {
+    if (!preparedTurn || !step.toolName) return;
+    if (step.requiresApproval && !approved) return;
 
     setError(null);
     setActiveStepId(step.id);
     try {
-      const result = await runtime.executeTool(
-        step.toolName,
-        step.input || {},
+      const [result] = await runtime.executeToolCalls(
+        [
+          {
+            id: step.id,
+            toolName: step.toolName,
+            input: step.input || {},
+            approved,
+          },
+        ],
         preparedTurn.context
       );
+      if (!result) return;
       setToolResults((state) => ({ ...state, [step.id]: result }));
+      if (result.status === "error") {
+        setError(result.error || "Tool execution failed");
+      }
     } catch (err: any) {
       setError(err?.message || String(err));
     } finally {
@@ -109,22 +129,33 @@ export function AssistantSidebar() {
                         </div>
                       )}
                     </div>
-                    {step.toolName && !step.requiresApproval && (
+                    {step.toolName && (
                       <Button
                         variant="ghost"
                         size="icon"
                         className={cn(
                           "h-6 w-6 rounded-sm text-muted-foreground hover:text-primary",
+                          step.requiresApproval && "text-amber-500 hover:text-amber-400",
                           activeStepId === step.id && "animate-pulse"
                         )}
-                        onClick={() => handleRunStep(step)}
+                        onClick={() => handleRunStep(step, step.requiresApproval)}
                         disabled={activeStepId !== null}
-                        title="Run"
+                        title={step.requiresApproval ? "Approve and run" : "Run"}
                       >
-                        <Play size={12} />
+                        {step.requiresApproval ? (
+                          <ShieldCheck size={12} />
+                        ) : (
+                          <Play size={12} />
+                        )}
                       </Button>
                     )}
                   </div>
+
+                  {step.requiresApproval && (
+                    <div className="mt-1 text-[10px] text-amber-500">
+                      Approval required
+                    </div>
+                  )}
 
                   {result !== undefined && (
                     <pre className="mt-2 max-h-44 overflow-auto rounded-sm bg-background-tertiary p-2 text-[10px] text-muted-foreground">
