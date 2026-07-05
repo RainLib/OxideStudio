@@ -269,7 +269,7 @@ pub fn mongodb_capabilities() -> DatabaseCapabilities {
         driver: "mongodb".to_string(),
         display_name: "MongoDB".to_string(),
         data_model: DatabaseDataModel::Document,
-        lsp_language_id: "json".to_string(),
+        lsp_language_id: "mongodb".to_string(),
         namespace_label: "database".to_string(),
         identifier_quote: String::new(),
         default_port: 27017,
@@ -1646,7 +1646,7 @@ WITH NO DATA;"#
         assert_eq!(mongodb.driver, "mongodb");
         assert_eq!(mongodb.display_name, "MongoDB");
         assert_eq!(mongodb.data_model, DatabaseDataModel::Document);
-        assert_eq!(mongodb.lsp_language_id, "json");
+        assert_eq!(mongodb.lsp_language_id, "mongodb");
         assert_eq!(mongodb.namespace_label, "database");
         assert_eq!(mongodb.default_port, 27017);
         assert!(mongodb.supports_collection_browsing);
