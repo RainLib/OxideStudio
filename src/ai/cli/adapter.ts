@@ -322,6 +322,7 @@ function helpText() {
     "  tools call <toolName> [--json-file payload.json]",
     "  tools call <toolName> --approve [--json '{...}']",
     "  mcp request --json '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}'",
+    "  mcp stdio",
     "",
   ].join("\n");
 }

@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { createCliToolAdapter } from "@/ai/cli/adapter";
+import { createMcpProtocolAdapter } from "@/ai/mcp/protocol";
+import type { McpProtocolAdapter } from "@/ai/mcp/protocol";
 import { registerCoreAiTools } from "@/ai/tools/coreTools";
 import { DEFAULT_AI_TOOL_POLICY } from "@/ai/tools/policy";
 import { createAiToolRegistry } from "@/ai/tools/registry";
@@ -39,17 +42,54 @@ async function main() {
     createHeadlessAdapters()
   );
   const createContext = createHeadlessContext;
+  const args = process.argv.slice(2);
+
+  if (isMcpStdioCommand(args)) {
+    await runMcpStdio(
+      createMcpProtocolAdapter({
+        registry,
+        createContext,
+        policy: DEFAULT_AI_TOOL_POLICY,
+      })
+    );
+    return;
+  }
+
   const cli = createCliToolAdapter({
     registry,
     createContext,
     policy: DEFAULT_AI_TOOL_POLICY,
     readFile: (path) => readFile(path, "utf8"),
   });
-  const result = await cli.run(process.argv.slice(2));
+  const result = await cli.run(args);
 
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
   process.exitCode = result.exitCode;
+}
+
+function isMcpStdioCommand(args: string[]) {
+  return args[0] === "mcp" && args[1] === "stdio";
+}
+
+async function runMcpStdio(protocol: McpProtocolAdapter) {
+  const lines = createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+  });
+
+  for await (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const response = await protocol.handleJson(line);
+      if (response) {
+        process.stdout.write(`${response}\n`);
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[oxide-ai] MCP stdio error: ${message}\n`);
+    }
+  }
 }
 
 main().catch((err: unknown) => {

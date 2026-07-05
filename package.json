@@ -9,6 +9,7 @@
         "preview": "vite preview",
         "tauri": "tauri",
         "ai": "tsx scripts/oxide-ai.ts",
+        "ai:mcp": "tsx scripts/oxide-ai.ts mcp stdio",
         "test": "vitest run",
         "test:live-db": "bash scripts/test-live-databases.sh"
     },
