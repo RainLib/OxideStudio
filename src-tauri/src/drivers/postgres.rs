@@ -189,6 +189,47 @@ impl PostgresDriver {
         })
     }
 
+    fn drain_active_query_backends(&self) -> Vec<(String, i32)> {
+        self.active_queries
+            .lock()
+            .expect("PostgreSQL active query map mutex poisoned")
+            .drain()
+            .collect()
+    }
+
+    async fn cancel_tracked_queries_on_pool(
+        &self,
+        pool: &Pool<Postgres>,
+        active_queries: Vec<(String, i32)>,
+    ) {
+        for (query_id, backend_pid) in active_queries {
+            let cancel_result: std::result::Result<bool, sqlx::Error> =
+                sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+                    .bind(backend_pid)
+                    .persistent(false)
+                    .fetch_one(pool)
+                    .await;
+
+            match cancel_result {
+                Ok(false) => {
+                    tracing::warn!(
+                        "PostgreSQL did not accept cancellation for active query {} on backend {} during disconnect",
+                        query_id,
+                        backend_pid
+                    );
+                }
+                Ok(true) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        "Failed to cancel active PostgreSQL query {} during disconnect: {}",
+                        query_id,
+                        error
+                    );
+                }
+            }
+        }
+    }
+
     async fn get_transaction_session(
         &self,
         session_id: &str,
@@ -313,10 +354,19 @@ impl DatabaseDriver for PostgresDriver {
     }
 
     async fn disconnect(&self) -> Result<()> {
-        self.active_queries
-            .lock()
-            .expect("PostgreSQL active query map mutex poisoned")
-            .clear();
+        let active_queries = self.drain_active_query_backends();
+        if !active_queries.is_empty() {
+            let cancel_pool = { self.pool.lock().await.clone() };
+
+            if let Some(pool) = cancel_pool {
+                self.cancel_tracked_queries_on_pool(&pool, active_queries)
+                    .await;
+            } else {
+                tracing::warn!(
+                    "Unable to cancel active PostgreSQL queries during disconnect because no pool is available"
+                );
+            }
+        }
 
         let mut sessions = self.transaction_sessions.lock().await;
         let drained_sessions: Vec<_> = sessions.drain().map(|(_, conn)| conn).collect();
@@ -1140,6 +1190,29 @@ mod tests {
             .lock()
             .expect("active query map mutex poisoned")
             .contains_key("q1"));
+    }
+
+    #[test]
+    fn drain_active_query_backends_clears_tracked_queries() {
+        let driver = PostgresDriver::new("postgres://user:pass@localhost/db");
+        driver
+            .active_queries
+            .lock()
+            .expect("active query map mutex poisoned")
+            .extend([("q1".to_string(), 41), ("q2".to_string(), 42)]);
+
+        let mut drained = driver.drain_active_query_backends();
+        drained.sort_by(|left, right| left.0.cmp(&right.0));
+
+        assert_eq!(
+            drained,
+            vec![("q1".to_string(), 41), ("q2".to_string(), 42)]
+        );
+        assert!(driver
+            .active_queries
+            .lock()
+            .expect("active query map mutex poisoned")
+            .is_empty());
     }
 
     #[test]

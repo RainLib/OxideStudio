@@ -263,6 +263,31 @@ impl MysqlDriver {
         })
     }
 
+    fn drain_active_query_threads(&self) -> Vec<(String, u64)> {
+        self.active_queries
+            .lock()
+            .expect("MySQL active query map mutex poisoned")
+            .drain()
+            .collect()
+    }
+
+    async fn cancel_tracked_queries_on_pool(
+        &self,
+        pool: &Pool<MySql>,
+        active_queries: Vec<(String, u64)>,
+    ) {
+        for (query_id, thread_id) in active_queries {
+            let sql = format!("KILL QUERY {thread_id}");
+            if let Err(error) = sqlx::raw_sql(&sql).execute(pool).await {
+                tracing::warn!(
+                    "Failed to cancel active MySQL query {} during disconnect: {}",
+                    query_id,
+                    error
+                );
+            }
+        }
+    }
+
     async fn get_transaction_session(&self, session_id: &str) -> Result<MysqlTransactionSession> {
         self.transaction_sessions
             .lock()
@@ -299,10 +324,26 @@ impl DatabaseDriver for MysqlDriver {
     }
 
     async fn disconnect(&self) -> Result<()> {
-        self.active_queries
-            .lock()
-            .expect("MySQL active query map mutex poisoned")
-            .clear();
+        let active_queries = self.drain_active_query_threads();
+        if !active_queries.is_empty() {
+            let cancel_pool = {
+                let pools = self.pools.lock().await;
+                if let Some(pool) = pools.get("") {
+                    Some(pool.clone())
+                } else {
+                    pools.values().next().cloned()
+                }
+            };
+
+            if let Some(pool) = cancel_pool {
+                self.cancel_tracked_queries_on_pool(&pool, active_queries)
+                    .await;
+            } else {
+                tracing::warn!(
+                    "Unable to cancel active MySQL queries during disconnect because no pool is available"
+                );
+            }
+        }
 
         let mut sessions = self.transaction_sessions.lock().await;
         let drained_sessions: Vec<_> = sessions.drain().map(|(_, conn)| conn).collect();
@@ -972,6 +1013,29 @@ mod tests {
             .lock()
             .expect("active query map mutex poisoned")
             .contains_key("q1"));
+    }
+
+    #[test]
+    fn drain_active_query_threads_clears_tracked_queries() {
+        let driver = MysqlDriver::new("mysql://user:pass@localhost/db");
+        driver
+            .active_queries
+            .lock()
+            .expect("active query map mutex poisoned")
+            .extend([("q1".to_string(), 11), ("q2".to_string(), 12)]);
+
+        let mut drained = driver.drain_active_query_threads();
+        drained.sort_by(|left, right| left.0.cmp(&right.0));
+
+        assert_eq!(
+            drained,
+            vec![("q1".to_string(), 11), ("q2".to_string(), 12)]
+        );
+        assert!(driver
+            .active_queries
+            .lock()
+            .expect("active query map mutex poisoned")
+            .is_empty());
     }
 
     #[test]
