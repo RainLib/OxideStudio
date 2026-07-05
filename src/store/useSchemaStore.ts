@@ -336,14 +336,64 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
   loadCollections: async (
     connectionId: string,
     namespace: string,
-    _force = false
+    force = false
   ) => {
     if (!connectionId) {
       set({ collections: [], isCollectionsLoading: false });
       return;
     }
 
+    const activeDriver = getConnectionDriver(connectionId);
+    const schemaResourceId = getSchemaResourceId(
+      connectionId,
+      namespace || "",
+      activeDriver
+    );
     set({ isCollectionsLoading: true });
+
+    try {
+      const cachedResources = await storeService.getResources(
+        connectionId,
+        schemaResourceId
+      );
+
+      if (cachedResources && cachedResources.length > 0 && !force) {
+        const cachedCollections: CollectionInfo[] = cachedResources
+          .filter((resource) => resourceMatchesDriver(resource, activeDriver))
+          .map((resource) => ({
+            name: resource.name,
+            namespace:
+              typeof resource.metadata?.namespace === "string"
+                ? resource.metadata.namespace
+                : namespace || null,
+            type:
+              typeof resource.metadata?.type === "string"
+                ? resource.metadata.type
+                : null,
+            documentCount:
+              typeof resource.metadata?.documentCount === "number"
+                ? resource.metadata.documentCount
+                : null,
+          }));
+
+        if (cachedCollections.length === 0) {
+          throw new Error("Collection cache is stale for active driver");
+        }
+
+        const activeConnectionId =
+          useConnectionStore.getState().activeConnectionId;
+        const currentSchema = get().currentSchema;
+        if (activeConnectionId !== connectionId || currentSchema !== namespace) {
+          return;
+        }
+
+        set({ collections: cachedCollections, isCollectionsLoading: false });
+        return;
+      }
+    } catch (e) {
+      console.warn("Store: Collection MetaStore miss or error", e);
+    }
+
     try {
       const collections = await schemaService.getCollections(
         connectionId,
@@ -354,7 +404,37 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       if (activeConnectionId !== connectionId || currentSchema !== namespace) {
         return;
       }
-      set({ collections, isCollectionsLoading: false });
+      set((state) => ({
+        collections,
+        isCollectionsLoading: false,
+        metadataVersion: state.metadataVersion + 1,
+      }));
+
+      const newResources: Resource[] = collections.map((collection) => ({
+        id: `${schemaResourceId}:${collection.name}`,
+        connection_id: connectionId,
+        parent_id: schemaResourceId,
+        kind: "COLLECTION",
+        name: collection.name,
+        metadata: {
+          driver: activeDriver,
+          namespace: collection.namespace ?? (namespace || null),
+          type: collection.type ?? null,
+          documentCount: collection.documentCount ?? null,
+        },
+        last_updated: Date.now(),
+      }));
+
+      storeService
+        .replaceResources(
+          connectionId,
+          schemaResourceId,
+          "COLLECTION",
+          newResources
+        )
+        .catch((err) => {
+          console.warn("Store: Failed to cache collections to MetaStore", err);
+        });
     } catch (e) {
       console.warn("Store: loadCollections failed", e);
       const activeConnectionId = useConnectionStore.getState().activeConnectionId;
