@@ -45,7 +45,7 @@ function lspDocumentExtension(languageId: string) {
   if (!normalized || normalized === "sql") return "sql";
   if (normalized === "json") return "json";
   if (normalized === "redis") return "redis";
-  if (normalized === "elasticsearch-dsl") return "esdsl";
-  if (normalized === "elasticsearch-eql") return "eseql";
+  if (normalized === "elasticsearch-dsl") return "elasticsearch";
+  if (normalized === "elasticsearch-eql") return "eql";
   return normalized.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "txt";
 }
