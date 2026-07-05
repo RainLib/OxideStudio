@@ -16,6 +16,7 @@ type ResponseSender = oneshot::Sender<Result<Value>>;
 enum LspOutgoingMessage {
     Request(LspRequest, ResponseSender),
     Notification(LspNotification),
+    CancelRequest(u64),
 }
 
 /// LSP Server Manager with bidirectional communication
@@ -50,6 +51,7 @@ impl LspServerManager {
             println!("🔄 [MANAGER] Killing existing process");
             tracing::info!("🔄 [LSP] Killing existing LSP process");
             let _ = child.kill().await;
+            let _ = child.wait().await;
         }
 
         println!("🚀 [MANAGER] Binary path: {}", self.binary_path);
@@ -197,6 +199,11 @@ impl LspServerManager {
                     }
                 }
             }
+
+            let mut pending = pending_responses_clone.lock().await;
+            for (_, tx) in pending.drain() {
+                let _ = tx.send(Err(anyhow::anyhow!("LSP stdout closed")));
+            }
         });
 
         // Spawn stdin writer task
@@ -212,6 +219,11 @@ impl LspServerManager {
                     }
                     LspOutgoingMessage::Notification(notif) => {
                         (serde_json::to_string(&notif), None, None)
+                    }
+                    LspOutgoingMessage::CancelRequest(id) => {
+                        let mut pending = pending_responses_for_writer.lock().await;
+                        pending.remove(&id);
+                        continue;
                     }
                 };
 
@@ -314,62 +326,26 @@ impl LspServerManager {
             }
         });
 
-        // We can't use self.send_request here easily because we are holding a mutable borrow
-        // but we can use the message_tx clone we just created or the one in self.
-        // Wait, send_request takes &self. We have &mut self.
-        // We can downgrade, or just implement the send logic inline for the handshake.
-
-        // Actually, we can clone the sender before assigning it to self for the handshake usage.
-        // But send_request logic is complex (oneshot channel setup).
-        // Let's rely on self.send_request AFTER we release the borrow?
-        // No, start() holds &mut self for the whole duration.
-        // We can split the function or just duplicate the send_request logic here using the local tx.
-
         println!("🤝 [HANDSHAKE] Sending LSP initialize request...");
         tracing::info!("Sending LSP initialize request...");
 
-        static REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let id = REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
-
-        let request = LspRequest {
-            jsonrpc: "2.0".to_string(),
-            id,
-            method: "initialize".to_string(),
-            params: init_params,
-        };
-
-        println!("🤝 [HANDSHAKE] Request ID: {}", id);
-
-        // Send using local message_tx (which is connected to the writer task we just spawned)
-        self.message_tx
-            .send(LspOutgoingMessage::Request(request, tx))
+        match self
+            .send_request("initialize".to_string(), init_params)
             .await
-            .context("Failed to send initialize request")?;
-
-        println!("🤝 [HANDSHAKE] Initialize request sent, waiting for response...");
-
-        // Wait for initialize response
-        let init_result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
-            .await
-            .context("LSP initialize timeout")?
-            .context("Response channel closed")?;
-
-        match &init_result {
+        {
             Ok(value) => {
                 println!("✅ [HANDSHAKE] Initialize response received!");
                 println!(
                     "✅ [HANDSHAKE] Response: {}",
-                    serde_json::to_string_pretty(value).unwrap_or_default()
+                    serde_json::to_string_pretty(&value).unwrap_or_default()
                 );
             }
             Err(e) => {
                 println!("❌ [HANDSHAKE] Initialize failed: {}", e);
+                self.kill_process().await;
                 return Err(anyhow::anyhow!("LSP initialize failed: {}", e));
             }
-        }
-
-        let _init_result = init_result?;
+        };
 
         println!("🤝 [HANDSHAKE] Sending initialized notification...");
         tracing::info!("LSP initialized successfully");
@@ -387,6 +363,14 @@ impl LspServerManager {
             .context("Failed to send initialized notification")?;
 
         Ok(())
+    }
+
+    async fn kill_process(&self) {
+        let mut process_lock = self.process.lock().await;
+        if let Some(mut child) = process_lock.take() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
     }
 
     /// Stop the LSP server process
@@ -433,10 +417,17 @@ impl LspServerManager {
             .await
             .context("Failed to send request to LSP writer")?;
 
-        tokio::time::timeout(std::time::Duration::from_secs(5), rx)
-            .await
-            .context("LSP request timeout")?
-            .context("Response channel closed")?
+        match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(anyhow::anyhow!("Response channel closed")),
+            Err(_) => {
+                let _ = self
+                    .message_tx
+                    .send(LspOutgoingMessage::CancelRequest(id))
+                    .await;
+                Err(anyhow::anyhow!("LSP request timeout"))
+            }
+        }
     }
 
     /// Send a notification to the LSP server
@@ -471,6 +462,7 @@ impl LspServerManager {
             Ok(None) => true,
             Err(error) => {
                 tracing::warn!("Failed to inspect LSP server process: {}", error);
+                *process_lock = None;
                 false
             }
         }
