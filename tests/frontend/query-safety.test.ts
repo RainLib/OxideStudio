@@ -58,6 +58,36 @@ describe("AI query safety classification", () => {
         "mongodb"
       )
     ).toBe("write");
+    expect(
+      classifyAiQuerySafety(
+        JSON.stringify({
+          collection: "users",
+          aggregate: [{ $match: { active: true } }, { $limit: 10 }],
+        }),
+        "mongodb"
+      )
+    ).toBe("read");
+    expect(
+      classifyAiQuerySafety(
+        JSON.stringify({
+          collection: "users",
+          aggregate: [{ $match: {} }, { $out: "users_archive" }],
+        }),
+        "mongodb"
+      )
+    ).toBe("destructive");
+    expect(
+      classifyAiQuerySafety(
+        JSON.stringify({
+          command: {
+            aggregate: "users",
+            pipeline: [{ $match: {} }, { $merge: "users_rollup" }],
+            cursor: {},
+          },
+        }),
+        "mongodb"
+      )
+    ).toBe("destructive");
   });
 
   it("classifies Redis command batches by command family", () => {
