@@ -181,6 +181,16 @@ function buildSuggestedPlan(
     });
   }
 
+  if (hasTool("workspace.getSelection")) {
+    steps.push({
+      id: "workspace-selection",
+      title: "Read the current editor selection",
+      toolName: "workspace.getSelection",
+      input: {},
+      requiresApproval: requiresApproval("workspace.getSelection"),
+    });
+  }
+
   if (hasTool("connection.list")) {
     steps.push({
       id: "connections",

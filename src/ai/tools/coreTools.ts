@@ -25,6 +25,11 @@ export const CORE_AI_TOOL_FAMILIES: AiToolFamily[] = [
     tools: [activeTabTool],
   },
   {
+    name: "workspace.selection",
+    enabled: (adapters) => Boolean(adapters.getWorkspaceSelection),
+    tools: [workspaceSelectionTool],
+  },
+  {
     name: "metadata.collections",
     enabled: (adapters) => Boolean(adapters.listCollections),
     tools: [listCollectionsTool],
@@ -148,6 +153,21 @@ function activeTabTool(adapters: AiToolAdapters): AiToolDefinition {
     capabilities: ["workspace"],
     timeoutMs: 5_000,
     execute: async () => adapters.getActiveTab?.() ?? null,
+  };
+}
+
+function workspaceSelectionTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "workspace.getSelection",
+    description: "Return the current editor selection for the active workspace tab.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+    },
+    permissions: ["read"],
+    capabilities: ["workspace"],
+    timeoutMs: 5_000,
+    execute: async () => adapters.getWorkspaceSelection?.() ?? null,
   };
 }
 

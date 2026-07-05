@@ -103,6 +103,18 @@ export type AiWorkspaceTabSummary = {
   title: string;
   sql?: string;
   connectionId?: string | null;
+  selection?: AiWorkspaceSelection | null;
+};
+
+export type AiWorkspaceSelection = {
+  tabId: string;
+  tabTitle: string;
+  text: string;
+  startLineNumber: number;
+  startColumn: number;
+  endLineNumber: number;
+  endColumn: number;
+  connectionId?: string | null;
 };
 
 export type AiReadOnlyQueryInput = {
@@ -215,6 +227,10 @@ export type AiToolAdapters = {
     driver: DatabaseDriver
   ) => Promise<DatabaseCapabilities> | DatabaseCapabilities;
   getActiveTab?: () => Promise<AiWorkspaceTabSummary | null> | AiWorkspaceTabSummary | null;
+  getWorkspaceSelection?: () =>
+    | Promise<AiWorkspaceSelection | null>
+    | AiWorkspaceSelection
+    | null;
   listCollections?: (
     input: { connectionId?: string | null; namespace?: string | null },
     context: AiToolExecutionContext

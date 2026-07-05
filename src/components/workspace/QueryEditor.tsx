@@ -108,6 +108,7 @@ export function QueryEditor() {
     runTabQuery,
     cancelTabQuery,
     setTargetSchema,
+    setEditorSelection,
   } = useTabStore(); // line 15...
   const { activeConnectionId, connections } = useConnectionStore();
   const { currentSchema, loadSchemas, loadTables, bumpMetadataVersion } =
@@ -125,6 +126,8 @@ export function QueryEditor() {
   >({});
   // const dropdownRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<any>(null);
+  const activeTabIdRef = useRef<string | null>(activeTabId);
+  const selectionDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const openedDocumentsRef = useRef<Set<string>>(new Set());
   const documentVersionsRef = useRef<Map<string, number>>(new Map());
   const activeTransactionsRef = useRef<
@@ -147,6 +150,17 @@ export function QueryEditor() {
   const activeTransactionState = activeTab
     ? transactionStates[activeTab.id] || "idle"
     : "idle";
+
+  useEffect(() => {
+    activeTabIdRef.current = activeTabId;
+  }, [activeTabId]);
+
+  useEffect(() => {
+    return () => {
+      selectionDisposableRef.current?.dispose();
+      selectionDisposableRef.current = null;
+    };
+  }, []);
 
   const getTransactionId = () => {
     if (!activeTab || !effectiveConnectionId) return null;
@@ -632,6 +646,28 @@ export function QueryEditor() {
           onChange={(value) => updateTabSql(activeTab.id, value || "")}
           onMount={(editor, monaco) => {
             editorRef.current = editor;
+            selectionDisposableRef.current?.dispose();
+            selectionDisposableRef.current = editor.onDidChangeCursorSelection(
+              (event: any) => {
+                const tabId = activeTabIdRef.current;
+                const model = editor.getModel();
+                if (!tabId || !model || !event.selection) return;
+
+                const selectedText = model.getValueInRange(event.selection);
+                setEditorSelection(
+                  tabId,
+                  selectedText.trim()
+                    ? {
+                        text: selectedText,
+                        startLineNumber: event.selection.startLineNumber,
+                        startColumn: event.selection.startColumn,
+                        endLineNumber: event.selection.endLineNumber,
+                        endColumn: event.selection.endColumn,
+                      }
+                    : null
+                );
+              }
+            );
             // Force theme update on mount
             monaco.editor.setTheme(mode === "light" ? "vs" : "vs-dark");
 

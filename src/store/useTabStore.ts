@@ -48,6 +48,14 @@ async function refreshMetadataAfterQuery(
 
 export type TabType = "query" | "table" | "create_table";
 
+export interface EditorSelectionState {
+  text: string;
+  startLineNumber: number;
+  startColumn: number;
+  endLineNumber: number;
+  endColumn: number;
+}
+
 export interface TabData {
   id: string;
   title: string;
@@ -91,6 +99,7 @@ export interface TabData {
   tableTotalRows?: number | null;
   tableFilterSql?: string | null;
   tableFilters?: TableFilter[] | null;
+  editorSelection?: EditorSelectionState | null;
 }
 
 interface TabState {
@@ -127,6 +136,10 @@ interface TabState {
   setActiveTab: (id: string) => void;
   reopenTab: () => void;
   updateTabSql: (id: string, sql: string) => void;
+  setEditorSelection: (
+    id: string,
+    selection: EditorSelectionState | null
+  ) => void;
   runTabQuery: (
     id: string,
     connectionId: string,
@@ -417,6 +430,14 @@ export const useTabStore = create<TabState>((set, get) => ({
   updateTabSql: (id: string, sql: string) => {
     set((state) => ({
       tabs: state.tabs.map((t) => (t.id === id ? { ...t, sql } : t)),
+    }));
+  },
+
+  setEditorSelection: (id: string, selection: EditorSelectionState | null) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === id ? { ...t, editorSelection: selection } : t
+      ),
     }));
   },
 

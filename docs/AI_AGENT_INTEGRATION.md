@@ -49,6 +49,7 @@ Read-only tools:
 - `metadata.listObjects`, `metadata.listCollections`, `metadata.describeObject`
 - `query.runReadOnly` with row/time limits and driver-aware syntax
 - `workspace.getActiveTab`
+- `workspace.getSelection`
 
 Write tools behind explicit approvals:
 
@@ -72,7 +73,6 @@ Write tools behind explicit approvals:
 Future tool families:
 
 - `lsp.explainDiagnostics`
-- `workspace.getSelection`
 
 ## MCP vs CLI
 

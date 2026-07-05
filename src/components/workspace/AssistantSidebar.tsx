@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { createAssistantRuntime } from "@/ai";
+import { useTabStore } from "@/store/useTabStore";
 import type {
   AssistantPlanStep,
   AssistantPreparedTurn,
@@ -11,6 +12,9 @@ import { useMemo, useState } from "react";
 
 export function AssistantSidebar() {
   const runtime = useMemo(() => createAssistantRuntime(), []);
+  const { tabs, activeTabId } = useTabStore();
+  const activeTab = tabs.find((tab) => tab.id === activeTabId);
+  const selectedText = activeTab?.editorSelection?.text || null;
   const [message, setMessage] = useState("");
   const [preparedTurn, setPreparedTurn] = useState<AssistantPreparedTurn | null>(
     null
@@ -24,7 +28,7 @@ export function AssistantSidebar() {
   const handlePrepare = () => {
     setError(null);
     setToolResults({});
-    setPreparedTurn(runtime.prepareTurn({ message }));
+    setPreparedTurn(runtime.prepareTurn({ message, selectedText }));
   };
 
   const handleRunStep = async (

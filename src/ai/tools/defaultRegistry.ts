@@ -26,6 +26,7 @@ import type {
   AiTableMutationInput,
   AiToolAdapters,
   AiToolExecutionContext,
+  AiWorkspaceSelection,
   AiWorkspaceTabSummary,
 } from "./types";
 
@@ -73,7 +74,14 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
         title: activeTab.title,
         sql: activeTab.sql,
         connectionId: activeTab.connectionId ?? null,
+        selection: workspaceSelectionFromTab(activeTab),
       } satisfies AiWorkspaceTabSummary;
+    },
+
+    getWorkspaceSelection: () => {
+      const tabState = useTabStore.getState();
+      const activeTab = tabState.tabs.find((tab) => tab.id === tabState.activeTabId);
+      return activeTab ? workspaceSelectionFromTab(activeTab) : null;
     },
 
     listCollections: async (input, context) => {
@@ -122,6 +130,31 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
       getLspCompletions(input, context),
 
     mutateNamespace: async (input, context) => mutateNamespace(input, context),
+  };
+}
+
+function workspaceSelectionFromTab(tab: {
+  id: string;
+  title: string;
+  connectionId?: string | null;
+  editorSelection?: {
+    text: string;
+    startLineNumber: number;
+    startColumn: number;
+    endLineNumber: number;
+    endColumn: number;
+  } | null;
+}): AiWorkspaceSelection | null {
+  if (!tab.editorSelection?.text.trim()) return null;
+  return {
+    tabId: tab.id,
+    tabTitle: tab.title,
+    text: tab.editorSelection.text,
+    startLineNumber: tab.editorSelection.startLineNumber,
+    startColumn: tab.editorSelection.startColumn,
+    endLineNumber: tab.editorSelection.endLineNumber,
+    endColumn: tab.editorSelection.endColumn,
+    connectionId: tab.connectionId ?? null,
   };
 }
 
