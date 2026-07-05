@@ -50,6 +50,23 @@ export function registerCoreAiTools(
     registry.register(deleteTableRowsTool(adapters));
   }
 
+  if (adapters.mutateDocuments) {
+    registry.register(insertDocumentsTool(adapters));
+    registry.register(updateDocumentsTool(adapters));
+    registry.register(deleteDocumentsTool(adapters));
+  }
+
+  if (adapters.mutateKeyValues) {
+    registry.register(setKeyValueTool(adapters));
+    registry.register(deleteKeysTool(adapters));
+  }
+
+  if (adapters.mutateSearchDocuments) {
+    registry.register(indexSearchDocumentTool(adapters));
+    registry.register(updateSearchDocumentTool(adapters));
+    registry.register(deleteSearchDocumentTool(adapters));
+  }
+
   return registry;
 }
 
@@ -414,6 +431,202 @@ function deleteTableRowsTool(adapters: AiToolAdapters): AiToolDefinition {
   };
 }
 
+function insertDocumentsTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "document.insertDocuments",
+    description: "Insert documents into a document collection after explicit approval.",
+    inputSchema: documentInsertSchema(),
+    permissions: ["write"],
+    capabilities: ["query"],
+    timeoutMs: 30_000,
+    execute: async (input, context) => {
+      const payload = documentMutationPayload(input);
+      return adapters.mutateDocuments?.(
+        {
+          operation: "insert",
+          connectionId: payload.connectionId,
+          namespace: payload.namespace,
+          collection: payload.collection,
+          documents: requireRecordArray(assertObject(input), "documents"),
+        },
+        context
+      );
+    },
+  };
+}
+
+function updateDocumentsTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "document.updateDocuments",
+    description: "Update matching documents after explicit approval.",
+    inputSchema: documentUpdateSchema(),
+    permissions: ["write"],
+    capabilities: ["query"],
+    timeoutMs: 30_000,
+    execute: async (input, context) => {
+      const payload = documentMutationPayload(input);
+      const raw = assertObject(input);
+      return adapters.mutateDocuments?.(
+        {
+          operation: "update",
+          connectionId: payload.connectionId,
+          namespace: payload.namespace,
+          collection: payload.collection,
+          filter: requireRecordField(raw, "filter"),
+          update: requireRecordField(raw, "update"),
+          many: optionalBoolean(raw, "many") ?? false,
+          upsert: optionalBoolean(raw, "upsert") ?? false,
+        },
+        context
+      );
+    },
+  };
+}
+
+function deleteDocumentsTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "document.deleteDocuments",
+    description: "Delete matching documents after explicit approval.",
+    inputSchema: documentDeleteSchema(),
+    permissions: ["destructive"],
+    capabilities: ["query"],
+    timeoutMs: 30_000,
+    execute: async (input, context) => {
+      const payload = documentMutationPayload(input);
+      const raw = assertObject(input);
+      return adapters.mutateDocuments?.(
+        {
+          operation: "delete",
+          connectionId: payload.connectionId,
+          namespace: payload.namespace,
+          collection: payload.collection,
+          filter: requireRecordField(raw, "filter"),
+          many: optionalBoolean(raw, "many") ?? false,
+        },
+        context
+      );
+    },
+  };
+}
+
+function setKeyValueTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "key.setValue",
+    description: "Set a key-value entry after explicit approval.",
+    inputSchema: keySetSchema(),
+    permissions: ["write"],
+    capabilities: ["query"],
+    timeoutMs: 30_000,
+    execute: async (input, context) => {
+      const raw = assertObject(input);
+      return adapters.mutateKeyValues?.(
+        {
+          operation: "set",
+          connectionId: optionalString(raw, "connectionId"),
+          key: requireString(raw, "key"),
+          value: requirePresent(raw, "value"),
+          ttlSeconds: optionalPositiveInteger(raw, "ttlSeconds"),
+        },
+        context
+      );
+    },
+  };
+}
+
+function deleteKeysTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "key.deleteKeys",
+    description: "Delete one or more keys after explicit approval.",
+    inputSchema: keyDeleteSchema(),
+    permissions: ["destructive"],
+    capabilities: ["query"],
+    timeoutMs: 30_000,
+    execute: async (input, context) => {
+      const raw = assertObject(input);
+      return adapters.mutateKeyValues?.(
+        {
+          operation: "delete",
+          connectionId: optionalString(raw, "connectionId"),
+          keys: requireStringArray(raw, "keys"),
+        },
+        context
+      );
+    },
+  };
+}
+
+function indexSearchDocumentTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "search.indexDocument",
+    description: "Index or replace an Elasticsearch document after explicit approval.",
+    inputSchema: searchIndexSchema(),
+    permissions: ["write"],
+    capabilities: ["query"],
+    timeoutMs: 30_000,
+    execute: async (input, context) => {
+      const raw = assertObject(input);
+      return adapters.mutateSearchDocuments?.(
+        {
+          operation: "index",
+          connectionId: optionalString(raw, "connectionId"),
+          index: requireString(raw, "index"),
+          id: optionalString(raw, "id"),
+          document: requireRecordField(raw, "document"),
+        },
+        context
+      );
+    },
+  };
+}
+
+function updateSearchDocumentTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "search.updateDocument",
+    description: "Partially update an Elasticsearch document after explicit approval.",
+    inputSchema: searchUpdateSchema(),
+    permissions: ["write"],
+    capabilities: ["query"],
+    timeoutMs: 30_000,
+    execute: async (input, context) => {
+      const raw = assertObject(input);
+      return adapters.mutateSearchDocuments?.(
+        {
+          operation: "update",
+          connectionId: optionalString(raw, "connectionId"),
+          index: requireString(raw, "index"),
+          id: requireString(raw, "id"),
+          document: requireRecordField(raw, "document"),
+          upsert: optionalBoolean(raw, "upsert") ?? false,
+        },
+        context
+      );
+    },
+  };
+}
+
+function deleteSearchDocumentTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "search.deleteDocument",
+    description: "Delete an Elasticsearch document after explicit approval.",
+    inputSchema: searchDeleteSchema(),
+    permissions: ["destructive"],
+    capabilities: ["query"],
+    timeoutMs: 30_000,
+    execute: async (input, context) => {
+      const raw = assertObject(input);
+      return adapters.mutateSearchDocuments?.(
+        {
+          operation: "delete",
+          connectionId: optionalString(raw, "connectionId"),
+          index: requireString(raw, "index"),
+          id: requireString(raw, "id"),
+        },
+        context
+      );
+    },
+  };
+}
+
 function assertObject(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("tool input must be an object");
@@ -528,6 +741,213 @@ function tableMutationPayload(input: unknown) {
   };
 }
 
+function documentBaseProperties() {
+  return {
+    connectionId: {
+      type: "string",
+      description: "Connection id. Defaults to the active connection.",
+    },
+    namespace: {
+      type: "string",
+      description: "MongoDB database. Defaults to the active namespace.",
+    },
+    collection: {
+      type: "string",
+      description: "Target collection name.",
+    },
+  };
+}
+
+function documentInsertSchema() {
+  return {
+    type: "object",
+    properties: {
+      ...documentBaseProperties(),
+      documents: {
+        type: "array",
+        description: "Documents to insert.",
+        items: { type: "object", additionalProperties: true },
+      },
+    },
+    required: ["collection", "documents"],
+    additionalProperties: false,
+  };
+}
+
+function documentUpdateSchema() {
+  return {
+    type: "object",
+    properties: {
+      ...documentBaseProperties(),
+      filter: {
+        type: "object",
+        description: "MongoDB filter selecting documents to update.",
+        additionalProperties: true,
+      },
+      update: {
+        type: "object",
+        description: "MongoDB update document, for example {$set:{...}}.",
+        additionalProperties: true,
+      },
+      many: {
+        type: "boolean",
+        description: "When true, update all matching documents.",
+      },
+      upsert: {
+        type: "boolean",
+        description: "When true, insert when no document matches.",
+      },
+    },
+    required: ["collection", "filter", "update"],
+    additionalProperties: false,
+  };
+}
+
+function documentDeleteSchema() {
+  return {
+    type: "object",
+    properties: {
+      ...documentBaseProperties(),
+      filter: {
+        type: "object",
+        description: "MongoDB filter selecting documents to delete.",
+        additionalProperties: true,
+      },
+      many: {
+        type: "boolean",
+        description: "When true, delete all matching documents.",
+      },
+    },
+    required: ["collection", "filter"],
+    additionalProperties: false,
+  };
+}
+
+function keySetSchema() {
+  return {
+    type: "object",
+    properties: {
+      connectionId: {
+        type: "string",
+        description: "Connection id. Defaults to the active connection.",
+      },
+      key: {
+        type: "string",
+        description: "Redis key.",
+      },
+      value: {
+        description: "Value to store. Objects and arrays are serialized as JSON.",
+      },
+      ttlSeconds: {
+        type: "number",
+        description: "Optional positive TTL in seconds.",
+      },
+    },
+    required: ["key", "value"],
+    additionalProperties: false,
+  };
+}
+
+function keyDeleteSchema() {
+  return {
+    type: "object",
+    properties: {
+      connectionId: {
+        type: "string",
+        description: "Connection id. Defaults to the active connection.",
+      },
+      keys: {
+        type: "array",
+        description: "Redis keys to delete.",
+        items: { type: "string" },
+      },
+    },
+    required: ["keys"],
+    additionalProperties: false,
+  };
+}
+
+function searchBaseProperties() {
+  return {
+    connectionId: {
+      type: "string",
+      description: "Connection id. Defaults to the active connection.",
+    },
+    index: {
+      type: "string",
+      description: "Elasticsearch index name.",
+    },
+  };
+}
+
+function searchIndexSchema() {
+  return {
+    type: "object",
+    properties: {
+      ...searchBaseProperties(),
+      id: {
+        type: "string",
+        description: "Optional document id. Omit to let Elasticsearch generate one.",
+      },
+      document: {
+        type: "object",
+        description: "Document body to index.",
+        additionalProperties: true,
+      },
+    },
+    required: ["index", "document"],
+    additionalProperties: false,
+  };
+}
+
+function searchUpdateSchema() {
+  return {
+    type: "object",
+    properties: {
+      ...searchBaseProperties(),
+      id: {
+        type: "string",
+        description: "Document id.",
+      },
+      document: {
+        type: "object",
+        description: "Partial document fields to update.",
+        additionalProperties: true,
+      },
+      upsert: {
+        type: "boolean",
+        description: "When true, create the document if it does not exist.",
+      },
+    },
+    required: ["index", "id", "document"],
+    additionalProperties: false,
+  };
+}
+
+function searchDeleteSchema() {
+  return {
+    type: "object",
+    properties: {
+      ...searchBaseProperties(),
+      id: {
+        type: "string",
+        description: "Document id.",
+      },
+    },
+    required: ["index", "id"],
+    additionalProperties: false,
+  };
+}
+
+function documentMutationPayload(input: unknown) {
+  const payload = assertObject(input);
+  return {
+    connectionId: optionalString(payload, "connectionId"),
+    namespace: optionalString(payload, "namespace"),
+    collection: requireString(payload, "collection"),
+  };
+}
+
 function requireRecordArray(
   payload: Record<string, unknown>,
   field: string
@@ -567,6 +987,66 @@ function requireTableDeletes(payload: Record<string, unknown>): TableRowDelete[]
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function requireRecordField(
+  payload: Record<string, unknown>,
+  field: string
+): Record<string, unknown> {
+  const value = payload[field];
+  if (!isRecord(value)) {
+    throw new Error(`${field} must be an object`);
+  }
+  return value;
+}
+
+function requireString(payload: Record<string, unknown>, field: string) {
+  const value = payload[field];
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${field} is required`);
+  }
+  return value;
+}
+
+function optionalString(payload: Record<string, unknown>, field: string) {
+  const value = payload[field];
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function requireStringArray(payload: Record<string, unknown>, field: string) {
+  const value = payload[field];
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    !value.every((item) => typeof item === "string" && item.trim())
+  ) {
+    throw new Error(`${field} must contain one or more strings`);
+  }
+  return value;
+}
+
+function requirePresent(payload: Record<string, unknown>, field: string) {
+  if (!Object.prototype.hasOwnProperty.call(payload, field)) {
+    throw new Error(`${field} is required`);
+  }
+  return payload[field];
+}
+
+function optionalBoolean(payload: Record<string, unknown>, field: string) {
+  const value = payload[field];
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function optionalPositiveInteger(
+  payload: Record<string, unknown>,
+  field: string
+) {
+  const value = payload[field];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`${field} must be a positive number`);
+  }
+  return Math.floor(value);
 }
 
 async function runApprovedMutation(

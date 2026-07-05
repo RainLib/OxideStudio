@@ -132,6 +132,13 @@ function classifyIntent(input: AssistantTurnInput): AssistantIntent {
   const text = `${input.message} ${input.selectedText || ""}`.toLowerCase();
   if (!text.trim()) return "unknown";
 
+  if (
+    /\b(create|delete|drop|insert|remove|replace|set|truncate|update|upsert|write)\b/.test(
+      text
+    )
+  ) {
+    return "query";
+  }
   if (/\b(schema|table|collection|index|key|metadata|database|list)\b/.test(text)) {
     return "metadata";
   }

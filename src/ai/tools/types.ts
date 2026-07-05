@@ -124,6 +124,36 @@ export type AiTableMutationInput = {
   deletes?: TableRowDelete[];
 };
 
+export type AiDocumentMutationInput = {
+  operation: "insert" | "update" | "delete";
+  connectionId?: string | null;
+  namespace?: string | null;
+  collection: string;
+  documents?: Array<Record<string, unknown>>;
+  filter?: Record<string, unknown>;
+  update?: Record<string, unknown>;
+  many?: boolean;
+  upsert?: boolean;
+};
+
+export type AiKeyValueMutationInput = {
+  operation: "set" | "delete";
+  connectionId?: string | null;
+  key?: string;
+  keys?: string[];
+  value?: unknown;
+  ttlSeconds?: number | null;
+};
+
+export type AiSearchDocumentMutationInput = {
+  operation: "index" | "update" | "delete";
+  connectionId?: string | null;
+  index: string;
+  id?: string | null;
+  document?: Record<string, unknown>;
+  upsert?: boolean;
+};
+
 export type AiDescribeObjectInput = {
   connectionId?: string | null;
   namespace?: string | null;
@@ -190,4 +220,16 @@ export type AiToolAdapters = {
     input: AiTableMutationInput,
     context: AiToolExecutionContext
   ) => Promise<TableMutationResult> | TableMutationResult;
+  mutateDocuments?: (
+    input: AiDocumentMutationInput,
+    context: AiToolExecutionContext
+  ) => Promise<QueryResult[]> | QueryResult[];
+  mutateKeyValues?: (
+    input: AiKeyValueMutationInput,
+    context: AiToolExecutionContext
+  ) => Promise<QueryResult[]> | QueryResult[];
+  mutateSearchDocuments?: (
+    input: AiSearchDocumentMutationInput,
+    context: AiToolExecutionContext
+  ) => Promise<QueryResult[]> | QueryResult[];
 };
