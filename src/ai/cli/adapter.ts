@@ -7,6 +7,8 @@ import {
   createWorkspaceAiToolRegistry,
 } from "@/ai/tools";
 import type { AiToolExecutionContext, AiToolExecutionPolicy } from "@/ai/tools";
+import { createAssistantRuntime } from "@/ai/assistant";
+import type { AssistantPlanner, AssistantTurnInput } from "@/ai/assistant";
 import type { CliInputReader, CliToolCommandResult } from "./types";
 
 export type CliToolAdapterOptions = {
@@ -14,12 +16,14 @@ export type CliToolAdapterOptions = {
   createContext?: () => AiToolExecutionContext;
   readFile?: CliInputReader;
   policy?: AiToolExecutionPolicy;
+  planner?: AssistantPlanner;
 };
 
 type ParsedCommand =
   | { kind: "help" }
   | { kind: "list" }
   | { kind: "manifest" }
+  | { kind: "plan"; input: AssistantTurnInput }
   | { kind: "call"; toolName: string; input: unknown; approved: boolean };
 
 export class CliToolAdapter {
@@ -27,12 +31,14 @@ export class CliToolAdapter {
   private readonly createContext: () => AiToolExecutionContext;
   private readonly readFile?: CliInputReader;
   private readonly policy: AiToolExecutionPolicy;
+  private readonly planner?: AssistantPlanner;
 
   constructor(options: CliToolAdapterOptions = {}) {
     this.registry = options.registry ?? createWorkspaceAiToolRegistry();
     this.createContext = options.createContext ?? createWorkspaceAiToolContext;
     this.readFile = options.readFile;
     this.policy = options.policy ?? DEFAULT_AI_TOOL_POLICY;
+    this.planner = options.planner;
   }
 
   async run(argv: string[]): Promise<CliToolCommandResult> {
@@ -45,6 +51,15 @@ export class CliToolAdapter {
           return okJson(this.registry.list());
         case "manifest":
           return okJson(createAiToolManifest(this.registry.list(), this.policy));
+        case "plan":
+          return okJson(
+            await createAssistantRuntime({
+              registry: this.registry,
+              createContext: this.createContext,
+              policy: this.policy,
+              planner: this.planner,
+            }).prepareTurnAsync(command.input)
+          );
         case "call": {
           const policy = command.approved
             ? approveAiToolForPolicy(this.policy, command.toolName)
@@ -91,6 +106,17 @@ export class CliToolAdapter {
       return this.parseCall(callArgs);
     }
 
+    if (
+      command === "plan" ||
+      (command === "assistant" && rest[0] === "plan") ||
+      (command === "tools" && rest[0] === "plan")
+    ) {
+      const planArgs = command === "assistant" || command === "tools"
+        ? rest.slice(1)
+        : rest;
+      return { kind: "plan", input: await this.parsePlan(planArgs) };
+    }
+
     throw new Error(`Unknown AI tools command: ${command}`);
   }
 
@@ -134,6 +160,58 @@ export class CliToolAdapter {
 
     return { kind: "call", toolName, input, approved };
   }
+
+  private async parsePlan(args: string[]): Promise<AssistantTurnInput> {
+    let input: AssistantTurnInput = { message: "" };
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index];
+      if (arg === "--message" || arg === "-m") {
+        const value = args[index + 1];
+        if (value === undefined) {
+          throw new Error(`${arg} requires a message`);
+        }
+        input = { ...input, message: value };
+        index += 1;
+        continue;
+      }
+      if (arg === "--selected-text") {
+        const value = args[index + 1];
+        if (value === undefined) {
+          throw new Error("--selected-text requires a value");
+        }
+        input = { ...input, selectedText: value };
+        index += 1;
+        continue;
+      }
+      if (arg === "--json") {
+        const value = args[index + 1];
+        if (value === undefined) {
+          throw new Error("--json requires a JSON payload");
+        }
+        input = parsePlanJson(value);
+        index += 1;
+        continue;
+      }
+      if (arg === "--json-file") {
+        const path = args[index + 1];
+        if (!path) {
+          throw new Error("--json-file requires a file path");
+        }
+        if (!this.readFile) {
+          throw new Error("--json-file requires a file reader adapter");
+        }
+        input = parsePlanJson(await this.readFile(path));
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown plan argument: ${arg}`);
+    }
+
+    if (!input.message.trim()) {
+      throw new Error("assistant plan requires --message or --json");
+    }
+    return input;
+  }
 }
 
 export function createCliToolAdapter(options?: CliToolAdapterOptions) {
@@ -156,6 +234,23 @@ function parseJson(value: string) {
   }
 }
 
+function parsePlanJson(value: string): AssistantTurnInput {
+  const parsed = parseJson(value);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Plan JSON payload must be an object");
+  }
+
+  const payload = parsed as Record<string, unknown>;
+  if (typeof payload.message !== "string") {
+    throw new Error("Plan JSON payload requires a string message");
+  }
+  return {
+    message: payload.message,
+    selectedText:
+      typeof payload.selectedText === "string" ? payload.selectedText : null,
+  };
+}
+
 function ok(stdout: string): CliToolCommandResult {
   return { exitCode: 0, stdout };
 }
@@ -171,6 +266,8 @@ function helpText() {
     "Commands:",
     "  tools list",
     "  tools manifest",
+    "  assistant plan --message 'show active schema'",
+    "  assistant plan --json '{\"message\":\"explain this query\"}'",
     "  tools call <toolName> [--json '{...}']",
     "  tools call <toolName> [--json-file payload.json]",
     "  tools call <toolName> --approve [--json '{...}']",

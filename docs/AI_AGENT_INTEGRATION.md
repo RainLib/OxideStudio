@@ -30,7 +30,7 @@ This keeps the editor integration direct and state-aware while allowing external
 - `src/ai/assistant` exposes an `AssistantPlanner` contract, a deterministic fallback planner, a provider-neutral model planner, and approval-aware execution for AI-proposed tool calls.
 - `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
 - `src/ai/mcp/protocol.ts` adds a transport-neutral JSON-RPC handler for `initialize`, `tools/list`, `tools/call`, and the Oxide manifest extension; stdio or HTTP servers should wrap this instead of reimplementing tool routing.
-- `src/ai/cli` provides a dependency-light command adapter for `tools list` and `tools call`.
+- `src/ai/cli` provides a dependency-light command adapter for `tools list`, `tools manifest`, `assistant plan`, and `tools call`.
 - The assistant panel is an editor entry point; real model/provider integration should call the runtime APIs rather than bypassing the registry.
 
 ## LangGraph Usage
@@ -103,6 +103,7 @@ CLI is useful for local automation, tests, and scripting. It can share the same 
 ```bash
 oxide tools list
 oxide tools manifest
+oxide assistant plan --message "list tables in the active database"
 oxide tools call query.runReadOnly --json payload.json
 oxide tools call key.setValue --approve --json '{"key":"demo","value":"ok"}'
 ```
