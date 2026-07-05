@@ -71,6 +71,8 @@ export type AiToolExecutionContext = {
   requestId: string;
   activeConnectionId?: string | null;
   activeDriver?: DatabaseDriver | null;
+  activeNamespace?: string | null;
+  activeTab?: AiWorkspaceTabSummary | null;
   abortSignal?: AbortSignal;
   audit?: AiToolAuditSink;
 };
@@ -104,6 +106,10 @@ export type AiWorkspaceTabSummary = {
   title: string;
   sql?: string;
   connectionId?: string | null;
+  targetSchema?: string | null;
+  schemaName?: string | null;
+  tableName?: string | null;
+  objectType?: string | null;
   selection?: AiWorkspaceSelection | null;
 };
 

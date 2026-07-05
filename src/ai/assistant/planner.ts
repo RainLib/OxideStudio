@@ -25,7 +25,9 @@ export class DefaultAssistantPlanner implements AssistantPlanner {
         input.turn,
         input.availableTools,
         input.policy,
-        input.context.activeDriver
+        input.context.activeDriver,
+        input.context.activeNamespace,
+        input.context.activeTab?.tableName
       ),
       notes: [
         "Use this planner as the local fallback; a LangGraph or model planner can implement the same AssistantPlanner contract.",
@@ -72,7 +74,9 @@ function buildSuggestedPlan(
   input: AssistantTurnInput,
   tools: AiToolSummary[],
   policy: AiToolExecutionPolicy,
-  activeDriver?: string | null
+  activeDriver?: string | null,
+  activeNamespace?: string | null,
+  activeObjectName?: string | null
 ): AssistantPlanStep[] {
   const hasTool = (name: string) => tools.some((tool) => tool.name === name);
   const requiresApproval = (name: string) => {
@@ -122,12 +126,25 @@ function buildSuggestedPlan(
     });
   }
 
+  if (intent === "metadata" && activeObjectName && hasTool("metadata.describeObject")) {
+    steps.push({
+      id: "metadata-active-object",
+      title: "Describe metadata for the active object",
+      toolName: "metadata.describeObject",
+      input: {
+        name: activeObjectName,
+        ...(activeNamespace ? { namespace: activeNamespace } : {}),
+      },
+      requiresApproval: requiresApproval("metadata.describeObject"),
+    });
+  }
+
   if (intent === "metadata" && hasTool("metadata.listObjects")) {
     steps.push({
       id: "metadata-objects",
       title: "List objects for the active namespace",
       toolName: "metadata.listObjects",
-      input: {},
+      input: activeNamespace ? { namespace: activeNamespace } : {},
       requiresApproval: requiresApproval("metadata.listObjects"),
     });
   } else if (intent === "metadata" && hasTool("metadata.listCollections")) {
@@ -135,7 +152,7 @@ function buildSuggestedPlan(
       id: "metadata-collections",
       title: "List collections, keys, or indexes for the active namespace",
       toolName: "metadata.listCollections",
-      input: {},
+      input: activeNamespace ? { namespace: activeNamespace } : {},
       requiresApproval: requiresApproval("metadata.listCollections"),
     });
   }

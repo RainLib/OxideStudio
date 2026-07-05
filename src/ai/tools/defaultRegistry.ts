@@ -74,14 +74,19 @@ export function createWorkspaceAiToolContext(
   requestId = createRequestId()
 ): AiToolExecutionContext {
   const connectionState = useConnectionStore.getState();
+  const schemaState = useSchemaStore.getState();
+  const tabState = useTabStore.getState();
   const activeConnection = connectionState.connections.find(
     (connection) => connection.id === connectionState.activeConnectionId
   );
+  const activeTab = tabState.tabs.find((tab) => tab.id === tabState.activeTabId);
 
   return {
     requestId,
     activeConnectionId: connectionState.activeConnectionId,
     activeDriver: activeConnection?.driver ?? null,
+    activeNamespace: schemaState.currentSchema,
+    activeTab: activeTab ? workspaceTabSummaryFromTab(activeTab) : null,
   };
 }
 
@@ -100,15 +105,7 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
     getActiveTab: () => {
       const tabState = useTabStore.getState();
       const activeTab = tabState.tabs.find((tab) => tab.id === tabState.activeTabId);
-      if (!activeTab) return null;
-      return {
-        id: activeTab.id,
-        type: activeTab.type,
-        title: activeTab.title,
-        sql: activeTab.sql,
-        connectionId: activeTab.connectionId ?? null,
-        selection: workspaceSelectionFromTab(activeTab),
-      } satisfies AiWorkspaceTabSummary;
+      return activeTab ? workspaceTabSummaryFromTab(activeTab) : null;
     },
 
     getWorkspaceSelection: () => {
@@ -199,6 +196,38 @@ function workspaceSelectionFromTab(tab: {
     endLineNumber: tab.editorSelection.endLineNumber,
     endColumn: tab.editorSelection.endColumn,
     connectionId: tab.connectionId ?? null,
+  };
+}
+
+function workspaceTabSummaryFromTab(tab: {
+  id: string;
+  type: string;
+  title: string;
+  sql?: string;
+  connectionId?: string | null;
+  targetSchema?: string | null;
+  schemaName?: string | null;
+  tableName?: string | null;
+  objectType?: string | null;
+  editorSelection?: {
+    text: string;
+    startLineNumber: number;
+    startColumn: number;
+    endLineNumber: number;
+    endColumn: number;
+  } | null;
+}): AiWorkspaceTabSummary {
+  return {
+    id: tab.id,
+    type: tab.type,
+    title: tab.title,
+    sql: tab.sql,
+    connectionId: tab.connectionId ?? null,
+    targetSchema: tab.targetSchema ?? null,
+    schemaName: tab.schemaName ?? null,
+    tableName: tab.tableName ?? null,
+    objectType: tab.objectType ?? null,
+    selection: workspaceSelectionFromTab(tab),
   };
 }
 
@@ -668,7 +697,8 @@ async function resolveMetadataTarget(
     throw new Error(`Connection driver is not available for ${connectionId}`);
   }
 
-  const namespace = requestedNamespace || useSchemaStore.getState().currentSchema || "";
+  const namespace =
+    requestedNamespace || context.activeNamespace || useSchemaStore.getState().currentSchema || "";
   const capabilities = await databaseService.getDatabaseCapabilities(driver);
   return { connectionId, namespace, driver, capabilities };
 }
@@ -690,14 +720,35 @@ function resolveQueryExecutionTarget(
   const driver = connection?.driver ?? context.activeDriver ?? "postgres";
   const namespace =
     requestedNamespace ||
-    inferActiveQueryNamespace(connectionId, driver) ||
+    inferActiveQueryNamespace(connectionId, driver, context) ||
+    context.activeNamespace ||
     undefined;
 
   return { connectionId, namespace };
 }
 
-function inferActiveQueryNamespace(connectionId: string, driver: DatabaseDriver) {
+function inferActiveQueryNamespace(
+  connectionId: string,
+  driver: DatabaseDriver,
+  context: AiToolExecutionContext
+) {
   const schemaState = useSchemaStore.getState();
+  if (
+    context.activeTab &&
+    (!context.activeTab.connectionId || context.activeTab.connectionId === connectionId)
+  ) {
+    return querySchemaContextForTab(
+      {
+        targetSchema: context.activeTab.targetSchema ?? undefined,
+        schemaName: context.activeTab.schemaName ?? undefined,
+        tableName: context.activeTab.tableName ?? undefined,
+        objectType: context.activeTab.objectType ?? undefined,
+      },
+      context.activeNamespace || schemaState.currentSchema,
+      driver
+    );
+  }
+
   const tabState = useTabStore.getState();
   const activeTab = tabState.tabs.find((tab) => tab.id === tabState.activeTabId);
 
