@@ -13,7 +13,7 @@ import type {
 } from "@/ai/assistant/types";
 import { cn } from "@/lib/utils";
 import { ListChecks, Play, ShieldCheck, Sparkles } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 export function AssistantSidebar() {
   const runtime = useMemo(
@@ -38,6 +38,9 @@ export function AssistantSidebar() {
   const [toolSummaries, setToolSummaries] = useState<
     Record<string, AssistantToolResultSummary>
   >({});
+  const toolResultsRef = useRef<Record<string, AssistantToolCallResult>>({});
+  const [turnSummary, setTurnSummary] =
+    useState<AssistantToolResultSummary | null>(null);
   const [isPlanning, setIsPlanning] = useState(false);
   const [isRunningSafeSteps, setIsRunningSafeSteps] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -54,8 +57,10 @@ export function AssistantSidebar() {
 
   const handlePrepare = async () => {
     setError(null);
+    toolResultsRef.current = {};
     setToolResults({});
     setToolSummaries({});
+    setTurnSummary(null);
     setIsPlanning(true);
     try {
       setPreparedTurn(await runtime.prepareTurnAsync({ message, selectedText }));
@@ -69,7 +74,8 @@ export function AssistantSidebar() {
   const executeStep = async (
     turn: AssistantPreparedTurn,
     step: AssistantPlanStep,
-    approved = false
+    approved = false,
+    summarizeStep = true
   ) => {
     if (!step.toolName) return null;
 
@@ -86,13 +92,19 @@ export function AssistantSidebar() {
     );
     if (!result) return null;
 
-    setToolResults((state) => ({ ...state, [step.id]: result }));
-    const summary = await runtime.summarizeToolResults(
-      { message, selectedText },
-      [result],
-      turn.context
-    );
-    setToolSummaries((state) => ({ ...state, [step.id]: summary }));
+    const nextResults = { ...toolResultsRef.current, [step.id]: result };
+    toolResultsRef.current = nextResults;
+    setToolResults(nextResults);
+
+    if (summarizeStep) {
+      const summary = await runtime.summarizeToolResults(
+        { message, selectedText },
+        [result],
+        turn.context
+      );
+      setToolSummaries((state) => ({ ...state, [step.id]: summary }));
+      setTurnSummary(summary);
+    }
     if (result.status !== "success") {
       setError(result.error || "Tool execution did not complete");
     }
@@ -122,11 +134,22 @@ export function AssistantSidebar() {
 
     setError(null);
     setIsRunningSafeSteps(true);
+    const completedResults: AssistantToolCallResult[] = [];
     try {
       for (const step of safeSteps) {
         setActiveStepId(step.id);
-        const result = await executeStep(preparedTurn, step, false);
+        const result = await executeStep(preparedTurn, step, false, false);
+        if (result) completedResults.push(result);
         if (result && result.status !== "success") break;
+      }
+      if (completedResults.length > 0) {
+        setTurnSummary(
+          await runtime.summarizeToolResults(
+            { message, selectedText },
+            completedResults,
+            preparedTurn.context
+          )
+        );
       }
     } catch (err: any) {
       setError(err?.message || String(err));
@@ -213,6 +236,17 @@ export function AssistantSidebar() {
                 </div>
               )}
             </div>
+
+            {turnSummary && (
+              <div className="rounded-sm border border-primary/25 bg-primary/5 px-2 py-1.5 text-[11px] text-foreground">
+                {turnSummary.message}
+                {turnSummary.warnings?.map((warning) => (
+                  <div key={warning} className="mt-1 text-[10px] text-amber-500">
+                    {warning}
+                  </div>
+                ))}
+              </div>
+            )}
 
             {preparedTurn.suggestedPlan.map((step) => {
               const result = toolResults[step.id];
