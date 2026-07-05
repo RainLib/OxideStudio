@@ -121,6 +121,48 @@ describe("AI MCP adapter", () => {
       ],
     });
   });
+
+  it("exposes a policy-aware manifest for external agents", async () => {
+    const protocol = createMcpProtocolAdapter({
+      registry: createTestRegistry(),
+      createContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+    });
+
+    const response = await protocol.handleMessage({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "oxide/tools/manifest",
+    });
+    const result = response && "result" in response
+      ? (response.result as { content: Array<{ text: string }> })
+      : null;
+    const manifest = JSON.parse(result?.content[0]?.text || "{}");
+
+    expect(manifest).toMatchObject({
+      schemaVersion: 1,
+      toolCount: 2,
+      permissions: {
+        read: 1,
+        write: 1,
+      },
+      capabilities: {
+        metadata: 1,
+        query: 1,
+      },
+    });
+    expect(manifest.tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "demo.write",
+          policy: expect.objectContaining({
+            allowed: false,
+            requiresApproval: true,
+          }),
+        }),
+      ])
+    );
+  });
 });
 
 describe("AI CLI adapter", () => {
@@ -205,6 +247,38 @@ describe("AI CLI adapter", () => {
         ],
       },
     });
+  });
+
+  it("prints the same policy-aware manifest from the CLI", async () => {
+    const cli = createCliToolAdapter({
+      registry: createTestRegistry(),
+      createContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+    });
+
+    const result = await cli.run(["tools", "manifest"]);
+    const manifest = JSON.parse(result.stdout);
+
+    expect(result.exitCode).toBe(0);
+    expect(manifest).toMatchObject({
+      schemaVersion: 1,
+      toolCount: 2,
+      permissions: {
+        read: 1,
+        write: 1,
+      },
+    });
+    expect(manifest.tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "demo.write",
+          policy: expect.objectContaining({
+            allowed: false,
+            requiresApproval: true,
+          }),
+        }),
+      ])
+    );
   });
 });
 
