@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 pub struct MongoDbDriver {
     url: String,
     default_database: String,
+    active_database: Mutex<String>,
     client: Mutex<Option<Client>>,
 }
 
@@ -52,6 +53,7 @@ impl MongoDbDriver {
         Self {
             url: url.to_string(),
             default_database: mongodb_default_database(url),
+            active_database: Mutex::new(mongodb_default_database(url)),
             client: Mutex::new(None),
         }
     }
@@ -64,22 +66,45 @@ impl MongoDbDriver {
             .ok_or_else(|| anyhow!("MongoDB connection is not established"))
     }
 
+    async fn active_database_name(&self) -> String {
+        let active = self.active_database.lock().await.clone();
+        if active.trim().is_empty() {
+            self.default_database.clone()
+        } else {
+            active
+        }
+    }
+
+    async fn database_name_for(&self, value: Option<&str>) -> Result<String> {
+        if let Some(database) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            return validate_mongodb_database_name(database);
+        }
+        Ok(self.active_database_name().await)
+    }
+
+    async fn execute_commands(&self, commands: Vec<MongoCommandInput>) -> Result<Vec<QueryResult>> {
+        if commands.is_empty() {
+            return Err(anyhow!("MongoDB command is required"));
+        }
+
+        let mut results = Vec::with_capacity(commands.len());
+        for command in commands {
+            results.push(self.execute_command(command).await?);
+        }
+        Ok(results)
+    }
+
     async fn execute_command(&self, input: MongoCommandInput) -> Result<QueryResult> {
         let client = self.client().await?;
-        let database_name = input
-            .database
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(&self.default_database);
-        let database = client.database(database_name);
+        let database_name = self.database_name_for(input.database.as_deref()).await?;
+        let database = client.database(&database_name);
 
         if let Some(command) = input.command.as_ref() {
             let result = database
                 .run_command(json_to_document(command, "command")?)
                 .await
                 .context("MongoDB command failed")?;
-            return Ok(command_result(database_name, "command", None, result));
+            return Ok(command_result(&database_name, "command", None, result));
         }
 
         let collection = input
@@ -114,7 +139,7 @@ impl MongoDbDriver {
                 .await
                 .context("MongoDB count command failed")?;
             return Ok(command_result(
-                database_name,
+                &database_name,
                 "countDocuments",
                 Some(collection),
                 result,
@@ -131,7 +156,7 @@ impl MongoDbDriver {
                 .await
                 .context("MongoDB insertOne command failed")?;
             return Ok(command_result(
-                database_name,
+                &database_name,
                 "insertOne",
                 Some(collection),
                 result,
@@ -151,7 +176,7 @@ impl MongoDbDriver {
                 .await
                 .context("MongoDB insertMany command failed")?;
             return Ok(command_result(
-                database_name,
+                &database_name,
                 "insertMany",
                 Some(collection),
                 result,
@@ -164,7 +189,7 @@ impl MongoDbDriver {
                 .await
                 .context("MongoDB updateOne command failed")?;
             return Ok(command_result(
-                database_name,
+                &database_name,
                 "updateOne",
                 Some(collection),
                 result,
@@ -177,7 +202,7 @@ impl MongoDbDriver {
                 .await
                 .context("MongoDB updateMany command failed")?;
             return Ok(command_result(
-                database_name,
+                &database_name,
                 "updateMany",
                 Some(collection),
                 result,
@@ -190,7 +215,7 @@ impl MongoDbDriver {
                 .await
                 .context("MongoDB deleteOne command failed")?;
             return Ok(command_result(
-                database_name,
+                &database_name,
                 "deleteOne",
                 Some(collection),
                 result,
@@ -203,7 +228,7 @@ impl MongoDbDriver {
                 .await
                 .context("MongoDB deleteMany command failed")?;
             return Ok(command_result(
-                database_name,
+                &database_name,
                 "deleteMany",
                 Some(collection),
                 result,
@@ -247,15 +272,22 @@ impl DatabaseDriver for MongoDbDriver {
 
     async fn query(&self, sql: &str) -> Result<Vec<QueryResult>> {
         let commands = parse_mongodb_commands(sql)?;
-        if commands.is_empty() {
-            return Err(anyhow!("MongoDB command is required"));
-        }
+        self.execute_commands(commands).await
+    }
 
-        let mut results = Vec::with_capacity(commands.len());
-        for command in commands {
-            results.push(self.execute_command(command).await?);
-        }
-        Ok(results)
+    async fn query_with_context(&self, sql: &str, schema: &str) -> Result<Vec<QueryResult>> {
+        let database = validate_mongodb_database_name(schema)?;
+        *self.active_database.lock().await = database.clone();
+        let commands = parse_mongodb_commands(sql)?
+            .into_iter()
+            .map(|mut command| {
+                if command.database.is_none() {
+                    command.database = Some(database.clone());
+                }
+                command
+            })
+            .collect();
+        self.execute_commands(commands).await
     }
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
@@ -271,11 +303,12 @@ impl DatabaseDriver for MongoDbDriver {
     async fn get_collections(&self, namespace: &str) -> Result<Vec<CollectionInfo>> {
         let namespace = namespace.trim();
         let database_name = if namespace.is_empty() {
-            &self.default_database
+            self.active_database_name().await
         } else {
-            namespace
+            validate_mongodb_database_name(namespace)?
         };
-        let database = self.client().await?.database(database_name);
+        *self.active_database.lock().await = database_name.clone();
+        let database = self.client().await?.database(&database_name);
         let names = database
             .list_collection_names()
             .await
@@ -288,7 +321,11 @@ impl DatabaseDriver for MongoDbDriver {
                 .estimated_document_count()
                 .await
                 .ok();
-            collections.push(mongodb_collection_info(database_name, name, document_count));
+            collections.push(mongodb_collection_info(
+                &database_name,
+                name,
+                document_count,
+            ));
         }
 
         Ok(collections)
@@ -297,9 +334,9 @@ impl DatabaseDriver for MongoDbDriver {
     async fn get_columns(&self, schema: &str, table: &str) -> Result<Vec<ColumnInfo>> {
         let schema = schema.trim();
         let database_name = if schema.is_empty() {
-            &self.default_database
+            self.active_database_name().await
         } else {
-            schema
+            validate_mongodb_database_name(schema)?
         };
         let collection = table.trim();
         if collection.is_empty() {
@@ -309,7 +346,7 @@ impl DatabaseDriver for MongoDbDriver {
         let result = self
             .client()
             .await?
-            .database(database_name)
+            .database(&database_name)
             .run_command(doc! {
                 "find": collection,
                 "filter": {},
@@ -326,9 +363,9 @@ impl DatabaseDriver for MongoDbDriver {
     async fn get_indexes(&self, schema: &str, table: &str) -> Result<Vec<IndexInfo>> {
         let schema = schema.trim();
         let database_name = if schema.is_empty() {
-            &self.default_database
+            self.active_database_name().await
         } else {
-            schema
+            validate_mongodb_database_name(schema)?
         };
         let collection = table.trim();
         if collection.is_empty() {
@@ -338,7 +375,7 @@ impl DatabaseDriver for MongoDbDriver {
         let result = self
             .client()
             .await?
-            .database(database_name)
+            .database(&database_name)
             .run_command(doc! {
                 "listIndexes": collection,
             })
@@ -347,6 +384,12 @@ impl DatabaseDriver for MongoDbDriver {
                 format!("Failed to list MongoDB indexes for {database_name}.{collection}")
             })?;
         Ok(mongodb_indexes_to_info(extract_cursor_batch(result)?))
+    }
+
+    async fn set_current_schema(&self, schema: &str) -> Result<()> {
+        let database = validate_mongodb_database_name(schema)?;
+        *self.active_database.lock().await = database;
+        Ok(())
     }
 }
 
@@ -742,6 +785,20 @@ fn mongodb_default_database(url: &str) -> String {
         .to_string()
 }
 
+fn validate_mongodb_database_name(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(anyhow!("MongoDB database name is required"));
+    }
+    if value
+        .chars()
+        .any(|ch| matches!(ch, '/' | '\\' | '.' | '"' | '$' | '\0'))
+    {
+        return Err(anyhow!("Invalid MongoDB database name: {value}"));
+    }
+    Ok(value.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -755,6 +812,29 @@ mod tests {
         assert_eq!(
             mongodb_default_database("mongodb://localhost:27017"),
             "admin"
+        );
+    }
+
+    #[test]
+    fn validates_mongodb_database_names() {
+        assert_eq!(validate_mongodb_database_name(" app ").unwrap(), "app");
+        assert!(validate_mongodb_database_name("").is_err());
+        assert!(validate_mongodb_database_name("app.users").is_err());
+        assert!(validate_mongodb_database_name("app/users").is_err());
+        assert!(validate_mongodb_database_name("$admin").is_err());
+    }
+
+    #[tokio::test]
+    async fn tracks_active_database_context() {
+        let driver = MongoDbDriver::new("mongodb://localhost:27017/default_db");
+
+        assert_eq!(driver.active_database_name().await, "default_db");
+        driver.set_current_schema(" reporting ").await.unwrap();
+        assert_eq!(driver.active_database_name().await, "reporting");
+        assert_eq!(driver.database_name_for(None).await.unwrap(), "reporting");
+        assert_eq!(
+            driver.database_name_for(Some("explicit")).await.unwrap(),
+            "explicit"
         );
     }
 
