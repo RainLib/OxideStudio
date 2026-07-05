@@ -118,6 +118,8 @@ function QueryEditor() {
 
 `LspConnectionSyncer` sends bounded schema snapshots when the active connection, schema, metadata version, or open query tabs change. Relational databases sync tables, columns, indexes, constraints, and functions. Redis keys sync as LSP table objects with lightweight synthetic columns and type-specific length/cardinality when available. Elasticsearch indices sync mapping fields when available, falling back to `id`, `score`, and `source`. MongoDB collections sync sampled top-level document fields and collection indexes when available, falling back to `_id` and `document`.
 
+The bundled LSP accepts both pure Elasticsearch JSON DSL and HTTP-style Elasticsearch requests such as `GET /index/_search` followed by a JSON body; diagnostics are applied to the body instead of treating request lines as JSON syntax errors. MongoDB completions include collection CRUD commands plus administrative command names such as `create`, `drop`, `dropDatabase`, `dropIndexes`, `renameCollection`, and `collMod`.
+
 ```typescript
 await lspClient.updateConfiguration({
   defaultDialect: "postgres",
