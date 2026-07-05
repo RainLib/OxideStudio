@@ -14,11 +14,12 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 4: Monaco Editor completion, hover, definition, references, formatting, and diagnostics integration
 - Phase 5: **Bidirectional IPC with async stdio** (JSON-RPC communication)
 - Phase 6: Relational schema synchronization through `LspConnectionSyncer`
+- Phase 7: Bounded Redis key and Elasticsearch index context synchronization through the LSP schema model
 
 ⏳ **Pending:**
 
-- Broader dialect-specific schema/spec handling for non-relational backends
-- Additional integration coverage for Redis, MongoDB, and Elasticsearch LSP paths
+- MongoDB/JSON dialect support in `lsp_sqls`
+- Additional live integration coverage for Redis, MongoDB, and Elasticsearch LSP paths
 
 ## Setup Instructions
 
@@ -108,7 +109,7 @@ function QueryEditor() {
 
 ## Schema Synchronization
 
-`LspConnectionSyncer` sends bounded relational schema snapshots when the active connection, schema, metadata version, or open query tabs change. It limits tables per schema and metadata concurrency to keep LSP updates responsive.
+`LspConnectionSyncer` sends bounded schema snapshots when the active connection, schema, metadata version, or open query tabs change. Relational databases sync tables, columns, indexes, constraints, and functions. Redis and Elasticsearch sync keys/indices as LSP table objects with lightweight synthetic columns. MongoDB remains JSON-editor-only until `lsp_sqls` has a MongoDB or generic JSON dialect.
 
 ```typescript
 await lspClient.updateConfiguration({

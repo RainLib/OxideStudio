@@ -7,6 +7,7 @@ import { getLspDocumentUri, lspClient } from "@/services/lsp";
 import {
   databaseService,
   schemaService,
+  type CollectionInfo,
   type DatabaseCapabilities,
 } from "@/services/tauri";
 import {
@@ -20,6 +21,7 @@ import { extractRelationReferences } from "@/lib/sqlAnalysis";
 import { v4 as uuidv4 } from "uuid";
 
 const MAX_LSP_TABLES_PER_SCHEMA = 200;
+const MAX_LSP_COLLECTIONS_PER_SCHEMA = 500;
 const LSP_METADATA_CONCURRENCY = 8;
 const LSP_METADATA_CACHE_TTL_MS = 60_000;
 
@@ -82,6 +84,83 @@ type LspSchemaDefinition = {
   functions: LspFunctionDefinition[];
 };
 
+function emptyLspTableDetails(): Pick<
+  LspTableDefinition,
+  "source_location" | "indexes" | "constraints"
+> {
+  return {
+    source_location: null,
+    indexes: [],
+    constraints: [],
+  };
+}
+
+function lspColumn(
+  name: string,
+  dataType: string,
+  comment: string | null = null
+): LspTableDefinition["columns"][number] {
+  return {
+    name,
+    data_type: dataType,
+    nullable: true,
+    primary_key: false,
+    unique: false,
+    indexed: false,
+    comment,
+    source_location: null,
+  };
+}
+
+function collectionToLspTableDefinition(
+  capabilities: DatabaseCapabilities,
+  collection: CollectionInfo
+): LspTableDefinition {
+  const objectType = collection.type || capabilities.dataModel;
+  const countLabel =
+    typeof collection.documentCount === "number"
+      ? `${collection.documentCount} document(s)`
+      : null;
+
+  return {
+    name: collection.name,
+    object_type: objectType,
+    comment: countLabel,
+    ...emptyLspTableDetails(),
+    columns: lspColumnsForCollection(capabilities, collection),
+  };
+}
+
+function lspColumnsForCollection(
+  capabilities: DatabaseCapabilities,
+  collection: CollectionInfo
+): LspTableDefinition["columns"] {
+  if (capabilities.dataModel === "keyValue") {
+    return [
+      lspColumn("key", "string", "Redis key"),
+      lspColumn("type", collection.type || "string", "Redis key type"),
+      lspColumn("value", "json", "Redis value preview"),
+    ];
+  }
+
+  if (capabilities.dataModel === "search") {
+    return [
+      lspColumn("id", "keyword", "Document id"),
+      lspColumn("score", "double", "Search score"),
+      lspColumn("source", "object", "Document source"),
+    ];
+  }
+
+  if (capabilities.dataModel === "document") {
+    return [
+      lspColumn("_id", "objectId", "Document id"),
+      lspColumn("document", "object", "Document body"),
+    ];
+  }
+
+  return [lspColumn("value", "json", "Object value")];
+}
+
 function findKnownSchemaName(schemaNames: string[], schemaName?: string | null) {
   const normalized = schemaName?.trim().toLowerCase();
   if (!normalized) return null;
@@ -104,9 +183,11 @@ function lspSchemaSignature(schemaDefinitions: LspSchemaDefinition[]) {
                 }:${column.indexed ? "1" : "0"}`
             )
             .join(",");
-          return `${table.name}:${table.object_type || ""}:${columnSignature}:${
-            table.indexes.length
-          }:${table.constraints.length}`;
+          return `${table.name}:${table.object_type || ""}:${
+            table.comment || ""
+          }:${columnSignature}:${table.indexes.length}:${
+            table.constraints.length
+          }`;
         })
         .join("|");
       const functionSignature = schema.functions
@@ -307,7 +388,7 @@ export function LspConnectionSyncer() {
           name: table.name,
           object_type: table.type || null,
           comment: table.comment || null,
-          source_location: null,
+          ...emptyLspTableDetails(),
           indexes: indexes.map((index) => ({
             name: index.name,
             columns: index.columns || [],
@@ -345,9 +426,7 @@ export function LspConnectionSyncer() {
           name: table.name,
           object_type: table.type || null,
           comment: table.comment || null,
-          source_location: null,
-          indexes: [],
-          constraints: [],
+          ...emptyLspTableDetails(),
           columns: [],
         };
       }
@@ -439,6 +518,10 @@ export function LspConnectionSyncer() {
       const buildTableDefinitions = async () => {
         const capabilities = await capabilitiesPromise;
         const canSyncTableMetadata = supportsTableWorkspace(capabilities);
+        const canSyncCollectionMetadata =
+          !canSyncTableMetadata &&
+          (capabilities.supportsCollectionBrowsing ||
+            capabilities.supportsKeyValueBrowsing);
         const lspDialect = normalizeLspDialect(
           capabilities.lspLanguageId || connection.driver
         );
@@ -456,22 +539,34 @@ export function LspConnectionSyncer() {
         );
         const schemaDefinitions: LspSchemaDefinition[] = await Promise.all(
           targetSchemas.map(async (schemaName) => {
-            const [schemaTables, schemaFunctions] = await Promise.all([
-              canSyncTableMetadata
-                ? schemaService.getTables(activeConnectionId, schemaName)
-                : Promise.resolve([]),
-              canSyncTableMetadata && capabilities.supportsFunctions
-                ? schemaService
-                    .getFunctions(activeConnectionId, schemaName)
-                    .catch((error) => {
-                      console.error(
-                        `[LSP] Failed to fetch functions for ${schemaName}:`,
-                        error
-                      );
-                      return [];
-                    })
-                : Promise.resolve([]),
-            ]);
+            const [schemaTables, schemaCollections, schemaFunctions] =
+              await Promise.all([
+                canSyncTableMetadata
+                  ? schemaService.getTables(activeConnectionId, schemaName)
+                  : Promise.resolve([]),
+                canSyncCollectionMetadata
+                  ? schemaService
+                      .getCollections(activeConnectionId, schemaName)
+                      .catch((error) => {
+                        console.error(
+                          `[LSP] Failed to fetch objects for ${schemaName}:`,
+                          error
+                        );
+                        return [];
+                      })
+                  : Promise.resolve([]),
+                canSyncTableMetadata && capabilities.supportsFunctions
+                  ? schemaService
+                      .getFunctions(activeConnectionId, schemaName)
+                      .catch((error) => {
+                        console.error(
+                          `[LSP] Failed to fetch functions for ${schemaName}:`,
+                          error
+                        );
+                        return [];
+                      })
+                  : Promise.resolve([]),
+              ]);
             const boundedTables = selectLspTablesForSchema(
               schemaTables,
               preferredTablesBySchema.get(schemaName),
@@ -482,6 +577,12 @@ export function LspConnectionSyncer() {
               LSP_METADATA_CONCURRENCY,
               async (table) => getCachedTableDefinition(schemaName, table)
             );
+            const lspCollections = schemaCollections
+              .slice(0, MAX_LSP_COLLECTIONS_PER_SCHEMA)
+              .map((collection) =>
+                collectionToLspTableDefinition(capabilities, collection)
+              );
+            const lspObjects = canSyncTableMetadata ? lspTables : lspCollections;
             const lspFunctions: LspFunctionDefinition[] = schemaFunctions.map(
               (func) => ({
                 name: func.name,
@@ -496,14 +597,16 @@ export function LspConnectionSyncer() {
               })
             );
             console.log(
-              `[LSP] Built ${lspTables.length}/${schemaTables.length} tables and ${lspFunctions.length} functions for ${schemaName}`
+              canSyncTableMetadata
+                ? `[LSP] Built ${lspTables.length}/${schemaTables.length} tables and ${lspFunctions.length} functions for ${schemaName}`
+                : `[LSP] Built ${lspCollections.length}/${schemaCollections.length} objects for ${schemaName}`
             );
 
             return {
               id: getSchemaId(schemaName),
               database: schemaName,
               source_uri: null,
-              tables: lspTables,
+              tables: lspObjects,
               functions: lspFunctions,
             };
           })
