@@ -1,5 +1,6 @@
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
+import { useTabStore } from "@/store/useTabStore";
 import { tableService } from "@/services/tauri";
 import type { TableExportFormat } from "@/services/tauri/types";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -25,6 +26,8 @@ export function useTableOperations() {
         currentSchema,
         tableName
       );
+      await loadTables(activeConnectionId, currentSchema, true);
+      await refreshOpenTableTabs(activeConnectionId, currentSchema, tableName);
       // toast.success(`Table ${tableName} truncated successfully`);
       console.log(`Table ${tableName} truncated successfully`);
     } catch (e: any) {
@@ -164,4 +167,30 @@ export function useTableOperations() {
     getViewDefinition,
     refreshMaterializedView,
   };
+}
+
+async function refreshOpenTableTabs(
+  connectionId: string,
+  schema: string,
+  tableName: string
+) {
+  const tabStore = useTabStore.getState();
+  const matchingTabs = tabStore.tabs.filter(
+    (tab) =>
+      tab.type === "table" &&
+      tab.connectionId === connectionId &&
+      tab.schemaName === schema &&
+      tab.tableName === tableName
+  );
+
+  await Promise.all(
+    matchingTabs.map((tab) =>
+      tabStore.loadTablePage(
+        tab.id,
+        tab.tablePage ?? 0,
+        tab.tableFilterSql ?? null,
+        tab.tableFilters ?? null
+      )
+    )
+  );
 }
