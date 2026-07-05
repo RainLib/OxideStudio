@@ -1,0 +1,161 @@
+import {
+  createAiToolManifest,
+  evaluateAiToolPolicy,
+} from "@/ai/tools";
+import type { AiToolManifest } from "@/ai/tools";
+import { classifyAssistantIntent, createDefaultAssistantPlanner } from "./planner";
+import type {
+  AssistantIntent,
+  AssistantPlanner,
+  AssistantPlannerInput,
+  AssistantPlannerResult,
+  AssistantPlanStep,
+  AssistantTurnInput,
+} from "./types";
+
+export type AssistantModelPlannerRequest = {
+  turn: AssistantTurnInput;
+  context: {
+    requestId: string;
+    activeConnectionId?: string | null;
+    activeDriver?: string | null;
+  };
+  manifest: AiToolManifest;
+  instructions: string[];
+};
+
+export type AssistantModelPlanStep = {
+  id?: string;
+  title?: string;
+  toolName?: string;
+  input?: Record<string, unknown>;
+};
+
+export type AssistantModelPlannerResponse = {
+  intent?: AssistantIntent;
+  steps?: AssistantModelPlanStep[];
+  warnings?: string[];
+  notes?: string[];
+};
+
+export type AssistantModelPlannerInvoke = (
+  request: AssistantModelPlannerRequest
+) => AssistantModelPlannerResponse | Promise<AssistantModelPlannerResponse>;
+
+export type ModelAssistantPlannerOptions = {
+  id?: string;
+  description?: string;
+  framework?: string;
+  invoke: AssistantModelPlannerInvoke;
+  fallback?: AssistantPlanner | false;
+};
+
+export class ModelAssistantPlanner implements AssistantPlanner {
+  readonly id: string;
+  readonly mode = "model" as const;
+  readonly description: string;
+  readonly framework?: string;
+
+  private readonly invoke: AssistantModelPlannerInvoke;
+  private readonly fallback?: AssistantPlanner | false;
+
+  constructor(options: ModelAssistantPlannerOptions) {
+    this.id = options.id || "model-tool-planner";
+    this.description =
+      options.description ||
+      "Provider-neutral planner that asks a model to choose AI tool calls from the shared manifest.";
+    this.framework = options.framework;
+    this.invoke = options.invoke;
+    this.fallback = options.fallback ?? createDefaultAssistantPlanner();
+  }
+
+  async plan(input: AssistantPlannerInput): Promise<AssistantPlannerResult> {
+    const response = await this.invoke({
+      turn: input.turn,
+      context: {
+        requestId: input.context.requestId,
+        activeConnectionId: input.context.activeConnectionId ?? null,
+        activeDriver: input.context.activeDriver ?? null,
+      },
+      manifest: createAiToolManifest(input.availableTools, input.policy),
+      instructions: MODEL_PLANNER_INSTRUCTIONS,
+    });
+
+    const warnings: string[] = [...(response.warnings ?? [])];
+    const steps = this.toPlanSteps(input, response.steps ?? [], warnings);
+
+    if (steps.length === 0 && this.fallback) {
+      const fallback = await this.fallback.plan(input);
+      return {
+        ...fallback,
+        warnings: [...(fallback.warnings ?? []), ...warnings],
+        notes: [
+          ...(fallback.notes ?? []),
+          "Model planner returned no executable steps; used fallback planner.",
+          ...(response.notes ?? []),
+        ],
+      };
+    }
+
+    return {
+      intent: response.intent || classifyAssistantIntent(input.turn),
+      steps,
+      warnings,
+      notes: response.notes ?? [],
+    };
+  }
+
+  private toPlanSteps(
+    input: AssistantPlannerInput,
+    steps: AssistantModelPlanStep[],
+    warnings: string[]
+  ): AssistantPlanStep[] {
+    const toolsByName = new Map(
+      input.availableTools.map((tool) => [tool.name, tool])
+    );
+
+    return steps.flatMap((step, index): AssistantPlanStep[] => {
+      if (!step.toolName) {
+        return [
+          {
+            id: step.id || `model-note-${index + 1}`,
+            title: step.title || "Model planning note",
+            input: step.input,
+            requiresApproval: false,
+          },
+        ];
+      }
+
+      const tool = toolsByName.get(step.toolName);
+      if (!tool) {
+        warnings.push(`Model planner requested unknown tool: ${step.toolName}`);
+        return [];
+      }
+
+      const decision = evaluateAiToolPolicy(tool, input.policy);
+      return [
+        {
+          id: step.id || `model-tool-${index + 1}`,
+          title: step.title || tool.description || step.toolName,
+          toolName: step.toolName,
+          input: step.input || {},
+          requiresApproval: decision.requiresApproval,
+        },
+      ];
+    });
+  }
+}
+
+export function createModelAssistantPlanner(
+  options: ModelAssistantPlannerOptions
+) {
+  return new ModelAssistantPlanner(options);
+}
+
+const MODEL_PLANNER_INSTRUCTIONS = [
+  "Choose tools only from manifest.tools.",
+  "Use read-only tools before mutation tools when context is missing.",
+  "Never mark a mutating or destructive action as approved; the runtime approval policy controls execution.",
+  "Keep inputs bounded and explicit, including connectionId, namespace, collection, table, index, or key when known.",
+  "Return an empty steps array when the user intent is unclear.",
+];
