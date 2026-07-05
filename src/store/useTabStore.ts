@@ -877,8 +877,9 @@ export const useTabStore = create<TabState>((set, get) => ({
 
     // Use metadata if available, otherwise we can't save safely
     const columnsMetadata = tab.tableColumns;
-    if (!columnsMetadata) {
-      console.error("Missing column metadata for table:", table);
+    const indexesMetadata = tab.tableIndexes;
+    if (!columnsMetadata || !indexesMetadata) {
+      console.error("Missing table metadata for table:", table);
       // Try to fetch it?
       await state.fetchTableColumns(tabId);
       // Re-get state
@@ -1069,7 +1070,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     const result = tab.results?.[0];
     if (!schema || !table || !result || result.columns.length === 0) return;
 
-    if (!tab.tableColumns) {
+    if (!tab.tableColumns || !tab.tableIndexes) {
       await state.fetchTableColumns(tabId);
     }
 

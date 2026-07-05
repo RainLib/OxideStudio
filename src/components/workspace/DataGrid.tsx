@@ -81,7 +81,7 @@ export function DataGrid({
     if (
       activeTabId &&
       activeTab?.type === "table" &&
-      !activeTab.tableColumns &&
+      (!activeTab.tableColumns || !activeTab.tableIndexes) &&
       !activeTab.isFetchingColumns
     ) {
       fetchTableColumns(activeTabId);
@@ -90,6 +90,7 @@ export function DataGrid({
     activeTabId,
     activeTab?.type,
     activeTab?.tableColumns,
+    activeTab?.tableIndexes,
     activeTab?.isFetchingColumns,
     fetchTableColumns,
   ]);

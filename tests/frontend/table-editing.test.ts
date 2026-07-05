@@ -170,6 +170,56 @@ describe("table editing store", () => {
     );
   });
 
+  it("fetches missing index metadata before saving existing row edits", async () => {
+    const columns = [column("email"), column("name")];
+    mocks.getColumns.mockResolvedValueOnce(columns);
+    mocks.getIndexes.mockResolvedValueOnce([
+      {
+        name: "users_email_key",
+        columns: ["email"],
+        is_unique: true,
+        is_primary: false,
+      },
+    ]);
+
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          tableColumns: columns,
+          tableIndexes: undefined,
+          results: [
+            {
+              columns: [
+                { name: "email", data_type: "text" },
+                { name: "name", data_type: "text" },
+              ],
+              rows: [["old@example.test", "Old Name"]],
+            },
+          ],
+          pendingEdits: new Map([["0:1", "New Name"]]),
+        },
+      ],
+    });
+
+    await useTabStore.getState().commitEdits("tab-1");
+
+    expect(mocks.getIndexes).toHaveBeenCalledWith(
+      "postgres-1",
+      "public",
+      "users"
+    );
+    expect(mocks.mutateTableRows).toHaveBeenCalledWith(
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      [],
+      [{ key: { email: "old@example.test" }, values: { name: "New Name" } }],
+      []
+    );
+  });
+
   it("uses a unique index to delete rows when no primary key exists", async () => {
     useTabStore.setState({
       tabs: [
