@@ -23,8 +23,8 @@ This keeps the editor integration direct and state-aware while allowing external
 
 ## Current Implementation
 
-- `src/ai/tools` defines the shared registry, read-only core tools, result limits, and permission policy.
-- `src/ai/assistant` prepares editor-aware plans and can execute AI-proposed tool calls with approval-aware results.
+- `src/ai/tools` defines the shared registry, metadata/query tools, result limits, audit hooks, and permission policy.
+- `src/ai/assistant` prepares editor-aware plans and can execute AI-proposed tool calls with approval-aware results, including approved mutation/destructive steps.
 - `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
 - `src/ai/cli` provides a dependency-light command adapter for `tools list` and `tools call`.
 - The assistant panel is an editor entry point; real model/provider integration should call the runtime APIs rather than bypassing the registry.
@@ -42,20 +42,25 @@ Use TypeScript LangGraph for the in-app assistant orchestration because the edit
 
 ## Tool Categories
 
-Start with read-only tools:
+Read-only tools:
 
-- `connection.list`, `connection.current`, `connection.capabilities`
-- `metadata.listNamespaces`, `metadata.listRelations`, `metadata.describeObject`
+- `connection.list`, `connection.capabilities`
+- `metadata.listObjects`, `metadata.listCollections`, `metadata.describeObject`
 - `query.runReadOnly` with row/time limits and driver-aware syntax
-- `lsp.complete`, `lsp.explainDiagnostics`
-- `workspace.getActiveTab`, `workspace.getSelection`
+- `workspace.getActiveTab`
 
-Add write tools only behind explicit approvals:
+Write tools behind explicit approvals:
 
 - `query.runMutation`
+- `query.runDestructive`
+
+Future tool families:
+
 - `table.updateRows`, `table.deleteRows`
 - `database.createNamespace`, `database.dropNamespace`
-- document/key/search mutations for MongoDB, Redis, and Elasticsearch
+- structured document/key/search mutations for MongoDB, Redis, and Elasticsearch
+- `lsp.complete`, `lsp.explainDiagnostics`
+- `workspace.getSelection`
 
 ## MCP vs CLI
 
@@ -75,7 +80,7 @@ For the editor itself, prefer direct TypeScript orchestration over MCP. The edit
 - Never expose raw credentials or connection URLs to model context.
 - Default all result sets to bounded row, byte, and time limits.
 - Require approval for mutations, exports, drops, and external network access.
-- Store an audit entry for tool name, connection id, redacted input, status, and duration.
+- Store an audit entry for request id, tool name, permissions, status, duration, and failure reason without persisting raw query text by default.
 - Prefer capability checks over driver name checks so new backends do not require broad rewrites.
 
 ## Implementation Phases
@@ -83,6 +88,7 @@ For the editor itself, prefer direct TypeScript orchestration over MCP. The edit
 1. Add `src/ai/tools` with registry types, schemas, and read-only database tools. Done.
 2. Add an assistant panel backed by the registry executor. Done.
 3. Add MCP and CLI adapters over the same registry. Done.
-4. Add write tools with approval gates and audit logging.
+4. Add write tools with approval gates and audit logging. Done for query-level mutation/destructive tools.
 5. Add a LangGraph-backed planner that chooses tool calls, pauses for approval, and feeds results back into the model.
-6. Add provider/plugin hooks so new databases register tools by capability, not by UI rewrites.
+6. Add structured write tools for tables, documents, keys, and search indexes.
+7. Add provider/plugin hooks so new databases register tools by capability, not by UI rewrites.
