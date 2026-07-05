@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { redactSecrets } from "@/lib/redaction";
 import type {
+  CompletionContext,
   CompletionItem,
   CompletionResponse,
   HoverInfo,
@@ -174,7 +175,8 @@ class LspClient {
   async getCompletions(
     uri: string,
     line: number,
-    character: number
+    character: number,
+    context?: CompletionContext
   ): Promise<CompletionItem[]> {
     if (!this.initialized) {
       console.warn("[LSP] Not initialized, returning empty completions");
@@ -185,10 +187,11 @@ class LspClient {
       console.log(`[LSP] → Request: textDocument/completion`, {
         uri,
         position: { line, character },
+        context,
       });
 
       const response = await invoke<CompletionResponse>("lsp_get_completions", {
-        request: { uri, line, character },
+        request: { uri, line, character, context },
       });
 
       console.log(`[LSP] ← Response: Got ${response.items.length} items`);

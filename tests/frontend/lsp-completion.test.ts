@@ -3,6 +3,7 @@ import {
   completionInsertText,
   completionSortText,
   isCompletedSqlContextKeyword,
+  toLspCompletionContext,
 } from "@/lib/lspCompletion";
 import { CompletionItemKind, type CompletionItem } from "@/services/lsp/types";
 
@@ -49,5 +50,18 @@ describe("LSP completion adapter helpers", () => {
         item({ label: "WHERE", kind: CompletionItemKind.Keyword })
       )
     ).toBe("3:where");
+  });
+
+  it("maps Monaco completion trigger context to LSP trigger context", () => {
+    expect(toLspCompletionContext()).toEqual({ triggerKind: 1 });
+    expect(toLspCompletionContext({ triggerKind: 0 })).toEqual({
+      triggerKind: 1,
+    });
+    expect(
+      toLspCompletionContext({ triggerKind: 1, triggerCharacter: "." })
+    ).toEqual({ triggerKind: 2, triggerCharacter: "." });
+    expect(toLspCompletionContext({ triggerKind: 2 })).toEqual({
+      triggerKind: 3,
+    });
   });
 });

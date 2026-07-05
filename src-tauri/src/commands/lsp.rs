@@ -20,9 +20,23 @@ pub struct CompletionRequest {
     pub uri: String,
     pub line: u32,
     pub character: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<CompletionContext>,
 }
 
 pub type TextDocumentPositionRequest = CompletionRequest;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CompletionContext {
+    #[serde(rename = "triggerKind")]
+    pub trigger_kind: u32,
+    #[serde(
+        default,
+        rename = "triggerCharacter",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub trigger_character: Option<String>,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FormatDocumentRequest {
@@ -255,7 +269,7 @@ pub async fn lsp_get_completions(
     );
 
     // Build LSP textDocument/completion params
-    let params = serde_json::json!({
+    let mut params = serde_json::json!({
         "textDocument": {
             "uri": request.uri
         },
@@ -264,6 +278,12 @@ pub async fn lsp_get_completions(
             "character": request.character
         }
     });
+    if let Some(context) = request.context {
+        let context = serde_json::to_value(context).map_err(|e| e.to_string())?;
+        if let Some(params) = params.as_object_mut() {
+            params.insert("context".to_string(), context);
+        }
+    }
 
     // Send LSP request
     match manager
@@ -513,10 +533,16 @@ mod tests {
             uri: "file:///test.sql".to_string(),
             line: 10,
             character: 15,
+            context: Some(CompletionContext {
+                trigger_kind: 2,
+                trigger_character: Some(".".to_string()),
+            }),
         };
 
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("file:///test.sql"));
+        assert!(json.contains("\"triggerKind\":2"));
+        assert!(json.contains("\"triggerCharacter\":\".\""));
     }
 
     #[test]

@@ -45,6 +45,11 @@ export interface CompletionResponse {
   items: CompletionItem[];
 }
 
+export interface CompletionContext {
+  triggerKind: 1 | 2 | 3;
+  triggerCharacter?: string;
+}
+
 export interface LspConnectionConfig {
   driver: string;
   dataSourceName: string;

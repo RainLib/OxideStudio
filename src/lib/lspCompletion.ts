@@ -1,5 +1,6 @@
 import {
   CompletionItemKind,
+  type CompletionContext,
   type CompletionItem,
 } from "@/services/lsp/types";
 
@@ -49,6 +50,25 @@ export function completionSortText(item: CompletionItem) {
     default:
       return `4:${label}`;
   }
+}
+
+export function toLspCompletionContext(monacoContext?: {
+  triggerKind?: number;
+  triggerCharacter?: string;
+}): CompletionContext {
+  const triggerKind: CompletionContext["triggerKind"] =
+    monacoContext?.triggerKind === 1
+      ? 2
+      : monacoContext?.triggerKind === 2
+        ? 3
+        : 1;
+
+  return {
+    triggerKind,
+    ...(monacoContext?.triggerCharacter
+      ? { triggerCharacter: monacoContext.triggerCharacter }
+      : {}),
+  };
 }
 
 export function toMonacoCompletionKind(monaco: any, lspKind?: number) {

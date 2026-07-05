@@ -21,6 +21,7 @@ import {
   completionInsertText,
   completionSortText,
   isCompletedSqlContextKeyword,
+  toLspCompletionContext,
   toMonacoCompletionKind,
 } from "@/lib/lspCompletion";
 import {
@@ -295,7 +296,11 @@ export function QueryEditor() {
     const completionDisposables = LSP_PROVIDER_LANGUAGES.map((language) =>
       monaco.languages.registerCompletionItemProvider(language, {
         triggerCharacters: [" ", ".", "(", ",", '"', "@"],
-        provideCompletionItems: async (model: any, position: any) => {
+        provideCompletionItems: async (
+          model: any,
+          position: any,
+          context: any
+        ) => {
           try {
             const uri = model.uri.toString();
             if (!isSupportedLspModelUri(uri)) return { suggestions: [] };
@@ -304,7 +309,8 @@ export function QueryEditor() {
             const items = await lspClient.getCompletions(
               uri,
               position.lineNumber - 1, // LSP uses 0-indexed lines
-              position.column - 1 // LSP uses 0-indexed columns
+              position.column - 1, // LSP uses 0-indexed columns
+              toLspCompletionContext(context)
             );
 
             console.log(`[LSP] Got ${items.length} completion items`);
