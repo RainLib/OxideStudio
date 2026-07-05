@@ -243,6 +243,8 @@ export type AiObjectDescription = {
   columns?: ColumnInfo[];
   indexes?: IndexInfo[];
   constraints?: ConstraintInfo[];
+  previewQuery?: string | null;
+  deleteQuery?: string | null;
 };
 
 export type AiToolAdapters = {

@@ -14,7 +14,15 @@ import type { QueryResult } from "@/services/tauri/types";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore, type EditorSelectionState } from "@/store/useTabStore";
-import { lspLanguageId, supportsLspLanguageId } from "@/lib/databaseDialect";
+import {
+  lspLanguageId,
+  previewTableQuery,
+  supportsLspLanguageId,
+} from "@/lib/databaseDialect";
+import {
+  collectionDeleteQueryTemplateForCapabilities,
+  collectionPreviewQueryTemplateForCapabilities,
+} from "@/lib/databaseObjectPreview";
 import { registerCoreAiTools } from "./coreTools";
 import { createAiToolRegistry } from "./registry";
 import type { AiToolFamily } from "./families";
@@ -684,6 +692,7 @@ async function describeObject(
       columns,
       indexes,
       constraints,
+      previewQuery: previewTableQuery(driver, namespace, input.name, 100),
     };
   }
 
@@ -701,6 +710,12 @@ async function describeObject(
         ? schemaService.getIndexes(connectionId, namespace, input.name).catch(() => [])
         : Promise.resolve([]),
     ]);
+    const previewCollection = collection ?? {
+      name: input.name,
+      namespace,
+      type: null,
+      documentCount: null,
+    };
     return {
       connectionId,
       namespace,
@@ -710,6 +725,16 @@ async function describeObject(
       collection: collection ?? null,
       columns,
       indexes,
+      previewQuery: collectionPreviewQueryTemplateForCapabilities(
+        capabilities,
+        namespace,
+        previewCollection
+      ),
+      deleteQuery: collectionDeleteQueryTemplateForCapabilities(
+        capabilities,
+        namespace,
+        previewCollection
+      ),
     };
   }
 
