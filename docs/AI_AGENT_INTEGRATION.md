@@ -126,6 +126,7 @@ Recommended usage:
 
 - Never expose raw credentials or connection URLs to model context.
 - Default all result sets to bounded row, byte, and time limits.
+- Treat multi-statement SQL conservatively; read-only gates must reject any statement with write or destructive operations.
 - Require approval for mutations, exports, drops, and external network access.
 - Do not auto-approve writes in MCP or CLI adapters; external callers must pass an explicit approval signal such as CLI `--approve`.
 - Store an audit entry for request id, tool name, permissions, status, duration, and failure reason without persisting raw query text by default.

@@ -45,6 +45,7 @@ export function looksAiQueryReadOnly(
     "grant",
     "insert",
     "load",
+    "lock",
     "merge",
     "replace",
     "revoke",
@@ -54,7 +55,11 @@ export function looksAiQueryReadOnly(
     "vacuum",
   ];
 
-  return !mutatingSqlPrefixes.some((prefix) => normalized.startsWith(prefix));
+  const statements = splitSqlStatements(query);
+  if (statements.length === 0) return false;
+  return statements.every((statement) =>
+    looksReadOnlySqlStatement(statement, mutatingSqlPrefixes)
+  );
 }
 
 export function looksAiQueryDestructive(
@@ -80,9 +85,175 @@ export function looksAiQueryDestructive(
     return looksDestructiveElasticsearchRequest(query);
   }
 
-  return ["delete", "drop", "truncate"].some((prefix) =>
-    normalized.startsWith(prefix)
+  return splitSqlStatements(query).some(looksDestructiveSqlStatement);
+}
+
+function looksReadOnlySqlStatement(
+  statement: string,
+  mutatingSqlPrefixes: string[]
+) {
+  const keywordText = sqlKeywordText(statement);
+  const normalized = keywordText.trim().toLowerCase();
+  if (!normalized) return false;
+
+  const firstKeyword = normalized.match(/^[a-z_]+/)?.[0] ?? "";
+  if (firstKeyword === "show" || firstKeyword === "describe" || firstKeyword === "desc") {
+    return true;
+  }
+  if (
+    firstKeyword === "select" ||
+    firstKeyword === "table" ||
+    firstKeyword === "values" ||
+    firstKeyword === "explain" ||
+    firstKeyword === "with"
+  ) {
+    if (/\bfor\s+(update|no\s+key\s+update|share|key\s+share)\b/.test(normalized)) {
+      return false;
+    }
+    return !mutatingSqlPrefixes.some((keyword) =>
+      new RegExp(`\\b${keyword}\\b`).test(normalized)
+    );
+  }
+
+  return false;
+}
+
+function looksDestructiveSqlStatement(statement: string) {
+  const normalized = sqlKeywordText(statement).trim().toLowerCase();
+  if (!normalized) return false;
+
+  const firstKeyword = normalized.match(/^[a-z_]+/)?.[0] ?? "";
+  if (["delete", "drop", "truncate"].includes(firstKeyword)) {
+    return true;
+  }
+  return (
+    /\bdrop\s+(database|schema|table|view|materialized\s+view|index|function|procedure|trigger|constraint)\b/.test(
+      normalized
+    ) ||
+    /\bdelete\s+from\b/.test(normalized) ||
+    /\btruncate\s+(table\s+)?\w/.test(normalized) ||
+    /\balter\s+table\b[\s\S]*\bdrop\b/.test(normalized)
   );
+}
+
+function splitSqlStatements(query: string) {
+  const statements: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | "`" | null = null;
+  let lineComment = false;
+  let blockComment = false;
+
+  for (let index = 0; index < query.length; index += 1) {
+    const char = query[index]!;
+    const next = query[index + 1] ?? "";
+
+    if (lineComment) {
+      if (char === "\n" || char === "\r") {
+        lineComment = false;
+        current += " ";
+      }
+      continue;
+    }
+
+    if (blockComment) {
+      if (char === "*" && next === "/") {
+        blockComment = false;
+        index += 1;
+        current += " ";
+      }
+      continue;
+    }
+
+    if (!quote && char === "-" && next === "-") {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (!quote && char === "#") {
+      lineComment = true;
+      continue;
+    }
+    if (!quote && char === "/" && next === "*") {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+
+    if (quote) {
+      current += char;
+      if (char === "\\" && next) {
+        current += next;
+        index += 1;
+        continue;
+      }
+      if (char === quote) {
+        if (next === quote) {
+          current += next;
+          index += 1;
+          continue;
+        }
+        quote = null;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      current += char;
+      continue;
+    }
+
+    if (char === ";") {
+      const statement = current.trim();
+      if (statement) statements.push(statement);
+      current = "";
+      continue;
+    }
+
+    current += char;
+  }
+
+  const statement = current.trim();
+  if (statement) statements.push(statement);
+  return statements;
+}
+
+function sqlKeywordText(statement: string) {
+  let result = "";
+  let quote: "'" | '"' | "`" | null = null;
+
+  for (let index = 0; index < statement.length; index += 1) {
+    const char = statement[index]!;
+    const next = statement[index + 1] ?? "";
+
+    if (quote) {
+      result += " ";
+      if (char === "\\" && next) {
+        result += " ";
+        index += 1;
+        continue;
+      }
+      if (char === quote) {
+        if (next === quote) {
+          result += " ";
+          index += 1;
+          continue;
+        }
+        quote = null;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      result += " ";
+      continue;
+    }
+
+    result += char;
+  }
+
+  return result;
 }
 
 function looksReadOnlyJsonSearchBody(query: string) {
