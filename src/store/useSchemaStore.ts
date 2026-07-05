@@ -80,6 +80,18 @@ const getSavedDefaultSchema = (
   localStorage.getItem(getDefaultSchemaKey(connectionId, driver)) ||
   localStorage.getItem(LEGACY_STORAGE_KEY);
 
+async function activateBackendSchema(connectionId: string, schema: string | null) {
+  if (!schema) return true;
+
+  try {
+    await schemaService.setCurrentSchema(connectionId, schema);
+    return true;
+  } catch (error) {
+    console.warn("Store: Failed to activate backend schema", error);
+    return false;
+  }
+}
+
 export const useSchemaStore = create<SchemaState>((set, get) => ({
   schemas: [],
   tables: [],
@@ -152,6 +164,13 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
           configDefault,
           savedDefault,
         ]);
+        const schemaActivated = await activateBackendSchema(
+          connectionId,
+          schemaToSelect
+        );
+        if (!schemaActivated && !force) {
+          throw new Error("Cached schema could not be activated on backend");
+        }
 
         set({
           schemas: cachedSchemas,
@@ -184,6 +203,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
           configDefault,
           savedDefault,
         ]);
+        await activateBackendSchema(connectionId, schemaToSelect);
 
         set({
           schemas: schemas,
