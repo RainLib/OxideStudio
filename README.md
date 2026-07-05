@@ -59,6 +59,17 @@ npm install
 npm run tauri dev
 ```
 
+也可以使用根目录 `Makefile` 统一管理常用任务：
+
+```bash
+make setup          # 初始化子模块并安装前端依赖
+make dev            # 启动 Tauri 桌面开发模式
+make web            # 仅启动 Vite 前端开发服务
+make check          # 前端构建 + Rust cargo check
+make test           # 运行前端、后端和 LSP 测试
+make test-live-db   # 使用 Docker 运行多数据库集成测试
+```
+
 ### 调试配置
 
 本项目已预配置好 VS Code 调试环境：
