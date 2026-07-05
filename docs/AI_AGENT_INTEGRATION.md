@@ -21,6 +21,13 @@ AiToolRegistry  ---->  Tauri service clients  ---->  Rust commands/drivers
 
 This keeps the editor integration direct and state-aware while allowing external agents to call the same tools through MCP. The CLI should be an automation/debug adapter, not the primary editor integration path.
 
+Decision summary:
+
+- Editor assistant: call `AssistantRuntime` directly in TypeScript. This is the best editor integration because it preserves active tab, selection, connection id, schema state, approval UI, and LSP diagnostics without protocol round-trips.
+- External AI clients: expose MCP over the same `AiToolRegistry`. MCP is the best integration for other agents because it provides tool discovery, schemas, and safety annotations.
+- CLI: keep it as a smoke-test, scripting, and local automation adapter. A standalone CLI binary should inject its own registry/context instead of using browser/Tauri defaults.
+- LangGraph: use it as an optional planner implementation, not as the core capability layer. The graph should select and sequence registry tools; it should not call database services directly.
+
 ## Current Implementation
 
 - `src/ai/tools` defines the shared registry, metadata/query tools, result limits, audit hooks, and permission policy.
@@ -31,6 +38,7 @@ This keeps the editor integration direct and state-aware while allowing external
 - `metadata.describeObject` returns relational structure metadata, sampled MongoDB collection fields and indexes, Elasticsearch mapping fields, and provider-neutral preview/delete request templates so planners can reason about objects without hard-coding driver syntax.
 - `src/lib/querySafety.ts` centralizes read/write/destructive classification for SQL, MongoDB, Redis, and Elasticsearch so planners and executors make the same safety decision.
 - `src/ai/assistant` exposes an `AssistantPlanner` contract, a deterministic fallback planner, a provider-neutral model planner, and approval-aware execution for AI-proposed tool calls.
+- `src/ai/assistant/langGraphPlanner.ts` provides a dependency-light LangGraph bridge. A real LangGraph graph can plug in by returning `AssistantPlannerResult` from the shared planner contract.
 - `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
 - `src/ai/mcp/protocol.ts` adds a transport-neutral JSON-RPC handler for `initialize`, `tools/list`, `tools/call`, and the Oxide manifest extension; stdio or HTTP servers should wrap this instead of reimplementing tool routing.
 - `src/ai/cli` provides a dependency-light command adapter for `tools list`, `tools manifest`, `assistant plan`, and `tools call`.
@@ -38,7 +46,9 @@ This keeps the editor integration direct and state-aware while allowing external
 
 ## LangGraph Usage
 
-Use TypeScript LangGraph as an optional implementation of `AssistantPlanner` for the in-app assistant orchestration. The editor should not call itself through MCP because editor state, connection metadata, tabs, and approval UI already live in the frontend. Recommended graph nodes:
+Use TypeScript LangGraph as an optional implementation of `AssistantPlanner` for the in-app assistant orchestration. The editor should not call itself through MCP because editor state, connection metadata, tabs, and approval UI already live in the frontend. `createLangGraphAssistantPlanner({ invoke })` is the bridge point; the `invoke` function can run a compiled LangGraph graph and return the same `AssistantPlannerResult` used by the default and model planners.
+
+Recommended graph nodes:
 
 - `classify_intent`: detect explain/query/debug/schema/edit/export tasks.
 - `collect_context`: gather active connection, selected text, schema, tab, and driver capabilities.
@@ -48,6 +58,16 @@ Use TypeScript LangGraph as an optional implementation of `AssistantPlanner` for
 - `summarize_result`: return concise answers with queries, row limits, and caveats.
 
 The shipped default planner stays dependency-light and deterministic. It reads workspace, connection, and provider capability context before suggesting metadata, LSP, or query steps. When selected JSON plus the user message clearly identify a table, collection, key, or index, it can suggest structured mutation tools such as `table.insertRows`, `document.insertDocuments`, `key.setValue`, or `search.indexDocument`; approval policy still controls execution. A LangGraph planner can replace it by implementing `AssistantPlanner.plan`, returning the same `AssistantPlanStep[]`, and pausing before any step whose tool policy requires approval.
+
+Example LangGraph bridge:
+
+```typescript
+const planner = createLangGraphAssistantPlanner({
+  invoke: async (input) => graph.invoke(input),
+});
+
+const runtime = createAssistantRuntime({ planner });
+```
 
 For model-provider integration without taking a LangGraph dependency, use `createModelAssistantPlanner({ invoke })`. The runtime sends the model a redacted workspace context plus the AI tool manifest; the model returns candidate tool steps; the planner validates tool names and marks write/destructive tools as requiring approval according to policy. Use `createModelToolResultSummarizer(invoke)` to feed tool results back to the provider for a final answer or follow-up suggestions.
 
