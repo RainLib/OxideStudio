@@ -3,7 +3,7 @@ import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useLspClient } from "@/hooks/useLspClient";
-import { getLspDocumentUri, lspClient } from "@/services/lsp";
+import { lspClient } from "@/services/lsp";
 import {
   databaseService,
   schemaService,
@@ -13,20 +13,22 @@ import {
 import {
   collectionToLspTableDefinition,
   emptyLspTableDetails,
-  lspSchemaSignature,
   selectLspTablesForSchema,
   type LspFunctionDefinition,
   type LspSchemaDefinition,
   type LspTableDefinition,
 } from "@/services/lsp/schemaConfig";
 import {
+  buildLspFileMappings,
+  createLspConfigKey,
+  createLspSyncPlan,
+} from "@/services/lsp/syncPlan";
+import {
   defaultDatabaseCapabilities,
   normalizeLspDialect,
-  selectPreferredNamespace,
   supportsLspLanguageId,
   supportsTableWorkspace,
 } from "@/lib/databaseDialect";
-import { extractRelationReferences } from "@/lib/sqlAnalysis";
 import { v4 as uuidv4 } from "uuid";
 
 const MAX_LSP_TABLES_PER_SCHEMA = 200;
@@ -80,29 +82,6 @@ async function collectionToLspTableDefinitionWithMetadata(
     );
     return collectionToLspTableDefinition(capabilities, collection);
   }
-}
-
-function findKnownSchemaName(schemaNames: string[], schemaName?: string | null) {
-  const normalized = schemaName?.trim().toLowerCase();
-  if (!normalized) return null;
-  return (
-    schemaNames.find((candidate) => candidate.toLowerCase() === normalized) ||
-    null
-  );
-}
-
-function addPreferredTable(
-  preferredTablesBySchema: Map<string, Set<string>>,
-  schemaName: string | null,
-  tableName: string | null | undefined
-) {
-  const schema = schemaName?.trim();
-  const table = tableName?.trim();
-  if (!schema || !table) return;
-
-  const tables = preferredTablesBySchema.get(schema) || new Set<string>();
-  tables.add(table);
-  preferredTablesBySchema.set(schema, tables);
 }
 
 async function mapWithConcurrency<T, R>(
@@ -170,11 +149,22 @@ export function LspConnectionSyncer() {
       return;
     }
 
-    const defaultSchema = selectPreferredNamespace(connection.driver, schemas, [
+    const syncPlan = createLspSyncPlan({
+      activeConnectionId,
+      connection,
+      schemas,
       currentSchema,
-      connection.database,
-    ]);
-    if (!defaultSchema) return;
+      tabs,
+    });
+    if (!syncPlan) return;
+
+    const {
+      defaultSchema,
+      queryTabs,
+      schemaByTabId,
+      targetSchemas,
+      preferredTablesBySchema,
+    } = syncPlan;
 
     const syncGeneration = syncGenerationRef.current + 1;
     syncGenerationRef.current = syncGeneration;
@@ -314,55 +304,6 @@ export function LspConnectionSyncer() {
       return promise;
     };
 
-    const connectionTabs = tabs.filter(
-      (tab) => (tab.connectionId || activeConnectionId) === activeConnectionId
-    );
-    const queryTabs = connectionTabs.filter((tab) => tab.type === "query");
-    const schemaForTab = (tab: (typeof queryTabs)[number]) =>
-      tab.targetSchema || defaultSchema;
-    const normalizeSchemaName = (schemaName: string | null | undefined) => {
-      const trimmed = schemaName?.trim();
-      return trimmed ? trimmed : null;
-    };
-    const preferredTablesBySchema = new Map<string, Set<string>>();
-    const referencedSchemas = new Set<string>();
-
-    for (const tab of connectionTabs) {
-      addPreferredTable(
-        preferredTablesBySchema,
-        normalizeSchemaName(tab.schemaName || tab.targetSchema || defaultSchema),
-        tab.tableName
-      );
-    }
-
-    for (const tab of queryTabs) {
-      const tabSchema = normalizeSchemaName(schemaForTab(tab)) || defaultSchema;
-      for (const reference of extractRelationReferences(
-        tab.sql || "",
-        connection.driver
-      )) {
-        const qualifiedSchema = findKnownSchemaName(schemas, reference.schema);
-        const schemaName = qualifiedSchema || tabSchema;
-        referencedSchemas.add(schemaName);
-        addPreferredTable(preferredTablesBySchema, schemaName, reference.table);
-      }
-    }
-
-    const targetSchemas = Array.from(
-      new Set(
-        [
-          defaultSchema,
-          ...referencedSchemas,
-          ...connectionTabs.flatMap((tab) => [
-            tab.targetSchema || null,
-            tab.schemaName || null,
-          ]),
-        ]
-          .map(normalizeSchemaName)
-          .filter((schemaName): schemaName is string => Boolean(schemaName))
-      )
-    );
-
     // Debounce: wait 500ms before sending
     debounceTimerRef.current = setTimeout(() => {
       console.log("[LSP] Building schema configuration for:", connection.name);
@@ -380,18 +321,14 @@ export function LspConnectionSyncer() {
         const lspDialect = normalizeLspDialect(
           capabilities.lspLanguageId || connection.driver
         );
-        const fileSchemas = Object.fromEntries(
-          queryTabs.map((tab) => [
-            getLspDocumentUri(tab.id, connection.driver, lspDialect),
-            getSchemaId(schemaForTab(tab)),
-          ])
-        );
-        const fileDialects = Object.fromEntries(
-          queryTabs.map((tab) => [
-            getLspDocumentUri(tab.id, connection.driver, lspDialect),
-            lspDialect,
-          ])
-        );
+        const { fileSchemas, fileDialects } = buildLspFileMappings({
+          queryTabs,
+          schemaByTabId,
+          defaultSchema,
+          driver: connection.driver,
+          lspDialect,
+          getSchemaId,
+        });
         const schemaDefinitions: LspSchemaDefinition[] = await Promise.all(
           targetSchemas.map(async (schemaName) => {
             const [schemaTables, schemaCollections, schemaFunctions] =
@@ -496,13 +433,13 @@ export function LspConnectionSyncer() {
             return;
           }
 
-          const configKey = JSON.stringify({
+          const configKey = createLspConfigKey({
             connectionId: activeConnectionId,
             driver: connection.driver,
             lspDialect,
             fileSchemas,
             fileDialects,
-            schemaSignature: lspSchemaSignature(schemaDefinitions),
+            schemaDefinitions,
           });
           if (lastConfigRef.current === configKey) {
             console.log("[LSP] Skipping duplicate configuration send");
