@@ -54,6 +54,8 @@ Write tools behind explicit approvals:
 
 - `query.runMutation`
 - `query.runDestructive`
+- `database.createNamespace`
+- `database.dropNamespace`
 - `table.insertRows`
 - `table.updateRows`
 - `table.deleteRows`
@@ -69,7 +71,6 @@ Write tools behind explicit approvals:
 
 Future tool families:
 
-- `database.createNamespace`, `database.dropNamespace`
 - `lsp.explainDiagnostics`
 - `workspace.getSelection`
 

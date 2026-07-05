@@ -164,6 +164,15 @@ export type AiLspCompletionInput = {
   languageId?: string | null;
 };
 
+export type AiNamespaceMutationInput = {
+  operation: "create" | "drop";
+  connectionId?: string | null;
+  namespace: string;
+  charset?: string | null;
+  collation?: string | null;
+  cascade?: boolean;
+};
+
 export type AiDescribeObjectInput = {
   connectionId?: string | null;
   namespace?: string | null;
@@ -246,4 +255,8 @@ export type AiToolAdapters = {
     input: AiLspCompletionInput,
     context: AiToolExecutionContext
   ) => Promise<CompletionItem[]> | CompletionItem[];
+  mutateNamespace?: (
+    input: AiNamespaceMutationInput,
+    context: AiToolExecutionContext
+  ) => Promise<string> | string;
 };

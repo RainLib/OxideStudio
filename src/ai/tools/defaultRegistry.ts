@@ -18,6 +18,7 @@ import type {
   AiKeyValueMutationInput,
   AiListObjectsInput,
   AiLspCompletionInput,
+  AiNamespaceMutationInput,
   AiObjectDescription,
   AiObjectKind,
   AiObjectSummary,
@@ -119,6 +120,8 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
 
     getLspCompletions: async (input, context) =>
       getLspCompletions(input, context),
+
+    mutateNamespace: async (input, context) => mutateNamespace(input, context),
   };
 }
 
@@ -237,6 +240,45 @@ async function getLspCompletions(
 
   await lspClient.didOpen(uri, text, Date.now(), languageId);
   return lspClient.getCompletions(uri, input.line, input.character);
+}
+
+async function mutateNamespace(
+  input: AiNamespaceMutationInput,
+  context: AiToolExecutionContext
+) {
+  const { connectionId, driver, capabilities } = await resolveMetadataTarget(
+    input.connectionId,
+    null,
+    context,
+    "database.mutateNamespace"
+  );
+
+  if (input.operation === "create") {
+    if (!capabilities.supportsCreateDatabase) {
+      throw new Error(
+        `${capabilities.displayName} does not support namespace creation`
+      );
+    }
+    return databaseService.createDatabase(
+      connectionId,
+      driver,
+      input.namespace,
+      input.charset ?? undefined,
+      input.collation ?? undefined
+    );
+  }
+
+  if (!capabilities.supportsCreateDatabase) {
+    throw new Error(
+      `${capabilities.displayName} does not support namespace deletion`
+    );
+  }
+  return databaseService.dropDatabase(
+    connectionId,
+    driver,
+    input.namespace,
+    input.cascade ?? false
+  );
 }
 
 function buildMongoMutationCommand(
