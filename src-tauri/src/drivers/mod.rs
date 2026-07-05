@@ -1,4 +1,7 @@
-use crate::core::{dialect::DatabaseKind, driver::DatabaseDriver};
+use crate::core::{
+    dialect::{canonical_driver_name, DatabaseKind},
+    driver::DatabaseDriver,
+};
 use anyhow::{Context, Result};
 use std::str::FromStr;
 
@@ -9,7 +12,10 @@ pub mod postgres;
 pub mod redis;
 
 pub async fn connect_driver(driver: &str, url: &str) -> Result<Box<dyn DatabaseDriver>> {
-    if driver.eq_ignore_ascii_case("mongodb") || driver.eq_ignore_ascii_case("mongo") {
+    let canonical_driver = canonical_driver_name(driver)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported database driver: {}", driver.trim()))?;
+
+    if canonical_driver == "mongodb" {
         let mut driver = mongodb::MongoDbDriver::new(url);
         driver
             .connect()
@@ -18,7 +24,7 @@ pub async fn connect_driver(driver: &str, url: &str) -> Result<Box<dyn DatabaseD
         return Ok(Box::new(driver));
     }
 
-    if driver.eq_ignore_ascii_case("elasticsearch") || driver.eq_ignore_ascii_case("elastic") {
+    if canonical_driver == "elasticsearch" {
         let mut driver = elasticsearch::ElasticsearchDriver::new(url)?;
         driver
             .connect()
@@ -27,7 +33,7 @@ pub async fn connect_driver(driver: &str, url: &str) -> Result<Box<dyn DatabaseD
         return Ok(Box::new(driver));
     }
 
-    if driver.eq_ignore_ascii_case("redis") {
+    if canonical_driver == "redis" {
         let mut driver = redis::RedisDriver::new(url)?;
         driver
             .connect()
@@ -36,7 +42,7 @@ pub async fn connect_driver(driver: &str, url: &str) -> Result<Box<dyn DatabaseD
         return Ok(Box::new(driver));
     }
 
-    let kind = DatabaseKind::from_str(driver)?;
+    let kind = DatabaseKind::from_str(canonical_driver)?;
     match kind {
         DatabaseKind::Postgres => {
             let mut driver = postgres::PostgresDriver::new(url);

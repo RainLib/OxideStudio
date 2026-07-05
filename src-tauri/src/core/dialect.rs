@@ -49,6 +49,7 @@ pub struct DatabaseCapabilities {
 #[derive(Debug, Clone, Copy)]
 pub struct DatabaseSpec {
     pub driver: &'static str,
+    pub aliases: &'static [&'static str],
     pub display_name: &'static str,
     pub data_model: DatabaseDataModel,
     pub lsp_language_id: &'static str,
@@ -78,6 +79,60 @@ pub struct DatabaseSpec {
     pub auto_increment_keyword: Option<&'static str>,
     pub default_primary_key_type: &'static str,
     pub common_data_types: &'static [&'static str],
+}
+
+impl DatabaseSpec {
+    pub fn matches_driver(&self, driver: &str) -> bool {
+        let driver = driver.trim();
+        self.driver.eq_ignore_ascii_case(driver)
+            || self
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(driver))
+    }
+
+    pub fn capabilities(&self) -> DatabaseCapabilities {
+        DatabaseCapabilities {
+            driver: self.driver.to_string(),
+            display_name: self.display_name.to_string(),
+            data_model: self.data_model,
+            lsp_language_id: self.lsp_language_id.to_string(),
+            namespace_label: self.namespace_label.to_string(),
+            identifier_quote: if self.identifier_quote == '\0' {
+                String::new()
+            } else {
+                self.identifier_quote.to_string()
+            },
+            default_port: self.default_port,
+            supports_sql_query: self.supports_sql_query,
+            supports_table_browsing: self.supports_table_browsing,
+            supports_collection_browsing: self.supports_collection_browsing,
+            supports_key_value_browsing: self.supports_key_value_browsing,
+            supports_schemas: self.supports_schemas,
+            supports_create_database: self.supports_create_database,
+            supports_create_database_charset: self.supports_create_database_charset,
+            supports_column_comments: self.supports_column_comments,
+            supports_inline_column_comments: self.supports_inline_column_comments,
+            supports_rename_database: self.supports_rename_database,
+            supports_views: self.supports_views,
+            supports_replace_view: self.supports_replace_view,
+            supports_materialized_views: self.supports_materialized_views,
+            supports_table_indexes: self.supports_table_indexes,
+            supports_table_constraints: self.supports_table_constraints,
+            supports_foreign_keys: self.supports_foreign_keys,
+            supports_check_constraints: self.supports_check_constraints,
+            supports_functions: self.supports_functions,
+            supports_transactions: self.supports_transactions,
+            supports_query_cancellation: self.supports_query_cancellation,
+            auto_increment_keyword: self.auto_increment_keyword.map(ToString::to_string),
+            default_primary_key_type: self.default_primary_key_type.to_string(),
+            common_data_types: self
+                .common_data_types
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        }
+    }
 }
 
 const POSTGRES_COMMON_DATA_TYPES: &[&str] = &[
@@ -124,6 +179,7 @@ const MONGODB_COMMON_DATA_TYPES: &[&str] = &[
 
 const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "postgres",
+    aliases: &["postgresql", "pgsql"],
     display_name: "PostgreSQL",
     data_model: DatabaseDataModel::Relational,
     lsp_language_id: "postgres",
@@ -157,6 +213,7 @@ const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
 
 const MYSQL_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "mysql",
+    aliases: &["mariadb"],
     display_name: "MySQL",
     data_model: DatabaseDataModel::Relational,
     lsp_language_id: "mysql",
@@ -188,146 +245,150 @@ const MYSQL_SPEC: DatabaseSpec = DatabaseSpec {
     common_data_types: MYSQL_COMMON_DATA_TYPES,
 };
 
+const REDIS_SPEC: DatabaseSpec = DatabaseSpec {
+    driver: "redis",
+    aliases: &[],
+    display_name: "Redis",
+    data_model: DatabaseDataModel::KeyValue,
+    lsp_language_id: "redis",
+    namespace_label: "database",
+    identifier_quote: '\0',
+    default_port: 6379,
+    supports_sql_query: false,
+    supports_table_browsing: false,
+    supports_collection_browsing: false,
+    supports_key_value_browsing: true,
+    supports_schemas: true,
+    supports_create_database: false,
+    supports_create_database_charset: false,
+    supports_column_comments: false,
+    supports_inline_column_comments: false,
+    supports_rename_database: false,
+    supports_views: false,
+    supports_replace_view: false,
+    supports_materialized_views: false,
+    supports_table_indexes: false,
+    supports_table_constraints: false,
+    supports_foreign_keys: false,
+    supports_check_constraints: false,
+    supports_functions: false,
+    supports_transactions: false,
+    supports_query_cancellation: false,
+    auto_increment_keyword: None,
+    default_primary_key_type: "",
+    common_data_types: REDIS_COMMON_DATA_TYPES,
+};
+
+const ELASTICSEARCH_SPEC: DatabaseSpec = DatabaseSpec {
+    driver: "elasticsearch",
+    aliases: &["elastic"],
+    display_name: "Elasticsearch",
+    data_model: DatabaseDataModel::Search,
+    lsp_language_id: "elasticsearch-dsl",
+    namespace_label: "index",
+    identifier_quote: '\0',
+    default_port: 9200,
+    supports_sql_query: false,
+    supports_table_browsing: false,
+    supports_collection_browsing: true,
+    supports_key_value_browsing: false,
+    supports_schemas: false,
+    supports_create_database: false,
+    supports_create_database_charset: false,
+    supports_column_comments: false,
+    supports_inline_column_comments: false,
+    supports_rename_database: false,
+    supports_views: false,
+    supports_replace_view: false,
+    supports_materialized_views: false,
+    supports_table_indexes: false,
+    supports_table_constraints: false,
+    supports_foreign_keys: false,
+    supports_check_constraints: false,
+    supports_functions: false,
+    supports_transactions: false,
+    supports_query_cancellation: false,
+    auto_increment_keyword: None,
+    default_primary_key_type: "",
+    common_data_types: ELASTICSEARCH_COMMON_DATA_TYPES,
+};
+
+const MONGODB_SPEC: DatabaseSpec = DatabaseSpec {
+    driver: "mongodb",
+    aliases: &["mongo"],
+    display_name: "MongoDB",
+    data_model: DatabaseDataModel::Document,
+    lsp_language_id: "mongodb",
+    namespace_label: "database",
+    identifier_quote: '\0',
+    default_port: 27017,
+    supports_sql_query: false,
+    supports_table_browsing: false,
+    supports_collection_browsing: true,
+    supports_key_value_browsing: false,
+    supports_schemas: true,
+    supports_create_database: false,
+    supports_create_database_charset: false,
+    supports_column_comments: false,
+    supports_inline_column_comments: false,
+    supports_rename_database: false,
+    supports_views: false,
+    supports_replace_view: false,
+    supports_materialized_views: false,
+    supports_table_indexes: false,
+    supports_table_constraints: false,
+    supports_foreign_keys: false,
+    supports_check_constraints: false,
+    supports_functions: false,
+    supports_transactions: false,
+    supports_query_cancellation: false,
+    auto_increment_keyword: None,
+    default_primary_key_type: "",
+    common_data_types: MONGODB_COMMON_DATA_TYPES,
+};
+
+const DATABASE_SPECS: &[&DatabaseSpec] = &[
+    &POSTGRES_SPEC,
+    &MYSQL_SPEC,
+    &ELASTICSEARCH_SPEC,
+    &MONGODB_SPEC,
+    &REDIS_SPEC,
+];
+
 pub fn redis_capabilities() -> DatabaseCapabilities {
-    DatabaseCapabilities {
-        driver: "redis".to_string(),
-        display_name: "Redis".to_string(),
-        data_model: DatabaseDataModel::KeyValue,
-        lsp_language_id: "redis".to_string(),
-        namespace_label: "database".to_string(),
-        identifier_quote: String::new(),
-        default_port: 6379,
-        supports_sql_query: false,
-        supports_table_browsing: false,
-        supports_collection_browsing: false,
-        supports_key_value_browsing: true,
-        supports_schemas: true,
-        supports_create_database: false,
-        supports_create_database_charset: false,
-        supports_column_comments: false,
-        supports_inline_column_comments: false,
-        supports_rename_database: false,
-        supports_views: false,
-        supports_replace_view: false,
-        supports_materialized_views: false,
-        supports_table_indexes: false,
-        supports_table_constraints: false,
-        supports_foreign_keys: false,
-        supports_check_constraints: false,
-        supports_functions: false,
-        supports_transactions: false,
-        supports_query_cancellation: false,
-        auto_increment_keyword: None,
-        default_primary_key_type: String::new(),
-        common_data_types: REDIS_COMMON_DATA_TYPES
-            .iter()
-            .map(ToString::to_string)
-            .collect(),
-    }
+    REDIS_SPEC.capabilities()
 }
 
 pub fn elasticsearch_capabilities() -> DatabaseCapabilities {
-    DatabaseCapabilities {
-        driver: "elasticsearch".to_string(),
-        display_name: "Elasticsearch".to_string(),
-        data_model: DatabaseDataModel::Search,
-        lsp_language_id: "elasticsearch-dsl".to_string(),
-        namespace_label: "index".to_string(),
-        identifier_quote: String::new(),
-        default_port: 9200,
-        supports_sql_query: false,
-        supports_table_browsing: false,
-        supports_collection_browsing: true,
-        supports_key_value_browsing: false,
-        supports_schemas: false,
-        supports_create_database: false,
-        supports_create_database_charset: false,
-        supports_column_comments: false,
-        supports_inline_column_comments: false,
-        supports_rename_database: false,
-        supports_views: false,
-        supports_replace_view: false,
-        supports_materialized_views: false,
-        supports_table_indexes: false,
-        supports_table_constraints: false,
-        supports_foreign_keys: false,
-        supports_check_constraints: false,
-        supports_functions: false,
-        supports_transactions: false,
-        supports_query_cancellation: false,
-        auto_increment_keyword: None,
-        default_primary_key_type: String::new(),
-        common_data_types: ELASTICSEARCH_COMMON_DATA_TYPES
-            .iter()
-            .map(ToString::to_string)
-            .collect(),
-    }
+    ELASTICSEARCH_SPEC.capabilities()
 }
 
 pub fn mongodb_capabilities() -> DatabaseCapabilities {
-    DatabaseCapabilities {
-        driver: "mongodb".to_string(),
-        display_name: "MongoDB".to_string(),
-        data_model: DatabaseDataModel::Document,
-        lsp_language_id: "mongodb".to_string(),
-        namespace_label: "database".to_string(),
-        identifier_quote: String::new(),
-        default_port: 27017,
-        supports_sql_query: false,
-        supports_table_browsing: false,
-        supports_collection_browsing: true,
-        supports_key_value_browsing: false,
-        supports_schemas: true,
-        supports_create_database: false,
-        supports_create_database_charset: false,
-        supports_column_comments: false,
-        supports_inline_column_comments: false,
-        supports_rename_database: false,
-        supports_views: false,
-        supports_replace_view: false,
-        supports_materialized_views: false,
-        supports_table_indexes: false,
-        supports_table_constraints: false,
-        supports_foreign_keys: false,
-        supports_check_constraints: false,
-        supports_functions: false,
-        supports_transactions: false,
-        supports_query_cancellation: false,
-        auto_increment_keyword: None,
-        default_primary_key_type: String::new(),
-        common_data_types: MONGODB_COMMON_DATA_TYPES
-            .iter()
-            .map(ToString::to_string)
-            .collect(),
-    }
+    MONGODB_SPEC.capabilities()
 }
 
 pub fn all_database_capabilities() -> Vec<DatabaseCapabilities> {
-    DatabaseKind::all()
+    DATABASE_SPECS
         .iter()
-        .map(|kind| kind.capabilities())
-        .chain([
-            elasticsearch_capabilities(),
-            mongodb_capabilities(),
-            redis_capabilities(),
-        ])
+        .map(|spec| spec.capabilities())
         .collect()
 }
 
+pub fn database_spec_for_driver(driver: &str) -> Option<&'static DatabaseSpec> {
+    DATABASE_SPECS
+        .iter()
+        .copied()
+        .find(|spec| spec.matches_driver(driver))
+}
+
+pub fn canonical_driver_name(driver: &str) -> Option<&'static str> {
+    database_spec_for_driver(driver).map(|spec| spec.driver)
+}
+
 pub fn database_capabilities_for_driver(driver: &str) -> Result<DatabaseCapabilities> {
-    if driver.eq_ignore_ascii_case("mongodb") || driver.eq_ignore_ascii_case("mongo") {
-        return Ok(mongodb_capabilities());
-    }
-
-    if driver.eq_ignore_ascii_case("elasticsearch") || driver.eq_ignore_ascii_case("elastic") {
-        return Ok(elasticsearch_capabilities());
-    }
-
-    if driver.eq_ignore_ascii_case("redis") {
-        return Ok(redis_capabilities());
-    }
-
-    DatabaseKind::from_str(driver).map(DatabaseKind::capabilities)
+    database_spec_for_driver(driver)
+        .map(DatabaseSpec::capabilities)
+        .ok_or_else(|| anyhow!("Unsupported database driver: {}", driver.trim()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,43 +431,7 @@ impl DatabaseKind {
     }
 
     pub fn capabilities(self) -> DatabaseCapabilities {
-        let spec = self.spec();
-        DatabaseCapabilities {
-            driver: spec.driver.to_string(),
-            display_name: spec.display_name.to_string(),
-            data_model: spec.data_model,
-            lsp_language_id: spec.lsp_language_id.to_string(),
-            namespace_label: spec.namespace_label.to_string(),
-            identifier_quote: spec.identifier_quote.to_string(),
-            default_port: spec.default_port,
-            supports_sql_query: spec.supports_sql_query,
-            supports_table_browsing: spec.supports_table_browsing,
-            supports_collection_browsing: spec.supports_collection_browsing,
-            supports_key_value_browsing: spec.supports_key_value_browsing,
-            supports_schemas: spec.supports_schemas,
-            supports_create_database: spec.supports_create_database,
-            supports_create_database_charset: spec.supports_create_database_charset,
-            supports_column_comments: spec.supports_column_comments,
-            supports_inline_column_comments: spec.supports_inline_column_comments,
-            supports_rename_database: spec.supports_rename_database,
-            supports_views: spec.supports_views,
-            supports_replace_view: spec.supports_replace_view,
-            supports_materialized_views: spec.supports_materialized_views,
-            supports_table_indexes: spec.supports_table_indexes,
-            supports_table_constraints: spec.supports_table_constraints,
-            supports_foreign_keys: spec.supports_foreign_keys,
-            supports_check_constraints: spec.supports_check_constraints,
-            supports_functions: spec.supports_functions,
-            supports_transactions: spec.supports_transactions,
-            supports_query_cancellation: spec.supports_query_cancellation,
-            auto_increment_keyword: spec.auto_increment_keyword.map(ToString::to_string),
-            default_primary_key_type: spec.default_primary_key_type.to_string(),
-            common_data_types: spec
-                .common_data_types
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        }
+        self.spec().capabilities()
     }
 
     pub fn common_data_types(self) -> &'static [&'static str] {
@@ -1137,10 +1162,10 @@ impl FromStr for DatabaseKind {
     type Err = anyhow::Error;
 
     fn from_str(value: &str) -> Result<Self> {
-        match value.to_ascii_lowercase().as_str() {
-            "postgres" | "postgresql" | "pgsql" => Ok(Self::Postgres),
-            "mysql" | "mariadb" => Ok(Self::Mysql),
-            other => Err(anyhow!("Unsupported database driver: {}", other)),
+        match database_spec_for_driver(value).map(|spec| spec.driver) {
+            Some("postgres") => Ok(Self::Postgres),
+            Some("mysql") => Ok(Self::Mysql),
+            _ => Err(anyhow!("Unsupported database driver: {}", value.trim())),
         }
     }
 }
@@ -1659,6 +1684,42 @@ WITH NO DATA;"#
         assert!(all_database_capabilities()
             .iter()
             .any(|capabilities| capabilities.driver == "mongodb"));
+    }
+
+    #[test]
+    fn driver_specs_centralize_aliases_and_capability_listing() {
+        assert_eq!(canonical_driver_name("postgresql"), Some("postgres"));
+        assert_eq!(canonical_driver_name("pgsql"), Some("postgres"));
+        assert_eq!(canonical_driver_name("mariadb"), Some("mysql"));
+        assert_eq!(canonical_driver_name("elastic"), Some("elasticsearch"));
+        assert_eq!(canonical_driver_name("mongo"), Some("mongodb"));
+        assert_eq!(canonical_driver_name("unknown"), None);
+
+        assert_eq!(
+            database_capabilities_for_driver("POSTGRESQL")
+                .unwrap()
+                .driver,
+            "postgres"
+        );
+        assert_eq!(
+            database_capabilities_for_driver("elastic").unwrap().driver,
+            "elasticsearch"
+        );
+
+        let drivers = all_database_capabilities()
+            .into_iter()
+            .map(|capabilities| capabilities.driver)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drivers,
+            vec!["postgres", "mysql", "elasticsearch", "mongodb", "redis"]
+        );
+
+        assert!(DatabaseKind::from_str("redis").is_err());
+        assert_eq!(
+            DatabaseKind::from_str("mariadb").unwrap(),
+            DatabaseKind::Mysql
+        );
     }
 
     #[test]
