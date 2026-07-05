@@ -17,10 +17,11 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 7: Bounded Redis key and Elasticsearch index context synchronization through the LSP schema model
 - Phase 8: Non-blocking Tauri command lifecycle; LSP requests clone the manager handle before awaiting server responses
 - Phase 9: MongoDB/JSON dialect support in `lsp_sqls` with bounded collection context synchronization
+- Phase 10: Live driver coverage for PostgreSQL, MySQL, Redis, MongoDB, and Elasticsearch via `scripts/test-live-databases.sh`
 
 ⏳ **Pending:**
 
-- Additional live integration coverage for Redis, MongoDB, and Elasticsearch LSP paths
+- Direct live LSP completion, diagnostics, and editor synchronization assertions for Redis, MongoDB, and Elasticsearch paths
 
 ## Setup Instructions
 
@@ -120,6 +121,16 @@ await lspClient.updateConfiguration({
   fileSchemas: {},
 });
 ```
+
+## Live Database Tests
+
+Run driver-level live integration coverage with Docker:
+
+```bash
+scripts/test-live-databases.sh
+```
+
+The script starts PostgreSQL, MySQL, Redis, MongoDB, and Elasticsearch, exports the corresponding `TEST_*_URL` variables, and runs `src-tauri/tests/live_database.rs`. To use existing services instead, set `OXIDE_LIVE_USE_EXISTING=1` plus `TEST_POSTGRES_URL`, `TEST_MYSQL_URL`, and optionally `TEST_REDIS_URL`, `TEST_MONGODB_URL`, and `TEST_ELASTICSEARCH_URL`.
 
 ## Troubleshooting
 

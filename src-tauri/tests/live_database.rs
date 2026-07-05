@@ -60,13 +60,40 @@ async fn manager_with_connection(
     url: &str,
     connection_id: &str,
 ) -> Result<ConnectionManager> {
+    manager_with_driver(kind.as_str(), url, connection_id).await
+}
+
+async fn manager_with_driver(
+    driver_name: &str,
+    url: &str,
+    connection_id: &str,
+) -> Result<ConnectionManager> {
     let manager = ConnectionManager::new();
-    let driver = connect_driver(kind.as_str(), url).await?;
+    let driver = connect_driver(driver_name, url).await?;
     manager
         .add_connection(connection_id.to_string(), driver)
         .await;
     manager.ping(connection_id).await?;
     Ok(manager)
+}
+
+fn optional_live_url(env_name: &str, label: &str) -> Option<String> {
+    env::var(env_name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            eprintln!("skipping live {label} test; set {env_name}");
+            None
+        })
+}
+
+fn column_index(result: &QueryResult, name: &str) -> Result<usize> {
+    result
+        .columns
+        .iter()
+        .position(|column| column.name == name)
+        .ok_or_else(|| anyhow!("Expected result column {name}"))
 }
 
 #[tokio::test]
@@ -667,4 +694,259 @@ async fn mysql_flow(
     assert_eq!(rollback_count, 0);
 
     Ok(())
+}
+
+#[tokio::test]
+async fn redis_live_key_value_metadata_and_commands() -> Result<()> {
+    dotenvy::dotenv().ok();
+    if !live_tests_enabled() {
+        eprintln!("skipping live Redis test; set OXIDE_LIVE_DB_TESTS=1");
+        return Ok(());
+    }
+
+    let Some(url) = optional_live_url("TEST_REDIS_URL", "Redis") else {
+        return Ok(());
+    };
+    let connection_id = "live-redis";
+    let key_prefix = unique_name("oxide_live_redis");
+    let string_key = format!("{key_prefix}:string");
+    let hash_key = format!("{key_prefix}:hash");
+    let manager = manager_with_driver("redis", &url, connection_id).await?;
+
+    let cleanup_command = format!("DEL {string_key} {hash_key}");
+    let _ = manager
+        .query(connection_id, &cleanup_command, None, None, None)
+        .await;
+
+    let test_result = async {
+        let schemas = manager.get_schemas(connection_id).await?;
+        assert!(
+            schemas.iter().any(|schema| schema == "0"),
+            "Redis database label should default to DB 0"
+        );
+
+        manager
+            .query(
+                connection_id,
+                &format!(
+                    "SET {string_key} ada@example.com\nHSET {hash_key} email ada@example.com active true"
+                ),
+                None,
+                None,
+                None,
+            )
+            .await?;
+
+        let get_results = manager
+            .query(connection_id, &format!("GET {string_key}"), None, None, None)
+            .await?;
+        assert_eq!(get_results[0].rows[0][1], json!("ada@example.com"));
+
+        let collections = manager.get_collections(connection_id, "").await?;
+        let string_entry = collections
+            .iter()
+            .find(|collection| collection.name == string_key)
+            .context("Redis string key should be discoverable")?;
+        assert_eq!(string_entry.collection_type.as_deref(), Some("string"));
+        assert!(collections.iter().any(|collection| collection.name == hash_key
+            && collection.collection_type.as_deref() == Some("hash")));
+
+        Ok(())
+    }
+    .await;
+
+    let _ = manager
+        .query(connection_id, &cleanup_command, None, None, None)
+        .await;
+    let _ = manager.disconnect_connection(connection_id).await;
+
+    test_result
+}
+
+#[tokio::test]
+async fn mongodb_live_document_metadata_and_commands() -> Result<()> {
+    dotenvy::dotenv().ok();
+    if !live_tests_enabled() {
+        eprintln!("skipping live MongoDB test; set OXIDE_LIVE_DB_TESTS=1");
+        return Ok(());
+    }
+
+    let Some(url) = optional_live_url("TEST_MONGODB_URL", "MongoDB") else {
+        return Ok(());
+    };
+    let connection_id = "live-mongodb";
+    let database = unique_name("oxide_live_mongo");
+    let collection = "users";
+    let manager = manager_with_driver("mongodb", &url, connection_id).await?;
+
+    let test_result = async {
+        manager
+            .query(
+                connection_id,
+                &serde_json::to_string(&json!({
+                    "database": database,
+                    "collection": collection,
+                    "insertMany": [
+                        {
+                            "email": "ada@example.com",
+                            "active": true,
+                            "score": 7,
+                            "profile": {"role": "admin"}
+                        },
+                        {
+                            "email": "grace@example.com",
+                            "active": false,
+                            "tags": ["compiler"]
+                        }
+                    ]
+                }))?,
+                None,
+                None,
+                None,
+            )
+            .await?;
+
+        let schemas = manager.get_schemas(connection_id).await?;
+        assert!(schemas.iter().any(|schema| schema == &database));
+
+        let collections = manager.get_collections(connection_id, &database).await?;
+        let users = collections
+            .iter()
+            .find(|item| item.name == collection)
+            .context("MongoDB users collection should be discoverable")?;
+        assert_eq!(users.collection_type.as_deref(), Some("collection"));
+        assert!(users.document_count.unwrap_or_default() >= 2);
+
+        let columns = manager
+            .get_columns(connection_id, &database, collection)
+            .await?;
+        assert!(columns
+            .iter()
+            .any(|column| column.name == "_id" && column.is_primary_key && column.is_indexed));
+        assert!(columns
+            .iter()
+            .any(|column| column.name == "email" && column.data_type == "string"));
+        assert!(columns.iter().any(|column| column.name == "active"));
+        assert!(columns.iter().any(|column| column.name == "profile"));
+        assert!(columns
+            .iter()
+            .any(|column| column.name == "tags" && column.is_nullable));
+
+        let find_results = manager
+            .query(
+                connection_id,
+                &serde_json::to_string(&json!({
+                    "database": database,
+                    "collection": collection,
+                    "find": {"active": true},
+                    "limit": 5
+                }))?,
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let email_index = column_index(&find_results[0], "email")?;
+        assert_eq!(find_results[0].rows.len(), 1);
+        assert_eq!(
+            find_results[0].rows[0][email_index],
+            json!("ada@example.com")
+        );
+
+        Ok(())
+    }
+    .await;
+
+    let _ = manager
+        .query(
+            connection_id,
+            &serde_json::to_string(&json!({
+                "database": database,
+                "command": {"dropDatabase": 1}
+            }))?,
+            None,
+            None,
+            None,
+        )
+        .await;
+    let _ = manager.disconnect_connection(connection_id).await;
+
+    test_result
+}
+
+#[tokio::test]
+async fn elasticsearch_live_index_metadata_and_search() -> Result<()> {
+    dotenvy::dotenv().ok();
+    if !live_tests_enabled() {
+        eprintln!("skipping live Elasticsearch test; set OXIDE_LIVE_DB_TESTS=1");
+        return Ok(());
+    }
+
+    let Some(url) = optional_live_url("TEST_ELASTICSEARCH_URL", "Elasticsearch") else {
+        return Ok(());
+    };
+    let connection_id = "live-elasticsearch";
+    let index = unique_name("oxide_live_es").to_ascii_lowercase();
+    let manager = manager_with_driver("elasticsearch", &url, connection_id).await?;
+
+    let test_result = async {
+        manager
+            .query(
+                connection_id,
+                &format!(
+                    r#"
+                    PUT /{index}
+                    {{"mappings":{{"properties":{{"email":{{"type":"keyword"}},"active":{{"type":"boolean"}},"score":{{"type":"integer"}}}}}}}}
+                    PUT /{index}/_doc/1
+                    {{"email":"ada@example.com","active":true,"score":7}}
+                    POST /{index}/_refresh
+                    "#,
+                ),
+                None,
+                None,
+                None,
+            )
+            .await?;
+
+        let collections = manager.get_collections(connection_id, "").await?;
+        let index_info = collections
+            .iter()
+            .find(|collection| collection.name == index)
+            .context("Elasticsearch index should be discoverable")?;
+        assert_eq!(index_info.collection_type.as_deref(), Some("index"));
+        assert!(index_info.document_count.unwrap_or_default() >= 1);
+
+        let search_results = manager
+            .query(
+                connection_id,
+                &format!(
+                    r#"
+                    POST /{index}/_search
+                    {{"query":{{"match_all":{{}}}},"sort":[{{"email":"asc"}}]}}
+                    "#,
+                ),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let source_index = column_index(&search_results[0], "source")?;
+        assert_eq!(search_results[0].rows.len(), 1);
+        assert_eq!(
+            search_results[0].rows[0][source_index]
+                .get("email")
+                .and_then(Value::as_str),
+            Some("ada@example.com")
+        );
+
+        Ok(())
+    }
+    .await;
+
+    let _ = manager
+        .query(connection_id, &format!("DELETE /{index}"), None, None, None)
+        .await;
+    let _ = manager.disconnect_connection(connection_id).await;
+
+    test_result
 }
