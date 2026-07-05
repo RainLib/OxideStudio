@@ -25,6 +25,7 @@ This keeps the editor integration direct and state-aware while allowing external
 
 - `src/ai/tools` defines the shared registry, metadata/query tools, result limits, audit hooks, and permission policy.
 - `src/ai/tools/families.ts` provides runtime `AiToolFamily` registration and merging, so database/provider packages can add tool families without editing the core registry.
+- `src/providers` exposes `registerDatabaseProvider` to bundle driver profiles, object preview behavior, and AI tool families behind one provider registration call.
 - `src/ai/tools/manifest.ts` exports a portable tool manifest with schemas, permissions, capabilities, and approval status for MCP, CLI, and planner hosts.
 - `src/lib/querySafety.ts` centralizes read/write/destructive classification for SQL, MongoDB, Redis, and Elasticsearch so planners and executors make the same safety decision.
 - `src/ai/assistant` exposes an `AssistantPlanner` contract, a deterministic fallback planner, a provider-neutral model planner, and approval-aware execution for AI-proposed tool calls.
@@ -132,5 +133,5 @@ Recommended usage:
 3. Add MCP and CLI adapters over the same registry. Done.
 4. Add write tools with approval gates and audit logging. Done for query-level mutation/destructive tools, structured table row mutations, and structured document/key/search mutations.
 5. Add a planner layer that chooses tool calls, pauses for approval, and feeds results back into the model. Foundation done with `AssistantPlanner`, `createModelAssistantPlanner`, and `createModelToolResultSummarizer`; full LangGraph graph wiring is still pending.
-6. Add provider/plugin hooks so new databases register tool families by capability, not by UI rewrites. Runtime family registration is done with `registerAiToolFamily`; dynamic package discovery/loading is still pending.
+6. Add provider/plugin hooks so new databases register tool families by capability, not by UI rewrites. Runtime provider registration is done with `registerDatabaseProvider`; dynamic package discovery/loading is still pending.
 7. Add live integration coverage for MongoDB, Redis, Elasticsearch, MySQL, and PostgreSQL tool paths.
