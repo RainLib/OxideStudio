@@ -93,4 +93,72 @@ describe("connection store", () => {
     expect(useConnectionStore.getState().activeConnectionId).toBe("postgres-1");
     expect(useConnectionStore.getState().isConnected).toBe(true);
   });
+
+  it("disconnects the previous active backend connection after a successful switch", async () => {
+    useConnectionStore.setState({
+      connections: [
+        connection({ id: "postgres-1", name: "Postgres" }),
+        connection({
+          id: "mysql-1",
+          name: "MySQL",
+          driver: "mysql",
+          port: 3306,
+        }),
+      ],
+      activeConnectionId: "postgres-1",
+      isConnected: true,
+    });
+
+    const error = await useConnectionStore.getState().connect(
+      connection({
+        id: "mysql-1",
+        name: "MySQL",
+        driver: "mysql",
+        port: 3306,
+      })
+    );
+
+    expect(error).toBeNull();
+    expect(mocks.connect).toHaveBeenCalledWith(
+      "mysql-1",
+      "mysql",
+      expect.stringContaining("localhost")
+    );
+    expect(mocks.disconnect).toHaveBeenCalledWith("postgres-1");
+    expect(useConnectionStore.getState().activeConnectionId).toBe("mysql-1");
+    expect(useConnectionStore.getState().isConnected).toBe(true);
+  });
+
+  it("keeps the previous active connection when a switch fails", async () => {
+    mocks.connect.mockRejectedValueOnce(new Error("login failed"));
+    useConnectionStore.setState({
+      connections: [connection({ id: "postgres-1", name: "Postgres" })],
+      activeConnectionId: "postgres-1",
+      isConnected: true,
+    });
+
+    const error = await useConnectionStore
+      .getState()
+      .connect(connection({ id: "mysql-1", driver: "mysql", port: 3306 }));
+
+    expect(error).toBe("login failed");
+    expect(mocks.disconnect).not.toHaveBeenCalled();
+    expect(useConnectionStore.getState().activeConnectionId).toBe("postgres-1");
+    expect(useConnectionStore.getState().isConnected).toBe(true);
+  });
+
+  it("does not issue a frontend disconnect when reconnecting the same id", async () => {
+    useConnectionStore.setState({
+      connections: [connection({ id: "postgres-1", name: "Postgres" })],
+      activeConnectionId: "postgres-1",
+      isConnected: true,
+    });
+
+    const error = await useConnectionStore.getState().connect(connection());
+
+    expect(error).toBeNull();
+    expect(mocks.disconnect).not.toHaveBeenCalled();
+    expect(useConnectionStore.getState().activeConnectionId).toBe("postgres-1");
+    expect(useConnectionStore.getState().isConnected).toBe(true);
+  });
 });

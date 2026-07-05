@@ -152,6 +152,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   connect: async (config) => {
+    const previousConnectionId = get().activeConnectionId;
     try {
       await connectionService.connect(
         config.id,
@@ -162,6 +163,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // does not wipe the currently usable workspace metadata.
       useSchemaStore.getState().reset();
       set({ activeConnectionId: config.id, isConnected: true });
+
+      if (previousConnectionId && previousConnectionId !== config.id) {
+        try {
+          await connectionService.disconnect(previousConnectionId);
+        } catch (disconnectError) {
+          console.warn(
+            "Failed to disconnect previous backend connection:",
+            disconnectError
+          );
+        }
+      }
+
       return null; // No error
     } catch (e: any) {
       const message = e.message || String(e);
