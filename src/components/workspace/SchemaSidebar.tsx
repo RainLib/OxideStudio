@@ -372,9 +372,14 @@ export function SchemaSidebar() {
         e.preventDefault();
         const selectedSchema = filteredSchemas[focusedIndex];
         if (selectedSchema) {
-          setCurrentSchema(selectedSchema);
-          setFilterText("");
-          setIsSelectOpen(false);
+          void setCurrentSchema(selectedSchema)
+            .then(() => {
+              setFilterText("");
+              setIsSelectOpen(false);
+            })
+            .catch((error) => {
+              console.warn("Failed to switch schema", error);
+            });
         }
       }
     };
@@ -696,9 +701,14 @@ export function SchemaSidebar() {
           <Select
             value={currentSchema || ""}
             onValueChange={(value: string) => {
-              setCurrentSchema(value);
-              setFilterText(""); // Clear table filter when switching database
-              setIsSelectOpen(false);
+              void setCurrentSchema(value)
+                .then(() => {
+                  setFilterText(""); // Clear table filter when switching database
+                  setIsSelectOpen(false);
+                })
+                .catch((error) => {
+                  console.warn("Failed to switch schema", error);
+                });
             }}
             open={isSelectOpen}
             onOpenChange={setIsSelectOpen}

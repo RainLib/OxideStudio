@@ -492,6 +492,16 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
 
   setCurrentSchema: async (schema: string) => {
     const { activeConnectionId } = useConnectionStore.getState();
+    const previous = {
+      currentSchema: get().currentSchema,
+      selectedTable: get().selectedTable,
+      tables: get().tables,
+      collections: get().collections,
+      functions: get().functions,
+      isCollectionsLoading: get().isCollectionsLoading,
+      isFunctionsLoading: get().isFunctionsLoading,
+    };
+
     // Clear tables immediately to prevent showing stale data from previous schema
     set({
       currentSchema: schema,
@@ -504,7 +514,12 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     });
 
     if (activeConnectionId && schema) {
-      await schemaService.setCurrentSchema(activeConnectionId, schema);
+      try {
+        await schemaService.setCurrentSchema(activeConnectionId, schema);
+      } catch (error) {
+        set(previous);
+        throw error;
+      }
     }
   },
 
