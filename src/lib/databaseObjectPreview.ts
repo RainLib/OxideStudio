@@ -20,6 +20,7 @@ export type DatabaseObjectPreviewProvider = {
   objectPluralLabel?: string;
   tabTitle?: (context: DatabaseObjectPreviewContext) => string;
   queryTemplate: (context: DatabaseObjectPreviewContext) => string;
+  deleteQueryTemplate?: (context: DatabaseObjectPreviewContext) => string | null;
 };
 
 const registeredPreviewProviders: DatabaseObjectPreviewProvider[] = [];
@@ -106,6 +107,19 @@ export function collectionPreviewQueryTemplateForCapabilities(
   });
 }
 
+export function collectionDeleteQueryTemplateForCapabilities(
+  capabilities: DatabaseCapabilities,
+  namespace: string | null,
+  collection: CollectionInfo
+) {
+  const provider = databaseObjectPreviewProvider(capabilities);
+  return provider.deleteQueryTemplate?.({
+    capabilities,
+    namespace,
+    collection,
+  }) ?? null;
+}
+
 const BUILTIN_PREVIEW_PROVIDERS: DatabaseObjectPreviewProvider[] = [
   {
     id: "builtin.key-value",
@@ -114,6 +128,7 @@ const BUILTIN_PREVIEW_PROVIDERS: DatabaseObjectPreviewProvider[] = [
     objectLabel: "Key",
     queryTemplate: ({ collection }) =>
       redisPreviewCommand(collection.name, collection.type),
+    deleteQueryTemplate: ({ collection }) => `DEL ${JSON.stringify(collection.name)}`,
   },
   {
     id: "builtin.search.elasticsearch",
@@ -130,6 +145,8 @@ const BUILTIN_PREVIEW_PROVIDERS: DatabaseObjectPreviewProvider[] = [
         null,
         2
       )}`,
+    deleteQueryTemplate: ({ collection }) =>
+      `DELETE /${encodeURIComponent(collection.name)}`,
   },
   {
     id: "builtin.document",
@@ -143,6 +160,15 @@ const BUILTIN_PREVIEW_PROVIDERS: DatabaseObjectPreviewProvider[] = [
           collection: collection.name,
           find: {},
           limit: 100,
+        },
+        null,
+        2
+      ),
+    deleteQueryTemplate: ({ namespace, collection }) =>
+      JSON.stringify(
+        {
+          ...(namespace ? { database: namespace } : {}),
+          command: { drop: collection.name },
         },
         null,
         2

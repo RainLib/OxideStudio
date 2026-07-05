@@ -14,6 +14,7 @@ import {
   TableProperties,
   Code2,
   Trash2,
+  Clipboard,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useSchemaStore } from "@/store/useSchemaStore";
@@ -42,6 +43,7 @@ import {
   supportsTableWorkspace,
 } from "@/lib/databaseDialect";
 import {
+  collectionDeleteQueryTemplateForCapabilities,
   databaseObjectPreviewProvider,
   collectionPreviewQueryTemplateForCapabilities,
   collectionPreviewTabTitleForCapabilities,
@@ -153,6 +155,7 @@ export function SchemaSidebar() {
     activeCapabilities.supportsKeyValueBrowsing;
   const collectionPreviewProvider =
     databaseObjectPreviewProvider(activeCapabilities);
+  const collectionLabel = collectionPreviewProvider.objectLabel;
   const collectionLabelPlural =
     collectionPreviewProvider.objectPluralLabel ||
     `${collectionPreviewProvider.objectLabel}s`;
@@ -391,6 +394,7 @@ export function SchemaSidebar() {
     findOrCreateObjectQueryTab,
     loadTablePage,
     createTableTab,
+    createTab,
     runTabQuery,
   } = useTabStore();
 
@@ -416,14 +420,24 @@ export function SchemaSidebar() {
     selectTable(collectionName);
   };
 
-  const handleCollectionDoubleClick = (collection: CollectionInfo) => {
-    if (!activeConnectionId) return;
-
-    const sql = collectionPreviewQueryTemplateForCapabilities(
+  const collectionPreviewSql = (collection: CollectionInfo) =>
+    collectionPreviewQueryTemplateForCapabilities(
       activeCapabilities,
       currentSchema,
       collection
     );
+
+  const collectionDeleteSql = (collection: CollectionInfo) =>
+    collectionDeleteQueryTemplateForCapabilities(
+      activeCapabilities,
+      currentSchema,
+      collection
+    );
+
+  const handleCollectionDoubleClick = (collection: CollectionInfo) => {
+    if (!activeConnectionId) return;
+
+    const sql = collectionPreviewSql(collection);
     const tabId = findOrCreateObjectQueryTab(
       activeConnectionId,
       currentSchema,
@@ -436,6 +450,39 @@ export function SchemaSidebar() {
         currentSchema
       )
     );
+    void runTabQuery(tabId, activeConnectionId, sql);
+  };
+
+  const handleCopyCollectionPreview = async (collection: CollectionInfo) => {
+    try {
+      await navigator.clipboard.writeText(collectionPreviewSql(collection));
+    } catch (err: any) {
+      window.alert(`Failed to copy preview request: ${err?.message || err}`);
+    }
+  };
+
+  const handleDeleteCollectionClick = (collection: CollectionInfo) => {
+    if (!activeConnectionId) return;
+
+    const sql = collectionDeleteSql(collection);
+    if (!sql) {
+      window.alert(
+        `${activeCapabilities.displayName} ${collectionLabel.toLowerCase()} deletion is not supported.`
+      );
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete ${collectionLabel.toLowerCase()} "${collection.name}"? This cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    const tabId = createTab("query", `Delete ${collection.name}`, sql, {
+      connectionId: activeConnectionId,
+      schemaName: currentSchema || undefined,
+      tableName: collection.name,
+      objectType: collection.type || null,
+    });
     void runTabQuery(tabId, activeConnectionId, sql);
   };
 
@@ -878,42 +925,76 @@ export function SchemaSidebar() {
             </div>
           ) : (
             <div className="px-1">
-              {filteredCollections.map((collection) => (
-                <div
-                  key={`${collection.namespace || currentSchema}:${collection.name}`}
-                  className={cn(
-                    "flex items-center gap-2 px-2 py-1.5 cursor-pointer text-[11px] group transition-all select-none rounded-sm relative",
-                    selectedTable === collection.name
-                      ? "bg-background-secondary text-primary"
-                      : "text-muted-foreground hover:text-foreground hover:bg-background-secondary/50"
-                  )}
-                  onClick={() => handleCollectionSelect(collection.name)}
-                  onDoubleClick={() => handleCollectionDoubleClick(collection)}
-                  title={collection.name}
-                >
-                  <Braces
-                    size={12}
-                    className={cn(
-                      "shrink-0 opacity-70",
-                      selectedTable === collection.name && "opacity-100"
-                    )}
-                  />
-                  <span className="truncate flex-1">
-                    {highlightMatch(collection.name, filterText)}
-                  </span>
-                  {collection.type && (
-                    <span className="text-[9px] uppercase opacity-50 shrink-0">
-                      {collection.type}
-                    </span>
-                  )}
-                  {collection.documentCount !== null &&
-                    collection.documentCount !== undefined && (
-                      <span className="text-[9px] opacity-50 shrink-0 tabular-nums">
-                        {collection.documentCount}
-                      </span>
-                    )}
-                </div>
-              ))}
+              {filteredCollections.map((collection) => {
+                const canDeleteCollection = Boolean(collectionDeleteSql(collection));
+                return (
+                  <ContextMenu
+                    key={`${collection.namespace || currentSchema}:${collection.name}`}
+                    onOpenChange={(open) => {
+                      if (open) handleCollectionSelect(collection.name);
+                    }}
+                  >
+                    <ContextMenuTrigger>
+                      <div
+                        className={cn(
+                          "flex items-center gap-2 px-2 py-1.5 cursor-pointer text-[11px] group transition-all select-none rounded-sm relative",
+                          selectedTable === collection.name
+                            ? "bg-background-secondary text-primary"
+                            : "text-muted-foreground hover:text-foreground hover:bg-background-secondary/50"
+                        )}
+                        onClick={() => handleCollectionSelect(collection.name)}
+                        onDoubleClick={() => handleCollectionDoubleClick(collection)}
+                        title={collection.name}
+                      >
+                        <Braces
+                          size={12}
+                          className={cn(
+                            "shrink-0 opacity-70",
+                            selectedTable === collection.name && "opacity-100"
+                          )}
+                        />
+                        <span className="truncate flex-1">
+                          {highlightMatch(collection.name, filterText)}
+                        </span>
+                        {collection.type && (
+                          <span className="text-[9px] uppercase opacity-50 shrink-0">
+                            {collection.type}
+                          </span>
+                        )}
+                        {collection.documentCount !== null &&
+                          collection.documentCount !== undefined && (
+                            <span className="text-[9px] opacity-50 shrink-0 tabular-nums">
+                              {collection.documentCount}
+                            </span>
+                          )}
+                      </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className="w-48">
+                      <ContextMenuItem
+                        onClick={() => handleCollectionDoubleClick(collection)}
+                      >
+                        <Code2 className="mr-2 h-3.5 w-3.5" />
+                        Open Preview
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        onClick={() => void handleCopyCollectionPreview(collection)}
+                      >
+                        <Clipboard className="mr-2 h-3.5 w-3.5" />
+                        Copy Preview Query
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        onClick={() => handleDeleteCollectionClick(collection)}
+                        disabled={!canDeleteCollection}
+                        className="text-destructive focus:text-destructive"
+                      >
+                        <Trash2 className="mr-2 h-3.5 w-3.5" />
+                        Delete {collectionLabel}
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
+                );
+              })}
             </div>
           )
         ) : !canBrowseTables ? (
