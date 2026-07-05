@@ -1,4 +1,8 @@
-import type { AiToolAdapters, AiToolDefinition } from "./types";
+import type {
+  AiToolAdapters,
+  AiToolDefinition,
+  AiToolExecutionContext,
+} from "./types";
 import type { AiToolRegistry } from "./registry";
 import type { DatabaseDriver } from "@/services/tauri/types";
 
@@ -29,6 +33,11 @@ export function registerCoreAiTools(
 
   if (adapters.runReadOnlyQuery) {
     registry.register(readOnlyQueryTool(adapters));
+  }
+
+  if (adapters.runMutationQuery) {
+    registry.register(mutationQueryTool(adapters));
+    registry.register(destructiveQueryTool(adapters));
   }
 
   return registry;
@@ -269,11 +278,97 @@ function readOnlyQueryTool(adapters: AiToolAdapters): AiToolDefinition {
   };
 }
 
+function mutationQueryTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "query.runMutation",
+    description: "Run a non-destructive database mutation after explicit approval.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        connectionId: {
+          type: "string",
+          description: "Connection id. Defaults to the active connection.",
+        },
+        query: {
+          type: "string",
+          description: "Mutation query or driver-native write request.",
+        },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    permissions: ["write"],
+    capabilities: ["query"],
+    timeoutMs: 30_000,
+    execute: async (input, context) =>
+      runApprovedMutation(adapters, input, context, "write"),
+  };
+}
+
+function destructiveQueryTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "query.runDestructive",
+    description: "Run a destructive database operation after explicit approval.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        connectionId: {
+          type: "string",
+          description: "Connection id. Defaults to the active connection.",
+        },
+        query: {
+          type: "string",
+          description: "Destructive query or driver-native request.",
+        },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    permissions: ["destructive"],
+    capabilities: ["query"],
+    timeoutMs: 30_000,
+    execute: async (input, context) =>
+      runApprovedMutation(adapters, input, context, "destructive"),
+  };
+}
+
 function assertObject(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("tool input must be an object");
   }
   return input as Record<string, unknown>;
+}
+
+async function runApprovedMutation(
+  adapters: AiToolAdapters,
+  input: unknown,
+  context: AiToolExecutionContext,
+  mode: "write" | "destructive"
+) {
+  const payload = assertObject(input);
+  const query = payload.query;
+  if (typeof query !== "string" || !query.trim()) {
+    throw new Error("query is required");
+  }
+
+  const connectionId =
+    typeof payload.connectionId === "string"
+      ? payload.connectionId
+      : context.activeConnectionId ?? null;
+  const driver = await resolveQueryDriver(adapters, connectionId, context.activeDriver);
+  const safety = classifyQuerySafety(query, driver);
+
+  if (safety === "read") {
+    throw new Error("Mutation tools do not run read-only requests");
+  }
+  if (mode === "write" && safety === "destructive") {
+    throw new Error("query.runMutation rejected a destructive request");
+  }
+  if (mode === "destructive" && safety !== "destructive") {
+    throw new Error("query.runDestructive only accepts destructive requests");
+  }
+
+  return adapters.runMutationQuery?.({ connectionId, query }, context);
 }
 
 async function resolveQueryDriver(
@@ -334,6 +429,40 @@ function looksReadOnly(query: string, driver?: DatabaseDriver | null) {
   return !mutatingSqlPrefixes.some((prefix) => normalized.startsWith(prefix));
 }
 
+function classifyQuerySafety(
+  query: string,
+  driver?: DatabaseDriver | null
+): "read" | "write" | "destructive" {
+  if (looksReadOnly(query, driver)) return "read";
+  if (looksDestructive(query, driver)) return "destructive";
+  return "write";
+}
+
+function looksDestructive(query: string, driver?: DatabaseDriver | null) {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return false;
+
+  const normalizedDriver = String(driver || "").trim().toLowerCase();
+  if (normalized.startsWith("{") || normalized.startsWith("[")) {
+    if (normalizedDriver === "mongodb" || normalizedDriver === "mongo") {
+      return looksDestructiveMongoCommand(query);
+    }
+    return looksDestructiveJsonSearchBody(query);
+  }
+
+  if (normalizedDriver === "redis") {
+    return looksDestructiveRedisCommands(query);
+  }
+
+  if (normalizedDriver === "elasticsearch" || normalizedDriver === "elastic") {
+    return looksDestructiveElasticsearchRequest(query);
+  }
+
+  return ["delete", "drop", "truncate"].some((prefix) =>
+    normalized.startsWith(prefix)
+  );
+}
+
 function looksReadOnlyJsonSearchBody(query: string) {
   const normalized = query.toLowerCase();
   const mutatingMarkers = [
@@ -346,6 +475,11 @@ function looksReadOnlyJsonSearchBody(query: string) {
     '"upsert"',
   ];
   return !mutatingMarkers.some((marker) => normalized.includes(marker));
+}
+
+function looksDestructiveJsonSearchBody(query: string) {
+  const normalized = query.toLowerCase();
+  return normalized.includes('"delete"') || normalized.includes('"delete_by_query"');
 }
 
 function looksReadOnlyMongoCommand(query: string) {
@@ -400,6 +534,57 @@ function looksReadOnlyMongoCommand(query: string) {
   });
 }
 
+function looksDestructiveMongoCommand(query: string) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(query);
+  } catch {
+    return false;
+  }
+
+  const commands = Array.isArray(parsed) ? parsed : [parsed];
+  return commands.some((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return false;
+    }
+
+    const payload = item as Record<string, unknown>;
+    const keys = Object.keys(payload).map((key) => key.toLowerCase());
+    if (
+      keys.some((key) =>
+        [
+          "collmod",
+          "deleteone",
+          "deletemany",
+          "drop",
+          "dropdatabase",
+          "renamecollection",
+        ].includes(key)
+      )
+    ) {
+      return true;
+    }
+
+    const commandBody = payload.command;
+    if (!commandBody || typeof commandBody !== "object" || Array.isArray(commandBody)) {
+      return false;
+    }
+    const [commandName] = Object.keys(commandBody).map((key) => key.toLowerCase());
+    return Boolean(
+      commandName &&
+        [
+          "collmod",
+          "delete",
+          "drop",
+          "dropdatabase",
+          "dropindexes",
+          "findandmodify",
+          "renamecollection",
+        ].includes(commandName)
+    );
+  });
+}
+
 const READ_ONLY_MONGO_COMMANDS = new Set([
   "aggregate",
   "buildinfo",
@@ -440,6 +625,29 @@ function looksReadOnlyElasticsearchRequest(query: string) {
   });
 }
 
+function looksDestructiveElasticsearchRequest(query: string) {
+  const requestLines = query
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+
+  return requestLines.some((line) => {
+    const match = line.match(/^(GET|HEAD|POST|PUT|PATCH|DELETE)\s+(\S+)/i);
+    if (!match) return false;
+
+    const method = match[1]!.toUpperCase();
+    const path = match[2]!.toLowerCase();
+    return (
+      method === "DELETE" ||
+      path.includes("_delete_by_query") ||
+      path.includes("_close") ||
+      path.includes("_forcemerge") ||
+      path.includes("_shrink") ||
+      path.includes("_split")
+    );
+  });
+}
+
 const READ_ONLY_ELASTICSEARCH_POST_PATHS = [
   /^\/_search(?:[/?#]|$)/,
   /^\/_msearch(?:[/?#]|$)/,
@@ -463,6 +671,18 @@ function looksReadOnlyRedisCommands(query: string) {
   return commands.every((line) => {
     const command = line.split(/\s+/)[0]?.toUpperCase();
     return Boolean(command && READ_ONLY_REDIS_COMMANDS.has(command));
+  });
+}
+
+function looksDestructiveRedisCommands(query: string) {
+  const commands = query
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/;$/, ""))
+    .filter((line) => line && !line.startsWith("#"));
+
+  return commands.some((line) => {
+    const command = line.split(/\s+/)[0]?.toUpperCase();
+    return Boolean(command && DESTRUCTIVE_REDIS_COMMANDS.has(command));
   });
 }
 
@@ -518,4 +738,40 @@ const READ_ONLY_REDIS_COMMANDS = new Set([
   "ZREVRANK",
   "ZSCAN",
   "ZSCORE",
+]);
+
+const DESTRUCTIVE_REDIS_COMMANDS = new Set([
+  "DEL",
+  "DISCARD",
+  "EVAL",
+  "EVALSHA",
+  "FLUSHALL",
+  "FLUSHDB",
+  "FT.DROPINDEX",
+  "HDEL",
+  "JSON.ARRPOP",
+  "JSON.CLEAR",
+  "JSON.DEL",
+  "JSON.FORGET",
+  "LPOP",
+  "LTRIM",
+  "MOVE",
+  "PERSIST",
+  "PEXPIRE",
+  "PEXPIREAT",
+  "RENAME",
+  "RENAMENX",
+  "RESTORE",
+  "RPOP",
+  "SPOP",
+  "SREM",
+  "UNLINK",
+  "XDEL",
+  "XTRIM",
+  "ZPOPMAX",
+  "ZPOPMIN",
+  "ZREM",
+  "ZREMRANGEBYLEX",
+  "ZREMRANGEBYRANK",
+  "ZREMRANGEBYSCORE",
 ]);

@@ -107,6 +107,11 @@ export type AiReadOnlyQueryInput = {
   limit?: number;
 };
 
+export type AiMutationQueryInput = {
+  connectionId?: string | null;
+  query: string;
+};
+
 export type AiDescribeObjectInput = {
   connectionId?: string | null;
   namespace?: string | null;
@@ -163,6 +168,10 @@ export type AiToolAdapters = {
   ) => Promise<AiObjectDescription> | AiObjectDescription;
   runReadOnlyQuery?: (
     input: AiReadOnlyQueryInput,
+    context: AiToolExecutionContext
+  ) => Promise<QueryResult[]> | QueryResult[];
+  runMutationQuery?: (
+    input: AiMutationQueryInput,
     context: AiToolExecutionContext
   ) => Promise<QueryResult[]> | QueryResult[];
 };

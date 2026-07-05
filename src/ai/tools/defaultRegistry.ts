@@ -86,6 +86,15 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
       const results = await queryService.executeQuery(connectionId, input.query);
       return limitQueryResults(results, input.limit ?? 200);
     },
+
+    runMutationQuery: async (input, context) => {
+      const connectionId = input.connectionId || context.activeConnectionId;
+      if (!connectionId) {
+        throw new Error("No active connection is available for mutation query");
+      }
+
+      return queryService.executeQuery(connectionId, input.query);
+    },
   };
 }
 
