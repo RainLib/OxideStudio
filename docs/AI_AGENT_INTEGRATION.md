@@ -65,11 +65,12 @@ Write tools behind explicit approvals:
 - `search.indexDocument`
 - `search.updateDocument`
 - `search.deleteDocument`
+- `lsp.getCompletions`
 
 Future tool families:
 
 - `database.createNamespace`, `database.dropNamespace`
-- `lsp.complete`, `lsp.explainDiagnostics`
+- `lsp.explainDiagnostics`
 - `workspace.getSelection`
 
 ## MCP vs CLI

@@ -73,6 +73,11 @@ export const CORE_AI_TOOL_FAMILIES: AiToolFamily[] = [
       deleteSearchDocumentTool,
     ],
   },
+  {
+    name: "lsp.completion",
+    enabled: (adapters) => Boolean(adapters.getLspCompletions),
+    tools: [lspCompletionsTool],
+  },
 ];
 
 export function registerCoreAiTools(
@@ -640,6 +645,65 @@ function deleteSearchDocumentTool(adapters: AiToolAdapters): AiToolDefinition {
   };
 }
 
+function lspCompletionsTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "lsp.getCompletions",
+    description: "Return LSP completions for a document position.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        connectionId: {
+          type: "string",
+          description: "Connection id. Defaults to the active connection.",
+        },
+        uri: {
+          type: "string",
+          description: "Optional document URI. Defaults to the active query tab URI.",
+        },
+        text: {
+          type: "string",
+          description: "Optional document text. Defaults to the active query text.",
+        },
+        line: {
+          type: "number",
+          description: "Zero-based line number.",
+        },
+        character: {
+          type: "number",
+          description: "Zero-based character offset.",
+        },
+        languageId: {
+          type: "string",
+          description: "Optional LSP language id. Defaults to the active driver dialect.",
+        },
+      },
+      required: ["line", "character"],
+      additionalProperties: false,
+    },
+    permissions: ["read"],
+    capabilities: ["lsp"],
+    timeoutMs: 10_000,
+    resultLimit: {
+      maxRows: 100,
+      maxBytes: 100_000,
+    },
+    execute: async (input, context) => {
+      const payload = assertObject(input);
+      return adapters.getLspCompletions?.(
+        {
+          connectionId: optionalString(payload, "connectionId"),
+          uri: optionalString(payload, "uri"),
+          text: typeof payload.text === "string" ? payload.text : null,
+          line: requireNonNegativeInteger(payload, "line"),
+          character: requireNonNegativeInteger(payload, "character"),
+          languageId: optionalString(payload, "languageId"),
+        },
+        context
+      );
+    },
+  };
+}
+
 function assertObject(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("tool input must be an object");
@@ -1058,6 +1122,17 @@ function optionalPositiveInteger(
   if (value === undefined || value === null) return null;
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     throw new Error(`${field} must be a positive number`);
+  }
+  return Math.floor(value);
+}
+
+function requireNonNegativeInteger(
+  payload: Record<string, unknown>,
+  field: string
+) {
+  const value = payload[field];
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${field} must be a non-negative number`);
   }
   return Math.floor(value);
 }

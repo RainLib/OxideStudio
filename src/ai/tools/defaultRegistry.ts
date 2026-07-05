@@ -4,10 +4,12 @@ import {
   schemaService,
   tableService,
 } from "@/services/tauri";
+import { getSqlDocumentUri, lspClient } from "@/services/lsp";
 import type { QueryResult } from "@/services/tauri/types";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
+import { lspLanguageId, supportsLspLanguageId } from "@/lib/databaseDialect";
 import { registerCoreAiTools } from "./coreTools";
 import { createAiToolRegistry } from "./registry";
 import type {
@@ -15,6 +17,7 @@ import type {
   AiDocumentMutationInput,
   AiKeyValueMutationInput,
   AiListObjectsInput,
+  AiLspCompletionInput,
   AiObjectDescription,
   AiObjectKind,
   AiObjectSummary,
@@ -113,6 +116,9 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
 
     mutateSearchDocuments: async (input, context) =>
       mutateSearchDocuments(input, context),
+
+    getLspCompletions: async (input, context) =>
+      getLspCompletions(input, context),
   };
 }
 
@@ -197,6 +203,40 @@ async function mutateSearchDocuments(
     connectionId,
     buildElasticsearchMutationRequest(input)
   );
+}
+
+async function getLspCompletions(
+  input: AiLspCompletionInput,
+  context: AiToolExecutionContext
+) {
+  const connectionId = input.connectionId || context.activeConnectionId;
+  if (!connectionId) {
+    throw new Error("No active connection is available for lsp.getCompletions");
+  }
+
+  const connection = useConnectionStore
+    .getState()
+    .connections.find((candidate) => candidate.id === connectionId);
+  const driver = connection?.driver ?? context.activeDriver ?? null;
+  if (!driver) {
+    throw new Error(`Connection driver is not available for ${connectionId}`);
+  }
+  if (!supportsLspLanguageId(driver)) {
+    throw new Error(`${driver} does not support LSP completions`);
+  }
+
+  const tabState = useTabStore.getState();
+  const activeTab = tabState.tabs.find((tab) => tab.id === tabState.activeTabId);
+  const uri =
+    input.uri ||
+    (activeTab
+      ? getSqlDocumentUri(activeTab.id, driver)
+      : getSqlDocumentUri(context.requestId, driver));
+  const text = input.text ?? activeTab?.sql ?? "";
+  const languageId = input.languageId || lspLanguageId(driver);
+
+  await lspClient.didOpen(uri, text, Date.now(), languageId);
+  return lspClient.getCompletions(uri, input.line, input.character);
 }
 
 function buildMongoMutationCommand(

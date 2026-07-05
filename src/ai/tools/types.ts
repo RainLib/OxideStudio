@@ -11,6 +11,7 @@ import type {
   TableRowDelete,
   TableRowUpdate,
 } from "@/services/tauri/types";
+import type { CompletionItem } from "@/services/lsp/types";
 
 export type AiToolPermission = "read" | "write" | "destructive" | "external";
 
@@ -154,6 +155,15 @@ export type AiSearchDocumentMutationInput = {
   upsert?: boolean;
 };
 
+export type AiLspCompletionInput = {
+  connectionId?: string | null;
+  uri?: string | null;
+  text?: string | null;
+  line: number;
+  character: number;
+  languageId?: string | null;
+};
+
 export type AiDescribeObjectInput = {
   connectionId?: string | null;
   namespace?: string | null;
@@ -232,4 +242,8 @@ export type AiToolAdapters = {
     input: AiSearchDocumentMutationInput,
     context: AiToolExecutionContext
   ) => Promise<QueryResult[]> | QueryResult[];
+  getLspCompletions?: (
+    input: AiLspCompletionInput,
+    context: AiToolExecutionContext
+  ) => Promise<CompletionItem[]> | CompletionItem[];
 };
