@@ -5,6 +5,7 @@ import type {
   AssistantPlanStep,
   AssistantPreparedTurn,
   AssistantToolCallResult,
+  AssistantToolResultSummary,
 } from "@/ai";
 import { cn } from "@/lib/utils";
 import { Play, ShieldCheck, Sparkles } from "lucide-react";
@@ -23,12 +24,16 @@ export function AssistantSidebar() {
   const [toolResults, setToolResults] = useState<
     Record<string, AssistantToolCallResult>
   >({});
+  const [toolSummaries, setToolSummaries] = useState<
+    Record<string, AssistantToolResultSummary>
+  >({});
   const [isPlanning, setIsPlanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handlePrepare = async () => {
     setError(null);
     setToolResults({});
+    setToolSummaries({});
     setIsPlanning(true);
     try {
       setPreparedTurn(await runtime.prepareTurnAsync({ message, selectedText }));
@@ -62,6 +67,12 @@ export function AssistantSidebar() {
       );
       if (!result) return;
       setToolResults((state) => ({ ...state, [step.id]: result }));
+      const summary = await runtime.summarizeToolResults(
+        { message, selectedText },
+        [result],
+        preparedTurn.context
+      );
+      setToolSummaries((state) => ({ ...state, [step.id]: summary }));
       if (result.status === "error") {
         setError(result.error || "Tool execution failed");
       }
@@ -125,6 +136,7 @@ export function AssistantSidebar() {
 
             {preparedTurn.suggestedPlan.map((step) => {
               const result = toolResults[step.id];
+              const summary = toolSummaries[step.id];
               return (
                 <div
                   key={step.id}
@@ -170,9 +182,16 @@ export function AssistantSidebar() {
                   )}
 
                   {result !== undefined && (
-                    <pre className="mt-2 max-h-44 overflow-auto rounded-sm bg-background-tertiary p-2 text-[10px] text-muted-foreground">
-                      {JSON.stringify(result, null, 2)}
-                    </pre>
+                    <div className="mt-2 space-y-1.5">
+                      {summary && (
+                        <div className="rounded-sm border border-border/60 bg-background-tertiary px-2 py-1.5 text-[10px] text-muted-foreground">
+                          {summary.message}
+                        </div>
+                      )}
+                      <pre className="max-h-44 overflow-auto rounded-sm bg-background-tertiary p-2 text-[10px] text-muted-foreground">
+                        {JSON.stringify(result, null, 2)}
+                      </pre>
+                    </div>
                   )}
                 </div>
               );

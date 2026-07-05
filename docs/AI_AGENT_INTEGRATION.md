@@ -45,7 +45,7 @@ Use TypeScript LangGraph as an optional implementation of `AssistantPlanner` for
 
 The shipped default planner stays dependency-light and deterministic. A LangGraph planner can replace it by implementing `AssistantPlanner.plan`, returning the same `AssistantPlanStep[]`, and pausing before any step whose tool policy requires approval.
 
-For model-provider integration without taking a LangGraph dependency, use `createModelAssistantPlanner({ invoke })`. The runtime sends the model a redacted workspace context plus the AI tool manifest; the model returns candidate tool steps; the planner validates tool names and marks write/destructive tools as requiring approval according to policy.
+For model-provider integration without taking a LangGraph dependency, use `createModelAssistantPlanner({ invoke })`. The runtime sends the model a redacted workspace context plus the AI tool manifest; the model returns candidate tool steps; the planner validates tool names and marks write/destructive tools as requiring approval according to policy. Use `createModelToolResultSummarizer(invoke)` to feed tool results back to the provider for a final answer or follow-up suggestions.
 
 ## Tool Categories
 
@@ -116,6 +116,6 @@ Recommended usage:
 2. Add an assistant panel backed by the registry executor. Done.
 3. Add MCP and CLI adapters over the same registry. Done.
 4. Add write tools with approval gates and audit logging. Done for query-level mutation/destructive tools, structured table row mutations, and structured document/key/search mutations.
-5. Add a planner layer that chooses tool calls, pauses for approval, and feeds results back into the model. Foundation done with `AssistantPlanner`; LangGraph/model provider implementation is pending.
+5. Add a planner layer that chooses tool calls, pauses for approval, and feeds results back into the model. Foundation done with `AssistantPlanner`, `createModelAssistantPlanner`, and `createModelToolResultSummarizer`; full LangGraph graph wiring is still pending.
 6. Add provider/plugin hooks so new databases register tool families by capability, not by UI rewrites. Runtime family registration is done with `registerAiToolFamily`; dynamic package discovery/loading is still pending.
 7. Add live integration coverage for MongoDB, Redis, Elasticsearch, MySQL, and PostgreSQL tool paths.

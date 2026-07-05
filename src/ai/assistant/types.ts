@@ -69,6 +69,25 @@ export type AssistantToolCallResult = {
   error?: string;
 };
 
+export type AssistantToolResultSummary = {
+  message: string;
+  warnings?: string[];
+  notes?: string[];
+  suggestedCalls?: AssistantToolCall[];
+};
+
+export type AssistantToolResultSummarizerInput = {
+  turn: AssistantTurnInput;
+  context: AiToolExecutionContext;
+  availableTools: AiToolSummary[];
+  policy: AiToolExecutionPolicy;
+  results: AssistantToolCallResult[];
+};
+
+export type AssistantToolResultSummarizer = (
+  input: AssistantToolResultSummarizerInput
+) => AssistantToolResultSummary | Promise<AssistantToolResultSummary>;
+
 export type AssistantPreparedTurn = {
   requestId: string;
   intent: AssistantIntent;

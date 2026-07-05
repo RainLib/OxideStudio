@@ -10,6 +10,9 @@ import type {
   AssistantPlannerInput,
   AssistantPlannerResult,
   AssistantPlanStep,
+  AssistantToolCallResult,
+  AssistantToolResultSummarizer,
+  AssistantToolResultSummary,
   AssistantTurnInput,
 } from "./types";
 
@@ -38,9 +41,25 @@ export type AssistantModelPlannerResponse = {
   notes?: string[];
 };
 
+export type AssistantModelResultSummaryRequest = {
+  turn: AssistantTurnInput;
+  context: AssistantModelPlannerRequest["context"];
+  manifest: AiToolManifest;
+  results: AssistantToolCallResult[];
+  instructions: string[];
+};
+
+export type AssistantModelResultSummaryResponse = AssistantToolResultSummary;
+
 export type AssistantModelPlannerInvoke = (
   request: AssistantModelPlannerRequest
 ) => AssistantModelPlannerResponse | Promise<AssistantModelPlannerResponse>;
+
+export type AssistantModelResultSummarizerInvoke = (
+  request: AssistantModelResultSummaryRequest
+) =>
+  | AssistantModelResultSummaryResponse
+  | Promise<AssistantModelResultSummaryResponse>;
 
 export type ModelAssistantPlannerOptions = {
   id?: string;
@@ -152,10 +171,34 @@ export function createModelAssistantPlanner(
   return new ModelAssistantPlanner(options);
 }
 
+export function createModelToolResultSummarizer(
+  invoke: AssistantModelResultSummarizerInvoke
+): AssistantToolResultSummarizer {
+  return async (input) =>
+    invoke({
+      turn: input.turn,
+      context: {
+        requestId: input.context.requestId,
+        activeConnectionId: input.context.activeConnectionId ?? null,
+        activeDriver: input.context.activeDriver ?? null,
+      },
+      manifest: createAiToolManifest(input.availableTools, input.policy),
+      results: input.results,
+      instructions: MODEL_RESULT_SUMMARY_INSTRUCTIONS,
+    });
+}
+
 const MODEL_PLANNER_INSTRUCTIONS = [
   "Choose tools only from manifest.tools.",
   "Use read-only tools before mutation tools when context is missing.",
   "Never mark a mutating or destructive action as approved; the runtime approval policy controls execution.",
   "Keep inputs bounded and explicit, including connectionId, namespace, collection, table, index, or key when known.",
   "Return an empty steps array when the user intent is unclear.",
+];
+
+const MODEL_RESULT_SUMMARY_INSTRUCTIONS = [
+  "Summarize only from tool results and the original user turn.",
+  "Mention row limits, approval requirements, and tool errors when relevant.",
+  "Do not invent database objects, rows, documents, keys, or indexes that are not present in the results.",
+  "Return suggestedCalls only when another tool call is clearly needed and available in the manifest.",
 ];
