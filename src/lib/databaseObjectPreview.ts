@@ -12,6 +12,12 @@ export type DatabaseObjectPreviewContext = {
   collection: CollectionInfo;
 };
 
+export type DatabaseObjectCreateContext = {
+  capabilities: DatabaseCapabilities;
+  namespace: string | null;
+  name: string;
+};
+
 export type DatabaseObjectPreviewProvider = {
   id: string;
   priority?: number;
@@ -19,6 +25,7 @@ export type DatabaseObjectPreviewProvider = {
   objectLabel: string;
   objectPluralLabel?: string;
   tabTitle?: (context: DatabaseObjectPreviewContext) => string;
+  createQueryTemplate?: (context: DatabaseObjectCreateContext) => string | null;
   queryTemplate: (context: DatabaseObjectPreviewContext) => string;
   deleteQueryTemplate?: (context: DatabaseObjectPreviewContext) => string | null;
 };
@@ -120,12 +127,26 @@ export function collectionDeleteQueryTemplateForCapabilities(
   }) ?? null;
 }
 
+export function collectionCreateQueryTemplateForCapabilities(
+  capabilities: DatabaseCapabilities,
+  namespace: string | null,
+  name: string
+) {
+  const provider = databaseObjectPreviewProvider(capabilities);
+  return provider.createQueryTemplate?.({
+    capabilities,
+    namespace,
+    name,
+  }) ?? null;
+}
+
 const BUILTIN_PREVIEW_PROVIDERS: DatabaseObjectPreviewProvider[] = [
   {
     id: "builtin.key-value",
     priority: 300,
     matches: dataModelMatches("keyValue"),
     objectLabel: "Key",
+    createQueryTemplate: ({ name }) => `SET ${JSON.stringify(name)} ""`,
     queryTemplate: ({ collection }) =>
       redisPreviewCommand(collection.name, collection.type),
     deleteQueryTemplate: ({ collection }) => `DEL ${JSON.stringify(collection.name)}`,
@@ -136,6 +157,8 @@ const BUILTIN_PREVIEW_PROVIDERS: DatabaseObjectPreviewProvider[] = [
     matches: dataModelMatches("search"),
     objectLabel: "Index",
     objectPluralLabel: "Indices",
+    createQueryTemplate: ({ name }) =>
+      `PUT /${encodeURIComponent(name)}\n${JSON.stringify({}, null, 2)}`,
     queryTemplate: ({ collection }) =>
       `GET /${encodeURIComponent(collection.name)}/_search\n${JSON.stringify(
         {
@@ -153,6 +176,15 @@ const BUILTIN_PREVIEW_PROVIDERS: DatabaseObjectPreviewProvider[] = [
     priority: 200,
     matches: dataModelMatches("document"),
     objectLabel: "Collection",
+    createQueryTemplate: ({ namespace, name }) =>
+      JSON.stringify(
+        {
+          ...(namespace ? { database: namespace } : {}),
+          command: { create: name },
+        },
+        null,
+        2
+      ),
     queryTemplate: ({ namespace, collection }) =>
       JSON.stringify(
         {

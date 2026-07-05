@@ -43,6 +43,7 @@ import {
   supportsTableWorkspace,
 } from "@/lib/databaseDialect";
 import {
+  collectionCreateQueryTemplateForCapabilities,
   collectionDeleteQueryTemplateForCapabilities,
   databaseObjectPreviewProvider,
   collectionPreviewQueryTemplateForCapabilities,
@@ -434,6 +435,13 @@ export function SchemaSidebar() {
       collection
     );
 
+  const collectionCreateSql = (name: string) =>
+    collectionCreateQueryTemplateForCapabilities(
+      activeCapabilities,
+      currentSchema,
+      name
+    );
+
   const handleCollectionDoubleClick = (collection: CollectionInfo) => {
     if (!activeConnectionId) return;
 
@@ -484,6 +492,31 @@ export function SchemaSidebar() {
       objectType: collection.type || null,
     });
     void runTabQuery(tabId, activeConnectionId, sql);
+  };
+
+  const handleCreateCollectionClick = () => {
+    if (!activeConnectionId) return;
+
+    const rawName = window.prompt(`New ${collectionLabel.toLowerCase()} name:`);
+    if (rawName === null) return;
+
+    const name = rawName.trim();
+    if (!name) return;
+
+    const sql = collectionCreateSql(name);
+    if (!sql) {
+      window.alert(
+        `${activeCapabilities.displayName} ${collectionLabel.toLowerCase()} creation is not supported.`
+      );
+      return;
+    }
+
+    createTab("query", `Create ${collectionLabel}: ${name}`, sql, {
+      connectionId: activeConnectionId,
+      schemaName: currentSchema || undefined,
+      tableName: name,
+      objectType: collectionLabel.toLowerCase(),
+    });
   };
 
   // Highlight matching text
@@ -897,6 +930,16 @@ export function SchemaSidebar() {
                   size={10}
                   className={cn(isCollectionsLoading && "animate-spin")}
                 />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5 text-muted-foreground hover:text-primary rounded-sm"
+                onClick={handleCreateCollectionClick}
+                title={`Create New ${collectionLabel}`}
+                disabled={!currentSchema}
+              >
+                <Plus size={10} />
               </Button>
             </div>
           )}

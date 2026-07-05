@@ -52,6 +52,12 @@ describe("AI query safety classification", () => {
         "mongodb"
       )
     ).toBe("destructive");
+    expect(
+      classifyAiQuerySafety(
+        JSON.stringify({ database: "app", command: { create: "users" } }),
+        "mongodb"
+      )
+    ).toBe("write");
   });
 
   it("classifies Redis command batches by command family", () => {
@@ -72,6 +78,7 @@ describe("AI query safety classification", () => {
     expect(
       classifyAiQuerySafety('POST /users/_doc\n{"name":"Ada"}', "elasticsearch")
     ).toBe("write");
+    expect(classifyAiQuerySafety("PUT /users\n{}", "elasticsearch")).toBe("write");
     expect(
       classifyAiQuerySafety("DELETE /users", "elasticsearch")
     ).toBe("destructive");
