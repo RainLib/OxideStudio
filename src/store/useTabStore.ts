@@ -21,6 +21,7 @@ import { classifyAiQuerySafety } from "@/lib/querySafety";
 import type { Diagnostic } from "@/services/lsp/types";
 import {
   extractSchemaContextChange,
+  metadataRefreshNamespaces,
   queryMayChangeMetadata,
 } from "@/lib/sqlAnalysis";
 
@@ -76,9 +77,14 @@ async function refreshMetadataAfterQuery(
   if (!shouldRefreshObjects) return;
 
   await schemaStore.loadSchemas(connectionId, true);
-  const schemaToRefresh =
+  const fallbackSchema =
     useSchemaStore.getState().currentSchema || schemaContext || undefined;
-  await refreshNamespaceObjects(schemaToRefresh);
+  const namespacesToRefresh = metadataRefreshNamespaces(
+    sql,
+    fallbackSchema,
+    driver
+  );
+  await Promise.all(namespacesToRefresh.map(refreshNamespaceObjects));
   schemaStore.bumpMetadataVersion();
 }
 

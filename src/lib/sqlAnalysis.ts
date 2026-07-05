@@ -352,6 +352,27 @@ export function queryMayChangeMetadata(
   });
 }
 
+export function metadataRefreshNamespaces(
+  sql: string,
+  fallbackNamespace?: string | null,
+  dialect?: string | null
+) {
+  const namespaces = new Set<string>();
+
+  for (const reference of extractRelationReferences(sql, dialect)) {
+    if (reference.schema) {
+      namespaces.add(reference.schema);
+    }
+  }
+
+  const fallback = fallbackNamespace?.trim();
+  if (namespaces.size === 0 && fallback) {
+    namespaces.add(fallback);
+  }
+
+  return Array.from(namespaces);
+}
+
 function firstMatchedGroup(match: RegExpMatchArray | null) {
   return match?.slice(1).find((value) => value && value.trim())?.trim() || null;
 }

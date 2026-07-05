@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   extractRelationReferences,
   extractSchemaContextChange,
+  metadataRefreshNamespaces,
   queryMayChangeMetadata,
   splitSqlStatements,
 } from "@/lib/sqlAnalysis";
@@ -94,5 +95,22 @@ describe("SQL analysis helpers", () => {
         FROM real_table;
       `)
     ).toEqual([{ table: "real_table" }]);
+  });
+
+  it("selects metadata refresh namespaces from explicit relation schemas", () => {
+    expect(
+      metadataRefreshNamespaces(
+        `
+          CREATE TABLE analytics.events(id INT);
+          CREATE INDEX idx_audit_id ON audit.events(id);
+        `,
+        "public",
+        "postgres"
+      )
+    ).toEqual(["analytics", "audit"]);
+
+    expect(
+      metadataRefreshNamespaces("ALTER TABLE users ADD COLUMN name TEXT", "public")
+    ).toEqual(["public"]);
   });
 });
