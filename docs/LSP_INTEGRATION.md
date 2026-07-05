@@ -2,7 +2,7 @@
 
 ## Overview
 
-OxideStudio now includes infrastructure for integrating with the [lsp_sqls](https://github.com/LikeRainDay/lsp_sqls) Language Server Protocol (LSP) server to provide advanced SQL intelligence features.
+OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) Language Server Protocol (LSP) server to provide SQL intelligence through the bundled `sql-lsp` binary.
 
 ## Current Status
 
@@ -11,61 +11,44 @@ OxideStudio now includes infrastructure for integrating with the [lsp_sqls](http
 - Phase 1: LSP process management with lifecycle control
 - Phase 2: Tauri commands for frontend communication
 - Phase 3: TypeScript client service and React hooks
+- Phase 4: Monaco Editor completion, hover, definition, references, formatting, and diagnostics integration
 - Phase 5: **Bidirectional IPC with async stdio** (JSON-RPC communication)
+- Phase 6: Relational schema synchronization through `LspConnectionSyncer`
 
 ⏳ **Pending:**
 
-- Phase 4: Monaco Editor integration (awaiting LSP binary)
-- Phase 6: Database schema synchronization
+- Broader dialect-specific schema/spec handling for non-relational backends
+- Additional integration coverage for Redis, MongoDB, and Elasticsearch LSP paths
 
 ## Setup Instructions
 
-### 1. Download LSP Binary
+### 1. Initialize the LSP Submodule
 
-Download the appropriate `sql-lsp` binary for your platform from the [lsp_sqls releases](https://github.com/LikeRainDay/lsp_sqls/releases/tag/v0.1.1):
-
-**Linux:**
-
-- x86_64: `sql-lsp-x86_64-unknown-linux-gnu-v0.1.1.tar.gz`
-- ARM64: `sql-lsp-aarch64-unknown-linux-gnu-v0.1.1.tar.gz`
-
-**macOS:**
-
-- Intel: `sql-lsp-x86_64-apple-darwin-v0.1.1.tar.gz`
-- Apple Silicon: `sql-lsp-aarch64-apple-darwin-v0.1.1.tar.gz`
-
-**Windows:**
-
-- x86_64: `sql-lsp-x86_64-pc-windows-msvc-v0.1.1.tar.gz`
-
-### 2. Extract Binary
+The LSP server is tracked as a git submodule at `vendor/sql-lsp`:
 
 ```bash
-# Extract the archive
-tar -xzf sql-lsp-*.tar.gz
-
-# Create binaries directory if it doesn't exist
-mkdir -p src-tauri/binaries
-
-# Copy binary to project
-cp sql-lsp src-tauri/binaries/
-# Windows: cp sql-lsp.exe src-tauri/binaries/
+git submodule update --init --recursive
+git -C vendor/sql-lsp describe --tags --always
 ```
 
-### 3. Configure Tauri
+Current tracked revision is `v0.1.3-3-g789e7d5`.
 
-Update `src-tauri/tauri.conf.json` to bundle the binary:
+### 2. Prepare the Binary
 
-```json
-{
-  "bundle": {
-    "resources": ["binaries/sql-lsp*"],
-    "externalBin": ["binaries/sql-lsp"]
-  }
-}
+`src-tauri/build_prepare.sh` builds the submodule and copies `sql-lsp` into `src-tauri/binaries/` during the Tauri build:
+
+```bash
+cd src-tauri
+./build_prepare.sh
 ```
 
-### 4. Test LSP Server
+To use a prebuilt binary instead of building the submodule:
+
+```bash
+OXIDE_SQL_LSP_BINARY=/path/to/sql-lsp ./build_prepare.sh
+```
+
+### 3. Test LSP Server
 
 The LSP client will automatically initialize on app startup via the `useLspClient` hook.
 
@@ -94,7 +77,8 @@ To verify it's working, check the console logs:
 - `lsp_shutdown` - Stop LSP server
 - `lsp_is_running` - Health check
 - `lsp_get_completions` - Get SQL completions (fully implemented)
-- `lsp_update_schema` - Update database schema
+- `lsp_did_change_configuration` - Update LSP settings and schema context
+- `lsp_did_open`, `lsp_did_change`, `lsp_did_close` - Synchronize editor documents
 
 ### Frontend (TypeScript)
 
@@ -122,46 +106,16 @@ function QueryEditor() {
 }
 ```
 
-## Next Steps
+## Schema Synchronization
 
-### Monaco Editor Integration
-
-Once the LSP binary is configured, integrate with Monaco Editor:
-
-1. Import LSP client in `QueryEditor.tsx`
-2. Replace tree-sitter completion provider
-3. Register LSP completion provider:
+`LspConnectionSyncer` sends bounded relational schema snapshots when the active connection, schema, metadata version, or open query tabs change. It limits tables per schema and metadata concurrency to keep LSP updates responsive.
 
 ```typescript
-monaco.languages.registerCompletionItemProvider("sql", {
-  async provideCompletionItems(model, position) {
-    const items = await lspClient.getCompletions(
-      model.uri.toString(),
-      position.lineNumber - 1,
-      position.column - 1
-    );
-
-    return {
-      suggestions: items.map((item) => ({
-        label: item.label,
-        kind: monaco.languages.CompletionItemKind.Field,
-        detail: item.detail,
-        insertText: item.label,
-      })),
-    };
-  },
+await lspClient.updateConfiguration({
+  defaultDialect: "postgres",
+  schemas: [{ id: "public", database: "public", tables: [] }],
+  fileSchemas: {},
 });
-```
-
-### Schema Synchronization
-
-Implement schema updates when database connection changes:
-
-```typescript
-// On connection change
-const schema = await fetchDatabaseSchema();
-const schemaJson = JSON.stringify(schema);
-await lspClient.updateSchema(schemaJson);
 ```
 
 ## Troubleshooting
@@ -196,6 +150,6 @@ Default timeout is 5 seconds. Long-running requests will fail.
 
 ## References
 
-- [lsp_sqls Repository](https://github.com/LikeRainDay/lsp_sqls)
+- [lsp_sqls Repository](https://github.com/RainLib/lsp_sqls)
 - [LSP Specification](https://microsoft.github.io/language-server-protocol/)
 - [Monaco Editor API](https://microsoft.github.io/monaco-editor/api/index.html)
