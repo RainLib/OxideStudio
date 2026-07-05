@@ -319,6 +319,9 @@ export function QueryEditor() {
               detail: item.detail,
               documentation: item.documentation,
               insertText: item.insertText || item.label,
+              sortText: item.sortText,
+              filterText: item.filterText,
+              preselect: item.preselect,
               insertTextRules:
                 item.insertTextFormat === 2
                   ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
