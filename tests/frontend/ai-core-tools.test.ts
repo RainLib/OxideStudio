@@ -161,6 +161,7 @@ describe("core AI tools", () => {
       "query.runReadOnly",
       {
         connectionId: "elasticsearch-1",
+        namespace: "users",
         query: 'GET /users/_search\n{"query":{"match_all":{}}}',
         limit: 500,
       },
@@ -204,6 +205,7 @@ describe("core AI tools", () => {
         name: "read",
         input: {
           connectionId: "elasticsearch-1",
+          namespace: "users",
           query: 'GET /users/_search\n{"query":{"match_all":{}}}',
           limit: 200,
         },
@@ -216,6 +218,13 @@ describe("core AI tools", () => {
         },
       },
     ]);
+
+    expect(
+      registry.list().find((tool) => tool.name === "query.runReadOnly")
+        ?.inputSchema.properties?.namespace
+    ).toMatchObject({
+      type: "string",
+    });
   });
 
   it("requires approval before structured mutation tools can call adapters", async () => {

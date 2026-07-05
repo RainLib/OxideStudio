@@ -429,6 +429,11 @@ function readOnlyQueryTool(adapters: AiToolAdapters): AiToolDefinition {
           type: "string",
           description: "Query or driver-native request body.",
         },
+        namespace: {
+          type: "string",
+          description:
+            "Optional schema, database, Redis DB, or Elasticsearch index context.",
+        },
         limit: {
           type: "number",
           description: "Maximum rows requested by the assistant.",
@@ -460,9 +465,11 @@ function readOnlyQueryTool(adapters: AiToolAdapters): AiToolDefinition {
         throw new Error("query.runReadOnly rejected a potentially mutating request");
       }
 
+      const namespace = optionalString(payload, "namespace");
       return adapters.runReadOnlyQuery?.(
         {
           connectionId,
+          ...(namespace ? { namespace } : {}),
           query,
           limit:
             typeof payload.limit === "number"
@@ -490,6 +497,11 @@ function mutationQueryTool(adapters: AiToolAdapters): AiToolDefinition {
           type: "string",
           description: "Mutation query or driver-native write request.",
         },
+        namespace: {
+          type: "string",
+          description:
+            "Optional schema, database, Redis DB, or Elasticsearch index context.",
+        },
       },
       required: ["query"],
       additionalProperties: false,
@@ -516,6 +528,11 @@ function destructiveQueryTool(adapters: AiToolAdapters): AiToolDefinition {
         query: {
           type: "string",
           description: "Destructive query or driver-native request.",
+        },
+        namespace: {
+          type: "string",
+          description:
+            "Optional schema, database, Redis DB, or Elasticsearch index context.",
         },
       },
       required: ["query"],
@@ -1462,7 +1479,15 @@ async function runApprovedMutation(
     throw new Error("query.runDestructive only accepts destructive requests");
   }
 
-  return adapters.runMutationQuery?.({ connectionId, query }, context);
+  const namespace = optionalString(payload, "namespace");
+  return adapters.runMutationQuery?.(
+    {
+      connectionId,
+      ...(namespace ? { namespace } : {}),
+      query,
+    },
+    context
+  );
 }
 
 async function resolveQueryDriver(

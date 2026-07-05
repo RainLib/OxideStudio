@@ -10,10 +10,14 @@ import {
   lspClient,
 } from "@/services/lsp";
 import type { Diagnostic } from "@/services/lsp/types";
-import type { QueryResult } from "@/services/tauri/types";
+import type { DatabaseDriver, QueryResult } from "@/services/tauri/types";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
-import { useTabStore, type EditorSelectionState } from "@/store/useTabStore";
+import {
+  querySchemaContextForTab,
+  useTabStore,
+  type EditorSelectionState,
+} from "@/store/useTabStore";
 import {
   lspLanguageId,
   previewTableQuery,
@@ -128,22 +132,30 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
     describeObject: async (input, context) => describeObject(input, context),
 
     runReadOnlyQuery: async (input, context) => {
-      const connectionId = input.connectionId || context.activeConnectionId;
-      if (!connectionId) {
-        throw new Error("No active connection is available for query.runReadOnly");
-      }
+      const { connectionId, namespace } = resolveQueryExecutionTarget(
+        input.connectionId,
+        input.namespace,
+        context,
+        "query.runReadOnly"
+      );
 
-      const results = await queryService.executeQuery(connectionId, input.query);
+      const results = await queryService.executeQuery(
+        connectionId,
+        input.query,
+        namespace
+      );
       return limitQueryResults(results, input.limit ?? 200);
     },
 
     runMutationQuery: async (input, context) => {
-      const connectionId = input.connectionId || context.activeConnectionId;
-      if (!connectionId) {
-        throw new Error("No active connection is available for mutation query");
-      }
+      const { connectionId, namespace } = resolveQueryExecutionTarget(
+        input.connectionId,
+        input.namespace,
+        context,
+        "mutation query"
+      );
 
-      return queryService.executeQuery(connectionId, input.query);
+      return queryService.executeQuery(connectionId, input.query, namespace);
     },
 
     mutateTableRows: async (input, context) => mutateTableRows(input, context),
@@ -659,6 +671,44 @@ async function resolveMetadataTarget(
   const namespace = requestedNamespace || useSchemaStore.getState().currentSchema || "";
   const capabilities = await databaseService.getDatabaseCapabilities(driver);
   return { connectionId, namespace, driver, capabilities };
+}
+
+function resolveQueryExecutionTarget(
+  requestedConnectionId: string | null | undefined,
+  requestedNamespace: string | null | undefined,
+  context: AiToolExecutionContext,
+  toolName: string
+) {
+  const connectionId = requestedConnectionId || context.activeConnectionId;
+  if (!connectionId) {
+    throw new Error(`No active connection is available for ${toolName}`);
+  }
+
+  const connection = useConnectionStore
+    .getState()
+    .connections.find((candidate) => candidate.id === connectionId);
+  const driver = connection?.driver ?? context.activeDriver ?? "postgres";
+  const namespace =
+    requestedNamespace ||
+    inferActiveQueryNamespace(connectionId, driver) ||
+    undefined;
+
+  return { connectionId, namespace };
+}
+
+function inferActiveQueryNamespace(connectionId: string, driver: DatabaseDriver) {
+  const schemaState = useSchemaStore.getState();
+  const tabState = useTabStore.getState();
+  const activeTab = tabState.tabs.find((tab) => tab.id === tabState.activeTabId);
+
+  if (
+    activeTab &&
+    (!activeTab.connectionId || activeTab.connectionId === connectionId)
+  ) {
+    return querySchemaContextForTab(activeTab, schemaState.currentSchema, driver);
+  }
+
+  return schemaState.currentSchema || undefined;
 }
 
 function limitQueryResults(results: QueryResult[], limit: number) {

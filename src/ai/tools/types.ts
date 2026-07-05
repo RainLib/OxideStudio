@@ -120,12 +120,14 @@ export type AiWorkspaceSelection = {
 
 export type AiReadOnlyQueryInput = {
   connectionId?: string | null;
+  namespace?: string | null;
   query: string;
   limit?: number;
 };
 
 export type AiMutationQueryInput = {
   connectionId?: string | null;
+  namespace?: string | null;
   query: string;
 };
 
