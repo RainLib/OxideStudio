@@ -44,7 +44,7 @@ interface SchemaState {
   bumpMetadataVersion: () => void;
   togglePinTable: (tableName: string) => void;
   setCurrentSchema: (schema: string) => Promise<void>;
-  setDefaultSchema: (schema: string) => void; // Persist user's choice
+  setDefaultSchema: (schema: string) => Promise<void>; // Persist user's choice
   selectTable: (table: string | null) => void;
   reset: () => void;
 }
@@ -77,8 +77,27 @@ const getSavedDefaultSchema = (
   connectionId: string,
   driver: string | null | undefined
 ) =>
-  localStorage.getItem(getDefaultSchemaKey(connectionId, driver)) ||
-  localStorage.getItem(LEGACY_STORAGE_KEY);
+  readStorageItem(getDefaultSchemaKey(connectionId, driver)) ||
+  readStorageItem(LEGACY_STORAGE_KEY);
+
+function readStorageItem(key: string) {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage.getItem(key);
+  } catch (error) {
+    console.warn("Store: Failed to read localStorage", error);
+    return null;
+  }
+}
+
+function writeStorageItem(key: string, value: string) {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(key, value);
+    }
+  } catch (error) {
+    console.warn("Store: Failed to write localStorage", error);
+  }
+}
 
 async function activateBackendSchema(connectionId: string, schema: string | null) {
   if (!schema) return true;
@@ -250,7 +269,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
 
     // Load pinned tables for this context
     const pinKey = getPinnedTablesKey(connectionId, schema, activeDriver);
-    const savedPins = JSON.parse(localStorage.getItem(pinKey) || "[]");
+    const savedPins = JSON.parse(readStorageItem(pinKey) || "[]");
     set({ pinnedTables: savedPins });
 
     // Parent ID for tables is scoped by connection + driver + schema.
@@ -486,7 +505,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       ? pinnedTables.filter((t) => t !== tableName)
       : [...pinnedTables, tableName];
 
-    localStorage.setItem(pinKey, JSON.stringify(newPinned));
+    writeStorageItem(pinKey, JSON.stringify(newPinned));
     set({ pinnedTables: newPinned });
   },
 
@@ -523,16 +542,19 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     }
   },
 
-  setDefaultSchema: (schema: string) => {
+  setDefaultSchema: async (schema: string) => {
     console.log("Store: setDefaultSchema called with:", schema);
     const { activeConnectionId } = useConnectionStore.getState();
     if (activeConnectionId) {
-      localStorage.setItem(
+      await get().setCurrentSchema(schema);
+      writeStorageItem(
         getDefaultSchemaKey(activeConnectionId, getConnectionDriver(activeConnectionId)),
         schema
       );
+    } else {
+      set({ currentSchema: schema });
     }
-    set({ defaultSchema: schema, currentSchema: schema });
+    set({ defaultSchema: schema });
     console.log("Store: setDefaultSchema - currentSchema updated to:", schema);
   },
 

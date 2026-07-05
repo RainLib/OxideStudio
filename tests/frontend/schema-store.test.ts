@@ -6,6 +6,21 @@ const mocks = vi.hoisted(() => ({
   setCurrentSchema: vi.fn(async () => "ok"),
 }));
 
+function createStorageMock() {
+  const storage = new Map<string, string>();
+
+  return {
+    clear: vi.fn(() => storage.clear()),
+    getItem: vi.fn((key: string) => storage.get(key) ?? null),
+    removeItem: vi.fn((key: string) => {
+      storage.delete(key);
+    }),
+    setItem: vi.fn((key: string, value: string) => {
+      storage.set(key, value);
+    }),
+  };
+}
+
 vi.mock("@/services/tauri", () => ({
   connectionService: {
     loadConnections: vi.fn(async () => []),
@@ -28,11 +43,23 @@ vi.mock("@/services/tauri", () => ({
 }));
 
 describe("schema store", () => {
+  let localStorageMock: ReturnType<typeof createStorageMock>;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorageMock = createStorageMock();
+    vi.stubGlobal("localStorage", localStorageMock);
     mocks.setCurrentSchema.mockResolvedValue("ok");
     useConnectionStore.setState({
-      connections: [],
+      connections: [
+        {
+          id: "conn-1",
+          name: "Main",
+          driver: "postgres",
+          url: "postgres://localhost/app",
+          database: "public",
+        },
+      ],
       activeConnectionId: "conn-1",
       isConnected: true,
       isLoading: false,
@@ -123,5 +150,38 @@ describe("schema store", () => {
 
     expect(mocks.setCurrentSchema).not.toHaveBeenCalled();
     expect(useSchemaStore.getState().currentSchema).toBe("audit");
+  });
+
+  it("activates backend schema before persisting a default schema", async () => {
+    await useSchemaStore.getState().setDefaultSchema("audit");
+
+    expect(mocks.setCurrentSchema).toHaveBeenCalledWith("conn-1", "audit");
+    expect(localStorageMock.setItem).toHaveBeenCalledWith(
+      "oxide-studio-default-schema:conn-1:postgres",
+      "audit"
+    );
+    expect(useSchemaStore.getState()).toMatchObject({
+      currentSchema: "audit",
+      defaultSchema: "audit",
+      selectedTable: null,
+      tables: [],
+      collections: [],
+      functions: [],
+    });
+  });
+
+  it("does not persist a default schema when backend activation fails", async () => {
+    mocks.setCurrentSchema.mockRejectedValueOnce(new Error("schema missing"));
+
+    await expect(
+      useSchemaStore.getState().setDefaultSchema("missing")
+    ).rejects.toThrow("schema missing");
+
+    expect(localStorageMock.setItem).not.toHaveBeenCalled();
+    expect(useSchemaStore.getState()).toMatchObject({
+      currentSchema: "public",
+      defaultSchema: null,
+      selectedTable: "users",
+    });
   });
 });

@@ -23,7 +23,9 @@ export function DatabaseSelector() {
   const handleSchemaChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newSchema = e.target.value;
     console.log("DatabaseSelector: Schema changed to:", newSchema);
-    setDefaultSchema(newSchema);
+    void setDefaultSchema(newSchema).catch((error) => {
+      console.warn("Failed to switch default schema", error);
+    });
   };
 
   const handleRefresh = () => {
