@@ -15,6 +15,8 @@ import {
   classifyAiQuerySafety,
   looksAiQueryReadOnly,
 } from "@/lib/querySafety";
+import { supportedDatabaseDriverProfiles } from "@/lib/databaseDialect";
+import { listRegisteredDatabaseProviders } from "@/providers";
 
 const DEFAULT_QUERY_LIMIT = 200;
 
@@ -22,6 +24,10 @@ export const CORE_AI_TOOL_FAMILIES: AiToolFamily[] = [
   {
     name: "connection",
     tools: [connectionListTool, connectionCapabilitiesTool],
+  },
+  {
+    name: "provider.registry",
+    tools: [providerListTool],
   },
   {
     name: "workspace",
@@ -147,6 +153,52 @@ function connectionCapabilitiesTool(adapters: AiToolAdapters): AiToolDefinition 
       }
       return adapters.getConnectionCapabilities(driver);
     },
+  };
+}
+
+function providerListTool(): AiToolDefinition {
+  return {
+    name: "provider.list",
+    description:
+      "List registered database providers and supported driver profiles available to the assistant.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+    },
+    permissions: ["read"],
+    capabilities: ["provider", "metadata"],
+    timeoutMs: 5_000,
+    execute: async () => ({
+      providers: listRegisteredDatabaseProviders().map((provider) => ({
+        id: provider.id,
+        displayName: provider.displayName,
+        priority: provider.priority ?? 0,
+        activated: provider.activated,
+        driverProfiles: (provider.driverProfiles ?? []).map(
+          (profile) => profile.driver
+        ),
+        objectPreviewProviders: (provider.objectPreviewProviders ?? []).map(
+          (previewProvider) => previewProvider.id
+        ),
+        aiToolFamilies: (provider.aiToolFamilies ?? []).map(
+          (family) => family.name
+        ),
+      })),
+      driverProfiles: supportedDatabaseDriverProfiles().map((profile) => ({
+        driver: profile.driver,
+        menuLabel: profile.menuLabel,
+        displayName: profile.capabilities.displayName,
+        dataModel: profile.capabilities.dataModel,
+        lspLanguageId: profile.capabilities.lspLanguageId,
+        namespaceLabel: profile.capabilities.namespaceLabel,
+        defaultPort: profile.capabilities.defaultPort,
+        supportsSqlQuery: profile.capabilities.supportsSqlQuery,
+        supportsTableBrowsing: profile.capabilities.supportsTableBrowsing,
+        supportsCollectionBrowsing:
+          profile.capabilities.supportsCollectionBrowsing,
+        supportsKeyValueBrowsing: profile.capabilities.supportsKeyValueBrowsing,
+      })),
+    }),
   };
 }
 

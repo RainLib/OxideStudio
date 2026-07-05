@@ -18,6 +18,7 @@ export type AiToolPermission = "read" | "write" | "destructive" | "external";
 export type AiToolCapability =
   | "connection"
   | "metadata"
+  | "provider"
   | "query"
   | "workspace"
   | "lsp";
