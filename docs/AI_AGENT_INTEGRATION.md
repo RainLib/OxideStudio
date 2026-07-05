@@ -29,6 +29,7 @@ This keeps the editor integration direct and state-aware while allowing external
 - `src/lib/querySafety.ts` centralizes read/write/destructive classification for SQL, MongoDB, Redis, and Elasticsearch so planners and executors make the same safety decision.
 - `src/ai/assistant` exposes an `AssistantPlanner` contract, a deterministic fallback planner, a provider-neutral model planner, and approval-aware execution for AI-proposed tool calls.
 - `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
+- `src/ai/mcp/protocol.ts` adds a transport-neutral JSON-RPC handler for `initialize`, `tools/list`, `tools/call`, and the Oxide manifest extension; stdio or HTTP servers should wrap this instead of reimplementing tool routing.
 - `src/ai/cli` provides a dependency-light command adapter for `tools list` and `tools call`.
 - The assistant panel is an editor entry point; real model/provider integration should call the runtime APIs rather than bypassing the registry.
 
@@ -83,6 +84,19 @@ Future tool families:
 ## MCP vs CLI
 
 MCP is the better external integration because it gives other AI clients a structured tool protocol with schemas, permissions, and discoverability. Implement MCP as an adapter over `AiToolRegistry`; do not duplicate tool logic in the MCP server.
+
+The protocol adapter is transport-neutral:
+
+```typescript
+const protocol = createMcpProtocolAdapter();
+await protocol.handleMessage({
+  jsonrpc: "2.0",
+  id: 1,
+  method: "tools/list",
+});
+```
+
+Mutating calls still require an explicit approval signal, for example `_meta: { "oxide/approved": true }`; do not grant that automatically from an external host.
 
 CLI is useful for local automation, tests, and scripting. It can share the same registry by running commands such as:
 
