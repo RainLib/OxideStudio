@@ -18,10 +18,11 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 8: Non-blocking Tauri command lifecycle; LSP requests clone the manager handle before awaiting server responses
 - Phase 9: MongoDB/JSON dialect support in `lsp_sqls` with bounded collection context synchronization
 - Phase 10: Live driver coverage for PostgreSQL, MySQL, Redis, MongoDB, and Elasticsearch via `scripts/test-live-databases.sh`
+- Phase 11: Schema-aware Redis, MongoDB, and Elasticsearch DSL LSP completion/hover/definition assertions in `lsp_sqls`
 
 ⏳ **Pending:**
 
-- Direct live LSP completion, diagnostics, and editor synchronization assertions for Redis, MongoDB, and Elasticsearch paths
+- Tauri/editor-level LSP synchronization assertions for Redis, MongoDB, and Elasticsearch paths
 
 ## Setup Instructions
 
@@ -34,7 +35,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-4-g4971175`.
+Current tracked revision is `v0.1.3-5-g8bf2d40`.
 
 ### 2. Prepare the Binary
 
