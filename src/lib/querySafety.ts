@@ -435,6 +435,7 @@ function looksReadOnlyElasticsearchRequest(query: string) {
 }
 
 function looksDestructiveElasticsearchRequest(query: string) {
+  const normalized = query.toLowerCase();
   const requestLines = query
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -448,6 +449,8 @@ function looksDestructiveElasticsearchRequest(query: string) {
     const path = match[2]!.toLowerCase();
     return (
       method === "DELETE" ||
+      (path.includes("_bulk") && normalized.includes('"delete"')) ||
+      (path.includes("_aliases") && normalized.includes('"remove_index"')) ||
       path.includes("_delete_by_query") ||
       path.includes("_close") ||
       path.includes("_forcemerge") ||

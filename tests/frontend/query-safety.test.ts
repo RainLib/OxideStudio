@@ -83,6 +83,18 @@ describe("AI query safety classification", () => {
       classifyAiQuerySafety("DELETE /users", "elasticsearch")
     ).toBe("destructive");
     expect(
+      classifyAiQuerySafety(
+        'POST /_bulk\n{"delete":{"_index":"users","_id":"1"}}',
+        "elasticsearch"
+      )
+    ).toBe("destructive");
+    expect(
+      classifyAiQuerySafety(
+        'POST /_aliases\n{"actions":[{"remove_index":{"index":"users"}}]}',
+        "elasticsearch"
+      )
+    ).toBe("destructive");
+    expect(
       classifyAiQuerySafety('{"delete":{"_index":"users","_id":"1"}}', "elasticsearch")
     ).toBe("destructive");
   });
