@@ -28,7 +28,6 @@ import { useTableOperations } from "@/hooks/useTableOperations";
 import { databaseService } from "@/services/tauri";
 import type {
   CollectionInfo,
-  DatabaseDriver,
   FunctionInfo,
   TableInfo,
 } from "@/services/tauri/types";
@@ -42,6 +41,11 @@ import {
   relationObjectLabel,
   supportsTableWorkspace,
 } from "@/lib/databaseDialect";
+import {
+  collectionObjectPluralLabel,
+  collectionPreviewQueryTemplate,
+  collectionPreviewTabTitle,
+} from "@/lib/databaseObjectPreview";
 import { useEffect, useState } from "react";
 import {
   Select,
@@ -74,63 +78,6 @@ function routineMatchesFilter(routine: FunctionInfo, filter: string) {
   ]
     .filter(Boolean)
     .some((value) => String(value).toLowerCase().includes(normalizedFilter));
-}
-
-function collectionObjectLabel(driver: DatabaseDriver) {
-  const normalized = String(driver).toLowerCase();
-  if (normalized === "elasticsearch" || normalized === "elastic") return "Index";
-  if (normalized === "redis") return "Key";
-  return "Collection";
-}
-
-function collectionQueryTemplate(
-  driver: DatabaseDriver,
-  namespace: string | null,
-  collection: string,
-  collectionType?: string | null
-) {
-  const normalized = String(driver).toLowerCase();
-  if (normalized === "elasticsearch" || normalized === "elastic") {
-    return `GET /${encodeURIComponent(collection)}/_search\n${JSON.stringify(
-      {
-        query: { match_all: {} },
-        size: 100,
-      },
-      null,
-      2
-    )}`;
-  }
-
-  if (normalized === "redis") {
-    const key = JSON.stringify(collection);
-    switch ((collectionType || "").toLowerCase()) {
-      case "string":
-        return `GET ${key}`;
-      case "hash":
-        return `HGETALL ${key}`;
-      case "list":
-        return `LRANGE ${key} 0 99`;
-      case "set":
-        return `SMEMBERS ${key}`;
-      case "zset":
-        return `ZRANGE ${key} 0 99 WITHSCORES`;
-      case "stream":
-        return `XRANGE ${key} - + COUNT 100`;
-      default:
-        return `TYPE ${key}`;
-    }
-  }
-
-  return JSON.stringify(
-    {
-      ...(namespace ? { database: namespace } : {}),
-      collection,
-      find: {},
-      limit: 100,
-    },
-    null,
-    2
-  );
 }
 
 export function SchemaSidebar() {
@@ -204,9 +151,7 @@ export function SchemaSidebar() {
   const canBrowseCollections =
     activeCapabilities.supportsCollectionBrowsing ||
     activeCapabilities.supportsKeyValueBrowsing;
-  const collectionLabel = collectionObjectLabel(activeDriver);
-  const collectionLabelPlural =
-    collectionLabel === "Index" ? "Indices" : `${collectionLabel}s`;
+  const collectionLabelPlural = collectionObjectPluralLabel(activeDriver);
   const objectSectionLabel = canBrowseTables
     ? "Tables"
     : canBrowseCollections
@@ -439,9 +384,9 @@ export function SchemaSidebar() {
 
   const {
     findOrCreateTableTab,
+    findOrCreateObjectQueryTab,
     loadTablePage,
     createTableTab,
-    createTab,
     runTabQuery,
   } = useTabStore();
 
@@ -470,15 +415,19 @@ export function SchemaSidebar() {
   const handleCollectionDoubleClick = (collection: CollectionInfo) => {
     if (!activeConnectionId) return;
 
-    const sql = collectionQueryTemplate(
+    const sql = collectionPreviewQueryTemplate(
       activeDriver,
       currentSchema,
-      collection.name,
-      collection.type
+      collection
     );
-    const tabId = createTab("query", collection.name, sql, {
-      connectionId: activeConnectionId,
-    });
+    const tabId = findOrCreateObjectQueryTab(
+      activeConnectionId,
+      currentSchema,
+      collection.name,
+      collection.type,
+      sql,
+      collectionPreviewTabTitle(activeDriver, collection)
+    );
     void runTabQuery(tabId, activeConnectionId, sql);
   };
 

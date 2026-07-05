@@ -161,6 +161,14 @@ interface TabState {
     tableName: string,
     objectType?: string | null
   ) => string;
+  findOrCreateObjectQueryTab: (
+    connectionId: string,
+    schemaName: string | null | undefined,
+    objectName: string,
+    objectType: string | null | undefined,
+    initialSql: string,
+    title?: string
+  ) => string;
   createTableTab: (connectionId: string, schemaName: string) => string;
   updateTabTitle: (id: string, title: string) => void;
   closeTab: (id: string) => void;
@@ -302,6 +310,50 @@ export const useTabStore = create<TabState>((set, get) => ({
       tableName,
       schemaName,
       objectType: objectType || null,
+    });
+  },
+
+  findOrCreateObjectQueryTab: (
+    connectionId: string,
+    schemaName: string | null | undefined,
+    objectName: string,
+    objectType: string | null | undefined,
+    initialSql: string,
+    title = objectName
+  ) => {
+    const normalizedSchema = schemaName || "";
+    const normalizedObjectType = objectType || null;
+    const existingTab = get().tabs.find(
+      (tab) =>
+        tab.type === "query" &&
+        tab.connectionId === connectionId &&
+        (tab.schemaName || "") === normalizedSchema &&
+        tab.tableName === objectName
+    );
+
+    if (existingTab) {
+      set((state) => ({
+        activeTabId: existingTab.id,
+        tabs: state.tabs.map((tab) =>
+          tab.id === existingTab.id
+            ? {
+                ...tab,
+                title,
+                sql: initialSql,
+                schemaName: normalizedSchema,
+                objectType: normalizedObjectType,
+              }
+            : tab
+        ),
+      }));
+      return existingTab.id;
+    }
+
+    return get().createTab("query", title, initialSql, {
+      connectionId,
+      schemaName: normalizedSchema,
+      tableName: objectName,
+      objectType: normalizedObjectType,
     });
   },
 
