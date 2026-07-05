@@ -139,6 +139,27 @@ export interface TabData {
   lspDiagnostics?: Diagnostic[];
 }
 
+export function querySchemaContextForTab(
+  tab: Pick<
+    TabData,
+    "targetSchema" | "schemaName" | "tableName" | "objectType"
+  >,
+  currentSchema: string | null | undefined,
+  driver: string = DEFAULT_DATABASE_DRIVER
+) {
+  const capabilities = defaultDatabaseCapabilities(driver);
+  if (
+    capabilities.dataModel === "search" &&
+    tab.tableName &&
+    !tab.targetSchema &&
+    (tab.objectType === "index" || !tab.schemaName || tab.schemaName === "default")
+  ) {
+    return tab.tableName;
+  }
+
+  return tab.targetSchema || tab.schemaName || currentSchema || undefined;
+}
+
 interface TabState {
   tabs: TabData[];
   activeTabId: string | null;
@@ -605,14 +626,15 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
 
     try {
-      // Determine schema context: use targetSchema (if set) > tab.schemaName (if table type) > globally selected schema
-      let schemaContext = tab.targetSchema || tab.schemaName;
-      if (!schemaContext) {
-        const { currentSchema } = useSchemaStore.getState();
-        if (currentSchema) {
-          schemaContext = currentSchema;
-        }
-      }
+      const { currentSchema } = useSchemaStore.getState();
+      const connection = useConnectionStore
+        .getState()
+        .connections.find((item) => item.id === connectionId);
+      const schemaContext = querySchemaContextForTab(
+        tab,
+        currentSchema,
+        connection?.driver || DEFAULT_DATABASE_DRIVER
+      );
 
       console.log(
         "TabStore: Running query with schema context:",

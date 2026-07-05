@@ -6,11 +6,13 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use reqwest::{Client, Method, Url};
 use serde_json::{json, Value};
+use tokio::sync::Mutex;
 
 pub struct ElasticsearchDriver {
     base_url: Url,
     client: Client,
     auth: Option<(String, String)>,
+    active_index: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +30,41 @@ impl ElasticsearchDriver {
             base_url,
             client: Client::new(),
             auth,
+            active_index: Mutex::new(None),
         })
+    }
+
+    async fn active_index_name(&self) -> Option<String> {
+        self.active_index.lock().await.clone()
+    }
+
+    async fn execute_requests(
+        &self,
+        requests: Vec<ElasticsearchRequest>,
+        context_index: Option<String>,
+    ) -> Result<Vec<QueryResult>> {
+        if requests.is_empty() {
+            return Err(anyhow!("Elasticsearch query is required"));
+        }
+
+        let active_index = match context_index {
+            Some(index) => Some(index),
+            None => self.active_index_name().await,
+        };
+        let mut results = Vec::new();
+
+        for request in requests {
+            let request = scope_search_request_to_index(request, active_index.as_deref());
+            let (status, body) = self.send_request(&request).await?;
+            let normalized = normalize_elasticsearch_response(body);
+            if let Some(result) = elasticsearch_table_result(&normalized) {
+                results.push(result);
+            } else {
+                results.push(elasticsearch_request_result(&request, status, normalized));
+            }
+        }
+
+        Ok(results)
     }
 
     async fn send_request(&self, request: &ElasticsearchRequest) -> Result<(u16, Value)> {
@@ -98,23 +134,14 @@ impl DatabaseDriver for ElasticsearchDriver {
 
     async fn query(&self, sql: &str) -> Result<Vec<QueryResult>> {
         let requests = parse_elasticsearch_requests(sql)?;
-        if requests.is_empty() {
-            return Err(anyhow!("Elasticsearch query is required"));
-        }
+        self.execute_requests(requests, None).await
+    }
 
-        let mut results = Vec::new();
-
-        for request in requests {
-            let (status, body) = self.send_request(&request).await?;
-            let normalized = normalize_elasticsearch_response(body);
-            if let Some(result) = elasticsearch_table_result(&normalized) {
-                results.push(result);
-            } else {
-                results.push(elasticsearch_request_result(&request, status, normalized));
-            }
-        }
-
-        Ok(results)
+    async fn query_with_context(&self, sql: &str, schema: &str) -> Result<Vec<QueryResult>> {
+        let index = validate_elasticsearch_index_context(schema)?;
+        *self.active_index.lock().await = index.clone();
+        let requests = parse_elasticsearch_requests(sql)?;
+        self.execute_requests(requests, index).await
     }
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
@@ -144,6 +171,11 @@ impl DatabaseDriver for ElasticsearchDriver {
         };
         let (_, body) = self.send_request(&request).await?;
         Ok(elasticsearch_mapping_to_columns(&body, index))
+    }
+
+    async fn set_current_schema(&self, schema: &str) -> Result<()> {
+        *self.active_index.lock().await = validate_elasticsearch_index_context(schema)?;
+        Ok(())
     }
 }
 
@@ -247,6 +279,49 @@ fn parse_request_line(line: &str) -> Result<Option<(Method, String, Option<Strin
         .map(ToString::to_string);
 
     Ok(Some((method, path.to_string(), inline_body)))
+}
+
+fn validate_elasticsearch_index_context(value: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("default") {
+        return Ok(None);
+    }
+    if value.chars().any(|ch| matches!(ch, '/' | '\\' | '\0')) {
+        return Err(anyhow!("Invalid Elasticsearch index context: {value}"));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn encode_elasticsearch_path_segment(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0F) as usize] as char);
+        }
+    }
+
+    encoded
+}
+
+fn scope_search_request_to_index(
+    mut request: ElasticsearchRequest,
+    index: Option<&str>,
+) -> ElasticsearchRequest {
+    let Some(index) = index.map(str::trim).filter(|value| !value.is_empty()) else {
+        return request;
+    };
+
+    if request.path == "/_search" {
+        request.path = format!("/{}/_search", encode_elasticsearch_path_segment(index));
+    }
+
+    request
 }
 
 fn normalize_elasticsearch_response(value: Value) -> Value {
@@ -467,6 +542,56 @@ mod tests {
         assert_eq!(requests[0].method, Method::POST);
         assert_eq!(requests[0].path, "/_search");
         assert!(requests[0].body.as_deref().unwrap().contains("match_all"));
+    }
+
+    #[test]
+    fn scopes_default_search_to_active_index() {
+        let request = parse_elasticsearch_requests(r#"{"query":{"match_all":{}}}"#)
+            .unwrap()
+            .remove(0);
+        let scoped = scope_search_request_to_index(request, Some("user events"));
+
+        assert_eq!(scoped.path, "/user%20events/_search");
+
+        let explicit = parse_elasticsearch_requests(
+            r#"
+            GET /users/_search
+            {"query":{"match_all":{}}}
+            "#,
+        )
+        .unwrap()
+        .remove(0);
+        let explicit = scope_search_request_to_index(explicit, Some("orders"));
+
+        assert_eq!(explicit.path, "/users/_search");
+    }
+
+    #[test]
+    fn validates_index_context_without_treating_default_as_index() {
+        assert_eq!(validate_elasticsearch_index_context("").unwrap(), None);
+        assert_eq!(
+            validate_elasticsearch_index_context(" default ").unwrap(),
+            None
+        );
+        assert_eq!(
+            validate_elasticsearch_index_context("logs-2026").unwrap(),
+            Some("logs-2026".to_string())
+        );
+        assert!(validate_elasticsearch_index_context("logs/2026").is_err());
+    }
+
+    #[tokio::test]
+    async fn tracks_active_index_context() {
+        let driver = ElasticsearchDriver::new("http://localhost:9200").unwrap();
+
+        assert_eq!(driver.active_index_name().await, None);
+        driver.set_current_schema("logs-2026").await.unwrap();
+        assert_eq!(
+            driver.active_index_name().await,
+            Some("logs-2026".to_string())
+        );
+        driver.set_current_schema("default").await.unwrap();
+        assert_eq!(driver.active_index_name().await, None);
     }
 
     #[test]
