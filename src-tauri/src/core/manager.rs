@@ -537,4 +537,40 @@ mod tests {
             .await
             .expect("new driver should remain active");
     }
+
+    #[tokio::test]
+    async fn disconnect_connection_removes_driver_and_schema_context() {
+        let manager = ConnectionManager::new();
+        let disconnect_calls = Arc::new(AtomicUsize::new(0));
+
+        manager
+            .add_connection(
+                "conn".to_string(),
+                Box::new(LifecycleDriver::new(disconnect_calls.clone(), false)),
+            )
+            .await;
+        manager
+            .set_current_schema("conn", "public")
+            .await
+            .expect("schema context should be stored");
+
+        assert_eq!(
+            manager
+                .active_schemas
+                .lock()
+                .await
+                .get("conn")
+                .map(String::as_str),
+            Some("public")
+        );
+
+        manager
+            .disconnect_connection("conn")
+            .await
+            .expect("disconnect should succeed");
+
+        assert_eq!(disconnect_calls.load(Ordering::SeqCst), 1);
+        assert!(!manager.active_schemas.lock().await.contains_key("conn"));
+        assert!(manager.ping("conn").await.is_err());
+    }
 }
