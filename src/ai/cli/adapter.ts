@@ -6,6 +6,7 @@ import {
   createWorkspaceAiToolContext,
   createWorkspaceAiToolRegistry,
 } from "@/ai/tools";
+import { createMcpProtocolAdapter } from "@/ai/mcp";
 import type { AiToolExecutionContext, AiToolExecutionPolicy } from "@/ai/tools";
 import { createAssistantRuntime } from "@/ai/assistant";
 import type { AssistantPlanner, AssistantTurnInput } from "@/ai/assistant";
@@ -23,6 +24,7 @@ type ParsedCommand =
   | { kind: "help" }
   | { kind: "list" }
   | { kind: "manifest" }
+  | { kind: "mcp"; request: string }
   | { kind: "plan"; input: AssistantTurnInput }
   | { kind: "call"; toolName: string; input: unknown; approved: boolean };
 
@@ -51,6 +53,14 @@ export class CliToolAdapter {
           return okJson(this.registry.list());
         case "manifest":
           return okJson(createAiToolManifest(this.registry.list(), this.policy));
+        case "mcp": {
+          const response = await createMcpProtocolAdapter({
+            registry: this.registry,
+            createContext: this.createContext,
+            policy: this.policy,
+          }).handleJson(command.request);
+          return ok(response ? `${response}\n` : "");
+        }
         case "plan":
           return okJson(
             await createAssistantRuntime({
@@ -104,6 +114,11 @@ export class CliToolAdapter {
     if (command === "call" || (command === "tools" && rest[0] === "call")) {
       const callArgs = command === "tools" ? rest.slice(1) : rest;
       return this.parseCall(callArgs);
+    }
+
+    if (command === "mcp" && (!rest[0] || rest[0] === "request")) {
+      const requestArgs = rest[0] === "request" ? rest.slice(1) : rest;
+      return { kind: "mcp", request: await this.parseMcpRequest(requestArgs) };
     }
 
     if (
@@ -212,6 +227,32 @@ export class CliToolAdapter {
     }
     return input;
   }
+
+  private async parseMcpRequest(args: string[]) {
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index];
+      if (arg === "--json") {
+        const value = args[index + 1];
+        if (value === undefined) {
+          throw new Error("--json requires a JSON-RPC request");
+        }
+        return value;
+      }
+      if (arg === "--json-file") {
+        const path = args[index + 1];
+        if (!path) {
+          throw new Error("--json-file requires a file path");
+        }
+        if (!this.readFile) {
+          throw new Error("--json-file requires a file reader adapter");
+        }
+        return this.readFile(path);
+      }
+      throw new Error(`Unknown mcp request argument: ${arg}`);
+    }
+
+    throw new Error("mcp request requires --json or --json-file");
+  }
 }
 
 export function createCliToolAdapter(options?: CliToolAdapterOptions) {
@@ -271,6 +312,7 @@ function helpText() {
     "  tools call <toolName> [--json '{...}']",
     "  tools call <toolName> [--json-file payload.json]",
     "  tools call <toolName> --approve [--json '{...}']",
+    "  mcp request --json '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}'",
     "",
   ].join("\n");
 }

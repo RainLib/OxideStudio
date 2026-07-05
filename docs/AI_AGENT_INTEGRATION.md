@@ -109,7 +109,10 @@ oxide tools manifest
 oxide assistant plan --message "list tables in the active database"
 oxide tools call query.runReadOnly --json payload.json
 oxide tools call key.setValue --approve --json '{"key":"demo","value":"ok"}'
+oxide mcp request --json '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
+
+Use `oxide mcp request` for local MCP JSON-RPC smoke tests or scripts that need to match an external MCP host exactly. Use `tools call` for simpler one-off automation.
 
 For the editor itself, prefer direct TypeScript orchestration over MCP. The editor already owns state, selection, tabs, connection ids, and approval UI; routing those through an external protocol would add latency and lose context. External MCP hosts should use tool annotations plus an explicit approval handoff before calling mutating tools.
 
