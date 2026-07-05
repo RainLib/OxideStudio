@@ -56,6 +56,16 @@ pub struct CompletionItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub insert_text_format: Option<u32>,
+    #[serde(default, rename = "sortText", skip_serializing_if = "Option::is_none")]
+    pub sort_text: Option<String>,
+    #[serde(
+        default,
+        rename = "filterText",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub filter_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preselect: Option<bool>,
 }
 
 fn lsp_documentation_to_string(value: &Value) -> Option<String> {
@@ -100,6 +110,15 @@ fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
             .get("insertTextFormat")
             .and_then(|v| v.as_u64())
             .map(|v| v as u32),
+        sort_text: item
+            .get("sortText")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        filter_text: item
+            .get("filterText")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        preselect: item.get("preselect").and_then(|v| v.as_bool()),
     })
 }
 
@@ -507,7 +526,10 @@ mod tests {
             "kind": 3,
             "detail": "Function",
             "insertText": "calculate_score()",
-            "insertTextFormat": 1
+            "insertTextFormat": 1,
+            "sortText": "1:calculate_score",
+            "filterText": "calculate_score",
+            "preselect": true
         });
 
         let parsed = parse_completion_item(&item).expect("completion should parse");
@@ -515,5 +537,8 @@ mod tests {
         assert_eq!(parsed.label, "calculate_score");
         assert_eq!(parsed.insert_text.as_deref(), Some("calculate_score()"));
         assert_eq!(parsed.insert_text_format, Some(1));
+        assert_eq!(parsed.sort_text.as_deref(), Some("1:calculate_score"));
+        assert_eq!(parsed.filter_text.as_deref(), Some("calculate_score"));
+        assert_eq!(parsed.preselect, Some(true));
     }
 }

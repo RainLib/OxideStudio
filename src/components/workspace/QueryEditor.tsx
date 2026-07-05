@@ -18,6 +18,12 @@ import {
   supportsLspLanguageId,
 } from "@/lib/databaseDialect";
 import {
+  completionInsertText,
+  completionSortText,
+  isCompletedSqlContextKeyword,
+  toMonacoCompletionKind,
+} from "@/lib/lspCompletion";
+import {
   extractLspDocumentIdentity,
   extractSqlDocumentTabId,
   getLspDocumentUri,
@@ -311,22 +317,35 @@ export function QueryEditor() {
               position.lineNumber,
               word.endColumn
             );
+            const typedWord = model.getValueInRange(range);
+            const completedContextKeyword =
+              isCompletedSqlContextKeyword(typedWord);
+            const insertRange = completedContextKeyword
+              ? new monaco.Range(
+                  position.lineNumber,
+                  position.column,
+                  position.lineNumber,
+                  position.column
+                )
+              : range;
 
             // Convert LSP completion items to Monaco format
             const suggestions = items.map((item) => ({
               label: item.label,
-              kind: item.kind || monaco.languages.CompletionItemKind.Field,
+              kind: toMonacoCompletionKind(monaco, item.kind),
               detail: item.detail,
               documentation: item.documentation,
-              insertText: item.insertText || item.label,
-              sortText: item.sortText,
-              filterText: item.filterText,
+              insertText: completionInsertText(item, completedContextKeyword),
+              sortText: completionSortText(item),
+              filterText: completedContextKeyword
+                ? typedWord
+                : item.filterText,
               preselect: item.preselect,
               insertTextRules:
                 item.insertTextFormat === 2
                   ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
                   : undefined,
-              range: range,
+              range: insertRange,
             }));
 
             return { suggestions };
