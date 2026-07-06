@@ -420,6 +420,7 @@ export function ConnectionForm() {
                       <div className="pt-2 border-t border-border/50 space-y-4">
                         <div className="space-y-2">
                           <Button
+                            type="button"
                             variant="outline"
                             size="sm"
                             className="w-full text-xs h-7"
@@ -475,6 +476,7 @@ export function ConnectionForm() {
               >
                 <DialogTrigger asChild>
                   <Button
+                    type="button"
                     variant="outline"
                     size="sm"
                     className="h-8 gap-2 text-xs uppercase tracking-wide font-semibold opacity-70 hover:opacity-100"
@@ -502,12 +504,15 @@ export function ConnectionForm() {
                   </div>
                   <DialogFooter>
                     <Button
+                      type="button"
                       variant="ghost"
                       onClick={() => setIsImportDialogOpen(false)}
                     >
                       Cancel
                     </Button>
-                    <Button onClick={handleImport}>Import</Button>
+                    <Button type="button" onClick={handleImport}>
+                      Import
+                    </Button>
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
@@ -586,6 +591,7 @@ export function ConnectionForm() {
                       >
                         {tag}
                         <button
+                          type="button"
                           onClick={() => handleRemoveTag(tag)}
                           className="hover:bg-primary/20 rounded-full p-0.5 transition-colors"
                         >
@@ -622,6 +628,7 @@ export function ConnectionForm() {
                       />
                     </div>
                     <Button
+                      type="button"
                       variant="ghost"
                       size="sm"
                       className="h-8 w-8 p-0 hover:bg-primary/10 hover:text-primary transition-colors border border-transparent hover:border-primary/20"
@@ -639,6 +646,7 @@ export function ConnectionForm() {
                       .slice(0, 4)
                       .map((tag: string) => (
                         <button
+                          type="button"
                           key={tag}
                           onClick={() => handleAddTag(tag)}
                           className="text-[10px] px-2 py-0.5 rounded-full border border-border/40 text-muted-foreground/60 hover:border-primary/30 hover:text-primary hover:bg-primary/5 transition-all"
@@ -753,6 +761,7 @@ export function ConnectionForm() {
                           autoComplete="off"
                         />
                         <button
+                          type="button"
                           onClick={() => setShowPassword(!showPassword)}
                           className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-foreground transition-colors"
                         >
@@ -811,6 +820,7 @@ export function ConnectionForm() {
 
           <div className="flex items-center gap-3">
             <Button
+              type="button"
               variant="secondary"
               onClick={handleSave}
               className="bg-secondary/80 hover:bg-secondary"
@@ -818,6 +828,7 @@ export function ConnectionForm() {
               Save Draft
             </Button>
             <Button
+              type="button"
               onClick={handleConnect}
               disabled={isConnecting}
               className="shadow-lg shadow-primary/20 min-w-[140px]"
