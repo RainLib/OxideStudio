@@ -142,7 +142,7 @@ export function WorkspacePage() {
               aria-pressed={!isRightCollapsed}
             >
               <Sparkles size={16} />
-              <span>AI</span>
+              <span>Assistant</span>
             </Button>
           </>
         }

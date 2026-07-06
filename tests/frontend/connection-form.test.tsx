@@ -125,4 +125,32 @@ describe("ConnectionForm", () => {
     expect(saveConnection).not.toHaveBeenCalled();
     expect(connect).not.toHaveBeenCalled();
   });
+
+  it("renders connection test errors without saving or connecting", async () => {
+    testConnection.mockResolvedValueOnce("connection refused");
+    const onSubmit = vi.fn((event: SubmitEvent) => event.preventDefault());
+    const form = document.createElement("form");
+    form.addEventListener("submit", onSubmit);
+    container.appendChild(form);
+    root = createRoot(form);
+
+    await act(async () => {
+      root?.render(<ConnectionForm />);
+      await flushAsyncWork();
+    });
+
+    const testButton = buttonWithText(form, "Test Connection");
+
+    await act(async () => {
+      testButton?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true })
+      );
+      await flushAsyncWork();
+    });
+
+    expect(form.textContent).toContain("connection refused");
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(saveConnection).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
+  });
 });
