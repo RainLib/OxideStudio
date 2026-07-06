@@ -330,6 +330,26 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         &["owner", "name", "form_background_url"],
     )
     .await?;
+    let postgres_from_labels = sorted_completion_labels_at(
+        &mut lsp,
+        postgres_uri,
+        0,
+        "SELECT * from".len() as u32,
+    )
+    .await?;
+    let first_two_from_labels = postgres_from_labels.iter().take(2).collect::<Vec<_>>();
+    if !first_two_from_labels
+        .iter()
+        .any(|label| label.as_str() == "public.form")
+        || !first_two_from_labels
+            .iter()
+            .any(|label| label.as_str() == "public.webhook")
+    {
+        bail!(
+            "FROM completion should prioritize relation targets; labels: {:?}",
+            postgres_from_labels
+        );
+    }
     assert_completion_at_contains(
         &mut lsp,
         postgres_where_uri,
@@ -346,7 +366,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         &["form_background_url", "form_css"],
     )
     .await?;
-    let postgres_where_labels = completion_labels_at(
+    let postgres_where_labels = sorted_completion_labels_at(
         &mut lsp,
         postgres_where_uri,
         0,
@@ -456,6 +476,16 @@ async fn completion_labels_at(
     Ok(completion_labels(&result))
 }
 
+async fn sorted_completion_labels_at(
+    lsp: &mut LspProcess,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> Result<Vec<String>> {
+    let result = completion_items_at(lsp, uri, line, character).await?;
+    Ok(sorted_completion_labels(&result))
+}
+
 async fn completion_items_at(
     lsp: &mut LspProcess,
     uri: &str,
@@ -547,6 +577,29 @@ fn completion_labels(result: &Value) -> Vec<String> {
         .filter_map(|item| item.get("label").and_then(Value::as_str))
         .map(ToString::to_string)
         .collect()
+}
+
+fn sorted_completion_labels(result: &Value) -> Vec<String> {
+    let items = result
+        .as_array()
+        .or_else(|| result.get("items").and_then(Value::as_array));
+
+    let mut labels = items
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let label = item.get("label").and_then(Value::as_str)?.to_string();
+            let sort_text = item
+                .get("sortText")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| label.clone());
+            Some((sort_text, label))
+        })
+        .collect::<Vec<_>>();
+
+    labels.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    labels.into_iter().map(|(_, label)| label).collect()
 }
 
 fn schema(
