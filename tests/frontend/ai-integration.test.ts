@@ -180,6 +180,44 @@ describe("AI MCP adapter", () => {
     });
   });
 
+  it("passes active context metadata into MCP tool calls", async () => {
+    const protocol = createMcpProtocolAdapter({
+      registry: createTestRegistry(),
+      createContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+    });
+
+    const response = await protocol.handleMessage({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "demo.read",
+        arguments: { value: "ok" },
+        _meta: {
+          "oxide/context": {
+            activeConnectionId: "mongodb-1",
+            activeDriver: "mongodb",
+            activeNamespace: "app",
+          },
+        },
+      },
+    });
+    const result = response && "result" in response
+      ? (response.result as { content: Array<{ text: string }> })
+      : null;
+
+    expect(response).toMatchObject({ jsonrpc: "2.0", id: 1 });
+    expect(JSON.parse(result?.content[0]?.text || "{}")).toMatchObject({
+      mode: "read",
+      context: {
+        activeConnectionId: "mongodb-1",
+        activeDriver: "mongodb",
+        activeNamespace: "app",
+      },
+    });
+  });
+
   it("exposes a policy-aware manifest for external agents", async () => {
     const protocol = createMcpProtocolAdapter({
       registry: createTestRegistry(),

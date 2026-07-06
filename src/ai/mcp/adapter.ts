@@ -26,7 +26,13 @@ export type McpToolAdapterOptions = {
 
 export type McpToolCallOptions = {
   approved?: boolean;
+  contextOverrides?: McpContextOverrides;
 };
+
+type McpContextOverrides = Pick<
+  AiToolExecutionContext,
+  "activeConnectionId" | "activeDriver" | "activeNamespace"
+>;
 
 export class McpToolAdapter {
   private readonly registry: AiToolRegistry;
@@ -80,7 +86,7 @@ export class McpToolAdapter {
       const result = await this.registry.executeWithPolicy(
         name,
         input,
-        this.createContext(),
+        applyContextOverrides(this.createContext(), options.contextOverrides),
         policy
       );
       return {
@@ -103,6 +109,26 @@ export class McpToolAdapter {
       };
     }
   }
+}
+
+function applyContextOverrides(
+  context: AiToolExecutionContext,
+  overrides: McpContextOverrides | undefined
+): AiToolExecutionContext {
+  if (!overrides) return context;
+
+  return {
+    ...context,
+    ...(overrides.activeConnectionId !== undefined
+      ? { activeConnectionId: overrides.activeConnectionId }
+      : {}),
+    ...(overrides.activeDriver !== undefined
+      ? { activeDriver: overrides.activeDriver }
+      : {}),
+    ...(overrides.activeNamespace !== undefined
+      ? { activeNamespace: overrides.activeNamespace }
+      : {}),
+  };
 }
 
 export function createMcpToolAdapter(options?: McpToolAdapterOptions) {

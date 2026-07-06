@@ -126,6 +126,8 @@ await protocol.handleMessage({
 
 Mutating calls still require an explicit approval signal, for example `_meta: { "oxide/approved": true }`; do not grant that automatically from an external host.
 
+MCP callers that need workspace-like context can pass `_meta: { "oxide/context": { "activeConnectionId": "...", "activeDriver": "redis", "activeNamespace": "2" } }` on `tools/call`. The adapter merges those fields into the execution context before policy and tool execution.
+
 CLI is useful for local automation, tests, and scripting. It can share the same registry by running commands such as:
 
 ```bash
@@ -187,3 +189,4 @@ Recommended usage:
 10. Add core AI tool contract tests for provider hints, approval gates, safety routing, and structured MongoDB, Redis, and Elasticsearch mutation adapters. Done.
 11. Add workspace adapter tests for metadata, query, table mutation, and MongoDB/Redis/Elasticsearch structured mutation service routing. Done.
 12. Add CLI context overrides for direct tool calls so injected standalone adapters can execute tools with active connection, driver, and namespace context. Done.
+13. Add MCP `tools/call` context overrides via `_meta["oxide/context"]` or `params.context` so external agents can execute tools with active connection, driver, and namespace context. Done.

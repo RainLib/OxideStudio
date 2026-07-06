@@ -165,7 +165,38 @@ function approvalOptions(
       params?.approved === true ||
       metadata["oxide/approved"] === true ||
       metadata.approved === true,
+    contextOverrides: contextOverrides(params, metadata),
   };
+}
+
+function contextOverrides(
+  params: Record<string, unknown> | undefined,
+  metadata: Record<string, unknown>
+): McpToolCallOptions["contextOverrides"] {
+  const source =
+    objectValue(params?.context) ||
+    objectValue(metadata["oxide/context"]) ||
+    objectValue(metadata.context);
+  if (!source) return undefined;
+
+  const activeConnectionId = nullableString(source.activeConnectionId);
+  const activeDriver = nullableString(source.activeDriver);
+  const activeNamespace = nullableString(source.activeNamespace);
+
+  return {
+    ...(activeConnectionId !== undefined ? { activeConnectionId } : {}),
+    ...(activeDriver !== undefined ? { activeDriver } : {}),
+    ...(activeNamespace !== undefined ? { activeNamespace } : {}),
+  };
+}
+
+function objectValue(value: unknown) {
+  return isObject(value) ? value : null;
+}
+
+function nullableString(value: unknown) {
+  if (value === null) return null;
+  return typeof value === "string" ? value || null : undefined;
 }
 
 function isRequest(value: unknown): value is McpJsonRpcRequest {
