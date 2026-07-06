@@ -22,6 +22,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 12: Bundled `sql-lsp` JSON-RPC integration test for Redis, MongoDB, and Elasticsearch schema completions
 - Phase 13: Frontend LSP schema config tests for Redis keys, MongoDB fields/indexes, Elasticsearch mapping fields, and server-inferable document URIs
 - Phase 14: Extracted and tested frontend LSP sync planning for target schemas, file schema/dialect mappings, and duplicate-send config keys
+- Phase 15: DML-aware SQL completion contexts for `INSERT INTO`, `UPDATE`, `DELETE FROM`, `TRUNCATE TABLE`, and `JOIN ... ON` table/column inference
 
 ⏳ **Pending:**
 
@@ -39,7 +40,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-22-g4481938`.
+Current tracked revision is `v0.1.3-24-gddafff0`.
 
 ### 2. Prepare the Binary
 
