@@ -44,7 +44,7 @@ Decision summary:
 - `tests/frontend/workspace-ai-tools.test.ts` verifies that in-app AI tools route metadata, query, table mutation, and MongoDB/Redis/Elasticsearch structured mutation calls through the workspace Tauri service adapters.
 - `tests/frontend/ai-external-tool-routing.test.ts` verifies that CLI and MCP external-agent entrypoints execute metadata, read query, and approved table mutation tools through an injected database adapter instead of bypassing the shared registry.
 - `src/ai/assistant` exposes an `AssistantPlanner` contract, a deterministic fallback planner, a provider-neutral model planner, and approval-aware execution for AI-proposed tool calls.
-- `src/ai/assistant/langGraphPlanner.ts` provides a dependency-light LangGraph bridge. A real LangGraph graph can plug in by returning `AssistantPlannerResult` from the shared planner contract.
+- `src/ai/assistant/langGraphPlanner.ts` provides a dependency-light LangGraph bridge plus `createAssistantPlannerGraph` for composing planner nodes over shared context, metadata, warnings, and notes. A real LangGraph graph can still plug in by returning `AssistantPlannerResult` from the shared planner contract.
 - `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
 - `src/ai/mcp/protocol.ts` adds a transport-neutral JSON-RPC handler for `initialize`, `tools/list`, `tools/call`, and the Oxide manifest extension; stdio or HTTP servers should wrap this instead of reimplementing tool routing.
 - `src/ai/cli` provides a dependency-light command adapter for `tools list`, `tools manifest`, `assistant plan`, and `tools call`.
@@ -52,7 +52,7 @@ Decision summary:
 
 ## LangGraph Usage
 
-Use TypeScript LangGraph as an optional implementation of `AssistantPlanner` for the in-app assistant orchestration. The editor should not call itself through MCP because editor state, connection metadata, tabs, and approval UI already live in the frontend. `createLangGraphAssistantPlanner({ invoke })` is the bridge point; the `invoke` function can run a compiled LangGraph graph and return the same `AssistantPlannerResult` used by the default and model planners.
+Use TypeScript LangGraph as an optional implementation of `AssistantPlanner` for the in-app assistant orchestration. The editor should not call itself through MCP because editor state, connection metadata, tabs, and approval UI already live in the frontend. `createLangGraphAssistantPlanner({ invoke })` is the bridge point; the `invoke` function can run a compiled LangGraph graph and return the same `AssistantPlannerResult` used by the default and model planners. For simple in-process orchestration, `createAssistantPlannerGraph({ nodes })` runs ordered planner nodes with shared metadata and merges warnings/notes before returning the final plan.
 
 Recommended graph nodes:
 
@@ -184,7 +184,7 @@ Recommended usage:
 2. Add an assistant panel backed by the registry executor. Done.
 3. Add MCP and CLI adapters over the same registry. Done.
 4. Add write tools with approval gates and audit logging. Done for query-level mutation/destructive tools, structured table row mutations, and structured document/key/search mutations.
-5. Add a planner layer that chooses tool calls, pauses for approval, and feeds results back into the model. Foundation done with `AssistantPlanner`, `createModelAssistantPlanner`, and `createModelToolResultSummarizer`; full LangGraph graph wiring is still pending.
+5. Add a planner layer that chooses tool calls, pauses for approval, and feeds results back into the model. Foundation done with `AssistantPlanner`, `createModelAssistantPlanner`, `createModelToolResultSummarizer`, `createLangGraphAssistantPlanner`, and `createAssistantPlannerGraph`; package-specific compiled LangGraph graphs can plug into the same bridge.
 6. Add provider/plugin hooks so new databases register tool families by capability, not by UI rewrites. Runtime provider registration is done with `registerDatabaseProvider`; dynamic module loading is done with `loadDatabaseProviders`; package manifest discovery/loading is done with `discoverDatabaseProviderLoaders` and `loadDatabaseProviderPackages`. Done.
 7. Add live integration coverage for MongoDB, Redis, Elasticsearch, MySQL, and PostgreSQL tool paths. Driver-level connection, metadata, query, and mutation coverage is available through `scripts/test-live-databases.sh`; CLI/MCP adapter-level AI tool routing is covered by `tests/frontend/ai-external-tool-routing.test.ts`; Docker-backed AI tool-specific live assertions are still pending.
 8. Add safety regression tests for SQL, MongoDB, Redis, and Elasticsearch request classification, and reject unknown MongoDB driver command fields before execution. Done.

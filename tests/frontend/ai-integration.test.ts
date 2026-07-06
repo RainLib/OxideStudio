@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createAssistantRuntime } from "@/ai/assistant/runtime";
-import { createLangGraphAssistantPlanner } from "@/ai/assistant/langGraphPlanner";
+import {
+  createAssistantPlannerGraph,
+  createLangGraphAssistantPlanner,
+} from "@/ai/assistant/langGraphPlanner";
 import {
   createModelAssistantPlanner,
   createModelToolResultSummarizer,
@@ -564,6 +567,64 @@ describe("LangGraph planner bridge", () => {
         toolName: "demo.read",
       }),
     ]);
+  });
+
+  it("wires graph nodes into a shared planner state before returning steps", async () => {
+    const graphInvoke = createAssistantPlannerGraph({
+      nodes: [
+        (state) => ({
+          metadata: {
+            selectedConnection: state.context.activeConnectionId,
+            toolCount: state.availableTools.length,
+          },
+          notes: ["context inspected"],
+        }),
+        (state) => ({
+          result: {
+            intent: "metadata",
+            steps: [
+              {
+                id: "graph-context-read",
+                title: `Read metadata for ${state.metadata.selectedConnection}`,
+                toolName: "demo.read",
+                input: {
+                  value: String(state.metadata.toolCount),
+                },
+                requiresApproval: false,
+              },
+            ],
+            warnings: ["graph warning"],
+          },
+          notes: ["plan produced"],
+        }),
+      ],
+    });
+    const runtime = createAssistantRuntime({
+      registry: createTestRegistry(),
+      createContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+      planner: createLangGraphAssistantPlanner({
+        id: "test-graph",
+        invoke: graphInvoke,
+      }),
+    });
+
+    const turn = await runtime.prepareTurnAsync({ message: "inspect metadata" });
+
+    expect(turn.planner).toMatchObject({
+      id: "test-graph",
+      mode: "graph",
+      framework: "langgraph",
+    });
+    expect(turn.suggestedPlan).toEqual([
+      expect.objectContaining({
+        id: "graph-context-read",
+        title: "Read metadata for connection-1",
+        input: { value: "2" },
+      }),
+    ]);
+    expect(turn.warnings).toContain("graph warning");
+    expect(turn.notes).toEqual(["context inspected", "plan produced"]);
   });
 });
 
