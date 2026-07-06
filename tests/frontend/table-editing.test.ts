@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useTabStore } from "@/store/useTabStore";
-import type { ColumnInfo } from "@/services/tauri/types";
+import type { ColumnInfo, IndexInfo } from "@/services/tauri/types";
 
 const mocks = vi.hoisted(() => ({
   mutateTableRows: vi.fn(async () => ({
@@ -258,5 +258,80 @@ describe("table editing store", () => {
       [],
       [{ key: { email: "old@example.test" } }]
     );
+  });
+
+  it("refreshes open table tabs with fresh metadata after structure changes", async () => {
+    const columns = [column("id", { primary: true }), column("email")];
+    const indexes: IndexInfo[] = [
+      {
+        name: "users_pkey",
+        columns: ["id"],
+        is_unique: true,
+        is_primary: true,
+      },
+    ];
+    mocks.getColumns.mockResolvedValueOnce(columns);
+    mocks.getIndexes.mockResolvedValueOnce(indexes);
+    mocks.previewTablePage.mockResolvedValueOnce({
+      result: {
+        columns: [
+          { name: "id", data_type: "int4" },
+          { name: "email", data_type: "text" },
+        ],
+        rows: [[1, "new@example.test"]],
+      },
+      page: 2,
+      pageSize: 500,
+      totalRows: 1,
+    });
+
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          tableColumns: [column("legacy_email")],
+          tableIndexes: [],
+          tablePage: 2,
+          tableFilterSql: "email is not null",
+          pendingEdits: new Map([["0:0", "draft@example.test"]]),
+          newRowsCount: 1,
+        },
+      ],
+    });
+
+    await useTabStore
+      .getState()
+      .refreshTableTabs("postgres-1", "public", "users");
+
+    const tab = useTabStore.getState().tabs[0]!;
+    expect(mocks.getColumns).toHaveBeenCalledWith(
+      "postgres-1",
+      "public",
+      "users"
+    );
+    expect(mocks.getIndexes).toHaveBeenCalledWith(
+      "postgres-1",
+      "public",
+      "users"
+    );
+    expect(mocks.previewTablePage).toHaveBeenCalledWith(
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      2,
+      500,
+      "email is not null",
+      undefined,
+      undefined
+    );
+    expect(tab.tableColumns).toEqual(columns);
+    expect(tab.tableIndexes).toEqual(indexes);
+    expect(tab.pendingEdits?.size).toBe(0);
+    expect(tab.newRowsCount).toBe(0);
+    expect(tab.results?.[0]?.columns.map((item) => item.name)).toEqual([
+      "id",
+      "email",
+    ]);
   });
 });

@@ -30,6 +30,7 @@ import {
   supportsAutoIncrementForDataType,
 } from "@/lib/databaseDialect";
 import { useSchemaStore } from "@/store/useSchemaStore";
+import { useTabStore } from "@/store/useTabStore";
 import { Pencil, Plus, Settings2, Trash2 } from "lucide-react";
 
 interface EditColumnsDialogProps {
@@ -180,7 +181,8 @@ export function EditColumnsDialog({
   const [alterDraft, setAlterDraft] = useState<AlterColumnDraft | null>(null);
   const [alteringColumn, setAlteringColumn] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const { bumpMetadataVersion } = useSchemaStore();
+  const { loadTables, bumpMetadataVersion } = useSchemaStore();
+  const { refreshTableTabs } = useTabStore();
   const draftAutoIncrementSupported = supportsAutoIncrementForDataType(
     capabilities,
     draft.type
@@ -203,6 +205,19 @@ export function EditColumnsDialog({
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const refreshAfterColumnChange = async () => {
+    await loadColumns();
+
+    if (connectionId && schema && tableName) {
+      await Promise.all([
+        loadTables(connectionId, schema, true),
+        refreshTableTabs(connectionId, schema, tableName),
+      ]);
+    }
+
+    bumpMetadataVersion();
   };
 
   useEffect(() => {
@@ -284,8 +299,7 @@ export function EditColumnsDialog({
       });
 
       setDraft(createDefaultDraft(capabilities));
-      await loadColumns();
-      bumpMetadataVersion();
+      await refreshAfterColumnChange();
     } catch (e: any) {
       setError(e?.message || String(e));
     } finally {
@@ -309,8 +323,7 @@ export function EditColumnsDialog({
         tableName,
         columnName
       );
-      await loadColumns();
-      bumpMetadataVersion();
+      await refreshAfterColumnChange();
     } catch (e: any) {
       setError(e?.message || String(e));
     } finally {
@@ -336,8 +349,7 @@ export function EditColumnsDialog({
         columnName,
         trimmedName
       );
-      await loadColumns();
-      bumpMetadataVersion();
+      await refreshAfterColumnChange();
     } catch (e: any) {
       setError(e?.message || String(e));
     } finally {
@@ -385,8 +397,7 @@ export function EditColumnsDialog({
         }
       );
       setAlterDraft(null);
-      await loadColumns();
-      bumpMetadataVersion();
+      await refreshAfterColumnChange();
     } catch (e: any) {
       setError(e?.message || String(e));
     } finally {

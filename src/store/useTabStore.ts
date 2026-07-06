@@ -349,6 +349,11 @@ interface TabState {
   // Schema selection method
   setTargetSchema: (tabId: string, schema: string | null) => void;
   fetchTableColumns: (tabId: string) => Promise<void>;
+  refreshTableTabs: (
+    connectionId: string,
+    schemaName: string,
+    tableName: string
+  ) => Promise<void>;
   loadTablePage: (
     tabId: string,
     page?: number,
@@ -1214,6 +1219,53 @@ export const useTabStore = create<TabState>((set, get) => ({
         ),
       }));
     }
+  },
+
+  refreshTableTabs: async (connectionId, schemaName, tableName) => {
+    const matchingTabs = get().tabs
+      .filter(
+        (tab) =>
+          tab.type === "table" &&
+          tab.connectionId === connectionId &&
+          tab.schemaName === schemaName &&
+          tab.tableName === tableName
+      )
+      .map((tab) => ({
+        id: tab.id,
+        page: tab.tablePage ?? 0,
+        filterSql: tab.tableFilterSql ?? null,
+        filters: tab.tableFilters ?? null,
+      }));
+
+    if (matchingTabs.length === 0) return;
+
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        matchingTabs.some((match) => match.id === tab.id)
+          ? {
+              ...tab,
+              tableColumns: undefined,
+              tableIndexes: undefined,
+              isFetchingColumns: false,
+              pendingEdits: new Map(),
+              newRowsCount: 0,
+              error: null,
+            }
+          : tab
+      ),
+    }));
+
+    await Promise.all(
+      matchingTabs.map(async (tab) => {
+        await get().fetchTableColumns(tab.id);
+        await get().loadTablePage(
+          tab.id,
+          tab.page,
+          tab.filterSql,
+          tab.filters
+        );
+      })
+    );
   },
 
   loadTablePage: async (tabId, page, filterSql, filters) => {

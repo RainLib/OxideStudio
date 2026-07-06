@@ -27,7 +27,9 @@ export function useTableOperations() {
         tableName
       );
       await loadTables(activeConnectionId, currentSchema, true);
-      await refreshOpenTableTabs(activeConnectionId, currentSchema, tableName);
+      await useTabStore
+        .getState()
+        .refreshTableTabs(activeConnectionId, currentSchema, tableName);
       // toast.success(`Table ${tableName} truncated successfully`);
       console.log(`Table ${tableName} truncated successfully`);
     } catch (e: any) {
@@ -64,7 +66,9 @@ export function useTableOperations() {
           newName,
           objectType
         );
-      await refreshOpenTableTabs(activeConnectionId, currentSchema, newName);
+      await useTabStore
+        .getState()
+        .refreshTableTabs(activeConnectionId, currentSchema, newName);
     } catch (e: any) {
       console.error(e);
       throw e; // Let dialog handle error
@@ -178,32 +182,6 @@ export function useTableOperations() {
     getViewDefinition,
     refreshMaterializedView,
   };
-}
-
-async function refreshOpenTableTabs(
-  connectionId: string,
-  schema: string,
-  tableName: string
-) {
-  const tabStore = useTabStore.getState();
-  const matchingTabs = tabStore.tabs.filter(
-    (tab) =>
-      tab.type === "table" &&
-      tab.connectionId === connectionId &&
-      tab.schemaName === schema &&
-      tab.tableName === tableName
-  );
-
-  await Promise.all(
-    matchingTabs.map((tab) =>
-      tabStore.loadTablePage(
-        tab.id,
-        tab.tablePage ?? 0,
-        tab.tableFilterSql ?? null,
-        tab.tableFilters ?? null
-      )
-    )
-  );
 }
 
 function closeOpenTableTabs(
