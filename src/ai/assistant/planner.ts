@@ -30,7 +30,8 @@ export class DefaultAssistantPlanner implements AssistantPlanner {
         input.policy,
         input.context.activeDriver,
         input.context.activeNamespace,
-        input.context.activeTab?.tableName
+        input.context.activeTab?.tableName,
+        input.context.activeTab?.sql
       ),
       notes: [
         "Use this planner as the local fallback; a LangGraph or model planner can implement the same AssistantPlanner contract.",
@@ -78,7 +79,8 @@ function buildSuggestedPlan(
   policy: AiToolExecutionPolicy,
   activeDriver?: string | null,
   activeNamespace?: string | null,
-  activeObjectName?: string | null
+  activeObjectName?: string | null,
+  activeSql?: string | null
 ): AssistantPlanStep[] {
   const hasTool = (name: string) => tools.some((tool) => tool.name === name);
   const requiresApproval = (name: string) => {
@@ -170,7 +172,7 @@ function buildSuggestedPlan(
   }
 
   if (intent === "query" && hasTool("query.runReadOnly")) {
-    const query = input.selectedText?.trim() || "";
+    const query = input.selectedText?.trim() || activeSql?.trim() || "";
     const structuredMutation = selectedStructuredMutationPlan(
       input,
       activeDriver,

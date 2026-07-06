@@ -436,4 +436,63 @@ describe("workspace AI tools", () => {
       ])
     );
   });
+
+  it("plans and executes the active tab SQL when no editor text is selected", async () => {
+    setWorkspaceConnection({
+      id: "postgres-1",
+      driver: "postgres",
+      namespace: "public",
+      tab: {
+        title: "Query",
+        sql: "SELECT * FROM users",
+        schemaName: "public",
+      },
+    });
+    const queryResult = {
+      columns: [{ name: "id", dataType: "integer" }],
+      rows: [[1]],
+      statementType: "SELECT",
+    };
+    mocks.executeQuery.mockResolvedValueOnce([queryResult]);
+    const runtime = createAssistantRuntime({
+      registry: createWorkspaceAiToolRegistry(),
+      createContext: () => createWorkspaceAiToolContext("workspace-ai-test"),
+    });
+
+    const turn = await runtime.prepareTurnAsync({
+      message: "run current query",
+    });
+    const step = turn.suggestedPlan.find(
+      (candidate) => candidate.id === "query-execution"
+    );
+
+    expect(step).toMatchObject({
+      toolName: "query.runReadOnly",
+      input: { query: "SELECT * FROM users" },
+      requiresApproval: false,
+    });
+
+    const results = await runtime.executeToolCalls(
+      [
+        {
+          id: step?.id || "query-execution",
+          toolName: step?.toolName || "query.runReadOnly",
+          input: step?.input,
+        },
+      ],
+      turn.context
+    );
+
+    expect(results).toEqual([
+      expect.objectContaining({
+        status: "success",
+        output: [queryResult],
+      }),
+    ]);
+    expect(mocks.executeQuery).toHaveBeenCalledWith(
+      "postgres-1",
+      "SELECT * FROM users",
+      "public"
+    );
+  });
 });

@@ -65,6 +65,8 @@ Recommended graph nodes:
 
 The shipped default planner stays dependency-light and deterministic. It reads workspace, connection, and provider capability context before suggesting metadata, LSP, or query steps. When selected JSON plus the user message clearly identify a table, collection, key, or index, it can suggest structured mutation tools such as `table.insertRows`, `document.insertDocuments`, `key.setValue`, or `search.indexDocument`; approval policy still controls execution. A LangGraph planner can replace it by implementing `AssistantPlanner.plan`, returning the same `AssistantPlanStep[]`, and pausing before any step whose tool policy requires approval.
 
+For query execution requests, selected SQL is preferred. If there is no selection, the default planner can execute the active query tab SQL through the same guarded `query.runReadOnly`, `query.runMutation`, or `query.runDestructive` tools.
+
 Example LangGraph bridge:
 
 ```typescript
@@ -197,3 +199,4 @@ Recommended usage:
 13. Add MCP `tools/call` context overrides via `_meta["oxide/context"]` or `params.context` so external agents can execute tools with active connection, driver, and namespace context. Done.
 14. Add CLI/MCP external-agent routing tests for injected database metadata, read query, and approved mutation adapters. Done.
 15. Add CLI/MCP manifest environment metadata so external agents can see enabled tool families and missing headless adapters before selecting tools. Done.
+16. Let the in-app default planner execute active query tab SQL when no editor selection is present, while still preferring selected SQL. Done.

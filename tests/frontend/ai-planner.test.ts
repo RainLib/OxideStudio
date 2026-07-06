@@ -58,13 +58,22 @@ const QUERY_TOOLS: AiToolSummary[] = [
 function planFor(
   message: string,
   activeDriver: "postgres" | "redis" | "mongodb" | "elasticsearch",
-  selectedText?: string
+  selectedText?: string,
+  activeSql?: string
 ) {
   return createDefaultAssistantPlanner().plan({
     turn: { message, selectedText },
     context: {
       requestId: `planner-${activeDriver}`,
       activeDriver,
+      activeTab: activeSql
+        ? {
+            id: "tab-1",
+            type: "query",
+            title: "Query #1",
+            sql: activeSql,
+          }
+        : undefined,
     },
     availableTools: QUERY_TOOLS,
     policy: DEFAULT_AI_TOOL_POLICY,
@@ -72,6 +81,41 @@ function planFor(
 }
 
 describe("default assistant planner", () => {
+  it("plans active tab query execution when no editor selection is present", () => {
+    const result = planFor(
+      "run current query",
+      "postgres",
+      undefined,
+      "SELECT * FROM users"
+    );
+
+    expect(result.intent).toBe("query");
+    expect(result.steps).toContainEqual(
+      expect.objectContaining({
+        id: "query-execution",
+        toolName: "query.runReadOnly",
+        input: { query: "SELECT * FROM users" },
+        requiresApproval: false,
+      })
+    );
+  });
+
+  it("prefers selected SQL over active tab SQL for query execution", () => {
+    const result = planFor(
+      "run current query",
+      "postgres",
+      "SELECT id FROM selected_users",
+      "SELECT * FROM users"
+    );
+
+    expect(result.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "query.runReadOnly",
+        input: { query: "SELECT id FROM selected_users" },
+      })
+    );
+  });
+
   it("plans Redis key reads without requiring selected text", () => {
     const result = planFor("read key session:1", "redis");
 
