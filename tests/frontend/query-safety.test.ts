@@ -102,6 +102,20 @@ describe("AI query safety classification", () => {
       "destructive"
     );
     expect(classifyAiQuerySafety('DEL "user:1"', "redis")).toBe("destructive");
+    expect(classifyAiQuerySafety("INFO\nCONFIG GET maxmemory", "redis")).toBe(
+      "read"
+    );
+    expect(classifyAiQuerySafety("CLIENT LIST", "redis")).toBe("read");
+    expect(classifyAiQuerySafety("CONFIG SET maxmemory 0", "redis")).toBe(
+      "destructive"
+    );
+    expect(classifyAiQuerySafety("ACL SETUSER app on", "redis")).toBe(
+      "destructive"
+    );
+    expect(classifyAiQuerySafety("CLIENT KILL 127.0.0.1:6379", "redis")).toBe(
+      "destructive"
+    );
+    expect(classifyAiQuerySafety("SCRIPT FLUSH", "redis")).toBe("destructive");
   });
 
   it("classifies Elasticsearch HTTP-style requests and JSON bodies", () => {

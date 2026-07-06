@@ -513,16 +513,32 @@ function looksReadOnlyRedisCommands(query: string) {
   if (commands.length === 0) return false;
 
   return commands.every((line) => {
-    const command = line.split(/\s+/)[0]?.toUpperCase();
-    return Boolean(command && READ_ONLY_REDIS_COMMANDS.has(command));
+    const [command, subcommand] = redisCommandTokens(line);
+    if (!command) return false;
+    if (READ_ONLY_REDIS_COMMANDS.has(command)) return true;
+    return Boolean(
+      subcommand && READ_ONLY_REDIS_COMMAND_PAIRS.has(`${command} ${subcommand}`)
+    );
   });
 }
 
 function looksDestructiveRedisCommands(query: string) {
   return parseRedisCommandLines(query).some((line) => {
-    const command = line.split(/\s+/)[0]?.toUpperCase();
-    return Boolean(command && DESTRUCTIVE_REDIS_COMMANDS.has(command));
+    const [command, subcommand] = redisCommandTokens(line);
+    if (!command) return false;
+    if (DESTRUCTIVE_REDIS_COMMANDS.has(command)) return true;
+    return Boolean(
+      subcommand && DESTRUCTIVE_REDIS_COMMAND_PAIRS.has(`${command} ${subcommand}`)
+    );
   });
+}
+
+function redisCommandTokens(line: string) {
+  return line
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((token) => token.replace(/^["']|["']$/g, "").toUpperCase());
 }
 
 function parseRedisCommandLines(query: string) {
@@ -589,6 +605,7 @@ function parseRedisCommandLines(query: string) {
 }
 
 const READ_ONLY_REDIS_COMMANDS = new Set([
+  "COMMAND",
   "DBSIZE",
   "EXISTS",
   "FT.INFO",
@@ -604,6 +621,7 @@ const READ_ONLY_REDIS_COMMANDS = new Set([
   "HSCAN",
   "HSTRLEN",
   "HVALS",
+  "INFO",
   "JSON.GET",
   "JSON.MGET",
   "KEYS",
@@ -642,6 +660,25 @@ const READ_ONLY_REDIS_COMMANDS = new Set([
   "ZSCORE",
 ]);
 
+const READ_ONLY_REDIS_COMMAND_PAIRS = new Set([
+  "ACL CAT",
+  "ACL GETUSER",
+  "ACL LIST",
+  "CLIENT ID",
+  "CLIENT INFO",
+  "CLIENT LIST",
+  "CONFIG GET",
+  "CONFIG HELP",
+  "FUNCTION LIST",
+  "FUNCTION STATS",
+  "MEMORY STATS",
+  "MEMORY USAGE",
+  "SCRIPT EXISTS",
+  "SCRIPT HELP",
+  "SLOWLOG GET",
+  "SLOWLOG LEN",
+]);
+
 const DESTRUCTIVE_REDIS_COMMANDS = new Set([
   "DEL",
   "DISCARD",
@@ -667,6 +704,8 @@ const DESTRUCTIVE_REDIS_COMMANDS = new Set([
   "RPOP",
   "SPOP",
   "SREM",
+  "SHUTDOWN",
+  "SWAPDB",
   "UNLINK",
   "XDEL",
   "XTRIM",
@@ -676,4 +715,21 @@ const DESTRUCTIVE_REDIS_COMMANDS = new Set([
   "ZREMRANGEBYLEX",
   "ZREMRANGEBYRANK",
   "ZREMRANGEBYSCORE",
+]);
+
+const DESTRUCTIVE_REDIS_COMMAND_PAIRS = new Set([
+  "ACL DELUSER",
+  "ACL LOAD",
+  "ACL SAVE",
+  "ACL SETUSER",
+  "CLIENT KILL",
+  "CLIENT PAUSE",
+  "CONFIG RESETSTAT",
+  "CONFIG REWRITE",
+  "CONFIG SET",
+  "FUNCTION DELETE",
+  "FUNCTION FLUSH",
+  "FUNCTION LOAD",
+  "SCRIPT FLUSH",
+  "SCRIPT KILL",
 ]);
