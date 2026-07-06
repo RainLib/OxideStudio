@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 use tauri::Manager;
 
 const LSP_VERSION: &str = "submodule";
@@ -9,6 +10,8 @@ pub struct LspBinaryInfo {
     pub version: String,
     pub path: PathBuf,
     pub exists: bool,
+    pub size_bytes: Option<u64>,
+    pub modified_unix_ms: Option<u64>,
 }
 
 /// Get platform-specific binary name
@@ -28,10 +31,14 @@ pub async fn check_lsp_binary(app: tauri::AppHandle) -> Result<LspBinaryInfo, St
     if let Ok(path) = std::env::var("OXIDE_SQL_LSP_BINARY") {
         let binary_path = PathBuf::from(path);
         let exists = binary_path.exists();
+        let size_bytes = binary_size_bytes(&binary_path);
+        let modified_unix_ms = binary_modified_unix_ms(&binary_path);
         return Ok(LspBinaryInfo {
             version: LSP_VERSION.to_string(),
             path: binary_path,
             exists,
+            size_bytes,
+            modified_unix_ms,
         });
     }
 
@@ -62,6 +69,8 @@ pub async fn check_lsp_binary(app: tauri::AppHandle) -> Result<LspBinaryInfo, St
     };
 
     let exists = binary_path.exists();
+    let size_bytes = binary_size_bytes(&binary_path);
+    let modified_unix_ms = binary_modified_unix_ms(&binary_path);
 
     if !exists {
         tracing::error!("❌ [LSP] Binary not found at: {:?}", binary_path);
@@ -87,5 +96,51 @@ pub async fn check_lsp_binary(app: tauri::AppHandle) -> Result<LspBinaryInfo, St
         version: LSP_VERSION.to_string(),
         path: binary_path,
         exists,
+        size_bytes,
+        modified_unix_ms,
     })
+}
+
+fn binary_size_bytes(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|metadata| metadata.len())
+}
+
+fn binary_modified_unix_ms(path: &Path) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let millis = modified.duration_since(UNIX_EPOCH).ok()?.as_millis();
+    Some(millis.min(u64::MAX as u128) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn reports_binary_file_metadata_when_present() {
+        let path = std::env::temp_dir().join(format!(
+            "oxide-lsp-info-test-{}",
+            std::process::id()
+        ));
+        let mut file = std::fs::File::create(&path).expect("create temp binary");
+        file.write_all(b"sql-lsp").expect("write temp binary");
+        drop(file);
+
+        assert_eq!(binary_size_bytes(&path), Some(7));
+        assert!(binary_modified_unix_ms(&path).is_some());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn omits_binary_file_metadata_when_missing() {
+        let path = std::env::temp_dir().join(format!(
+            "oxide-lsp-info-missing-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(binary_size_bytes(&path), None);
+        assert_eq!(binary_modified_unix_ms(&path), None);
+    }
 }

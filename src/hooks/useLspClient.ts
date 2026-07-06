@@ -30,9 +30,13 @@ export function useLspClient() {
         console.log("[useLspClient] 📞 Calling check_lsp_binary...");
 
         // Get binary path from backend command
-        const info = await invoke<{ path: string; exists: boolean }>(
-          "check_lsp_binary"
-        );
+        const info = await invoke<{
+          version: string;
+          path: string;
+          exists: boolean;
+          size_bytes?: number | null;
+          modified_unix_ms?: number | null;
+        }>("check_lsp_binary");
 
         console.log("[useLspClient] 📋 Binary info:", info);
 
