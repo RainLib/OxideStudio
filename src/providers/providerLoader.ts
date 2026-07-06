@@ -26,11 +26,24 @@ export type DatabaseProviderLoader = {
 
 export type DatabaseProviderModuleLoader = () => Promise<DatabaseProviderModule>;
 
+export type DatabaseProviderPackageManifest = {
+  id: string;
+  module: string;
+  enabled?: boolean;
+  priority?: number;
+  displayName?: string;
+};
+
 export type DatabaseProviderLoadStatus = {
   id: string;
   status: "loaded" | "skipped" | "failed";
   providerIds: string[];
   error?: string;
+};
+
+export type DatabaseProviderDiscoveryResult = {
+  loaders: DatabaseProviderLoader[];
+  statuses: DatabaseProviderLoadStatus[];
 };
 
 export function createDatabaseProviderLoaders(
@@ -39,6 +52,83 @@ export function createDatabaseProviderLoaders(
   return Object.entries(modules)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([id, load]) => ({ id, load }));
+}
+
+export function discoverDatabaseProviderLoaders(
+  manifests: DatabaseProviderPackageManifest[],
+  modules: Record<string, DatabaseProviderModuleLoader>
+): DatabaseProviderDiscoveryResult {
+  const discovered: Array<DatabaseProviderLoader & { priority: number }> = [];
+  const statuses: DatabaseProviderLoadStatus[] = [];
+
+  for (const manifest of manifests) {
+    const id = manifest.id?.trim();
+    const moduleId = manifest.module?.trim();
+
+    if (!id) {
+      statuses.push({
+        id: manifest.id ?? "",
+        status: "failed",
+        providerIds: [],
+        error: "Database provider package id is required",
+      });
+      continue;
+    }
+
+    if (manifest.enabled === false) {
+      statuses.push({ id, status: "skipped", providerIds: [] });
+      continue;
+    }
+
+    if (!moduleId) {
+      statuses.push({
+        id,
+        status: "failed",
+        providerIds: [],
+        error: "Database provider package module is required",
+      });
+      continue;
+    }
+
+    const load = modules[moduleId];
+    if (!load) {
+      statuses.push({
+        id,
+        status: "failed",
+        providerIds: [],
+        error: `Database provider module not found: ${moduleId}`,
+      });
+      continue;
+    }
+
+    discovered.push({
+      id,
+      load,
+      priority: manifest.priority ?? 0,
+    });
+  }
+
+  discovered.sort((left, right) => {
+    const priorityDelta = right.priority - left.priority;
+    if (priorityDelta !== 0) return priorityDelta;
+    return left.id.localeCompare(right.id);
+  });
+
+  return {
+    loaders: discovered.map(({ priority: _priority, ...loader }) => loader),
+    statuses,
+  };
+}
+
+export async function loadDatabaseProviderPackages(
+  manifests: DatabaseProviderPackageManifest[],
+  modules: Record<string, DatabaseProviderModuleLoader>
+): Promise<DatabaseProviderLoadStatus[]> {
+  const discovery = discoverDatabaseProviderLoaders(manifests, modules);
+  return [
+    ...discovery.statuses,
+    ...(await loadDatabaseProviders(discovery.loaders)),
+  ];
 }
 
 export async function loadDatabaseProviders(

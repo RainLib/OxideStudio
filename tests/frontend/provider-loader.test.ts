@@ -8,6 +8,8 @@ import {
 } from "@/lib/databaseDialect";
 import {
   createDatabaseProviderLoaders,
+  discoverDatabaseProviderLoaders,
+  loadDatabaseProviderPackages,
   loadDatabaseProviders,
   type DatabaseProviderModule,
 } from "@/providers";
@@ -171,5 +173,84 @@ describe("database provider loader", () => {
     await expect(
       registry.execute("loader.echo", { value: "ok" }, { requestId: "loader" })
     ).resolves.toEqual({ value: "ok" });
+  });
+
+  it("discovers package manifests with priority ordering and failure isolation", () => {
+    const modules: Record<string, () => Promise<DatabaseProviderModule>> = {
+      "./alpha": async () => ({
+        default: {
+          id: "test.package.alpha",
+          displayName: "Alpha",
+        },
+      }),
+      "./beta": async () => ({
+        default: {
+          id: "test.package.beta",
+          displayName: "Beta",
+        },
+      }),
+    };
+
+    const discovery = discoverDatabaseProviderLoaders(
+      [
+        { id: "disabled", module: "./alpha", enabled: false },
+        { id: "missing", module: "./missing" },
+        { id: "beta", module: "./beta", priority: 20 },
+        { id: "alpha", module: "./alpha", priority: 10 },
+      ],
+      modules
+    );
+
+    expect(discovery.statuses).toEqual([
+      { id: "disabled", status: "skipped", providerIds: [] },
+      {
+        id: "missing",
+        status: "failed",
+        providerIds: [],
+        error: "Database provider module not found: ./missing",
+      },
+    ]);
+    expect(discovery.loaders.map((loader) => loader.id)).toEqual([
+      "beta",
+      "alpha",
+    ]);
+  });
+
+  it("loads provider packages from manifests and reports discovery statuses", async () => {
+    const packageDriver = "loader_package" as DatabaseDriver;
+    const statuses = await loadDatabaseProviderPackages(
+      [
+        { id: "disabled-package", module: "./disabled", enabled: false },
+        { id: "invalid-package", module: "./missing" },
+        { id: "package-provider", module: "./provider", priority: 100 },
+      ],
+      {
+        "./provider": async () => ({
+          default: {
+            id: "test.loader.package",
+            displayName: "Loader Package",
+            driverProfiles: [profile(packageDriver, "Loader Package")],
+          },
+        }),
+      }
+    );
+
+    expect(statuses).toEqual([
+      { id: "disabled-package", status: "skipped", providerIds: [] },
+      {
+        id: "invalid-package",
+        status: "failed",
+        providerIds: [],
+        error: "Database provider module not found: ./missing",
+      },
+      {
+        id: "package-provider",
+        status: "loaded",
+        providerIds: ["test.loader.package"],
+      },
+    ]);
+    expect(databaseDriverProfile(packageDriver).menuLabel).toBe(
+      "Loader Package"
+    );
   });
 });
