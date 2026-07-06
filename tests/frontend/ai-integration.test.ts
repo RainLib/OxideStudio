@@ -316,6 +316,55 @@ describe("AI CLI adapter", () => {
   });
 });
 
+describe("AI tool input validation", () => {
+  it("rejects invalid tool inputs before execution", async () => {
+    const registry = createTestRegistry();
+
+    await expect(
+      registry.executeWithPolicy(
+        "demo.read",
+        { value: 42 },
+        createContext(),
+        DEFAULT_AI_TOOL_POLICY
+      )
+    ).rejects.toThrow("Invalid input for AI tool demo.read: $.value must be string");
+
+    await expect(
+      registry.executeWithPolicy(
+        "demo.read",
+        { value: "ok", extra: true },
+        createContext(),
+        DEFAULT_AI_TOOL_POLICY
+      )
+    ).rejects.toThrow("Invalid input for AI tool demo.read: $.extra is not allowed");
+  });
+
+  it("reports invalid model-planned tool inputs as assistant tool errors", async () => {
+    const runtime = createAssistantRuntime({
+      registry: createTestRegistry(),
+      createContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+    });
+
+    const results = await runtime.executeToolCalls([
+      {
+        id: "bad-read",
+        toolName: "demo.read",
+        input: { value: 42 },
+      },
+    ]);
+
+    expect(results).toEqual([
+      expect.objectContaining({
+        id: "bad-read",
+        toolName: "demo.read",
+        status: "error",
+        error: expect.stringContaining("$.value must be string"),
+      }),
+    ]);
+  });
+});
+
 describe("LangGraph planner bridge", () => {
   it("plugs a graph planner into the assistant runtime contract", async () => {
     const runtime = createAssistantRuntime({

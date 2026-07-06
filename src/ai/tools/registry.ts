@@ -4,6 +4,7 @@ import type {
   AiToolExecutionPolicy,
   AiToolExecutionContext,
   AiToolSummary,
+  JsonSchema,
 } from "./types";
 import { evaluateAiToolPolicy } from "./policy";
 
@@ -41,6 +42,11 @@ export class AiToolRegistry {
     const tool = this.get(name);
     if (!tool) {
       throw new Error(`AI tool not found: ${name}`);
+    }
+
+    const inputError = validateToolInput(input, tool.inputSchema);
+    if (inputError) {
+      throw new Error(`Invalid input for AI tool ${tool.name}: ${inputError}`);
     }
 
     if (!tool.timeoutMs || tool.timeoutMs <= 0) {
@@ -113,6 +119,114 @@ export class AiToolRegistry {
 
 export function createAiToolRegistry() {
   return new AiToolRegistry();
+}
+
+function validateToolInput(input: unknown, schema: JsonSchema) {
+  return validateJsonSchema(input, schema, "$");
+}
+
+function validateJsonSchema(
+  value: unknown,
+  schema: JsonSchema | undefined,
+  path: string
+): string | null {
+  if (!schema) return null;
+
+  const expectedType = inferredSchemaType(schema);
+  if (expectedType && !matchesJsonSchemaType(value, expectedType)) {
+    return `${path} must be ${expectedType}`;
+  }
+
+  if (schema.enum && !schema.enum.includes(String(value))) {
+    return `${path} must be one of: ${schema.enum.join(", ")}`;
+  }
+
+  if (expectedType === "object") {
+    const objectValue = value as Record<string, unknown>;
+    for (const key of schema.required || []) {
+      if (!(key in objectValue)) {
+        return `${path}.${key} is required`;
+      }
+    }
+
+    for (const [key, propertySchema] of Object.entries(schema.properties || {})) {
+      if (key in objectValue) {
+        const error = validateJsonSchema(
+          objectValue[key],
+          propertySchema,
+          `${path}.${key}`
+        );
+        if (error) return error;
+      }
+    }
+
+    const knownProperties = new Set(Object.keys(schema.properties || {}));
+    const additionalProperties = schema.additionalProperties;
+    for (const key of Object.keys(objectValue)) {
+      if (knownProperties.has(key)) continue;
+      if (additionalProperties === false) {
+        return `${path}.${key} is not allowed`;
+      }
+      if (
+        additionalProperties &&
+        typeof additionalProperties === "object"
+      ) {
+        const error = validateJsonSchema(
+          objectValue[key],
+          additionalProperties,
+          `${path}.${key}`
+        );
+        if (error) return error;
+      }
+    }
+  }
+
+  if (expectedType === "array" && Array.isArray(value) && schema.items) {
+    for (let index = 0; index < value.length; index += 1) {
+      const error = validateJsonSchema(
+        value[index],
+        schema.items,
+        `${path}[${index}]`
+      );
+      if (error) return error;
+    }
+  }
+
+  return null;
+}
+
+function inferredSchemaType(schema: JsonSchema) {
+  if (schema.type) return schema.type;
+  if (
+    schema.properties ||
+    schema.required ||
+    schema.additionalProperties !== undefined
+  ) {
+    return "object";
+  }
+  if (schema.items) return "array";
+  return null;
+}
+
+function matchesJsonSchemaType(value: unknown, type: string) {
+  switch (type) {
+    case "array":
+      return Array.isArray(value);
+    case "boolean":
+      return typeof value === "boolean";
+    case "integer":
+      return typeof value === "number" && Number.isInteger(value);
+    case "null":
+      return value === null;
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "object":
+      return typeof value === "object" && value !== null && !Array.isArray(value);
+    case "string":
+      return typeof value === "string";
+    default:
+      return true;
+  }
 }
 
 async function recordAudit(
