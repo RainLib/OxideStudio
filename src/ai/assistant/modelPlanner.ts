@@ -94,7 +94,7 @@ export class ModelAssistantPlanner implements AssistantPlanner {
 
   async plan(input: AssistantPlannerInput): Promise<AssistantPlannerResult> {
     const response = await this.invoke({
-      turn: input.turn,
+      turn: modelPlannerTurn(input.turn),
       context: modelPlannerContext(input.context),
       manifest: createAiToolManifest(input.availableTools, input.policy),
       instructions: MODEL_PLANNER_INSTRUCTIONS,
@@ -176,7 +176,7 @@ export function createModelToolResultSummarizer(
 ): AssistantToolResultSummarizer {
   return async (input) =>
     invoke({
-      turn: input.turn,
+      turn: modelPlannerTurn(input.turn),
       context: modelPlannerContext(input.context),
       manifest: createAiToolManifest(input.availableTools, input.policy),
       results: input.results,
@@ -192,8 +192,44 @@ function modelPlannerContext(
     activeConnectionId: context.activeConnectionId ?? null,
     activeDriver: context.activeDriver ?? null,
     activeNamespace: context.activeNamespace ?? null,
-    activeTab: context.activeTab ?? null,
+    activeTab: context.activeTab
+      ? {
+          ...context.activeTab,
+          sql: boundedOptionalModelText(context.activeTab.sql),
+          selection: context.activeTab.selection
+            ? {
+                ...context.activeTab.selection,
+                text: boundedRequiredModelText(context.activeTab.selection.text),
+              }
+            : context.activeTab.selection,
+        }
+      : null,
   };
+}
+
+function modelPlannerTurn(turn: AssistantTurnInput): AssistantTurnInput {
+  return {
+    ...turn,
+    selectedText: boundedNullableModelText(turn.selectedText),
+  };
+}
+
+const MODEL_CONTEXT_TEXT_LIMIT = 8_000;
+const MODEL_CONTEXT_TRUNCATION_SUFFIX = "\n...[truncated]";
+
+function boundedRequiredModelText(text: string) {
+  if (text.length <= MODEL_CONTEXT_TEXT_LIMIT) return text;
+  return `${text.slice(0, MODEL_CONTEXT_TEXT_LIMIT)}${MODEL_CONTEXT_TRUNCATION_SUFFIX}`;
+}
+
+function boundedOptionalModelText(text: string | undefined) {
+  if (text === undefined) return undefined;
+  return boundedRequiredModelText(text);
+}
+
+function boundedNullableModelText(text: string | null | undefined) {
+  if (text === null || text === undefined) return text;
+  return boundedRequiredModelText(text);
 }
 
 const MODEL_PLANNER_INSTRUCTIONS = [

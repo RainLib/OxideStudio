@@ -77,7 +77,7 @@ const planner = createLangGraphAssistantPlanner({
 const runtime = createAssistantRuntime({ planner });
 ```
 
-For model-provider integration without taking a LangGraph dependency, use `createModelAssistantPlanner({ invoke })`. The runtime sends the model a redacted workspace context plus the AI tool manifest; the model returns candidate tool steps; the planner validates tool names and marks write/destructive tools as requiring approval according to policy. Use `createModelToolResultSummarizer(invoke)` to feed tool results back to the provider for a final answer or follow-up suggestions.
+For model-provider integration without taking a LangGraph dependency, use `createModelAssistantPlanner({ invoke })`. The runtime sends the model a redacted and bounded workspace context plus the AI tool manifest; the model returns candidate tool steps; the planner validates tool names and marks write/destructive tools as requiring approval according to policy. Active tab SQL, selected text, and editor selection text are truncated before provider invocation so large scripts cannot dominate model requests. Use `createModelToolResultSummarizer(invoke)` to feed tool results back to the provider for a final answer or follow-up suggestions.
 
 ## Tool Categories
 
@@ -200,3 +200,4 @@ Recommended usage:
 14. Add CLI/MCP external-agent routing tests for injected database metadata, read query, and approved mutation adapters. Done.
 15. Add CLI/MCP manifest environment metadata so external agents can see enabled tool families and missing headless adapters before selecting tools. Done.
 16. Let the in-app default planner execute active query tab SQL when no editor selection is present, while still preferring selected SQL. Done.
+17. Bound model planner turn and workspace text context before provider invocation, covering selected text, active tab SQL, and editor selection text. Done.

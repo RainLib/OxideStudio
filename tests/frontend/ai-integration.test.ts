@@ -660,6 +660,49 @@ describe("LangGraph planner bridge", () => {
 });
 
 describe("model assistant planner", () => {
+  it("bounds large model planner text context before invoking providers", async () => {
+    const largeSql = `SELECT * FROM logs WHERE message = '${"x".repeat(9_000)}'`;
+    const largeSelection = "y".repeat(9_000);
+    const richContext = createRichContext();
+    let captured: AssistantModelPlannerRequest | null = null;
+    const runtime = createAssistantRuntime({
+      registry: createTestRegistry(),
+      createContext: () => ({
+        ...richContext,
+        activeTab: {
+          ...richContext.activeTab!,
+          sql: largeSql,
+          selection: {
+            ...richContext.activeTab!.selection!,
+            text: largeSelection,
+          },
+        },
+      }),
+      policy: DEFAULT_AI_TOOL_POLICY,
+      planner: createModelAssistantPlanner({
+        fallback: false,
+        invoke: async (request) => {
+          captured = request;
+          return { intent: "query", steps: [] };
+        },
+      }),
+    });
+
+    await runtime.prepareTurnAsync({
+      message: "inspect selected query",
+      selectedText: largeSelection,
+    });
+
+    expect(captured?.turn.selectedText).toContain("[truncated]");
+    expect(captured?.turn.selectedText?.length).toBeLessThan(largeSelection.length);
+    expect(captured?.context.activeTab?.sql).toContain("[truncated]");
+    expect(captured?.context.activeTab?.sql?.length).toBeLessThan(largeSql.length);
+    expect(captured?.context.activeTab?.selection?.text).toContain("[truncated]");
+    expect(captured?.context.activeTab?.selection?.text.length).toBeLessThan(
+      largeSelection.length
+    );
+  });
+
   it("passes active workspace context to the model planner", async () => {
     let captured: AssistantModelPlannerRequest | null = null;
     const runtime = createAssistantRuntime({
