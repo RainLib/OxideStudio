@@ -28,7 +28,7 @@ function createTestRegistry() {
     },
     permissions: ["read"],
     capabilities: ["metadata"],
-    execute: async (input) => ({ input, mode: "read" }),
+    execute: async (input, context) => ({ input, mode: "read", context }),
   });
 
   registry.register({
@@ -337,6 +337,39 @@ describe("AI CLI adapter", () => {
         }),
       ])
     );
+  });
+
+  it("passes active context overrides into direct tool calls", async () => {
+    const cli = createCliToolAdapter({
+      registry: createTestRegistry(),
+      createContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+    });
+
+    const result = await cli.run([
+      "tools",
+      "call",
+      "demo.read",
+      "--json",
+      '{"value":"ok"}',
+      "--active-connection-id",
+      "redis-1",
+      "--active-driver",
+      "redis",
+      "--active-namespace",
+      "2",
+    ]);
+    const output = JSON.parse(result.stdout);
+
+    expect(result.exitCode).toBe(0);
+    expect(output).toMatchObject({
+      mode: "read",
+      context: {
+        activeConnectionId: "redis-1",
+        activeDriver: "redis",
+        activeNamespace: "2",
+      },
+    });
   });
 
   it("passes active driver and namespace overrides into assistant planning", async () => {

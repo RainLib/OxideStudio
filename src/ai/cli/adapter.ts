@@ -34,7 +34,13 @@ type ParsedCommand =
       input: AssistantTurnInput;
       contextOverrides: CliContextOverrides;
     }
-  | { kind: "call"; toolName: string; input: unknown; approved: boolean };
+  | {
+      kind: "call";
+      toolName: string;
+      input: unknown;
+      approved: boolean;
+      contextOverrides: CliContextOverrides;
+    };
 
 type CliContextOverrides = Pick<
   AiToolExecutionContext,
@@ -99,7 +105,7 @@ export class CliToolAdapter {
           const result = await this.registry.executeWithPolicy(
             command.toolName,
             command.input,
-            this.createContext(),
+            applyContextOverrides(this.createContext(), command.contextOverrides),
             policy
           );
           return okJson(result);
@@ -166,6 +172,7 @@ export class CliToolAdapter {
 
     let input: unknown = {};
     let approved = false;
+    const contextOverrides: CliContextOverrides = {};
     for (let index = 0; index < rest.length; index += 1) {
       const arg = rest[index];
       if (arg === "--approve") {
@@ -193,10 +200,38 @@ export class CliToolAdapter {
         index += 1;
         continue;
       }
+      if (arg === "--active-connection-id") {
+        const value = rest[index + 1];
+        if (value === undefined) {
+          throw new Error("--active-connection-id requires a value");
+        }
+        contextOverrides.activeConnectionId = value || null;
+        index += 1;
+        continue;
+      }
+      if (arg === "--active-driver") {
+        const value = rest[index + 1];
+        if (value === undefined) {
+          throw new Error("--active-driver requires a value");
+        }
+        contextOverrides.activeDriver =
+          value as AiToolExecutionContext["activeDriver"];
+        index += 1;
+        continue;
+      }
+      if (arg === "--active-namespace") {
+        const value = rest[index + 1];
+        if (value === undefined) {
+          throw new Error("--active-namespace requires a value");
+        }
+        contextOverrides.activeNamespace = value || null;
+        index += 1;
+        continue;
+      }
       throw new Error(`Unknown call argument: ${arg}`);
     }
 
-    return { kind: "call", toolName, input, approved };
+    return { kind: "call", toolName, input, approved, contextOverrides };
   }
 
   private async parsePlan(args: string[]): Promise<{
@@ -385,6 +420,7 @@ function helpText() {
     "  assistant plan --message 'read key session:1' --active-driver redis",
     "  tools call <toolName> [--json '{...}']",
     "  tools call <toolName> [--json-file payload.json]",
+    "  tools call <toolName> --active-driver redis --active-namespace 2 [--json '{...}']",
     "  tools call <toolName> --approve [--json '{...}']",
     "  mcp request --json '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}'",
     "  mcp stdio",

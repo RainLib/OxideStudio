@@ -133,6 +133,7 @@ npm run ai -- tools list
 npm run ai -- tools manifest
 npm run ai -- assistant plan --message "list tables in the active database"
 npm run ai -- tools call query.runReadOnly --json-file payload.json
+npm run ai -- tools call key.getValue --active-driver redis --active-namespace 2 --json '{"key":"session:1"}'
 npm run ai -- tools call key.setValue --approve --json '{"key":"demo","value":"ok"}'
 npm run ai -- mcp request --json '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
@@ -150,6 +151,8 @@ make ai-mcp-stdio
 Use `npm run ai -- mcp request` or `make ai-mcp-smoke` for local MCP JSON-RPC smoke tests or scripts that need to match an external MCP host exactly. Use `tools call` for simpler one-off automation.
 
 Current limitation: `scripts/oxide-ai.ts` runs in a headless Node process, so it does not have the in-app Tauri connection manager, active editor tab, selected schema, or approval UI. Its default adapter intentionally exposes provider and capability discovery only. Database query, metadata, LSP, and mutation tools are fully available through the in-app workspace adapter; a standalone MCP server that can query databases must inject its own connection/query adapter instead of relying on browser/Tauri state.
+
+For injected standalone adapters, both `assistant plan` and `tools call` accept `--active-connection-id`, `--active-driver`, and `--active-namespace` so external agents can pass the same context shape used by the in-app assistant before choosing or executing tools.
 
 For the editor itself, prefer direct TypeScript orchestration over MCP. The editor already owns state, selection, tabs, connection ids, and approval UI; routing those through an external protocol would add latency and lose context. External MCP hosts should use tool annotations plus an explicit approval handoff before calling mutating tools.
 
@@ -183,3 +186,4 @@ Recommended usage:
 9. Extract and test native AI mutation request builders for MongoDB, Redis, and Elasticsearch. Done.
 10. Add core AI tool contract tests for provider hints, approval gates, safety routing, and structured MongoDB, Redis, and Elasticsearch mutation adapters. Done.
 11. Add workspace adapter tests for metadata, query, table mutation, and MongoDB/Redis/Elasticsearch structured mutation service routing. Done.
+12. Add CLI context overrides for direct tool calls so injected standalone adapters can execute tools with active connection, driver, and namespace context. Done.
