@@ -26,10 +26,11 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 16: Extracted and tested frontend LSP metadata caching and configuration dispatch for stale/duplicate schema syncs
 - Phase 17: Added relation-target/predicate completion regressions and disabled Monaco word suggestions so SQL editor completions stay LSP-owned
 - Phase 18: Extracted and tested frontend LSP debounce scheduling, cleanup cancellation, and replacement timer behavior
+- Phase 19: Added LSP client tests for `lsp_did_change_configuration` Tauri command dispatch and pre-initialization no-op behavior
 
 ⏳ **Pending:**
 
-- React component-level assertions for `LspConnectionSyncer` Tauri command wiring
+- Full React render-level assertions for `LspConnectionSyncer` store-to-client integration
 - AI tool-specific live assertions for database metadata, query, and mutation paths
 
 ## Setup Instructions
