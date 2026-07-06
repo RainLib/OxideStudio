@@ -727,7 +727,11 @@ export function previewTableQuery(
 }
 
 export function lspLanguageId(driver: DatabaseDriver) {
-  return normalizeLspDialect(configuredLspLanguageId(driver));
+  const dialect = configuredLspLanguageId(driver);
+  if (!dialect) return DEFAULT_LSP_DIALECT;
+  return SUPPORTED_LSP_DIALECTS.has(dialect)
+    ? normalizeLspDialect(dialect)
+    : dialect;
 }
 
 export function configuredLspLanguageId(driver: DatabaseDriver) {
@@ -736,7 +740,7 @@ export function configuredLspLanguageId(driver: DatabaseDriver) {
 
 export function supportsLspLanguageId(driver: DatabaseDriver) {
   const dialect = configuredLspLanguageId(driver);
-  return dialect === "sql" || SUPPORTED_LSP_DIALECTS.has(dialect);
+  return SUPPORTED_LSP_DIALECTS.has(dialect);
 }
 
 export function queryEditorLanguageId(driver: DatabaseDriver) {

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { defaultDatabaseCapabilities, lspLanguageId } from "@/lib/databaseDialect";
+import {
+  defaultDatabaseCapabilities,
+  lspLanguageId,
+  normalizeLspDialect,
+  supportsLspLanguageId,
+} from "@/lib/databaseDialect";
 import { getLspDocumentUri } from "@/services/lsp/document";
 import {
   collectionToLspTableDefinition,
@@ -129,6 +134,13 @@ describe("LSP schema config", () => {
         lspLanguageId("elasticsearch")
       )
     ).toBe("oxide://query/tab%2Fsearch.elasticsearch.elasticsearch");
+  });
+
+  it("does not treat generic sql as a concrete LSP dialect", () => {
+    expect(supportsLspLanguageId("postgres")).toBe(true);
+    expect(supportsLspLanguageId("unknown-sql")).toBe(false);
+    expect(lspLanguageId("unknown-sql")).toBe("sql");
+    expect(normalizeLspDialect("sql", "mysql")).toBe("mysql");
   });
 
   it("captures schema signature changes from NoSQL fields and indexes", () => {
