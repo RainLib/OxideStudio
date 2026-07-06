@@ -60,6 +60,10 @@ function createAdapters(calls: AdapterCall[] = []): AiToolAdapters {
       calls.push({ name: "search", input });
       return [];
     },
+    mutateNamespace: async (input) => {
+      calls.push({ name: "namespace", input });
+      return "ok";
+    },
     getLspCompletions: async (input) => {
       calls.push({ name: "lsp.completions", input });
       return [];
@@ -102,6 +106,10 @@ describe("core AI tools", () => {
     }>("provider.list", {}, createContext("postgres"));
 
     const redis = result.driverProfiles.find((profile) => profile.driver === "redis");
+    const postgres = result.driverProfiles.find(
+      (profile) => profile.driver === "postgres"
+    );
+    const mysql = result.driverProfiles.find((profile) => profile.driver === "mysql");
     const mongodb = result.driverProfiles.find(
       (profile) => profile.driver === "mongodb"
     );
@@ -120,6 +128,14 @@ describe("core AI tools", () => {
         "lsp.getCompletions",
         "lsp.explainDiagnostics",
       ]),
+    });
+    expect(postgres?.aiToolHints).toMatchObject({
+      write: expect.arrayContaining(["database.createNamespace"]),
+      destructive: expect.arrayContaining(["database.dropNamespace"]),
+    });
+    expect(mysql?.aiToolHints).toMatchObject({
+      write: expect.arrayContaining(["database.createNamespace"]),
+      destructive: expect.arrayContaining(["database.dropNamespace"]),
     });
     expect(mongodb?.aiToolHints).toMatchObject({
       write: expect.arrayContaining([
@@ -244,6 +260,64 @@ describe("core AI tools", () => {
         DEFAULT_AI_TOOL_POLICY
       )
     ).rejects.toThrow("requires explicit approval");
+  });
+
+  it("gates namespace mutations behind approval and normalizes inputs", async () => {
+    const calls: AdapterCall[] = [];
+    const registry = createRegistry(createAdapters(calls));
+
+    await expect(
+      registry.executeWithPolicy(
+        "database.createNamespace",
+        { namespace: "app" },
+        createContext("postgres"),
+        DEFAULT_AI_TOOL_POLICY
+      )
+    ).rejects.toThrow("requires explicit approval");
+
+    await registry.executeWithPolicy(
+      "database.createNamespace",
+      {
+        connectionId: "postgres-1",
+        namespace: "app",
+        charset: "",
+        collation: "",
+      },
+      createContext("postgres"),
+      approvedPolicy("database.createNamespace")
+    );
+    await registry.executeWithPolicy(
+      "database.dropNamespace",
+      {
+        connectionId: "postgres-1",
+        namespace: "app",
+        cascade: true,
+      },
+      createContext("postgres"),
+      approvedPolicy("database.dropNamespace")
+    );
+
+    expect(calls).toEqual([
+      {
+        name: "namespace",
+        input: {
+          operation: "create",
+          connectionId: "postgres-1",
+          namespace: "app",
+          charset: null,
+          collation: null,
+        },
+      },
+      {
+        name: "namespace",
+        input: {
+          operation: "drop",
+          connectionId: "postgres-1",
+          namespace: "app",
+          cascade: true,
+        },
+      },
+    ]);
   });
 
   it("reads Redis keys through a bounded read-only tool", async () => {
