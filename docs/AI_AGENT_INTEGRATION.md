@@ -42,6 +42,7 @@ Decision summary:
 - `tests/frontend/ai-core-tools.test.ts` locks the core AI tool contract for provider hints, read/write/destructive safety routing, approval gates, and structured MongoDB, Redis, and Elasticsearch mutation adapters.
 - `tests/frontend/provider-loader.test.ts` covers dynamic provider module loading, failure isolation, and dynamically registered AI tool families.
 - `tests/frontend/workspace-ai-tools.test.ts` verifies that in-app AI tools route metadata, query, table mutation, and MongoDB/Redis/Elasticsearch structured mutation calls through the workspace Tauri service adapters.
+- `tests/frontend/ai-external-tool-routing.test.ts` verifies that CLI and MCP external-agent entrypoints execute metadata, read query, and approved table mutation tools through an injected database adapter instead of bypassing the shared registry.
 - `src/ai/assistant` exposes an `AssistantPlanner` contract, a deterministic fallback planner, a provider-neutral model planner, and approval-aware execution for AI-proposed tool calls.
 - `src/ai/assistant/langGraphPlanner.ts` provides a dependency-light LangGraph bridge. A real LangGraph graph can plug in by returning `AssistantPlannerResult` from the shared planner contract.
 - `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
@@ -185,10 +186,11 @@ Recommended usage:
 4. Add write tools with approval gates and audit logging. Done for query-level mutation/destructive tools, structured table row mutations, and structured document/key/search mutations.
 5. Add a planner layer that chooses tool calls, pauses for approval, and feeds results back into the model. Foundation done with `AssistantPlanner`, `createModelAssistantPlanner`, and `createModelToolResultSummarizer`; full LangGraph graph wiring is still pending.
 6. Add provider/plugin hooks so new databases register tool families by capability, not by UI rewrites. Runtime provider registration is done with `registerDatabaseProvider`; dynamic module loading is done with `loadDatabaseProviders`; package manifest discovery is still pending.
-7. Add live integration coverage for MongoDB, Redis, Elasticsearch, MySQL, and PostgreSQL tool paths. Driver-level connection, metadata, query, and mutation coverage is available through `scripts/test-live-databases.sh`; AI tool-specific live assertions are still pending.
+7. Add live integration coverage for MongoDB, Redis, Elasticsearch, MySQL, and PostgreSQL tool paths. Driver-level connection, metadata, query, and mutation coverage is available through `scripts/test-live-databases.sh`; CLI/MCP adapter-level AI tool routing is covered by `tests/frontend/ai-external-tool-routing.test.ts`; Docker-backed AI tool-specific live assertions are still pending.
 8. Add safety regression tests for SQL, MongoDB, Redis, and Elasticsearch request classification, and reject unknown MongoDB driver command fields before execution. Done.
 9. Extract and test native AI mutation request builders for MongoDB, Redis, and Elasticsearch. Done.
 10. Add core AI tool contract tests for provider hints, approval gates, safety routing, and structured MongoDB, Redis, and Elasticsearch mutation adapters. Done.
 11. Add workspace adapter tests for metadata, query, table mutation, and MongoDB/Redis/Elasticsearch structured mutation service routing. Done.
 12. Add CLI context overrides for direct tool calls so injected standalone adapters can execute tools with active connection, driver, and namespace context. Done.
 13. Add MCP `tools/call` context overrides via `_meta["oxide/context"]` or `params.context` so external agents can execute tools with active connection, driver, and namespace context. Done.
+14. Add CLI/MCP external-agent routing tests for injected database metadata, read query, and approved mutation adapters. Done.
