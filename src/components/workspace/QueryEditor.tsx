@@ -4,6 +4,7 @@ import { useSavedQueryStore } from "@/store/useSavedQueryStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { EditorActionBar } from "./EditorActionBar";
+import { QUERY_EDITOR_OPTIONS } from "./queryEditorOptions";
 import { ThemeContext } from "@/theme/ThemeProvider";
 import Editor, { useMonaco } from "@monaco-editor/react";
 import { listen } from "@tauri-apps/api/event";
@@ -723,24 +724,7 @@ export function QueryEditor() {
             });
           }}
           // Theme is updated via useEffect to ensure it responds to context
-          options={{
-            minimap: { enabled: false },
-            fontSize: 16,
-            fontFamily: "'JetBrains Mono', 'Fira Code', Consolas, monospace",
-            scrollBeyondLastLine: false,
-            automaticLayout: true,
-            padding: { top: 24, bottom: 16 },
-            lineNumbers: "on",
-            renderLineHighlight: "all",
-            smoothScrolling: true,
-            cursorBlinking: "smooth",
-            quickSuggestions: { other: true, comments: true, strings: true },
-            suggestOnTriggerCharacters: true,
-            // SQL semantic suggestions come from the LSP; Monaco word suggestions
-            // can surface column-like tokens in relation-target contexts.
-            wordBasedSuggestions: "off",
-            acceptSuggestionOnCommitCharacter: false,
-          }}
+          options={QUERY_EDITOR_OPTIONS}
         />
       </div>
 
