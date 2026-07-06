@@ -365,11 +365,14 @@ impl DatabaseDriver for PostgresDriver {
     }
 
     async fn disconnect(&self) -> Result<()> {
+        let pool = {
+            let mut pool = self.pool.lock().await;
+            pool.take()
+        };
+
         let active_queries = self.drain_active_query_backends();
         if !active_queries.is_empty() {
-            let cancel_pool = { self.pool.lock().await.clone() };
-
-            if let Some(pool) = cancel_pool {
+            if let Some(pool) = &pool {
                 self.cancel_tracked_queries_on_pool(&pool, active_queries)
                     .await;
             } else {
@@ -393,10 +396,6 @@ impl DatabaseDriver for PostgresDriver {
             }
         }
 
-        let pool = {
-            let mut pool = self.pool.lock().await;
-            pool.take()
-        };
         if let Some(pool) = pool {
             Self::close_pool_with_timeout(pool).await;
         }
@@ -1224,6 +1223,32 @@ mod tests {
             .lock()
             .expect("active query map mutex poisoned")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn disconnect_clears_and_closes_postgres_pool() {
+        let driver = PostgresDriver::new("postgres://user:pass@localhost/db");
+        let options = PgConnectOptions::from_str("postgres://user:pass@localhost/db")
+            .expect("test connection options should parse")
+            .disable_statement_logging()
+            .statement_cache_capacity(0)
+            .to_owned();
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(options);
+
+        {
+            let mut current_pool = driver.pool.lock().await;
+            *current_pool = Some(pool.clone());
+        }
+
+        driver
+            .disconnect()
+            .await
+            .expect("disconnect should close a lazy pool");
+
+        assert!(driver.pool.lock().await.is_none());
+        assert!(pool.is_closed());
     }
 
     #[test]
