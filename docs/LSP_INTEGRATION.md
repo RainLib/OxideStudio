@@ -49,7 +49,7 @@ Current tracked revision is `v0.1.3-22-g4481938`.
 bash src-tauri/build_prepare.sh
 ```
 
-`make dev` runs `lsp-build` first, then starts Tauri with `OXIDE_SKIP_SQL_LSP_PREPARE=1` so the `beforeDevCommand` does not rewrite the watched bundled binary during startup. After changing `vendor/sql-lsp`, run `make lsp-build` or the script above before starting dev mode.
+`make dev` runs `lsp-build` first, then starts Tauri with `OXIDE_SKIP_SQL_LSP_PREPARE=1`; the Tauri `beforeDevCommand` also sets that flag so direct `npm run tauri -- dev` does not rewrite the watched bundled binary during startup. After changing `vendor/sql-lsp`, run `make lsp-build` or the script above before starting dev mode.
 
 To use a prebuilt binary instead of building the submodule:
 
