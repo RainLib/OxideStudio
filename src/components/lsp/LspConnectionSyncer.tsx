@@ -19,6 +19,10 @@ import {
   type LspTableDefinition,
 } from "@/services/lsp/schemaConfig";
 import {
+  getCachedLspMetadata,
+  type CachedLspMetadata,
+} from "@/services/lsp/metadataCache";
+import {
   buildLspFileMappings,
   createLspConfigKey,
   createLspSyncPlan,
@@ -36,10 +40,7 @@ const MAX_LSP_COLLECTIONS_PER_SCHEMA = 500;
 const LSP_METADATA_CONCURRENCY = 8;
 const LSP_METADATA_CACHE_TTL_MS = 60_000;
 
-type CachedLspTableDefinition = {
-  expiresAt: number;
-  promise: Promise<LspTableDefinition>;
-};
+type CachedLspTableDefinition = CachedLspMetadata<LspTableDefinition>;
 
 async function collectionToLspTableDefinitionWithMetadata(
   connectionId: string,
@@ -281,27 +282,13 @@ export function LspConnectionSyncer() {
       schemaName: string,
       table: { name: string; type?: string | null; comment?: string | null }
     ) => {
-      const now = Date.now();
-      const cache = tableMetadataCacheRef.current;
       const cacheKey = `${activeConnectionId}:${connection.driver}:${schemaName}:${table.name}`;
-
-      for (const [key, cached] of cache) {
-        if (cached.expiresAt <= now) {
-          cache.delete(key);
-        }
-      }
-
-      const cached = cache.get(cacheKey);
-      if (cached && cached.expiresAt > now) {
-        return cached.promise;
-      }
-
-      const promise = buildTableDefinition(schemaName, table);
-      cache.set(cacheKey, {
-        expiresAt: now + LSP_METADATA_CACHE_TTL_MS,
-        promise,
-      });
-      return promise;
+      return getCachedLspMetadata(
+        tableMetadataCacheRef.current,
+        cacheKey,
+        LSP_METADATA_CACHE_TTL_MS,
+        () => buildTableDefinition(schemaName, table)
+      );
     };
 
     // Debounce: wait 500ms before sending
