@@ -31,8 +31,9 @@ impl ConnectionManager {
     }
 
     pub async fn add_connection(&self, id: String, driver: Box<dyn DatabaseDriver>) {
-        let mut conns = self.connections.lock().await;
-        conns.insert(id, Arc::from(driver));
+        if let Err(error) = self.replace_connection(id, driver).await {
+            tracing::warn!("Failed to add connection: {}", error);
+        }
     }
 
     pub async fn remove_connection(&self, id: &str) -> Option<Arc<dyn DatabaseDriver>> {
@@ -555,6 +556,37 @@ mod tests {
             .expect("replace should succeed after installing the new driver");
 
         assert_eq!(disconnect_calls.load(Ordering::SeqCst), 1);
+        manager
+            .ping("conn")
+            .await
+            .expect("new driver should remain active");
+    }
+
+    #[tokio::test]
+    async fn add_connection_disconnects_replaced_driver_and_schema_context() {
+        let manager = ConnectionManager::new();
+        let disconnect_calls = Arc::new(AtomicUsize::new(0));
+
+        manager
+            .add_connection(
+                "conn".to_string(),
+                Box::new(LifecycleDriver::new(disconnect_calls.clone(), false)),
+            )
+            .await;
+        manager
+            .set_current_schema("conn", "public")
+            .await
+            .expect("schema context should be stored");
+
+        manager
+            .add_connection(
+                "conn".to_string(),
+                Box::new(LifecycleDriver::new(disconnect_calls.clone(), false)),
+            )
+            .await;
+
+        assert_eq!(disconnect_calls.load(Ordering::SeqCst), 1);
+        assert!(!manager.active_schemas.lock().await.contains_key("conn"));
         manager
             .ping("conn")
             .await
