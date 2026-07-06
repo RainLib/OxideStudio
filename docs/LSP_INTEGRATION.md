@@ -29,10 +29,10 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 19: Added LSP client tests for `lsp_did_change_configuration` Tauri command dispatch and pre-initialization no-op behavior
 - Phase 20: Bundled LSP now returns `TextEdit` ranges for schema-qualified relation/function completions so `public.us` and `test_db.calc` replace the full typed token instead of duplicating qualifiers
 - Phase 21: Bundled LSP integration tests now assert schema-qualified relation completions include full-token `TextEdit` replacement ranges
+- Phase 22: React render-level coverage now mounts `LspConnectionSyncer` against real Zustand store state and asserts the derived schema configuration is sent through the LSP client
 
 ⏳ **Pending:**
 
-- Full React render-level assertions for `LspConnectionSyncer` store-to-client integration
 - AI tool-specific live assertions for database metadata, query, and mutation paths
 
 ## Setup Instructions
