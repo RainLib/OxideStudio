@@ -34,6 +34,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 24: SQL completion now scopes referenced table inference to the cursor's current query, so subquery and CTE completions avoid leaking outer or nested table columns
 - Phase 25: Alias member completion and schema selection now use scoped aliases, so same-named aliases in subqueries do not override the cursor's current query alias
 - Phase 26: File-level schema inference now uses the same CTE-aware table reference extraction as completion, so CTE names do not create false schema ambiguity
+- Phase 27: Completed clause keyword completions are pruned by expected target kind, so `FROM`/`JOIN` cannot surface field names and `WHERE`/`ON` cannot surface relation targets; Tauri now preserves LSP `textEdit` ranges for Monaco.
 
 ⏳ **Pending:**
 
@@ -50,7 +51,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-28-ge773ded`.
+Current tracked revision is `v0.1.3-30-g34d9089`.
 
 ### 2. Prepare the Binary
 

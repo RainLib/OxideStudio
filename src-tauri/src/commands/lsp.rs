@@ -51,6 +51,25 @@ pub struct CompletionResponse {
     pub items: Vec<CompletionItem>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Position {
+    pub line: u32,
+    pub character: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Range {
+    pub start: Position,
+    pub end: Position,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TextEdit {
+    pub range: Range,
+    #[serde(rename = "newText")]
+    pub new_text: String,
+}
+
 /// Completion item
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionItem {
@@ -78,6 +97,8 @@ pub struct CompletionItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub filter_text: Option<String>,
+    #[serde(default, rename = "textEdit", skip_serializing_if = "Option::is_none")]
+    pub text_edit: Option<TextEdit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preselect: Option<bool>,
 }
@@ -103,6 +124,27 @@ fn lsp_documentation_to_string(value: &Value) -> Option<String> {
     }
 
     None
+}
+
+fn parse_position(value: &Value) -> Option<Position> {
+    Some(Position {
+        line: value.get("line")?.as_u64()?.try_into().ok()?,
+        character: value.get("character")?.as_u64()?.try_into().ok()?,
+    })
+}
+
+fn parse_range(value: &Value) -> Option<Range> {
+    Some(Range {
+        start: parse_position(value.get("start")?)?,
+        end: parse_position(value.get("end")?)?,
+    })
+}
+
+fn parse_text_edit(value: &Value) -> Option<TextEdit> {
+    Some(TextEdit {
+        range: parse_range(value.get("range")?)?,
+        new_text: value.get("newText")?.as_str()?.to_string(),
+    })
 }
 
 fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
@@ -132,6 +174,7 @@ fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
             .get("filterText")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+        text_edit: item.get("textEdit").and_then(parse_text_edit),
         preselect: item.get("preselect").and_then(|v| v.as_bool()),
     })
 }
@@ -555,6 +598,13 @@ mod tests {
             "insertTextFormat": 1,
             "sortText": "1:calculate_score",
             "filterText": "calculate_score",
+            "textEdit": {
+                "range": {
+                    "start": { "line": 0, "character": 7 },
+                    "end": { "line": 0, "character": 16 }
+                },
+                "newText": "public.calculate_score()"
+            },
             "preselect": true
         });
 
@@ -565,6 +615,22 @@ mod tests {
         assert_eq!(parsed.insert_text_format, Some(1));
         assert_eq!(parsed.sort_text.as_deref(), Some("1:calculate_score"));
         assert_eq!(parsed.filter_text.as_deref(), Some("calculate_score"));
+        assert_eq!(
+            parsed.text_edit,
+            Some(TextEdit {
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 7
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 16
+                    },
+                },
+                new_text: "public.calculate_score()".to_string(),
+            })
+        );
         assert_eq!(parsed.preselect, Some(true));
     }
 }
