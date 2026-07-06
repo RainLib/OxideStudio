@@ -27,6 +27,12 @@ import {
   toMonacoCompletionKind,
 } from "@/lib/lspCompletion";
 import {
+  collectStaleTransactionTabIds,
+  removeTransactionStates,
+  type QueryTransactionSession,
+  type QueryTransactionTabContext,
+} from "@/lib/queryTransactionLifecycle";
+import {
   extractLspDocumentIdentity,
   extractSqlDocumentTabId,
   getLspDocumentUri,
@@ -138,9 +144,9 @@ export function QueryEditor() {
   const selectionDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const openedDocumentsRef = useRef<Set<string>>(new Set());
   const documentVersionsRef = useRef<Map<string, number>>(new Map());
-  const activeTransactionsRef = useRef<
-    Map<string, { connectionId: string; transactionId: string }>
-  >(new Map());
+  const activeTransactionsRef = useRef<Map<string, QueryTransactionSession>>(
+    new Map()
+  );
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const effectiveConnectionId = activeTab?.connectionId || activeConnectionId;
@@ -254,28 +260,43 @@ export function QueryEditor() {
   }, [lspClient, monaco]);
 
   useEffect(() => {
-    const existingTabIds = new Set(tabs.map((tab) => tab.id));
-    const staleTabIds: string[] = [];
+    const contexts: QueryTransactionTabContext[] = tabs.map((tab) => {
+      const tabConnectionId = tab.connectionId || activeConnectionId || null;
+      const tabConnection = connections.find(
+        (connection) => connection.id === tabConnectionId
+      );
+      const tabDriver = tabConnection?.driver || DEFAULT_DATABASE_DRIVER;
 
-    for (const [tabId, session] of activeTransactionsRef.current.entries()) {
-      if (!existingTabIds.has(tabId)) {
-        staleTabIds.push(tabId);
+      return {
+        tabId: tab.id,
+        connectionId: tabConnectionId,
+        supportsTransactions:
+          defaultDatabaseCapabilities(tabDriver).supportsTransactions,
+      };
+    });
+
+    const staleTabIds = collectStaleTransactionTabIds(
+      activeTransactionsRef.current,
+      contexts
+    );
+
+    if (staleTabIds.length > 0) {
+      for (const tabId of staleTabIds) {
+        const session = activeTransactionsRef.current.get(tabId);
+        if (!session) continue;
+
         void transactionService.rollbackTransaction(
           session.connectionId,
           session.transactionId
         );
         activeTransactionsRef.current.delete(tabId);
       }
-    }
 
-    if (staleTabIds.length > 0) {
-      setTransactionStates((state) => {
-        const next = { ...state };
-        staleTabIds.forEach((tabId) => delete next[tabId]);
-        return next;
-      });
+      setTransactionStates((state) =>
+        removeTransactionStates(state, staleTabIds)
+      );
     }
-  }, [tabs]);
+  }, [activeConnectionId, connections, tabs]);
 
   useEffect(() => {
     return () => {
@@ -567,7 +588,15 @@ export function QueryEditor() {
       window.removeEventListener(APP_EVENT_RUN_CURRENT, onRunCurrent);
       window.removeEventListener(APP_EVENT_FORMAT_SQL, onFormat);
     };
-  }, [activeConnectionId, activeTab]);
+  }, [
+    activeConnectionId,
+    activeTab,
+    activeTransactionState,
+    effectiveConnectionId,
+    runTabQuery,
+    supportsTransactions,
+    transactionMode,
+  ]);
 
   const handleSchemaChange = (schema: string) => {
     if (activeTab) {
