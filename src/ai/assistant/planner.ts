@@ -49,29 +49,22 @@ export function classifyAssistantIntent(
   const text = `${input.message} ${input.selectedText || ""}`.toLowerCase();
   if (!text.trim()) return "unknown";
 
-  if (
-    /\b(create|delete|drop|insert|remove|replace|set|truncate|update|upsert|write)\b/.test(
-      text
-    )
-  ) {
+  if (hasWriteIntent(text)) {
     return "query";
   }
-  if (/\bkey\b/.test(text) && /\b(get|read|show|fetch|inspect)\b/.test(text)) {
+  if (hasKeyReadIntent(text)) {
     return "query";
   }
-  if (/key/.test(text) && /读取|查看|获取|查询|显示/.test(text)) {
-    return "query";
-  }
-  if (/\b(schema|table|collection|index|key|metadata|database|list)\b/.test(text)) {
+  if (hasMetadataIntent(text)) {
     return "metadata";
   }
-  if (/\b(query|select|find|search|run|execute|count|aggregate)\b/.test(text)) {
+  if (hasQueryIntent(text)) {
     return "query";
   }
-  if (/\b(explain|diagnostic|error|fix|why|optimi[sz]e)\b/.test(text)) {
+  if (hasExplainIntent(text)) {
     return "explain";
   }
-  if (/\b(tab|selection|editor|workspace|current)\b/.test(text)) {
+  if (hasWorkspaceIntent(text)) {
     return "workspace";
   }
 
@@ -216,11 +209,11 @@ function selectedStructuredMutationPlan(
   const text = message.toLowerCase();
 
   if (capabilities.dataModel === "keyValue") {
-    const key = extractTargetName(message, ["key"]);
+    const key = extractTargetName(message, ["key", "键"]);
     if (
       key &&
       hasTool("key.getValue") &&
-      /\b(get|read|show|fetch|inspect)\b|读取|查看|获取|查询|显示/.test(text)
+      hasReadIntent(text)
     ) {
       return {
         toolName: "key.getValue",
@@ -232,7 +225,7 @@ function selectedStructuredMutationPlan(
     if (
       key &&
       hasTool("key.deleteKeys") &&
-      /\b(delete|remove|unset)\b|删除|移除/.test(text)
+      hasDeleteIntent(text)
     ) {
       return {
         toolName: "key.deleteKeys",
@@ -250,9 +243,9 @@ function selectedStructuredMutationPlan(
     capabilities.dataModel === "relational" &&
     hasTool("table.insertRows") &&
     records?.length &&
-    /\b(add|create|insert|new|write)\b/.test(text)
+    hasCreateOrWriteIntent(text)
   ) {
-    const table = extractTargetName(message, ["table", "into"]);
+    const table = extractTargetName(message, ["table", "into", "表", "到表"]);
     if (table) {
       return {
         toolName: "table.insertRows",
@@ -266,9 +259,14 @@ function selectedStructuredMutationPlan(
     capabilities.dataModel === "document" &&
     hasTool("document.insertDocuments") &&
     records?.length &&
-    /\b(add|create|insert|new|write)\b/.test(text)
+    hasCreateOrWriteIntent(text)
   ) {
-    const collection = extractTargetName(message, ["collection", "into"]);
+    const collection = extractTargetName(message, [
+      "collection",
+      "into",
+      "集合",
+      "到集合",
+    ]);
     if (collection) {
       return {
         toolName: "document.insertDocuments",
@@ -279,11 +277,11 @@ function selectedStructuredMutationPlan(
   }
 
   if (capabilities.dataModel === "keyValue") {
-    const key = extractTargetName(message, ["key"]);
+    const key = extractTargetName(message, ["key", "键"]);
     if (
       key &&
       hasTool("key.setValue") &&
-      /\b(add|create|set|write)\b/.test(text)
+      hasCreateSetOrWriteIntent(text)
     ) {
       return {
         toolName: "key.setValue",
@@ -300,16 +298,16 @@ function selectedStructuredMutationPlan(
     capabilities.dataModel === "search" &&
     hasTool("search.indexDocument") &&
     records?.length === 1 &&
-    /\b(add|create|index|replace|upsert|write)\b/.test(text)
+    hasIndexWriteIntent(text)
   ) {
-    const index = extractTargetName(message, ["index", "into"]);
+    const index = extractTargetName(message, ["index", "into", "索引", "到索引"]);
     if (index) {
       return {
         toolName: "search.indexDocument",
         title: "Index selected JSON document with approval",
         input: {
           index,
-          id: extractTargetName(message, ["id"]) ?? undefined,
+          id: extractTargetName(message, ["id", "编号"]) ?? undefined,
           document: records[0],
         },
       };
@@ -361,14 +359,83 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 function extractTargetName(message: string, labels: string[]) {
   for (const label of labels) {
     const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const isAsciiLabel = /^[a-z0-9_-]+$/i.test(label);
     const match = message.match(
-      new RegExp(`\\b${escaped}\\b\\s+(?:named\\s+)?["'\`]?([\\w.:-]+)`, "i")
+      new RegExp(
+        isAsciiLabel
+          ? `\\b${escaped}\\b\\s+(?:named\\s+)?["'\`]?([\\w.:-]+)`
+          : `${escaped}\\s*(?:名为|叫|named\\s+)?["'\`]?([\\w.:-]+)`,
+        "i"
+      )
     );
     if (match?.[1]) {
       return match[1];
     }
   }
   return null;
+}
+
+function hasWriteIntent(text: string) {
+  return (
+    /\b(create|delete|drop|insert|remove|replace|set|truncate|update|upsert|write)\b/.test(
+      text
+    ) || /创建|删除|移除|插入|新增|替换|设置|写入|更新|清空|截断|保存/.test(text)
+  );
+}
+
+function hasReadIntent(text: string) {
+  return /\b(get|read|show|fetch|inspect)\b/.test(text) ||
+    /读取|查看|获取|查询|显示/.test(text);
+}
+
+function hasKeyReadIntent(text: string) {
+  return (
+    (/\bkey\b/.test(text) || /键/.test(text)) &&
+    hasReadIntent(text)
+  );
+}
+
+function hasMetadataIntent(text: string) {
+  return (
+    /\b(schema|table|collection|index|key|metadata|database|list)\b/.test(text) ||
+    /架构|模式|表|集合|索引|键|元数据|数据库|列出|列表/.test(text)
+  );
+}
+
+function hasQueryIntent(text: string) {
+  return (
+    /\b(query|select|find|search|run|execute|count|aggregate)\b/.test(text) ||
+    /查询|搜索|运行|执行|计数|统计|聚合/.test(text)
+  );
+}
+
+function hasExplainIntent(text: string) {
+  return /\b(explain|diagnostic|error|fix|why|optimi[sz]e)\b/.test(text) ||
+    /解释|诊断|错误|修复|为什么|优化/.test(text);
+}
+
+function hasWorkspaceIntent(text: string) {
+  return /\b(tab|selection|editor|workspace|current)\b/.test(text) ||
+    /标签|选区|编辑器|工作区|当前/.test(text);
+}
+
+function hasDeleteIntent(text: string) {
+  return /\b(delete|remove|unset)\b/.test(text) || /删除|移除|清除/.test(text);
+}
+
+function hasCreateOrWriteIntent(text: string) {
+  return /\b(add|create|insert|new|write)\b/.test(text) ||
+    /新增|创建|插入|写入|添加/.test(text);
+}
+
+function hasCreateSetOrWriteIntent(text: string) {
+  return /\b(add|create|set|write)\b/.test(text) ||
+    /新增|创建|设置|写入|添加/.test(text);
+}
+
+function hasIndexWriteIntent(text: string) {
+  return /\b(add|create|index|replace|upsert|write)\b/.test(text) ||
+    /新增|创建|索引|替换|写入|添加/.test(text);
 }
 
 function selectedMutationTool(

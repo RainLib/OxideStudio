@@ -25,19 +25,55 @@ const QUERY_TOOLS: AiToolSummary[] = [
     permissions: ["destructive"],
     capabilities: ["query"],
   },
+  {
+    name: "key.setValue",
+    description: "Set Redis key.",
+    inputSchema: { type: "object" },
+    permissions: ["write"],
+    capabilities: ["query"],
+  },
+  {
+    name: "table.insertRows",
+    description: "Insert table rows.",
+    inputSchema: { type: "object" },
+    permissions: ["write"],
+    capabilities: ["query"],
+  },
+  {
+    name: "document.insertDocuments",
+    description: "Insert documents.",
+    inputSchema: { type: "object" },
+    permissions: ["write"],
+    capabilities: ["query"],
+  },
+  {
+    name: "search.indexDocument",
+    description: "Index search document.",
+    inputSchema: { type: "object" },
+    permissions: ["write"],
+    capabilities: ["query"],
+  },
 ];
+
+function planFor(
+  message: string,
+  activeDriver: "postgres" | "redis" | "mongodb" | "elasticsearch",
+  selectedText?: string
+) {
+  return createDefaultAssistantPlanner().plan({
+    turn: { message, selectedText },
+    context: {
+      requestId: `planner-${activeDriver}`,
+      activeDriver,
+    },
+    availableTools: QUERY_TOOLS,
+    policy: DEFAULT_AI_TOOL_POLICY,
+  });
+}
 
 describe("default assistant planner", () => {
   it("plans Redis key reads without requiring selected text", () => {
-    const result = createDefaultAssistantPlanner().plan({
-      turn: { message: "read key session:1" },
-      context: {
-        requestId: "planner-key-read",
-        activeDriver: "redis",
-      },
-      availableTools: QUERY_TOOLS,
-      policy: DEFAULT_AI_TOOL_POLICY,
-    });
+    const result = planFor("read key session:1", "redis");
 
     expect(result.intent).toBe("query");
     expect(result.steps).toContainEqual(
@@ -46,6 +82,51 @@ describe("default assistant planner", () => {
         toolName: "key.getValue",
         input: { key: "session:1" },
         requiresApproval: false,
+      })
+    );
+  });
+
+  it("plans Chinese Redis key reads without requiring selected text", () => {
+    const result = planFor("查看键 session:1", "redis");
+
+    expect(result.intent).toBe("query");
+    expect(result.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "key.getValue",
+        input: { key: "session:1" },
+      })
+    );
+  });
+
+  it("plans Chinese structured writes for relational, document, and search drivers", () => {
+    const rowInsert = planFor("插入到表 users", "postgres", '{"id":1}');
+    const documentInsert = planFor(
+      "新增到集合 users",
+      "mongodb",
+      '{"name":"Ada"}'
+    );
+    const searchIndex = planFor(
+      "写入到索引 users 编号 1",
+      "elasticsearch",
+      '{"active":true}'
+    );
+
+    expect(rowInsert.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "table.insertRows",
+        input: { table: "users", inserts: [{ id: 1 }] },
+      })
+    );
+    expect(documentInsert.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "document.insertDocuments",
+        input: { collection: "users", documents: [{ name: "Ada" }] },
+      })
+    );
+    expect(searchIndex.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "search.indexDocument",
+        input: { index: "users", id: "1", document: { active: true } },
       })
     );
   });
