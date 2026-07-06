@@ -28,6 +28,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 18: Extracted and tested frontend LSP debounce scheduling, cleanup cancellation, and replacement timer behavior
 - Phase 19: Added LSP client tests for `lsp_did_change_configuration` Tauri command dispatch and pre-initialization no-op behavior
 - Phase 20: Bundled LSP now returns `TextEdit` ranges for schema-qualified relation/function completions so `public.us` and `test_db.calc` replace the full typed token instead of duplicating qualifiers
+- Phase 21: Bundled LSP integration tests now assert schema-qualified relation completions include full-token `TextEdit` replacement ranges
 
 ⏳ **Pending:**
 

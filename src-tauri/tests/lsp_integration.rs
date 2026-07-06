@@ -190,6 +190,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let elasticsearch_uri = "file:///oxide/elasticsearch.es.dsl";
     let postgres_uri = "file:///oxide/postgres.sql";
     let postgres_where_uri = "file:///oxide/postgres-where.sql";
+    let postgres_qualified_uri = "file:///oxide/postgres-qualified.sql";
 
     let mut file_schemas = Map::new();
     file_schemas.insert(
@@ -212,6 +213,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_where_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
+    file_schemas.insert(
+        postgres_qualified_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
 
     let mut file_dialects = Map::new();
     file_dialects.insert(redis_uri.to_string(), json!("redis"));
@@ -219,6 +224,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     file_dialects.insert(elasticsearch_uri.to_string(), json!("elasticsearch-dsl"));
     file_dialects.insert(postgres_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_where_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_qualified_uri.to_string(), json!("postgres"));
 
     lsp.notify(
         "workspace/didChangeConfiguration",
@@ -297,6 +303,13 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         "SELECT * from public.webhook where ",
     )
     .await?;
+    open_document(
+        &mut lsp,
+        postgres_qualified_uri,
+        "postgres",
+        "SELECT * from public.fo",
+    )
+    .await?;
 
     assert_completion_contains(&mut lsp, redis_uri, &["GET", "user:1"]).await?;
     assert_completion_contains(&mut lsp, mongodb_uri, &["find", "users", "email"]).await?;
@@ -353,6 +366,17 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
             postgres_where_labels
         );
     }
+    assert_completion_text_edit(
+        &mut lsp,
+        postgres_qualified_uri,
+        0,
+        "SELECT * from public.fo".len() as u32,
+        "public.form",
+        "SELECT * from ".len() as u32,
+        "SELECT * from public.fo".len() as u32,
+        "public.form",
+    )
+    .await?;
 
     lsp.shutdown().await
 }
@@ -428,6 +452,16 @@ async fn completion_labels_at(
     line: u32,
     character: u32,
 ) -> Result<Vec<String>> {
+    let result = completion_items_at(lsp, uri, line, character).await?;
+    Ok(completion_labels(&result))
+}
+
+async fn completion_items_at(
+    lsp: &mut LspProcess,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> Result<Value> {
     let result = lsp
         .request(
             "textDocument/completion",
@@ -446,7 +480,60 @@ async fn completion_labels_at(
         )
         .await?;
 
-    Ok(completion_labels(&result))
+    Ok(result)
+}
+
+async fn assert_completion_text_edit(
+    lsp: &mut LspProcess,
+    uri: &str,
+    line: u32,
+    character: u32,
+    label: &str,
+    expected_start_character: u32,
+    expected_end_character: u32,
+    expected_new_text: &str,
+) -> Result<()> {
+    let result = completion_items_at(lsp, uri, line, character).await?;
+    let items = result
+        .as_array()
+        .or_else(|| result.get("items").and_then(Value::as_array))
+        .ok_or_else(|| anyhow!("completion response did not contain an item array"))?;
+    let item = items
+        .iter()
+        .find(|item| item.get("label").and_then(Value::as_str) == Some(label))
+        .ok_or_else(|| anyhow!("missing completion label {label:?} for {uri}; items: {items:?}"))?;
+    let text_edit = item
+        .get("textEdit")
+        .ok_or_else(|| anyhow!("completion {label:?} missing textEdit: {item:?}"))?;
+
+    assert_eq!(
+        text_edit
+            .pointer("/range/start/line")
+            .and_then(Value::as_u64),
+        Some(line as u64)
+    );
+    assert_eq!(
+        text_edit
+            .pointer("/range/start/character")
+            .and_then(Value::as_u64),
+        Some(expected_start_character as u64)
+    );
+    assert_eq!(
+        text_edit.pointer("/range/end/line").and_then(Value::as_u64),
+        Some(line as u64)
+    );
+    assert_eq!(
+        text_edit
+            .pointer("/range/end/character")
+            .and_then(Value::as_u64),
+        Some(expected_end_character as u64)
+    );
+    assert_eq!(
+        text_edit.get("newText").and_then(Value::as_str),
+        Some(expected_new_text)
+    );
+
+    Ok(())
 }
 
 fn completion_labels(result: &Value) -> Vec<String> {
