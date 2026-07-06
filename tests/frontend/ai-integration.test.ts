@@ -317,6 +317,44 @@ describe("AI CLI adapter", () => {
 });
 
 describe("AI tool input validation", () => {
+  it("allows optional null inputs but rejects null for required fields", async () => {
+    const registry = createTestRegistry();
+
+    await expect(
+      registry.executeWithPolicy(
+        "demo.read",
+        { value: null },
+        createContext(),
+        DEFAULT_AI_TOOL_POLICY
+      )
+    ).resolves.toMatchObject({ input: { value: null }, mode: "read" });
+
+    registry.register({
+      name: "demo.required",
+      description: "Read a required demo value.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          value: { type: "string" },
+        },
+        required: ["value"],
+        additionalProperties: false,
+      },
+      permissions: ["read"],
+      capabilities: ["metadata"],
+      execute: async (input) => ({ input, mode: "required" }),
+    });
+
+    await expect(
+      registry.executeWithPolicy(
+        "demo.required",
+        { value: null },
+        createContext(),
+        DEFAULT_AI_TOOL_POLICY
+      )
+    ).rejects.toThrow("$.value must be string");
+  });
+
   it("rejects invalid tool inputs before execution", async () => {
     const registry = createTestRegistry();
 

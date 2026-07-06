@@ -143,7 +143,8 @@ function validateJsonSchema(
 
   if (expectedType === "object") {
     const objectValue = value as Record<string, unknown>;
-    for (const key of schema.required || []) {
+    const requiredProperties = new Set(schema.required || []);
+    for (const key of requiredProperties) {
       if (!(key in objectValue)) {
         return `${path}.${key} is required`;
       }
@@ -151,6 +152,9 @@ function validateJsonSchema(
 
     for (const [key, propertySchema] of Object.entries(schema.properties || {})) {
       if (key in objectValue) {
+        if (objectValue[key] === null && !requiredProperties.has(key)) {
+          continue;
+        }
         const error = validateJsonSchema(
           objectValue[key],
           propertySchema,
