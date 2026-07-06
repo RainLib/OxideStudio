@@ -31,6 +31,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 21: Bundled LSP integration tests now assert schema-qualified relation completions include full-token `TextEdit` replacement ranges
 - Phase 22: React render-level coverage now mounts `LspConnectionSyncer` against real Zustand store state and asserts the derived schema configuration is sent through the LSP client
 - Phase 23: Docker-backed live database tests now include AI tool-equivalent metadata, read, mutation, and destructive assertions over `ConnectionManager` for PostgreSQL, MySQL, Redis, MongoDB, and Elasticsearch
+- Phase 24: SQL completion now scopes referenced table inference to the cursor's current query, so subquery and CTE completions avoid leaking outer or nested table columns
 
 ⏳ **Pending:**
 
@@ -47,7 +48,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-26-g42be20b`.
+Current tracked revision is `v0.1.3-27-gb4c3529`.
 
 ### 2. Prepare the Binary
 
