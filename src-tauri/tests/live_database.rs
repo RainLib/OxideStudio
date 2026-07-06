@@ -96,6 +96,138 @@ fn column_index(result: &QueryResult, name: &str) -> Result<usize> {
         .ok_or_else(|| anyhow!("Expected result column {name}"))
 }
 
+struct LiveAiToolHarness<'a> {
+    manager: &'a ConnectionManager,
+    connection_id: &'a str,
+}
+
+impl<'a> LiveAiToolHarness<'a> {
+    fn new(manager: &'a ConnectionManager, connection_id: &'a str) -> Self {
+        Self {
+            manager,
+            connection_id,
+        }
+    }
+
+    async fn metadata_list_objects(&self, namespace: &str) -> Result<Vec<String>> {
+        Ok(self
+            .manager
+            .get_tables(self.connection_id, namespace)
+            .await?
+            .into_iter()
+            .map(|table| table.name)
+            .collect())
+    }
+
+    async fn metadata_describe_relational_object(
+        &self,
+        namespace: &str,
+        object: &str,
+    ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+        let columns = self
+            .manager
+            .get_columns(self.connection_id, namespace, object)
+            .await?
+            .into_iter()
+            .map(|column| column.name)
+            .collect();
+        let indexes = self
+            .manager
+            .get_indexes(self.connection_id, namespace, object)
+            .await?
+            .into_iter()
+            .map(|index| index.name)
+            .collect();
+        let constraints = self
+            .manager
+            .get_constraints(self.connection_id, namespace, object)
+            .await?
+            .into_iter()
+            .map(|constraint| constraint.constraint_type)
+            .collect();
+
+        Ok((columns, indexes, constraints))
+    }
+
+    async fn metadata_list_collections(&self, namespace: &str) -> Result<Vec<String>> {
+        Ok(self
+            .manager
+            .get_collections(self.connection_id, namespace)
+            .await?
+            .into_iter()
+            .map(|collection| collection.name)
+            .collect())
+    }
+
+    async fn metadata_describe_collection(
+        &self,
+        namespace: &str,
+        collection: &str,
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let fields = self.metadata_describe_fields(namespace, collection).await?;
+        let indexes = self
+            .manager
+            .get_indexes(self.connection_id, namespace, collection)
+            .await?
+            .into_iter()
+            .map(|index| index.name)
+            .collect();
+
+        Ok((fields, indexes))
+    }
+
+    async fn metadata_describe_fields(&self, namespace: &str, object: &str) -> Result<Vec<String>> {
+        Ok(self
+            .manager
+            .get_columns(self.connection_id, namespace, object)
+            .await?
+            .into_iter()
+            .map(|column| column.name)
+            .collect())
+    }
+
+    async fn query_read_only(
+        &self,
+        query: &str,
+        namespace: Option<&str>,
+    ) -> Result<Vec<QueryResult>> {
+        self.query_tool_path("read", query, namespace).await
+    }
+
+    async fn query_mutation(
+        &self,
+        query: &str,
+        namespace: Option<&str>,
+    ) -> Result<Vec<QueryResult>> {
+        self.query_tool_path("mutation", query, namespace).await
+    }
+
+    async fn query_destructive(
+        &self,
+        query: &str,
+        namespace: Option<&str>,
+    ) -> Result<Vec<QueryResult>> {
+        self.query_tool_path("destructive", query, namespace).await
+    }
+
+    async fn query_tool_path(
+        &self,
+        operation: &str,
+        query: &str,
+        namespace: Option<&str>,
+    ) -> Result<Vec<QueryResult>> {
+        self.manager
+            .query(
+                self.connection_id,
+                query,
+                namespace.map(str::to_string),
+                None,
+                Some(unique_name(&format!("ai_live_{operation}"))),
+            )
+            .await
+    }
+}
+
 #[tokio::test]
 async fn postgres_live_lifecycle_metadata_crud_and_transactions() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -300,6 +432,35 @@ async fn postgres_flow(
         .parameters
         .iter()
         .any(|parameter| parameter.name == "bonus" && parameter.optional));
+
+    let ai = LiveAiToolHarness::new(manager, connection_id);
+    let ai_objects = ai.metadata_list_objects(schema).await?;
+    assert!(ai_objects.iter().any(|name| name == "accounts"));
+    assert!(ai_objects.iter().any(|name| name == "active_accounts"));
+    let (ai_columns, ai_indexes, ai_constraints) = ai
+        .metadata_describe_relational_object(schema, "accounts")
+        .await?;
+    assert!(ai_columns.iter().any(|name| name == "email"));
+    assert!(ai_indexes.iter().any(|name| name == "accounts_active_idx"));
+    assert!(ai_constraints.iter().any(|kind| kind == "PRIMARY KEY"));
+    ai.query_mutation(
+        "INSERT INTO accounts (email) VALUES ('ai-path@example.com');",
+        Some(schema),
+    )
+    .await?;
+    let ai_count = scalar_i64(
+        &ai.query_read_only(
+            "SELECT COUNT(*) FROM accounts WHERE email = 'ai-path@example.com';",
+            Some(schema),
+        )
+        .await?,
+    )?;
+    assert_eq!(ai_count, 1);
+    ai.query_destructive(
+        "DELETE FROM accounts WHERE email = 'ai-path@example.com';",
+        Some(schema),
+    )
+    .await?;
 
     manager
         .execute_parameterized(
@@ -584,6 +745,35 @@ async fn mysql_flow(
     assert_eq!(score_function.return_type.to_ascii_lowercase(), "int");
     assert_eq!(score_function.parameters.len(), 2);
 
+    let ai = LiveAiToolHarness::new(manager, connection_id);
+    let ai_objects = ai.metadata_list_objects(database).await?;
+    assert!(ai_objects.iter().any(|name| name == "accounts"));
+    assert!(ai_objects.iter().any(|name| name == "active_accounts"));
+    let (ai_columns, ai_indexes, ai_constraints) = ai
+        .metadata_describe_relational_object(database, "accounts")
+        .await?;
+    assert!(ai_columns.iter().any(|name| name == "email"));
+    assert!(ai_indexes.iter().any(|name| name == "accounts_active_idx"));
+    assert!(ai_constraints.iter().any(|kind| kind == "PRIMARY KEY"));
+    ai.query_mutation(
+        "INSERT INTO accounts (email) VALUES ('ai-path@example.com');",
+        Some(database),
+    )
+    .await?;
+    let ai_count = scalar_i64(
+        &ai.query_read_only(
+            "SELECT COUNT(*) FROM accounts WHERE email = 'ai-path@example.com';",
+            Some(database),
+        )
+        .await?,
+    )?;
+    assert_eq!(ai_count, 1);
+    ai.query_destructive(
+        "DELETE FROM accounts WHERE email = 'ai-path@example.com';",
+        Some(database),
+    )
+    .await?;
+
     manager
         .execute_parameterized(
             connection_id,
@@ -711,9 +901,10 @@ async fn redis_live_key_value_metadata_and_commands() -> Result<()> {
     let key_prefix = unique_name("oxide_live_redis");
     let string_key = format!("{key_prefix}:string");
     let hash_key = format!("{key_prefix}:hash");
+    let ai_key = format!("{key_prefix}:ai");
     let manager = manager_with_driver("redis", &url, connection_id).await?;
 
-    let cleanup_command = format!("DEL {string_key} {hash_key}");
+    let cleanup_command = format!("DEL {string_key} {hash_key} {ai_key}");
     let _ = manager
         .query(connection_id, &cleanup_command, None, None, None)
         .await;
@@ -750,11 +941,21 @@ async fn redis_live_key_value_metadata_and_commands() -> Result<()> {
         assert_eq!(string_entry.collection_type.as_deref(), Some("string"));
         let hash_entry = collections
             .iter()
-            .find(|collection| {
-                collection.name == hash_key && collection.collection_type.as_deref() == Some("hash")
-            })
+            .find(|collection| collection.name == hash_key)
+            .filter(|collection| collection.collection_type.as_deref() == Some("hash"))
             .context("Redis hash key should be discoverable")?;
         assert_eq!(hash_entry.document_count, Some(2));
+
+        let ai = LiveAiToolHarness::new(&manager, connection_id);
+        ai.query_mutation(&format!("SET {ai_key} ai@example.com"), None)
+            .await?;
+        let ai_get = ai.query_read_only(&format!("GET {ai_key}"), None).await?;
+        assert_eq!(ai_get[0].rows[0][1], json!("ai@example.com"));
+        let ai_collections = ai.metadata_list_collections("").await?;
+        assert!(ai_collections.iter().any(|name| name == &ai_key));
+        ai.query_destructive(&format!("DEL {ai_key}"), None).await?;
+        let ai_after_delete = ai.query_read_only(&format!("GET {ai_key}"), None).await?;
+        assert_eq!(ai_after_delete[0].rows[0][1], Value::Null);
 
         Ok(())
     }
@@ -870,6 +1071,63 @@ async fn mongodb_live_document_metadata_and_commands() -> Result<()> {
             .iter()
             .any(|index| index.name == "email_1" && index.is_unique && index.columns == ["email"]));
 
+        let ai = LiveAiToolHarness::new(&manager, connection_id);
+        let ai_collections = ai.metadata_list_collections(&database).await?;
+        assert!(ai_collections.iter().any(|name| name == collection));
+        let (ai_fields, ai_indexes) = ai
+            .metadata_describe_collection(&database, collection)
+            .await?;
+        assert!(ai_fields.iter().any(|name| name == "email"));
+        assert!(ai_indexes.iter().any(|name| name == "email_1"));
+        ai.query_mutation(
+            &serde_json::to_string(&json!({
+                "database": database,
+                "collection": collection,
+                "insertMany": [
+                    {"email": "ai@example.com", "active": true, "score": 11}
+                ]
+            }))?,
+            None,
+        )
+        .await?;
+        let ai_find_results = ai
+            .query_read_only(
+                &serde_json::to_string(&json!({
+                    "database": database,
+                    "collection": collection,
+                    "find": {"email": "ai@example.com"},
+                    "limit": 5
+                }))?,
+                None,
+            )
+            .await?;
+        let ai_email_index = column_index(&ai_find_results[0], "email")?;
+        assert_eq!(
+            ai_find_results[0].rows[0][ai_email_index],
+            json!("ai@example.com")
+        );
+        ai.query_destructive(
+            &serde_json::to_string(&json!({
+                "database": database,
+                "collection": collection,
+                "deleteMany": {"email": "ai@example.com"}
+            }))?,
+            None,
+        )
+        .await?;
+        let ai_deleted = ai
+            .query_read_only(
+                &serde_json::to_string(&json!({
+                    "database": database,
+                    "collection": collection,
+                    "find": {"email": "ai@example.com"},
+                    "limit": 5
+                }))?,
+                None,
+            )
+            .await?;
+        assert!(ai_deleted[0].rows.is_empty());
+
         let find_results = manager
             .query(
                 connection_id,
@@ -964,6 +1222,51 @@ async fn elasticsearch_live_index_metadata_and_search() -> Result<()> {
             && column.data_type == "boolean"));
         assert!(columns.iter().any(|column| column.name == "score"
             && column.data_type == "integer"));
+
+        let ai = LiveAiToolHarness::new(&manager, connection_id);
+        let ai_collections = ai.metadata_list_collections("").await?;
+        assert!(ai_collections.iter().any(|name| name == &index));
+        let ai_fields = ai.metadata_describe_fields("default", &index).await?;
+        assert!(ai_fields.iter().any(|name| name == "email"));
+        ai.query_mutation(
+            &format!(
+                r#"
+                PUT /{index}/_doc/ai
+                {{"email":"ai@example.com","active":true,"score":11}}
+                POST /{index}/_refresh
+                "#
+            ),
+            None,
+        )
+        .await?;
+        let ai_search_results = ai
+            .query_read_only(
+                &format!(
+                    r#"
+                    POST /{index}/_search
+                    {{"query":{{"term":{{"email":"ai@example.com"}}}}}}
+                    "#
+                ),
+                None,
+            )
+            .await?;
+        let ai_source_index = column_index(&ai_search_results[0], "source")?;
+        assert_eq!(
+            ai_search_results[0].rows[0][ai_source_index]
+                .get("email")
+                .and_then(Value::as_str),
+            Some("ai@example.com")
+        );
+        ai.query_destructive(
+            &format!(
+                r#"
+                DELETE /{index}/_doc/ai
+                POST /{index}/_refresh
+                "#
+            ),
+            None,
+        )
+        .await?;
 
         let search_results = manager
             .query(

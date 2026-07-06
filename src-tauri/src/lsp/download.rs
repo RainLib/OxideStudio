@@ -118,10 +118,7 @@ mod tests {
 
     #[test]
     fn reports_binary_file_metadata_when_present() {
-        let path = std::env::temp_dir().join(format!(
-            "oxide-lsp-info-test-{}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("oxide-lsp-info-test-{}", std::process::id()));
         let mut file = std::fs::File::create(&path).expect("create temp binary");
         file.write_all(b"sql-lsp").expect("write temp binary");
         drop(file);
@@ -134,10 +131,8 @@ mod tests {
 
     #[test]
     fn omits_binary_file_metadata_when_missing() {
-        let path = std::env::temp_dir().join(format!(
-            "oxide-lsp-info-missing-{}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("oxide-lsp-info-missing-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(binary_size_bytes(&path), None);

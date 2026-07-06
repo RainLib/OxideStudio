@@ -330,13 +330,9 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         &["owner", "name", "form_background_url"],
     )
     .await?;
-    let postgres_from_labels = sorted_completion_labels_at(
-        &mut lsp,
-        postgres_uri,
-        0,
-        "SELECT * from".len() as u32,
-    )
-    .await?;
+    let postgres_from_labels =
+        sorted_completion_labels_at(&mut lsp, postgres_uri, 0, "SELECT * from".len() as u32)
+            .await?;
     let first_two_from_labels = postgres_from_labels.iter().take(2).collect::<Vec<_>>();
     if !first_two_from_labels
         .iter()
