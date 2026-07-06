@@ -67,6 +67,14 @@ export function buildRedisMutationCommand(input: AiKeyValueMutationInput) {
   return ["DEL", ...keys.map(redisArg)].join(" ");
 }
 
+export function buildRedisGetCommand(key: string) {
+  const trimmed = key.trim();
+  if (!trimmed) {
+    throw new Error("key is required");
+  }
+  return `GET ${redisArg(trimmed)}`;
+}
+
 export function buildElasticsearchMutationRequest(
   input: AiSearchDocumentMutationInput
 ) {

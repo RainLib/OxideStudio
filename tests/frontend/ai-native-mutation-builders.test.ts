@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildElasticsearchMutationRequest,
   buildMongoMutationCommand,
+  buildRedisGetCommand,
   buildRedisMutationCommand,
 } from "@/ai/tools/nativeMutationBuilders";
 
@@ -60,6 +61,8 @@ describe("AI native mutation builders", () => {
   });
 
   it("builds Redis SET and DEL commands with safe quoting", () => {
+    expect(buildRedisGetCommand("session token")).toBe('GET "session token"');
+
     expect(
       buildRedisMutationCommand({
         operation: "set",

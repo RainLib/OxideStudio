@@ -56,6 +56,12 @@ export function classifyAssistantIntent(
   ) {
     return "query";
   }
+  if (/\bkey\b/.test(text) && /\b(get|read|show|fetch|inspect)\b/.test(text)) {
+    return "query";
+  }
+  if (/key/.test(text) && /读取|查看|获取|查询|显示/.test(text)) {
+    return "query";
+  }
   if (/\b(schema|table|collection|index|key|metadata|database|list)\b/.test(text)) {
     return "metadata";
   }
@@ -206,10 +212,38 @@ function selectedStructuredMutationPlan(
 ): { toolName: string; title: string; input: Record<string, unknown> } | null {
   const message = input.message || "";
   const selectedText = input.selectedText?.trim() || "";
-  if (!selectedText) return null;
-
   const capabilities = defaultDatabaseCapabilities(activeDriver || "postgres");
   const text = message.toLowerCase();
+
+  if (capabilities.dataModel === "keyValue") {
+    const key = extractTargetName(message, ["key"]);
+    if (
+      key &&
+      hasTool("key.getValue") &&
+      /\b(get|read|show|fetch|inspect)\b|读取|查看|获取|查询|显示/.test(text)
+    ) {
+      return {
+        toolName: "key.getValue",
+        title: "Read a Redis key value",
+        input: { key },
+      };
+    }
+
+    if (
+      key &&
+      hasTool("key.deleteKeys") &&
+      /\b(delete|remove|unset)\b|删除|移除/.test(text)
+    ) {
+      return {
+        toolName: "key.deleteKeys",
+        title: "Delete Redis keys with approval",
+        input: { keys: [key] },
+      };
+    }
+  }
+
+  if (!selectedText) return null;
+
   const records = parseSelectedRecordArray(selectedText);
 
   if (
@@ -258,18 +292,6 @@ function selectedStructuredMutationPlan(
           key,
           value: parseSelectedJsonValue(selectedText),
         },
-      };
-    }
-
-    if (
-      key &&
-      hasTool("key.deleteKeys") &&
-      /\b(delete|remove|unset)\b/.test(text)
-    ) {
-      return {
-        toolName: "key.deleteKeys",
-        title: "Delete Redis keys with approval",
-        input: { keys: [key] },
       };
     }
   }

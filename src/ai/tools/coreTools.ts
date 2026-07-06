@@ -21,6 +21,7 @@ import {
   supportsLspLanguageId,
 } from "@/lib/databaseDialect";
 import { listRegisteredDatabaseProviders } from "@/providers";
+import { buildRedisGetCommand } from "./nativeMutationBuilders";
 
 const DEFAULT_QUERY_LIMIT = 200;
 
@@ -82,6 +83,11 @@ export const CORE_AI_TOOL_FAMILIES: AiToolFamily[] = [
     name: "document.mutations",
     enabled: (adapters) => Boolean(adapters.mutateDocuments),
     tools: [insertDocumentsTool, updateDocumentsTool, deleteDocumentsTool],
+  },
+  {
+    name: "keyValue.read",
+    enabled: (adapters) => Boolean(adapters.runReadOnlyQuery),
+    tools: [getKeyValueTool],
   },
   {
     name: "keyValue.mutations",
@@ -243,6 +249,7 @@ function aiToolHintsForCapabilities(capabilities: DatabaseCapabilities) {
     write.push("document.insertDocuments", "document.updateDocuments");
     destructive.push("document.deleteDocuments");
   } else if (capabilities.dataModel === "keyValue") {
+    read.push("key.getValue");
     write.push("key.setValue");
     destructive.push("key.deleteKeys");
   } else if (capabilities.dataModel === "search") {
@@ -743,6 +750,50 @@ function deleteDocumentsTool(adapters: AiToolAdapters): AiToolDefinition {
   };
 }
 
+function getKeyValueTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "key.getValue",
+    description: "Read a Redis key value from a key-value connection.",
+    inputSchema: keyGetSchema(),
+    permissions: ["read"],
+    capabilities: ["query"],
+    timeoutMs: 30_000,
+    resultLimit: {
+      maxRows: 1,
+      maxBytes: 100_000,
+    },
+    execute: async (input, context) => {
+      const raw = assertObject(input);
+      const connectionId =
+        optionalString(raw, "connectionId") ?? context.activeConnectionId ?? null;
+      const driver = await resolveQueryDriver(
+        adapters,
+        connectionId,
+        context.activeDriver
+      );
+      if (!driver) {
+        throw new Error("Connection driver is required for key.getValue");
+      }
+      const capabilities = await adapters.getConnectionCapabilities(driver);
+      if (capabilities.dataModel !== "keyValue") {
+        throw new Error(
+          `${capabilities.displayName} does not support key-value reads`
+        );
+      }
+      const namespace = optionalString(raw, "namespace");
+      return adapters.runReadOnlyQuery?.(
+        {
+          connectionId,
+          ...(namespace ? { namespace } : {}),
+          query: buildRedisGetCommand(requireString(raw, "key")),
+          limit: 1,
+        },
+        context
+      );
+    },
+  };
+}
+
 function setKeyValueTool(adapters: AiToolAdapters): AiToolDefinition {
   return {
     name: "key.setValue",
@@ -1211,6 +1262,28 @@ function documentDeleteSchema() {
       },
     },
     required: ["collection", "filter"],
+    additionalProperties: false,
+  };
+}
+
+function keyGetSchema() {
+  return {
+    type: "object",
+    properties: {
+      connectionId: {
+        type: "string",
+        description: "Connection id. Defaults to the active connection.",
+      },
+      namespace: {
+        type: "string",
+        description: "Redis database index. Defaults to the active namespace.",
+      },
+      key: {
+        type: "string",
+        description: "Redis key.",
+      },
+    },
+    required: ["key"],
     additionalProperties: false,
   };
 }

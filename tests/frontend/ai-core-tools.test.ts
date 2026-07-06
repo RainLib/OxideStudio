@@ -110,6 +110,7 @@ describe("core AI tools", () => {
     );
 
     expect(redis?.aiToolHints).toMatchObject({
+      read: expect.arrayContaining(["key.getValue"]),
       write: expect.arrayContaining(["query.runMutation", "key.setValue"]),
       destructive: expect.arrayContaining([
         "query.runDestructive",
@@ -243,6 +244,51 @@ describe("core AI tools", () => {
         DEFAULT_AI_TOOL_POLICY
       )
     ).rejects.toThrow("requires explicit approval");
+  });
+
+  it("reads Redis keys through a bounded read-only tool", async () => {
+    const calls: AdapterCall[] = [];
+    const registry = createRegistry(createAdapters(calls));
+
+    await registry.executeWithPolicy(
+      "key.getValue",
+      {
+        connectionId: "redis-1",
+        namespace: "2",
+        key: "session token",
+      },
+      createContext("redis"),
+      DEFAULT_AI_TOOL_POLICY
+    );
+
+    expect(calls).toEqual([
+      {
+        name: "read",
+        input: {
+          connectionId: "redis-1",
+          namespace: "2",
+          query: 'GET "session token"',
+          limit: 1,
+        },
+      },
+    ]);
+
+    expect(
+      registry.list().find((tool) => tool.name === "key.getValue")?.inputSchema
+        .properties?.namespace
+    ).toMatchObject({ type: "string" });
+
+    await expect(
+      registry.executeWithPolicy(
+        "key.getValue",
+        {
+          connectionId: "postgres-1",
+          key: "session:1",
+        },
+        createContext("postgres"),
+        DEFAULT_AI_TOOL_POLICY
+      )
+    ).rejects.toThrow("does not support key-value reads");
   });
 
   it("normalizes MongoDB, Redis, and Elasticsearch structured mutations", async () => {
