@@ -29,8 +29,17 @@ type ParsedCommand =
   | { kind: "list" }
   | { kind: "manifest" }
   | { kind: "mcp"; request: string }
-  | { kind: "plan"; input: AssistantTurnInput }
+  | {
+      kind: "plan";
+      input: AssistantTurnInput;
+      contextOverrides: CliContextOverrides;
+    }
   | { kind: "call"; toolName: string; input: unknown; approved: boolean };
+
+type CliContextOverrides = Pick<
+  AiToolExecutionContext,
+  "activeConnectionId" | "activeDriver" | "activeNamespace"
+>;
 
 export class CliToolAdapter {
   private readonly registry: AiToolRegistry;
@@ -74,7 +83,11 @@ export class CliToolAdapter {
           return okJson(
             await createAssistantRuntime({
               registry: this.registry,
-              createContext: this.createContext,
+              createContext: () =>
+                applyContextOverrides(
+                  this.createContext(),
+                  command.contextOverrides
+                ),
               policy: this.policy,
               planner: this.planner,
             }).prepareTurnAsync(command.input)
@@ -138,7 +151,8 @@ export class CliToolAdapter {
       const planArgs = command === "assistant" || command === "tools"
         ? rest.slice(1)
         : rest;
-      return { kind: "plan", input: await this.parsePlan(planArgs) };
+      const { input, contextOverrides } = await this.parsePlan(planArgs);
+      return { kind: "plan", input, contextOverrides };
     }
 
     throw new Error(`Unknown AI tools command: ${command}`);
@@ -185,8 +199,12 @@ export class CliToolAdapter {
     return { kind: "call", toolName, input, approved };
   }
 
-  private async parsePlan(args: string[]): Promise<AssistantTurnInput> {
+  private async parsePlan(args: string[]): Promise<{
+    input: AssistantTurnInput;
+    contextOverrides: CliContextOverrides;
+  }> {
     let input: AssistantTurnInput = { message: "" };
+    const contextOverrides: CliContextOverrides = {};
     for (let index = 0; index < args.length; index += 1) {
       const arg = args[index];
       if (arg === "--message" || arg === "-m") {
@@ -228,13 +246,41 @@ export class CliToolAdapter {
         index += 1;
         continue;
       }
+      if (arg === "--active-connection-id") {
+        const value = args[index + 1];
+        if (value === undefined) {
+          throw new Error("--active-connection-id requires a value");
+        }
+        contextOverrides.activeConnectionId = value || null;
+        index += 1;
+        continue;
+      }
+      if (arg === "--active-driver") {
+        const value = args[index + 1];
+        if (value === undefined) {
+          throw new Error("--active-driver requires a value");
+        }
+        contextOverrides.activeDriver =
+          value as AiToolExecutionContext["activeDriver"];
+        index += 1;
+        continue;
+      }
+      if (arg === "--active-namespace") {
+        const value = args[index + 1];
+        if (value === undefined) {
+          throw new Error("--active-namespace requires a value");
+        }
+        contextOverrides.activeNamespace = value || null;
+        index += 1;
+        continue;
+      }
       throw new Error(`Unknown plan argument: ${arg}`);
     }
 
     if (!input.message.trim()) {
       throw new Error("assistant plan requires --message or --json");
     }
-    return input;
+    return { input, contextOverrides };
   }
 
   private async parseMcpRequest(args: string[]) {
@@ -309,6 +355,24 @@ function okJson(value: unknown): CliToolCommandResult {
   return ok(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+function applyContextOverrides(
+  context: AiToolExecutionContext,
+  overrides: CliContextOverrides
+): AiToolExecutionContext {
+  return {
+    ...context,
+    ...(overrides.activeConnectionId !== undefined
+      ? { activeConnectionId: overrides.activeConnectionId }
+      : {}),
+    ...(overrides.activeDriver !== undefined
+      ? { activeDriver: overrides.activeDriver }
+      : {}),
+    ...(overrides.activeNamespace !== undefined
+      ? { activeNamespace: overrides.activeNamespace }
+      : {}),
+  };
+}
+
 function helpText() {
   return [
     "Oxide AI tools",
@@ -318,6 +382,7 @@ function helpText() {
     "  tools manifest",
     "  assistant plan --message 'show active schema'",
     "  assistant plan --json '{\"message\":\"explain this query\"}'",
+    "  assistant plan --message 'read key session:1' --active-driver redis",
     "  tools call <toolName> [--json '{...}']",
     "  tools call <toolName> [--json-file payload.json]",
     "  tools call <toolName> --approve [--json '{...}']",

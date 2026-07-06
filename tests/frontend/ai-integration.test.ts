@@ -49,6 +49,30 @@ function createTestRegistry() {
   return registry;
 }
 
+function createPlannerRegistry() {
+  const registry = createAiToolRegistry();
+
+  registry.register({
+    name: "query.runReadOnly",
+    description: "Run a read-only query.",
+    inputSchema: { type: "object", additionalProperties: true },
+    permissions: ["read"],
+    capabilities: ["query"],
+    execute: async (input) => ({ input }),
+  });
+
+  registry.register({
+    name: "key.getValue",
+    description: "Read a Redis key.",
+    inputSchema: { type: "object", additionalProperties: true },
+    permissions: ["read"],
+    capabilities: ["query"],
+    execute: async (input) => ({ input }),
+  });
+
+  return registry;
+}
+
 function createContext(): AiToolExecutionContext {
   return {
     requestId: "test-request",
@@ -312,6 +336,38 @@ describe("AI CLI adapter", () => {
           }),
         }),
       ])
+    );
+  });
+
+  it("passes active driver and namespace overrides into assistant planning", async () => {
+    const cli = createCliToolAdapter({
+      registry: createPlannerRegistry(),
+      createContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+    });
+
+    const result = await cli.run([
+      "assistant",
+      "plan",
+      "--message",
+      "read key session:1",
+      "--active-driver",
+      "redis",
+      "--active-namespace",
+      "2",
+    ]);
+    const turn = JSON.parse(result.stdout);
+
+    expect(result.exitCode).toBe(0);
+    expect(turn.context).toMatchObject({
+      activeDriver: "redis",
+      activeNamespace: "2",
+    });
+    expect(turn.suggestedPlan).toContainEqual(
+      expect.objectContaining({
+        toolName: "key.getValue",
+        input: { key: "session:1" },
+      })
     );
   });
 });
