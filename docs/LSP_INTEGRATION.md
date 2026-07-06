@@ -32,6 +32,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 22: React render-level coverage now mounts `LspConnectionSyncer` against real Zustand store state and asserts the derived schema configuration is sent through the LSP client
 - Phase 23: Docker-backed live database tests now include AI tool-equivalent metadata, read, mutation, and destructive assertions over `ConnectionManager` for PostgreSQL, MySQL, Redis, MongoDB, and Elasticsearch
 - Phase 24: SQL completion now scopes referenced table inference to the cursor's current query, so subquery and CTE completions avoid leaking outer or nested table columns
+- Phase 25: Alias member completion and schema selection now use scoped aliases, so same-named aliases in subqueries do not override the cursor's current query alias
 
 ⏳ **Pending:**
 
@@ -48,7 +49,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-27-gb4c3529`.
+Current tracked revision is `v0.1.3-28-ge773ded`.
 
 ### 2. Prepare the Binary
 
