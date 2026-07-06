@@ -27,6 +27,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 17: Added relation-target/predicate completion regressions and disabled Monaco word suggestions so SQL editor completions stay LSP-owned
 - Phase 18: Extracted and tested frontend LSP debounce scheduling, cleanup cancellation, and replacement timer behavior
 - Phase 19: Added LSP client tests for `lsp_did_change_configuration` Tauri command dispatch and pre-initialization no-op behavior
+- Phase 20: Bundled LSP now returns `TextEdit` ranges for schema-qualified relation/function completions so `public.us` and `test_db.calc` replace the full typed token instead of duplicating qualifiers
 
 ⏳ **Pending:**
 
@@ -44,7 +45,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-25-g02bc54c`.
+Current tracked revision is `v0.1.3-26-g42be20b`.
 
 ### 2. Prepare the Binary
 
