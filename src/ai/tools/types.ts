@@ -161,6 +161,7 @@ export type AiDocumentMutationInput = {
 export type AiKeyValueMutationInput = {
   operation: "set" | "delete";
   connectionId?: string | null;
+  namespace?: string | null;
   key?: string;
   keys?: string[];
   value?: unknown;

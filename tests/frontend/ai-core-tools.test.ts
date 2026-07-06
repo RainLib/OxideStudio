@@ -230,6 +230,11 @@ describe("core AI tools", () => {
   it("requires approval before structured mutation tools can call adapters", async () => {
     const registry = createRegistry(createAdapters());
 
+    expect(
+      registry.list().find((tool) => tool.name === "key.setValue")?.inputSchema
+        .properties?.namespace
+    ).toMatchObject({ type: "string" });
+
     await expect(
       registry.executeWithPolicy(
         "key.setValue",
@@ -259,6 +264,7 @@ describe("core AI tools", () => {
       "key.setValue",
       {
         connectionId: "redis-1",
+        namespace: "2",
         key: "session:1",
         value: { status: "active" },
         ttlSeconds: 60.8,
@@ -295,6 +301,7 @@ describe("core AI tools", () => {
         input: {
           operation: "set",
           connectionId: "redis-1",
+          namespace: "2",
           key: "session:1",
           value: { status: "active" },
           ttlSeconds: 60,

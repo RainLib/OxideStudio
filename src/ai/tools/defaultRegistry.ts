@@ -281,9 +281,9 @@ async function mutateKeyValues(
   input: AiKeyValueMutationInput,
   context: AiToolExecutionContext
 ) {
-  const { connectionId, capabilities } = await resolveMetadataTarget(
+  const { connectionId, namespace, capabilities } = await resolveMetadataTarget(
     input.connectionId,
-    null,
+    input.namespace,
     context,
     "key.mutate"
   );
@@ -291,7 +291,11 @@ async function mutateKeyValues(
     throw new Error(`${capabilities.displayName} does not support key-value mutation`);
   }
 
-  return queryService.executeQuery(connectionId, buildRedisMutationCommand(input));
+  return queryService.executeQuery(
+    connectionId,
+    buildRedisMutationCommand(input),
+    namespace || undefined
+  );
 }
 
 async function mutateSearchDocuments(

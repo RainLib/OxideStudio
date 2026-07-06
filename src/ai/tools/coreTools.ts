@@ -757,6 +757,7 @@ function setKeyValueTool(adapters: AiToolAdapters): AiToolDefinition {
         {
           operation: "set",
           connectionId: optionalString(raw, "connectionId"),
+          namespace: optionalString(raw, "namespace"),
           key: requireString(raw, "key"),
           value: requirePresent(raw, "value"),
           ttlSeconds: optionalPositiveInteger(raw, "ttlSeconds"),
@@ -781,6 +782,7 @@ function deleteKeysTool(adapters: AiToolAdapters): AiToolDefinition {
         {
           operation: "delete",
           connectionId: optionalString(raw, "connectionId"),
+          namespace: optionalString(raw, "namespace"),
           keys: requireStringArray(raw, "keys"),
         },
         context
@@ -1221,6 +1223,10 @@ function keySetSchema() {
         type: "string",
         description: "Connection id. Defaults to the active connection.",
       },
+      namespace: {
+        type: "string",
+        description: "Redis database index. Defaults to the active namespace.",
+      },
       key: {
         type: "string",
         description: "Redis key.",
@@ -1245,6 +1251,10 @@ function keyDeleteSchema() {
       connectionId: {
         type: "string",
         description: "Connection id. Defaults to the active connection.",
+      },
+      namespace: {
+        type: "string",
+        description: "Redis database index. Defaults to the active namespace.",
       },
       keys: {
         type: "array",
