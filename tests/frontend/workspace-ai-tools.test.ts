@@ -4,13 +4,34 @@ import {
   createWorkspaceAiToolContext,
   createWorkspaceAiToolRegistry,
 } from "@/ai/tools/defaultRegistry";
-import { DEFAULT_AI_TOOL_POLICY } from "@/ai/tools/policy";
+import {
+  DEFAULT_AI_TOOL_POLICY,
+  approveAiToolForPolicy,
+} from "@/ai/tools/policy";
+import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
+import type { DatabaseDriver } from "@/services/tauri/types";
 
 const mocks = vi.hoisted(() => ({
   executeQuery: vi.fn(async () => []),
+  getDatabaseCapabilities: vi.fn(),
+  createDatabase: vi.fn(async () => undefined),
+  dropDatabase: vi.fn(async () => undefined),
+  getCollections: vi.fn(async () => []),
+  getColumns: vi.fn(async () => []),
+  getConstraints: vi.fn(async () => []),
+  getFunctions: vi.fn(async () => []),
+  getIndexes: vi.fn(async () => []),
+  getTables: vi.fn(async () => []),
+  setCurrentSchema: vi.fn(async () => undefined),
+  mutateTableRows: vi.fn(async () => ({
+    inserted: 0,
+    updated: 0,
+    deleted: 0,
+    rowsAffected: 0,
+  })),
 }));
 
 vi.mock("@/services/tauri", () => ({
@@ -21,70 +42,124 @@ vi.mock("@/services/tauri", () => ({
     disconnect: vi.fn(async () => undefined),
   },
   databaseService: {
-    getDatabaseCapabilities: vi.fn(async () => ({})),
+    getDatabaseCapabilities: mocks.getDatabaseCapabilities,
+    createDatabase: mocks.createDatabase,
+    dropDatabase: mocks.dropDatabase,
   },
   queryService: {
     executeQuery: mocks.executeQuery,
   },
   schemaService: {
-    getCollections: vi.fn(async () => []),
-    getColumns: vi.fn(async () => []),
-    getConstraints: vi.fn(async () => []),
-    getFunctions: vi.fn(async () => []),
-    getIndexes: vi.fn(async () => []),
-    getTables: vi.fn(async () => []),
-    setCurrentSchema: vi.fn(async () => undefined),
+    getCollections: mocks.getCollections,
+    getColumns: mocks.getColumns,
+    getConstraints: mocks.getConstraints,
+    getFunctions: mocks.getFunctions,
+    getIndexes: mocks.getIndexes,
+    getTables: mocks.getTables,
+    setCurrentSchema: mocks.setCurrentSchema,
   },
   storeService: {
     getResources: vi.fn(async () => []),
     upsertResources: vi.fn(async () => undefined),
   },
-  tableService: {},
+  tableService: {
+    mutateTableRows: mocks.mutateTableRows,
+  },
 }));
+
+function setWorkspaceConnection(options: {
+  id: string;
+  driver: DatabaseDriver;
+  name?: string;
+  namespace: string;
+  tab?: {
+    id?: string;
+    title?: string;
+    sql?: string;
+    schemaName?: string | null;
+    tableName?: string | null;
+    objectType?: string | null;
+  };
+}) {
+  const tabId = options.tab?.id ?? "tab-1";
+  useConnectionStore.setState({
+    connections: [
+      {
+        id: options.id,
+        name: options.name ?? options.driver,
+        driver: options.driver,
+        url: "mock://local",
+      },
+    ],
+    activeConnectionId: options.id,
+    isConnected: true,
+    isLoading: false,
+    selectedConnection: null,
+  });
+  useSchemaStore.setState({
+    schemas: [options.namespace],
+    currentSchema: options.namespace,
+    tables: [],
+    collections: [],
+    functions: [],
+  });
+  useTabStore.setState({
+    activeTabId: tabId,
+    tabs: [
+      {
+        id: tabId,
+        title: options.tab?.title ?? "Query",
+        type: "query",
+        sql: options.tab?.sql ?? "",
+        connectionId: options.id,
+        schemaName: options.tab?.schemaName ?? options.namespace,
+        tableName: options.tab?.tableName ?? null,
+        objectType: options.tab?.objectType ?? null,
+        results: null,
+        isExecuting: false,
+        error: null,
+        isPinned: false,
+      },
+    ],
+    closedTabsStack: [],
+  });
+}
+
+function approvedPolicy(toolName: string) {
+  return approveAiToolForPolicy(DEFAULT_AI_TOOL_POLICY, toolName);
+}
 
 describe("workspace AI tools", () => {
   beforeEach(() => {
-    mocks.executeQuery.mockClear();
-    useConnectionStore.setState({
-      connections: [
-        {
-          id: "elasticsearch-1",
-          name: "Elasticsearch",
-          driver: "elasticsearch",
-          url: "http://localhost:9200",
-        },
-      ],
-      activeConnectionId: "elasticsearch-1",
-      isConnected: true,
-      isLoading: false,
-      selectedConnection: null,
+    vi.clearAllMocks();
+    mocks.getDatabaseCapabilities.mockImplementation(
+      async (driver: DatabaseDriver) => defaultDatabaseCapabilities(driver)
+    );
+    mocks.executeQuery.mockResolvedValue([]);
+    mocks.getCollections.mockResolvedValue([]);
+    mocks.getColumns.mockResolvedValue([]);
+    mocks.getConstraints.mockResolvedValue([]);
+    mocks.getFunctions.mockResolvedValue([]);
+    mocks.getIndexes.mockResolvedValue([]);
+    mocks.getTables.mockResolvedValue([]);
+    mocks.mutateTableRows.mockResolvedValue({
+      inserted: 0,
+      updated: 0,
+      deleted: 0,
+      rowsAffected: 0,
     });
-    useSchemaStore.setState({
-      schemas: ["default"],
-      currentSchema: "default",
-      tables: [],
-      collections: [],
-      functions: [],
-    });
-    useTabStore.setState({
-      activeTabId: "tab-1",
-      tabs: [
-        {
-          id: "tab-1",
-          title: "Index: events-2026",
-          type: "query",
-          sql: '{"query":{"match_all":{}}}',
-          connectionId: "elasticsearch-1",
-          schemaName: "default",
-          tableName: "events-2026",
-          objectType: "index",
-          results: null,
-          isExecuting: false,
-          error: null,
-          isPinned: false,
-        },
-      ],
-      closedTabsStack: [],
+    setWorkspaceConnection({
+      id: "elasticsearch-1",
+      name: "Elasticsearch",
+      driver: "elasticsearch",
+      namespace: "default",
+      tab: {
+        title: "Index: events-2026",
+        sql: '{"query":{"match_all":{}}}',
+        schemaName: "default",
+        tableName: "events-2026",
+        objectType: "index",
+      },
     });
   });
 
@@ -152,6 +227,190 @@ describe("workspace AI tools", () => {
         objectType: "index",
       },
     });
+  });
+
+  it("describes relational objects through workspace schema services", async () => {
+    setWorkspaceConnection({
+      id: "postgres-1",
+      driver: "postgres",
+      namespace: "public",
+      tab: {
+        title: "Query",
+        sql: "SELECT * FROM users",
+        schemaName: "public",
+      },
+    });
+    mocks.getColumns.mockResolvedValueOnce([
+      {
+        name: "id",
+        data_type: "integer",
+        is_nullable: false,
+        is_primary_key: true,
+        is_unique: true,
+        is_indexed: true,
+      },
+    ]);
+    mocks.getIndexes.mockResolvedValueOnce([
+      {
+        name: "users_pkey",
+        columns: ["id"],
+        is_unique: true,
+        is_primary: true,
+      },
+    ]);
+    mocks.getConstraints.mockResolvedValueOnce([
+      {
+        name: "users_pkey",
+        constraint_type: "PRIMARY KEY",
+        columns: ["id"],
+        referenced_columns: [],
+      },
+    ]);
+    const registry = createWorkspaceAiToolRegistry();
+
+    const result = await registry.execute<any>(
+      "metadata.describeObject",
+      { name: "users" },
+      createWorkspaceAiToolContext("workspace-ai-test")
+    );
+
+    expect(mocks.getColumns).toHaveBeenCalledWith(
+      "postgres-1",
+      "public",
+      "users"
+    );
+    expect(mocks.getIndexes).toHaveBeenCalledWith(
+      "postgres-1",
+      "public",
+      "users"
+    );
+    expect(mocks.getConstraints).toHaveBeenCalledWith(
+      "postgres-1",
+      "public",
+      "users"
+    );
+    expect(result).toMatchObject({
+      connectionId: "postgres-1",
+      namespace: "public",
+      name: "users",
+      driver: "postgres",
+      kind: "relation",
+      previewQuery: 'SELECT * FROM "public"."users" LIMIT 100;',
+    });
+  });
+
+  it("routes structured table row mutations through table service", async () => {
+    setWorkspaceConnection({
+      id: "postgres-1",
+      driver: "postgres",
+      namespace: "public",
+      tab: {
+        title: "Table: users",
+        schemaName: "public",
+        tableName: "users",
+        objectType: "BASE TABLE",
+      },
+    });
+    mocks.mutateTableRows.mockResolvedValueOnce({
+      inserted: 1,
+      updated: 0,
+      deleted: 0,
+      rowsAffected: 1,
+    });
+    const registry = createWorkspaceAiToolRegistry();
+
+    await registry.executeWithPolicy(
+      "table.insertRows",
+      {
+        table: "users",
+        inserts: [{ name: "Ada" }],
+      },
+      createWorkspaceAiToolContext("workspace-ai-test"),
+      approvedPolicy("table.insertRows")
+    );
+
+    expect(mocks.mutateTableRows).toHaveBeenCalledWith(
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      [{ name: "Ada" }],
+      [],
+      []
+    );
+  });
+
+  it("executes structured MongoDB, Redis, and Elasticsearch mutations through query service", async () => {
+    const registry = createWorkspaceAiToolRegistry();
+
+    setWorkspaceConnection({
+      id: "mongodb-1",
+      driver: "mongodb",
+      namespace: "app",
+    });
+    await registry.executeWithPolicy(
+      "document.insertDocuments",
+      {
+        collection: "users",
+        documents: [{ name: "Ada" }],
+      },
+      createWorkspaceAiToolContext("workspace-ai-mongo"),
+      approvedPolicy("document.insertDocuments")
+    );
+
+    setWorkspaceConnection({
+      id: "redis-1",
+      driver: "redis",
+      namespace: "2",
+    });
+    await registry.executeWithPolicy(
+      "key.setValue",
+      {
+        key: "session:1",
+        value: { active: true },
+        ttlSeconds: 30,
+      },
+      createWorkspaceAiToolContext("workspace-ai-redis"),
+      approvedPolicy("key.setValue")
+    );
+
+    setWorkspaceConnection({
+      id: "elasticsearch-1",
+      driver: "elasticsearch",
+      namespace: "default",
+    });
+    await registry.executeWithPolicy(
+      "search.updateDocument",
+      {
+        index: "events",
+        id: "1",
+        document: { active: true },
+        upsert: true,
+      },
+      createWorkspaceAiToolContext("workspace-ai-search"),
+      approvedPolicy("search.updateDocument")
+    );
+
+    expect(mocks.executeQuery).toHaveBeenNthCalledWith(
+      1,
+      "mongodb-1",
+      JSON.stringify({
+        database: "app",
+        collection: "users",
+        insertMany: [{ name: "Ada" }],
+      })
+    );
+    expect(mocks.executeQuery).toHaveBeenNthCalledWith(
+      2,
+      "redis-1",
+      'SET session:1 "{\\"active\\":true}" EX 30',
+      "2"
+    );
+    expect(mocks.executeQuery).toHaveBeenNthCalledWith(
+      3,
+      "elasticsearch-1",
+      'POST /events/_update/1\n{"doc":{"active":true},"doc_as_upsert":true}'
+    );
   });
 
   it("plans metadata description for the active object before listing objects", async () => {
