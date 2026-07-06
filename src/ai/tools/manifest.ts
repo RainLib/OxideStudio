@@ -5,10 +5,23 @@ import type {
   AiToolPolicyDecision,
   AiToolSummary,
 } from "./types";
+import type { AiToolAdapterName } from "./families";
 import { evaluateAiToolPolicy } from "./policy";
 
 export type AiToolManifestTool = AiToolSummary & {
   policy: AiToolPolicyDecision;
+};
+
+export type AiToolManifestEnvironment = {
+  host: string;
+  enabledToolFamilies?: string[];
+  disabledToolFamilies?: Array<{
+    name: string;
+    toolCount: number;
+    requiredAdapters: AiToolAdapterName[];
+    missingAdapters: AiToolAdapterName[];
+  }>;
+  notes?: string[];
 };
 
 export type AiToolManifest = {
@@ -17,12 +30,14 @@ export type AiToolManifest = {
   toolCount: number;
   permissions: Record<AiToolPermission, number>;
   capabilities: Record<AiToolCapability, number>;
+  environment?: AiToolManifestEnvironment;
   tools: AiToolManifestTool[];
 };
 
 export function createAiToolManifest(
   tools: AiToolSummary[],
-  policy?: AiToolExecutionPolicy
+  policy?: AiToolExecutionPolicy,
+  environment?: AiToolManifestEnvironment
 ): AiToolManifest {
   const sortedTools = [...tools].sort((a, b) => a.name.localeCompare(b.name));
   const manifestTools = sortedTools.map((tool) => ({
@@ -36,6 +51,7 @@ export function createAiToolManifest(
     toolCount: manifestTools.length,
     permissions: countToolValues(manifestTools, "permissions"),
     capabilities: countToolValues(manifestTools, "capabilities"),
+    ...(environment ? { environment } : {}),
     tools: manifestTools,
   };
 }

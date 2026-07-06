@@ -5,7 +5,11 @@ import type {
 } from "./types";
 import type { AiToolRegistry } from "./registry";
 import type { AiToolFamily } from "./families";
-import { mergeAiToolFamilies, registerAiToolFamilies } from "./families";
+import {
+  describeAiToolFamilyAvailability,
+  mergeAiToolFamilies,
+  registerAiToolFamilies,
+} from "./families";
 import type {
   DatabaseCapabilities,
   DatabaseDriver,
@@ -36,67 +40,67 @@ export const CORE_AI_TOOL_FAMILIES: AiToolFamily[] = [
   },
   {
     name: "workspace",
-    enabled: (adapters) => Boolean(adapters.getActiveTab),
+    requiredAdapters: ["getActiveTab"],
     tools: [activeTabTool],
   },
   {
     name: "workspace.selection",
-    enabled: (adapters) => Boolean(adapters.getWorkspaceSelection),
+    requiredAdapters: ["getWorkspaceSelection"],
     tools: [workspaceSelectionTool],
   },
   {
     name: "metadata.collections",
-    enabled: (adapters) => Boolean(adapters.listCollections),
+    requiredAdapters: ["listCollections"],
     tools: [listCollectionsTool],
   },
   {
     name: "metadata.objects",
-    enabled: (adapters) => Boolean(adapters.listObjects),
+    requiredAdapters: ["listObjects"],
     tools: [listObjectsTool],
   },
   {
     name: "metadata.describe",
-    enabled: (adapters) => Boolean(adapters.describeObject),
+    requiredAdapters: ["describeObject"],
     tools: [describeObjectTool],
   },
   {
     name: "query.read",
-    enabled: (adapters) => Boolean(adapters.runReadOnlyQuery),
+    requiredAdapters: ["runReadOnlyQuery"],
     tools: [readOnlyQueryTool],
   },
   {
     name: "query.write",
-    enabled: (adapters) => Boolean(adapters.runMutationQuery),
+    requiredAdapters: ["runMutationQuery"],
     tools: [mutationQueryTool, destructiveQueryTool],
   },
   {
     name: "database.namespace",
-    enabled: (adapters) => Boolean(adapters.mutateNamespace),
+    requiredAdapters: ["mutateNamespace"],
     tools: [createNamespaceTool, dropNamespaceTool],
   },
   {
     name: "table.rows",
-    enabled: (adapters) => Boolean(adapters.mutateTableRows),
+    requiredAdapters: ["mutateTableRows"],
     tools: [insertTableRowsTool, updateTableRowsTool, deleteTableRowsTool],
   },
   {
     name: "document.mutations",
-    enabled: (adapters) => Boolean(adapters.mutateDocuments),
+    requiredAdapters: ["mutateDocuments"],
     tools: [insertDocumentsTool, updateDocumentsTool, deleteDocumentsTool],
   },
   {
     name: "keyValue.read",
-    enabled: (adapters) => Boolean(adapters.runReadOnlyQuery),
+    requiredAdapters: ["runReadOnlyQuery"],
     tools: [getKeyValueTool],
   },
   {
     name: "keyValue.mutations",
-    enabled: (adapters) => Boolean(adapters.mutateKeyValues),
+    requiredAdapters: ["mutateKeyValues"],
     tools: [setKeyValueTool, deleteKeysTool],
   },
   {
     name: "search.mutations",
-    enabled: (adapters) => Boolean(adapters.mutateSearchDocuments),
+    requiredAdapters: ["mutateSearchDocuments"],
     tools: [
       indexSearchDocumentTool,
       updateSearchDocumentTool,
@@ -105,12 +109,12 @@ export const CORE_AI_TOOL_FAMILIES: AiToolFamily[] = [
   },
   {
     name: "lsp.completion",
-    enabled: (adapters) => Boolean(adapters.getLspCompletions),
+    requiredAdapters: ["getLspCompletions"],
     tools: [lspCompletionsTool],
   },
   {
     name: "lsp.diagnostics",
-    enabled: (adapters) => Boolean(adapters.explainLspDiagnostics),
+    requiredAdapters: ["explainLspDiagnostics"],
     tools: [lspExplainDiagnosticsTool],
   },
 ];
@@ -121,6 +125,29 @@ export function registerCoreAiTools(
   families: AiToolFamily[] = mergeAiToolFamilies(CORE_AI_TOOL_FAMILIES)
 ) {
   return registerAiToolFamilies(registry, adapters, families);
+}
+
+export function describeCoreAiToolEnvironment(
+  adapters: AiToolAdapters,
+  host: string,
+  families: AiToolFamily[] = mergeAiToolFamilies(CORE_AI_TOOL_FAMILIES)
+) {
+  const availability = describeAiToolFamilyAvailability(families, adapters);
+
+  return {
+    host,
+    enabledToolFamilies: availability
+      .filter((family) => family.enabled)
+      .map((family) => family.name),
+    disabledToolFamilies: availability
+      .filter((family) => !family.enabled)
+      .map((family) => ({
+        name: family.name,
+        toolCount: family.toolCount,
+        requiredAdapters: family.requiredAdapters,
+        missingAdapters: family.missingAdapters,
+      })),
+  };
 }
 
 function connectionListTool(adapters: AiToolAdapters): AiToolDefinition {

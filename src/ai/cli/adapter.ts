@@ -4,6 +4,7 @@ import {
   approveAiToolForPolicy,
 } from "@/ai/tools/policy";
 import { createAiToolManifest } from "@/ai/tools/manifest";
+import type { AiToolManifestEnvironment } from "@/ai/tools/manifest";
 import type {
   AiToolExecutionContext,
   AiToolExecutionPolicy,
@@ -22,6 +23,7 @@ export type CliToolAdapterOptions = {
   readFile?: CliInputReader;
   policy?: AiToolExecutionPolicy;
   planner?: AssistantPlanner;
+  manifestEnvironment?: AiToolManifestEnvironment;
 };
 
 type ParsedCommand =
@@ -53,6 +55,7 @@ export class CliToolAdapter {
   private readonly readFile?: CliInputReader;
   private readonly policy: AiToolExecutionPolicy;
   private readonly planner?: AssistantPlanner;
+  private readonly manifestEnvironment?: AiToolManifestEnvironment;
 
   constructor(options: CliToolAdapterOptions = {}) {
     if (!options.registry || !options.createContext) {
@@ -65,6 +68,7 @@ export class CliToolAdapter {
     this.readFile = options.readFile;
     this.policy = options.policy ?? DEFAULT_AI_TOOL_POLICY;
     this.planner = options.planner;
+    this.manifestEnvironment = options.manifestEnvironment;
   }
 
   async run(argv: string[]): Promise<CliToolCommandResult> {
@@ -76,12 +80,19 @@ export class CliToolAdapter {
         case "list":
           return okJson(this.registry.list());
         case "manifest":
-          return okJson(createAiToolManifest(this.registry.list(), this.policy));
+          return okJson(
+            createAiToolManifest(
+              this.registry.list(),
+              this.policy,
+              this.manifestEnvironment
+            )
+          );
         case "mcp": {
           const response = await createMcpProtocolAdapter({
             registry: this.registry,
             createContext: this.createContext,
             policy: this.policy,
+            manifestEnvironment: this.manifestEnvironment,
           }).handleJson(command.request);
           return ok(response ? `${response}\n` : "");
         }

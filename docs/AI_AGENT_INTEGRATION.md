@@ -157,6 +157,8 @@ Use `npm run ai -- mcp request` or `make ai-mcp-smoke` for local MCP JSON-RPC sm
 
 Current limitation: `scripts/oxide-ai.ts` runs in a headless Node process, so it does not have the in-app Tauri connection manager, active editor tab, selected schema, or approval UI. Its default adapter intentionally exposes provider and capability discovery only. Database query, metadata, LSP, and mutation tools are fully available through the in-app workspace adapter; a standalone MCP server that can query databases must inject its own connection/query adapter instead of relying on browser/Tauri state.
 
+The CLI/MCP manifest includes `environment.enabledToolFamilies` and `environment.disabledToolFamilies` with missing adapter names. Agents should use this to distinguish an unavailable headless adapter from an unsupported database capability before planning tool calls.
+
 For injected standalone adapters, both `assistant plan` and `tools call` accept `--active-connection-id`, `--active-driver`, and `--active-namespace` so external agents can pass the same context shape used by the in-app assistant before choosing or executing tools.
 
 For the editor itself, prefer direct TypeScript orchestration over MCP. The editor already owns state, selection, tabs, connection ids, and approval UI; routing those through an external protocol would add latency and lose context. External MCP hosts should use tool annotations plus an explicit approval handoff before calling mutating tools.
@@ -194,3 +196,4 @@ Recommended usage:
 12. Add CLI context overrides for direct tool calls so injected standalone adapters can execute tools with active connection, driver, and namespace context. Done.
 13. Add MCP `tools/call` context overrides via `_meta["oxide/context"]` or `params.context` so external agents can execute tools with active connection, driver, and namespace context. Done.
 14. Add CLI/MCP external-agent routing tests for injected database metadata, read query, and approved mutation adapters. Done.
+15. Add CLI/MCP manifest environment metadata so external agents can see enabled tool families and missing headless adapters before selecting tools. Done.

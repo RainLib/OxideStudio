@@ -226,6 +226,18 @@ describe("AI MCP adapter", () => {
       registry: createTestRegistry(),
       createContext,
       policy: DEFAULT_AI_TOOL_POLICY,
+      manifestEnvironment: {
+        host: "test-mcp",
+        enabledToolFamilies: ["demo"],
+        disabledToolFamilies: [
+          {
+            name: "query.read",
+            toolCount: 1,
+            requiredAdapters: ["runReadOnlyQuery"],
+            missingAdapters: ["runReadOnlyQuery"],
+          },
+        ],
+      },
     });
 
     const response = await protocol.handleMessage({
@@ -249,7 +261,17 @@ describe("AI MCP adapter", () => {
         metadata: 1,
         query: 1,
       },
+      environment: {
+        host: "test-mcp",
+        enabledToolFamilies: ["demo"],
+      },
     });
+    expect(manifest.environment.disabledToolFamilies).toEqual([
+      expect.objectContaining({
+        name: "query.read",
+        missingAdapters: ["runReadOnlyQuery"],
+      }),
+    ]);
     expect(manifest.tools).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -353,6 +375,11 @@ describe("AI CLI adapter", () => {
       registry: createTestRegistry(),
       createContext,
       policy: DEFAULT_AI_TOOL_POLICY,
+      manifestEnvironment: {
+        host: "test-cli",
+        enabledToolFamilies: ["demo"],
+        disabledToolFamilies: [],
+      },
     });
 
     const result = await cli.run(["tools", "manifest"]);
@@ -365,6 +392,10 @@ describe("AI CLI adapter", () => {
       permissions: {
         read: 1,
         write: 1,
+      },
+      environment: {
+        host: "test-cli",
+        enabledToolFamilies: ["demo"],
       },
     });
     expect(manifest.tools).toEqual(

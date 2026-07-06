@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { registerCoreAiTools } from "@/ai/tools/coreTools";
+import {
+  describeCoreAiToolEnvironment,
+  registerCoreAiTools,
+} from "@/ai/tools/coreTools";
 import {
   DEFAULT_AI_TOOL_POLICY,
   approveAiToolForPolicy,
@@ -90,6 +93,38 @@ function approvedPolicy(toolName: string) {
 }
 
 describe("core AI tools", () => {
+  it("describes unavailable core tool families for headless agent adapters", () => {
+    const headlessAdapters: AiToolAdapters = {
+      listConnections: () => [],
+      getConnectionCapabilities: (driver) => defaultDatabaseCapabilities(driver),
+    };
+
+    const environment = describeCoreAiToolEnvironment(
+      headlessAdapters,
+      "headless-cli"
+    );
+
+    expect(environment.enabledToolFamilies).toEqual(
+      expect.arrayContaining(["connection", "provider.registry"])
+    );
+    expect(environment.disabledToolFamilies).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "metadata.objects",
+          missingAdapters: ["listObjects"],
+        }),
+        expect.objectContaining({
+          name: "query.read",
+          missingAdapters: ["runReadOnlyQuery"],
+        }),
+        expect.objectContaining({
+          name: "lsp.completion",
+          missingAdapters: ["getLspCompletions"],
+        }),
+      ])
+    );
+  });
+
   it("advertises driver-specific NoSQL and search capabilities to AI planners", async () => {
     const registry = createRegistry();
 

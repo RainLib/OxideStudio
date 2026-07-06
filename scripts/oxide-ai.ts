@@ -4,7 +4,10 @@ import { createInterface } from "node:readline";
 import { createCliToolAdapter } from "@/ai/cli/adapter";
 import { createMcpProtocolAdapter } from "@/ai/mcp/protocol";
 import type { McpProtocolAdapter } from "@/ai/mcp/protocol";
-import { registerCoreAiTools } from "@/ai/tools/coreTools";
+import {
+  describeCoreAiToolEnvironment,
+  registerCoreAiTools,
+} from "@/ai/tools/coreTools";
 import { DEFAULT_AI_TOOL_POLICY } from "@/ai/tools/policy";
 import { createAiToolRegistry } from "@/ai/tools/registry";
 import type {
@@ -37,10 +40,18 @@ function createRequestId() {
 }
 
 async function main() {
+  const adapters = createHeadlessAdapters();
   const registry = registerCoreAiTools(
     createAiToolRegistry(),
-    createHeadlessAdapters()
+    adapters
   );
+  const manifestEnvironment = {
+    ...describeCoreAiToolEnvironment(adapters, "headless-cli"),
+    notes: [
+      "The bundled headless CLI exposes provider and capability discovery by default.",
+      "Database metadata, query, mutation, workspace, and LSP tools require an injected adapter or the in-app Tauri runtime.",
+    ],
+  };
   const createContext = createHeadlessContext;
   const args = process.argv.slice(2);
 
@@ -50,6 +61,7 @@ async function main() {
         registry,
         createContext,
         policy: DEFAULT_AI_TOOL_POLICY,
+        manifestEnvironment,
       })
     );
     return;
@@ -59,6 +71,7 @@ async function main() {
     registry,
     createContext,
     policy: DEFAULT_AI_TOOL_POLICY,
+    manifestEnvironment,
     readFile: (path) => readFile(path, "utf8"),
   });
   const result = await cli.run(args);

@@ -4,6 +4,7 @@ import {
   approveAiToolForPolicy,
 } from "@/ai/tools/policy";
 import { createAiToolManifest } from "@/ai/tools/manifest";
+import type { AiToolManifestEnvironment } from "@/ai/tools/manifest";
 import type {
   AiToolCapability,
   AiToolExecutionContext,
@@ -22,6 +23,7 @@ export type McpToolAdapterOptions = {
   registry?: AiToolRegistry;
   createContext?: () => AiToolExecutionContext;
   policy?: AiToolExecutionPolicy;
+  manifestEnvironment?: AiToolManifestEnvironment;
 };
 
 export type McpToolCallOptions = {
@@ -38,6 +40,7 @@ export class McpToolAdapter {
   private readonly registry: AiToolRegistry;
   private readonly createContext: () => AiToolExecutionContext;
   private readonly policy: AiToolExecutionPolicy;
+  private readonly manifestEnvironment?: AiToolManifestEnvironment;
 
   constructor(options: McpToolAdapterOptions = {}) {
     if (!options.registry || !options.createContext) {
@@ -48,6 +51,7 @@ export class McpToolAdapter {
     this.registry = options.registry;
     this.createContext = options.createContext;
     this.policy = options.policy ?? DEFAULT_AI_TOOL_POLICY;
+    this.manifestEnvironment = options.manifestEnvironment;
   }
 
   listTools(): McpTool[] {
@@ -65,7 +69,11 @@ export class McpToolAdapter {
         {
           type: "text",
           text: JSON.stringify(
-            createAiToolManifest(this.registry.list(), this.policy),
+            createAiToolManifest(
+              this.registry.list(),
+              this.policy,
+              this.manifestEnvironment
+            ),
             null,
             2
           ),
