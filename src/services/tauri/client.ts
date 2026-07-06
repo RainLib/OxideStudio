@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { redactSecrets } from "@/lib/redaction";
-import type { ApiResponse, ApiError } from "./types";
+import { ApiError, type ApiResponse } from "./types";
 
 /**
  * 基础 API 客户端
@@ -27,22 +27,21 @@ export async function invokeCommand<T>(
 
     // 处理错误响应
     const errorMessage = response.error?.message || "Unknown error occurred";
+    const errorCode = response.error?.code || "API_ERROR";
 
-    throw new Error(errorMessage) as ApiError & { code: string };
+    throw new ApiError(errorMessage, errorCode, response.error);
   } catch (error) {
     // 如果已经是我们的错误格式,直接抛出
-    if (error instanceof Error && "code" in error) {
+    if (error instanceof ApiError) {
       throw error;
     }
 
     // 包装其他错误
-    const apiError = new Error(
-      error instanceof Error ? error.message : String(error)
-    ) as ApiError & { code: string; originalError: unknown };
-
-    apiError.name = "ApiError";
-    apiError.code = "INVOKE_ERROR";
-    apiError.originalError = error;
+    const apiError = new ApiError(
+      error instanceof Error ? error.message : String(error),
+      "INVOKE_ERROR",
+      error
+    );
 
     throw apiError;
   }
