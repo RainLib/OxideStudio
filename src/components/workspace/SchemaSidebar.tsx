@@ -154,6 +154,11 @@ export function SchemaSidebar() {
   const canBrowseCollections =
     activeCapabilities.supportsCollectionBrowsing ||
     activeCapabilities.supportsKeyValueBrowsing;
+  const collectionNamespace = currentSchema || "";
+  const collectionNamespaceForTemplate = collectionNamespace || null;
+  const hasObjectContext = canBrowseTables
+    ? Boolean(currentSchema)
+    : canBrowseCollections;
   const collectionPreviewProvider =
     databaseObjectPreviewProvider(activeCapabilities);
   const collectionLabel = collectionPreviewProvider.objectLabel;
@@ -266,13 +271,13 @@ export function SchemaSidebar() {
   }, [activeConnectionId, canBrowseTables, currentSchema, loadTables]);
 
   useEffect(() => {
-    if (activeConnectionId && currentSchema && canBrowseCollections) {
-      loadCollections(activeConnectionId, currentSchema);
+    if (activeConnectionId && canBrowseCollections) {
+      loadCollections(activeConnectionId, collectionNamespace);
     }
   }, [
     activeConnectionId,
     canBrowseCollections,
-    currentSchema,
+    collectionNamespace,
     loadCollections,
   ]);
 
@@ -429,27 +434,27 @@ export function SchemaSidebar() {
   const collectionPreviewSql = (collection: CollectionInfo) =>
     collectionPreviewQueryTemplateForCapabilities(
       activeCapabilities,
-      currentSchema,
+      collectionNamespaceForTemplate,
       collection
     );
 
   const collectionDeleteSql = (collection: CollectionInfo) =>
     collectionDeleteQueryTemplateForCapabilities(
       activeCapabilities,
-      currentSchema,
+      collectionNamespaceForTemplate,
       collection
     );
 
   const collectionCreateSql = (name: string) =>
     collectionCreateQueryTemplateForCapabilities(
       activeCapabilities,
-      currentSchema,
+      collectionNamespaceForTemplate,
       name
     );
 
   const refreshCollectionObjects = async () => {
-    if (!activeConnectionId || !currentSchema || !canBrowseCollections) return;
-    await loadCollections(activeConnectionId, currentSchema, true);
+    if (!activeConnectionId || !canBrowseCollections) return;
+    await loadCollections(activeConnectionId, collectionNamespace, true);
     bumpMetadataVersion();
   };
 
@@ -469,14 +474,14 @@ export function SchemaSidebar() {
     const sql = collectionPreviewSql(collection);
     const tabId = findOrCreateObjectQueryTab(
       activeConnectionId,
-      currentSchema,
+      collectionNamespace,
       collection.name,
       collection.type,
       sql,
       collectionPreviewTabTitleForCapabilities(
         activeCapabilities,
         collection,
-        currentSchema
+        collectionNamespaceForTemplate
       )
     );
     void runTabQuery(tabId, activeConnectionId, sql);
@@ -508,7 +513,7 @@ export function SchemaSidebar() {
 
     const tabId = createTab("query", `Delete ${collection.name}`, sql, {
       connectionId: activeConnectionId,
-      schemaName: currentSchema || undefined,
+      schemaName: collectionNamespace || undefined,
       tableName: collection.name,
       objectType: collection.type || null,
     });
@@ -534,7 +539,7 @@ export function SchemaSidebar() {
 
     const tabId = createTab("query", `Create ${collectionLabel}: ${name}`, sql, {
       connectionId: activeConnectionId,
-      schemaName: currentSchema || undefined,
+      schemaName: collectionNamespace || undefined,
       tableName: name,
       objectType: collectionLabel.toLowerCase(),
     });
@@ -687,8 +692,8 @@ export function SchemaSidebar() {
           await loadFunctions(activeConnectionId, currentSchema, true);
         }
       }
-      if (currentSchema && canBrowseCollections) {
-        await loadCollections(activeConnectionId, currentSchema, true);
+      if (canBrowseCollections) {
+        await loadCollections(activeConnectionId, collectionNamespace, true);
       }
     }
   };
@@ -854,7 +859,7 @@ export function SchemaSidebar() {
             className="w-full bg-background-tertiary text-foreground text-[11px] h-7 pl-7 pr-2 rounded-sm border border-border focus:border-primary focus:outline-none transition-colors placeholder:text-muted-foreground/50"
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
-            disabled={!currentSchema}
+            disabled={!hasObjectContext}
           />
         </div>
       </div>
@@ -869,7 +874,7 @@ export function SchemaSidebar() {
           <span className="text-[10px] font-bold text-muted-foreground tracking-wider uppercase">
             {objectSectionLabel}
           </span>
-          {currentSchema && (
+          {hasObjectContext && (
             <span className="text-[9px] bg-background-secondary px-1.5 py-0.5 rounded text-muted-foreground border border-border">
               {canBrowseTables
                 ? filteredTables.length
@@ -936,7 +941,6 @@ export function SchemaSidebar() {
           </div>
         )}
         {isTablesHovered &&
-          currentSchema &&
           !canBrowseTables &&
           canBrowseCollections && (
             <div
@@ -964,7 +968,7 @@ export function SchemaSidebar() {
                 className="h-5 w-5 text-muted-foreground hover:text-primary rounded-sm"
                 onClick={handleCreateCollectionClick}
                 title={`Create New ${collectionLabel}`}
-                disabled={!currentSchema}
+                disabled={!activeConnectionId}
               >
                 <Plus size={10} />
               </Button>
@@ -978,7 +982,7 @@ export function SchemaSidebar() {
         onMouseEnter={() => setIsTablesHovered(true)}
         onMouseLeave={() => setIsTablesHovered(false)}
       >
-       {!currentSchema ? (
+       {!hasObjectContext ? (
           <div className="p-4 text-xs text-center text-gray-500 italic">
             Select a {namespaceLabel} to view objects
           </div>
