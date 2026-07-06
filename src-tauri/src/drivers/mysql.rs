@@ -110,6 +110,12 @@ impl MysqlDriver {
     /// Helper to get or create a pool for a specific schema
     async fn get_pool(&self, schema: Option<&str>) -> Result<Pool<MySql>> {
         let schema_key = schema.unwrap_or("").to_string();
+        let mut options = {
+            let base_options = self.base_options.lock().await;
+            base_options
+                .clone()
+                .ok_or_else(|| anyhow!("Driver not connected (no base options)"))?
+        };
 
         // internal scope to drop the lock before awaiting pool creation if possible
         // but we need to insert it back.
@@ -124,33 +130,38 @@ impl MysqlDriver {
             }
         }
 
-        // Pool not found, create it
-        let mut options = {
-            let base_options = self.base_options.lock().await;
-            base_options
-                .clone()
-                .ok_or_else(|| anyhow!("Driver not connected (no base options)"))?
-        };
-
         if !schema_key.is_empty() {
             options = options.database(&schema_key);
         }
 
-        let pool = MySqlPoolOptions::new()
+        let new_pool = MySqlPoolOptions::new()
             .max_connections(5)
             .acquire_timeout(Duration::from_secs(30))
             .connect_with(options)
             .await?;
 
-        // Insert into map
-        let mut pools = self.pools.lock().await;
-        // Check again in case another thread created it
-        if let Some(pool) = pools.get(&schema_key) {
-            return Ok(pool.clone());
+        let base_options = self.base_options.lock().await;
+        if base_options.is_none() {
+            drop(base_options);
+            Self::close_pool_with_timeout(new_pool).await;
+            return Err(anyhow!(
+                "Driver disconnected while opening MySQL schema pool"
+            ));
         }
-        pools.insert(schema_key.clone(), pool.clone());
 
-        Ok(pool)
+        let mut pools = self.pools.lock().await;
+        if let Some(existing_pool) = pools.get(&schema_key) {
+            let existing_pool = existing_pool.clone();
+            drop(pools);
+            drop(base_options);
+            Self::close_pool_with_timeout(new_pool).await;
+            return Ok(existing_pool);
+        }
+        pools.insert(schema_key.clone(), new_pool.clone());
+        drop(pools);
+        drop(base_options);
+
+        Ok(new_pool)
     }
 
     fn process_rows(&self, rows: Vec<MySqlRow>) -> Result<Vec<QueryResult>> {
@@ -335,6 +346,11 @@ impl DatabaseDriver for MysqlDriver {
     }
 
     async fn disconnect(&self) -> Result<()> {
+        {
+            let mut base_options = self.base_options.lock().await;
+            *base_options = None;
+        }
+
         let active_queries = self.drain_active_query_threads();
         if !active_queries.is_empty() {
             let cancel_pool = {
@@ -378,8 +394,6 @@ impl DatabaseDriver for MysqlDriver {
             Self::close_pool_with_timeout(pool).await;
         }
 
-        let mut base_options = self.base_options.lock().await;
-        *base_options = None;
         Ok(())
     }
 
@@ -1047,6 +1061,40 @@ mod tests {
             .lock()
             .expect("active query map mutex poisoned")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_pool_rejects_when_driver_is_not_connected() {
+        let driver = MysqlDriver::new("mysql://user:pass@localhost/db");
+
+        let error = driver.get_pool(None).await.unwrap_err().to_string();
+
+        assert!(error.contains("Driver not connected"));
+    }
+
+    #[tokio::test]
+    async fn disconnect_clears_mysql_connection_options() {
+        let driver = MysqlDriver::new("mysql://user:pass@localhost/db");
+        let options = MySqlConnectOptions::from_str("mysql://user:pass@localhost/db")
+            .expect("test MySQL URL should parse")
+            .disable_statement_logging()
+            .to_owned();
+        {
+            let mut base_options = driver.base_options.lock().await;
+            *base_options = Some(options);
+        }
+
+        driver
+            .disconnect()
+            .await
+            .expect("disconnect should succeed");
+        driver
+            .disconnect()
+            .await
+            .expect("second disconnect should be idempotent");
+
+        assert!(driver.base_options.lock().await.is_none());
+        assert!(driver.pools.lock().await.is_empty());
     }
 
     #[test]

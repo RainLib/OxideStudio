@@ -127,6 +127,7 @@ interface DatabaseResponse<T> {
   - Value: 具体的驱动实例 (线程安全)
 - **连接切换**: 新连接建立并通过 ping 后才替换或激活；旧连接断开失败不会回滚新连接。
 - **事务生命周期**: PostgreSQL/MySQL 手动事务绑定到 tab 与 connection id。当前 tab 的连接上下文变化、驱动不支持事务或 tab 关闭时，前端会回滚 stale session 并清理本地事务状态，避免继续向后端发送已失效的 `transactionId`。
+- **MySQL schema pool**: MySQL 按 schema 懒创建连接池。断开开始时会先清除 base options，阻止新的 schema pool 创建；若断开期间已有 pool 创建完成，会立即关闭并返回连接已断开的错误。
 
 ## 5. 错误处理策略
 
