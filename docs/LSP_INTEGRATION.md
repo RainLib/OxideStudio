@@ -24,6 +24,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 14: Extracted and tested frontend LSP sync planning for target schemas, file schema/dialect mappings, and duplicate-send config keys
 - Phase 15: DML-aware SQL completion contexts for `INSERT INTO`, `UPDATE`, `DELETE FROM`, `TRUNCATE TABLE`, and `JOIN ... ON` table/column inference
 - Phase 16: Extracted and tested frontend LSP metadata caching and configuration dispatch for stale/duplicate schema syncs
+- Phase 17: Added relation-target/predicate completion regressions and disabled Monaco word suggestions so SQL editor completions stay LSP-owned
 
 ⏳ **Pending:**
 
@@ -41,7 +42,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-24-gddafff0`.
+Current tracked revision is `v0.1.3-25-g02bc54c`.
 
 ### 2. Prepare the Binary
 

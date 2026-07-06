@@ -736,6 +736,9 @@ export function QueryEditor() {
             cursorBlinking: "smooth",
             quickSuggestions: { other: true, comments: true, strings: true },
             suggestOnTriggerCharacters: true,
+            // SQL semantic suggestions come from the LSP; Monaco word suggestions
+            // can surface column-like tokens in relation-target contexts.
+            wordBasedSuggestions: "off",
             acceptSuggestionOnCommitCharacter: false,
           }}
         />
