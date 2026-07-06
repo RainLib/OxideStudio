@@ -132,7 +132,6 @@ npm run ai -- tools list
 npm run ai -- tools manifest
 npm run ai -- assistant plan --message "list tables in the active database"
 npm run ai -- tools call query.runReadOnly --json-file payload.json
-npm run ai -- tools call key.getValue --json '{"key":"demo"}'
 npm run ai -- tools call key.setValue --approve --json '{"key":"demo","value":"ok"}'
 npm run ai -- mcp request --json '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
