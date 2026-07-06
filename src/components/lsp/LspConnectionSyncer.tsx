@@ -22,9 +22,9 @@ import {
   getCachedLspMetadata,
   type CachedLspMetadata,
 } from "@/services/lsp/metadataCache";
+import { dispatchLspConfiguration } from "@/services/lsp/configDispatch";
 import {
   buildLspFileMappings,
-  createLspConfigKey,
   createLspSyncPlan,
 } from "@/services/lsp/syncPlan";
 import {
@@ -415,27 +415,37 @@ export function LspConnectionSyncer() {
         console.log("[LSP] - Files:", Object.keys(fileSchemas).length);
 
         try {
-          if (cancelled || syncGeneration !== syncGenerationRef.current) {
+          const dispatchResult = await dispatchLspConfiguration({
+            connectionId: activeConnectionId,
+            driver: connection.driver,
+            lspDialect,
+            config,
+            lastConfigKey: lastConfigRef.current,
+            syncGeneration,
+            getCurrentGeneration: () => syncGenerationRef.current,
+            isCancelled: () => cancelled,
+            updateConfiguration: (nextConfig) =>
+              lspClient.updateConfiguration(nextConfig),
+          });
+
+          if (dispatchResult.status === "stale") {
             console.log("[LSP] Skipping stale schema configuration");
             return;
           }
 
-          const configKey = createLspConfigKey({
-            connectionId: activeConnectionId,
-            driver: connection.driver,
-            lspDialect,
-            fileSchemas,
-            fileDialects,
-            schemaDefinitions,
-          });
-          if (lastConfigRef.current === configKey) {
+          if (dispatchResult.status === "duplicate") {
             console.log("[LSP] Skipping duplicate configuration send");
             return;
           }
 
-          await lspClient.updateConfiguration(config);
-          // Mark this configuration as sent
-          lastConfigRef.current = configKey;
+          if (dispatchResult.status === "sent-stale") {
+            console.log(
+              "[LSP] Configuration sent, but not cached because a newer sync started"
+            );
+            return;
+          }
+
+          lastConfigRef.current = dispatchResult.lastConfigKey;
           console.log("[LSP] ✅ Configuration sent and cached");
         } catch (err) {
           console.error("[LSP] Failed to sync schema:", err);

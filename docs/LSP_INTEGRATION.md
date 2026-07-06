@@ -23,10 +23,11 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 13: Frontend LSP schema config tests for Redis keys, MongoDB fields/indexes, Elasticsearch mapping fields, and server-inferable document URIs
 - Phase 14: Extracted and tested frontend LSP sync planning for target schemas, file schema/dialect mappings, and duplicate-send config keys
 - Phase 15: DML-aware SQL completion contexts for `INSERT INTO`, `UPDATE`, `DELETE FROM`, `TRUNCATE TABLE`, and `JOIN ... ON` table/column inference
+- Phase 16: Extracted and tested frontend LSP metadata caching and configuration dispatch for stale/duplicate schema syncs
 
 ⏳ **Pending:**
 
-- React component-level assertions for `LspConnectionSyncer` debounce/caching and Tauri command dispatch
+- React component-level assertions for `LspConnectionSyncer` debounce timing and Tauri command wiring
 - AI tool-specific live assertions for database metadata, query, and mutation paths
 
 ## Setup Instructions
