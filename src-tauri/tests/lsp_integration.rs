@@ -190,6 +190,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let elasticsearch_uri = "file:///oxide/elasticsearch.es.dsl";
     let postgres_uri = "file:///oxide/postgres.sql";
     let postgres_where_uri = "file:///oxide/postgres-where.sql";
+    let postgres_where_operator_uri = "file:///oxide/postgres-where-operator.sql";
     let postgres_qualified_uri = "file:///oxide/postgres-qualified.sql";
 
     let mut file_schemas = Map::new();
@@ -214,6 +215,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
+        postgres_where_operator_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
         postgres_qualified_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
@@ -224,6 +229,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     file_dialects.insert(elasticsearch_uri.to_string(), json!("elasticsearch-dsl"));
     file_dialects.insert(postgres_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_where_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_where_operator_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_qualified_uri.to_string(), json!("postgres"));
 
     lsp.notify(
@@ -305,6 +311,13 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     .await?;
     open_document(
         &mut lsp,
+        postgres_where_operator_uri,
+        "postgres",
+        "SELECT * from public.webhook where owner ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
         postgres_qualified_uri,
         "postgres",
         "SELECT * from public.fo",
@@ -359,7 +372,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_where_uri,
         0,
         "SELECT * from public.webhook where ".len() as u32,
-        &["form_background_url", "form_css"],
+        &["!=", "=", "form_background_url", "form_css"],
     )
     .await?;
     let postgres_where_labels = sorted_completion_labels_at(
@@ -382,6 +395,22 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
             postgres_where_labels
         );
     }
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_where_operator_uri,
+        0,
+        "SELECT * from public.webhook where owner ".len() as u32,
+        &["!=", "="],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_where_operator_uri,
+        0,
+        "SELECT * from public.webhook where owner ".len() as u32,
+        &["owner", "name", "form_background_url"],
+    )
+    .await?;
     assert_completion_text_edit(
         &mut lsp,
         postgres_qualified_uri,
