@@ -61,6 +61,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 51: SQL `IN (...)` value-list completions now keep suggesting value keywords after commas, so `WHERE col IN ('a', ` does not fall back to fields or operators.
 - Phase 52: SQL `BETWEEN` completions now narrow the first-bound continuation to `AND`, avoiding invalid `OR`, query follow-ups, fields, or operators before the upper bound.
 - Phase 53: SQL `CASE WHEN` condition completions now use predicate-aware fields, right-hand values, `THEN` continuation, and `BETWEEN` first-bound handling instead of falling back to `SELECT` or default suggestions.
+- Phase 54: SQL `CASE THEN/ELSE` result completions now have dedicated result-expression and `WHEN`/`ELSE`/`END` continuation states, including string literal handling such as `THEN 'end' `.
 
 ⏳ **Pending:**
 
@@ -77,7 +78,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-57-g358f6a1`.
+Current tracked revision is `v0.1.3-58-g3b56c25`.
 
 ### 2. Prepare the Binary
 
