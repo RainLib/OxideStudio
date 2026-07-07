@@ -69,6 +69,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 59: PostgreSQL `ON CONFLICT DO UPDATE SET` completions now behave like assignment editing: bare target columns, operators after a column, value keywords after `=`, and `WHERE`/`RETURNING` continuations after completed values.
 - Phase 60: MySQL `ON DUPLICATE KEY UPDATE` completions now support assignment editing with target columns, operators, value keywords, and comma continuation for additional assignments.
 - Phase 61: Hive and ClickHouse predicate completions now scope `WHERE`/`HAVING` fields to referenced tables, use bare column labels for single-table predicates, and avoid leaking unrelated table columns.
+- Phase 62: MySQL `INSERT ... SET` completions now support assignment editing and continue with `,` or `ON DUPLICATE KEY UPDATE` after completed values instead of invalid `WHERE` suggestions.
 
 ⏳ **Pending:**
 
@@ -85,7 +86,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-65-g57c136b`.
+Current tracked revision is `v0.1.3-66-gadb4c7c`.
 
 ### 2. Prepare the Binary
 
