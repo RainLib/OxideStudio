@@ -246,11 +246,11 @@ function redisPreviewCommand(keyName: string, keyType?: string | null) {
     case "string":
       return `GET ${key}`;
     case "hash":
-      return `HGETALL ${key}`;
+      return `HSCAN ${key} 0 COUNT 100`;
     case "list":
       return `LRANGE ${key} 0 99`;
     case "set":
-      return `SMEMBERS ${key}`;
+      return `SSCAN ${key} 0 COUNT 100`;
     case "zset":
       return `ZRANGE ${key} 0 99 WITHSCORES`;
     case "stream":

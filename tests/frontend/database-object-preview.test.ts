@@ -45,6 +45,27 @@ describe("database object operation templates", () => {
     ).toBe('JSON.GET "profile:1"');
   });
 
+  it("bounds Redis hash and set previews with cursor scans", () => {
+    const capabilities = defaultDatabaseCapabilities("redis");
+
+    expect(
+      collectionPreviewQueryTemplateForCapabilities(capabilities, "0", {
+        name: "profile:1",
+        type: "hash",
+        namespace: "0",
+        documentCount: 5000,
+      })
+    ).toBe('HSCAN "profile:1" 0 COUNT 100');
+    expect(
+      collectionPreviewQueryTemplateForCapabilities(capabilities, "0", {
+        name: "active-users",
+        type: "set",
+        namespace: "0",
+        documentCount: 5000,
+      })
+    ).toBe('SSCAN "active-users" 0 COUNT 100');
+  });
+
   it("builds MongoDB collection create, preview, and delete JSON", () => {
     const capabilities = defaultDatabaseCapabilities("mongodb");
     const collection = {
