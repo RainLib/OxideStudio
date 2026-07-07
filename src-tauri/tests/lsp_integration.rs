@@ -206,6 +206,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_alter_constraint_uri = "file:///oxide/postgres-alter-constraint.sql";
     let postgres_create_table_type_uri = "file:///oxide/postgres-create-table-type.sql";
     let postgres_alter_column_type_uri = "file:///oxide/postgres-alter-column-type.sql";
+    let mysql_modify_column_uri = "file:///oxide/mysql-modify-column.sql";
 
     let mut file_schemas = Map::new();
     file_schemas.insert(
@@ -292,6 +293,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_alter_column_type_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
+    file_schemas.insert(
+        mysql_modify_column_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
 
     let mut file_dialects = Map::new();
     file_dialects.insert(redis_uri.to_string(), json!("redis"));
@@ -324,6 +329,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_alter_column_type_uri.to_string(),
         json!("postgres"),
     );
+    file_dialects.insert(mysql_modify_column_uri.to_string(), json!("mysql"));
 
     lsp.notify(
         "workspace/didChangeConfiguration",
@@ -521,6 +527,13 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_alter_column_type_uri,
         "postgres",
         "ALTER TABLE public.webhook ALTER COLUMN owner TYPE ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        mysql_modify_column_uri,
+        "mysql",
+        "ALTER TABLE public.webhook MODIFY COLUMN ",
     )
     .await?;
 
@@ -850,6 +863,22 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         0,
         "ALTER TABLE public.webhook ALTER COLUMN owner TYPE ".len() as u32,
         &["public.webhook", "owner", "="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        mysql_modify_column_uri,
+        0,
+        "ALTER TABLE public.webhook MODIFY COLUMN ".len() as u32,
+        &["owner", "name"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        mysql_modify_column_uri,
+        0,
+        "ALTER TABLE public.webhook MODIFY COLUMN ".len() as u32,
+        &["public.form", "form_css", "="],
     )
     .await?;
 

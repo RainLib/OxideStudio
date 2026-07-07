@@ -46,6 +46,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 36: SQL index-target completions now use synchronized index metadata, so `DROP INDEX`, `ALTER INDEX`, and MySQL-style `ALTER TABLE ... DROP/RENAME INDEX` suggest index names instead of tables or fields.
 - Phase 37: SQL column definition completions now suggest dialect-aware data types for `CREATE TABLE` and `ALTER TABLE ... ADD COLUMN` positions instead of tables, fields, or operators.
 - Phase 38: SQL data type completions now cover common ALTER forms including `ADD` without `COLUMN`, PostgreSQL `ALTER COLUMN ... TYPE`, and MySQL `MODIFY/CHANGE COLUMN`.
+- Phase 39: MySQL-style `ALTER TABLE ... MODIFY/CHANGE [COLUMN]` completions now suggest the target table's existing columns before switching to data type suggestions after the column name.
 
 ⏳ **Pending:**
 
@@ -62,7 +63,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-42-gdd20c96`.
+Current tracked revision is `v0.1.3-43-gc610689`.
 
 ### 2. Prepare the Binary
 
