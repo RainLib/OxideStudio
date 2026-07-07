@@ -1321,6 +1321,8 @@ export const useTabStore = create<TabState>((set, get) => ({
                 tableTotalRows: pageResult.totalRows ?? null,
                 tableFilterSql: nextFilterSql || null,
                 tableFilters: nextFilters || null,
+                pendingEdits: new Map(),
+                newRowsCount: 0,
               }
             : t
         ),

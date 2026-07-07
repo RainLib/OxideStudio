@@ -334,4 +334,92 @@ describe("table editing store", () => {
       "email",
     ]);
   });
+
+  it("clears stale pending edits when a table page is replaced", async () => {
+    mocks.previewTablePage.mockResolvedValueOnce({
+      result: {
+        columns: [{ name: "email", data_type: "text" }],
+        rows: [["fresh@example.test"]],
+      },
+      page: 1,
+      pageSize: 500,
+      totalRows: 1,
+    });
+
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          tableIndexes: [],
+          newRowsCount: 1,
+          pendingEdits: new Map([["0:0", "draft@example.test"]]),
+        },
+      ],
+    });
+
+    await useTabStore.getState().loadTablePage("tab-1", 1);
+
+    const tab = useTabStore.getState().tabs[0]!;
+    expect(tab.pendingEdits?.size).toBe(0);
+    expect(tab.newRowsCount).toBe(0);
+    expect(tab.results?.[0]?.rows).toEqual([["fresh@example.test"]]);
+  });
+
+  it("clears stale pending edits after deleting rows and reloading table data", async () => {
+    mocks.previewTablePage.mockResolvedValueOnce({
+      result: {
+        columns: [
+          { name: "id", data_type: "int4" },
+          { name: "email", data_type: "text" },
+        ],
+        rows: [],
+      },
+      page: 0,
+      pageSize: 500,
+      totalRows: 0,
+    });
+
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          tableColumns: [column("id", { primary: true }), column("email")],
+          tableIndexes: [
+            {
+              name: "users_pkey",
+              columns: ["id"],
+              is_unique: true,
+              is_primary: true,
+            },
+          ],
+          results: [
+            {
+              columns: [
+                { name: "id", data_type: "int4" },
+                { name: "email", data_type: "text" },
+              ],
+              rows: [[1, "old@example.test"]],
+            },
+          ],
+          newRowsCount: 1,
+          pendingEdits: new Map([["0:1", "draft@example.test"]]),
+        },
+      ],
+    });
+
+    await useTabStore.getState().deleteRows("tab-1", [0]);
+
+    const tab = useTabStore.getState().tabs[0]!;
+    expect(mocks.mutateTableRows).toHaveBeenCalledWith(
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      [],
+      [],
+      [{ key: { id: 1 } }]
+    );
+    expect(tab.pendingEdits?.size).toBe(0);
+    expect(tab.newRowsCount).toBe(0);
+  });
 });
