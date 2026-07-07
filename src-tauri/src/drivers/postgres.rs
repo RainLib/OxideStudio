@@ -5,7 +5,7 @@ use crate::core::protocol::{
     ParameterizedStatement, QueryParameter, QueryResult, TableInfo,
 };
 use crate::core::statement::{
-    classify_statement, execution_mode, has_multiple_statements, QueryExecutionMode,
+    execution_mode, execution_statement_kind, has_multiple_statements, QueryExecutionMode,
     StatementScanDialect,
 };
 use anyhow::{anyhow, Result};
@@ -101,7 +101,7 @@ impl PostgresDriver {
                 QueryExecutionMode::AffectsRows => {
                     let result = sqlx::raw_sql(sql).execute(pool).await?;
                     Ok(vec![QueryResult::execution(
-                        classify_statement(sql).as_str(),
+                        execution_statement_kind(sql).as_str(),
                         result.rows_affected(),
                     )])
                 }
@@ -116,7 +116,7 @@ impl PostgresDriver {
             QueryExecutionMode::AffectsRows => {
                 let result = sqlx::query(sql).persistent(false).execute(pool).await?;
                 Ok(vec![QueryResult::execution(
-                    classify_statement(sql).as_str(),
+                    execution_statement_kind(sql).as_str(),
                     result.rows_affected(),
                 )])
             }
@@ -137,7 +137,7 @@ impl PostgresDriver {
                 QueryExecutionMode::AffectsRows => {
                     let result = (&mut *conn).execute(sql).await?;
                     Ok(vec![QueryResult::execution(
-                        classify_statement(sql).as_str(),
+                        execution_statement_kind(sql).as_str(),
                         result.rows_affected(),
                     )])
                 }
@@ -158,7 +158,7 @@ impl PostgresDriver {
                     .execute(&mut *conn)
                     .await?;
                 Ok(vec![QueryResult::execution(
-                    classify_statement(sql).as_str(),
+                    execution_statement_kind(sql).as_str(),
                     result.rows_affected(),
                 )])
             }
@@ -451,7 +451,7 @@ impl DatabaseDriver for PostgresDriver {
                 }
                 let result = query.execute(&pool).await?;
                 Ok(vec![QueryResult::execution(
-                    classify_statement(sql).as_str(),
+                    execution_statement_kind(sql).as_str(),
                     result.rows_affected(),
                 )])
             }
