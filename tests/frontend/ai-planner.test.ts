@@ -47,10 +47,38 @@ const QUERY_TOOLS: AiToolSummary[] = [
     capabilities: ["query"],
   },
   {
+    name: "document.updateDocuments",
+    description: "Update documents.",
+    inputSchema: { type: "object" },
+    permissions: ["write"],
+    capabilities: ["query"],
+  },
+  {
+    name: "document.deleteDocuments",
+    description: "Delete documents.",
+    inputSchema: { type: "object" },
+    permissions: ["destructive"],
+    capabilities: ["query"],
+  },
+  {
     name: "search.indexDocument",
     description: "Index search document.",
     inputSchema: { type: "object" },
     permissions: ["write"],
+    capabilities: ["query"],
+  },
+  {
+    name: "search.updateDocument",
+    description: "Update search document.",
+    inputSchema: { type: "object" },
+    permissions: ["write"],
+    capabilities: ["query"],
+  },
+  {
+    name: "search.deleteDocument",
+    description: "Delete search document.",
+    inputSchema: { type: "object" },
+    permissions: ["destructive"],
     capabilities: ["query"],
   },
 ];
@@ -171,6 +199,78 @@ describe("default assistant planner", () => {
       expect.objectContaining({
         toolName: "search.indexDocument",
         input: { index: "users", id: "1", document: { active: true } },
+      })
+    );
+  });
+
+  it("plans document, key-value, and search structured mutations beyond inserts", () => {
+    const documentUpdate = planFor(
+      'update collection users where {"id":1}',
+      "mongodb",
+      '{"active":false}'
+    );
+    const documentDelete = planFor(
+      "delete many from collection users",
+      "mongodb",
+      '{"filter":{"active":false},"many":true}'
+    );
+    const redisDelete = planFor("delete key session:1", "redis");
+    const searchUpdate = planFor(
+      "update index users id 42",
+      "elasticsearch",
+      '{"active":false}'
+    );
+    const searchDelete = planFor(
+      "delete from index users id 42",
+      "elasticsearch"
+    );
+
+    expect(documentUpdate.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "document.updateDocuments",
+        input: {
+          collection: "users",
+          filter: { id: 1 },
+          update: { $set: { active: false } },
+          many: false,
+          upsert: false,
+        },
+      })
+    );
+    expect(documentDelete.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "document.deleteDocuments",
+        input: {
+          collection: "users",
+          filter: { active: false },
+          many: true,
+        },
+      })
+    );
+    expect(redisDelete.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "key.deleteKeys",
+        input: { keys: ["session:1"] },
+      })
+    );
+    expect(searchUpdate.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "search.updateDocument",
+        input: {
+          index: "users",
+          id: "42",
+          document: { active: false },
+          upsert: false,
+        },
+      })
+    );
+    expect(searchDelete.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "search.deleteDocument",
+        input: {
+          index: "users",
+          id: "42",
+        },
       })
     );
   });

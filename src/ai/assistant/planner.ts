@@ -176,6 +176,8 @@ function buildSuggestedPlan(
     const structuredMutation = selectedStructuredMutationPlan(
       input,
       activeDriver,
+      activeNamespace,
+      activeObjectName,
       hasTool
     );
     const structuredRead = !structuredMutation && !query
@@ -216,12 +218,15 @@ function buildSuggestedPlan(
 function selectedStructuredMutationPlan(
   input: AssistantTurnInput,
   activeDriver: string | null | undefined,
+  activeNamespace: string | null | undefined,
+  activeObjectName: string | null | undefined,
   hasTool: (name: string) => boolean
 ): { toolName: string; title: string; input: Record<string, unknown> } | null {
   const message = input.message || "";
   const selectedText = input.selectedText?.trim() || "";
   const capabilities = defaultDatabaseCapabilities(activeDriver || "postgres");
   const text = message.toLowerCase();
+  const inlineJson = extractInlineJsonObject(message);
 
   if (capabilities.dataModel === "keyValue") {
     const key = extractTargetName(message, ["key", "键"]);
@@ -250,9 +255,8 @@ function selectedStructuredMutationPlan(
     }
   }
 
-  if (!selectedText) return null;
-
-  const records = parseSelectedRecordArray(selectedText);
+  const selectedRecord = selectedText ? parseSelectedRecord(selectedText) : null;
+  const records = selectedText ? parseSelectedRecordArray(selectedText) : null;
 
   if (
     capabilities.dataModel === "relational" &&
@@ -267,6 +271,55 @@ function selectedStructuredMutationPlan(
         title: "Insert selected JSON rows into a table with approval",
         input: { table, inserts: records },
       };
+    }
+  }
+
+  if (capabilities.dataModel === "document") {
+    const collection =
+      extractTargetName(message, [
+        "collection",
+        "into",
+        "from",
+        "in",
+        "集合",
+        "到集合",
+        "从集合",
+      ]) || activeObjectName;
+    if (collection && hasTool("document.updateDocuments") && hasUpdateIntent(text)) {
+      const filter = recordField(selectedRecord, "filter") ?? inlineJson;
+      const update =
+        recordField(selectedRecord, "update") ??
+        inferMongoUpdateDocument(selectedRecord);
+      if (filter && update) {
+        return {
+          toolName: "document.updateDocuments",
+          title: "Update MongoDB documents with approval",
+          input: {
+            ...(activeNamespace ? { namespace: activeNamespace } : {}),
+            collection,
+            filter,
+            update,
+            many: booleanField(selectedRecord, "many") ?? hasManyIntent(text),
+            upsert: booleanField(selectedRecord, "upsert") ?? hasUpsertIntent(text),
+          },
+        };
+      }
+    }
+
+    if (collection && hasTool("document.deleteDocuments") && hasDeleteIntent(text)) {
+      const filter = recordField(selectedRecord, "filter") ?? selectedRecord ?? inlineJson;
+      if (filter) {
+        return {
+          toolName: "document.deleteDocuments",
+          title: "Delete MongoDB documents with approval",
+          input: {
+            ...(activeNamespace ? { namespace: activeNamespace } : {}),
+            collection,
+            filter,
+            many: booleanField(selectedRecord, "many") ?? hasManyIntent(text),
+          },
+        };
+      }
     }
   }
 
@@ -309,13 +362,57 @@ function selectedStructuredMutationPlan(
     }
   }
 
+  if (capabilities.dataModel === "search") {
+    const index =
+      extractTargetName(message, ["index", "into", "from", "in", "索引", "到索引", "从索引"]) ||
+      activeObjectName;
+    const id = extractTargetName(message, ["id", "编号"]);
+
+    if (
+      index &&
+      id &&
+      hasTool("search.updateDocument") &&
+      hasUpdateIntent(text) &&
+      selectedRecord
+    ) {
+      return {
+        toolName: "search.updateDocument",
+        title: "Update Elasticsearch document with approval",
+        input: {
+          index,
+          id,
+          document: recordField(selectedRecord, "document") ?? selectedRecord,
+          upsert: booleanField(selectedRecord, "upsert") ?? hasUpsertIntent(text),
+        },
+      };
+    }
+
+    if (
+      index &&
+      id &&
+      hasTool("search.deleteDocument") &&
+      hasDeleteIntent(text)
+    ) {
+      return {
+        toolName: "search.deleteDocument",
+        title: "Delete Elasticsearch document with approval",
+        input: {
+          index,
+          id,
+        },
+      };
+    }
+  }
+
   if (
     capabilities.dataModel === "search" &&
     hasTool("search.indexDocument") &&
     records?.length === 1 &&
     hasIndexWriteIntent(text)
   ) {
-    const index = extractTargetName(message, ["index", "into", "索引", "到索引"]);
+    const index =
+      extractTargetName(message, ["index", "into", "索引", "到索引"]) ||
+      activeObjectName;
     if (index) {
       return {
         toolName: "search.indexDocument",
@@ -430,6 +527,11 @@ function parseSelectedRecordArray(
   return null;
 }
 
+function parseSelectedRecord(text: string): Record<string, unknown> | null {
+  const value = parseSelectedJsonValue(text);
+  return isPlainRecord(value) ? value : null;
+}
+
 function parseSelectedJsonValue(text: string) {
   try {
     return JSON.parse(text);
@@ -440,6 +542,38 @@ function parseSelectedJsonValue(text: string) {
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function recordField(
+  value: Record<string, unknown> | null,
+  field: string
+): Record<string, unknown> | null {
+  const fieldValue = value?.[field];
+  return isPlainRecord(fieldValue) ? fieldValue : null;
+}
+
+function booleanField(
+  value: Record<string, unknown> | null,
+  field: string
+): boolean | null {
+  const fieldValue = value?.[field];
+  return typeof fieldValue === "boolean" ? fieldValue : null;
+}
+
+function inferMongoUpdateDocument(
+  value: Record<string, unknown> | null
+): Record<string, unknown> | null {
+  if (!value) return null;
+  const updateKeys = Object.keys(value).filter((key) => key.startsWith("$"));
+  if (updateKeys.length > 0) {
+    return value;
+  }
+
+  const ignoredFields = new Set(["filter", "many", "upsert"]);
+  const setFields = Object.fromEntries(
+    Object.entries(value).filter(([key]) => !ignoredFields.has(key))
+  );
+  return Object.keys(setFields).length > 0 ? { $set: setFields } : null;
 }
 
 function extractTargetName(message: string, labels: string[]) {
@@ -677,6 +811,21 @@ function hasWorkspaceIntent(text: string) {
 
 function hasDeleteIntent(text: string) {
   return /\b(delete|remove|unset)\b/.test(text) || /删除|移除|清除/.test(text);
+}
+
+function hasUpdateIntent(text: string) {
+  return /\b(update|modify|patch|change)\b/.test(text) ||
+    /更新|修改|变更/.test(text);
+}
+
+function hasManyIntent(text: string) {
+  return /\b(all|many|multiple|bulk)\b/.test(text) ||
+    /全部|所有|多条|批量/.test(text);
+}
+
+function hasUpsertIntent(text: string) {
+  return /\b(upsert|insert if missing|create if missing)\b/.test(text) ||
+    /不存在则创建|不存在就创建|插入或更新/.test(text);
 }
 
 function hasCreateOrWriteIntent(text: string) {
