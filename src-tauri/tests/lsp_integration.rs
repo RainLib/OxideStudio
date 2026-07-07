@@ -199,6 +199,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_where_in_value_uri = "file:///oxide/postgres-where-in-value.sql";
     let postgres_where_between_uri = "file:///oxide/postgres-where-between.sql";
     let postgres_where_continuation_uri = "file:///oxide/postgres-where-continuation.sql";
+    let postgres_case_when_uri = "file:///oxide/postgres-case-when.sql";
     let postgres_having_uri = "file:///oxide/postgres-having.sql";
     let postgres_having_operator_uri = "file:///oxide/postgres-having-operator.sql";
     let postgres_group_continuation_uri = "file:///oxide/postgres-group-continuation.sql";
@@ -281,6 +282,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     );
     file_schemas.insert(
         postgres_where_continuation_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        postgres_case_when_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
@@ -412,6 +417,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_where_continuation_uri.to_string(),
         json!("postgres"),
     );
+    file_dialects.insert(postgres_case_when_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_having_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_having_operator_uri.to_string(), json!("postgres"));
     file_dialects.insert(
@@ -616,6 +622,13 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_where_continuation_uri,
         "postgres",
         "SELECT * from public.webhook where owner = 'app' ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_case_when_uri,
+        "postgres",
+        "SELECT CASE WHEN owner = 'app' ",
     )
     .await?;
     open_document(
@@ -1022,6 +1035,22 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         0,
         "SELECT * from public.webhook where owner = 'app' ".len() as u32,
         &["owner", "name", "public.webhook", "=", "!="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_case_when_uri,
+        0,
+        "SELECT CASE WHEN owner = 'app' ".len() as u32,
+        &["THEN", "AND", "OR"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_case_when_uri,
+        0,
+        "SELECT CASE WHEN owner = 'app' ".len() as u32,
+        &["ORDER BY", "owner", "name", "=", "!="],
     )
     .await?;
     assert_completion_at_contains(
