@@ -51,6 +51,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 41: SQL foreign-key `REFERENCES table ` completions now suggest follow-up actions such as `(`, `ON DELETE`, and `ON UPDATE` instead of falling back to generic keywords.
 - Phase 42: SQL foreign-key `ON DELETE` and `ON UPDATE` completions now suggest referential rules such as `CASCADE`, `RESTRICT`, `NO ACTION`, and `SET NULL`.
 - Phase 43: SQL `ORDER BY <expression> ` completions now switch to sort direction suggestions and expose PostgreSQL `NULLS FIRST`/`NULLS LAST` options instead of repeating fields.
+- Phase 44: SQL `ORDER BY` modifier completions now advance through direction, PostgreSQL `NULLS`, and continuation stages without repeating completed sort directions.
 
 ⏳ **Pending:**
 
@@ -67,7 +68,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-47-gf9dc2e0`.
+Current tracked revision is `v0.1.3-48-g94dbc4a`.
 
 ### 2. Prepare the Binary
 
