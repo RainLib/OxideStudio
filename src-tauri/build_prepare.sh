@@ -24,7 +24,14 @@ copy_binary_if_changed() {
         return
     fi
 
-    cp "${source_binary}" "${target_binary}"
+    local temp_binary
+    temp_binary="$(mktemp "${target_binary}.tmp.XXXXXX")"
+    if cp "${source_binary}" "${temp_binary}"; then
+        mv -f "${temp_binary}" "${target_binary}"
+    else
+        rm -f "${temp_binary}"
+        return 1
+    fi
 }
 
 echo "=== SQL LSP Build Preparation ==="
