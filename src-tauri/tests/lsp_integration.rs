@@ -195,6 +195,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_join_condition_uri = "file:///oxide/postgres-join-condition.sql";
     let postgres_where_uri = "file:///oxide/postgres-where.sql";
     let postgres_where_operator_uri = "file:///oxide/postgres-where-operator.sql";
+    let postgres_where_value_uri = "file:///oxide/postgres-where-value.sql";
     let postgres_having_uri = "file:///oxide/postgres-having.sql";
     let postgres_having_operator_uri = "file:///oxide/postgres-having-operator.sql";
     let postgres_group_continuation_uri = "file:///oxide/postgres-group-continuation.sql";
@@ -204,6 +205,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_insert_action_uri = "file:///oxide/postgres-insert-action.sql";
     let postgres_insert_value_uri = "file:///oxide/postgres-insert-value.sql";
     let postgres_update_action_uri = "file:///oxide/postgres-update-action.sql";
+    let postgres_update_value_uri = "file:///oxide/postgres-update-value.sql";
     let postgres_delete_action_uri = "file:///oxide/postgres-delete-action.sql";
     let postgres_drop_index_uri = "file:///oxide/postgres-drop-index.sql";
     let postgres_create_index_uri = "file:///oxide/postgres-create-index.sql";
@@ -262,6 +264,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
+        postgres_where_value_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
         postgres_having_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
@@ -295,6 +301,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     );
     file_schemas.insert(
         postgres_update_action_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        postgres_update_value_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
@@ -375,6 +385,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     file_dialects.insert(postgres_join_condition_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_where_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_where_operator_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_where_value_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_having_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_having_operator_uri.to_string(), json!("postgres"));
     file_dialects.insert(
@@ -390,6 +401,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     file_dialects.insert(postgres_insert_action_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_insert_value_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_update_action_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_update_value_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_delete_action_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_drop_index_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_create_index_uri.to_string(), json!("postgres"));
@@ -550,6 +562,13 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     .await?;
     open_document(
         &mut lsp,
+        postgres_where_value_uri,
+        "postgres",
+        "SELECT * from public.webhook where owner = ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
         postgres_having_uri,
         "postgres",
         "SELECT owner, count(*) from public.webhook group by owner having ",
@@ -609,6 +628,13 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_update_action_uri,
         "postgres",
         "UPDATE public.webhook ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_update_value_uri,
+        "postgres",
+        "UPDATE public.webhook SET owner = ",
     )
     .await?;
     open_document(
@@ -870,6 +896,22 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     .await?;
     assert_completion_at_contains(
         &mut lsp,
+        postgres_where_value_uri,
+        0,
+        "SELECT * from public.webhook where owner = ".len() as u32,
+        &["NULL", "TRUE", "CURRENT_TIMESTAMP"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_where_value_uri,
+        0,
+        "SELECT * from public.webhook where owner = ".len() as u32,
+        &["DEFAULT", "owner", "name", "public.webhook", "=", "!="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
         postgres_order_direction_uri,
         0,
         "SELECT * from public.webhook ORDER BY owner ".len() as u32,
@@ -1005,6 +1047,22 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         0,
         "UPDATE public.webhook ".len() as u32,
         &["owner", "name", "public.form", "="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_update_value_uri,
+        0,
+        "UPDATE public.webhook SET owner = ".len() as u32,
+        &["DEFAULT", "NULL", "CURRENT_TIMESTAMP"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_update_value_uri,
+        0,
+        "UPDATE public.webhook SET owner = ".len() as u32,
+        &["owner", "name", "public.webhook", "public.form", "=", "!="],
     )
     .await?;
     assert_completion_at_contains(
