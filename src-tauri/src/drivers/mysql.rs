@@ -284,6 +284,24 @@ impl MysqlDriver {
             .collect()
     }
 
+    fn active_query_thread(&self, query_id: &str) -> Option<u64> {
+        self.active_queries
+            .lock()
+            .expect("MySQL active query map mutex poisoned")
+            .get(query_id)
+            .copied()
+    }
+
+    fn remove_active_query_thread_if_matches(&self, query_id: &str, thread_id: u64) {
+        let mut active_queries = self
+            .active_queries
+            .lock()
+            .expect("MySQL active query map mutex poisoned");
+        if active_queries.get(query_id) == Some(&thread_id) {
+            active_queries.remove(query_id);
+        }
+    }
+
     async fn cancel_tracked_queries_on_pool(
         &self,
         pool: &Pool<MySql>,
@@ -583,16 +601,11 @@ impl DatabaseDriver for MysqlDriver {
     }
 
     async fn cancel_query(&self, query_id: &str) -> Result<bool> {
-        let thread_id = self
-            .active_queries
-            .lock()
-            .expect("MySQL active query map mutex poisoned")
-            .remove(query_id);
-
-        if let Some(thread_id) = thread_id {
+        if let Some(thread_id) = self.active_query_thread(query_id) {
             let pool = self.get_pool(None).await?;
             let sql = format!("KILL QUERY {thread_id}");
             sqlx::raw_sql(&sql).execute(&pool).await?;
+            self.remove_active_query_thread_if_matches(query_id, thread_id);
             Ok(true)
         } else {
             Ok(false)
@@ -1062,6 +1075,40 @@ mod tests {
             .lock()
             .expect("active query map mutex poisoned")
             .is_empty());
+    }
+
+    #[test]
+    fn remove_active_query_thread_only_removes_matching_thread() {
+        let driver = MysqlDriver::new("mysql://user:pass@localhost/db");
+        driver
+            .active_queries
+            .lock()
+            .expect("active query map mutex poisoned")
+            .insert("q1".to_string(), 41);
+
+        driver.remove_active_query_thread_if_matches("q1", 42);
+        assert_eq!(driver.active_query_thread("q1"), Some(41));
+
+        driver.remove_active_query_thread_if_matches("q1", 41);
+        assert_eq!(driver.active_query_thread("q1"), None);
+    }
+
+    #[tokio::test]
+    async fn cancel_query_retains_tracking_when_mysql_pool_is_unavailable() {
+        let driver = MysqlDriver::new("mysql://user:pass@localhost/db");
+        driver
+            .active_queries
+            .lock()
+            .expect("active query map mutex poisoned")
+            .insert("q1".to_string(), 42);
+
+        let error = driver
+            .cancel_query("q1")
+            .await
+            .expect_err("missing pool should fail cancellation");
+
+        assert!(error.to_string().contains("Driver not connected"));
+        assert_eq!(driver.active_query_thread("q1"), Some(42));
     }
 
     #[tokio::test]

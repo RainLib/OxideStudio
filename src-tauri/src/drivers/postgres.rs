@@ -199,6 +199,24 @@ impl PostgresDriver {
             .collect()
     }
 
+    fn active_query_backend(&self, query_id: &str) -> Option<i32> {
+        self.active_queries
+            .lock()
+            .expect("PostgreSQL active query map mutex poisoned")
+            .get(query_id)
+            .copied()
+    }
+
+    fn remove_active_query_backend_if_matches(&self, query_id: &str, backend_pid: i32) {
+        let mut active_queries = self
+            .active_queries
+            .lock()
+            .expect("PostgreSQL active query map mutex poisoned");
+        if active_queries.get(query_id) == Some(&backend_pid) {
+            active_queries.remove(query_id);
+        }
+    }
+
     async fn cancel_tracked_queries_on_pool(
         &self,
         pool: &Pool<Postgres>,
@@ -674,19 +692,16 @@ impl DatabaseDriver for PostgresDriver {
     }
 
     async fn cancel_query(&self, query_id: &str) -> Result<bool> {
-        let backend_pid = self
-            .active_queries
-            .lock()
-            .expect("PostgreSQL active query map mutex poisoned")
-            .remove(query_id);
-
-        if let Some(backend_pid) = backend_pid {
+        if let Some(backend_pid) = self.active_query_backend(query_id) {
             let pool = self.get_pool().await?;
             let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
                 .bind(backend_pid)
                 .persistent(false)
                 .fetch_one(&pool)
                 .await?;
+            if cancelled {
+                self.remove_active_query_backend_if_matches(query_id, backend_pid);
+            }
             Ok(cancelled)
         } else {
             Ok(false)
@@ -1226,6 +1241,40 @@ mod tests {
             .lock()
             .expect("active query map mutex poisoned")
             .is_empty());
+    }
+
+    #[test]
+    fn remove_active_query_backend_only_removes_matching_backend() {
+        let driver = PostgresDriver::new("postgres://user:pass@localhost/db");
+        driver
+            .active_queries
+            .lock()
+            .expect("active query map mutex poisoned")
+            .insert("q1".to_string(), 41);
+
+        driver.remove_active_query_backend_if_matches("q1", 42);
+        assert_eq!(driver.active_query_backend("q1"), Some(41));
+
+        driver.remove_active_query_backend_if_matches("q1", 41);
+        assert_eq!(driver.active_query_backend("q1"), None);
+    }
+
+    #[tokio::test]
+    async fn cancel_query_retains_tracking_when_postgres_pool_is_unavailable() {
+        let driver = PostgresDriver::new("postgres://user:pass@localhost/db");
+        driver
+            .active_queries
+            .lock()
+            .expect("active query map mutex poisoned")
+            .insert("q1".to_string(), 42);
+
+        let error = driver
+            .cancel_query("q1")
+            .await
+            .expect_err("missing pool should fail cancellation");
+
+        assert!(error.to_string().contains("Not connected"));
+        assert_eq!(driver.active_query_backend("q1"), Some(42));
     }
 
     #[tokio::test]
