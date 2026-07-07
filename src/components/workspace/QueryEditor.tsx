@@ -22,7 +22,9 @@ import {
   completionFilterText,
   completionInsertText,
   completionSortText,
+  filterCompletionsForSqlContext,
   isCompletedSqlContextKeyword,
+  sqlContextKeywordBeforeCursor,
   toLspCompletionContext,
   toMonacoCompletionKind,
 } from "@/lib/lspCompletion";
@@ -395,6 +397,11 @@ export function QueryEditor() {
             const typedWord = model.getValueInRange(range);
             const completedContextKeyword =
               isCompletedSqlContextKeyword(typedWord);
+            const textBeforeCursor = model.getValueInRange(
+              new monaco.Range(1, 1, position.lineNumber, position.column)
+            );
+            const sqlContextKeyword =
+              sqlContextKeywordBeforeCursor(textBeforeCursor);
             const insertRange = completedContextKeyword
               ? new monaco.Range(
                   position.lineNumber,
@@ -403,9 +410,13 @@ export function QueryEditor() {
                   position.column
                 )
               : range;
+            const filteredItems = filterCompletionsForSqlContext(
+              items,
+              sqlContextKeyword
+            );
 
             // Convert LSP completion items to Monaco format
-            const suggestions = items.map((item) => ({
+            const suggestions = filteredItems.map((item) => ({
               label: item.label,
               kind: toMonacoCompletionKind(monaco, item.kind),
               detail: item.detail,

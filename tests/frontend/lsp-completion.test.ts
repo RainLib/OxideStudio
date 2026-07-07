@@ -3,7 +3,9 @@ import {
   completionFilterText,
   completionInsertText,
   completionSortText,
+  filterCompletionsForSqlContext,
   isCompletedSqlContextKeyword,
+  sqlContextKeywordBeforeCursor,
   toLspCompletionContext,
 } from "@/lib/lspCompletion";
 import { CompletionItemKind, type CompletionItem } from "@/services/lsp/types";
@@ -23,6 +25,45 @@ describe("LSP completion adapter helpers", () => {
     expect(isCompletedSqlContextKeyword("fro")).toBe(false);
     expect(isCompletedSqlContextKeyword("order")).toBe(false);
     expect(isCompletedSqlContextKeyword("customer")).toBe(false);
+  });
+
+  it("finds the active SQL context keyword before the cursor", () => {
+    expect(sqlContextKeywordBeforeCursor("SELECT * from")).toBe("from");
+    expect(sqlContextKeywordBeforeCursor("SELECT * from ")).toBe("from");
+    expect(sqlContextKeywordBeforeCursor("SELECT * FROM users where ")).toBe(
+      "where"
+    );
+    expect(
+      sqlContextKeywordBeforeCursor("SELECT * FROM users where owner ")
+    ).toBeNull();
+    expect(sqlContextKeywordBeforeCursor("SELECT owner ")).toBeNull();
+  });
+
+  it("filters mixed completions after relation context keywords", () => {
+    const items = [
+      item({ label: "public.webhook", kind: CompletionItemKind.Class }),
+      item({ label: "form_background_url", kind: CompletionItemKind.Field }),
+      item({ label: "FROM", kind: CompletionItemKind.Keyword }),
+    ];
+
+    expect(filterCompletionsForSqlContext(items, "from")).toEqual([
+      items[0],
+    ]);
+  });
+
+  it("filters operators and relation targets at the start of predicates", () => {
+    const items = [
+      item({ label: "id", kind: CompletionItemKind.Field }),
+      item({ label: "!=", kind: CompletionItemKind.Operator }),
+      item({ label: "public.form", kind: CompletionItemKind.Class }),
+      item({ label: "TRUE", kind: CompletionItemKind.Keyword }),
+    ];
+
+    expect(filterCompletionsForSqlContext(items, "where")).toEqual([
+      items[0],
+      items[3],
+    ]);
+    expect(filterCompletionsForSqlContext(items, null)).toEqual(items);
   });
 
   it("inserts after completed clause keywords instead of replacing them", () => {

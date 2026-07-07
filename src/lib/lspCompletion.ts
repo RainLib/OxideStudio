@@ -23,6 +23,58 @@ export function isCompletedSqlContextKeyword(word: string) {
   return SQL_CONTEXT_KEYWORDS.has(word.trim().toLowerCase());
 }
 
+export function sqlContextKeywordBeforeCursor(textBeforeCursor: string) {
+  const trimmed = textBeforeCursor.trimEnd();
+  const match = trimmed.match(/([A-Za-z_][A-Za-z0-9_]*)$/);
+  const token = match?.[1];
+  if (!token) return null;
+
+  const keyword = token.toLowerCase();
+  return SQL_CONTEXT_KEYWORDS.has(keyword) ? keyword : null;
+}
+
+function isRelationCompletionKind(kind?: number) {
+  return (
+    kind === CompletionItemKind.Class ||
+    kind === CompletionItemKind.Struct ||
+    kind === CompletionItemKind.Module ||
+    kind === CompletionItemKind.File ||
+    kind === CompletionItemKind.Folder
+  );
+}
+
+export function filterCompletionsForSqlContext(
+  items: CompletionItem[],
+  contextKeyword: string | null
+) {
+  if (!contextKeyword) return items;
+
+  return items.filter((item) => {
+    const label = item.label.trim().toLowerCase();
+    if (label === contextKeyword) return false;
+
+    switch (contextKeyword) {
+      case "from":
+      case "join":
+      case "into":
+        return isRelationCompletionKind(item.kind);
+      case "where":
+      case "having":
+        return (
+          !isRelationCompletionKind(item.kind) &&
+          item.kind !== CompletionItemKind.Operator
+        );
+      case "select":
+      case "by":
+      case "values":
+      case "set":
+        return !isRelationCompletionKind(item.kind);
+      default:
+        return true;
+    }
+  });
+}
+
 export function completionInsertText(
   item: CompletionItem,
   completedContextKeyword: boolean
