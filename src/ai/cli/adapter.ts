@@ -286,6 +286,18 @@ export class CliToolAdapter {
         index += 1;
         continue;
       }
+      if (arg === "--selected-text-file") {
+        const path = args[index + 1];
+        if (!path) {
+          throw new Error("--selected-text-file requires a file path");
+        }
+        if (!this.readFile) {
+          throw new Error("--selected-text-file requires a file reader adapter");
+        }
+        input = { ...input, selectedText: await this.readFile(path) };
+        index += 1;
+        continue;
+      }
       if (arg === "--json") {
         const value = args[index + 1];
         if (value === undefined) {
@@ -458,6 +470,7 @@ function helpText() {
     "  assistant plan --message 'show active schema'",
     "  assistant plan --json '{\"message\":\"explain this query\"}'",
     "  assistant plan --message 'read key session:1' --active-driver redis",
+    "  assistant plan --message 'run selected' --selected-text-file selection.sql",
     "  tools call <toolName> [--json '{...}']",
     "  tools call <toolName> [--json-file payload.json]",
     "  tools call <toolName> --active-driver redis --active-namespace 2 [--json '{...}']",

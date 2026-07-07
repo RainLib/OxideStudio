@@ -146,6 +146,7 @@ npm run ai -- tools list
 npm run ai -- tools manifest
 npm run ai -- tools inspect provider.list
 npm run ai -- assistant plan --message "list tables in the active database"
+npm run ai -- assistant plan --message "run selected query" --selected-text-file selection.sql
 npm run ai -- tools call query.runReadOnly --json-file payload.json
 npm run ai -- tools call key.getValue --active-driver redis --active-namespace 2 --json '{"key":"session:1"}'
 npm run ai -- tools call key.setValue --approve --json '{"key":"demo","value":"ok"}'
@@ -169,7 +170,7 @@ Current limitation: `scripts/oxide-ai.ts` runs in a headless Node process, so it
 
 The CLI/MCP manifest includes `environment.enabledToolFamilies` and `environment.disabledToolFamilies` with missing adapter names. Agents should use this to distinguish an unavailable headless adapter from an unsupported database capability before planning tool calls.
 
-For injected standalone adapters, both `assistant plan` and `tools call` accept `--active-connection-id`, `--active-driver`, and `--active-namespace` so external agents can pass the same context shape used by the in-app assistant before choosing or executing tools.
+For injected standalone adapters, both `assistant plan` and `tools call` accept `--active-connection-id`, `--active-driver`, and `--active-namespace` so external agents can pass the same context shape used by the in-app assistant before choosing or executing tools. `assistant plan` also accepts `--selected-text` or `--selected-text-file` so editor scripts can pass the active selection without embedding large SQL or JSON directly in the shell command.
 
 For the editor itself, prefer direct TypeScript orchestration over MCP. The editor already owns state, selection, tabs, connection ids, and approval UI; routing those through an external protocol would add latency and lose context. External MCP hosts should use tool annotations plus an explicit approval handoff before calling mutating tools.
 

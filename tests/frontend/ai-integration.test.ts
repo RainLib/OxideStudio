@@ -547,6 +547,38 @@ describe("AI CLI adapter", () => {
       })
     );
   });
+
+  it("loads selected text from a file for assistant planning", async () => {
+    const cli = createCliToolAdapter({
+      registry: createPlannerRegistry(),
+      createContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+      readFile: async (path) => {
+        if (path !== "selection.sql") {
+          throw new Error(`unexpected path: ${path}`);
+        }
+        return "SELECT * FROM users";
+      },
+    });
+
+    const result = await cli.run([
+      "assistant",
+      "plan",
+      "--message",
+      "run selected query",
+      "--selected-text-file",
+      "selection.sql",
+    ]);
+    const turn = JSON.parse(result.stdout);
+
+    expect(result.exitCode).toBe(0);
+    expect(turn.suggestedPlan).toContainEqual(
+      expect.objectContaining({
+        toolName: "query.runReadOnly",
+        input: { query: "SELECT * FROM users" },
+      })
+    );
+  });
 });
 
 describe("AI tool input validation", () => {
