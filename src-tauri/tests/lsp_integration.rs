@@ -204,6 +204,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_alter_action_uri = "file:///oxide/postgres-alter-action.sql";
     let postgres_alter_column_uri = "file:///oxide/postgres-alter-column.sql";
     let postgres_alter_constraint_uri = "file:///oxide/postgres-alter-constraint.sql";
+    let postgres_create_table_type_uri = "file:///oxide/postgres-create-table-type.sql";
 
     let mut file_schemas = Map::new();
     file_schemas.insert(
@@ -282,6 +283,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_alter_constraint_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
+    file_schemas.insert(
+        postgres_create_table_type_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
 
     let mut file_dialects = Map::new();
     file_dialects.insert(redis_uri.to_string(), json!("redis"));
@@ -306,6 +311,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     file_dialects.insert(postgres_alter_action_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_alter_column_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_alter_constraint_uri.to_string(), json!("postgres"));
+    file_dialects.insert(
+        postgres_create_table_type_uri.to_string(),
+        json!("postgres"),
+    );
 
     lsp.notify(
         "workspace/didChangeConfiguration",
@@ -489,6 +498,13 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_alter_constraint_uri,
         "postgres",
         "ALTER TABLE public.webhook DROP CONSTRAINT ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_create_table_type_uri,
+        "postgres",
+        "CREATE TABLE public.audit_log (owner ",
     )
     .await?;
 
@@ -786,6 +802,22 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         0,
         "ALTER TABLE public.webhook DROP CONSTRAINT ".len() as u32,
         &["owner", "name", "form_pkey", "public.form", "="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_create_table_type_uri,
+        0,
+        "CREATE TABLE public.audit_log (owner ".len() as u32,
+        &["VARCHAR", "TEXT", "JSONB"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_create_table_type_uri,
+        0,
+        "CREATE TABLE public.audit_log (owner ".len() as u32,
+        &["public.webhook", "owner", "="],
     )
     .await?;
 
