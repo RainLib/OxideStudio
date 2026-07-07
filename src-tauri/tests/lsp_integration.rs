@@ -188,6 +188,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let redis_uri = "file:///oxide/redis.redis";
     let mongodb_uri = "file:///oxide/mongodb.mongodb";
     let elasticsearch_uri = "file:///oxide/elasticsearch.es.dsl";
+    let hive_where_uri = "file:///oxide/hive-where.sql";
+    let hive_having_uri = "file:///oxide/hive-having.sql";
+    let clickhouse_where_uri = "file:///oxide/clickhouse-where.sql";
+    let clickhouse_having_uri = "file:///oxide/clickhouse-having.sql";
     let postgres_uri = "file:///oxide/postgres.sql";
     let postgres_select_continuation_uri = "file:///oxide/postgres-select-continuation.sql";
     let postgres_select_wildcard_uri = "file:///oxide/postgres-select-wildcard.sql";
@@ -264,6 +268,22 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     file_schemas.insert(
         elasticsearch_uri.to_string(),
         json!("33333333-3333-4333-8333-333333333333"),
+    );
+    file_schemas.insert(
+        hive_where_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        hive_having_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        clickhouse_where_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        clickhouse_having_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
         postgres_uri.to_string(),
@@ -490,6 +510,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     file_dialects.insert(redis_uri.to_string(), json!("redis"));
     file_dialects.insert(mongodb_uri.to_string(), json!("mongodb"));
     file_dialects.insert(elasticsearch_uri.to_string(), json!("elasticsearch-dsl"));
+    file_dialects.insert(hive_where_uri.to_string(), json!("hive"));
+    file_dialects.insert(hive_having_uri.to_string(), json!("hive"));
+    file_dialects.insert(clickhouse_where_uri.to_string(), json!("clickhouse"));
+    file_dialects.insert(clickhouse_having_uri.to_string(), json!("clickhouse"));
     file_dialects.insert(postgres_uri.to_string(), json!("postgres"));
     file_dialects.insert(
         postgres_select_continuation_uri.to_string(),
@@ -702,6 +726,34 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     open_document(&mut lsp, redis_uri, "redis", "").await?;
     open_document(&mut lsp, mongodb_uri, "mongodb", "").await?;
     open_document(&mut lsp, elasticsearch_uri, "elasticsearch-dsl", "").await?;
+    open_document(
+        &mut lsp,
+        hive_where_uri,
+        "hive",
+        "SELECT * FROM public.webhook WHERE ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        hive_having_uri,
+        "hive",
+        "SELECT owner, COUNT(*) FROM public.webhook GROUP BY owner HAVING ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        clickhouse_where_uri,
+        "clickhouse",
+        "SELECT * FROM public.webhook WHERE ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        clickhouse_having_uri,
+        "clickhouse",
+        "SELECT owner, COUNT(*) FROM public.webhook GROUP BY owner HAVING ",
+    )
+    .await?;
     open_document(&mut lsp, postgres_uri, "postgres", "SELECT * from").await?;
     open_document(
         &mut lsp,
@@ -1079,6 +1131,70 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     assert_completion_contains(&mut lsp, redis_uri, &["GET", "user:1"]).await?;
     assert_completion_contains(&mut lsp, mongodb_uri, &["find", "users", "email"]).await?;
     assert_completion_contains(&mut lsp, elasticsearch_uri, &["match", "users", "email"]).await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        hive_where_uri,
+        0,
+        "SELECT * FROM public.webhook WHERE ".len() as u32,
+        &["owner", "name"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        hive_where_uri,
+        0,
+        "SELECT * FROM public.webhook WHERE ".len() as u32,
+        &["form_background_url", "public.form", "=", "!="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        hive_having_uri,
+        0,
+        "SELECT owner, COUNT(*) FROM public.webhook GROUP BY owner HAVING ".len() as u32,
+        &["owner", "COUNT"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        hive_having_uri,
+        0,
+        "SELECT owner, COUNT(*) FROM public.webhook GROUP BY owner HAVING ".len() as u32,
+        &["form_background_url", "public.form", "=", "!="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        clickhouse_where_uri,
+        0,
+        "SELECT * FROM public.webhook WHERE ".len() as u32,
+        &["owner", "name"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        clickhouse_where_uri,
+        0,
+        "SELECT * FROM public.webhook WHERE ".len() as u32,
+        &["form_background_url", "public.form", "=", "!="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        clickhouse_having_uri,
+        0,
+        "SELECT owner, COUNT(*) FROM public.webhook GROUP BY owner HAVING ".len() as u32,
+        &["owner", "COUNT"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        clickhouse_having_uri,
+        0,
+        "SELECT owner, COUNT(*) FROM public.webhook GROUP BY owner HAVING ".len() as u32,
+        &["form_background_url", "public.form", "=", "!="],
+    )
+    .await?;
     assert_completion_at_contains(
         &mut lsp,
         postgres_uri,
