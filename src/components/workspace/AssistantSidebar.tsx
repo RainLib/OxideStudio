@@ -17,8 +17,8 @@ import type {
   AssistantToolResultSummary,
 } from "@/ai/assistant/types";
 import { cn } from "@/lib/utils";
-import { ListChecks, Play, ShieldCheck, Sparkles } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { ListChecks, Play, ShieldCheck, Sparkles, Square } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 export function AssistantSidebar() {
   const aiEnabled = useAiSettingsStore((state) => state.enabled);
@@ -70,10 +70,12 @@ export function AssistantSidebar() {
     Record<string, AssistantToolResultSummary>
   >({});
   const toolResultsRef = useRef<Record<string, AssistantToolCallResult>>({});
+  const activeAbortControllerRef = useRef<AbortController | null>(null);
   const [turnSummary, setTurnSummary] =
     useState<AssistantToolResultSummary | null>(null);
   const [isPlanning, setIsPlanning] = useState(false);
   const [isRunningSafeSteps, setIsRunningSafeSteps] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const safeSteps =
     preparedTurn?.suggestedPlan.filter(
@@ -86,6 +88,13 @@ export function AssistantSidebar() {
     ? `${activeTab.title}${selectedText ? " - selection" : ""}`
     : "No active tab";
   const plannerLabel = modelConfig ? modelConfig.model : "Local planner";
+
+  useEffect(
+    () => () => {
+      activeAbortControllerRef.current?.abort();
+    },
+    []
+  );
 
   const handlePrepare = async () => {
     setError(null);
@@ -107,7 +116,8 @@ export function AssistantSidebar() {
     turn: AssistantPreparedTurn,
     step: AssistantPlanStep,
     approved = false,
-    summarizeStep = true
+    summarizeStep = true,
+    executionContext = turn.context
   ) => {
     if (!step.toolName) return null;
 
@@ -120,7 +130,7 @@ export function AssistantSidebar() {
           approved,
         },
       ],
-      turn.context
+      executionContext
     );
     if (!result) return null;
 
@@ -128,11 +138,11 @@ export function AssistantSidebar() {
     toolResultsRef.current = nextResults;
     setToolResults(nextResults);
 
-    if (summarizeStep) {
+    if (summarizeStep && !executionContext.abortSignal?.aborted) {
       const summary = await runtime.summarizeToolResults(
         { message, selectedText },
         [result],
-        turn.context
+        executionContext
       );
       setToolSummaries((state) => ({ ...state, [step.id]: summary }));
       setTurnSummary(summary);
@@ -143,6 +153,15 @@ export function AssistantSidebar() {
     return result;
   };
 
+  const handleStopRunning = () => {
+    const controller = activeAbortControllerRef.current;
+    if (!controller || controller.signal.aborted) return;
+
+    controller.abort();
+    setIsCancelling(true);
+    setError("Stopping assistant tool execution...");
+  };
+
   const handleRunStep = async (
     step: AssistantPlanStep,
     approved = false
@@ -150,43 +169,91 @@ export function AssistantSidebar() {
     if (!preparedTurn || !step.toolName) return;
     if (step.requiresApproval && !approved) return;
 
+    const controller = new AbortController();
+    const executionContext = {
+      ...preparedTurn.context,
+      abortSignal: controller.signal,
+    };
+    activeAbortControllerRef.current = controller;
     setError(null);
+    setIsCancelling(false);
     setActiveStepId(step.id);
     try {
-      await executeStep(preparedTurn, step, approved);
+      await executeStep(preparedTurn, step, approved, true, executionContext);
+      if (controller.signal.aborted) {
+        setError("Assistant run cancelled");
+      }
     } catch (err: any) {
-      setError(err?.message || String(err));
+      setError(
+        controller.signal.aborted
+          ? "Assistant run cancelled"
+          : err?.message || String(err)
+      );
     } finally {
+      if (activeAbortControllerRef.current === controller) {
+        activeAbortControllerRef.current = null;
+      }
       setActiveStepId(null);
+      setIsCancelling(false);
     }
   };
 
   const handleRunSafeSteps = async () => {
     if (!preparedTurn || safeSteps.length === 0) return;
 
+    const controller = new AbortController();
+    const executionContext = {
+      ...preparedTurn.context,
+      abortSignal: controller.signal,
+    };
+    activeAbortControllerRef.current = controller;
     setError(null);
+    setIsCancelling(false);
     setIsRunningSafeSteps(true);
     const completedResults: AssistantToolCallResult[] = [];
     try {
       for (const step of safeSteps) {
+        if (controller.signal.aborted) break;
         setActiveStepId(step.id);
-        const result = await executeStep(preparedTurn, step, false, false);
+        const result = await executeStep(
+          preparedTurn,
+          step,
+          false,
+          false,
+          executionContext
+        );
         if (result) completedResults.push(result);
-        if (result && result.status !== "success") break;
+        if (
+          controller.signal.aborted ||
+          (result && result.status !== "success")
+        ) {
+          break;
+        }
       }
-      if (completedResults.length > 0) {
+      if (completedResults.length > 0 && !controller.signal.aborted) {
         setTurnSummary(
           await runtime.summarizeToolResults(
             { message, selectedText },
             completedResults,
-            preparedTurn.context
+            executionContext
           )
         );
       }
+      if (controller.signal.aborted) {
+        setError("Assistant run cancelled");
+      }
     } catch (err: any) {
-      setError(err?.message || String(err));
+      setError(
+        controller.signal.aborted
+          ? "Assistant run cancelled"
+          : err?.message || String(err)
+      );
     } finally {
+      if (activeAbortControllerRef.current === controller) {
+        activeAbortControllerRef.current = null;
+      }
       setActiveStepId(null);
+      setIsCancelling(false);
       setIsRunningSafeSteps(false);
     }
   };
@@ -227,20 +294,35 @@ export function AssistantSidebar() {
           >
             {isPlanning ? "Planning" : "Plan"}
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-7 rounded-sm px-2 text-[11px]"
-            onClick={handleRunSafeSteps}
-            disabled={
-              !preparedTurn || safeSteps.length === 0 || isPlanning || isRunning
-            }
-            title="Run read-only steps"
-          >
-            <ListChecks size={12} className="mr-1" />
-            {isRunningSafeSteps ? "Running" : "Run Safe"}
-          </Button>
+          {isRunning ? (
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              className="h-7 rounded-sm px-2 text-[11px]"
+              onClick={handleStopRunning}
+              disabled={isCancelling}
+              title="Stop active assistant tool"
+            >
+              <Square size={12} className="mr-1 fill-current" />
+              {isCancelling ? "Stopping" : "Stop"}
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 rounded-sm px-2 text-[11px]"
+              onClick={handleRunSafeSteps}
+              disabled={
+                !preparedTurn || safeSteps.length === 0 || isPlanning || isRunning
+              }
+              title="Run read-only steps"
+            >
+              <ListChecks size={12} className="mr-1" />
+              Run Safe
+            </Button>
+          )}
         </div>
       </div>
 

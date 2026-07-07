@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
       statementType: "SELECT",
     },
   ]),
+  cancelQuery: vi.fn(async () => "cancelled"),
   getDatabaseCapabilities: vi.fn(async (driver: string) =>
     defaultDatabaseCapabilities(driver)
   ),
@@ -42,6 +43,7 @@ vi.mock("@/services/tauri", () => ({
   },
   queryService: {
     executeQuery: mocks.executeQuery,
+    cancelQuery: mocks.cancelQuery,
   },
   schemaService: {
     getCollections: mocks.getCollections,
@@ -88,6 +90,7 @@ describe("AssistantSidebar", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.cancelQuery.mockResolvedValue("cancelled");
     useAiSettingsStore.setState(
       {
         ...initialAiSettings,
@@ -188,8 +191,68 @@ describe("AssistantSidebar", () => {
     expect(mocks.executeQuery).toHaveBeenCalledWith(
       "postgres-1",
       "SELECT * FROM users",
-      "public"
+      "public",
+      undefined,
+      expect.any(String)
     );
     expect(container.textContent).toContain("tool calls succeeded");
+  });
+
+  it("stops an active assistant tool run and cancels the backend query", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    const textarea = container.querySelector("textarea");
+    expect(textarea).toBeTruthy();
+
+    await act(async () => {
+      setTextareaValue(textarea!, "run current query");
+      await flushAsyncWork();
+    });
+
+    await act(async () => {
+      buttonWithText(container, "Plan")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true })
+      );
+      await flushAsyncWork();
+    });
+
+    let resolveQuery: (value: any[]) => void = () => undefined;
+    mocks.executeQuery.mockImplementationOnce(
+      () =>
+        new Promise<any[]>((resolve) => {
+          resolveQuery = resolve;
+        })
+    );
+
+    await act(async () => {
+      buttonWithText(container, "Run Safe")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true })
+      );
+      await flushAsyncWork();
+    });
+
+    const queryId = mocks.executeQuery.mock.calls[0]?.[4];
+    expect(queryId).toEqual(expect.any(String));
+    expect(buttonWithText(container, "Stop")).toBeTruthy();
+
+    await act(async () => {
+      buttonWithText(container, "Stop")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true })
+      );
+      await flushAsyncWork();
+    });
+
+    expect(mocks.cancelQuery).toHaveBeenCalledWith(queryId);
+
+    await act(async () => {
+      resolveQuery([]);
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain("Assistant run cancelled");
   });
 });
