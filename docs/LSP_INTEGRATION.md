@@ -63,6 +63,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 53: SQL `CASE WHEN` condition completions now use predicate-aware fields, right-hand values, `THEN` continuation, and `BETWEEN` first-bound handling instead of falling back to `SELECT` or default suggestions.
 - Phase 54: SQL `CASE THEN/ELSE` result completions now have dedicated result-expression and `WHEN`/`ELSE`/`END` continuation states, including string literal handling such as `THEN 'end' `.
 - Phase 55: SQL simple `CASE expression WHEN value THEN ...` completions now distinguish match-value positions from searched `CASE WHEN` predicates, so `WHEN` values suggest expressions and completed values narrow to `THEN`.
+- Phase 56: SQL `INSERT ... VALUES (...) ` completions now suggest dialect-specific continuations such as PostgreSQL `ON CONFLICT`/`RETURNING` and MySQL `ON DUPLICATE KEY UPDATE`.
 
 ⏳ **Pending:**
 
@@ -79,7 +80,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-59-g8fe6020`.
+Current tracked revision is `v0.1.3-60-g9157c20`.
 
 ### 2. Prepare the Binary
 
