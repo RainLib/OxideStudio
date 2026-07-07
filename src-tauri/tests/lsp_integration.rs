@@ -246,6 +246,11 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_references_action_uri = "file:///oxide/postgres-references-action.sql";
     let postgres_references_rule_uri = "file:///oxide/postgres-references-rule.sql";
     let mysql_modify_column_uri = "file:///oxide/mysql-modify-column.sql";
+    let mysql_insert_duplicate_set_uri = "file:///oxide/mysql-insert-duplicate-set.sql";
+    let mysql_insert_duplicate_operator_uri = "file:///oxide/mysql-insert-duplicate-operator.sql";
+    let mysql_insert_duplicate_value_uri = "file:///oxide/mysql-insert-duplicate-value.sql";
+    let mysql_insert_duplicate_continuation_uri =
+        "file:///oxide/mysql-insert-duplicate-continuation.sql";
 
     let mut file_schemas = Map::new();
     file_schemas.insert(
@@ -464,6 +469,22 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         mysql_modify_column_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
+    file_schemas.insert(
+        mysql_insert_duplicate_set_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        mysql_insert_duplicate_operator_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        mysql_insert_duplicate_value_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        mysql_insert_duplicate_continuation_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
 
     let mut file_dialects = Map::new();
     file_dialects.insert(redis_uri.to_string(), json!("redis"));
@@ -586,6 +607,16 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     );
     file_dialects.insert(postgres_references_rule_uri.to_string(), json!("postgres"));
     file_dialects.insert(mysql_modify_column_uri.to_string(), json!("mysql"));
+    file_dialects.insert(mysql_insert_duplicate_set_uri.to_string(), json!("mysql"));
+    file_dialects.insert(
+        mysql_insert_duplicate_operator_uri.to_string(),
+        json!("mysql"),
+    );
+    file_dialects.insert(mysql_insert_duplicate_value_uri.to_string(), json!("mysql"));
+    file_dialects.insert(
+        mysql_insert_duplicate_continuation_uri.to_string(),
+        json!("mysql"),
+    );
 
     lsp.notify(
         "workspace/didChangeConfiguration",
@@ -1014,6 +1045,34 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         mysql_modify_column_uri,
         "mysql",
         "ALTER TABLE public.webhook MODIFY COLUMN ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        mysql_insert_duplicate_set_uri,
+        "mysql",
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON DUPLICATE KEY UPDATE ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        mysql_insert_duplicate_operator_uri,
+        "mysql",
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON DUPLICATE KEY UPDATE owner ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        mysql_insert_duplicate_value_uri,
+        "mysql",
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON DUPLICATE KEY UPDATE owner = ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        mysql_insert_duplicate_continuation_uri,
+        "mysql",
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON DUPLICATE KEY UPDATE owner = 'app' ",
     )
     .await?;
 
@@ -1905,6 +1964,76 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         0,
         "ALTER TABLE public.webhook MODIFY COLUMN ".len() as u32,
         &["public.form", "form_css", "="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        mysql_insert_duplicate_set_uri,
+        0,
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON DUPLICATE KEY UPDATE ".len() as u32,
+        &["owner", "name"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        mysql_insert_duplicate_set_uri,
+        0,
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON DUPLICATE KEY UPDATE ".len() as u32,
+        &["public.form", "webhook.owner", "=", "!="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        mysql_insert_duplicate_operator_uri,
+        0,
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON DUPLICATE KEY UPDATE owner ".len()
+            as u32,
+        &["=", "!="],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        mysql_insert_duplicate_operator_uri,
+        0,
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON DUPLICATE KEY UPDATE owner ".len()
+            as u32,
+        &["owner", "name", "public.form"],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        mysql_insert_duplicate_value_uri,
+        0,
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON DUPLICATE KEY UPDATE owner = ".len()
+            as u32,
+        &["DEFAULT", "NULL", "CURRENT_TIMESTAMP"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        mysql_insert_duplicate_value_uri,
+        0,
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON DUPLICATE KEY UPDATE owner = ".len()
+            as u32,
+        &["owner", "name", "public.webhook", "public.form", "=", "!="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        mysql_insert_duplicate_continuation_uri,
+        0,
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON DUPLICATE KEY UPDATE owner = 'app' "
+            .len() as u32,
+        &[","],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        mysql_insert_duplicate_continuation_uri,
+        0,
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON DUPLICATE KEY UPDATE owner = 'app' "
+            .len() as u32,
+        &["WHERE", "owner", "name", "=", "!="],
     )
     .await?;
 
