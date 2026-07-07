@@ -14,7 +14,7 @@ import { createCliToolAdapter } from "@/ai/cli/adapter";
 import { createMcpProtocolAdapter } from "@/ai/mcp/protocol";
 import { DEFAULT_AI_TOOL_POLICY } from "@/ai/tools/policy";
 import { createAiToolRegistry } from "@/ai/tools/registry";
-import type { AiToolExecutionContext } from "@/ai/tools/types";
+import type { AiToolAuditEntry, AiToolExecutionContext } from "@/ai/tools/types";
 
 function createTestRegistry() {
   const registry = createAiToolRegistry();
@@ -608,6 +608,68 @@ describe("AI tool input validation", () => {
         DEFAULT_AI_TOOL_POLICY
       )
     ).rejects.toThrow("Invalid input for AI tool demo.read: $.extra is not allowed");
+  });
+
+  it("records bounded and redacted audit entries for tool execution", async () => {
+    const registry = createTestRegistry();
+    const auditEntries: AiToolAuditEntry[] = [];
+    const context: AiToolExecutionContext = {
+      ...createContext(),
+      audit: (entry) => auditEntries.push(entry),
+    };
+
+    registry.register({
+      name: "demo.error",
+      description: "Raise an error that includes sensitive operational text.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+      },
+      permissions: ["read"],
+      capabilities: ["query"],
+      execute: async () => {
+        throw new Error(
+          [
+            "query: SELECT * FROM private.users WHERE token = 'secret-token';",
+            "postgres://admin:super-secret@localhost/app?password=hidden",
+            "x".repeat(600),
+          ].join(" ")
+        );
+      },
+    });
+
+    await registry.executeWithPolicy(
+      "demo.read",
+      { value: "ok" },
+      context,
+      DEFAULT_AI_TOOL_POLICY
+    );
+    await expect(
+      registry.executeWithPolicy(
+        "demo.write",
+        { value: "blocked" },
+        context,
+        DEFAULT_AI_TOOL_POLICY
+      )
+    ).rejects.toThrow("requires explicit approval");
+    await expect(
+      registry.executeWithPolicy("demo.error", {}, context, DEFAULT_AI_TOOL_POLICY)
+    ).rejects.toThrow("SELECT * FROM private.users");
+
+    expect(auditEntries.map((entry) => entry.status)).toEqual([
+      "success",
+      "blocked",
+      "error",
+    ]);
+    const errorReason = auditEntries.find(
+      (entry) => entry.toolName === "demo.error"
+    )?.reason;
+    expect(errorReason).toContain("query: <redacted>");
+    expect(errorReason).toContain("postgres://admin:****@localhost/app?password=****");
+    expect(errorReason).not.toContain("SELECT * FROM private.users");
+    expect(errorReason).not.toContain("super-secret");
+    expect(errorReason).not.toContain("hidden");
+    expect(errorReason?.length).toBeLessThanOrEqual(503);
   });
 
   it("reports invalid model-planned tool inputs as assistant tool errors", async () => {

@@ -7,6 +7,9 @@ import type {
   JsonSchema,
 } from "./types";
 import { evaluateAiToolPolicy } from "./policy";
+import { redactSecretString } from "@/lib/redaction";
+
+const MAX_AUDIT_REASON_LENGTH = 500;
 
 export class AiToolRegistry {
   private readonly tools = new Map<string, AiToolDefinition>();
@@ -238,10 +241,34 @@ async function recordAudit(
   entry: AiToolAuditEntry
 ) {
   try {
-    await context.audit?.(entry);
+    await context.audit?.(sanitizeAuditEntry(entry));
   } catch (err) {
     console.warn("[AI tools] Audit sink failed:", err);
   }
+}
+
+function sanitizeAuditEntry(entry: AiToolAuditEntry): AiToolAuditEntry {
+  if (!entry.reason) return entry;
+  return {
+    ...entry,
+    reason: sanitizeAuditReason(entry.reason),
+  };
+}
+
+function sanitizeAuditReason(reason: string) {
+  const redacted = redactSecretString(reason)
+    .replace(
+      /\b(query|sql|statement)\s*[:=]\s*(['"`])[\s\S]*?\2/gi,
+      "$1: <redacted>"
+    )
+    .replace(
+      /\b(query|sql|statement)\s*[:=]\s*[^;\r\n]+;?/gi,
+      "$1: <redacted>"
+    );
+
+  return redacted.length > MAX_AUDIT_REASON_LENGTH
+    ? `${redacted.slice(0, MAX_AUDIT_REASON_LENGTH)}...`
+    : redacted;
 }
 
 async function withTimeout<T>(
