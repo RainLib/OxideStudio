@@ -180,6 +180,18 @@ describe("default assistant planner", () => {
       'find collection users where {"active":true} limit 10',
       "mongodb"
     );
+    const nativeFindResult = planFor(
+      'find {"collection":"users","find":{"active":true}}',
+      "mongodb"
+    );
+    const nativeLimitedFindResult = planFor(
+      'find {"collection":"users","find":{"active":true},"limit":20}',
+      "mongodb"
+    );
+    const aggregateResult = planFor(
+      'aggregate collection events {"aggregate":[{"$match":{"active":true}}]}',
+      "mongodb"
+    );
     const countResult = createDefaultAssistantPlanner().plan({
       turn: { message: "count current collection" },
       context: {
@@ -209,6 +221,44 @@ describe("default assistant planner", () => {
             limit: 10,
           }),
           limit: 10,
+        },
+      })
+    );
+    expect(nativeFindResult.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "query.runReadOnly",
+        input: {
+          query: JSON.stringify({
+            collection: "users",
+            find: { active: true },
+            limit: 50,
+          }),
+          limit: 50,
+        },
+      })
+    );
+    expect(nativeLimitedFindResult.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "query.runReadOnly",
+        input: {
+          query: JSON.stringify({
+            collection: "users",
+            find: { active: true },
+            limit: 20,
+          }),
+          limit: 50,
+        },
+      })
+    );
+    expect(aggregateResult.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "query.runReadOnly",
+        input: {
+          query: JSON.stringify({
+            collection: "events",
+            aggregate: [{ $match: { active: true } }, { $limit: 50 }],
+          }),
+          limit: 50,
         },
       })
     );
@@ -247,6 +297,10 @@ describe("default assistant planner", () => {
       availableTools: QUERY_TOOLS,
       policy: DEFAULT_AI_TOOL_POLICY,
     });
+    const nativeBodyResult = planFor(
+      'search current index {"query":{"match_all":{}},"size":25}',
+      "elasticsearch"
+    );
 
     expect(result.intent).toBe("query");
     expect(result.steps).toContainEqual(
@@ -257,6 +311,18 @@ describe("default assistant planner", () => {
           query: JSON.stringify({
             query: { term: { status: "open" } },
             size: 50,
+          }),
+          limit: 50,
+        },
+      })
+    );
+    expect(nativeBodyResult.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "query.runReadOnly",
+        input: {
+          query: JSON.stringify({
+            query: { match_all: {} },
+            size: 25,
           }),
           limit: 50,
         },

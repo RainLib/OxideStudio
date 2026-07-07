@@ -345,21 +345,27 @@ function selectedStructuredReadPlan(
   const inlineJson = extractInlineJsonObject(message);
 
   if (capabilities.dataModel === "document") {
+    const inlineCollection =
+      typeof inlineJson?.collection === "string" ? inlineJson.collection : null;
     const collection =
       extractTargetName(message, ["collection", "from", "in", "集合", "从集合"]) ||
+      inlineCollection ||
       activeObjectName;
     if (!collection) return null;
 
-    const query = hasCountIntent(text)
-      ? {
-          collection,
-          countDocuments: inlineJson ?? {},
-        }
-      : {
-          collection,
-          find: inlineJson ?? {},
-          limit,
-        };
+    const query =
+      inlineJson && isMongoReadCommand(inlineJson)
+        ? boundedMongoReadCommand(inlineJson, collection, limit)
+        : hasCountIntent(text)
+          ? {
+              collection,
+              countDocuments: inlineJson ?? {},
+            }
+          : {
+              collection,
+              find: inlineJson ?? {},
+              limit,
+            };
 
     return {
       toolName: "query.runReadOnly",
@@ -535,6 +541,91 @@ function elasticsearchReadBody(
     },
   };
 }
+
+function isMongoReadCommand(value: Record<string, unknown>) {
+  const keys = Object.keys(value);
+  const operations = keys.filter((key) =>
+    MONGO_READ_OPERATION_KEYS.has(key.toLowerCase())
+  );
+
+  if (operations.length > 1) return false;
+  if (operations.length === 1) {
+    const operation = operations[0]?.toLowerCase();
+    if (operation === "aggregate") {
+      return Array.isArray(value.aggregate);
+    }
+    if (operation === "command") {
+      return isPlainRecord(value.command);
+    }
+    return true;
+  }
+
+  return typeof value.collection === "string";
+}
+
+function boundedMongoReadCommand(
+  command: Record<string, unknown>,
+  collection: string,
+  limit: number
+) {
+  const hasRawCommand = isPlainRecord(command.command);
+  const keys = Object.keys(command).map((key) => key.toLowerCase());
+  const hasOperation = keys.some((key) => MONGO_READ_OPERATION_KEYS.has(key));
+  const scopedCommand =
+    hasRawCommand || typeof command.collection === "string"
+      ? command
+      : {
+          collection,
+          ...command,
+        };
+
+  if (!hasOperation && !hasRawCommand) {
+    return {
+      ...scopedCommand,
+      find: {},
+      limit: normalizedReadLimit(scopedCommand.limit, limit),
+    };
+  }
+
+  if ("find" in scopedCommand) {
+    return {
+      ...scopedCommand,
+      limit: normalizedReadLimit(scopedCommand.limit, limit),
+    };
+  }
+
+  if (Array.isArray(scopedCommand.aggregate)) {
+    return {
+      ...scopedCommand,
+      aggregate: mongoPipelineHasLimit(scopedCommand.aggregate)
+        ? scopedCommand.aggregate
+        : [...scopedCommand.aggregate, { $limit: limit }],
+    };
+  }
+
+  return scopedCommand;
+}
+
+function normalizedReadLimit(value: unknown, fallback: number) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(1, Math.min(Math.floor(value), 200));
+}
+
+function mongoPipelineHasLimit(pipeline: unknown[]) {
+  return pipeline.some((stage) => {
+    if (!isPlainRecord(stage)) return false;
+    return Object.keys(stage).some((key) => key.toLowerCase() === "$limit");
+  });
+}
+
+const MONGO_READ_OPERATION_KEYS = new Set([
+  "aggregate",
+  "command",
+  "countdocuments",
+  "find",
+]);
 
 function hasWriteIntent(text: string) {
   return (
