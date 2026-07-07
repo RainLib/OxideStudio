@@ -197,6 +197,8 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_create_index_uri = "file:///oxide/postgres-create-index.sql";
     let postgres_create_index_columns_uri = "file:///oxide/postgres-create-index-columns.sql";
     let postgres_join_using_uri = "file:///oxide/postgres-join-using.sql";
+    let postgres_alter_column_uri = "file:///oxide/postgres-alter-column.sql";
+    let postgres_alter_constraint_uri = "file:///oxide/postgres-alter-constraint.sql";
 
     let mut file_schemas = Map::new();
     file_schemas.insert(
@@ -247,6 +249,14 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_join_using_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
+    file_schemas.insert(
+        postgres_alter_column_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        postgres_alter_constraint_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
 
     let mut file_dialects = Map::new();
     file_dialects.insert(redis_uri.to_string(), json!("redis"));
@@ -264,6 +274,8 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         json!("postgres"),
     );
     file_dialects.insert(postgres_join_using_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_alter_column_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_alter_constraint_uri.to_string(), json!("postgres"));
 
     lsp.notify(
         "workspace/didChangeConfiguration",
@@ -305,21 +317,28 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
                         "44444444-4444-4444-8444-444444444444",
                         "public",
                         vec![
-                            table(
+                            table_with_constraints(
                                 "webhook",
                                 "table",
                                 vec![
                                     column("owner", "varchar"),
                                     column("name", "varchar")
+                                ],
+                                vec![
+                                    constraint("webhook_pkey", "PRIMARY KEY", vec!["owner", "name"]),
+                                    constraint("webhook_owner_check", "CHECK", vec!["owner"])
                                 ]
                             ),
-                            table(
+                            table_with_constraints(
                                 "form",
                                 "table",
                                 vec![
                                     column("owner", "varchar"),
                                     column("form_background_url", "varchar"),
                                     column("form_css", "text")
+                                ],
+                                vec![
+                                    constraint("form_pkey", "PRIMARY KEY", vec!["owner"])
                                 ]
                             )
                         ]
@@ -390,6 +409,20 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_join_using_uri,
         "postgres",
         "SELECT * from public.webhook w JOIN public.form f USING (",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_alter_column_uri,
+        "postgres",
+        "ALTER TABLE public.webhook DROP COLUMN ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_alter_constraint_uri,
+        "postgres",
+        "ALTER TABLE public.webhook DROP CONSTRAINT ",
     )
     .await?;
 
@@ -575,6 +608,38 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
             "=",
             "public.form",
         ],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_alter_column_uri,
+        0,
+        "ALTER TABLE public.webhook DROP COLUMN ".len() as u32,
+        &["owner", "name"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_alter_column_uri,
+        0,
+        "ALTER TABLE public.webhook DROP COLUMN ".len() as u32,
+        &["form_background_url", "public.form", "=", "webhook_pkey"],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_alter_constraint_uri,
+        0,
+        "ALTER TABLE public.webhook DROP CONSTRAINT ".len() as u32,
+        &["webhook_pkey", "webhook_owner_check"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_alter_constraint_uri,
+        0,
+        "ALTER TABLE public.webhook DROP CONSTRAINT ".len() as u32,
+        &["owner", "name", "form_pkey", "public.form", "="],
     )
     .await?;
 
@@ -803,13 +868,34 @@ fn schema_with_tables(id: &str, database: &str, tables: Vec<Value>) -> Value {
 }
 
 fn table(name: &str, object_type: &str, columns: Vec<Value>) -> Value {
+    table_with_constraints(name, object_type, columns, Vec::new())
+}
+
+fn table_with_constraints(
+    name: &str,
+    object_type: &str,
+    columns: Vec<Value>,
+    constraints: Vec<Value>,
+) -> Value {
     json!({
         "name": name,
         "object_type": object_type,
         "columns": columns,
         "indexes": [],
-        "constraints": [],
+        "constraints": constraints,
         "comment": null
+    })
+}
+
+fn constraint(name: &str, constraint_type: &str, columns: Vec<&str>) -> Value {
+    json!({
+        "name": name,
+        "constraint_type": constraint_type,
+        "columns": columns,
+        "referenced_schema": null,
+        "referenced_table": null,
+        "referenced_columns": [],
+        "definition": null
     })
 }
 

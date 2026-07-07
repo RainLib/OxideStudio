@@ -40,6 +40,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 30: SQL `HAVING` completions now use the same predicate phase split across PostgreSQL, MySQL, Hive, and ClickHouse; MySQL predicate completions also include symbol operators such as `=`.
 - Phase 31: SQL completion now distinguishes DDL `ON` relation targets from predicate `JOIN ... ON`, so `CREATE INDEX ... ON` suggests tables and `ON table (` suggests scoped columns; DML completion regressions cover `INSERT`, `UPDATE`, `DELETE`, and `RETURNING`.
 - Phase 32: SQL `JOIN ... USING (` completions now use a dedicated context across PostgreSQL, MySQL, Hive, and ClickHouse, suggesting only shared join columns and excluding relation targets or predicate operators.
+- Phase 33: SQL `ALTER TABLE` completions now distinguish column and constraint targets, so `DROP/ALTER/RENAME COLUMN` suggests scoped columns and `DROP/RENAME CONSTRAINT` suggests scoped constraints instead of relation names.
 
 ⏳ **Pending:**
 
@@ -56,7 +57,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-36-gb1e03cc`.
+Current tracked revision is `v0.1.3-37-g8a06065`.
 
 ### 2. Prepare the Binary
 
