@@ -136,10 +136,12 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
         "query.runReadOnly"
       );
 
-      const results = await queryService.executeQuery(
+      const results = await executeWorkspaceQuery(
         connectionId,
         input.query,
-        namespace
+        namespace,
+        context,
+        "query.runReadOnly"
       );
       return limitQueryResults(results, input.limit ?? 200);
     },
@@ -152,7 +154,13 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
         "mutation query"
       );
 
-      return queryService.executeQuery(connectionId, input.query, namespace);
+      return executeWorkspaceQuery(
+        connectionId,
+        input.query,
+        namespace,
+        context,
+        "query.runMutation"
+      );
     },
 
     mutateTableRows: async (input, context) => mutateTableRows(input, context),
@@ -271,9 +279,13 @@ async function mutateDocuments(
     throw new Error(`${capabilities.displayName} does not support document mutation`);
   }
 
-  return queryService.executeQuery(
+  return executeWorkspaceQuery(
     connectionId,
-    JSON.stringify(buildMongoMutationCommand(input, namespace))
+    JSON.stringify(buildMongoMutationCommand(input, namespace)),
+    undefined,
+    context,
+    "document.mutate",
+    false
   );
 }
 
@@ -291,10 +303,12 @@ async function mutateKeyValues(
     throw new Error(`${capabilities.displayName} does not support key-value mutation`);
   }
 
-  return queryService.executeQuery(
+  return executeWorkspaceQuery(
     connectionId,
     buildRedisMutationCommand(input),
-    namespace || undefined
+    namespace || undefined,
+    context,
+    "key.mutate"
   );
 }
 
@@ -312,9 +326,13 @@ async function mutateSearchDocuments(
     throw new Error(`${capabilities.displayName} does not support search document mutation`);
   }
 
-  return queryService.executeQuery(
+  return executeWorkspaceQuery(
     connectionId,
-    buildElasticsearchMutationRequest(input)
+    buildElasticsearchMutationRequest(input),
+    undefined,
+    context,
+    "search.mutate",
+    false
   );
 }
 
@@ -764,6 +782,64 @@ function inferActiveQueryNamespace(
   }
 
   return schemaState.currentSchema || undefined;
+}
+
+async function executeWorkspaceQuery(
+  connectionId: string,
+  query: string,
+  namespace: string | undefined,
+  context: AiToolExecutionContext,
+  operation: string,
+  includeNamespaceArgument = true
+) {
+  const queryId = createCancellableAiQueryId(context, operation);
+  if (!queryId) {
+    return includeNamespaceArgument
+      ? queryService.executeQuery(connectionId, query, namespace)
+      : queryService.executeQuery(connectionId, query);
+  }
+
+  const abortSignal = context.abortSignal;
+  if (abortSignal?.aborted) {
+    throw new Error("AI tool execution aborted");
+  }
+
+  let isSettled = false;
+  const abortHandler = () => {
+    if (isSettled) return;
+    void queryService.cancelQuery(queryId).catch(() => undefined);
+  };
+  abortSignal?.addEventListener("abort", abortHandler, { once: true });
+
+  try {
+    const queryNamespace = includeNamespaceArgument ? namespace : undefined;
+    return await queryService.executeQuery(
+      connectionId,
+      query,
+      queryNamespace,
+      undefined,
+      queryId
+    );
+  } finally {
+    isSettled = true;
+    abortSignal?.removeEventListener("abort", abortHandler);
+  }
+}
+
+function createCancellableAiQueryId(
+  context: AiToolExecutionContext,
+  operation: string
+) {
+  if (!context.abortSignal) return undefined;
+  return [
+    sanitizeQueryIdSegment(context.requestId),
+    sanitizeQueryIdSegment(operation),
+    createRequestId(),
+  ].join(":");
+}
+
+function sanitizeQueryIdSegment(value: string) {
+  return value.trim().replace(/[^a-zA-Z0-9_.:-]+/g, "-") || "ai";
 }
 
 function limitQueryResults(results: QueryResult[], limit: number) {

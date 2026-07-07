@@ -16,6 +16,7 @@ import type { DatabaseDriver } from "@/services/tauri/types";
 
 const mocks = vi.hoisted(() => ({
   executeQuery: vi.fn(async () => []),
+  cancelQuery: vi.fn(async () => "cancelled"),
   getDatabaseCapabilities: vi.fn(),
   createDatabase: vi.fn(async () => undefined),
   dropDatabase: vi.fn(async () => undefined),
@@ -48,6 +49,7 @@ vi.mock("@/services/tauri", () => ({
   },
   queryService: {
     executeQuery: mocks.executeQuery,
+    cancelQuery: mocks.cancelQuery,
   },
   schemaService: {
     getCollections: mocks.getCollections,
@@ -129,6 +131,10 @@ function approvedPolicy(toolName: string) {
   return approveAiToolForPolicy(DEFAULT_AI_TOOL_POLICY, toolName);
 }
 
+function waitForNextTask() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe("workspace AI tools", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -136,6 +142,7 @@ describe("workspace AI tools", () => {
       async (driver: DatabaseDriver) => defaultDatabaseCapabilities(driver)
     );
     mocks.executeQuery.mockResolvedValue([]);
+    mocks.cancelQuery.mockResolvedValue("cancelled");
     mocks.getCollections.mockResolvedValue([]);
     mocks.getColumns.mockResolvedValue([]);
     mocks.getConstraints.mockResolvedValue([]);
@@ -210,6 +217,84 @@ describe("workspace AI tools", () => {
       '{"query":{"match_all":{}}}',
       "manual-index"
     );
+  });
+
+  it("passes cancellable query ids and cancels active AI read queries on abort", async () => {
+    setWorkspaceConnection({
+      id: "postgres-1",
+      driver: "postgres",
+      namespace: "public",
+    });
+    let resolveQuery: (value: any[]) => void = () => undefined;
+    mocks.executeQuery.mockImplementationOnce(
+      () =>
+        new Promise<any[]>((resolve) => {
+          resolveQuery = resolve;
+        })
+    );
+    const controller = new AbortController();
+    const registry = createWorkspaceAiToolRegistry();
+
+    const run = registry.executeWithPolicy(
+      "query.runReadOnly",
+      {
+        connectionId: "postgres-1",
+        query: "SELECT pg_sleep(30)",
+      },
+      {
+        requestId: "workspace-ai-abort",
+        activeConnectionId: "postgres-1",
+        activeDriver: "postgres",
+        abortSignal: controller.signal,
+      },
+      DEFAULT_AI_TOOL_POLICY
+    );
+    await waitForNextTask();
+
+    const queryId = mocks.executeQuery.mock.calls[0]?.[4];
+    expect(mocks.executeQuery).toHaveBeenCalledWith(
+      "postgres-1",
+      "SELECT pg_sleep(30)",
+      "public",
+      undefined,
+      expect.stringMatching(/^workspace-ai-abort:query.runReadOnly:/)
+    );
+
+    controller.abort();
+
+    expect(mocks.cancelQuery).toHaveBeenCalledWith(queryId);
+    resolveQuery([]);
+    await expect(run).resolves.toEqual([]);
+  });
+
+  it("does not start a workspace query when the AI context is already aborted", async () => {
+    setWorkspaceConnection({
+      id: "postgres-1",
+      driver: "postgres",
+      namespace: "public",
+    });
+    const controller = new AbortController();
+    controller.abort();
+    const registry = createWorkspaceAiToolRegistry();
+
+    await expect(
+      registry.executeWithPolicy(
+        "query.runReadOnly",
+        {
+          connectionId: "postgres-1",
+          query: "SELECT 1",
+        },
+        {
+          requestId: "workspace-ai-abort",
+          activeConnectionId: "postgres-1",
+          activeDriver: "postgres",
+          abortSignal: controller.signal,
+        },
+        DEFAULT_AI_TOOL_POLICY
+      )
+    ).rejects.toThrow("AI tool execution aborted");
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(mocks.cancelQuery).not.toHaveBeenCalled();
   });
 
   it("exposes active namespace and object context to assistant planners", () => {
