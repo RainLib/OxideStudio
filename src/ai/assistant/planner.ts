@@ -56,11 +56,11 @@ export function classifyAssistantIntent(
   if (hasKeyReadIntent(text)) {
     return "query";
   }
-  if (hasMetadataIntent(text)) {
-    return "metadata";
-  }
   if (hasQueryIntent(text)) {
     return "query";
+  }
+  if (hasMetadataIntent(text)) {
+    return "metadata";
   }
   if (hasExplainIntent(text)) {
     return "explain";
@@ -178,21 +178,34 @@ function buildSuggestedPlan(
       activeDriver,
       hasTool
     );
+    const structuredRead = !structuredMutation && !query
+      ? selectedStructuredReadPlan(
+          input,
+          activeDriver,
+          activeNamespace,
+          activeObjectName
+        )
+      : null;
     const writeTool = selectedMutationTool(query, activeDriver, hasTool);
     const toolName =
       structuredMutation?.toolName ||
+      structuredRead?.toolName ||
       (query ? writeTool || "query.runReadOnly" : undefined);
     steps.push({
       id: "query-execution",
       title:
         structuredMutation?.title ||
+        structuredRead?.title ||
         (writeTool
           ? "Run the selected mutation with approval"
           : query
             ? "Run the selected query with read-only safeguards"
             : queryPreparationTitle(activeDriver)),
       toolName,
-      input: structuredMutation?.input || (query ? { query } : undefined),
+      input:
+        structuredMutation?.input ||
+        structuredRead?.input ||
+        (query ? { query } : undefined),
       requiresApproval: toolName ? requiresApproval(toolName) : false,
     });
   }
@@ -319,6 +332,71 @@ function selectedStructuredMutationPlan(
   return null;
 }
 
+function selectedStructuredReadPlan(
+  input: AssistantTurnInput,
+  activeDriver: string | null | undefined,
+  activeNamespace: string | null | undefined,
+  activeObjectName: string | null | undefined
+): { toolName: string; title: string; input: Record<string, unknown> } | null {
+  const message = input.message || "";
+  const text = message.toLowerCase();
+  const capabilities = defaultDatabaseCapabilities(activeDriver || "postgres");
+  const limit = extractLimit(message);
+  const inlineJson = extractInlineJsonObject(message);
+
+  if (capabilities.dataModel === "document") {
+    const collection =
+      extractTargetName(message, ["collection", "from", "in", "集合", "从集合"]) ||
+      activeObjectName;
+    if (!collection) return null;
+
+    const query = hasCountIntent(text)
+      ? {
+          collection,
+          countDocuments: inlineJson ?? {},
+        }
+      : {
+          collection,
+          find: inlineJson ?? {},
+          limit,
+        };
+
+    return {
+      toolName: "query.runReadOnly",
+      title: hasCountIntent(text)
+        ? "Count MongoDB documents with read-only safeguards"
+        : "Find MongoDB documents with read-only safeguards",
+      input: {
+        ...(activeNamespace ? { namespace: activeNamespace } : {}),
+        query: JSON.stringify(query),
+        limit,
+      },
+    };
+  }
+
+  if (capabilities.dataModel === "search") {
+    const index =
+      extractTargetName(message, ["index", "from", "in", "索引", "从索引"]) ||
+      activeObjectName ||
+      activeNamespace;
+    const body = elasticsearchReadBody(inlineJson, text, limit);
+
+    return {
+      toolName: "query.runReadOnly",
+      title: hasCountIntent(text)
+        ? "Count Elasticsearch documents with read-only safeguards"
+        : "Search Elasticsearch documents with read-only safeguards",
+      input: {
+        ...(index && index !== "default" ? { namespace: index } : {}),
+        query: JSON.stringify(body),
+        limit,
+      },
+    };
+  }
+
+  return null;
+}
+
 function queryPreparationTitle(activeDriver: string | null | undefined) {
   const capabilities = defaultDatabaseCapabilities(activeDriver || "postgres");
   if (capabilities.dataModel === "document") {
@@ -370,11 +448,92 @@ function extractTargetName(message: string, labels: string[]) {
         "i"
       )
     );
-    if (match?.[1]) {
-      return match[1];
+    const candidate = match?.[1]?.replace(/[,.，。;；:：]+$/, "");
+    if (candidate && !TARGET_NAME_STOP_WORDS.has(candidate.toLowerCase())) {
+      return candidate;
     }
   }
   return null;
+}
+
+const TARGET_NAME_STOP_WORDS = new Set([
+  "active",
+  "current",
+  "selected",
+  "this",
+  "that",
+  "limit",
+  "where",
+  "with",
+  "by",
+]);
+
+function extractLimit(message: string, fallback = 50) {
+  const match =
+    message.match(/\blimit\s+(\d{1,4})\b/i) ||
+    message.match(/\btop\s+(\d{1,4})\b/i) ||
+    message.match(/前\s*(\d{1,4})\s*(?:条|个)?/);
+  const value = match?.[1] ? Number.parseInt(match[1], 10) : fallback;
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.min(value, 200));
+}
+
+function extractInlineJsonObject(message: string): Record<string, unknown> | null {
+  const start = message.indexOf("{");
+  const end = message.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+
+  try {
+    const value = JSON.parse(message.slice(start, end + 1));
+    return isPlainRecord(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function elasticsearchReadBody(
+  inlineJson: Record<string, unknown> | null,
+  text: string,
+  limit: number
+) {
+  if (inlineJson) {
+    if (
+      Object.keys(inlineJson).some((key) =>
+        ["query", "aggs", "aggregations", "size", "sort"].includes(
+          key.toLowerCase()
+        )
+      )
+    ) {
+      return {
+        ...inlineJson,
+        size:
+          typeof inlineJson.size === "number"
+            ? Math.min(Math.max(1, Math.floor(inlineJson.size)), 200)
+            : limit,
+      };
+    }
+
+    return {
+      query: inlineJson,
+      size: limit,
+    };
+  }
+
+  if (hasCountIntent(text)) {
+    return {
+      size: 0,
+      query: {
+        match_all: {},
+      },
+    };
+  }
+
+  return {
+    size: limit,
+    query: {
+      match_all: {},
+    },
+  };
 }
 
 function hasWriteIntent(text: string) {
@@ -409,6 +568,10 @@ function hasQueryIntent(text: string) {
     /\b(query|select|find|search|run|execute|count|aggregate)\b/.test(text) ||
     /查询|搜索|运行|执行|计数|统计|聚合/.test(text)
   );
+}
+
+function hasCountIntent(text: string) {
+  return /\b(count|total)\b/.test(text) || /计数|统计|总数|数量/.test(text);
 }
 
 function hasExplainIntent(text: string) {

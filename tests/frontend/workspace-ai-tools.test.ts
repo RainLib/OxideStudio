@@ -495,4 +495,141 @@ describe("workspace AI tools", () => {
       "public"
     );
   });
+
+  it("plans and executes MongoDB reads from active collection context", async () => {
+    setWorkspaceConnection({
+      id: "mongodb-1",
+      driver: "mongodb",
+      namespace: "app",
+      tab: {
+        title: "Collection: users",
+        tableName: "users",
+        objectType: "collection",
+      },
+    });
+    const queryResult = {
+      columns: [{ name: "name", dataType: "string" }],
+      rows: [["Ada"]],
+      statementType: "FIND",
+    };
+    mocks.executeQuery.mockResolvedValueOnce([queryResult]);
+    const runtime = createAssistantRuntime({
+      registry: createWorkspaceAiToolRegistry(),
+      createContext: () => createWorkspaceAiToolContext("workspace-ai-mongo"),
+    });
+
+    const turn = await runtime.prepareTurnAsync({
+      message: "find current collection limit 5",
+    });
+    const step = turn.suggestedPlan.find(
+      (candidate) => candidate.id === "query-execution"
+    );
+    const expectedQuery = JSON.stringify({
+      collection: "users",
+      find: {},
+      limit: 5,
+    });
+
+    expect(step).toMatchObject({
+      toolName: "query.runReadOnly",
+      input: {
+        namespace: "app",
+        query: expectedQuery,
+        limit: 5,
+      },
+      requiresApproval: false,
+    });
+
+    const results = await runtime.executeToolCalls(
+      [
+        {
+          id: step?.id || "query-execution",
+          toolName: step?.toolName || "query.runReadOnly",
+          input: step?.input,
+        },
+      ],
+      turn.context
+    );
+
+    expect(results).toEqual([
+      expect.objectContaining({
+        status: "success",
+        output: [queryResult],
+      }),
+    ]);
+    expect(mocks.executeQuery).toHaveBeenCalledWith(
+      "mongodb-1",
+      expectedQuery,
+      "app"
+    );
+  });
+
+  it("plans and executes Elasticsearch searches from active index context", async () => {
+    setWorkspaceConnection({
+      id: "elasticsearch-1",
+      driver: "elasticsearch",
+      namespace: "default",
+      tab: {
+        title: "Index: events",
+        tableName: "events",
+        objectType: "index",
+      },
+    });
+    const queryResult = {
+      columns: [{ name: "_id", dataType: "keyword" }],
+      rows: [["1"]],
+      statementType: "SEARCH",
+    };
+    mocks.executeQuery.mockResolvedValueOnce([queryResult]);
+    const runtime = createAssistantRuntime({
+      registry: createWorkspaceAiToolRegistry(),
+      createContext: () => createWorkspaceAiToolContext("workspace-ai-search"),
+    });
+
+    const turn = await runtime.prepareTurnAsync({
+      message: "search current index limit 5",
+    });
+    const step = turn.suggestedPlan.find(
+      (candidate) => candidate.id === "query-execution"
+    );
+    const expectedQuery = JSON.stringify({
+      size: 5,
+      query: {
+        match_all: {},
+      },
+    });
+
+    expect(step).toMatchObject({
+      toolName: "query.runReadOnly",
+      input: {
+        namespace: "events",
+        query: expectedQuery,
+        limit: 5,
+      },
+      requiresApproval: false,
+    });
+
+    const results = await runtime.executeToolCalls(
+      [
+        {
+          id: step?.id || "query-execution",
+          toolName: step?.toolName || "query.runReadOnly",
+          input: step?.input,
+        },
+      ],
+      turn.context
+    );
+
+    expect(results).toEqual([
+      expect.objectContaining({
+        status: "success",
+        output: [queryResult],
+      }),
+    ]);
+    expect(mocks.executeQuery).toHaveBeenCalledWith(
+      "elasticsearch-1",
+      expectedQuery,
+      "events"
+    );
+  });
 });

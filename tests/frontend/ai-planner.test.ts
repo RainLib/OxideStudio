@@ -174,4 +174,93 @@ describe("default assistant planner", () => {
       })
     );
   });
+
+  it("plans MongoDB read commands from natural language and active collection context", () => {
+    const findResult = planFor(
+      'find collection users where {"active":true} limit 10',
+      "mongodb"
+    );
+    const countResult = createDefaultAssistantPlanner().plan({
+      turn: { message: "count current collection" },
+      context: {
+        requestId: "planner-mongodb",
+        activeDriver: "mongodb",
+        activeNamespace: "app",
+        activeTab: {
+          id: "tab-1",
+          type: "query",
+          title: "Collection: users",
+          tableName: "users",
+          objectType: "collection",
+        },
+      },
+      availableTools: QUERY_TOOLS,
+      policy: DEFAULT_AI_TOOL_POLICY,
+    });
+
+    expect(findResult.intent).toBe("query");
+    expect(findResult.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "query.runReadOnly",
+        input: {
+          query: JSON.stringify({
+            collection: "users",
+            find: { active: true },
+            limit: 10,
+          }),
+          limit: 10,
+        },
+      })
+    );
+    expect(countResult.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "query.runReadOnly",
+        input: {
+          namespace: "app",
+          query: JSON.stringify({
+            collection: "users",
+            countDocuments: {},
+          }),
+          limit: 50,
+        },
+      })
+    );
+  });
+
+  it("plans Elasticsearch read requests from natural language and active index context", () => {
+    const result = createDefaultAssistantPlanner().plan({
+      turn: {
+        message: 'search current index {"query":{"term":{"status":"open"}}}',
+      },
+      context: {
+        requestId: "planner-elasticsearch",
+        activeDriver: "elasticsearch",
+        activeNamespace: "default",
+        activeTab: {
+          id: "tab-1",
+          type: "query",
+          title: "Index: events",
+          tableName: "events",
+          objectType: "index",
+        },
+      },
+      availableTools: QUERY_TOOLS,
+      policy: DEFAULT_AI_TOOL_POLICY,
+    });
+
+    expect(result.intent).toBe("query");
+    expect(result.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "query.runReadOnly",
+        input: {
+          namespace: "events",
+          query: JSON.stringify({
+            query: { term: { status: "open" } },
+            size: 50,
+          }),
+          limit: 50,
+        },
+      })
+    );
+  });
 });
