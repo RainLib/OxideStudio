@@ -194,6 +194,8 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_having_uri = "file:///oxide/postgres-having.sql";
     let postgres_having_operator_uri = "file:///oxide/postgres-having-operator.sql";
     let postgres_qualified_uri = "file:///oxide/postgres-qualified.sql";
+    let postgres_create_index_uri = "file:///oxide/postgres-create-index.sql";
+    let postgres_create_index_columns_uri = "file:///oxide/postgres-create-index-columns.sql";
 
     let mut file_schemas = Map::new();
     file_schemas.insert(
@@ -232,6 +234,14 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_qualified_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
+    file_schemas.insert(
+        postgres_create_index_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        postgres_create_index_columns_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
 
     let mut file_dialects = Map::new();
     file_dialects.insert(redis_uri.to_string(), json!("redis"));
@@ -243,6 +253,11 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     file_dialects.insert(postgres_having_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_having_operator_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_qualified_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_create_index_uri.to_string(), json!("postgres"));
+    file_dialects.insert(
+        postgres_create_index_columns_uri.to_string(),
+        json!("postgres"),
+    );
 
     lsp.notify(
         "workspace/didChangeConfiguration",
@@ -347,6 +362,20 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_qualified_uri,
         "postgres",
         "SELECT * from public.fo",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_create_index_uri,
+        "postgres",
+        "CREATE INDEX webhook_owner_idx ON",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_create_index_columns_uri,
+        "postgres",
+        "CREATE INDEX webhook_owner_idx ON public.webhook (",
     )
     .await?;
 
@@ -478,6 +507,38 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         "SELECT * from ".len() as u32,
         "SELECT * from public.fo".len() as u32,
         "public.form",
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_create_index_uri,
+        0,
+        "CREATE INDEX webhook_owner_idx ON".len() as u32,
+        &["public.webhook", "public.form"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_create_index_uri,
+        0,
+        "CREATE INDEX webhook_owner_idx ON".len() as u32,
+        &["owner", "name", "form_background_url"],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_create_index_columns_uri,
+        0,
+        "CREATE INDEX webhook_owner_idx ON public.webhook (".len() as u32,
+        &["owner", "name"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_create_index_columns_uri,
+        0,
+        "CREATE INDEX webhook_owner_idx ON public.webhook (".len() as u32,
+        &["form_background_url", "form_css"],
     )
     .await?;
 

@@ -38,6 +38,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 28: PostgreSQL and MySQL predicate completions now split expression and operator phases, so `WHERE` starts with scoped fields/functions and comparison operators appear only after a left-side expression.
 - Phase 29: ClickHouse and Hive now follow the same predicate completion phases, keeping fields ahead of operators at `WHERE` starts and moving operators to the left-expression position.
 - Phase 30: SQL `HAVING` completions now use the same predicate phase split across PostgreSQL, MySQL, Hive, and ClickHouse; MySQL predicate completions also include symbol operators such as `=`.
+- Phase 31: SQL completion now distinguishes DDL `ON` relation targets from predicate `JOIN ... ON`, so `CREATE INDEX ... ON` suggests tables and `ON table (` suggests scoped columns; DML completion regressions cover `INSERT`, `UPDATE`, `DELETE`, and `RETURNING`.
 
 ⏳ **Pending:**
 
@@ -54,7 +55,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-33-g57b61fe`.
+Current tracked revision is `v0.1.3-35-geee580d`.
 
 ### 2. Prepare the Binary
 
