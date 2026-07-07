@@ -54,6 +54,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 44: SQL `ORDER BY` modifier completions now advance through direction, PostgreSQL `NULLS`, and continuation stages without repeating completed sort directions.
 - Phase 45: SQL `GROUP BY <expression> ` completions now suggest follow-up clauses such as `HAVING`, `ORDER BY`, and `LIMIT` instead of columns or sort directions.
 - Phase 46: SQL `FROM <relation> ` and `JOIN <relation> ` completions now switch to structural follow-ups such as joins, predicates, `ON`, and `USING` instead of repeating relation targets.
+- Phase 47: SQL `SELECT <expression> ` completions now suggest `FROM`, `AS`, or `,` instead of repeating fields, while wildcard selections omit invalid alias suggestions.
 
 ⏳ **Pending:**
 
@@ -70,7 +71,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-50-g2a92bac`.
+Current tracked revision is `v0.1.3-51-gfc0ba89`.
 
 ### 2. Prepare the Binary
 

@@ -189,6 +189,8 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let mongodb_uri = "file:///oxide/mongodb.mongodb";
     let elasticsearch_uri = "file:///oxide/elasticsearch.es.dsl";
     let postgres_uri = "file:///oxide/postgres.sql";
+    let postgres_select_continuation_uri = "file:///oxide/postgres-select-continuation.sql";
+    let postgres_select_wildcard_uri = "file:///oxide/postgres-select-wildcard.sql";
     let postgres_from_continuation_uri = "file:///oxide/postgres-from-continuation.sql";
     let postgres_join_condition_uri = "file:///oxide/postgres-join-condition.sql";
     let postgres_where_uri = "file:///oxide/postgres-where.sql";
@@ -232,6 +234,14 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     );
     file_schemas.insert(
         postgres_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        postgres_select_continuation_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        postgres_select_wildcard_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
@@ -348,6 +358,11 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     file_dialects.insert(mongodb_uri.to_string(), json!("mongodb"));
     file_dialects.insert(elasticsearch_uri.to_string(), json!("elasticsearch-dsl"));
     file_dialects.insert(postgres_uri.to_string(), json!("postgres"));
+    file_dialects.insert(
+        postgres_select_continuation_uri.to_string(),
+        json!("postgres"),
+    );
+    file_dialects.insert(postgres_select_wildcard_uri.to_string(), json!("postgres"));
     file_dialects.insert(
         postgres_from_continuation_uri.to_string(),
         json!("postgres"),
@@ -485,6 +500,20 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     open_document(&mut lsp, mongodb_uri, "mongodb", "").await?;
     open_document(&mut lsp, elasticsearch_uri, "elasticsearch-dsl", "").await?;
     open_document(&mut lsp, postgres_uri, "postgres", "SELECT * from").await?;
+    open_document(
+        &mut lsp,
+        postgres_select_continuation_uri,
+        "postgres",
+        "SELECT owner ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_select_wildcard_uri,
+        "postgres",
+        "SELECT * ",
+    )
+    .await?;
     open_document(
         &mut lsp,
         postgres_from_continuation_uri,
@@ -686,6 +715,38 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         0,
         "SELECT * from".len() as u32,
         &["owner", "name", "form_background_url"],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_select_continuation_uri,
+        0,
+        "SELECT owner ".len() as u32,
+        &[",", "AS", "FROM"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_select_continuation_uri,
+        0,
+        "SELECT owner ".len() as u32,
+        &["owner", "name", "public.webhook", "="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_select_wildcard_uri,
+        0,
+        "SELECT * ".len() as u32,
+        &[",", "FROM"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_select_wildcard_uri,
+        0,
+        "SELECT * ".len() as u32,
+        &["AS", "owner", "public.webhook", "="],
     )
     .await?;
     assert_completion_at_contains(
