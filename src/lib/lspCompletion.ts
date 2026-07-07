@@ -17,6 +17,11 @@ const SQL_CONTEXT_KEYWORDS = new Set([
   "values",
   "set",
   "into",
+  "update",
+  "table",
+  "truncate",
+  "describe",
+  "desc",
 ]);
 
 export function isCompletedSqlContextKeyword(word: string) {
@@ -57,8 +62,14 @@ export function filterCompletionsForSqlContext(
       case "from":
       case "join":
       case "into":
+      case "update":
+      case "table":
+      case "truncate":
+      case "describe":
+      case "desc":
         return isRelationCompletionKind(item.kind);
       case "where":
+      case "on":
       case "having":
         return (
           !isRelationCompletionKind(item.kind) &&
@@ -68,7 +79,10 @@ export function filterCompletionsForSqlContext(
       case "by":
       case "values":
       case "set":
-        return !isRelationCompletionKind(item.kind);
+        return (
+          !isRelationCompletionKind(item.kind) &&
+          item.kind !== CompletionItemKind.Operator
+        );
       default:
         return true;
     }

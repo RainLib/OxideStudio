@@ -33,6 +33,14 @@ describe("LSP completion adapter helpers", () => {
     expect(sqlContextKeywordBeforeCursor("SELECT * FROM users where ")).toBe(
       "where"
     );
+    expect(sqlContextKeywordBeforeCursor("SELECT * FROM users join ")).toBe(
+      "join"
+    );
+    expect(sqlContextKeywordBeforeCursor("SELECT * FROM users join orders on ")).toBe(
+      "on"
+    );
+    expect(sqlContextKeywordBeforeCursor("UPDATE ")).toBe("update");
+    expect(sqlContextKeywordBeforeCursor("ALTER TABLE ")).toBe("table");
     expect(
       sqlContextKeywordBeforeCursor("SELECT * FROM users where owner ")
     ).toBeNull();
@@ -63,7 +71,43 @@ describe("LSP completion adapter helpers", () => {
       items[0],
       items[3],
     ]);
+    expect(filterCompletionsForSqlContext(items, "on")).toEqual([
+      items[0],
+      items[3],
+    ]);
     expect(filterCompletionsForSqlContext(items, null)).toEqual(items);
+  });
+
+  it("filters relation targets after DML and DDL relation keywords", () => {
+    const items = [
+      item({ label: "public.users", kind: CompletionItemKind.Class }),
+      item({ label: "email", kind: CompletionItemKind.Field }),
+      item({ label: "TABLE", kind: CompletionItemKind.Keyword }),
+    ];
+
+    expect(filterCompletionsForSqlContext(items, "update")).toEqual([
+      items[0],
+    ]);
+    expect(filterCompletionsForSqlContext(items, "table")).toEqual([
+      items[0],
+    ]);
+    expect(filterCompletionsForSqlContext(items, "describe")).toEqual([
+      items[0],
+    ]);
+  });
+
+  it("filters operators at the start of SET assignments", () => {
+    const items = [
+      item({ label: "email", kind: CompletionItemKind.Field }),
+      item({ label: "=", kind: CompletionItemKind.Operator }),
+      item({ label: "public.users", kind: CompletionItemKind.Class }),
+      item({ label: "DEFAULT", kind: CompletionItemKind.Keyword }),
+    ];
+
+    expect(filterCompletionsForSqlContext(items, "set")).toEqual([
+      items[0],
+      items[3],
+    ]);
   });
 
   it("inserts after completed clause keywords instead of replacing them", () => {
