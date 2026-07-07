@@ -202,6 +202,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_order_after_direction_uri = "file:///oxide/postgres-order-after-direction.sql";
     let postgres_qualified_uri = "file:///oxide/postgres-qualified.sql";
     let postgres_insert_action_uri = "file:///oxide/postgres-insert-action.sql";
+    let postgres_insert_value_uri = "file:///oxide/postgres-insert-value.sql";
     let postgres_update_action_uri = "file:///oxide/postgres-update-action.sql";
     let postgres_delete_action_uri = "file:///oxide/postgres-delete-action.sql";
     let postgres_drop_index_uri = "file:///oxide/postgres-drop-index.sql";
@@ -286,6 +287,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     );
     file_schemas.insert(
         postgres_insert_action_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        postgres_insert_value_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
@@ -383,6 +388,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     );
     file_dialects.insert(postgres_qualified_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_insert_action_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_insert_value_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_update_action_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_delete_action_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_drop_index_uri.to_string(), json!("postgres"));
@@ -589,6 +595,13 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_insert_action_uri,
         "postgres",
         "INSERT INTO public.webhook ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_insert_value_uri,
+        "postgres",
+        "INSERT INTO public.webhook (owner, name) VALUES (",
     )
     .await?;
     open_document(
@@ -960,6 +973,22 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         0,
         "INSERT INTO public.webhook ".len() as u32,
         &["owner", "name", "public.form", "="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_insert_value_uri,
+        0,
+        "INSERT INTO public.webhook (owner, name) VALUES (".len() as u32,
+        &["DEFAULT", "NULL", "CURRENT_TIMESTAMP"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_insert_value_uri,
+        0,
+        "INSERT INTO public.webhook (owner, name) VALUES (".len() as u32,
+        &["owner", "name", "public.webhook", "public.form", "="],
     )
     .await?;
     assert_completion_at_contains(

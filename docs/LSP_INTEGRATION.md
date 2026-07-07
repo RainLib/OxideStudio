@@ -55,6 +55,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 45: SQL `GROUP BY <expression> ` completions now suggest follow-up clauses such as `HAVING`, `ORDER BY`, and `LIMIT` instead of columns or sort directions.
 - Phase 46: SQL `FROM <relation> ` and `JOIN <relation> ` completions now switch to structural follow-ups such as joins, predicates, `ON`, and `USING` instead of repeating relation targets.
 - Phase 47: SQL `SELECT <expression> ` completions now suggest `FROM`, `AS`, or `,` instead of repeating fields, while wildcard selections omit invalid alias suggestions.
+- Phase 48: SQL `INSERT ... VALUES (` completions now suggest value keywords such as `DEFAULT`, `NULL`, and timestamp constants instead of columns or relation targets.
 
 ⏳ **Pending:**
 
@@ -71,7 +72,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-51-gfc0ba89`.
+Current tracked revision is `v0.1.3-52-g0b2c834`.
 
 ### 2. Prepare the Binary
 
