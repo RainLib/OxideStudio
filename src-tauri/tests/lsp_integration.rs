@@ -197,6 +197,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_insert_action_uri = "file:///oxide/postgres-insert-action.sql";
     let postgres_update_action_uri = "file:///oxide/postgres-update-action.sql";
     let postgres_delete_action_uri = "file:///oxide/postgres-delete-action.sql";
+    let postgres_drop_index_uri = "file:///oxide/postgres-drop-index.sql";
     let postgres_create_index_uri = "file:///oxide/postgres-create-index.sql";
     let postgres_create_index_columns_uri = "file:///oxide/postgres-create-index-columns.sql";
     let postgres_join_using_uri = "file:///oxide/postgres-join-using.sql";
@@ -254,6 +255,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
+        postgres_drop_index_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
         postgres_create_index_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
@@ -291,6 +296,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     file_dialects.insert(postgres_insert_action_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_update_action_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_delete_action_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_drop_index_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_create_index_uri.to_string(), json!("postgres"));
     file_dialects.insert(
         postgres_create_index_columns_uri.to_string(),
@@ -341,7 +347,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
                         "44444444-4444-4444-8444-444444444444",
                         "public",
                         vec![
-                            table_with_constraints(
+                            table_with_metadata(
                                 "webhook",
                                 "table",
                                 vec![
@@ -349,17 +355,24 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
                                     column("name", "varchar")
                                 ],
                                 vec![
+                                    index("webhook_owner_idx", vec!["owner"], false, false),
+                                    index("webhook_name_unique_idx", vec!["name"], true, false)
+                                ],
+                                vec![
                                     constraint("webhook_pkey", "PRIMARY KEY", vec!["owner", "name"]),
                                     constraint("webhook_owner_check", "CHECK", vec!["owner"])
                                 ]
                             ),
-                            table_with_constraints(
+                            table_with_metadata(
                                 "form",
                                 "table",
                                 vec![
                                     column("owner", "varchar"),
                                     column("form_background_url", "varchar"),
                                     column("form_css", "text")
+                                ],
+                                vec![
+                                    index("form_css_idx", vec!["form_css"], false, false)
                                 ],
                                 vec![
                                     constraint("form_pkey", "PRIMARY KEY", vec!["owner"])
@@ -435,6 +448,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         "DELETE FROM public.webhook ",
     )
     .await?;
+    open_document(&mut lsp, postgres_drop_index_uri, "postgres", "DROP INDEX ").await?;
     open_document(
         &mut lsp,
         postgres_create_index_uri,
@@ -653,6 +667,22 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_delete_action_uri,
         0,
         "DELETE FROM public.webhook ".len() as u32,
+        &["owner", "name", "public.form", "="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_drop_index_uri,
+        0,
+        "DROP INDEX ".len() as u32,
+        &["public.webhook_owner_idx", "public.form_css_idx"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_drop_index_uri,
+        0,
+        "DROP INDEX ".len() as u32,
         &["owner", "name", "public.form", "="],
     )
     .await?;
@@ -993,13 +1023,34 @@ fn table_with_constraints(
     columns: Vec<Value>,
     constraints: Vec<Value>,
 ) -> Value {
+    table_with_metadata(name, object_type, columns, Vec::new(), constraints)
+}
+
+fn table_with_metadata(
+    name: &str,
+    object_type: &str,
+    columns: Vec<Value>,
+    indexes: Vec<Value>,
+    constraints: Vec<Value>,
+) -> Value {
     json!({
         "name": name,
         "object_type": object_type,
         "columns": columns,
-        "indexes": [],
+        "indexes": indexes,
         "constraints": constraints,
         "comment": null
+    })
+}
+
+fn index(name: &str, columns: Vec<&str>, is_unique: bool, is_primary: bool) -> Value {
+    json!({
+        "name": name,
+        "columns": columns,
+        "is_unique": is_unique,
+        "is_primary": is_primary,
+        "index_type": null,
+        "definition": null
     })
 }
 

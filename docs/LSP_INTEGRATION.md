@@ -43,6 +43,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 33: SQL `ALTER TABLE` completions now distinguish column and constraint targets, so `DROP/ALTER/RENAME COLUMN` suggests scoped columns and `DROP/RENAME CONSTRAINT` suggests scoped constraints instead of relation names.
 - Phase 34: SQL `ALTER TABLE <table> ` completions now suggest dialect-aware structure actions such as `ADD COLUMN`, `DROP COLUMN`, and `ADD CONSTRAINT` instead of continuing to suggest relation targets.
 - Phase 35: SQL `INSERT INTO <table> `, `UPDATE <table> `, and `DELETE FROM <table> ` completions now suggest dialect-aware DML actions instead of continuing to suggest relation targets or scoped fields.
+- Phase 36: SQL index-target completions now use synchronized index metadata, so `DROP INDEX`, `ALTER INDEX`, and MySQL-style `ALTER TABLE ... DROP/RENAME INDEX` suggest index names instead of tables or fields.
 
 ⏳ **Pending:**
 
@@ -59,7 +60,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-39-g87861a0`.
+Current tracked revision is `v0.1.3-40-gf6cd6ce`.
 
 ### 2. Prepare the Binary
 
