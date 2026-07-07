@@ -66,6 +66,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 56: SQL `INSERT ... VALUES (...) ` completions now suggest dialect-specific continuations such as PostgreSQL `ON CONFLICT`/`RETURNING` and MySQL `ON DUPLICATE KEY UPDATE`.
 - Phase 57: PostgreSQL `ON CONFLICT` completions now suggest target columns inside `ON CONFLICT (` and action choices such as `DO NOTHING` and `DO UPDATE SET` after the target.
 - Phase 58: PostgreSQL `ON CONFLICT ON CONSTRAINT` completions now suggest usable target-table primary/unique/exclusion constraints and return to `DO NOTHING`/`DO UPDATE SET` after a constraint name.
+- Phase 59: PostgreSQL `ON CONFLICT DO UPDATE SET` completions now behave like assignment editing: bare target columns, operators after a column, value keywords after `=`, and `WHERE`/`RETURNING` continuations after completed values.
 
 ⏳ **Pending:**
 
@@ -82,7 +83,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-62-gc6c3857`.
+Current tracked revision is `v0.1.3-63-g8936562`.
 
 ### 2. Prepare the Binary
 
