@@ -113,6 +113,39 @@ function toMarker(monaco: any, diagnostic: Diagnostic) {
   };
 }
 
+type LspDocumentSyncClient = {
+  didOpen: (
+    uri: string,
+    text: string,
+    version: number,
+    languageId: string
+  ) => Promise<void>;
+  didChange: (uri: string, text: string, version: number) => Promise<void>;
+};
+
+export async function syncLspModelBeforeCompletion(options: {
+  uri: string;
+  model: { getValue: () => string };
+  languageId: string;
+  client: LspDocumentSyncClient;
+  openedDocuments: Set<string>;
+  documentVersions: Map<string, number>;
+}) {
+  const { uri, model, languageId, client, openedDocuments, documentVersions } =
+    options;
+  const text = model.getValue();
+  const version = (documentVersions.get(uri) || 0) + 1;
+  documentVersions.set(uri, version);
+
+  if (openedDocuments.has(uri)) {
+    await client.didChange(uri, text, version);
+    return;
+  }
+
+  openedDocuments.add(uri);
+  await client.didOpen(uri, text, version, languageId);
+}
+
 export function QueryEditor() {
   const {
     tabs,
@@ -327,6 +360,19 @@ export function QueryEditor() {
           try {
             const uri = model.uri.toString();
             if (!isSupportedLspModelUri(uri)) return { suggestions: [] };
+
+            const identity = extractLspDocumentIdentity(uri);
+            const languageId = identity?.driver
+              ? lspLanguageId(identity.driver)
+              : "sql";
+            await syncLspModelBeforeCompletion({
+              uri,
+              model,
+              languageId,
+              client: lspClient,
+              openedDocuments: openedDocumentsRef.current,
+              documentVersions: documentVersionsRef.current,
+            });
 
             // Now request completions with synchronized state
             const items = await lspClient.getCompletions(
