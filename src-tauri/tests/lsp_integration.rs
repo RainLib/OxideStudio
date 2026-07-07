@@ -194,6 +194,9 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_having_uri = "file:///oxide/postgres-having.sql";
     let postgres_having_operator_uri = "file:///oxide/postgres-having-operator.sql";
     let postgres_qualified_uri = "file:///oxide/postgres-qualified.sql";
+    let postgres_insert_action_uri = "file:///oxide/postgres-insert-action.sql";
+    let postgres_update_action_uri = "file:///oxide/postgres-update-action.sql";
+    let postgres_delete_action_uri = "file:///oxide/postgres-delete-action.sql";
     let postgres_create_index_uri = "file:///oxide/postgres-create-index.sql";
     let postgres_create_index_columns_uri = "file:///oxide/postgres-create-index-columns.sql";
     let postgres_join_using_uri = "file:///oxide/postgres-join-using.sql";
@@ -239,6 +242,18 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
+        postgres_insert_action_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        postgres_update_action_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        postgres_delete_action_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
         postgres_create_index_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
@@ -273,6 +288,9 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     file_dialects.insert(postgres_having_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_having_operator_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_qualified_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_insert_action_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_update_action_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_delete_action_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_create_index_uri.to_string(), json!("postgres"));
     file_dialects.insert(
         postgres_create_index_columns_uri.to_string(),
@@ -394,6 +412,27 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_qualified_uri,
         "postgres",
         "SELECT * from public.fo",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_insert_action_uri,
+        "postgres",
+        "INSERT INTO public.webhook ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_update_action_uri,
+        "postgres",
+        "UPDATE public.webhook ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_delete_action_uri,
+        "postgres",
+        "DELETE FROM public.webhook ",
     )
     .await?;
     open_document(
@@ -567,6 +606,54 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         "SELECT * from ".len() as u32,
         "SELECT * from public.fo".len() as u32,
         "public.form",
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_insert_action_uri,
+        0,
+        "INSERT INTO public.webhook ".len() as u32,
+        &["VALUES", "SELECT"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_insert_action_uri,
+        0,
+        "INSERT INTO public.webhook ".len() as u32,
+        &["owner", "name", "public.form", "="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_update_action_uri,
+        0,
+        "UPDATE public.webhook ".len() as u32,
+        &["SET"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_update_action_uri,
+        0,
+        "UPDATE public.webhook ".len() as u32,
+        &["owner", "name", "public.form", "="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_delete_action_uri,
+        0,
+        "DELETE FROM public.webhook ".len() as u32,
+        &["WHERE", "USING", "RETURNING"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_delete_action_uri,
+        0,
+        "DELETE FROM public.webhook ".len() as u32,
+        &["owner", "name", "public.form", "="],
     )
     .await?;
     assert_completion_at_contains(
