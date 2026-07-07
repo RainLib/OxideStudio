@@ -82,6 +82,27 @@ export class McpToolAdapter {
     };
   }
 
+  inspectTool(name: string): McpToolManifestResult {
+    const manifest = createAiToolManifest(
+      this.registry.list(),
+      this.policy,
+      this.manifestEnvironment
+    );
+    const tool = manifest.tools.find((candidate) => candidate.name === name);
+    if (!tool) {
+      throw new Error(`Unknown AI tool: ${name}`);
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(tool, null, 2),
+        },
+      ],
+    };
+  }
+
   async callTool(
     name: string,
     input: unknown,

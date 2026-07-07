@@ -109,6 +109,9 @@ export class McpProtocolAdapter {
         return { tools: this.adapter.listTools() };
       case "tools/call":
         return this.callTool(request.params);
+      case "tools/inspect":
+      case "oxide/tools/inspect":
+        return this.inspectTool(request.params);
       case "tools/manifest":
       case "oxide/tools/manifest":
         return this.adapter.manifest();
@@ -148,6 +151,15 @@ export class McpProtocolAdapter {
           : {};
     const options = approvalOptions(params);
     return this.adapter.callTool(name, toolInput, options);
+  }
+
+  private inspectTool(params: Record<string, unknown> | undefined) {
+    const name = typeof params?.name === "string" ? params.name : "";
+    if (!name) {
+      throw invalidParams("tools/inspect requires params.name");
+    }
+
+    return this.adapter.inspectTool(name);
   }
 }
 

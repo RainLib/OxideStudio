@@ -284,6 +284,51 @@ describe("AI MCP adapter", () => {
       ])
     );
   });
+
+  it("inspects a single policy-aware tool definition for external agents", async () => {
+    const protocol = createMcpProtocolAdapter({
+      registry: createTestRegistry(),
+      createContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+    });
+
+    const response = await protocol.handleMessage({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "oxide/tools/inspect",
+      params: {
+        name: "demo.write",
+      },
+    });
+    const invalid = await protocol.handleMessage({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/inspect",
+      params: {},
+    });
+    const result = response && "result" in response
+      ? (response.result as { content: Array<{ text: string }> })
+      : null;
+    const tool = JSON.parse(result?.content[0]?.text || "{}");
+
+    expect(response).toMatchObject({ jsonrpc: "2.0", id: 1 });
+    expect(tool).toMatchObject({
+      name: "demo.write",
+      permissions: ["write"],
+      policy: {
+        allowed: false,
+        requiresApproval: true,
+      },
+    });
+    expect(invalid).toMatchObject({
+      jsonrpc: "2.0",
+      id: 2,
+      error: {
+        code: -32602,
+        message: "tools/inspect requires params.name",
+      },
+    });
+  });
 });
 
 describe("AI CLI adapter", () => {

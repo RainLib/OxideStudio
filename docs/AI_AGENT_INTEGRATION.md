@@ -46,7 +46,7 @@ Decision summary:
 - `src/ai/assistant` exposes an `AssistantPlanner` contract, a deterministic fallback planner, a provider-neutral model planner, and approval-aware execution for AI-proposed tool calls.
 - `src/ai/assistant/langGraphPlanner.ts` provides a dependency-light LangGraph bridge plus `createAssistantPlannerGraph` for composing planner nodes over shared context, metadata, warnings, and notes. A real LangGraph graph can still plug in by returning `AssistantPlannerResult` from the shared planner contract.
 - `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
-- `src/ai/mcp/protocol.ts` adds a transport-neutral JSON-RPC handler for `initialize`, `tools/list`, `tools/call`, and the Oxide manifest extension; stdio or HTTP servers should wrap this instead of reimplementing tool routing.
+- `src/ai/mcp/protocol.ts` adds a transport-neutral JSON-RPC handler for `initialize`, `tools/list`, `tools/call`, single-tool inspection, and the Oxide manifest extension; stdio or HTTP servers should wrap this instead of reimplementing tool routing.
 - `src/ai/cli` provides a dependency-light command adapter for `tools list`, `tools manifest`, `assistant plan`, and `tools call`.
 - The assistant panel is an editor entry point; real model/provider integration should call the runtime APIs rather than bypassing the registry.
 
@@ -133,6 +133,12 @@ Mutating calls still require an explicit approval signal, for example `_meta: { 
 
 MCP callers that need workspace-like context can pass `_meta: { "oxide/context": { "activeConnectionId": "...", "activeDriver": "redis", "activeNamespace": "2" } }` on `tools/call`. The adapter merges those fields into the execution context before policy and tool execution.
 
+MCP callers that already know a candidate tool name can inspect only that tool's schema and approval policy:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"oxide/tools/inspect","params":{"name":"provider.list"}}
+```
+
 CLI is useful for local automation, tests, and scripting. It can share the same registry by running commands such as:
 
 ```bash
@@ -157,7 +163,7 @@ make ai-mcp-smoke
 make ai-mcp-stdio
 ```
 
-Use `tools inspect <toolName>` when an agent already has a candidate tool name and needs only that tool's schema, permission set, capabilities, and approval policy. Use `npm run ai -- mcp request` or `make ai-mcp-smoke` for local MCP JSON-RPC smoke tests or scripts that need to match an external MCP host exactly. Use `tools call` for simpler one-off automation.
+Use `tools inspect <toolName>` or MCP `oxide/tools/inspect` when an agent already has a candidate tool name and needs only that tool's schema, permission set, capabilities, and approval policy. Use `npm run ai -- mcp request` or `make ai-mcp-smoke` for local MCP JSON-RPC smoke tests or scripts that need to match an external MCP host exactly. Use `tools call` for simpler one-off automation.
 
 Current limitation: `scripts/oxide-ai.ts` runs in a headless Node process, so it does not have the in-app Tauri connection manager, active editor tab, selected schema, or approval UI. Its default adapter intentionally exposes provider and capability discovery only. Database query, metadata, LSP, and mutation tools are fully available through the in-app workspace adapter; a standalone MCP server that can query databases must inject its own connection/query adapter instead of relying on browser/Tauri state.
 
