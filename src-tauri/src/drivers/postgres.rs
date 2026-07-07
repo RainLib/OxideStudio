@@ -359,8 +359,11 @@ impl DatabaseDriver for PostgresDriver {
             .connect_with(options)
             .await?;
 
-        let mut current_pool = self.pool.lock().await;
-        *current_pool = Some(pool);
+        let old_pool = self.pool.get_mut().replace(pool);
+        if let Some(old_pool) = old_pool {
+            Self::close_pool_with_timeout(old_pool).await;
+        }
+
         Ok(())
     }
 

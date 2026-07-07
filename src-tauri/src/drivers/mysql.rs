@@ -327,20 +327,21 @@ impl DatabaseDriver for MysqlDriver {
             .disable_statement_logging()
             .to_owned();
 
-        {
-            let mut base_options = self.base_options.lock().await;
-            *base_options = Some(options.clone());
-        }
-
         // Initialize default pool
         let pool = MySqlPoolOptions::new()
             .max_connections(5)
             .acquire_timeout(Duration::from_secs(30))
-            .connect_with(options)
+            .connect_with(options.clone())
             .await?;
 
         let pools = self.pools.get_mut(); // Since we have &mut self, we can get_mut access to Mutex
+        let old_pools = pools.drain().map(|(_, pool)| pool).collect::<Vec<_>>();
         pools.insert("".to_string(), pool);
+        *self.base_options.get_mut() = Some(options);
+
+        for old_pool in old_pools {
+            Self::close_pool_with_timeout(old_pool).await;
+        }
 
         Ok(())
     }
