@@ -242,6 +242,7 @@ impl MongoDbDriver {
 #[async_trait]
 impl DatabaseDriver for MongoDbDriver {
     async fn connect(&mut self) -> Result<()> {
+        let default_database = self.default_database.clone();
         let client = Client::with_uri_str(&self.url)
             .await
             .with_context(|| format!("Failed to connect to MongoDB at {}", self.url))?;
@@ -252,11 +253,13 @@ impl DatabaseDriver for MongoDbDriver {
             .context("MongoDB ping failed")?;
 
         *self.client.lock().await = Some(client);
+        *self.active_database.lock().await = default_database;
         Ok(())
     }
 
     async fn disconnect(&self) -> Result<()> {
         *self.client.lock().await = None;
+        *self.active_database.lock().await = self.default_database.clone();
         Ok(())
     }
 
@@ -996,5 +999,17 @@ mod tests {
         assert_eq!(collection.namespace.as_deref(), Some("app"));
         assert_eq!(collection.collection_type.as_deref(), Some("collection"));
         assert_eq!(collection.document_count, Some(42));
+    }
+
+    #[tokio::test]
+    async fn disconnect_clears_client_and_resets_active_database() {
+        let driver = MongoDbDriver::new("mongodb://localhost:27017/app");
+        *driver.active_database.lock().await = "analytics".to_string();
+
+        driver.disconnect().await.unwrap();
+
+        assert!(driver.client.lock().await.is_none());
+        assert_eq!(driver.active_database.lock().await.as_str(), "app");
+        assert!(driver.ping().await.is_err());
     }
 }

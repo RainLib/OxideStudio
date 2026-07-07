@@ -111,6 +111,7 @@ impl RedisDriver {
 #[async_trait]
 impl DatabaseDriver for RedisDriver {
     async fn connect(&mut self) -> Result<()> {
+        let default_database = redis_database_label(&self.url);
         let manager = self
             .client
             .get_connection_manager()
@@ -124,11 +125,13 @@ impl DatabaseDriver for RedisDriver {
             .context("Redis ping failed")?;
 
         *self.connection.lock().await = Some(manager);
+        *self.active_database.lock().await = default_database;
         Ok(())
     }
 
     async fn disconnect(&self) -> Result<()> {
         *self.connection.lock().await = None;
+        *self.active_database.lock().await = redis_database_label(&self.url);
         Ok(())
     }
 
@@ -584,5 +587,17 @@ mod tests {
         assert_eq!(redis_cardinality_command("zset"), Some("ZCARD"));
         assert_eq!(redis_cardinality_command("stream"), Some("XLEN"));
         assert_eq!(redis_cardinality_command("none"), None);
+    }
+
+    #[tokio::test]
+    async fn disconnect_clears_connection_and_resets_active_database() {
+        let driver = RedisDriver::new("redis://localhost:6379/2").unwrap();
+        *driver.active_database.lock().await = "8".to_string();
+
+        driver.disconnect().await.unwrap();
+
+        assert!(driver.connection.lock().await.is_none());
+        assert_eq!(driver.active_database.lock().await.as_str(), "2");
+        assert!(driver.ping().await.is_err());
     }
 }

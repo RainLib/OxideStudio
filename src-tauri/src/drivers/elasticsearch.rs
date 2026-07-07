@@ -13,6 +13,7 @@ pub struct ElasticsearchDriver {
     client: Client,
     auth: Option<(String, String)>,
     active_index: Mutex<Option<String>>,
+    connected: Mutex<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,11 +32,20 @@ impl ElasticsearchDriver {
             client: Client::new(),
             auth,
             active_index: Mutex::new(None),
+            connected: Mutex::new(false),
         })
     }
 
     async fn active_index_name(&self) -> Option<String> {
         self.active_index.lock().await.clone()
+    }
+
+    async fn ensure_connected(&self) -> Result<()> {
+        if *self.connected.lock().await {
+            Ok(())
+        } else {
+            Err(anyhow!("Elasticsearch connection is not established"))
+        }
     }
 
     async fn execute_requests(
@@ -68,6 +78,11 @@ impl ElasticsearchDriver {
     }
 
     async fn send_request(&self, request: &ElasticsearchRequest) -> Result<(u16, Value)> {
+        self.ensure_connected().await?;
+        self.send_request_unchecked(request).await
+    }
+
+    async fn send_request_unchecked(&self, request: &ElasticsearchRequest) -> Result<(u16, Value)> {
         let url = self
             .base_url
             .join(request.path.trim_start_matches('/'))
@@ -116,10 +131,21 @@ impl ElasticsearchDriver {
 #[async_trait]
 impl DatabaseDriver for ElasticsearchDriver {
     async fn connect(&mut self) -> Result<()> {
-        self.ping().await
+        *self.connected.lock().await = false;
+        let request = ElasticsearchRequest {
+            method: Method::GET,
+            path: "/".to_string(),
+            body: None,
+        };
+        self.send_request_unchecked(&request).await?;
+        *self.connected.lock().await = true;
+        *self.active_index.lock().await = None;
+        Ok(())
     }
 
     async fn disconnect(&self) -> Result<()> {
+        *self.connected.lock().await = false;
+        *self.active_index.lock().await = None;
         Ok(())
     }
 
@@ -145,6 +171,7 @@ impl DatabaseDriver for ElasticsearchDriver {
     }
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
+        self.ensure_connected().await?;
         Ok(vec!["default".to_string()])
     }
 
@@ -174,6 +201,7 @@ impl DatabaseDriver for ElasticsearchDriver {
     }
 
     async fn set_current_schema(&self, schema: &str) -> Result<()> {
+        self.ensure_connected().await?;
         *self.active_index.lock().await = validate_elasticsearch_index_context(schema)?;
         Ok(())
     }
@@ -585,6 +613,7 @@ mod tests {
         let driver = ElasticsearchDriver::new("http://localhost:9200").unwrap();
 
         assert_eq!(driver.active_index_name().await, None);
+        *driver.connected.lock().await = true;
         driver.set_current_schema("logs-2026").await.unwrap();
         assert_eq!(
             driver.active_index_name().await,
@@ -592,6 +621,20 @@ mod tests {
         );
         driver.set_current_schema("default").await.unwrap();
         assert_eq!(driver.active_index_name().await, None);
+    }
+
+    #[tokio::test]
+    async fn disconnect_marks_driver_unavailable_and_clears_active_index() {
+        let driver = ElasticsearchDriver::new("http://localhost:9200").unwrap();
+        *driver.connected.lock().await = true;
+        *driver.active_index.lock().await = Some("logs-2026".to_string());
+
+        driver.disconnect().await.unwrap();
+
+        assert!(!*driver.connected.lock().await);
+        assert_eq!(driver.active_index_name().await, None);
+        assert!(driver.ping().await.is_err());
+        assert!(driver.get_schemas().await.is_err());
     }
 
     #[test]
