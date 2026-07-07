@@ -2,7 +2,7 @@ import React from "react";
 import { Button } from "@/components/ui/button";
 import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { cn } from "@/lib/utils";
-import { Database, Clock, Code } from "lucide-react";
+import { Database, Clock, Code, Settings } from "lucide-react";
 import { SchemaSidebar } from "./SchemaSidebar";
 import { HistorySidebar } from "./HistorySidebar";
 import { SavedQueriesSidebar } from "./SavedQueriesSidebar";
@@ -69,6 +69,15 @@ export function LeftPanel({
               title="Saved Queries"
             />
           </div>
+
+          <div className="mt-auto flex w-full flex-col gap-3 px-2 pb-2">
+            <ActivityBarButton
+              active={false}
+              onClick={() => setShowSettings(true)}
+              icon={Settings}
+              title="Settings"
+            />
+          </div>
         </div>
 
         {/* Sidebar Content */}
@@ -131,6 +140,7 @@ function ActivityBarButton({
       )}
       onClick={onClick}
       title={title}
+      aria-label={title}
     >
       {active && (
         <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-4 bg-primary rounded-r-full" />
