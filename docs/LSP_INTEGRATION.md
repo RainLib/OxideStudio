@@ -59,6 +59,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 49: SQL predicate and assignment right-hand completions now switch to value keywords after operators, so `WHERE col = ` and `SET col = ` stop repeating fields, relation targets, or operators.
 - Phase 50: SQL predicate and assignment completions now advance after completed values, suggesting `AND`/`OR`/follow-up clauses or `SET` assignment continuations instead of repeating operators.
 - Phase 51: SQL `IN (...)` value-list completions now keep suggesting value keywords after commas, so `WHERE col IN ('a', ` does not fall back to fields or operators.
+- Phase 52: SQL `BETWEEN` completions now narrow the first-bound continuation to `AND`, avoiding invalid `OR`, query follow-ups, fields, or operators before the upper bound.
 
 ⏳ **Pending:**
 
@@ -75,7 +76,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-55-gce334bd`.
+Current tracked revision is `v0.1.3-56-gdeb03e5`.
 
 ### 2. Prepare the Binary
 
