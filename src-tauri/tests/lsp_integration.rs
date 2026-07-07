@@ -196,6 +196,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_where_uri = "file:///oxide/postgres-where.sql";
     let postgres_where_operator_uri = "file:///oxide/postgres-where-operator.sql";
     let postgres_where_value_uri = "file:///oxide/postgres-where-value.sql";
+    let postgres_where_in_value_uri = "file:///oxide/postgres-where-in-value.sql";
     let postgres_where_continuation_uri = "file:///oxide/postgres-where-continuation.sql";
     let postgres_having_uri = "file:///oxide/postgres-having.sql";
     let postgres_having_operator_uri = "file:///oxide/postgres-having-operator.sql";
@@ -267,6 +268,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     );
     file_schemas.insert(
         postgres_where_value_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        postgres_where_in_value_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
@@ -396,6 +401,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     file_dialects.insert(postgres_where_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_where_operator_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_where_value_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_where_in_value_uri.to_string(), json!("postgres"));
     file_dialects.insert(
         postgres_where_continuation_uri.to_string(),
         json!("postgres"),
@@ -583,6 +589,13 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_where_value_uri,
         "postgres",
         "SELECT * from public.webhook where owner = ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_where_in_value_uri,
+        "postgres",
+        "SELECT * from public.webhook where owner IN ('app', ",
     )
     .await?;
     open_document(
@@ -939,6 +952,22 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_where_value_uri,
         0,
         "SELECT * from public.webhook where owner = ".len() as u32,
+        &["DEFAULT", "owner", "name", "public.webhook", "=", "!="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_where_in_value_uri,
+        0,
+        "SELECT * from public.webhook where owner IN ('app', ".len() as u32,
+        &["NULL", "TRUE", "CURRENT_TIMESTAMP"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_where_in_value_uri,
+        0,
+        "SELECT * from public.webhook where owner IN ('app', ".len() as u32,
         &["DEFAULT", "owner", "name", "public.webhook", "=", "!="],
     )
     .await?;

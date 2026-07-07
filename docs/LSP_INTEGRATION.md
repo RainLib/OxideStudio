@@ -58,6 +58,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 48: SQL `INSERT ... VALUES (` completions now suggest value keywords such as `DEFAULT`, `NULL`, and timestamp constants instead of columns or relation targets.
 - Phase 49: SQL predicate and assignment right-hand completions now switch to value keywords after operators, so `WHERE col = ` and `SET col = ` stop repeating fields, relation targets, or operators.
 - Phase 50: SQL predicate and assignment completions now advance after completed values, suggesting `AND`/`OR`/follow-up clauses or `SET` assignment continuations instead of repeating operators.
+- Phase 51: SQL `IN (...)` value-list completions now keep suggesting value keywords after commas, so `WHERE col IN ('a', ` does not fall back to fields or operators.
 
 ⏳ **Pending:**
 
@@ -74,7 +75,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-54-g8a7cbfa`.
+Current tracked revision is `v0.1.3-55-gce334bd`.
 
 ### 2. Prepare the Binary
 
