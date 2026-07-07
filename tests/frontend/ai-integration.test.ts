@@ -754,6 +754,43 @@ describe("model assistant planner", () => {
     ]);
   });
 
+  it("falls back to the deterministic planner when the model provider fails", async () => {
+    const registry = createAiToolRegistry();
+    registry.register({
+      name: "connection.list",
+      description: "List connections.",
+      inputSchema: { type: "object", additionalProperties: false },
+      permissions: ["read"],
+      capabilities: ["connection"],
+      execute: async () => [],
+    });
+
+    const runtime = createAssistantRuntime({
+      registry,
+      createContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+      planner: createModelAssistantPlanner({
+        invoke: async () => {
+          throw new Error("provider offline");
+        },
+      }),
+    });
+
+    const turn = await runtime.prepareTurnAsync({
+      message: "show this workspace",
+    });
+
+    expect(turn.warnings).toContain(
+      "Model planner failed; used fallback planner: provider offline"
+    );
+    expect(turn.suggestedPlan).toContainEqual(
+      expect.objectContaining({
+        id: "connections",
+        toolName: "connection.list",
+      })
+    );
+  });
+
   it("passes active workspace context to model result summaries", async () => {
     let captured: AssistantModelResultSummaryRequest | null = null;
     const runtime = createAssistantRuntime({

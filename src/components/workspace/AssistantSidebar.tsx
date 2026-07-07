@@ -1,9 +1,14 @@
 import { Button } from "@/components/ui/button";
+import {
+  createOpenAiCompatibleAssistantPlanner,
+  createOpenAiCompatibleResultSummarizer,
+} from "@/ai/assistant/openAiCompatiblePlanner";
 import { createAssistantRuntime } from "@/ai/assistant/runtime";
 import {
   createWorkspaceAiToolContext,
   createWorkspaceAiToolRegistry,
 } from "@/ai/tools/defaultRegistry";
+import { useAiSettingsStore } from "@/store/useAiSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
 import type {
   AssistantPlanStep,
@@ -16,13 +21,39 @@ import { ListChecks, Play, ShieldCheck, Sparkles } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 
 export function AssistantSidebar() {
+  const aiEnabled = useAiSettingsStore((state) => state.enabled);
+  const aiBaseUrl = useAiSettingsStore((state) => state.baseUrl);
+  const aiModel = useAiSettingsStore((state) => state.model);
+  const aiApiKey = useAiSettingsStore((state) => state.apiKey);
+  const aiTimeoutMs = useAiSettingsStore((state) => state.timeoutMs);
+  const modelConfig = useMemo(() => {
+    const baseUrl = aiBaseUrl.trim();
+    const model = aiModel.trim();
+    if (!aiEnabled || !baseUrl || !model) return null;
+    return {
+      baseUrl,
+      model,
+      apiKey: aiApiKey.trim() || undefined,
+      timeoutMs: aiTimeoutMs,
+    };
+  }, [aiApiKey, aiBaseUrl, aiEnabled, aiModel, aiTimeoutMs]);
   const runtime = useMemo(
-    () =>
-      createAssistantRuntime({
+    () => {
+      const planner = modelConfig
+        ? createOpenAiCompatibleAssistantPlanner(modelConfig)
+        : undefined;
+      const summarizeToolResults = modelConfig
+        ? createOpenAiCompatibleResultSummarizer(modelConfig)
+        : undefined;
+
+      return createAssistantRuntime({
         registry: createWorkspaceAiToolRegistry(),
         createContext: createWorkspaceAiToolContext,
-      }),
-    []
+        planner,
+        summarizeToolResults,
+      });
+    },
+    [modelConfig]
   );
   const { tabs, activeTabId } = useTabStore();
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
@@ -54,6 +85,7 @@ export function AssistantSidebar() {
   const activeContextLabel = activeTab
     ? `${activeTab.title}${selectedText ? " - selection" : ""}`
     : "No active tab";
+  const plannerLabel = modelConfig ? modelConfig.model : "Local planner";
 
   const handlePrepare = async () => {
     setError(null);
@@ -170,6 +202,9 @@ export function AssistantSidebar() {
             </div>
             <div className="truncate text-[10px] text-muted-foreground/70">
               {activeContextLabel}
+            </div>
+            <div className="truncate text-[10px] text-muted-foreground/70">
+              {plannerLabel}
             </div>
           </div>
         </div>

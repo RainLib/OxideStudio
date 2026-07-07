@@ -93,12 +93,28 @@ export class ModelAssistantPlanner implements AssistantPlanner {
   }
 
   async plan(input: AssistantPlannerInput): Promise<AssistantPlannerResult> {
-    const response = await this.invoke({
-      turn: modelPlannerTurn(input.turn),
-      context: modelPlannerContext(input.context),
-      manifest: createAiToolManifest(input.availableTools, input.policy),
-      instructions: MODEL_PLANNER_INSTRUCTIONS,
-    });
+    let response: AssistantModelPlannerResponse;
+    try {
+      response = await this.invoke({
+        turn: modelPlannerTurn(input.turn),
+        context: modelPlannerContext(input.context),
+        manifest: createAiToolManifest(input.availableTools, input.policy),
+        instructions: MODEL_PLANNER_INSTRUCTIONS,
+      });
+    } catch (error: any) {
+      if (!this.fallback) {
+        throw error;
+      }
+
+      const fallback = await this.fallback.plan(input);
+      return {
+        ...fallback,
+        warnings: [
+          ...(fallback.warnings ?? []),
+          `Model planner failed; used fallback planner: ${error?.message || String(error)}`,
+        ],
+      };
+    }
 
     const warnings: string[] = [...(response.warnings ?? [])];
     const steps = this.toPlanSteps(input, response.steps ?? [], warnings);

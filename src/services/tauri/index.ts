@@ -18,6 +18,7 @@
 
 // 服务导出
 export * from "./connection.service";
+export * from "./ai.service";
 export * from "./database.service";
 export * from "./query.service";
 export * from "./schema.service";

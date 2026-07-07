@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod cache;
 /// Commands module
 /// 将所有 Tauri commands 按功能模块组织
@@ -12,6 +13,7 @@ pub mod transaction;
 pub mod window;
 
 // Re-export all commands for easy access
+pub use ai::*;
 pub use cache::*;
 pub use connection::*;
 pub use database::*;

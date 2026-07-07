@@ -67,6 +67,9 @@ pub fn run() {
             commands::connection::disconnect_db,
             commands::connection::save_connections,
             commands::connection::load_connections,
+            // AI commands
+            commands::ai::ai_chat_completion,
+            commands::ai::ai_test_provider,
             // Query commands
             commands::query::execute_query,
             commands::query::cancel_query,
