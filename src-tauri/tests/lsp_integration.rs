@@ -209,6 +209,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_references_table_uri = "file:///oxide/postgres-references-table.sql";
     let postgres_references_columns_uri = "file:///oxide/postgres-references-columns.sql";
     let postgres_references_action_uri = "file:///oxide/postgres-references-action.sql";
+    let postgres_references_rule_uri = "file:///oxide/postgres-references-rule.sql";
     let mysql_modify_column_uri = "file:///oxide/mysql-modify-column.sql";
 
     let mut file_schemas = Map::new();
@@ -309,6 +310,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
+        postgres_references_rule_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
         mysql_modify_column_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
@@ -353,6 +358,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_references_action_uri.to_string(),
         json!("postgres"),
     );
+    file_dialects.insert(postgres_references_rule_uri.to_string(), json!("postgres"));
     file_dialects.insert(mysql_modify_column_uri.to_string(), json!("mysql"));
 
     lsp.notify(
@@ -572,6 +578,13 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_references_action_uri,
         "postgres",
         "CREATE TABLE public.audit_log (owner varchar REFERENCES public.webhook ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_references_rule_uri,
+        "postgres",
+        "CREATE TABLE public.audit_log (owner varchar REFERENCES public.webhook ON DELETE ",
     )
     .await?;
     open_document(
@@ -956,6 +969,24 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         0,
         "CREATE TABLE public.audit_log (owner varchar REFERENCES public.webhook ".len() as u32,
         &["public.form", "owner", "="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_references_rule_uri,
+        0,
+        "CREATE TABLE public.audit_log (owner varchar REFERENCES public.webhook ON DELETE ".len()
+            as u32,
+        &["CASCADE", "RESTRICT", "NO ACTION", "SET NULL"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_references_rule_uri,
+        0,
+        "CREATE TABLE public.audit_log (owner varchar REFERENCES public.webhook ON DELETE ".len()
+            as u32,
+        &["public.form", "owner", "ON UPDATE"],
     )
     .await?;
     assert_completion_at_contains(

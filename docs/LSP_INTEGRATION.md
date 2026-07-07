@@ -49,6 +49,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 39: MySQL-style `ALTER TABLE ... MODIFY/CHANGE [COLUMN]` completions now suggest the target table's existing columns before switching to data type suggestions after the column name.
 - Phase 40: SQL foreign-key `REFERENCES` completions now suggest relation targets and scope `REFERENCES table (...)` column lists to the referenced table.
 - Phase 41: SQL foreign-key `REFERENCES table ` completions now suggest follow-up actions such as `(`, `ON DELETE`, and `ON UPDATE` instead of falling back to generic keywords.
+- Phase 42: SQL foreign-key `ON DELETE` and `ON UPDATE` completions now suggest referential rules such as `CASCADE`, `RESTRICT`, `NO ACTION`, and `SET NULL`.
 
 ⏳ **Pending:**
 
@@ -65,7 +66,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-45-gb27f8f9`.
+Current tracked revision is `v0.1.3-46-gf6d9b60`.
 
 ### 2. Prepare the Binary
 
