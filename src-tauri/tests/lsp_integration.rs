@@ -216,6 +216,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_insert_continuation_uri = "file:///oxide/postgres-insert-continuation.sql";
     let postgres_insert_conflict_target_uri = "file:///oxide/postgres-insert-conflict-target.sql";
     let postgres_insert_conflict_action_uri = "file:///oxide/postgres-insert-conflict-action.sql";
+    let postgres_insert_conflict_constraint_uri =
+        "file:///oxide/postgres-insert-conflict-constraint.sql";
+    let postgres_insert_conflict_constraint_action_uri =
+        "file:///oxide/postgres-insert-conflict-constraint-action.sql";
     let postgres_update_action_uri = "file:///oxide/postgres-update-action.sql";
     let postgres_update_value_uri = "file:///oxide/postgres-update-value.sql";
     let postgres_update_continuation_uri = "file:///oxide/postgres-update-continuation.sql";
@@ -357,6 +361,14 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
+        postgres_insert_conflict_constraint_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        postgres_insert_conflict_constraint_action_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
         postgres_update_action_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
@@ -488,6 +500,14 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     );
     file_dialects.insert(
         postgres_insert_conflict_action_uri.to_string(),
+        json!("postgres"),
+    );
+    file_dialects.insert(
+        postgres_insert_conflict_constraint_uri.to_string(),
+        json!("postgres"),
+    );
+    file_dialects.insert(
+        postgres_insert_conflict_constraint_action_uri.to_string(),
         json!("postgres"),
     );
     file_dialects.insert(postgres_update_action_uri.to_string(), json!("postgres"));
@@ -792,6 +812,20 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_insert_conflict_action_uri,
         "postgres",
         "INSERT INTO public.webhook (owner) VALUES ('app') ON CONFLICT (owner) ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_insert_conflict_constraint_uri,
+        "postgres",
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON CONFLICT ON CONSTRAINT ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_insert_conflict_constraint_action_uri,
+        "postgres",
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON CONFLICT ON CONSTRAINT webhook_pkey ",
     )
     .await?;
     open_document(
@@ -1393,6 +1427,48 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         0,
         "INSERT INTO public.webhook (owner) VALUES ('app') ON CONFLICT (owner) ".len() as u32,
         &["owner", "name", "=", "!="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_insert_conflict_constraint_uri,
+        0,
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON CONFLICT ON CONSTRAINT ".len() as u32,
+        &["webhook_pkey"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_insert_conflict_constraint_uri,
+        0,
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON CONFLICT ON CONSTRAINT ".len() as u32,
+        &[
+            "webhook_owner_check",
+            "form_pkey",
+            "owner",
+            "name",
+            "DO NOTHING",
+            "=",
+            "!=",
+        ],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_insert_conflict_constraint_action_uri,
+        0,
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON CONFLICT ON CONSTRAINT webhook_pkey "
+            .len() as u32,
+        &["DO NOTHING", "DO UPDATE SET"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_insert_conflict_constraint_action_uri,
+        0,
+        "INSERT INTO public.webhook (owner) VALUES ('app') ON CONFLICT ON CONSTRAINT webhook_pkey "
+            .len() as u32,
+        &["webhook_pkey", "owner", "name", "=", "!="],
     )
     .await?;
     assert_completion_at_contains(
