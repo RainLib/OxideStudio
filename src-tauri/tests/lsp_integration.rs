@@ -197,6 +197,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_create_index_uri = "file:///oxide/postgres-create-index.sql";
     let postgres_create_index_columns_uri = "file:///oxide/postgres-create-index-columns.sql";
     let postgres_join_using_uri = "file:///oxide/postgres-join-using.sql";
+    let postgres_alter_action_uri = "file:///oxide/postgres-alter-action.sql";
     let postgres_alter_column_uri = "file:///oxide/postgres-alter-column.sql";
     let postgres_alter_constraint_uri = "file:///oxide/postgres-alter-constraint.sql";
 
@@ -250,6 +251,10 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
+        postgres_alter_action_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
         postgres_alter_column_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
@@ -274,6 +279,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         json!("postgres"),
     );
     file_dialects.insert(postgres_join_using_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_alter_action_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_alter_column_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_alter_constraint_uri.to_string(), json!("postgres"));
 
@@ -409,6 +415,13 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_join_using_uri,
         "postgres",
         "SELECT * from public.webhook w JOIN public.form f USING (",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_alter_action_uri,
+        "postgres",
+        "ALTER TABLE public.webhook ",
     )
     .await?;
     open_document(
@@ -608,6 +621,22 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
             "=",
             "public.form",
         ],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_alter_action_uri,
+        0,
+        "ALTER TABLE public.webhook ".len() as u32,
+        &["ADD COLUMN", "DROP COLUMN", "ADD CONSTRAINT"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_alter_action_uri,
+        0,
+        "ALTER TABLE public.webhook ".len() as u32,
+        &["owner", "name", "public.form", "="],
     )
     .await?;
     assert_completion_at_contains(
