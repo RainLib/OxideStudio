@@ -59,6 +59,8 @@ function connectionUrlForConfig(config: ConnectionConfig) {
   });
 }
 
+let latestConnectAttempt = 0;
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connections: [],
   activeConnectionId: null,
@@ -153,12 +155,29 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   connect: async (config) => {
     const previousConnectionId = get().activeConnectionId;
+    const attemptId = latestConnectAttempt + 1;
+    latestConnectAttempt = attemptId;
     try {
       await connectionService.connect(
         config.id,
         config.driver,
         connectionUrlForConfig(config)
       );
+
+      if (attemptId !== latestConnectAttempt) {
+        if (get().activeConnectionId !== config.id) {
+          try {
+            await connectionService.disconnect(config.id);
+          } catch (disconnectError) {
+            console.warn(
+              "Failed to disconnect superseded backend connection:",
+              disconnectError
+            );
+          }
+        }
+        return null;
+      }
+
       // Reset only after the backend connection is ready so a failed switch
       // does not wipe the currently usable workspace metadata.
       useSchemaStore.getState().reset();
@@ -177,6 +196,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       return null; // No error
     } catch (e: any) {
+      if (attemptId !== latestConnectAttempt) {
+        return null;
+      }
       const message = e.message || String(e);
       return message;
     }

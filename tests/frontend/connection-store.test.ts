@@ -38,6 +38,16 @@ function connection(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig
   };
 }
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("connection store", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -160,5 +170,37 @@ describe("connection store", () => {
     expect(mocks.disconnect).not.toHaveBeenCalled();
     expect(useConnectionStore.getState().activeConnectionId).toBe("postgres-1");
     expect(useConnectionStore.getState().isConnected).toBe(true);
+  });
+
+  it("ignores older connection attempts that finish after a newer switch", async () => {
+    const postgresConnect = deferred();
+    const mysqlConnect = deferred();
+    mocks.connect.mockImplementation((id: string) => {
+      if (id === "postgres-1") return postgresConnect.promise;
+      if (id === "mysql-1") return mysqlConnect.promise;
+      return Promise.resolve();
+    });
+
+    const first = useConnectionStore.getState().connect(connection());
+    const second = useConnectionStore.getState().connect(
+      connection({
+        id: "mysql-1",
+        name: "MySQL",
+        driver: "mysql",
+        port: 3306,
+      })
+    );
+
+    mysqlConnect.resolve();
+    await expect(second).resolves.toBeNull();
+    expect(useConnectionStore.getState().activeConnectionId).toBe("mysql-1");
+
+    postgresConnect.resolve();
+    await expect(first).resolves.toBeNull();
+
+    expect(useConnectionStore.getState().activeConnectionId).toBe("mysql-1");
+    expect(useConnectionStore.getState().isConnected).toBe(true);
+    expect(mocks.disconnect).toHaveBeenCalledWith("postgres-1");
+    expect(mocks.disconnect).not.toHaveBeenCalledWith("mysql-1");
   });
 });
