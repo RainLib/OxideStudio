@@ -206,6 +206,8 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_alter_constraint_uri = "file:///oxide/postgres-alter-constraint.sql";
     let postgres_create_table_type_uri = "file:///oxide/postgres-create-table-type.sql";
     let postgres_alter_column_type_uri = "file:///oxide/postgres-alter-column-type.sql";
+    let postgres_references_table_uri = "file:///oxide/postgres-references-table.sql";
+    let postgres_references_columns_uri = "file:///oxide/postgres-references-columns.sql";
     let mysql_modify_column_uri = "file:///oxide/mysql-modify-column.sql";
 
     let mut file_schemas = Map::new();
@@ -294,6 +296,14 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
+        postgres_references_table_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        postgres_references_columns_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
         mysql_modify_column_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
@@ -327,6 +337,11 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     );
     file_dialects.insert(
         postgres_alter_column_type_uri.to_string(),
+        json!("postgres"),
+    );
+    file_dialects.insert(postgres_references_table_uri.to_string(), json!("postgres"));
+    file_dialects.insert(
+        postgres_references_columns_uri.to_string(),
         json!("postgres"),
     );
     file_dialects.insert(mysql_modify_column_uri.to_string(), json!("mysql"));
@@ -527,6 +542,20 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_alter_column_type_uri,
         "postgres",
         "ALTER TABLE public.webhook ALTER COLUMN owner TYPE ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_references_table_uri,
+        "postgres",
+        "CREATE TABLE public.audit_log (owner varchar REFERENCES ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_references_columns_uri,
+        "postgres",
+        "CREATE TABLE public.audit_log (owner varchar REFERENCES public.webhook (",
     )
     .await?;
     open_document(
@@ -863,6 +892,38 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         0,
         "ALTER TABLE public.webhook ALTER COLUMN owner TYPE ".len() as u32,
         &["public.webhook", "owner", "="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_references_table_uri,
+        0,
+        "CREATE TABLE public.audit_log (owner varchar REFERENCES ".len() as u32,
+        &["public.webhook", "public.form"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_references_table_uri,
+        0,
+        "CREATE TABLE public.audit_log (owner varchar REFERENCES ".len() as u32,
+        &["owner", "name", "="],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_references_columns_uri,
+        0,
+        "CREATE TABLE public.audit_log (owner varchar REFERENCES public.webhook (".len() as u32,
+        &["owner", "name"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_references_columns_uri,
+        0,
+        "CREATE TABLE public.audit_log (owner varchar REFERENCES public.webhook (".len() as u32,
+        &["public.form", "form_css", "="],
     )
     .await?;
     assert_completion_at_contains(
