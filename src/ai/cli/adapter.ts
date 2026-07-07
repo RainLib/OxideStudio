@@ -30,6 +30,7 @@ type ParsedCommand =
   | { kind: "help" }
   | { kind: "list" }
   | { kind: "manifest" }
+  | { kind: "inspect"; toolName: string }
   | { kind: "mcp"; request: string }
   | {
       kind: "plan";
@@ -87,6 +88,8 @@ export class CliToolAdapter {
               this.manifestEnvironment
             )
           );
+        case "inspect":
+          return okJson(this.inspectTool(command.toolName));
         case "mcp": {
           const response = await createMcpProtocolAdapter({
             registry: this.registry,
@@ -148,6 +151,18 @@ export class CliToolAdapter {
       (command === "tools" && rest[0] === "manifest")
     ) {
       return { kind: "manifest" };
+    }
+
+    if (command === "inspect" || (command === "tools" && rest[0] === "inspect")) {
+      const inspectArgs = command === "tools" ? rest.slice(1) : rest;
+      const [toolName, ...extra] = inspectArgs;
+      if (!toolName) {
+        throw new Error("Tool name is required");
+      }
+      if (extra.length > 0) {
+        throw new Error(`Unknown inspect argument: ${extra[0]}`);
+      }
+      return { kind: "inspect", toolName };
     }
 
     if (command === "call" || (command === "tools" && rest[0] === "call")) {
@@ -354,6 +369,19 @@ export class CliToolAdapter {
 
     throw new Error("mcp request requires --json or --json-file");
   }
+
+  private inspectTool(toolName: string) {
+    const manifest = createAiToolManifest(
+      this.registry.list(),
+      this.policy,
+      this.manifestEnvironment
+    );
+    const tool = manifest.tools.find((candidate) => candidate.name === toolName);
+    if (!tool) {
+      throw new Error(`Unknown AI tool: ${toolName}`);
+    }
+    return tool;
+  }
 }
 
 export function createCliToolAdapter(options?: CliToolAdapterOptions) {
@@ -426,6 +454,7 @@ function helpText() {
     "Commands:",
     "  tools list",
     "  tools manifest",
+    "  tools inspect <toolName>",
     "  assistant plan --message 'show active schema'",
     "  assistant plan --json '{\"message\":\"explain this query\"}'",
     "  assistant plan --message 'read key session:1' --active-driver redis",

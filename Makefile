@@ -1,4 +1,4 @@
-.PHONY: help setup install submodules dev dev-no-watch start web preview build package test test-frontend test-rust test-lsp test-lsp-integration test-live-db check cargo-check lsp-build ai ai-tools ai-manifest ai-mcp-smoke ai-mcp-stdio ai-plan clean info
+.PHONY: help setup install submodules dev dev-no-watch start web preview build package test test-frontend test-rust test-lsp test-lsp-integration test-live-db check cargo-check lsp-build ai ai-tools ai-manifest ai-inspect ai-mcp-smoke ai-mcp-stdio ai-plan clean info
 
 .DEFAULT_GOAL := help
 
@@ -10,6 +10,7 @@ ROOT_DIR := $(CURDIR)
 TAURI_MANIFEST := src-tauri/Cargo.toml
 LSP_MANIFEST := vendor/sql-lsp/Cargo.toml
 AI_MESSAGE ?= list available database providers
+AI_TOOL ?= provider.list
 TAURI_DEV_ARGS ?=
 
 COLOR_RESET := \033[0m
@@ -83,6 +84,9 @@ ai-tools: ## List headless AI tools exposed to CLI and MCP clients.
 
 ai-manifest: ## Print the policy-aware AI tool manifest.
 	$(NPM) run ai -- tools manifest
+
+ai-inspect: ## Print one AI tool definition. Usage: make ai-inspect AI_TOOL=provider.list
+	$(NPM) run ai -- tools inspect $(AI_TOOL)
 
 ai-mcp-smoke: ## Verify the AI MCP JSON-RPC tools/list path.
 	$(NPM) run ai -- mcp request --json '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'

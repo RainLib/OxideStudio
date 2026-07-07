@@ -69,6 +69,7 @@ make web            # 仅启动 Vite 前端开发服务
 make check          # 前端构建 + Rust cargo check
 make test           # 运行前端、后端和 LSP 测试
 make test-live-db   # 使用 Docker 运行多数据库集成测试
+make ai-inspect     # 查看单个 AI 工具 schema 和审批策略
 ```
 
 如果开发模式反复出现 `src-tauri/binaries/sql-lsp changed` 并触发重建，先停止 dev 进程，执行 `make lsp-build`，再使用 `make dev-no-watch` 启动。默认 `make dev` 仍保留 Rust 热重载。

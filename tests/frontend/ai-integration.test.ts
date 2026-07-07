@@ -411,6 +411,33 @@ describe("AI CLI adapter", () => {
     );
   });
 
+  it("prints a single policy-aware tool definition from the CLI", async () => {
+    const cli = createCliToolAdapter({
+      registry: createTestRegistry(),
+      createContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+    });
+
+    const result = await cli.run(["tools", "inspect", "demo.write"]);
+    const missing = await cli.run(["tools", "inspect", "demo.missing"]);
+    const tool = JSON.parse(result.stdout);
+
+    expect(result.exitCode).toBe(0);
+    expect(tool).toMatchObject({
+      name: "demo.write",
+      inputSchema: {
+        type: "object",
+      },
+      permissions: ["write"],
+      policy: {
+        allowed: false,
+        requiresApproval: true,
+      },
+    });
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stderr).toContain("Unknown AI tool: demo.missing");
+  });
+
   it("passes active context overrides into direct tool calls", async () => {
     const cli = createCliToolAdapter({
       registry: createTestRegistry(),

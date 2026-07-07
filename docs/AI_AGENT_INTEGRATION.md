@@ -138,6 +138,7 @@ CLI is useful for local automation, tests, and scripting. It can share the same 
 ```bash
 npm run ai -- tools list
 npm run ai -- tools manifest
+npm run ai -- tools inspect provider.list
 npm run ai -- assistant plan --message "list tables in the active database"
 npm run ai -- tools call query.runReadOnly --json-file payload.json
 npm run ai -- tools call key.getValue --active-driver redis --active-namespace 2 --json '{"key":"session:1"}'
@@ -150,12 +151,13 @@ The Makefile exposes the same entry points:
 ```bash
 make ai-tools
 make ai-manifest
+make ai-inspect AI_TOOL=provider.list
 make ai-plan AI_MESSAGE="inspect this workspace"
 make ai-mcp-smoke
 make ai-mcp-stdio
 ```
 
-Use `npm run ai -- mcp request` or `make ai-mcp-smoke` for local MCP JSON-RPC smoke tests or scripts that need to match an external MCP host exactly. Use `tools call` for simpler one-off automation.
+Use `tools inspect <toolName>` when an agent already has a candidate tool name and needs only that tool's schema, permission set, capabilities, and approval policy. Use `npm run ai -- mcp request` or `make ai-mcp-smoke` for local MCP JSON-RPC smoke tests or scripts that need to match an external MCP host exactly. Use `tools call` for simpler one-off automation.
 
 Current limitation: `scripts/oxide-ai.ts` runs in a headless Node process, so it does not have the in-app Tauri connection manager, active editor tab, selected schema, or approval UI. Its default adapter intentionally exposes provider and capability discovery only. Database query, metadata, LSP, and mutation tools are fully available through the in-app workspace adapter; a standalone MCP server that can query databases must inject its own connection/query adapter instead of relying on browser/Tauri state.
 
