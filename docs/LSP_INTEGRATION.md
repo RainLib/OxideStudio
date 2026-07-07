@@ -98,6 +98,16 @@ bash src-tauri/build_prepare.sh
 
 `make dev` runs `lsp-build` first, then starts Tauri with `OXIDE_SKIP_SQL_LSP_PREPARE=1`; the Tauri `beforeDevCommand` also sets that flag so direct `npm run tauri -- dev` does not rewrite the watched bundled binary during startup. After changing `vendor/sql-lsp`, run `make lsp-build` or the script above before starting dev mode.
 
+If Tauri dev still rebuilds repeatedly with `src-tauri/binaries/sql-lsp changed`, stop the dev process before rebuilding the LSP binary. For a stable session while iterating on the frontend or app logic, use:
+
+```bash
+make dev-no-watch
+# or pass Tauri CLI args through the default target
+make dev TAURI_DEV_ARGS=--no-watch
+```
+
+`dev-no-watch` disables Tauri's Rust file watcher only; Vite HMR still handles frontend changes.
+
 To use a prebuilt binary instead of building the submodule:
 
 ```bash

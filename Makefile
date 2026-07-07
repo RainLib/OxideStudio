@@ -1,4 +1,4 @@
-.PHONY: help setup install submodules dev start web preview build package test test-frontend test-rust test-lsp test-lsp-integration test-live-db check cargo-check lsp-build ai ai-tools ai-manifest ai-mcp-smoke ai-mcp-stdio ai-plan clean info
+.PHONY: help setup install submodules dev dev-no-watch start web preview build package test test-frontend test-rust test-lsp test-lsp-integration test-live-db check cargo-check lsp-build ai ai-tools ai-manifest ai-mcp-smoke ai-mcp-stdio ai-plan clean info
 
 .DEFAULT_GOAL := help
 
@@ -10,6 +10,7 @@ ROOT_DIR := $(CURDIR)
 TAURI_MANIFEST := src-tauri/Cargo.toml
 LSP_MANIFEST := vendor/sql-lsp/Cargo.toml
 AI_MESSAGE ?= list available database providers
+TAURI_DEV_ARGS ?=
 
 COLOR_RESET := \033[0m
 COLOR_BOLD := \033[1m
@@ -30,7 +31,10 @@ submodules: ## Initialize and update git submodules.
 	git submodule update --init --recursive
 
 dev: lsp-build ## Start the Tauri desktop app in development mode.
-	OXIDE_SKIP_SQL_LSP_PREPARE=1 $(NPM) run tauri -- dev
+	OXIDE_SKIP_SQL_LSP_PREPARE=1 $(NPM) run tauri -- dev $(TAURI_DEV_ARGS)
+
+dev-no-watch: lsp-build ## Start Tauri dev without the Rust file watcher.
+	OXIDE_SKIP_SQL_LSP_PREPARE=1 $(NPM) run tauri -- dev --no-watch
 
 start: dev ## Alias for make dev.
 
