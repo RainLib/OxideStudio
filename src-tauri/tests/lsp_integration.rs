@@ -191,6 +191,8 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     let postgres_uri = "file:///oxide/postgres.sql";
     let postgres_where_uri = "file:///oxide/postgres-where.sql";
     let postgres_where_operator_uri = "file:///oxide/postgres-where-operator.sql";
+    let postgres_having_uri = "file:///oxide/postgres-having.sql";
+    let postgres_having_operator_uri = "file:///oxide/postgres-having-operator.sql";
     let postgres_qualified_uri = "file:///oxide/postgres-qualified.sql";
 
     let mut file_schemas = Map::new();
@@ -219,6 +221,14 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         json!("44444444-4444-4444-8444-444444444444"),
     );
     file_schemas.insert(
+        postgres_having_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
+        postgres_having_operator_uri.to_string(),
+        json!("44444444-4444-4444-8444-444444444444"),
+    );
+    file_schemas.insert(
         postgres_qualified_uri.to_string(),
         json!("44444444-4444-4444-8444-444444444444"),
     );
@@ -230,6 +240,8 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     file_dialects.insert(postgres_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_where_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_where_operator_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_having_uri.to_string(), json!("postgres"));
+    file_dialects.insert(postgres_having_operator_uri.to_string(), json!("postgres"));
     file_dialects.insert(postgres_qualified_uri.to_string(), json!("postgres"));
 
     lsp.notify(
@@ -314,6 +326,20 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_where_operator_uri,
         "postgres",
         "SELECT * from public.webhook where owner ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_having_uri,
+        "postgres",
+        "SELECT owner, count(*) from public.webhook group by owner having ",
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        postgres_having_operator_uri,
+        "postgres",
+        "SELECT owner, count(*) from public.webhook group by owner having count(*) ",
     )
     .await?;
     open_document(
@@ -408,6 +434,38 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_where_operator_uri,
         0,
         "SELECT * from public.webhook where owner ".len() as u32,
+        &["owner", "name", "form_background_url"],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_having_uri,
+        0,
+        "SELECT owner, count(*) from public.webhook group by owner having ".len() as u32,
+        &["owner", "name", "COUNT"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_having_uri,
+        0,
+        "SELECT owner, count(*) from public.webhook group by owner having ".len() as u32,
+        &["!=", "=", "form_background_url", "form_css"],
+    )
+    .await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        postgres_having_operator_uri,
+        0,
+        "SELECT owner, count(*) from public.webhook group by owner having count(*) ".len() as u32,
+        &["!=", "="],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        postgres_having_operator_uri,
+        0,
+        "SELECT owner, count(*) from public.webhook group by owner having count(*) ".len() as u32,
         &["owner", "name", "form_background_url"],
     )
     .await?;

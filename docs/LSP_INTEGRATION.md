@@ -37,6 +37,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 27: Completed clause keyword completions are pruned by expected target kind, so `FROM`/`JOIN` cannot surface field names and `WHERE`/`ON` cannot surface relation targets; Tauri now preserves LSP `textEdit` ranges for Monaco.
 - Phase 28: PostgreSQL and MySQL predicate completions now split expression and operator phases, so `WHERE` starts with scoped fields/functions and comparison operators appear only after a left-side expression.
 - Phase 29: ClickHouse and Hive now follow the same predicate completion phases, keeping fields ahead of operators at `WHERE` starts and moving operators to the left-expression position.
+- Phase 30: SQL `HAVING` completions now use the same predicate phase split across PostgreSQL, MySQL, Hive, and ClickHouse; MySQL predicate completions also include symbol operators such as `=`.
 
 ⏳ **Pending:**
 
@@ -53,7 +54,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-32-g59b1a74`.
+Current tracked revision is `v0.1.3-33-g57b61fe`.
 
 ### 2. Prepare the Binary
 
