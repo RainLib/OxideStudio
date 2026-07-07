@@ -90,19 +90,26 @@ async function runMcpStdio(protocol: McpProtocolAdapter) {
     input: process.stdin,
     crlfDelay: Infinity,
   });
+  const pending = new Set<Promise<void>>();
 
   for await (const line of lines) {
     if (!line.trim()) continue;
-    try {
-      const response = await protocol.handleJson(line);
-      if (response) {
-        process.stdout.write(`${response}\n`);
-      }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[oxide-ai] MCP stdio error: ${message}\n`);
-    }
+    const task = protocol
+      .handleJson(line)
+      .then((response) => {
+        if (response) {
+          process.stdout.write(`${response}\n`);
+        }
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[oxide-ai] MCP stdio error: ${message}\n`);
+      });
+    pending.add(task);
+    task.finally(() => pending.delete(task));
   }
+
+  await Promise.allSettled(pending);
 }
 
 main().catch((err: unknown) => {

@@ -329,6 +329,60 @@ describe("AI MCP adapter", () => {
       },
     });
   });
+
+  it("aborts in-flight MCP tool calls on cancelled notifications", async () => {
+    const registry = createAiToolRegistry();
+    let finishToolCall: (() => void) | undefined;
+    const started = new Promise<AbortSignal | undefined>((resolveStarted) => {
+      registry.register({
+        name: "demo.slow",
+        description: "Run a slow demo read.",
+        inputSchema: { type: "object", additionalProperties: false },
+        permissions: ["read"],
+        capabilities: ["query"],
+        execute: async (_input, context) => {
+          resolveStarted(context.abortSignal);
+          await new Promise<void>((resolve) => {
+            finishToolCall = resolve;
+          });
+          return { aborted: context.abortSignal?.aborted ?? false };
+        },
+      });
+    });
+    const protocol = createMcpProtocolAdapter({
+      registry,
+      createContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+    });
+
+    const call = protocol.handleMessage({
+      jsonrpc: "2.0",
+      id: 99,
+      method: "tools/call",
+      params: {
+        name: "demo.slow",
+        arguments: {},
+      },
+    });
+    const signal = await started;
+
+    expect(signal).toBeTruthy();
+    expect(signal?.aborted).toBe(false);
+    expect(
+      await protocol.handleMessage({
+        jsonrpc: "2.0",
+        method: "notifications/cancelled",
+        params: {
+          requestId: 99,
+          reason: "user stopped the request",
+        },
+      })
+    ).toBeNull();
+    expect(signal?.aborted).toBe(true);
+
+    finishToolCall?.();
+    await expect(call).resolves.toBeNull();
+  });
 });
 
 describe("AI CLI adapter", () => {

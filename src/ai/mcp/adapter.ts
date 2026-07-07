@@ -29,6 +29,7 @@ export type McpToolAdapterOptions = {
 export type McpToolCallOptions = {
   approved?: boolean;
   contextOverrides?: McpContextOverrides;
+  abortSignal?: AbortSignal;
 };
 
 type McpContextOverrides = Pick<
@@ -112,10 +113,16 @@ export class McpToolAdapter {
       const policy = options.approved
         ? approveAiToolForPolicy(this.policy, name)
         : this.policy;
+      const context = applyContextOverrides(
+        this.createContext(),
+        options.contextOverrides
+      );
       const result = await this.registry.executeWithPolicy(
         name,
         input,
-        applyContextOverrides(this.createContext(), options.contextOverrides),
+        options.abortSignal
+          ? { ...context, abortSignal: options.abortSignal }
+          : context,
         policy
       );
       return {

@@ -39,6 +39,11 @@ export type McpProtocolAdapterOptions = McpToolAdapterOptions & {
   protocolVersion?: string;
 };
 
+type ActiveMcpRequest = {
+  controller: AbortController;
+  method: string;
+};
+
 const JSON_RPC_VERSION = "2.0";
 const DEFAULT_PROTOCOL_VERSION = "2025-11-25";
 
@@ -47,6 +52,7 @@ export class McpProtocolAdapter {
   private readonly serverName: string;
   private readonly serverVersion: string;
   private readonly protocolVersion: string;
+  private readonly activeRequests = new Map<McpJsonRpcId, ActiveMcpRequest>();
 
   constructor(options: McpProtocolAdapterOptions = {}) {
     this.adapter = options.adapter ?? createMcpToolAdapter(options);
@@ -79,15 +85,30 @@ export class McpProtocolAdapter {
       return null;
     }
 
+    const controller = new AbortController();
+    this.activeRequests.set(message.id, {
+      controller,
+      method: message.method,
+    });
+
     try {
-      return successResponse(message.id, await this.handleRequest(message));
+      const result = await this.handleRequest(message, controller.signal);
+      if (controller.signal.aborted) {
+        return null;
+      }
+      return successResponse(message.id, result);
     } catch (err: any) {
+      if (controller.signal.aborted) {
+        return null;
+      }
       return errorResponse(
         message.id,
         err?.code || -32603,
         err?.message || String(err),
         err?.data
       );
+    } finally {
+      this.activeRequests.delete(message.id);
     }
   }
 
@@ -98,17 +119,24 @@ export class McpProtocolAdapter {
     if (request.method === "initialized") {
       return;
     }
+    if (request.method === "notifications/cancelled") {
+      this.cancelRequest(request.params);
+      return;
+    }
     throw methodNotFound(request.method);
   }
 
-  private async handleRequest(request: McpJsonRpcRequest) {
+  private async handleRequest(
+    request: McpJsonRpcRequest,
+    abortSignal: AbortSignal
+  ) {
     switch (request.method) {
       case "initialize":
         return this.initializeResult();
       case "tools/list":
         return { tools: this.adapter.listTools() };
       case "tools/call":
-        return this.callTool(request.params);
+        return this.callTool(request.params, abortSignal);
       case "tools/inspect":
       case "oxide/tools/inspect":
         return this.inspectTool(request.params);
@@ -120,6 +148,20 @@ export class McpProtocolAdapter {
       default:
         throw methodNotFound(request.method);
     }
+  }
+
+  private cancelRequest(params: Record<string, unknown> | undefined) {
+    const requestId = params?.requestId;
+    if (typeof requestId !== "string" && typeof requestId !== "number") {
+      return;
+    }
+
+    const activeRequest = this.activeRequests.get(requestId);
+    if (!activeRequest || activeRequest.method === "initialize") {
+      return;
+    }
+
+    activeRequest.controller.abort();
   }
 
   private initializeResult() {
@@ -137,7 +179,10 @@ export class McpProtocolAdapter {
     };
   }
 
-  private async callTool(params: Record<string, unknown> | undefined) {
+  private async callTool(
+    params: Record<string, unknown> | undefined,
+    abortSignal: AbortSignal
+  ) {
     const name = typeof params?.name === "string" ? params.name : "";
     if (!name) {
       throw invalidParams("tools/call requires params.name");
@@ -150,7 +195,10 @@ export class McpProtocolAdapter {
           ? params.input
           : {};
     const options = approvalOptions(params);
-    return this.adapter.callTool(name, toolInput, options);
+    return this.adapter.callTool(name, toolInput, {
+      ...options,
+      abortSignal,
+    });
   }
 
   private inspectTool(params: Record<string, unknown> | undefined) {
