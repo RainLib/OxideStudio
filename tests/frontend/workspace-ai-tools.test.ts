@@ -61,7 +61,9 @@ vi.mock("@/services/tauri", () => ({
     setCurrentSchema: mocks.setCurrentSchema,
   },
   storeService: {
+    saveResources: vi.fn(async () => undefined),
     getResources: vi.fn(async () => []),
+    replaceResources: vi.fn(async () => undefined),
     upsertResources: vi.fn(async () => undefined),
   },
   tableService: {

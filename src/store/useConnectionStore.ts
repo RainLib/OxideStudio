@@ -12,6 +12,9 @@ import {
   defaultDatabasePort,
 } from "@/lib/databaseDialect";
 
+const ACTIVE_PROJECT_KEY = "oxide-studio-active-project";
+const DEFAULT_PROJECT_ID = "sqls";
+
 export interface ConnectionConfig extends SavedConnection {
   host?: string;
   port?: number;
@@ -26,6 +29,7 @@ export interface ConnectionConfig extends SavedConnection {
 interface ConnectionState {
   connections: ConnectionConfig[];
   activeConnectionId: string | null;
+  connectedConnectionIds: string[];
   isConnected: boolean;
   isLoading: boolean;
   selectedConnection: ConnectionConfig | null;
@@ -61,17 +65,54 @@ function connectionUrlForConfig(config: ConnectionConfig) {
 
 let latestConnectAttempt = 0;
 
+function activeProjectId() {
+  try {
+    return localStorage.getItem(ACTIVE_PROJECT_KEY) || DEFAULT_PROJECT_ID;
+  } catch {
+    return DEFAULT_PROJECT_ID;
+  }
+}
+
+function scopeConnectionToActiveProject<T extends ConnectionConfig>(config: T): T {
+  return {
+    ...config,
+    projectId: config.projectId || activeProjectId(),
+  };
+}
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connections: [],
   activeConnectionId: null,
+  connectedConnectionIds: [],
   isConnected: false,
   isLoading: true,
   selectedConnection: null,
 
   loadConnections: async () => {
     try {
-      const connections = await connectionService.loadConnections();
-      set({ connections, isLoading: false });
+      const projectId = activeProjectId();
+      const connections = (await connectionService.loadConnections(projectId)).map(
+        (connection) => ({
+          ...connection,
+          projectId: connection.projectId || projectId,
+        })
+      );
+      const activeConnectionId = get().activeConnectionId;
+      const activeConnectionExists = connections.some(
+        (connection) => connection.id === activeConnectionId
+      );
+      const connectedConnectionIds = get().connectedConnectionIds.filter((id) =>
+        connections.some((connection) => connection.id === id)
+      );
+
+      set({
+        connections,
+        activeConnectionId: activeConnectionExists ? activeConnectionId : null,
+        connectedConnectionIds,
+        isConnected: activeConnectionExists && connectedConnectionIds.length > 0,
+        selectedConnection: null,
+        isLoading: false,
+      });
     } catch (e) {
       console.error("Failed to load connections:", e);
       set({ isLoading: false });
@@ -92,6 +133,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   createNewConnection: () => {
     const newConn: ConnectionConfig = {
       id: uuidv4(),
+      projectId: activeProjectId(),
       name: "New Connection",
       driver: DEFAULT_DATABASE_DRIVER,
       url: "",
@@ -117,27 +159,28 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   saveConnection: async (config) => {
+    const scopedConfig = scopeConnectionToActiveProject(config);
     const connections = get().connections;
-    const existingIndex = connections.findIndex((c) => c.id === config.id);
+    const existingIndex = connections.findIndex((c) => c.id === scopedConfig.id);
 
     let updatedConnections;
     if (existingIndex >= 0) {
       updatedConnections = [...connections];
-      updatedConnections[existingIndex] = config;
+      updatedConnections[existingIndex] = scopedConfig;
     } else {
-      updatedConnections = [...connections, config];
+      updatedConnections = [...connections, scopedConfig];
     }
 
     // Optimistic update
-    set({ connections: updatedConnections, selectedConnection: config });
+    set({ connections: updatedConnections, selectedConnection: scopedConfig });
 
     // Save to backend
-    await connectionService.saveConnections(updatedConnections);
+    await connectionService.saveConnections(updatedConnections, activeProjectId());
   },
 
   // Deprecated simplified add
   addConnection: async (config) => {
-    const newConn = { ...config, id: uuidv4() };
+    const newConn = scopeConnectionToActiveProject({ ...config, id: uuidv4() });
     await get().saveConnection(newConn);
   },
 
@@ -154,7 +197,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   connect: async (config) => {
-    const previousConnectionId = get().activeConnectionId;
     const attemptId = latestConnectAttempt + 1;
     latestConnectAttempt = attemptId;
     try {
@@ -178,21 +220,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         return null;
       }
 
-      // Reset only after the backend connection is ready so a failed switch
-      // does not wipe the currently usable workspace metadata.
-      useSchemaStore.getState().reset();
-      set({ activeConnectionId: config.id, isConnected: true });
-
-      if (previousConnectionId && previousConnectionId !== config.id) {
-        try {
-          await connectionService.disconnect(previousConnectionId);
-        } catch (disconnectError) {
-          console.warn(
-            "Failed to disconnect previous backend connection:",
-            disconnectError
-          );
-        }
-      }
+      // Clear only the active metadata after the backend connection is ready.
+      // Per-connection snapshots are preserved so switching back to an already
+      // opened source does not blank the explorer before cache hydration.
+      const schemaStore = useSchemaStore.getState();
+      schemaStore.snapshotActiveMetadata();
+      schemaStore.clearActiveMetadata();
+      set({
+        activeConnectionId: config.id,
+        connectedConnectionIds: Array.from(
+          new Set([...get().connectedConnectionIds, config.id])
+        ),
+        isConnected: true,
+      });
 
       return null; // No error
     } catch (e: any) {
@@ -205,7 +245,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   setActiveConnection: async (id: string) => {
-    const { activeConnectionId, isConnected, connections } = get();
+    const {
+      activeConnectionId,
+      connectedConnectionIds,
+      isConnected,
+      connections,
+    } = get();
     if (activeConnectionId === id && isConnected) {
       return null;
     }
@@ -215,6 +260,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const message = `Connection not found: ${id}`;
       console.warn(message);
       return message;
+    }
+
+    if (connectedConnectionIds.includes(id)) {
+      const schemaStore = useSchemaStore.getState();
+      schemaStore.snapshotActiveMetadata();
+      schemaStore.restoreConnectionSnapshot(id);
+      set({ activeConnectionId: id, isConnected: true });
+      return null;
     }
 
     return get().connect(connection);
@@ -231,7 +284,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       }
     }
 
-    useSchemaStore.getState().reset();
-    set({ activeConnectionId: null, isConnected: false });
+    const connectedConnectionIds = get().connectedConnectionIds.filter(
+      (id) => id !== connectionId
+    );
+
+    const schemaStore = useSchemaStore.getState();
+    schemaStore.snapshotActiveMetadata();
+    if (connectedConnectionIds[0]) {
+      schemaStore.restoreConnectionSnapshot(connectedConnectionIds[0]);
+    } else {
+      schemaStore.clearActiveMetadata();
+    }
+    set({
+      activeConnectionId: connectedConnectionIds[0] ?? null,
+      connectedConnectionIds,
+      isConnected: connectedConnectionIds.length > 0,
+    });
   },
 }));

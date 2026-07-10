@@ -52,6 +52,7 @@ import {
   APP_EVENT_RUN_CURRENT,
   APP_EVENT_FORMAT_SQL,
 } from "@/hooks/useShortcuts";
+import { editorExecutionConfirmation } from "@/lib/sqlExecutionGate";
 
 type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
@@ -197,7 +198,15 @@ export function QueryEditor() {
   const supportsTransactions = capabilities.supportsTransactions;
   const activeDocumentSql = activeTab?.sql || "";
   const monaco = useMonaco();
-  const { isReady: lspReady, client: lspClient } = useLspClient(); // Added LSP client state
+  const {
+    isReady: lspReady,
+    client: lspClient,
+    sessionKey: lspSessionKey,
+  } = useLspClient({
+    connectionId: effectiveConnectionId,
+    driver,
+    enabled: Boolean(activeTab && effectiveConnectionId && canUseLsp),
+  });
   const activeTransactionState = activeTab
     ? transactionStates[activeTab.id] || "idle"
     : "idle";
@@ -293,6 +302,11 @@ export function QueryEditor() {
       documentVersionsRef.current.clear();
     };
   }, [lspClient, monaco]);
+
+  useEffect(() => {
+    openedDocumentsRef.current.clear();
+    documentVersionsRef.current.clear();
+  }, [lspSessionKey]);
 
   useEffect(() => {
     const contexts: QueryTransactionTabContext[] = tabs.map((tab) => {
@@ -548,6 +562,12 @@ export function QueryEditor() {
     let unlisten: (() => void) | undefined;
 
     void listen<LspServerNotification>(LSP_NOTIFICATION_EVENT, (event) => {
+      if (
+        event.payload.sessionKey &&
+        event.payload.sessionKey !== lspSessionKey
+      ) {
+        return;
+      }
       if (event.payload.method !== "textDocument/publishDiagnostics") return;
       if (!isPublishDiagnosticsParams(event.payload.params)) return;
 
@@ -577,7 +597,7 @@ export function QueryEditor() {
       disposed = true;
       unlisten?.();
     };
-  }, [monaco, lspReady, setLspDiagnostics]);
+  }, [lspSessionKey, monaco, lspReady, setLspDiagnostics]);
 
   // Initialize targetSchema from currentSchema if not set
   useEffect(() => {
@@ -589,8 +609,15 @@ export function QueryEditor() {
   // Close dropdown on click outside - COMMENTED OUT UNUSED
   // useEffect(() => { ... }, []);
 
+  const confirmEditorExecution = (sql: string) => {
+    const confirmation = editorExecutionConfirmation(sql, driver);
+    if (!confirmation.required) return true;
+    return window.confirm(confirmation.message || "Execute this query?");
+  };
+
   const handleRun = () => {
     if (effectiveConnectionId && activeTab) {
+      if (!confirmEditorExecution(activeTab.sql)) return;
       const transactionId =
         supportsTransactions &&
         transactionMode === "manual" &&
@@ -624,9 +651,11 @@ export function QueryEditor() {
 
     // If something is selected, run only that.
     if (selectedText && selectedText.trim()) {
+      if (!confirmEditorExecution(selectedText)) return;
       runTabQuery(activeTab.id, effectiveConnectionId, selectedText, transactionId);
     } else {
       // Otherwise run the full tab query
+      if (!confirmEditorExecution(activeTab.sql)) return;
       runTabQuery(activeTab.id, effectiveConnectionId, undefined, transactionId);
     }
   };
@@ -760,7 +789,31 @@ export function QueryEditor() {
   if (!activeTab) return null;
 
   return (
-    <div className="relative h-full w-full bg-background flex flex-col">
+    <div className="relative h-full w-full bg-[hsl(var(--wb-editor))] flex flex-col">
+      <EditorActionBar
+        currentSchema={activeTab.targetSchema ?? currentSchema}
+        onSchemaChange={handleSchemaChange}
+        transactionMode={transactionMode}
+        transactionState={activeTransactionState}
+        onTransactionModeChange={handleTransactionModeChange}
+        onBeginTransaction={handleBeginTransaction}
+        onCommitTransaction={handleCommitTransaction}
+        onRollbackTransaction={handleRollbackTransaction}
+        onFormat={handleFormat}
+        onRun={handleRun}
+        onCancelRun={handleCancelRun}
+        isExecuting={activeTab.isExecuting}
+        isConnected={!!effectiveConnectionId}
+        history={history}
+        savedQueries={savedQueries}
+        onLoadQuery={(sql: string) => updateTabSql(activeTab.id, sql)}
+        onSaveQuery={(_name: string, _sql: string) =>
+          saveQuery(_name, activeTab.sql)
+        }
+        onDeleteQuery={deleteQuery}
+        supportsTransactions={supportsTransactions}
+      />
+
       {/* Editor */}
       <div className="flex-1 min-h-0">
         <Editor
@@ -794,8 +847,7 @@ export function QueryEditor() {
                 );
               }
             );
-            // Force theme update on mount
-            monaco.editor.setTheme(mode === "light" ? "vs" : "vs-dark");
+            monaco.editor.setTheme(mode === "light" ? "vs" : "oxide-dark");
 
           }}
           beforeMount={(monaco) => {
@@ -805,7 +857,12 @@ export function QueryEditor() {
               inherit: true,
               rules: [],
               colors: {
-                "editor.background": "#09090b", // zinc-950
+                "editor.background": "#1c1d20",
+                "editorLineNumber.foreground": "#6f7786",
+                "editorCursor.foreground": "#75a7ff",
+                "editor.selectionBackground": "#2c4573",
+                "editor.inactiveSelectionBackground": "#263247",
+                "editor.lineHighlightBackground": "#24272d",
               },
             });
           }}
@@ -813,31 +870,6 @@ export function QueryEditor() {
           options={QUERY_EDITOR_OPTIONS}
         />
       </div>
-
-      {/* Action Bar at Bottom */}
-      <EditorActionBar
-        currentSchema={activeTab.targetSchema ?? currentSchema}
-        onSchemaChange={handleSchemaChange}
-        transactionMode={transactionMode}
-        transactionState={activeTransactionState}
-        onTransactionModeChange={handleTransactionModeChange}
-        onBeginTransaction={handleBeginTransaction}
-        onCommitTransaction={handleCommitTransaction}
-        onRollbackTransaction={handleRollbackTransaction}
-        onFormat={handleFormat}
-        onRun={handleRun}
-        onCancelRun={handleCancelRun}
-        isExecuting={activeTab.isExecuting}
-        isConnected={!!effectiveConnectionId}
-        history={history}
-        savedQueries={savedQueries}
-        onLoadQuery={(sql: string) => updateTabSql(activeTab.id, sql)}
-        onSaveQuery={(_name: string, _sql: string) =>
-          saveQuery(_name, activeTab.sql)
-        }
-        onDeleteQuery={deleteQuery}
-        supportsTransactions={supportsTransactions}
-      />
     </div>
   );
 }

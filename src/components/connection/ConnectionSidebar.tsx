@@ -106,13 +106,13 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
   return (
     <div
       style={{ width: `${width}px` }}
-      className="border-r border-white/5 bg-[#18181b] flex flex-col h-full z-10"
+      className="border-r border-[hsl(var(--wb-border-subtle))] wb-panel flex flex-col h-full z-10"
     >
       {/* Header & Actions */}
-      <div className="p-4 pb-2 flex flex-col gap-3">
+      <div className="p-2 flex flex-col gap-2 border-b border-[hsl(var(--wb-border-subtle))]">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold tracking-tight text-foreground/90">
-            Connections
+          <h2 className="text-xs font-semibold text-[hsl(var(--wb-text))]">
+            Data Sources
           </h2>
           <div className="flex items-center gap-1">
             {allTags.length > 0 && (
@@ -121,10 +121,10 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
                 size="icon"
                 onClick={() => setShowTagFilters(!showTagFilters)}
                 className={cn(
-                  "h-7 w-7 rounded-lg transition-colors",
+                  "wb-icon-button",
                   showTagFilters || selectedTags.length > 0
-                    ? "text-primary bg-primary/10"
-                    : "text-muted-foreground hover:text-foreground hover:bg-white/5"
+                    ? "text-[hsl(var(--wb-text))] bg-[hsl(var(--wb-active))]"
+                    : ""
                 )}
                 title="Filter by tags"
               >
@@ -142,7 +142,7 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
               }}
               variant="ghost"
               size="icon"
-              className="h-7 w-7 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-lg transition-colors"
+              className="wb-icon-button"
             >
               <Plus size={16} strokeWidth={2.5} />
             </Button>
@@ -156,7 +156,7 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
             size={14}
           />
           <input
-            className="w-full bg-secondary/50 hover:bg-secondary/80 focus:bg-background text-foreground text-xs pl-9 pr-3 h-9 rounded-lg border border-transparent focus:border-border/60 focus:outline-none focus:ring-2 focus:ring-primary/10 transition-all placeholder:text-muted-foreground/50"
+            className="wb-field w-full pl-8 pr-3"
             placeholder="Search..."
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
@@ -196,7 +196,7 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2 space-y-1 custom-scrollbar">
+      <div className="flex-1 overflow-y-auto px-1 py-1 custom-scrollbar">
         {isLoading && (
           <div className="p-8 text-center text-xs text-muted-foreground/50 animate-pulse">
             Loading...
@@ -214,13 +214,13 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
           <div
             key={conn.id}
             className={cn(
-              "flex items-center gap-3 p-3 rounded-lg cursor-pointer group transition-all duration-200 border border-transparent",
+              "flex items-center gap-2 px-2 py-1.5 rounded-[4px] cursor-pointer group transition-colors border border-transparent",
               // Selected state
               selectedConnection?.id === conn.id
-                ? "bg-secondary shadow-sm ring-1 ring-border/50"
-                : "hover:bg-secondary/40",
+                ? "bg-[hsl(var(--wb-active))] text-[hsl(var(--wb-text))]"
+                : "hover:bg-[hsl(var(--wb-hover))]",
               // Active (Connected) state
-              activeConnectionId === conn.id && "bg-secondary/30"
+              activeConnectionId === conn.id && "border-[hsl(var(--wb-accent))]/40"
             )}
             onClick={() => selectConnection(conn.id)}
             onDoubleClick={() => {
@@ -230,21 +230,19 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
             {/* Status Indicator */}
             <div
               className={cn(
-                "w-1 h-10 rounded-full transition-all duration-500",
-                activeConnectionId === conn.id
-                  ? "bg-green-500 scale-y-100 opacity-100"
-                  : "bg-transparent scale-y-0 opacity-0 w-0"
+                "h-2 w-2 rounded-full shrink-0",
+                activeConnectionId === conn.id ? "bg-emerald-500" : "bg-transparent"
               )}
             />
 
             {/* Icon Box */}
             <div
               className={cn(
-                "w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 transition-all duration-300 shadow-sm",
+                "w-7 h-7 rounded-[4px] flex items-center justify-center shrink-0 transition-colors",
                 !conn.icon &&
                   !conn.color &&
                   defaultConnectionAccentClassName(conn.driver),
-                selectedConnection?.id === conn.id && "scale-105 shadow-md"
+                selectedConnection?.id === conn.id && "bg-[hsl(var(--wb-panel-raised))]"
               )}
               style={{
                 backgroundColor: conn.color ? `${conn.color}20` : undefined,
@@ -257,7 +255,7 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
             <div className="flex-1 overflow-hidden min-w-0 flex flex-col justify-center gap-2">
               <div
                 className={cn(
-                  "font-semibold text-sm truncate transition-colors leading-tight",
+                  "font-medium text-xs truncate transition-colors leading-tight",
                   selectedConnection?.id === conn.id
                     ? "text-foreground"
                     : "text-muted-foreground group-hover:text-foreground/90"
@@ -268,12 +266,12 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
 
               {/* Tags Display - Optimized */}
               {conn.tags && conn.tags.length > 0 ? (
-                <div className="flex items-center gap-1.5 overflow-hidden flex-wrap">
+                  <div className="flex items-center gap-1 overflow-hidden flex-wrap">
                   {conn.tags.slice(0, 3).map((tag: string) => (
                     <span
                       key={tag}
                       className={cn(
-                        "text-[10px] px-2 py-0.5 rounded-md leading-none whitespace-nowrap font-medium transition-all",
+                        "text-[10px] px-1.5 py-0.5 rounded-[3px] leading-none whitespace-nowrap font-medium transition-colors",
                         "bg-white/5 text-muted-foreground/90 border border-white/5 group-hover:border-white/10",
                         selectedConnection?.id === conn.id &&
                           "bg-primary/10 text-primary border-primary/20"

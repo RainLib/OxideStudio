@@ -1,8 +1,4 @@
-import { Button } from "@/components/ui/button";
-import {
-  createOpenAiCompatibleAssistantPlanner,
-  createOpenAiCompatibleResultSummarizer,
-} from "@/ai/assistant/openAiCompatiblePlanner";
+import { createAssistantPlannerSelection } from "@/ai/assistant/plannerRegistry";
 import { createAssistantRuntime } from "@/ai/assistant/runtime";
 import {
   createWorkspaceAiToolContext,
@@ -16,9 +12,10 @@ import type {
   AssistantToolCallResult,
   AssistantToolResultSummary,
 } from "@/ai/assistant/types";
-import { cn } from "@/lib/utils";
-import { ListChecks, Play, ShieldCheck, Sparkles, Square } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AssistantHeader } from "./assistant/AssistantHeader";
+import { AssistantPlanView } from "./assistant/AssistantPlanView";
+import { AssistantPromptBox } from "./assistant/AssistantPromptBox";
 
 export function AssistantSidebar() {
   const aiEnabled = useAiSettingsStore((state) => state.enabled);
@@ -26,6 +23,7 @@ export function AssistantSidebar() {
   const aiModel = useAiSettingsStore((state) => state.model);
   const aiApiKey = useAiSettingsStore((state) => state.apiKey);
   const aiTimeoutMs = useAiSettingsStore((state) => state.timeoutMs);
+  const aiPlannerKind = useAiSettingsStore((state) => state.plannerKind);
   const modelConfig = useMemo(() => {
     const baseUrl = aiBaseUrl.trim();
     const model = aiModel.trim();
@@ -37,23 +35,24 @@ export function AssistantSidebar() {
       timeoutMs: aiTimeoutMs,
     };
   }, [aiApiKey, aiBaseUrl, aiEnabled, aiModel, aiTimeoutMs]);
+  const plannerSelection = useMemo(
+    () =>
+      createAssistantPlannerSelection({
+        enabled: aiEnabled,
+        plannerKind: aiPlannerKind,
+        modelConfig,
+      }),
+    [aiEnabled, aiPlannerKind, modelConfig]
+  );
   const runtime = useMemo(
-    () => {
-      const planner = modelConfig
-        ? createOpenAiCompatibleAssistantPlanner(modelConfig)
-        : undefined;
-      const summarizeToolResults = modelConfig
-        ? createOpenAiCompatibleResultSummarizer(modelConfig)
-        : undefined;
-
-      return createAssistantRuntime({
+    () =>
+      createAssistantRuntime({
         registry: createWorkspaceAiToolRegistry(),
         createContext: createWorkspaceAiToolContext,
-        planner,
-        summarizeToolResults,
-      });
-    },
-    [modelConfig]
+        planner: plannerSelection.planner,
+        summarizeToolResults: plannerSelection.summarizeToolResults,
+      }),
+    [plannerSelection]
   );
   const { tabs, activeTabId } = useTabStore();
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
@@ -87,7 +86,7 @@ export function AssistantSidebar() {
   const activeContextLabel = activeTab
     ? `${activeTab.title}${selectedText ? " - selection" : ""}`
     : "No active tab";
-  const plannerLabel = modelConfig ? modelConfig.model : "Local planner";
+  const plannerLabel = plannerSelection.label;
 
   useEffect(
     () => () => {
@@ -259,194 +258,54 @@ export function AssistantSidebar() {
   };
 
   return (
-    <div className="flex h-full flex-col bg-background-tertiary">
-      <div className="border-b border-border bg-background-secondary/50 px-3 py-2">
-        <div className="flex items-start gap-2">
-          <Sparkles size={14} className="mt-0.5 shrink-0 text-primary" />
-          <div className="min-w-0">
-            <div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-              Assistant
-            </div>
-            <div className="truncate text-[10px] text-muted-foreground/70">
-              {activeContextLabel}
-            </div>
-            <div className="truncate text-[10px] text-muted-foreground/70">
-              {plannerLabel}
-            </div>
-          </div>
-        </div>
-      </div>
+    <div className="flex h-full flex-col wb-panel">
+      <AssistantHeader
+        activeContextLabel={activeContextLabel}
+        plannerLabel={plannerLabel}
+        plannerDetail={plannerSelection.detail}
+        isConfigured={plannerSelection.configured}
+        isRunning={isRunning}
+      />
 
-      <div className="shrink-0 border-b border-border bg-background-secondary/30 p-2">
-        <textarea
-          value={message}
-          onChange={(event) => setMessage(event.target.value)}
-          placeholder="Ask about this workspace"
-          className="min-h-24 w-full resize-none rounded-sm border border-border bg-background-tertiary px-2 py-2 text-[11px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/50 focus:border-primary"
+      <div className="custom-scrollbar min-h-0 flex-1 overflow-auto bg-[hsl(var(--wb-editor))]">
+        <AssistantPlanView
+          preparedTurn={preparedTurn}
+          runnableStepCount={runnableSteps.length}
+          activeStepId={activeStepId}
+          isRunning={isRunning}
+          turnSummary={turnSummary}
+          toolResults={toolResults}
+          toolSummaries={toolSummaries}
+          onRunStep={handleRunStep}
         />
-        <div className="mt-2 flex gap-2">
-          <Button
-            type="button"
-            size="sm"
-            className="h-7 flex-1 rounded-sm text-[11px]"
-            onClick={handlePrepare}
-            disabled={!message.trim() || isPlanning || isRunning}
-          >
-            {isPlanning ? "Planning" : "Plan"}
-          </Button>
-          {isRunning ? (
-            <Button
-              type="button"
-              variant="destructive"
-              size="sm"
-              className="h-7 rounded-sm px-2 text-[11px]"
-              onClick={handleStopRunning}
-              disabled={isCancelling}
-              title="Stop active assistant tool"
-            >
-              <Square size={12} className="mr-1 fill-current" />
-              {isCancelling ? "Stopping" : "Stop"}
-            </Button>
-          ) : (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-7 rounded-sm px-2 text-[11px]"
-              onClick={handleRunSafeSteps}
-              disabled={
-                !preparedTurn || safeSteps.length === 0 || isPlanning || isRunning
-              }
-              title="Run read-only steps"
-            >
-              <ListChecks size={12} className="mr-1" />
-              Run Safe
-            </Button>
-          )}
-        </div>
-      </div>
-
-      <div className="custom-scrollbar flex-1 overflow-auto p-2">
-        {preparedTurn && (
-          <div className="space-y-2">
-            <div className="rounded-sm border border-border bg-background-secondary/40 px-2 py-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                  {preparedTurn.intent}
-                </span>
-                <span className="text-[10px] text-muted-foreground">
-                  {preparedTurn.availableTools.length} tools / {preparedTurn.planner.mode}
-                </span>
-              </div>
-              {preparedTurn.warnings.length > 0 && (
-                <div className="mt-1 space-y-1">
-                  {preparedTurn.warnings.map((warning) => (
-                    <div key={warning} className="text-[10px] text-amber-500">
-                      {warning}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {runnableSteps.length === 0 && (
-                <div className="mt-1 text-[10px] text-muted-foreground">
-                  No executable tool step was planned.
-                </div>
-              )}
-            </div>
-
-            {turnSummary && (
-              <div className="rounded-sm border border-primary/25 bg-primary/5 px-2 py-1.5 text-[11px] text-foreground">
-                {turnSummary.message}
-                {turnSummary.warnings?.map((warning) => (
-                  <div key={warning} className="mt-1 text-[10px] text-amber-500">
-                    {warning}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {preparedTurn.suggestedPlan.map((step) => {
-              const result = toolResults[step.id];
-              const summary = toolSummaries[step.id];
-              return (
-                <div
-                  key={step.id}
-                  className="rounded-sm border border-border bg-background-secondary/30 p-2"
-                >
-                  <div className="flex items-start gap-2">
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-[11px] text-foreground">
-                        {step.title}
-                      </div>
-                      {step.toolName && (
-                        <div className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
-                          {step.toolName}
-                        </div>
-                      )}
-                    </div>
-                    {step.toolName && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className={cn(
-                          "h-6 w-6 rounded-sm text-muted-foreground hover:text-primary",
-                          step.requiresApproval && "text-amber-500 hover:text-amber-400",
-                          activeStepId === step.id && "animate-pulse"
-                        )}
-                        onClick={() => handleRunStep(step, step.requiresApproval)}
-                        disabled={isRunning}
-                        title={step.requiresApproval ? "Approve and run" : "Run"}
-                      >
-                        {step.requiresApproval ? (
-                          <ShieldCheck size={12} />
-                        ) : (
-                          <Play size={12} />
-                        )}
-                      </Button>
-                    )}
-                  </div>
-
-                  {step.requiresApproval && (
-                    <div className="mt-1 text-[10px] text-amber-500">
-                      Approval required
-                    </div>
-                  )}
-
-                  {result !== undefined && (
-                    <div className="mt-2 space-y-1.5">
-                      {summary && (
-                        <div className="rounded-sm border border-border/60 bg-background-tertiary px-2 py-1.5 text-[10px] text-muted-foreground">
-                          {summary.message}
-                          {summary.warnings?.map((warning) => (
-                            <div key={warning} className="mt-1 text-amber-500">
-                              {warning}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      <pre className="max-h-44 overflow-auto rounded-sm bg-background-tertiary p-2 text-[10px] text-muted-foreground">
-                        {JSON.stringify(result, null, 2)}
-                      </pre>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {!preparedTurn && (
-          <div className="p-4 text-center text-xs italic text-gray-500">
-            No plan
-          </div>
-        )}
 
         {error && (
-          <div className="mt-2 rounded-sm border border-destructive/30 bg-destructive/10 p-2 text-[11px] text-destructive">
+          <div className="mx-2 mb-2 border border-destructive/30 bg-destructive/10 p-2 text-[11px] text-destructive">
             {error}
           </div>
         )}
       </div>
+
+      <AssistantPromptBox
+        message={message}
+        onMessageChange={setMessage}
+        onPlan={handlePrepare}
+        onRunSafe={handleRunSafeSteps}
+        onStop={handleStopRunning}
+        activeContextLabel={activeContextLabel}
+        plannerLabel={plannerLabel}
+        hasSelection={Boolean(selectedText)}
+        safeStepCount={safeSteps.length}
+        isPlanning={isPlanning}
+        isRunning={isRunning}
+        isCancelling={isCancelling}
+        canRunSafe={
+          Boolean(preparedTurn) &&
+          safeSteps.length > 0 &&
+          !isPlanning &&
+          !isRunning
+        }
+      />
     </div>
   );
 }

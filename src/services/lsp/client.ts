@@ -94,6 +94,19 @@ class LspClient {
   private initialized = false;
   private binaryPath: string | null = null;
   private initializationPromise: Promise<void> | null = null;
+  private sessionKey: string;
+
+  constructor(sessionKey = "default") {
+    this.sessionKey = sessionKey;
+  }
+
+  private requestSessionPayload() {
+    return this.sessionKey === "default" ? {} : { session_key: this.sessionKey };
+  }
+
+  private commandSessionPayload() {
+    return this.sessionKey === "default" ? {} : { sessionKey: this.sessionKey };
+  }
 
   /**
    * Initialize the LSP server
@@ -126,7 +139,10 @@ class LspClient {
   private async initializeServer(binaryPath: string): Promise<void> {
     try {
       const result = await invoke<string>("lsp_initialize", {
-        request: { binary_path: binaryPath },
+        request: {
+          binary_path: binaryPath,
+          ...this.requestSessionPayload(),
+        },
       });
 
       this.initialized = true;
@@ -144,7 +160,9 @@ class LspClient {
    */
   async shutdown(): Promise<void> {
     try {
-      const result = await invoke<string>("lsp_shutdown");
+      const result = await invoke<string>("lsp_shutdown", {
+        ...this.commandSessionPayload(),
+      });
       this.initialized = false;
       this.initializationPromise = null;
       console.log("[LSP] Shutdown:", result);
@@ -159,7 +177,9 @@ class LspClient {
    */
   async isRunning(): Promise<boolean> {
     try {
-      return await invoke<boolean>("lsp_is_running");
+      return await invoke<boolean>("lsp_is_running", {
+        ...this.commandSessionPayload(),
+      });
     } catch (error) {
       console.error("[LSP] Status check failed:", error);
       return false;
@@ -191,7 +211,13 @@ class LspClient {
       });
 
       const response = await invoke<CompletionResponse>("lsp_get_completions", {
-        request: { uri, line, character, context },
+        request: {
+          ...this.requestSessionPayload(),
+          uri,
+          line,
+          character,
+          context,
+        },
       });
 
       console.log(`[LSP] ← Response: Got ${response.items.length} items`);
@@ -215,7 +241,7 @@ class LspClient {
 
     try {
       const response = await invoke<unknown>("lsp_hover", {
-        request: { uri, line, character },
+        request: { ...this.requestSessionPayload(), uri, line, character },
       });
       if (!isObject(response)) return null;
 
@@ -241,7 +267,7 @@ class LspClient {
 
     try {
       const response = await invoke<unknown>("lsp_goto_definition", {
-        request: { uri, line, character },
+        request: { ...this.requestSessionPayload(), uri, line, character },
       });
       return parseLocations(response);
     } catch (error) {
@@ -259,7 +285,7 @@ class LspClient {
 
     try {
       const response = await invoke<unknown>("lsp_references", {
-        request: { uri, line, character },
+        request: { ...this.requestSessionPayload(), uri, line, character },
       });
       return parseLocations(response);
     } catch (error) {
@@ -278,6 +304,7 @@ class LspClient {
     try {
       const response = await invoke<unknown>("lsp_formatting", {
         request: {
+          ...this.requestSessionPayload(),
           uri,
           tab_size: tabSize,
           insert_spaces: insertSpaces,
@@ -326,6 +353,7 @@ class LspClient {
       // Final structure will be: { settings: { connections: [...], fileSchemas: {...} } }
       await invoke<string>("lsp_did_change_configuration", {
         settings: config, // Don't wrap in sqls - send directly
+        ...this.commandSessionPayload(),
       });
 
       const schemas = Array.isArray(config?.schemas) ? config.schemas : [];
@@ -390,6 +418,7 @@ class LspClient {
         languageId,
         version,
         text,
+        ...this.commandSessionPayload(),
       });
       console.log("[LSP] ✓ didOpen sent");
     } catch (e) {
@@ -409,7 +438,12 @@ class LspClient {
         textLength: text.length,
       });
 
-      await invoke("lsp_did_change", { uri, version, text });
+      await invoke("lsp_did_change", {
+        uri,
+        version,
+        text,
+        ...this.commandSessionPayload(),
+      });
       console.log("[LSP] ✓ didChange sent");
     } catch (e) {
       console.error("[LSP] ✗ didChange failed:", e);
@@ -423,7 +457,10 @@ class LspClient {
     if (!this.initialized) return;
     try {
       console.log(`[LSP] → Notification: textDocument/didClose`, { uri });
-      await invoke("lsp_did_close", { uri });
+      await invoke("lsp_did_close", {
+        uri,
+        ...this.commandSessionPayload(),
+      });
       console.log("[LSP] ✓ didClose sent");
     } catch (e) {
       console.error("[LSP] ✗ didClose failed:", e);
@@ -450,6 +487,10 @@ class LspClient {
    */
   getBinaryPath(): string | null {
     return this.binaryPath;
+  }
+
+  getSessionKey(): string {
+    return this.sessionKey;
   }
 }
 

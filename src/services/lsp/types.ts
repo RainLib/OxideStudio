@@ -81,6 +81,7 @@ export interface HoverInfo {
 }
 
 export interface LspServerNotification {
+  sessionKey?: string;
   method: string;
   params: unknown;
 }

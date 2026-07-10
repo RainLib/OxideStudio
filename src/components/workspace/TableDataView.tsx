@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTabStore } from "@/store/useTabStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
+import { useTaskStore } from "@/store/useTaskStore";
 import { databaseService, schemaService, tableService } from "@/services/tauri";
 import type {
   ColumnInfo,
@@ -27,6 +28,7 @@ import {
   RefreshCw,
   TableProperties,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { CreateConstraintDialog } from "./CreateConstraintDialog";
 import { CreateIndexDialog } from "./CreateIndexDialog";
@@ -39,6 +41,7 @@ import {
 } from "@/lib/databaseDialect";
 
 export function TableDataView() {
+  const importInputRef = useRef<HTMLInputElement | null>(null);
   const {
     tabs,
     activeTabId,
@@ -49,6 +52,7 @@ export function TableDataView() {
   } = useTabStore();
   const { activeConnectionId, connections } = useConnectionStore();
   const { bumpMetadataVersion } = useSchemaStore();
+  const { startTask, updateTask, finishTask, failTask } = useTaskStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const tabConnectionId = activeTab?.connectionId || activeConnectionId;
   const activeConnection = connections.find((c) => c.id === tabConnectionId);
@@ -304,6 +308,12 @@ export function TableDataView() {
           }
         : undefined;
 
+    const taskId = startTask({
+      kind: "export",
+      title: `Export ${activeTab.tableName}`,
+      detail: format.toUpperCase(),
+    });
+
     try {
       const exported = await tableService.exportTableData(
         tabConnectionId,
@@ -315,9 +325,132 @@ export function TableDataView() {
         activeTab.tableFilters || undefined,
         sort
       );
+      finishTask(
+        taskId,
+        `${exported.rowsExported.toLocaleString()} rows to ${format.toUpperCase()}`
+      );
       await revealItemInDir(exported.filePath);
     } catch (error) {
+      failTask(taskId, error instanceof Error ? error.message : String(error));
       console.error("Table export failed:", error);
+    }
+  };
+
+  const parseCsv = (content: string) => {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let cell = "";
+    let inQuotes = false;
+
+    for (let index = 0; index < content.length; index += 1) {
+      const char = content[index];
+      const nextChar = content[index + 1];
+
+      if (char === '"' && inQuotes && nextChar === '"') {
+        cell += '"';
+        index += 1;
+        continue;
+      }
+
+      if (char === '"') {
+        inQuotes = !inQuotes;
+        continue;
+      }
+
+      if (char === "," && !inQuotes) {
+        row.push(cell);
+        cell = "";
+        continue;
+      }
+
+      if ((char === "\n" || char === "\r") && !inQuotes) {
+        if (char === "\r" && nextChar === "\n") {
+          index += 1;
+        }
+        row.push(cell);
+        if (row.some((value) => value.length > 0)) {
+          rows.push(row);
+        }
+        row = [];
+        cell = "";
+        continue;
+      }
+
+      cell += char;
+    }
+
+    row.push(cell);
+    if (row.some((value) => value.length > 0)) {
+      rows.push(row);
+    }
+
+    return rows;
+  };
+
+  const handleImportCsv = async (file: File) => {
+    if (
+      !tabConnectionId ||
+      !activeTab.tableName ||
+      !activeTab.schemaName ||
+      activeTab.isExecuting ||
+      isReadOnlyRelation
+    ) {
+      return;
+    }
+
+    const taskId = startTask({
+      kind: "import",
+      title: `Import ${file.name}`,
+      detail: activeTab.tableName,
+    });
+
+    const content = await file.text();
+    const rows = parseCsv(content);
+    const [headers, ...dataRows] = rows;
+    const normalizedHeaders = (headers || []).map((header) => header.trim());
+    if (normalizedHeaders.length === 0 || dataRows.length === 0) {
+      failTask(taskId, "CSV file has no importable rows");
+      return;
+    }
+
+    updateTask(taskId, {
+      detail: `${dataRows.length.toLocaleString()} rows parsed`,
+    });
+
+    const knownColumns = new Set(
+      (metadataColumns.length > 0
+        ? metadataColumns.map((column) => column.name)
+        : normalizedHeaders
+      ).map((column) => column.toLowerCase())
+    );
+    const insertRows = dataRows.map((values) =>
+      normalizedHeaders.reduce<Record<string, unknown>>((record, header, index) => {
+        if (!header || !knownColumns.has(header.toLowerCase())) return record;
+        const value = values[index] ?? "";
+        record[header] = value === "" ? null : value;
+        return record;
+      }, {})
+    );
+
+    const usableRows = insertRows.filter((row) => Object.keys(row).length > 0);
+    if (usableRows.length === 0) {
+      failTask(taskId, "CSV headers do not match table columns");
+      return;
+    }
+
+    try {
+      await tableService.mutateTableRows(
+        tabConnectionId,
+        driver,
+        activeTab.schemaName,
+        activeTab.tableName,
+        usableRows
+      );
+      finishTask(taskId, `${usableRows.length.toLocaleString()} rows imported`);
+      await loadTablePage(activeTab.id, page);
+    } catch (error) {
+      failTask(taskId, error instanceof Error ? error.message : String(error));
+      console.error("CSV import failed:", error);
     }
   };
 
@@ -607,7 +740,7 @@ export function TableDataView() {
   };
 
   return (
-    <div className="flex flex-col h-full bg-background">
+    <div className="flex flex-col h-full wb-grid-surface">
       {/* Query Builder Filter Row */}
       {(result || fallbackColumns.length > 0) && (
         <GridFilterRow
@@ -624,9 +757,22 @@ export function TableDataView() {
         />
       )}
 
-      <div className="shrink-0 border-b border-border bg-background px-3 py-2">
+      <div className="shrink-0 border-b wb-data-toolbar px-3 py-2">
         <div className="flex min-w-0 items-center justify-between gap-3">
-          <div className="flex min-w-0 flex-1 items-center gap-3 text-xs text-muted-foreground">
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.currentTarget.files?.[0];
+              event.currentTarget.value = "";
+              if (file) {
+                void handleImportCsv(file);
+              }
+            }}
+          />
+          <div className="flex min-w-0 flex-1 items-center gap-3 text-xs text-[hsl(var(--wb-text-muted))]">
             <span className="flex min-w-0 items-center gap-1.5">
               <TableProperties size={13} className="shrink-0" />
               <span className="truncate">
@@ -650,16 +796,56 @@ export function TableDataView() {
               {foreignKeys.length.toLocaleString()} foreign keys
             </span>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 shrink-0 px-2 text-xs"
-            onClick={() => setShowStructure((value) => !value)}
-            title="Toggle table structure"
-          >
-            <ListTree size={13} className="mr-1.5" />
-            Structure
-          </Button>
+          <div className="flex shrink-0 items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 shrink-0 px-2 text-xs text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))]"
+              onClick={() => importInputRef.current?.click()}
+              disabled={activeTab.isExecuting || isReadOnlyRelation}
+              title={
+                isReadOnlyRelation
+                  ? "Import is disabled for read-only objects"
+                  : "Import CSV into this table"
+              }
+            >
+              <Upload size={13} className="mr-1.5" />
+              Import
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 shrink-0 px-2 text-xs text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))]"
+              onClick={() => void handleExport("csv")}
+              disabled={activeTab.isExecuting}
+              title="Export table data as CSV"
+            >
+              <Download size={13} className="mr-1.5" />
+              CSV
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 shrink-0 px-2 text-xs text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))]"
+              onClick={() => void handleExport("json")}
+              disabled={activeTab.isExecuting}
+              title="Export table data as JSON"
+            >
+              <FileJson size={13} className="mr-1.5" />
+              JSON
+            </Button>
+            <div className="mx-1 h-4 w-px bg-[hsl(var(--wb-border-subtle))]" />
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 shrink-0 px-2 text-xs text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))]"
+              onClick={() => setShowStructure((value) => !value)}
+              title="Toggle table structure"
+            >
+              <ListTree size={13} className="mr-1.5" />
+              Structure
+            </Button>
+          </div>
         </div>
         {metadataError && (
           <div className="mt-1 truncate text-xs text-destructive">
@@ -667,14 +853,14 @@ export function TableDataView() {
           </div>
         )}
         {isMetadataLoading && !metadataError && (
-          <div className="mt-1 text-xs text-muted-foreground">
+          <div className="mt-1 text-xs text-[hsl(var(--wb-text-muted))]">
             Loading structure...
           </div>
         )}
       </div>
 
       {showStructure && (
-        <div className="grid max-h-44 shrink-0 grid-cols-3 gap-4 overflow-auto border-b border-border bg-background px-3 py-2 text-xs">
+        <div className="grid max-h-44 shrink-0 grid-cols-3 gap-4 overflow-auto border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 py-2 text-xs">
           <div className="min-w-0">
             <div className="mb-1 font-medium text-foreground">Columns</div>
             {metadataColumns.length === 0 ? (
@@ -843,8 +1029,8 @@ export function TableDataView() {
         </div>
       )}
 
-      <div className="h-9 shrink-0 border-b border-border bg-background flex items-center justify-between px-3">
-        <div className="text-xs text-muted-foreground">
+      <div className="h-9 shrink-0 border-b wb-data-toolbar flex items-center justify-between px-3">
+        <div className="text-xs text-[hsl(var(--wb-text-muted))]">
           {totalRows == null
             ? `${visibleRows.toLocaleString()} rows`
             : `${startRow.toLocaleString()}-${endRow.toLocaleString()} of ${totalRows.toLocaleString()}`}
@@ -853,7 +1039,7 @@ export function TableDataView() {
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            className="wb-icon-button h-7 w-7"
             disabled={activeTab.isExecuting}
             onClick={() => void handleExport("csv")}
             title="Export CSV"
@@ -863,7 +1049,7 @@ export function TableDataView() {
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            className="wb-icon-button h-7 w-7"
             disabled={activeTab.isExecuting}
             onClick={() => void handleExport("json")}
             title="Export JSON"
@@ -873,7 +1059,7 @@ export function TableDataView() {
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            className="wb-icon-button h-7 w-7"
             disabled={activeTab.isExecuting}
             onClick={handleRefresh}
             title="Refresh page"
@@ -883,20 +1069,20 @@ export function TableDataView() {
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            className="wb-icon-button h-7 w-7"
             disabled={!canPrevious}
             onClick={handlePrevious}
             title="Previous page"
           >
             <ChevronLeft size={14} />
           </Button>
-          <span className="min-w-14 text-center text-xs text-muted-foreground">
+          <span className="min-w-14 text-center text-xs text-[hsl(var(--wb-text-muted))]">
             {page + 1}
           </span>
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            className="wb-icon-button h-7 w-7"
             disabled={!canNext}
             onClick={handleNext}
             title="Next page"
@@ -907,7 +1093,7 @@ export function TableDataView() {
       </div>
 
       {/* Main Grid View */}
-      <div className="flex-1 min-h-0 bg-background-tertiary">
+      <div className="flex-1 min-h-0 wb-grid-surface">
         <DataGrid
           overrideColumns={fallbackColumns}
           readOnly={isReadOnlyRelation}

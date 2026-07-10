@@ -18,15 +18,7 @@ vi.mock("@/theme/useTheme", () => ({
 }));
 
 vi.mock("@/components/workspace/SchemaSidebar", () => ({
-  SchemaSidebar: () => <div data-testid="schema-sidebar" />,
-}));
-
-vi.mock("@/components/workspace/HistorySidebar", () => ({
-  HistorySidebar: () => <div data-testid="history-sidebar" />,
-}));
-
-vi.mock("@/components/workspace/SavedQueriesSidebar", () => ({
-  SavedQueriesSidebar: () => <div data-testid="saved-queries-sidebar" />,
+  SchemaSidebar: () => <div data-testid="schema-sidebar">Database Explorer</div>,
 }));
 
 vi.mock("@/components/workspace/QueryEditor", () => ({
@@ -63,13 +55,7 @@ vi.mock("@/components/workspace/AssistantSidebar", () => ({
 
 const initialTabState = useTabStore.getState();
 
-function buttonWithText(container: HTMLElement, text: string) {
-  return Array.from(container.querySelectorAll("button")).find((button) =>
-    button.textContent?.includes(text)
-  );
-}
-
-describe("workspace assistant entry", () => {
+describe("database workspace entry", () => {
   let container: HTMLDivElement;
   let root: Root | null = null;
 
@@ -78,19 +64,8 @@ describe("workspace assistant entry", () => {
     document.body.appendChild(container);
     useTabStore.setState({
       ...initialTabState,
-      tabs: [
-        {
-          id: "query-1",
-          title: "Query #1",
-          type: "query",
-          sql: "select 1",
-          results: null,
-          isExecuting: false,
-          error: null,
-          isPinned: false,
-        },
-      ],
-      activeTabId: "query-1",
+      tabs: [],
+      activeTabId: null,
       closedTabsStack: [],
     });
   });
@@ -102,7 +77,7 @@ describe("workspace assistant entry", () => {
     useTabStore.setState(initialTabState, true);
   });
 
-  it("keeps assistant out of the left activity bar", async () => {
+  it("renders the database explorer as the left panel without an activity rail", async () => {
     await act(async () => {
       root = createRoot(container);
       root.render(
@@ -116,39 +91,27 @@ describe("workspace assistant entry", () => {
       );
     });
 
+    expect(container.querySelector("[data-testid='schema-sidebar']")).toBeTruthy();
     const buttonTitles = Array.from(container.querySelectorAll("button"))
       .map((button) => button.getAttribute("title") || "")
       .filter(Boolean);
-
-    expect(buttonTitles).toEqual(
-      expect.arrayContaining([
-        "Entities (Tables)",
-        "History",
-        "Saved Queries",
-      ])
-    );
     expect(buttonTitles.some((title) => /assistant|ai/i.test(title))).toBe(false);
   });
 
-  it("exposes a working assistant toggle in the top app bar", async () => {
+  it("opens directly into an empty database workspace", async () => {
     await act(async () => {
       root = createRoot(container);
       root.render(<WorkspacePage />);
     });
 
-    const assistantToggle = buttonWithText(container, "Assistant");
-    expect(assistantToggle).toBeTruthy();
-    expect(assistantToggle?.getAttribute("title")).toBe("Hide AI Assistant");
-    expect(assistantToggle?.getAttribute("aria-pressed")).toBe("true");
+    expect(container.querySelector("[data-testid='schema-sidebar']")).toBeTruthy();
+    expect(container.querySelector("[data-testid='query-shortcuts']")).toBeTruthy();
+    expect(container.querySelector("[data-testid='tab-bar']")).toBeFalsy();
     expect(container.querySelector("[data-testid='assistant-sidebar']")).toBeTruthy();
-
-    await act(async () => {
-      assistantToggle?.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true })
-      );
-    });
-
-    expect(assistantToggle?.getAttribute("title")).toBe("Show AI Assistant");
-    expect(assistantToggle?.getAttribute("aria-pressed")).toBe("false");
+    expect(
+      Array.from(container.querySelectorAll("button")).some(
+        (button) => button.getAttribute("title") === "Toggle AI Assistant"
+      )
+    ).toBe(true);
   });
 });

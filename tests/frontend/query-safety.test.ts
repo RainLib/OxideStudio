@@ -4,6 +4,10 @@ import {
   looksAiQueryDestructive,
   looksAiQueryReadOnly,
 } from "@/lib/querySafety";
+import {
+  editorExecutionConfirmation,
+  evaluateSqlExecutionIntent,
+} from "@/lib/sqlExecutionGate";
 
 describe("AI query safety classification", () => {
   it("classifies relational reads, writes, and destructive SQL", () => {
@@ -147,5 +151,76 @@ describe("AI query safety classification", () => {
     expect(
       classifyAiQuerySafety('{"delete":{"_index":"users","_id":"1"}}', "elasticsearch")
     ).toBe("destructive");
+  });
+});
+
+describe("SQL execution gate", () => {
+  it("blocks mutating SQL from read-only execution", () => {
+    const decision = evaluateSqlExecutionIntent({
+      sql: "delete from users where id = 1",
+      driver: "postgres",
+      intent: "read",
+      approved: true,
+    });
+
+    expect(decision).toMatchObject({
+      safety: "destructive",
+      allowed: false,
+      requiresApproval: false,
+    });
+  });
+
+  it("keeps destructive SQL out of write execution", () => {
+    const decision = evaluateSqlExecutionIntent({
+      sql: "drop table users",
+      driver: "postgres",
+      intent: "write",
+      approved: true,
+    });
+
+    expect(decision).toMatchObject({
+      safety: "destructive",
+      allowed: false,
+    });
+  });
+
+  it("requires approval for destructive execution", () => {
+    expect(
+      evaluateSqlExecutionIntent({
+        sql: "truncate table users",
+        driver: "postgres",
+        intent: "destructive",
+      })
+    ).toMatchObject({
+      safety: "destructive",
+      allowed: false,
+      requiresApproval: true,
+    });
+
+    expect(
+      evaluateSqlExecutionIntent({
+        sql: "truncate table users",
+        driver: "postgres",
+        intent: "destructive",
+        approved: true,
+      })
+    ).toMatchObject({
+      safety: "destructive",
+      allowed: true,
+      requiresApproval: false,
+    });
+  });
+
+  it("only prompts editor execution for destructive SQL", () => {
+    expect(
+      editorExecutionConfirmation("select * from users", "postgres")
+    ).toMatchObject({
+      required: false,
+    });
+    expect(
+      editorExecutionConfirmation("delete from users", "postgres")
+    ).toMatchObject({
+      required: true,
+    });
   });
 });

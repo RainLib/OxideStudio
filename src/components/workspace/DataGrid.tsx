@@ -54,6 +54,24 @@ function exportFilename(title: string | undefined, extension: "csv" | "json") {
   return `${safeTitle || "query-result"}.${extension}`;
 }
 
+function cssHslVar(name: string, fallback: string) {
+  if (typeof window === "undefined") return fallback;
+  const value = window
+    .getComputedStyle(document.documentElement)
+    .getPropertyValue(name)
+    .trim();
+  return value ? `hsl(${value})` : fallback;
+}
+
+function cssHslVarAlpha(name: string, alpha: number, fallback: string) {
+  if (typeof window === "undefined") return fallback;
+  const value = window
+    .getComputedStyle(document.documentElement)
+    .getPropertyValue(name)
+    .trim();
+  return value ? `hsl(${value} / ${alpha})` : fallback;
+}
+
 export function DataGrid({
   globalFilter = "",
   columnFilters = [],
@@ -862,65 +880,99 @@ export function DataGrid({
   // Draw borders after cells are rendered
 
   const { mode } = useTheme();
-  // Create a dynamic grid theme that pulls from CSS variables
+  // Keep the canvas palette aligned with the workbench CSS tokens.
   const gridTheme: Partial<Theme> = useMemo(
     () => ({
-      // Premium Dark Palette (Zinc based)
-      accentColor: "#3b82f6", // Bright Blue for selection border
-      accentLight: "rgba(59, 130, 246, 0.2)", // Blue tint (Used for selected Row/Column Headers)
+      accentColor: cssHslVar(
+        "--wb-accent",
+        mode === "dark" ? "#75a7ff" : "#2f65d7"
+      ),
+      accentLight: cssHslVarAlpha(
+        "--wb-accent",
+        mode === "dark" ? 0.24 : 0.16,
+        mode === "dark"
+          ? "rgba(91, 137, 214, 0.24)"
+          : "rgba(47, 101, 215, 0.16)"
+      ),
 
-      // Deep background for cells
-      bgCell: mode === "dark" ? "#09090b" : "#ffffff",
-      bgCellMedium: mode === "dark" ? "#18181b" : "#f4f4f5", // Zinc-900 / Zinc-100
+      bgCell: cssHslVar("--wb-grid", mode === "dark" ? "#1e1f22" : "#ffffff"),
+      bgCellMedium: cssHslVar(
+        "--wb-editor",
+        mode === "dark" ? "#1f2125" : "#f5f7fb"
+      ),
 
-      // Slightly lighter headers
-      bgHeader: mode === "dark" ? "#18181b" : "#f4f4f5",
-      bgHeaderHasFocus: mode === "dark" ? "#27272a" : "#e4e4e7",
-      bgHeaderHovered: mode === "dark" ? "#3f3f46" : "#d4d4d8", // Lighter (Zinc 700/300) for distinct hover effect
+      bgHeader: cssHslVar(
+        "--wb-grid-header",
+        mode === "dark" ? "#24272d" : "#eef2f8"
+      ),
+      bgHeaderHasFocus: cssHslVarAlpha(
+        "--wb-active-strong",
+        mode === "dark" ? 0.88 : 0.82,
+        mode === "dark" ? "#2d3a56" : "#dfe8f7"
+      ),
+      bgHeaderHovered: cssHslVar(
+        "--wb-hover",
+        mode === "dark" ? "#303846" : "#d8e3f5"
+      ),
 
-      // Text Colors - High Contrast
-      textHeader: mode === "dark" ? "#a1a1aa" : "#52525b", // Zinc-400 / Zinc-600
-      textGroupHeader: mode === "dark" ? "#71717a" : "#a1a1aa",
+      textHeader: cssHslVar(
+        "--wb-text-muted",
+        mode === "dark" ? "#aeb7c8" : "#4b5565"
+      ),
+      textGroupHeader: cssHslVar(
+        "--wb-text-muted",
+        mode === "dark" ? "#828b9b" : "#7a8393"
+      ),
+      textDark: cssHslVar("--wb-text", mode === "dark" ? "#d9dee8" : "#111827"),
+      textMedium: cssHslVar(
+        "--wb-text-muted",
+        mode === "dark" ? "#a7afbd" : "#596274"
+      ),
+      textLight: cssHslVarAlpha(
+        "--wb-text-muted",
+        mode === "dark" ? 0.72 : 0.78,
+        mode === "dark" ? "#7a8393" : "#8a93a3"
+      ),
+      textBubble: cssHslVar(
+        "--wb-text",
+        mode === "dark" ? "#d9dee8" : "#111827"
+      ),
 
-      // Main data text - pure white in dark mode for pop
-      textDark: mode === "dark" ? "#ffffff" : "#09090b",
+      borderColor: cssHslVar(
+        "--wb-border-subtle",
+        mode === "dark" ? "#343943" : "#dce3ee"
+      ),
+      drilldownBorder: cssHslVar(
+        "--wb-border-subtle",
+        mode === "dark" ? "#343943" : "#dce3ee"
+      ),
 
-      textMedium: mode === "dark" ? "#a1a1aa" : "#71717a",
-      textLight: mode === "dark" ? "#71717a" : "#a1a1aa",
-      textBubble: mode === "dark" ? "#ffffff" : "#09090b",
+      linkColor: cssHslVar(
+        "--wb-accent",
+        mode === "dark" ? "#75a7ff" : "#2f65d7"
+      ),
 
-      // Subtle Borders
-      borderColor: mode === "dark" ? "#27272a" : "#e4e4e7", // Zinc-800 / Zinc-200
-      drilldownBorder: mode === "dark" ? "#27272a" : "#e4e4e7",
-
-      linkColor: "hsl(var(--primary))",
-
-      // Typography
       headerFontStyle: "600 13px",
       baseFontStyle: "13px",
       fontFamily: "Inter, system-ui, sans-serif",
       editorFontSize: "13px",
-      lineHeight: 1.5, // Slightly more breathing room
+      lineHeight: 1.45,
 
-      // Row marker styling
-      bgIconHeader: mode === "dark" ? "#09090b" : "#ffffff", // Blend with bgCell
-      fgIconHeader: mode === "dark" ? "#a1a1aa" : "#71717a",
-
-      // Selection STYLING
-      // bgBubble: The background of non-selected cells in specific contexts? Usually transparent or match bgCell.
-      bgBubble: mode === "dark" ? "#09090b" : "#ffffff",
-
-      // bgBubbleSelected: The background of SELECTED cells.
-      // User Req: "background is original color" -> Transparent fill.
+      bgIconHeader: cssHslVar(
+        "--wb-editor",
+        mode === "dark" ? "#202328" : "#f7f9fc"
+      ),
+      fgIconHeader: cssHslVar(
+        "--wb-text-muted",
+        mode === "dark" ? "#aeb7c8" : "#596274"
+      ),
+      bgBubble: cssHslVar(
+        "--wb-panel-raised",
+        mode === "dark" ? "#1e1f22" : "#ffffff"
+      ),
       bgBubbleSelected: "transparent",
 
-      // Note: Row Header highlight typically derives from 'accentLight' in GDG.
-      // By setting accentLight to blue tint and bgBubbleSelected to transparent, we hope to achieve:
-      // - Cells: Transparent fill (no blue tint).
-      // - Cells: Transparent fill (no blue tint).
-      // - Row Header: Blue tint (from accentLight).
-
-      cellHorizontalPadding: 12, // More padding for premium feel
+      cellHorizontalPadding: 12,
       cellVerticalPadding: 6,
     }),
     [mode]
@@ -935,9 +987,9 @@ export function DataGrid({
   }
 
   return (
-    <div className="flex flex-col h-full bg-background">
+    <div className="flex flex-col h-full wb-grid-surface">
       {activeTab?.type !== "table" && result && (
-        <div className="h-9 shrink-0 border-b border-border bg-background flex items-center gap-2 px-3">
+        <div className="h-9 shrink-0 border-b wb-data-toolbar flex items-center gap-2 px-3">
           <div className="text-xs text-muted-foreground">
             {result.rows.length.toLocaleString()} row
             {result.rows.length === 1 ? "" : "s"}
@@ -1105,11 +1157,14 @@ export function DataGrid({
 
         {/* Loading Overlay */}
         {activeTab?.isExecuting && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-sm animate-in fade-in duration-200">
-            <div className="bg-background-elevated border border-border px-8 py-6 rounded-xl shadow-2xl flex flex-col items-center gap-4">
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-[hsl(var(--wb-grid)/0.62)] backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="flex flex-col items-center gap-4 rounded-[8px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] px-8 py-6 shadow-[0_18px_48px_rgba(0,0,0,0.36),0_0_0_1px_hsl(var(--wb-accent)/0.08)]">
               <div className="relative">
-                <Loader2 size={36} className="text-primary animate-spin" />
-                <div className="absolute inset-0 text-primary/30 animate-pulse blur-md">
+                <Loader2
+                  size={36}
+                  className="animate-spin text-[hsl(var(--wb-accent))]"
+                />
+                <div className="absolute inset-0 animate-pulse blur-md text-[hsl(var(--wb-accent)/0.32)]">
                   <Loader2 size={36} />
                 </div>
               </div>
@@ -1127,7 +1182,7 @@ export function DataGrid({
           </div>
         )}
         {activeTab?.type === "table" && (
-          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 p-1.5 bg-background/80 backdrop-blur-md border border-border rounded-full shadow-xl transition-all animate-in slide-in-from-bottom-2">
+          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 rounded-full border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised)/0.88)] p-1.5 shadow-[0_10px_30px_rgba(0,0,0,0.28),0_0_0_1px_hsl(var(--wb-accent)/0.06)] backdrop-blur-md transition-all animate-in slide-in-from-bottom-2">
             <div className="px-3 text-xs font-medium text-muted-foreground flex items-center gap-2">
               <span>{filteredRows.length + newRowsCount} rows</span>
             </div>

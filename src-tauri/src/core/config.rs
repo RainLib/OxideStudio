@@ -12,6 +12,8 @@ pub struct AppConfig {
 #[serde(rename_all = "camelCase")]
 pub struct SavedConnection {
     pub id: String,
+    #[serde(default = "default_project_id")]
+    pub project_id: String,
     pub name: String,
     pub driver: String,
     pub url: String,
@@ -25,6 +27,10 @@ pub struct SavedConnection {
     pub tags: Option<Vec<String>>,
     pub icon: Option<String>,
     pub color: Option<String>,
+}
+
+fn default_project_id() -> String {
+    "sqls".to_string()
 }
 
 pub struct ConfigManager {

@@ -43,22 +43,22 @@ export function ConnectionPage() {
   }
 
   return (
-    <div className="flex flex-col h-screen w-full bg-background/95 text-foreground overflow-hidden">
+    <div className="workbench-shell flex flex-col">
       <AppBar title="OxideStudio" />
-      <div className="flex flex-1 min-h-0 bg-[#09090b] relative">
+      <div className="flex flex-1 min-h-0 bg-[hsl(var(--wb-editor))] relative">
         <WorkspaceSidebar />
         <ConnectionSidebar width={sidebarWidth} />
 
         {/* Resizer Divider */}
         <div
           className={cn(
-            "w-px hover:w-1 bg-white/5 hover:bg-primary/50 cursor-col-resize transition-all z-20 absolute top-0 bottom-0"
+            "wb-resizer-x z-20 absolute top-0 bottom-0"
           )}
-          style={{ left: `${sidebarWidth + 70}px` }} // 70px is the width of WorkspaceSidebar
+          style={{ left: `${sidebarWidth + 40}px` }}
           onMouseDown={handleDragStart}
         />
 
-        <div className="flex-1 min-w-0 bg-[#09090b] relative z-10">
+        <div className="flex-1 min-w-0 bg-[hsl(var(--wb-editor))] relative z-10">
           <ConnectionForm />
         </div>
       </div>

@@ -1,88 +1,100 @@
-import { useEffect, useState } from "react";
-import { lspClient } from "@/services/lsp";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useMemo, useState } from "react";
+import type { DatabaseDriver } from "@/services/tauri/types";
+import {
+  ensureLspSession,
+  getLspSessionDescriptor,
+  lspClient,
+  type LspSessionDescriptor,
+} from "@/services/lsp";
+
+type LspRuntimeStatus =
+  | "disabled"
+  | "idle"
+  | "starting"
+  | "ready"
+  | "error";
+
+type UseLspClientOptions = {
+  connectionId?: string | null;
+  driver?: DatabaseDriver | null;
+  enabled?: boolean;
+};
 
 /**
- * Hook to manage LSP client lifecycle
- * Initializes LSP server on mount and provides status
+ * Lazily starts the built-in LSP for the active driver and connection.
+ *
+ * Existing callers that do not pass a driver keep receiving the legacy default
+ * client, but they do not auto-start the bundled process.
  */
-export function useLspClient() {
-  const [isReady, setIsReady] = useState(false);
+export function useLspClient(options: UseLspClientOptions = {}) {
+  const enabled = options.enabled !== false;
+  const descriptor = useMemo<LspSessionDescriptor | null>(
+    () =>
+      enabled
+        ? getLspSessionDescriptor({
+            connectionId: options.connectionId,
+            driver: options.driver,
+          })
+        : null,
+    [enabled, options.connectionId, options.driver]
+  );
+  const [isReady, setIsReady] = useState(
+    () => descriptor?.client.isInitialized() ?? false
+  );
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<LspRuntimeStatus>(
+    descriptor ? (descriptor.client.isInitialized() ? "ready" : "idle") : "disabled"
+  );
 
   useEffect(() => {
     let mounted = true;
 
-    async function initializeLsp() {
-      console.log("[useLspClient] 🚀 Starting LSP initialization...");
-
-      // If already initialized in service, just update state
-      if (lspClient.isInitialized()) {
-        console.log("[useLspClient] ✓ LSP already initialized");
-        if (mounted) {
-          setIsReady(true);
-          setError(null);
-        }
-        return;
-      }
-
-      try {
-        console.log("[useLspClient] 📞 Calling check_lsp_binary...");
-
-        // Get binary path from backend command
-        const info = await invoke<{
-          version: string;
-          path: string;
-          exists: boolean;
-          size_bytes?: number | null;
-          modified_unix_ms?: number | null;
-        }>("check_lsp_binary");
-
-        console.log("[useLspClient] 📋 Binary info:", info);
-
-        if (!info.exists) {
-          const errorMsg = "LSP binary not found at: " + info.path;
-          console.error("[useLspClient] ❌", errorMsg);
-          throw new Error(errorMsg);
-        }
-
-        console.log("[useLspClient] ✓ Binary found, initializing client...");
-        console.log("[useLspClient] Binary path:", info.path);
-
-        await lspClient.initialize(info.path);
-
-        console.log("[useLspClient] ✅ LSP client initialized successfully!");
-
-        if (mounted) {
-          setIsReady(true);
-          setError(null);
-        }
-      } catch (err) {
-        console.error("[useLspClient] ❌ Initialization failed:", err);
-        console.error("[useLspClient] Error details:", {
-          message: err instanceof Error ? err.message : String(err),
-          stack: err instanceof Error ? err.stack : undefined,
-        });
-        if (mounted) {
-          setError(err instanceof Error ? err.message : String(err));
-          setIsReady(false);
-        }
-      }
+    if (!descriptor || !options.connectionId || !options.driver) {
+      setIsReady(false);
+      setError(null);
+      setStatus("disabled");
+      return;
     }
 
-    console.log("[useLspClient] Hook mounted, starting initialization");
-    initializeLsp();
+    if (descriptor.client.isInitialized()) {
+      setIsReady(true);
+      setError(null);
+      setStatus("ready");
+      return;
+    }
 
-    // Do NOT shutdown on unmount, as other components might use it.
+    setIsReady(false);
+    setError(null);
+    setStatus("starting");
+
+    ensureLspSession({
+      connectionId: options.connectionId,
+      driver: options.driver,
+    })
+      .then((nextDescriptor) => {
+        if (!mounted) return;
+        setIsReady(Boolean(nextDescriptor?.client.isInitialized()));
+        setStatus(nextDescriptor?.client.isInitialized() ? "ready" : "disabled");
+        setError(null);
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        setIsReady(false);
+        setStatus("error");
+        setError(err instanceof Error ? err.message : String(err));
+      });
+
     return () => {
-      console.log("[useLspClient] Hook unmounting");
       mounted = false;
     };
-  }, []);
+  }, [descriptor, options.connectionId, options.driver]);
 
   return {
     isReady,
     error,
-    client: lspClient,
+    status,
+    profile: descriptor?.profile ?? null,
+    sessionKey: descriptor?.key ?? "default",
+    client: descriptor?.client ?? lspClient,
   };
 }

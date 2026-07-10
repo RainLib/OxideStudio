@@ -1,22 +1,38 @@
 use crate::lsp::LspServerManager;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 /// LSP server state managed by Tauri
-pub struct LspState(pub Arc<Mutex<Option<Arc<LspServerManager>>>>);
+pub struct LspState(pub Arc<Mutex<HashMap<String, Arc<LspServerManager>>>>);
+
+const DEFAULT_LSP_SESSION_KEY: &str = "default";
+
+fn normalize_session_key(session_key: Option<&str>) -> String {
+    let trimmed = session_key.unwrap_or(DEFAULT_LSP_SESSION_KEY).trim();
+    if trimmed.is_empty() {
+        DEFAULT_LSP_SESSION_KEY.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
 
 /// Initialize LSP request
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InitializeLspRequest {
     pub binary_path: String,
+    #[serde(default)]
+    pub session_key: Option<String>,
 }
 
 /// Completion request
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CompletionRequest {
+    #[serde(default)]
+    pub session_key: Option<String>,
     pub uri: String,
     pub line: u32,
     pub character: u32,
@@ -40,6 +56,8 @@ pub struct CompletionContext {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FormatDocumentRequest {
+    #[serde(default)]
+    pub session_key: Option<String>,
     pub uri: String,
     pub tab_size: u32,
     pub insert_spaces: bool,
@@ -179,12 +197,16 @@ fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
     })
 }
 
-async fn current_manager(state: &State<'_, LspState>) -> Result<Arc<LspServerManager>, String> {
+async fn current_manager(
+    state: &State<'_, LspState>,
+    session_key: Option<&str>,
+) -> Result<Arc<LspServerManager>, String> {
+    let key = normalize_session_key(session_key);
     let lsp_lock = state.0.lock().await;
     lsp_lock
-        .as_ref()
+        .get(&key)
         .cloned()
-        .ok_or_else(|| "LSP server is not running".to_string())
+        .ok_or_else(|| format!("LSP session is not running: {}", key))
 }
 
 /// Initialize the LSP server
@@ -196,21 +218,25 @@ pub async fn lsp_initialize(
 ) -> Result<String, String> {
     tracing::info!("🚀 LSP initialize command called");
     tracing::debug!("Binary path: {}", request.binary_path);
+    let session_key = normalize_session_key(request.session_key.as_deref());
     let existing_manager = {
         let mut lsp_lock = state.0.lock().await;
 
-        if let Some(manager) = lsp_lock.as_ref() {
+        if let Some(manager) = lsp_lock.get(&session_key) {
             if manager.is_running().await && manager.binary_path() == request.binary_path {
-                tracing::info!("LSP server already running for requested binary");
-                return Ok("LSP server already running".to_string());
+                tracing::info!("LSP server already running for requested session");
+                return Ok(format!("LSP session already running: {}", session_key));
             }
         }
 
-        lsp_lock.take()
+        lsp_lock.remove(&session_key)
     };
 
     if let Some(manager) = existing_manager {
-        tracing::info!("Stopping existing LSP server before reinitialization");
+        tracing::info!(
+            "Stopping existing LSP server before reinitialization: {}",
+            session_key
+        );
         manager
             .stop()
             .await
@@ -218,7 +244,7 @@ pub async fn lsp_initialize(
     }
 
     // Create new LSP manager
-    let mut manager = LspServerManager::new(request.binary_path, app);
+    let mut manager = LspServerManager::new(request.binary_path, app, session_key.clone());
 
     // Start the LSP server
     manager
@@ -227,10 +253,13 @@ pub async fn lsp_initialize(
         .map_err(|e| format!("Failed to start LSP server: {}", e))?;
 
     let mut lsp_lock = state.0.lock().await;
-    *lsp_lock = Some(Arc::new(manager));
+    lsp_lock.insert(session_key.clone(), Arc::new(manager));
 
-    tracing::info!("✓ LSP server initialized successfully");
-    Ok("LSP server initialized successfully".to_string())
+    tracing::info!("✓ LSP session initialized successfully: {}", session_key);
+    Ok(format!(
+        "LSP session initialized successfully: {}",
+        session_key
+    ))
 }
 
 async fn send_position_request(
@@ -238,7 +267,7 @@ async fn send_position_request(
     request: TextDocumentPositionRequest,
     state: State<'_, LspState>,
 ) -> Result<Value, String> {
-    let manager = current_manager(&state).await?;
+    let manager = current_manager(&state, request.session_key.as_deref()).await?;
 
     let params = serde_json::json!({
         "textDocument": {
@@ -258,10 +287,14 @@ async fn send_position_request(
 
 /// Stop the LSP server
 #[tauri::command]
-pub async fn lsp_shutdown(state: State<'_, LspState>) -> Result<String, String> {
+pub async fn lsp_shutdown(
+    session_key: Option<String>,
+    state: State<'_, LspState>,
+) -> Result<String, String> {
+    let key = normalize_session_key(session_key.as_deref());
     let manager = {
         let mut lsp_lock = state.0.lock().await;
-        lsp_lock.take()
+        lsp_lock.remove(&key)
     };
 
     if let Some(manager) = manager {
@@ -270,18 +303,22 @@ pub async fn lsp_shutdown(state: State<'_, LspState>) -> Result<String, String> 
             .await
             .map_err(|e| format!("Failed to stop LSP server: {}", e))?;
 
-        Ok("LSP server stopped successfully".to_string())
+        Ok(format!("LSP session stopped successfully: {}", key))
     } else {
-        Err("LSP server is not running".to_string())
+        Err(format!("LSP session is not running: {}", key))
     }
 }
 
 /// Check if LSP server is running
 #[tauri::command]
-pub async fn lsp_is_running(state: State<'_, LspState>) -> Result<bool, String> {
+pub async fn lsp_is_running(
+    session_key: Option<String>,
+    state: State<'_, LspState>,
+) -> Result<bool, String> {
+    let key = normalize_session_key(session_key.as_deref());
     let manager = {
         let lsp_lock = state.0.lock().await;
-        lsp_lock.as_ref().cloned()
+        lsp_lock.get(&key).cloned()
     };
 
     if let Some(manager) = manager {
@@ -303,7 +340,7 @@ pub async fn lsp_get_completions(
         request.line,
         request.character
     );
-    let manager = current_manager(&state).await?;
+    let manager = current_manager(&state, request.session_key.as_deref()).await?;
     tracing::debug!(
         "Completion request for {}:{}:{}",
         request.uri,
@@ -388,7 +425,7 @@ pub async fn lsp_references(
     request: TextDocumentPositionRequest,
     state: State<'_, LspState>,
 ) -> Result<Value, String> {
-    let manager = current_manager(&state).await?;
+    let manager = current_manager(&state, request.session_key.as_deref()).await?;
 
     let params = serde_json::json!({
         "textDocument": {
@@ -414,7 +451,7 @@ pub async fn lsp_formatting(
     request: FormatDocumentRequest,
     state: State<'_, LspState>,
 ) -> Result<Value, String> {
-    let manager = current_manager(&state).await?;
+    let manager = current_manager(&state, request.session_key.as_deref()).await?;
 
     let params = serde_json::json!({
         "textDocument": {
@@ -451,9 +488,10 @@ pub struct LspConnectionConfig {
 #[tauri::command]
 pub async fn lsp_did_change_configuration(
     settings: Value,
+    session_key: Option<String>,
     state: State<'_, LspState>,
 ) -> Result<String, String> {
-    let manager = current_manager(&state).await?;
+    let manager = current_manager(&state, session_key.as_deref()).await?;
 
     tracing::debug!("Sending workspace/didChangeConfiguration");
 
@@ -476,6 +514,7 @@ pub async fn lsp_did_open(
     language_id: String,
     version: i32,
     text: String,
+    session_key: Option<String>,
     state: State<'_, LspState>,
 ) -> Result<(), String> {
     tracing::info!(
@@ -488,7 +527,7 @@ pub async fn lsp_did_open(
         text.len(),
         language_id
     );
-    if let Ok(manager) = current_manager(&state).await {
+    if let Ok(manager) = current_manager(&state, session_key.as_deref()).await {
         let params = serde_json::json!({
             "textDocument": {
                 "uri": uri,
@@ -518,9 +557,10 @@ pub async fn lsp_did_change(
     uri: String,
     version: i32,
     text: String,
+    session_key: Option<String>,
     state: State<'_, LspState>,
 ) -> Result<(), String> {
-    if let Ok(manager) = current_manager(&state).await {
+    if let Ok(manager) = current_manager(&state, session_key.as_deref()).await {
         // sending full text sync for simplicity
         let params = serde_json::json!({
             "textDocument": {
@@ -547,8 +587,12 @@ pub async fn lsp_did_change(
 
 /// Send textDocument/didClose notification
 #[tauri::command]
-pub async fn lsp_did_close(uri: String, state: State<'_, LspState>) -> Result<(), String> {
-    if let Ok(manager) = current_manager(&state).await {
+pub async fn lsp_did_close(
+    uri: String,
+    session_key: Option<String>,
+    state: State<'_, LspState>,
+) -> Result<(), String> {
+    if let Ok(manager) = current_manager(&state, session_key.as_deref()).await {
         let params = serde_json::json!({
             "textDocument": {
                 "uri": uri
@@ -573,6 +617,7 @@ mod tests {
     #[test]
     fn test_completion_request_serialization() {
         let req = CompletionRequest {
+            session_key: None,
             uri: "file:///test.sql".to_string(),
             line: 10,
             character: 15,

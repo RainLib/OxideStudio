@@ -4,12 +4,19 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LeftPanel } from "@/components/workspace/LeftPanel";
+import { AppBar } from "@/components/AppBar";
 import { ThemeContext, type ThemeContextType } from "@/theme/ThemeProvider";
 
 vi.mock("@/services/tauri/ai.service", () => ({
   aiService: {
     testProvider: vi.fn(),
+  },
+}));
+
+vi.mock("@/services/tauri/store.service", () => ({
+  storeService: {
+    getProjects: vi.fn(async () => []),
+    saveProject: vi.fn(async () => undefined),
   },
 }));
 
@@ -26,7 +33,7 @@ async function flushAsyncWork() {
   }
 }
 
-describe("LeftPanel settings entry", () => {
+describe("Workbench settings entry", () => {
   let container: HTMLDivElement;
   let root: Root | null = null;
 
@@ -37,7 +44,7 @@ describe("LeftPanel settings entry", () => {
     document.body.innerHTML = "";
   });
 
-  it("opens workspace settings with the AI configuration tab available", async () => {
+  it("opens workspace settings from the title bar", async () => {
     container = document.createElement("div");
     document.body.appendChild(container);
 
@@ -45,13 +52,7 @@ describe("LeftPanel settings entry", () => {
       root = createRoot(container);
       root.render(
         <ThemeContext.Provider value={themeContext}>
-          <LeftPanel
-            activeTab={null}
-            onTabClick={vi.fn()}
-            isDrawerOpen={false}
-            sidebarWidth={280}
-            onDragStart={vi.fn()}
-          />
+          <AppBar title="sqls" />
         </ThemeContext.Provider>
       );
       await flushAsyncWork();
@@ -69,17 +70,29 @@ describe("LeftPanel settings entry", () => {
       await flushAsyncWork();
     });
 
+    const settingsMenuItem = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Settings...")
+    );
+    expect(settingsMenuItem).toBeTruthy();
+
+    await act(async () => {
+      settingsMenuItem?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true })
+      );
+      await flushAsyncWork();
+    });
+
     expect(document.body.textContent).toContain("Settings");
-    expect(document.body.textContent).toContain("AI");
+    expect(document.body.textContent).toContain("AI Assistant");
 
     const aiTab = Array.from(document.querySelectorAll("button")).find(
-      (button) => button.textContent?.includes("AI")
+      (button) => button.textContent?.includes("AI Assistant")
     );
     expect(aiTab).toBeTruthy();
 
     await act(async () => {
       aiTab?.dispatchEvent(
-        new MouseEvent("mousedown", {
+        new MouseEvent("click", {
           bubbles: true,
           cancelable: true,
           button: 0,

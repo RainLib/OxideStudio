@@ -3,10 +3,12 @@ import { persist } from "zustand/middleware";
 import type { AiProviderConfig } from "@/services/tauri/ai.service";
 
 export type AiProviderKind = "openai-compatible";
+export type AiPlannerKind = "model" | "langgraph" | "local";
 
 export interface AiSettingsState {
   enabled: boolean;
   provider: AiProviderKind;
+  plannerKind: AiPlannerKind;
   baseUrl: string;
   model: string;
   apiKey: string;
@@ -18,7 +20,13 @@ export interface AiSettingsState {
 
 export type AiSettingsValues = Pick<
   AiSettingsState,
-  "enabled" | "provider" | "baseUrl" | "model" | "apiKey" | "timeoutMs"
+  | "enabled"
+  | "provider"
+  | "plannerKind"
+  | "baseUrl"
+  | "model"
+  | "apiKey"
+  | "timeoutMs"
 >;
 
 export const DEFAULT_AI_BASE_URL = "https://api.openai.com/v1";
@@ -29,6 +37,7 @@ export const useAiSettingsStore = create<AiSettingsState>()(
     (set, get) => ({
       enabled: false,
       provider: "openai-compatible",
+      plannerKind: "model",
       baseUrl: DEFAULT_AI_BASE_URL,
       model: DEFAULT_AI_MODEL,
       apiKey: "",
@@ -56,6 +65,7 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       partialize: (state) => ({
         enabled: state.enabled,
         provider: state.provider,
+        plannerKind: state.plannerKind,
         baseUrl: state.baseUrl,
         model: state.model,
         apiKey: state.apiKey,

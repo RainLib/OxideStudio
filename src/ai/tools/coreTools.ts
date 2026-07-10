@@ -16,10 +16,7 @@ import type {
   TableRowDelete,
   TableRowUpdate,
 } from "@/services/tauri/types";
-import {
-  classifyAiQuerySafety,
-  looksAiQueryReadOnly,
-} from "@/lib/querySafety";
+import { evaluateSqlExecutionIntent } from "@/lib/sqlExecutionGate";
 import {
   supportedDatabaseDriverProfiles,
   supportsLspLanguageId,
@@ -495,8 +492,14 @@ function readOnlyQueryTool(adapters: AiToolAdapters): AiToolDefinition {
           : context.activeConnectionId ?? null;
       const driver = await resolveQueryDriver(adapters, connectionId, context.activeDriver);
 
-      if (!looksAiQueryReadOnly(query, driver)) {
-        throw new Error("query.runReadOnly rejected a potentially mutating request");
+      const gate = evaluateSqlExecutionIntent({
+        sql: query,
+        driver,
+        intent: "read",
+        approved: true,
+      });
+      if (!gate.allowed) {
+        throw new Error(`query.runReadOnly rejected request: ${gate.reason}`);
       }
 
       const namespace = optionalString(payload, "namespace");
@@ -1577,16 +1580,16 @@ async function runApprovedMutation(
       ? payload.connectionId
       : context.activeConnectionId ?? null;
   const driver = await resolveQueryDriver(adapters, connectionId, context.activeDriver);
-  const safety = classifyAiQuerySafety(query, driver);
-
-  if (safety === "read") {
-    throw new Error("Mutation tools do not run read-only requests");
-  }
-  if (mode === "write" && safety === "destructive") {
-    throw new Error("query.runMutation rejected a destructive request");
-  }
-  if (mode === "destructive" && safety !== "destructive") {
-    throw new Error("query.runDestructive only accepts destructive requests");
+  const gate = evaluateSqlExecutionIntent({
+    sql: query,
+    driver,
+    intent: mode,
+    approved: true,
+  });
+  if (!gate.allowed) {
+    throw new Error(
+      `${mode === "write" ? "query.runMutation" : "query.runDestructive"} rejected request: ${gate.reason}`
+    );
   }
 
   const namespace = optionalString(payload, "namespace");

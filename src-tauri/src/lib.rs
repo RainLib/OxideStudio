@@ -19,7 +19,9 @@ pub fn run() {
     let manager = ConnectionManager::new();
 
     // Initialize LSP state
-    let lsp_state = commands::lsp::LspState(Arc::new(tokio::sync::Mutex::new(None)));
+    let lsp_state = commands::lsp::LspState(Arc::new(tokio::sync::Mutex::new(
+        std::collections::HashMap::new(),
+    )));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -123,11 +125,14 @@ pub fn run() {
             commands::cache::get_cached_tables,
             commands::cache::refresh_tables,
             // Store commands (SQLite MetaStore)
+            commands::store::save_project,
+            commands::store::get_projects,
             commands::store::save_connection,
             commands::store::get_connections,
             commands::store::delete_connection,
             commands::store::save_resources,
             commands::store::replace_resources,
+            commands::store::delete_resources,
             commands::store::get_resources,
             commands::store::search_resources,
             // LSP commands

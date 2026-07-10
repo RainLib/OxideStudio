@@ -24,18 +24,20 @@ pub struct LspServerManager {
     process: Arc<Mutex<Option<Child>>>,
     message_tx: mpsc::Sender<LspOutgoingMessage>,
     binary_path: String,
+    session_key: String,
     app_handle: AppHandle,
 }
 
 impl LspServerManager {
     /// Create a new LSP server manager
-    pub fn new(binary_path: String, app_handle: AppHandle) -> Self {
+    pub fn new(binary_path: String, app_handle: AppHandle, session_key: String) -> Self {
         let (tx, _rx) = mpsc::channel(100);
 
         Self {
             process: Arc::new(Mutex::new(None)),
             message_tx: tx,
             binary_path,
+            session_key,
             app_handle,
         }
     }
@@ -114,6 +116,7 @@ impl LspServerManager {
         // Spawn stdout reader task
         let pending_responses_clone = pending_responses.clone();
         let app_handle = self.app_handle.clone();
+        let session_key = self.session_key.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
@@ -184,6 +187,7 @@ impl LspServerManager {
                         {
                             tracing::debug!("Received LSP notification: {}", method);
                             let notification = LspServerNotification {
+                                session_key: Some(session_key.clone()),
                                 method: method.to_string(),
                                 params: message.get("params").cloned().unwrap_or(Value::Null),
                             };
@@ -471,5 +475,9 @@ impl LspServerManager {
     /// Get binary path
     pub fn binary_path(&self) -> &str {
         &self.binary_path
+    }
+
+    pub fn session_key(&self) -> &str {
+        &self.session_key
     }
 }

@@ -83,7 +83,7 @@ export function EditorActionBar({
   };
 
   return (
-    <div className="h-10 shrink-0 bg-background-primary border-t border-border flex items-center justify-between px-3">
+    <div className="wb-toolbar flex items-center justify-between">
       {/* Left Side - Transaction Control */}
       <div className="flex items-center gap-3">
         {supportsTransactions && (
@@ -111,7 +111,7 @@ export function EditorActionBar({
           variant="ghost"
           size="icon"
           onClick={onFormat}
-          className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-background-elevated"
+          className="wb-icon-button"
           title="Format Query"
         >
           <Paintbrush size={14} />
@@ -123,17 +123,17 @@ export function EditorActionBar({
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-background-elevated"
+            className="wb-icon-button"
               title="Query History"
             >
               <History size={14} />
             </Button>
           </DialogTrigger>
-          <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col bg-[#1e1e1e] border-[#333] text-gray-200">
+          <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col bg-[hsl(var(--wb-panel-raised))] border-[hsl(var(--wb-border))] text-[hsl(var(--wb-text))]">
             <DialogHeader>
               <DialogTitle>Query History</DialogTitle>
             </DialogHeader>
-            <div className="flex-1 overflow-y-auto border border-[#333] rounded-md bg-[#1a1a1a]">
+            <div className="flex-1 overflow-y-auto border border-[hsl(var(--wb-border-subtle))] rounded-[4px] bg-[hsl(var(--wb-panel))]">
               {history.length === 0 && (
                 <div className="p-4 text-center text-gray-500">No history</div>
               )}
@@ -161,17 +161,17 @@ export function EditorActionBar({
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 text-gray-400 hover:text-white hover:bg-[#2a2a2a]"
+              className="wb-icon-button"
               title="Saved Queries"
             >
               <Star size={14} />
             </Button>
           </DialogTrigger>
-          <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col bg-[#1e1e1e] border-[#333] text-gray-200">
+          <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col bg-[hsl(var(--wb-panel-raised))] border-[hsl(var(--wb-border))] text-[hsl(var(--wb-text))]">
             <DialogHeader>
               <DialogTitle>Saved Queries</DialogTitle>
             </DialogHeader>
-            <div className="flex-1 overflow-y-auto border border-[#333] rounded-md bg-[#1a1a1a]">
+            <div className="flex-1 overflow-y-auto border border-[hsl(var(--wb-border-subtle))] rounded-[4px] bg-[hsl(var(--wb-panel))]">
               {savedQueries.length === 0 && (
                 <div className="p-4 text-center text-gray-500">
                   No saved queries
@@ -210,7 +210,7 @@ export function EditorActionBar({
         {/* Save Dialog & Button */}
         <Dialog open={isSaveOpen} onOpenChange={setIsSaveOpen}>
           <DialogTrigger asChild>
-            <Button className="h-8 px-3 text-xs bg-background-elevated hover:bg-background-tertiary text-foreground font-medium border border-border">
+            <Button className="wb-text-button border border-[hsl(var(--wb-border-subtle))]">
               Save
             </Button>
           </DialogTrigger>
@@ -243,19 +243,19 @@ export function EditorActionBar({
             onClick={isExecuting ? onCancelRun : onRun}
             disabled={!isConnected}
             className={cn(
-              "h-8 px-3 bg-foreground text-background hover:bg-foreground/90 text-xs font-bold rounded-l-md rounded-r-none border-r border-background/20 transition-all flex items-center gap-1.5 min-w-[70px]",
+              "h-7 px-3 bg-[hsl(var(--wb-accent))] text-[hsl(var(--wb-accent-foreground))] hover:brightness-110 text-[11px] font-semibold rounded-l-[4px] rounded-r-none transition-all flex items-center gap-1.5 min-w-[70px]",
               isExecuting && "bg-destructive text-destructive-foreground hover:bg-destructive/90"
             )}
           >
             {isExecuting ? (
               <>
                 <Square className="h-3.5 w-3.5 fill-current" />
-                <span>CANCEL</span>
+                <span>Cancel</span>
               </>
             ) : (
               <>
                 <Play size={14} className="fill-primary text-primary" />
-                <span>RUN</span>
+                <span>Run</span>
               </>
             )}
           </Button>
@@ -263,14 +263,14 @@ export function EditorActionBar({
             size="icon"
             onClick={() => setIsRunDropdownOpen(!isRunDropdownOpen)}
             disabled={isExecuting || !isConnected}
-            className="h-8 w-7 bg-foreground text-background hover:bg-foreground/90 rounded-l-none rounded-r-md transition-all border-l border-background/10"
+            className="h-7 w-6 bg-[hsl(var(--wb-accent))] text-[hsl(var(--wb-accent-foreground))] hover:brightness-110 rounded-l-none rounded-r-[4px] transition-all border-l border-black/10"
           >
             <ChevronDown size={14} />
           </Button>
 
           {/* Custom Dropdown Menu */}
           {isRunDropdownOpen && (
-            <div className="absolute bottom-full right-0 mb-2 w-48 bg-background-elevated border border-border rounded-lg shadow-xl overflow-hidden flex flex-col py-1">
+            <div className="absolute top-full right-0 mt-1 w-48 bg-background-elevated border border-border rounded-[4px] overflow-hidden flex flex-col py-1 z-50">
               <button
                 className="px-4 py-2 text-left text-xs text-foreground hover:bg-background-tertiary flex items-center gap-2 transition-colors"
                 onClick={() => {
@@ -293,7 +293,7 @@ export function EditorActionBar({
               </button>
               <div className="h-px bg-border my-1" />
               <div className="px-4 py-1.5 text-[10px] text-muted-foreground/60 font-medium">
-                SHORTCUTS
+                Shortcuts
               </div>
               <div className="px-4 py-1 flex justify-between text-[11px] text-muted-foreground/80">
                 <span>Run</span> <span className="opacity-50">Ctrl+Enter</span>

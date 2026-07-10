@@ -76,6 +76,27 @@
 
     --border-subtle: 214.3 31.8% 94%;
     --border-divider: 214.3 31.8% 88%;
+
+    --wb-frame: 220 14% 93%;
+    --wb-titlebar: 276 22% 88%;
+    --wb-brand: 275 46% 55%;
+    --wb-panel: 220 13% 96%;
+    --wb-panel-raised: 0 0% 100%;
+    --wb-editor: 0 0% 100%;
+    --wb-grid: 0 0% 100%;
+    --wb-grid-header: 220 13% 94%;
+    --wb-grid-toolbar: 216 50% 93%;
+    --wb-toolbar: 220 13% 94%;
+    --wb-hover: 220 13% 90%;
+    --wb-active: 214 90% 92%;
+    --wb-active-strong: 215 80% 86%;
+    --wb-accent: 217 88% 54%;
+    --wb-accent-foreground: 0 0% 100%;
+    --wb-border: 220 13% 82%;
+    --wb-border-subtle: 220 12% 88%;
+    --wb-text: 222 22% 12%;
+    --wb-text-muted: 220 9% 39%;
+    --wb-status: 219 13% 91%;
   }
 
   .dark {
@@ -106,6 +127,27 @@
 
     --border-subtle: 0 0% 6.7%; /* #111 */
     --border-divider: 0 0% 26.7%; /* #444 */
+
+    --wb-frame: 220 8% 10%;
+    --wb-titlebar: 288 18% 25%;
+    --wb-brand: 276 44% 55%;
+    --wb-panel: 220 8% 14%;
+    --wb-panel-raised: 220 8% 17%;
+    --wb-editor: 220 8% 12%;
+    --wb-grid: 220 7% 12%;
+    --wb-grid-header: 220 8% 16%;
+    --wb-grid-toolbar: 220 14% 18%;
+    --wb-toolbar: 220 8% 14%;
+    --wb-hover: 220 9% 20%;
+    --wb-active: 218 32% 25%;
+    --wb-active-strong: 218 38% 32%;
+    --wb-accent: 216 82% 64%;
+    --wb-accent-foreground: 220 18% 9%;
+    --wb-border: 220 9% 26%;
+    --wb-border-subtle: 220 9% 19%;
+    --wb-text: 220 14% 88%;
+    --wb-text-muted: 220 10% 66%;
+    --wb-status: 220 8% 15%;
   }
 }
 
@@ -145,4 +187,199 @@
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: rgba(128, 128, 128, 0.4);
+}
+
+@layer components {
+  .workbench-shell {
+    @apply h-screen w-screen overflow-hidden font-sans;
+    background:
+      linear-gradient(
+        180deg,
+        hsl(var(--wb-frame)) 0,
+        hsl(var(--wb-frame)) calc(100% - 34px),
+        hsl(var(--wb-status)) 100%
+      );
+    color: hsl(var(--wb-text));
+    font-size: 12px;
+  }
+
+  .wb-titlebar {
+    @apply h-9 shrink-0 select-none border-b;
+    background:
+      linear-gradient(
+        90deg,
+        hsl(var(--wb-titlebar)) 0,
+        hsl(var(--wb-titlebar)) 320px,
+        hsl(var(--wb-frame)) 560px,
+        hsl(var(--wb-frame)) 100%
+      );
+    border-color: hsl(var(--wb-border-subtle));
+  }
+
+  .wb-toolbar {
+    @apply h-8 shrink-0 border-b px-2;
+    background: hsl(var(--wb-toolbar));
+    border-color: hsl(var(--wb-border-subtle));
+  }
+
+  .wb-data-toolbar {
+    background: hsl(var(--wb-grid-toolbar));
+    border-color: hsl(var(--wb-border-subtle));
+    color: hsl(var(--wb-text));
+    box-shadow: inset 0 1px hsl(var(--wb-accent) / 0.12);
+  }
+
+  .wb-panel {
+    background: hsl(var(--wb-panel));
+    color: hsl(var(--wb-text));
+  }
+
+  .wb-panel-raised {
+    background: hsl(var(--wb-panel-raised));
+  }
+
+  .wb-grid-surface {
+    background: hsl(var(--wb-grid));
+  }
+
+  .wb-tree-active-zone {
+    background: hsl(var(--wb-active) / 0.72);
+  }
+
+  .wb-tree-row-selected {
+    background: hsl(var(--wb-active-strong));
+    color: hsl(var(--wb-text));
+  }
+
+  .wb-panel-header {
+    @apply flex h-8 shrink-0 items-center justify-between border-b px-2 text-xs font-medium;
+    background: hsl(var(--wb-toolbar));
+    border-color: hsl(var(--wb-border-subtle));
+    color: hsl(var(--wb-text));
+  }
+
+  .wb-icon-button {
+    @apply inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[4px] transition-colors disabled:pointer-events-none disabled:opacity-45;
+    color: hsl(var(--wb-text-muted));
+  }
+
+  .wb-icon-button:hover {
+    background: hsl(var(--wb-hover));
+    color: hsl(var(--wb-text));
+  }
+
+  .wb-icon-button[data-active="true"] {
+    background: hsl(var(--wb-active-strong));
+    color: hsl(var(--wb-text));
+  }
+
+  .wb-text-button {
+    @apply inline-flex h-6 shrink-0 items-center gap-1 rounded-[4px] px-2 text-[11px] font-medium transition-colors disabled:pointer-events-none disabled:opacity-45;
+    color: hsl(var(--wb-text-muted));
+  }
+
+  .wb-text-button:hover {
+    background: hsl(var(--wb-hover));
+    color: hsl(var(--wb-text));
+  }
+
+  .wb-primary-button {
+    @apply inline-flex h-7 shrink-0 items-center gap-1.5 rounded-[4px] px-3 text-[11px] font-semibold transition-colors disabled:pointer-events-none disabled:opacity-50;
+    background: hsl(var(--wb-accent));
+    color: hsl(var(--wb-accent-foreground));
+  }
+
+  .wb-primary-button:hover {
+    filter: brightness(1.08);
+  }
+
+  .wb-field {
+    @apply h-7 rounded-[4px] border px-2 text-[11px] outline-none transition-colors;
+    background: hsl(var(--wb-editor));
+    border-color: hsl(var(--wb-border));
+    color: hsl(var(--wb-text));
+  }
+
+  .wb-field:focus {
+    border-color: hsl(var(--wb-accent));
+  }
+
+  .wb-field::placeholder {
+    color: hsl(var(--wb-text-muted));
+  }
+
+  .wb-section-title {
+    @apply text-xs font-semibold;
+    color: hsl(var(--wb-text));
+  }
+
+  .wb-muted {
+    color: hsl(var(--wb-text-muted));
+  }
+
+  .wb-form-panel {
+    @apply rounded-[4px] border p-3;
+    background: hsl(var(--wb-panel));
+    border-color: hsl(var(--wb-border-subtle));
+  }
+
+  .wb-statusbar {
+    @apply h-6 shrink-0 border-t text-[11px];
+    background:
+      linear-gradient(
+        180deg,
+        hsl(var(--wb-frame) / 0.82),
+        hsl(var(--wb-status))
+      );
+    border-color: hsl(var(--wb-border-subtle));
+    color: hsl(var(--wb-text-muted));
+  }
+
+  .wb-progress-track {
+    @apply relative block h-1 w-24 overflow-hidden rounded-full;
+    background: hsl(var(--wb-border-subtle));
+  }
+
+  .wb-progress-bar {
+    @apply absolute left-0 top-0 h-full w-1/2 rounded-full;
+    background: hsl(var(--wb-accent));
+    animation: wb-progress-slide 1.2s ease-in-out infinite;
+  }
+
+  .wb-resizer-x {
+    @apply w-[3px] shrink-0 cursor-col-resize transition-colors;
+    background: transparent;
+  }
+
+  .wb-resizer-x:hover {
+    background: hsl(var(--wb-accent) / 0.45);
+  }
+
+  .wb-resizer-y {
+    @apply h-[3px] shrink-0 cursor-row-resize transition-colors;
+    background: hsl(var(--wb-border-subtle));
+  }
+
+  .wb-resizer-y:hover {
+    background: hsl(var(--wb-accent) / 0.55);
+  }
+}
+
+@keyframes wb-progress-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+
+  100% {
+    transform: translateX(220%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wb-progress-bar {
+    animation: none;
+    opacity: 0.7;
+    transform: none;
+    width: 100%;
+  }
 }

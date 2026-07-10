@@ -6,6 +6,17 @@ import type { SavedConnection } from "./types";
  * 管理数据库连接的建立、断开和保存
  */
 
+const ACTIVE_PROJECT_KEY = "oxide-studio-active-project";
+const DEFAULT_PROJECT_ID = "sqls";
+
+function activeProjectId() {
+  try {
+    return localStorage.getItem(ACTIVE_PROJECT_KEY) || DEFAULT_PROJECT_ID;
+  } catch {
+    return DEFAULT_PROJECT_ID;
+  }
+}
+
 /**
  * 连接到数据库
  * @param connectionId - 连接 ID
@@ -53,8 +64,12 @@ export async function disconnect(connectionId: string): Promise<string> {
  * 加载保存的连接列表
  * @returns Promise<SavedConnection[]> - 连接列表
  */
-export async function loadConnections(): Promise<SavedConnection[]> {
-  return invokeWithInterceptors<SavedConnection[]>("load_connections");
+export async function loadConnections(
+  projectId = activeProjectId()
+): Promise<SavedConnection[]> {
+  return invokeWithInterceptors<SavedConnection[]>("load_connections", {
+    projectId,
+  });
 }
 
 /**
@@ -63,10 +78,15 @@ export async function loadConnections(): Promise<SavedConnection[]> {
  * @returns Promise<string> - 保存成功消息
  */
 export async function saveConnections(
-  connections: SavedConnection[]
+  connections: SavedConnection[],
+  projectId = activeProjectId()
 ): Promise<string> {
   return invokeWithInterceptors<string>("save_connections", {
-    connections,
+    projectId,
+    connections: connections.map((connection) => ({
+      ...connection,
+      projectId: connection.projectId || projectId,
+    })),
   });
 }
 

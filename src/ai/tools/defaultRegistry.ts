@@ -5,9 +5,9 @@ import {
   tableService,
 } from "@/services/tauri";
 import {
+  ensureLspSession,
   extractSqlDocumentTabId,
   getLspDocumentUri,
-  lspClient,
 } from "@/services/lsp";
 import type { Diagnostic } from "@/services/lsp/types";
 import type { DatabaseDriver, QueryResult } from "@/services/tauri/types";
@@ -365,9 +365,13 @@ async function getLspCompletions(
       ? getLspDocumentUri(activeTab.id, driver, languageId)
       : getLspDocumentUri(context.requestId, driver, languageId));
   const text = input.text ?? activeTab?.sql ?? "";
+  const descriptor = await ensureLspSession({ connectionId, driver });
+  if (!descriptor) {
+    throw new Error(`${driver} does not have an enabled built-in LSP profile`);
+  }
 
-  await lspClient.didOpen(uri, text, Date.now(), languageId);
-  return lspClient.getCompletions(uri, input.line, input.character);
+  await descriptor.client.didOpen(uri, text, Date.now(), languageId);
+  return descriptor.client.getCompletions(uri, input.line, input.character);
 }
 
 async function explainLspDiagnostics(

@@ -180,7 +180,7 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
   );
 
   return (
-    <div className="border-b border-border bg-background-primary px-2 py-2">
+    <div className="border-b wb-data-toolbar px-2 py-2">
       <div className="flex flex-col gap-2">
         {/* Row 1: Mode/Logic + Filter Inputs */}
         {mode === "sql" ? (
@@ -201,7 +201,7 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
               placeholder="WHERE clause (e.g. id > 10)"
               value={sqlFilter}
               onChange={(e) => onSqlFilterChange(e.target.value)}
-              className="h-7 flex-1 text-xs font-mono bg-background-tertiary border-border"
+              className="h-7 flex-1 text-xs font-mono bg-[hsl(var(--wb-editor))] border-[hsl(var(--wb-border))]"
             />
             <Button
               variant="default"
@@ -234,7 +234,7 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
                     ) : (
                       <button
                         onClick={() => handleToggleLogic(index)}
-                        className="text-[10px] font-bold font-mono px-1.5 py-0.5 rounded bg-background-elevated text-muted-foreground hover:text-foreground hover:bg-background-tertiary border border-border uppercase w-8 text-center transition-colors"
+                        className="text-[10px] font-bold font-mono px-1.5 py-0.5 rounded-[3px] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text-muted))] hover:text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] border border-[hsl(var(--wb-border))] uppercase w-8 text-center transition-colors"
                       >
                         {filter.logic || "AND"}
                       </button>
@@ -242,13 +242,13 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
                   </div>
 
                   {/* Filter Inputs Group */}
-                  <div className="flex-1 flex items-center gap-2 bg-background-tertiary/30 p-1 rounded-md border border-transparent hover:border-border/50 transition-colors">
+                  <div className="flex-1 flex items-center gap-2 rounded-[4px] border border-transparent bg-[hsl(var(--wb-editor)/0.42)] p-1 transition-colors hover:border-[hsl(var(--wb-border))]">
                     <div className="min-w-[120px]">
                       <Select
                         value={filter.column}
                         onValueChange={(val) => handleColumnChange(index, val)}
                       >
-                        <SelectTrigger className="h-7 text-xs bg-background-tertiary border-border px-2">
+                        <SelectTrigger className="h-7 text-xs bg-[hsl(var(--wb-editor))] border-[hsl(var(--wb-border))] px-2">
                           <SelectValue placeholder="Column" />
                         </SelectTrigger>
                         <SelectContent>
@@ -271,7 +271,7 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
                           handleOperatorChange(index, val as FilterOperator)
                         }
                       >
-                        <SelectTrigger className="h-7 text-xs bg-background-tertiary border-border px-2">
+                        <SelectTrigger className="h-7 text-xs bg-[hsl(var(--wb-editor))] border-[hsl(var(--wb-border))] px-2">
                           <SelectValue placeholder="Op" />
                         </SelectTrigger>
                         <SelectContent>
@@ -289,7 +289,7 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
                       placeholder="Value"
                       value={filter.value}
                       onChange={(e) => handleValueChange(index, e.target.value)}
-                      className="h-7 flex-1 text-xs bg-background-tertiary border-border text-foreground placeholder:text-muted-foreground/40 min-w-[100px]"
+                      className="h-7 flex-1 text-xs bg-[hsl(var(--wb-editor))] border-[hsl(var(--wb-border))] text-[hsl(var(--wb-text))] placeholder:text-[hsl(var(--wb-text-muted))] min-w-[100px]"
                     />
 
                     {/* Right Action: Delete (if >0) OR Add+Search (if 0) */}
@@ -317,7 +317,7 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
                     ) : (
                       <button
                         onClick={() => handleRemoveFilter(index)}
-                        className="h-7 w-7 flex items-center justify-center text-muted-foreground hover:text-red-400 hover:bg-background-elevated rounded transition-colors ml-1"
+                        className="h-7 w-7 flex items-center justify-center text-[hsl(var(--wb-text-muted))] hover:text-red-400 hover:bg-[hsl(var(--wb-hover))] rounded transition-colors ml-1"
                         title="Remove filter"
                       >
                         <Trash2 size={14} />

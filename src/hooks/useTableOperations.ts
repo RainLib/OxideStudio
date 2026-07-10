@@ -5,6 +5,7 @@ import { tableService } from "@/services/tauri";
 import type { TableExportFormat } from "@/services/tauri/types";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { DEFAULT_DATABASE_DRIVER } from "@/lib/databaseDialect";
+import { useTaskStore } from "@/store/useTaskStore";
 
 export function useTableOperations() {
   const { activeConnectionId, connections } = useConnectionStore();
@@ -102,6 +103,12 @@ export function useTableOperations() {
   ) => {
     if (!activeConnectionId || !currentSchema) return;
     const driver = getDriver();
+    const taskStore = useTaskStore.getState();
+    const taskId = taskStore.startTask({
+      kind: "export",
+      title: `Export ${tableName}`,
+      detail: format.toUpperCase(),
+    });
 
     try {
       const exported = await tableService.exportTableData(
@@ -114,8 +121,13 @@ export function useTableOperations() {
       console.log(
         `Exported ${exported.rowsExported} rows from ${tableName} to ${exported.filePath}`
       );
+      taskStore.finishTask(
+        taskId,
+        `${exported.rowsExported.toLocaleString()} rows to ${format.toUpperCase()}`
+      );
       await revealItemInDir(exported.filePath);
     } catch (e: any) {
+      taskStore.failTask(taskId, e?.message || String(e));
       console.error("Export failed:", e);
     }
   };

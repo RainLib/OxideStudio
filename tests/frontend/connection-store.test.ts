@@ -48,12 +48,29 @@ function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
+function createStorageMock() {
+  const storage = new Map<string, string>();
+
+  return {
+    clear: vi.fn(() => storage.clear()),
+    getItem: vi.fn((key: string) => storage.get(key) ?? null),
+    removeItem: vi.fn((key: string) => {
+      storage.delete(key);
+    }),
+    setItem: vi.fn((key: string, value: string) => {
+      storage.set(key, value);
+    }),
+  };
+}
+
 describe("connection store", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal("localStorage", createStorageMock());
     useConnectionStore.setState({
       connections: [],
       activeConnectionId: null,
+      connectedConnectionIds: [],
       isConnected: false,
       isLoading: false,
       selectedConnection: null,
@@ -101,10 +118,13 @@ describe("connection store", () => {
       expect.stringContaining("localhost")
     );
     expect(useConnectionStore.getState().activeConnectionId).toBe("postgres-1");
+    expect(useConnectionStore.getState().connectedConnectionIds).toEqual([
+      "postgres-1",
+    ]);
     expect(useConnectionStore.getState().isConnected).toBe(true);
   });
 
-  it("disconnects the previous active backend connection after a successful switch", async () => {
+  it("keeps previous backend connections open after a successful switch", async () => {
     useConnectionStore.setState({
       connections: [
         connection({ id: "postgres-1", name: "Postgres" }),
@@ -116,6 +136,7 @@ describe("connection store", () => {
         }),
       ],
       activeConnectionId: "postgres-1",
+      connectedConnectionIds: ["postgres-1"],
       isConnected: true,
     });
 
@@ -134,8 +155,12 @@ describe("connection store", () => {
       "mysql",
       expect.stringContaining("localhost")
     );
-    expect(mocks.disconnect).toHaveBeenCalledWith("postgres-1");
+    expect(mocks.disconnect).not.toHaveBeenCalled();
     expect(useConnectionStore.getState().activeConnectionId).toBe("mysql-1");
+    expect(useConnectionStore.getState().connectedConnectionIds).toEqual([
+      "postgres-1",
+      "mysql-1",
+    ]);
     expect(useConnectionStore.getState().isConnected).toBe(true);
   });
 
@@ -144,6 +169,7 @@ describe("connection store", () => {
     useConnectionStore.setState({
       connections: [connection({ id: "postgres-1", name: "Postgres" })],
       activeConnectionId: "postgres-1",
+      connectedConnectionIds: ["postgres-1"],
       isConnected: true,
     });
 
@@ -154,6 +180,9 @@ describe("connection store", () => {
     expect(error).toBe("login failed");
     expect(mocks.disconnect).not.toHaveBeenCalled();
     expect(useConnectionStore.getState().activeConnectionId).toBe("postgres-1");
+    expect(useConnectionStore.getState().connectedConnectionIds).toEqual([
+      "postgres-1",
+    ]);
     expect(useConnectionStore.getState().isConnected).toBe(true);
   });
 
@@ -161,6 +190,7 @@ describe("connection store", () => {
     useConnectionStore.setState({
       connections: [connection({ id: "postgres-1", name: "Postgres" })],
       activeConnectionId: "postgres-1",
+      connectedConnectionIds: ["postgres-1"],
       isConnected: true,
     });
 
@@ -169,7 +199,62 @@ describe("connection store", () => {
     expect(error).toBeNull();
     expect(mocks.disconnect).not.toHaveBeenCalled();
     expect(useConnectionStore.getState().activeConnectionId).toBe("postgres-1");
+    expect(useConnectionStore.getState().connectedConnectionIds).toEqual([
+      "postgres-1",
+    ]);
     expect(useConnectionStore.getState().isConnected).toBe(true);
+  });
+
+  it("activates an already connected data source without reconnecting", async () => {
+    useConnectionStore.setState({
+      connections: [
+        connection({ id: "postgres-1", name: "Postgres" }),
+        connection({
+          id: "mysql-1",
+          name: "MySQL",
+          driver: "mysql",
+          port: 3306,
+        }),
+      ],
+      activeConnectionId: "postgres-1",
+      connectedConnectionIds: ["postgres-1", "mysql-1"],
+      isConnected: true,
+    });
+
+    const error = await useConnectionStore
+      .getState()
+      .setActiveConnection("mysql-1");
+
+    expect(error).toBeNull();
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(mocks.disconnect).not.toHaveBeenCalled();
+    expect(useConnectionStore.getState().activeConnectionId).toBe("mysql-1");
+  });
+
+  it("loads and saves connections inside the active project scope", async () => {
+    localStorage.setItem("oxide-studio-active-project", "project-a");
+    mocks.loadConnections.mockResolvedValueOnce([
+      connection({ id: "postgres-1", projectId: "project-a" }),
+    ]);
+
+    await useConnectionStore.getState().loadConnections();
+
+    expect(mocks.loadConnections).toHaveBeenCalledWith("project-a");
+    expect(useConnectionStore.getState().connections).toEqual([
+      expect.objectContaining({ id: "postgres-1", projectId: "project-a" }),
+    ]);
+
+    await useConnectionStore
+      .getState()
+      .saveConnection(connection({ id: "mysql-1", driver: "mysql", port: 3306 }));
+
+    expect(mocks.saveConnections).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "postgres-1", projectId: "project-a" }),
+        expect.objectContaining({ id: "mysql-1", projectId: "project-a" }),
+      ]),
+      "project-a"
+    );
   });
 
   it("ignores older connection attempts that finish after a newer switch", async () => {

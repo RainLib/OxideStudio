@@ -1,11 +1,12 @@
 /// 连接管理相关 commands
 use crate::core::{
-    config::{AppConfig, ConfigManager, SavedConnection},
+    config::{ConfigManager, SavedConnection as ConfigSavedConnection},
     dialect::database_capabilities_for_driver,
     driver::DatabaseDriver,
     manager::ConnectionManager,
     protocol::Response,
     redaction::redact_connection_url,
+    store::{MetaStore, SavedConnection as StoreSavedConnection},
 };
 use crate::drivers::connect_driver;
 use tauri::State;
@@ -26,6 +27,59 @@ async fn ping_driver_or_cleanup(driver: &dyn DatabaseDriver) -> Result<(), Strin
             }
         }
     }
+}
+
+fn current_timestamp_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn store_connection_from_config(
+    project_id: &str,
+    connection: &ConfigSavedConnection,
+) -> Result<StoreSavedConnection, String> {
+    let now = current_timestamp_millis();
+    let mut scoped_connection = connection.clone();
+    scoped_connection.project_id = project_id.to_string();
+    let config = serde_json::to_value(&scoped_connection).map_err(|error| error.to_string())?;
+
+    Ok(StoreSavedConnection {
+        id: scoped_connection.id,
+        project_id: project_id.to_string(),
+        name: scoped_connection.name,
+        driver: scoped_connection.driver,
+        config,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+fn config_connection_from_store(
+    project_id: &str,
+    connection: StoreSavedConnection,
+) -> ConfigSavedConnection {
+    let mut config_connection = serde_json::from_value::<ConfigSavedConnection>(connection.config)
+        .unwrap_or_else(|_| ConfigSavedConnection {
+            id: connection.id,
+            project_id: project_id.to_string(),
+            name: connection.name,
+            driver: connection.driver,
+            url: String::new(),
+            host: None,
+            port: None,
+            user: None,
+            password: None,
+            database: None,
+            connection_url: None,
+            ssl_mode: None,
+            tags: None,
+            icon: None,
+            color: None,
+        });
+    config_connection.project_id = project_id.to_string();
+    config_connection
 }
 
 /// 连接数据库
@@ -120,22 +174,61 @@ pub async fn disconnect_db(
 
 /// 保存连接配置
 #[tauri::command]
-pub fn save_connections(
-    config_manager: State<'_, ConfigManager>,
-    connections: Vec<SavedConnection>,
+pub async fn save_connections(
+    meta_store: State<'_, MetaStore>,
+    project_id: Option<String>,
+    connections: Vec<ConfigSavedConnection>,
 ) -> Result<Response<String>, String> {
-    let config = AppConfig { connections };
-    config_manager.save(&config);
+    let project_id = project_id.unwrap_or_else(|| "sqls".to_string());
+    let store_connections = connections
+        .iter()
+        .map(|connection| store_connection_from_config(&project_id, connection))
+        .collect::<Result<Vec<_>, _>>()?;
+    meta_store
+        .replace_connections(&project_id, &store_connections)
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(Response::ok("Connections saved successfully".to_string()))
 }
 
 /// 加载连接配置
 #[tauri::command]
-pub fn load_connections(
+pub async fn load_connections(
+    meta_store: State<'_, MetaStore>,
     config_manager: State<'_, ConfigManager>,
-) -> Result<Response<Vec<SavedConnection>>, String> {
-    let config = config_manager.load();
-    Ok(Response::ok(config.connections))
+    project_id: Option<String>,
+) -> Result<Response<Vec<ConfigSavedConnection>>, String> {
+    let project_id = project_id.unwrap_or_else(|| "sqls".to_string());
+    let mut store_connections = meta_store
+        .get_connections(&project_id)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if store_connections.is_empty() {
+        let legacy_connections = config_manager
+            .load()
+            .connections
+            .into_iter()
+            .filter(|connection| connection.project_id == project_id)
+            .collect::<Vec<_>>();
+
+        if !legacy_connections.is_empty() {
+            store_connections = legacy_connections
+                .iter()
+                .map(|connection| store_connection_from_config(&project_id, connection))
+                .collect::<Result<Vec<_>, _>>()?;
+            meta_store
+                .replace_connections(&project_id, &store_connections)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
+    let connections = store_connections
+        .into_iter()
+        .map(|connection| config_connection_from_store(&project_id, connection))
+        .collect();
+    Ok(Response::ok(connections))
 }
 
 #[cfg(test)]

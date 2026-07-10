@@ -23,6 +23,8 @@ pub struct LspNotification {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LspServerNotification {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_key: Option<String>,
     pub method: String,
     pub params: serde_json::Value,
 }

@@ -155,10 +155,7 @@ export function WorkspaceSidebar() {
   return (
     <div
       className={cn(
-        "w-[70px] shrink-0 flex flex-col items-center py-6 gap-4 z-20 h-full transition-colors",
-        isDark
-          ? "bg-[#18181b] border-r border-white/5" // Unified Frame Color
-          : "bg-[#f4f4f5] border-r border-border" // Light mode can stay or be adjusted, keeping simple for now
+        "w-10 shrink-0 flex flex-col items-center py-1 gap-1 z-20 h-full transition-colors bg-[hsl(var(--wb-toolbar))] border-r border-[hsl(var(--wb-border-subtle))]"
       )}
     >
       <TooltipProvider delayDuration={0}>
@@ -168,12 +165,10 @@ export function WorkspaceSidebar() {
             <div
               onClick={() => setActiveWorkspace(null)}
               className={cn(
-                "w-10 h-10 rounded-2xl flex items-center justify-center cursor-pointer transition-all duration-300 group relative",
+                "w-7 h-7 rounded-[4px] flex items-center justify-center cursor-pointer transition-colors group relative",
                 activeWorkspaceId === null
-                  ? "bg-primary text-primary-foreground shadow-lg shadow-primary/25 scale-100"
-                  : isDark
-                  ? "text-muted-foreground hover:bg-white/10 hover:text-foreground"
-                  : "text-muted-foreground hover:bg-black/5 hover:text-foreground"
+                  ? "bg-[hsl(var(--wb-active))] text-[hsl(var(--wb-text))]"
+                  : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
               )}
             >
               <LayoutGrid size={20} strokeWidth={1.5} />
@@ -193,15 +188,10 @@ export function WorkspaceSidebar() {
           </TooltipContent>
         </Tooltip>
 
-        <div
-          className={cn(
-            "w-8 h-[2px] rounded-full mx-auto opacity-50",
-            isDark ? "bg-white/10" : "bg-black/5"
-          )}
-        />
+        <div className="my-1 h-px w-6 bg-[hsl(var(--wb-border-subtle))]" />
 
         {/* WORKSPACES LIST */}
-        <div className="flex-1 w-full flex flex-col items-center gap-3 overflow-y-auto overflow-x-hidden px-2 no-scrollbar">
+        <div className="flex-1 w-full flex flex-col items-center gap-1 overflow-y-auto overflow-x-hidden no-scrollbar">
           {workspaces.map((workspace) => (
             <ContextMenu key={workspace.id}>
               <ContextMenuTrigger>
@@ -210,12 +200,10 @@ export function WorkspaceSidebar() {
                     <div
                       onClick={() => setActiveWorkspace(workspace.id)}
                       className={cn(
-                        "w-10 h-10 rounded-2xl flex items-center justify-center cursor-pointer transition-all duration-300 group relative",
+                        "w-7 h-7 rounded-[4px] flex items-center justify-center cursor-pointer transition-colors group relative",
                         activeWorkspaceId === workspace.id
-                          ? "shadow-md scale-100 ring-2 ring-offset-2 ring-offset-background"
-                          : isDark
-                          ? "text-muted-foreground hover:bg-white/10 hover:text-foreground"
-                          : "text-muted-foreground hover:bg-black/5 hover:text-foreground"
+                          ? "text-white"
+                          : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
                       )}
                       style={
                         activeWorkspaceId === workspace.id
@@ -245,10 +233,7 @@ export function WorkspaceSidebar() {
                   <TooltipContent
                     side="right"
                     className={cn(
-                      "ml-2 flex flex-col gap-1 min-w-[150px] p-3 shadow-xl",
-                      isDark
-                        ? "bg-[#1a1a1a] border-[#333]"
-                        : "bg-white border-gray-200"
+                    "ml-2 flex flex-col gap-1 min-w-[150px] p-3 shadow-lg bg-[hsl(var(--wb-panel-raised))] border-[hsl(var(--wb-border))]"
                     )}
                   >
                     <div className="flex items-center gap-2">

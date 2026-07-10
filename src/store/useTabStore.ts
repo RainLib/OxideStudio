@@ -17,6 +17,7 @@ import type {
 import { useHistoryStore } from "./useHistoryStore";
 import { useConnectionStore } from "./useConnectionStore";
 import { useSchemaStore } from "./useSchemaStore";
+import { useTaskStore } from "./useTaskStore";
 import type { FilterOperator } from "@/components/workspace/GridFilterRow";
 import {
   DEFAULT_DATABASE_DRIVER,
@@ -700,6 +701,12 @@ export const useTabStore = create<TabState>((set, get) => ({
     const sqlToRun = sqlOverride || tab.sql;
     if (!sqlToRun.trim()) return;
     const queryId = `${id}:${uuidv4()}`;
+    const taskStore = useTaskStore.getState();
+    const taskId = taskStore.startTask({
+      kind: "query",
+      title: `Run ${tab.title}`,
+      detail: "Executing SQL",
+    });
 
     // Update state to executing
     set((state) => ({
@@ -746,6 +753,12 @@ export const useTabStore = create<TabState>((set, get) => ({
       }
 
       console.log("[TabStore] Query successfully finished", results);
+      const rowCount =
+        results?.reduce((total, result) => total + result.rows.length, 0) ?? 0;
+      taskStore.finishTask(
+        taskId,
+        `${rowCount.toLocaleString()} row${rowCount === 1 ? "" : "s"}`
+      );
 
       set((state) => ({
         tabs: state.tabs.map((t) =>
@@ -771,6 +784,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         });
       }
     } catch (e: any) {
+      taskStore.failTask(taskId, e.message || String(e));
       set((state) => ({
         tabs: state.tabs.map((t) =>
           t.id === id && t.runningQueryId === queryId
@@ -1292,6 +1306,12 @@ export const useTabStore = create<TabState>((set, get) => ({
     const driver = connection?.driver || DEFAULT_DATABASE_DRIVER;
     const nextPage = Math.max(0, page ?? tab.tablePage ?? 0);
     const pageSize = tab.tablePageSize || 500;
+    const taskStore = useTaskStore.getState();
+    const taskId = taskStore.startTask({
+      kind: "table",
+      title: `Load ${tab.tableName}`,
+      detail: `Page ${nextPage + 1}`,
+    });
     const nextFilterSql = filterSql === undefined ? tab.tableFilterSql : filterSql;
     const nextFilters = filters === undefined ? tab.tableFilters : filters;
     const tableSort: TableSort | undefined =
@@ -1339,7 +1359,14 @@ export const useTabStore = create<TabState>((set, get) => ({
             : t
         ),
       }));
+      taskStore.finishTask(
+        taskId,
+        `${pageResult.result.rows.length.toLocaleString()} row${
+          pageResult.result.rows.length === 1 ? "" : "s"
+        }`
+      );
     } catch (e: any) {
+      taskStore.failTask(taskId, e.message || String(e));
       set((state) => ({
         tabs: state.tabs.map((t) =>
           t.id === tabId

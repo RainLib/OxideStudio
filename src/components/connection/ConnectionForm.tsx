@@ -343,11 +343,11 @@ export function ConnectionForm() {
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden">
-      <div className="flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar">
-        <div className="w-full max-w-3xl mx-auto flex flex-col min-h-0">
+    <div className="flex-1 flex flex-col h-full overflow-hidden bg-[hsl(var(--wb-editor))]">
+      <div className="flex-1 overflow-y-auto p-3 custom-scrollbar">
+        <div className="w-full max-w-5xl mx-auto flex flex-col min-h-0">
           {/* Header Section */}
-          <div className="mb-8 flex flex-col gap-1">
+          <div className="mb-3 flex flex-col gap-1">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3 flex-1 mr-4">
                 {/* Icon Selector */}
@@ -355,7 +355,7 @@ export function ConnectionForm() {
                   <PopoverTrigger asChild>
                     <div
                       className={cn(
-                        "w-12 h-12 rounded-xl flex items-center justify-center cursor-pointer hover:shadow-lg transition-all border border-transparent hover:border-border/60",
+                        "w-8 h-8 rounded-[4px] flex items-center justify-center cursor-pointer transition-colors border border-transparent hover:border-[hsl(var(--wb-border))]",
                         !selectedConnection.icon &&
                           !selectedConnection.color &&
                           "bg-secondary/50"
@@ -374,7 +374,7 @@ export function ConnectionForm() {
                     <div className="space-y-4">
                       {/* Icon Grid */}
                       <div className="space-y-2">
-                        <label className="text-xs font-bold text-muted-foreground uppercase">
+                        <label className="text-xs font-semibold text-muted-foreground">
                           Icon
                         </label>
                         <div className="grid grid-cols-6 gap-2">
@@ -396,7 +396,7 @@ export function ConnectionForm() {
 
                       {/* Text Icon Input */}
                       <div className="space-y-2">
-                        <label className="text-xs font-bold text-muted-foreground uppercase">
+                        <label className="text-xs font-semibold text-muted-foreground">
                           Text Icon
                         </label>
                         <Input
@@ -438,7 +438,7 @@ export function ConnectionForm() {
                         </div>
 
                         <div className="space-y-2">
-                          <label className="text-xs font-bold text-muted-foreground uppercase">
+                          <label className="text-xs font-semibold text-muted-foreground">
                             Color
                           </label>
                           <div className="grid grid-cols-8 gap-2">
@@ -462,7 +462,7 @@ export function ConnectionForm() {
                 </Popover>
 
                 <Input
-                  className="text-2xl font-bold tracking-tight text-foreground bg-transparent border-none p-0 h-auto focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:opacity-20 hover:bg-white/5 transition-colors cursor-text px-2 rounded-md"
+                  className="text-lg font-semibold text-[hsl(var(--wb-text))] bg-transparent border-none p-0 h-8 focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:opacity-40 hover:bg-[hsl(var(--wb-hover))] transition-colors cursor-text px-2 rounded-[4px]"
                   placeholder="New Connection"
                   value={selectedConnection?.name || ""}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -479,7 +479,7 @@ export function ConnectionForm() {
                     type="button"
                     variant="outline"
                     size="sm"
-                    className="h-8 gap-2 text-xs uppercase tracking-wide font-semibold opacity-70 hover:opacity-100"
+                    className="wb-text-button border border-[hsl(var(--wb-border-subtle))]"
                   >
                     <Globe size={14} /> Import URL
                   </Button>
@@ -517,17 +517,17 @@ export function ConnectionForm() {
                 </DialogContent>
               </Dialog>
             </div>
-            <p className="text-sm text-muted-foreground ml-16">
+            <p className="text-xs wb-muted ml-10">
               Configure your database connection details below.
             </p>
           </div>
 
-          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <div className="space-y-3">
             {/* Section: Driver & Security & Tags */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-start">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
               <section className="space-y-4">
-                <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/80 flex items-center gap-2">
-                  <Database size={14} /> Database Type
+                <h3 className="wb-section-title flex items-center gap-2">
+                  <Database size={14} /> Database type
                 </h3>
                 <Select
                   value={selectedConnection?.driver || ""}
@@ -561,10 +561,10 @@ export function ConnectionForm() {
 
                 {/* Security nested here to save top-level space if needed, or keeping it distinct */}
                 <div className="pt-2">
-                  <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-2 ml-1">
-                    Security Settings
+                  <h3 className="text-[11px] font-semibold text-muted-foreground/80 mb-2 ml-1">
+                    Security settings
                   </h3>
-                  <div className="flex items-center justify-between p-2.5 px-4 rounded-xl border border-border/40 bg-card/20 hover:bg-card/40 transition-colors">
+                  <div className="flex items-center justify-between wb-form-panel">
                     <div className="text-xs font-medium">SSL Connection</div>
                     <Switch
                       checked={selectedConnection?.sslMode === "require"}
@@ -577,10 +577,10 @@ export function ConnectionForm() {
               </section>
 
               <section className="space-y-4">
-                <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/80 flex items-center gap-2">
+                <h3 className="wb-section-title flex items-center gap-2">
                   <Tag size={14} /> Tags
                 </h3>
-                <div className="space-y-3 p-4 rounded-xl border border-border/50 bg-card/20 group">
+                <div className="space-y-3 wb-form-panel group">
                   {/* Active Tags */}
                   <div className="flex flex-wrap gap-2 min-h-[24px]">
                     {selectedConnection.tags?.map((tag: string) => (
@@ -593,7 +593,7 @@ export function ConnectionForm() {
                         <button
                           type="button"
                           onClick={() => handleRemoveTag(tag)}
-                          className="hover:bg-primary/20 rounded-full p-0.5 transition-colors"
+                          className="hover:bg-primary/20 rounded-[3px] p-0.5 transition-colors"
                         >
                           <X size={10} />
                         </button>
@@ -649,7 +649,7 @@ export function ConnectionForm() {
                           type="button"
                           key={tag}
                           onClick={() => handleAddTag(tag)}
-                          className="text-[10px] px-2 py-0.5 rounded-full border border-border/40 text-muted-foreground/60 hover:border-primary/30 hover:text-primary hover:bg-primary/5 transition-all"
+                          className="text-[10px] px-2 py-0.5 rounded-[3px] border border-border/40 text-muted-foreground/60 hover:border-primary/30 hover:text-primary hover:bg-primary/5 transition-colors"
                         >
                           + {tag}
                         </button>
@@ -659,19 +659,19 @@ export function ConnectionForm() {
               </section>
             </div>
 
-            <div className="h-px bg-white/5" />
+            <div className="h-px bg-[hsl(var(--wb-border-subtle))]" />
 
             {/* Section: Connection Parameters */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {/* Left Column: Network & Database */}
               {/* Left Column: Network & Database */}
               <div className="space-y-6">
                 <section className="space-y-3">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground/50 flex items-center gap-2 mb-3">
-                    <Globe size={12} /> Network & Database
+                  <h3 className="wb-section-title flex items-center gap-2 mb-2">
+                    <Globe size={12} /> Network and database
                   </h3>
 
-                  <div className="bg-card/20 border border-border/40 rounded-xl p-4 space-y-4">
+                  <div className="wb-form-panel space-y-3">
                     <div className="grid grid-cols-4 gap-3">
                       <div className="col-span-3 space-y-1.5">
                         <label className="text-xs font-medium text-muted-foreground ml-1">
@@ -726,10 +726,10 @@ export function ConnectionForm() {
 
               {/* Right Column: Authentication */}
               <section className="space-y-3">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground/50 flex items-center gap-2 mb-3">
+                <h3 className="wb-section-title flex items-center gap-2 mb-2">
                   <Lock size={12} /> Authentication
                 </h3>
-                <div className="space-y-4 p-4 rounded-xl border border-border/40 bg-card/20">
+                <div className="space-y-4 wb-form-panel">
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1.5">
                       <label className="text-xs font-medium text-muted-foreground ml-1">
@@ -782,15 +782,15 @@ export function ConnectionForm() {
       </div>
 
       {/* Footer Actions */}
-      <div className="py-4 bg-[#09090b]/90 backdrop-blur-lg border-t border-white/5 flex items-center justify-center z-10 shrink-0">
-        <div className="w-full max-w-3xl flex items-center justify-between px-8">
+      <div className="h-12 bg-[hsl(var(--wb-toolbar))] border-t border-[hsl(var(--wb-border-subtle))] flex items-center justify-center z-10 shrink-0">
+        <div className="w-full max-w-5xl flex items-center justify-between px-3">
           <div className="flex items-center gap-4">
             <Button
               type="button"
               variant="ghost"
               onClick={handleTest}
               disabled={testStatus?.type === "loading"}
-              className="text-muted-foreground hover:text-foreground"
+              className="wb-text-button"
             >
               {testStatus?.type === "loading" ? (
                 <Loader2 size={16} className="animate-spin mr-2" />
@@ -823,7 +823,7 @@ export function ConnectionForm() {
               type="button"
               variant="secondary"
               onClick={handleSave}
-              className="bg-secondary/80 hover:bg-secondary"
+              className="wb-text-button border border-[hsl(var(--wb-border-subtle))]"
             >
               Save Draft
             </Button>
@@ -831,7 +831,7 @@ export function ConnectionForm() {
               type="button"
               onClick={handleConnect}
               disabled={isConnecting}
-              className="shadow-lg shadow-primary/20 min-w-[140px]"
+              className="wb-primary-button min-w-[120px]"
             >
               {isConnecting ? (
                 <Loader2 size={16} className="animate-spin mr-2" />

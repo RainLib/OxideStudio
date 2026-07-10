@@ -52,6 +52,7 @@ describe("AI settings", () => {
       {
         ...initialAiSettings,
         enabled: true,
+        plannerKind: "langgraph",
         baseUrl: "https://api.openai.com/v1",
         model: "gpt-test",
         apiKey: "test-key",
@@ -82,8 +83,8 @@ describe("AI settings", () => {
     });
 
     await act(async () => {
-      buttonWithText(document, "AI")?.dispatchEvent(
-        new MouseEvent("mousedown", {
+      buttonWithText(document, "AI Assistant")?.dispatchEvent(
+        new MouseEvent("click", {
           bubbles: true,
           cancelable: true,
           button: 0,
@@ -94,6 +95,8 @@ describe("AI settings", () => {
 
     const testButton = buttonWithText(document, "Test Provider");
     expect(testButton).toBeTruthy();
+    expect(document.body.textContent).toContain("LangGraph planner plugin");
+    expect(document.body.textContent).toContain("@langchain/langgraph");
     expect(testButton?.getAttribute("type")).toBe("button");
     expect(
       Array.from(document.querySelectorAll("a")).some((anchor) =>

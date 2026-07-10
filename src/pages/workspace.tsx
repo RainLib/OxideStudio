@@ -1,62 +1,65 @@
 import { AppBar } from "@/components/AppBar";
-import { Button } from "@/components/ui/button";
 import { DataGrid } from "@/components/workspace/DataGrid";
-import { LeftPanel, SidebarTab } from "@/components/workspace/LeftPanel";
+import { LeftPanel } from "@/components/workspace/LeftPanel";
 import { QueryEditor } from "@/components/workspace/QueryEditor";
 import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
+import { AssistantSidebar } from "@/components/workspace/AssistantSidebar";
 import { TabBar } from "@/components/workspace/TabBar";
 import { TableDataView } from "@/components/workspace/TableDataView";
 import { CreateTableTab } from "@/components/workspace/CreateTableTab";
-import { AssistantSidebar } from "@/components/workspace/AssistantSidebar";
-import { cn } from "@/lib/utils";
+import { TaskStatusCenter } from "@/components/workspace/TaskStatusCenter";
 import { useTabStore } from "@/store/useTabStore";
-import { useTheme } from "@/theme/useTheme";
+import { useConnectionStore } from "@/store/useConnectionStore";
+import { useSchemaStore } from "@/store/useSchemaStore";
 import { CommandPalette } from "@/components/workspace/CommandPalette";
+import { cn } from "@/lib/utils";
 import {
+  ChevronDown,
+  ChevronRight,
   PanelLeft,
   PanelLeftClose,
-  Sparkles,
+  PanelRight,
+  PanelRightClose,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
 export function WorkspacePage() {
-  const { mode } = useTheme();
-  // const { activeConnectionId } = useConnectionStore(); // Removed unused
-  const { tabs, activeTabId, createTab } = useTabStore();
+  const { tabs, activeTabId } = useTabStore();
+  const { connections, activeConnectionId } = useConnectionStore();
+  const {
+    currentSchema,
+    isLoading: isSchemaLoading,
+    isCollectionsLoading,
+    isFunctionsLoading,
+  } = useSchemaStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
+  const activeConnection = connections.find((c) => c.id === activeConnectionId);
+  const isIntrospecting =
+    isSchemaLoading || isCollectionsLoading || isFunctionsLoading;
 
   const currentResult = Array.isArray(activeTab?.results)
     ? activeTab?.results[0]
     : activeTab?.results;
 
   // Layout State
-  const [activeSidebarTab, setActiveSidebarTab] =
-    useState<SidebarTab>("tables");
   const [isLeftDrawerOpen, setIsLeftDrawerOpen] = useState(true);
-  const [sidebarWidth, setSidebarWidth] = useState(280); // Fixed pixel width
-  const [editorHeight, setEditorHeight] = useState(400); // Default pixel height for editor
+  const [isRightDrawerOpen, setIsRightDrawerOpen] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(400); // Fixed pixel width
+  const [rightSidebarWidth, setRightSidebarWidth] = useState(360);
+  const [resultPanelHeight, setResultPanelHeight] = useState(320);
+  const [isResultPanelHidden, setIsResultPanelHidden] = useState(false);
+  const isQueryTab =
+    activeTab?.type !== "table" && activeTab?.type !== "create_table";
+  const hasQueryResultSurface =
+    Boolean(isQueryTab && activeTab) &&
+    Boolean(currentResult || activeTab?.isExecuting || activeTab?.error);
+  const showQueryResultPanel = hasQueryResultSurface && !isResultPanelHidden;
 
-  const [isRightCollapsed, setIsRightCollapsed] = useState(false);
-
-  // Auto-create default SQL tab on first load
   useEffect(() => {
-    if (tabs.length === 0) {
-      createTab("query", "Query #1", "");
+    if (hasQueryResultSurface) {
+      setIsResultPanelHidden(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Only run once on mount
-
-  // Toggle Logic
-  const handleActivityBarClick = (tab: SidebarTab) => {
-    if (activeSidebarTab === tab) {
-      setIsLeftDrawerOpen(!isLeftDrawerOpen);
-    } else {
-      setActiveSidebarTab(tab);
-      if (!isLeftDrawerOpen) {
-        setIsLeftDrawerOpen(true);
-      }
-    }
-  };
+  }, [activeTab?.id, activeTab?.isExecuting, currentResult, hasQueryResultSurface]);
 
   const handleDragStart = (e: React.MouseEvent) => {
     const startX = e.clientX;
@@ -66,11 +69,36 @@ export function WorkspacePage() {
       const deltaX = moveEvent.clientX - startX;
       const newWidth = Math.max(0, startWidth + deltaX);
 
-      if (newWidth < 100) {
+      if (newWidth < 160) {
         setIsLeftDrawerOpen(false);
-        setSidebarWidth(280);
+        setSidebarWidth(400);
       } else {
-        setSidebarWidth(Math.min(newWidth, 600));
+        setSidebarWidth(Math.min(newWidth, 680));
+      }
+    };
+
+    const handleDragEnd = () => {
+      document.removeEventListener("mousemove", handleDrag);
+      document.removeEventListener("mouseup", handleDragEnd);
+    };
+
+    document.addEventListener("mousemove", handleDrag);
+    document.addEventListener("mouseup", handleDragEnd);
+  };
+
+  const handleRightDragStart = (e: React.MouseEvent) => {
+    const startX = e.clientX;
+    const startWidth = rightSidebarWidth;
+
+    const handleDrag = (moveEvent: MouseEvent) => {
+      const deltaX = startX - moveEvent.clientX;
+      const newWidth = Math.max(0, startWidth + deltaX);
+
+      if (newWidth < 180) {
+        setIsRightDrawerOpen(false);
+        setRightSidebarWidth(360);
+      } else {
+        setRightSidebarWidth(Math.min(newWidth, 560));
       }
     };
 
@@ -86,16 +114,15 @@ export function WorkspacePage() {
   const handleVerticalDragStart = (e: React.MouseEvent) => {
     e.preventDefault();
     const startY = e.clientY;
-    const startHeight = editorHeight;
+    const startHeight = resultPanelHeight;
 
     const handleDrag = (moveEvent: MouseEvent) => {
-      const deltaY = moveEvent.clientY - startY;
-      // Constraint: min 100px, max window height - 200px
+      const deltaY = startY - moveEvent.clientY;
       const newHeight = Math.max(
-        100,
-        Math.min(startHeight + deltaY, window.innerHeight - 200)
+        140,
+        Math.min(startHeight + deltaY, window.innerHeight - 220)
       );
-      setEditorHeight(newHeight);
+      setResultPanelHeight(newHeight);
     };
 
     const handleDragEnd = () => {
@@ -110,56 +137,48 @@ export function WorkspacePage() {
   };
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-background text-foreground font-sans overflow-hidden">
+    <div className="workbench-shell flex flex-col">
       <AppBar
         right={
-          <>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-accent/50"
+          <div className="flex items-center gap-0.5">
+            <button
+              type="button"
+              className="wb-icon-button"
               onClick={() => setIsLeftDrawerOpen(!isLeftDrawerOpen)}
               title="Toggle Left Panel"
             >
               {isLeftDrawerOpen ? (
-                <PanelLeftClose size={16} />
+                <PanelLeftClose size={14} />
               ) : (
-                <PanelLeft size={16} />
+                <PanelLeft size={14} />
               )}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className={cn(
-                "h-8 gap-1.5 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-accent/50",
-                !isRightCollapsed && "text-primary bg-primary/10"
-              )}
-              onClick={() => setIsRightCollapsed(!isRightCollapsed)}
-              title={isRightCollapsed ? "Show AI Assistant" : "Hide AI Assistant"}
-              aria-label={
-                isRightCollapsed ? "Show AI Assistant" : "Hide AI Assistant"
-              }
-              aria-pressed={!isRightCollapsed}
+            </button>
+            <button
+              type="button"
+              className="wb-icon-button"
+              onClick={() => setIsRightDrawerOpen(!isRightDrawerOpen)}
+              title="Toggle AI Assistant"
             >
-              <Sparkles size={16} />
-              <span>Assistant</span>
-            </Button>
-          </>
+              {isRightDrawerOpen ? (
+                <PanelRightClose size={14} />
+              ) : (
+                <PanelRight size={14} />
+              )}
+            </button>
+          </div>
         }
       />
 
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex flex-1 gap-1 overflow-hidden bg-[hsl(var(--wb-frame))] p-1">
         {/* Unified Left Panel */}
         <LeftPanel
-          activeTab={activeSidebarTab}
-          onTabClick={handleActivityBarClick}
           isDrawerOpen={isLeftDrawerOpen}
           sidebarWidth={sidebarWidth}
           onDragStart={handleDragStart}
         />
 
         {/* Main Content Area + Right Panel with Unified Bottom StatusBar */}
-        <div className="flex-1 flex flex-col min-w-0 bg-background/50 relative z-10">
+        <div className="relative z-10 flex min-w-0 flex-1 flex-col overflow-hidden rounded-[6px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))]">
           {/* Top: Content Areas */}
           <div className="flex flex-1 min-h-0">
             {/* Main Editor Area */}
@@ -167,9 +186,9 @@ export function WorkspacePage() {
               {tabs.length === 0 ? (
                 <QueryShortcuts />
               ) : (
-                <div className="flex flex-col h-full min-w-0 bg-background shadow-sm z-10">
+                <div className="flex flex-col h-full min-w-0 gap-1 bg-[hsl(var(--wb-editor))] z-10">
                   {/* Main functionality area */}
-                  <div className="border-b border-border/40 bg-background/95 backdrop-blur z-20">
+                  <div className="z-20">
                     <TabBar />
                   </div>
 
@@ -182,70 +201,131 @@ export function WorkspacePage() {
                       schemaName={activeTab.schemaName || ""}
                     />
                   ) : (
-                    <div className="flex flex-col h-full min-h-0 relative">
-                      {/* Top: Editor */}
-                      <div
-                        style={{ height: `${editorHeight}px` }}
-                        className="min-h-[100px] border-b border-border/40 flex flex-col shrink-0 overflow-hidden"
-                      >
+                    <div className="flex flex-col h-full min-h-0 gap-1 relative">
+                      <div className="min-h-[160px] flex-1 flex flex-col overflow-hidden">
                         <QueryEditor />
                       </div>
 
-                      {/* Resizer Handle */}
-                      <div
-                        className="h-1.5 w-full hover:bg-primary/30 cursor-row-resize z-50 transition-colors relative group shrink-0"
-                        onMouseDown={handleVerticalDragStart}
-                      >
-                        <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-px bg-border/50 group-hover:bg-primary/40 transition-colors" />
-                      </div>
+                      {showQueryResultPanel && (
+                        <>
+                          <div
+                            className="wb-resizer-y z-50 relative group"
+                            onMouseDown={handleVerticalDragStart}
+                          />
 
-                      {/* Bottom: Results or Shortcuts */}
-                      <div className="flex-1 min-h-0 flex flex-col bg-muted/5 z-0">
-                        {currentResult ? <DataGrid readOnly /> : <QueryShortcuts />}
-                      </div>
+                          <div
+                            className="min-h-[140px] shrink-0 overflow-hidden rounded-b-[6px] border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-grid))]"
+                            style={{ height: `${resultPanelHeight}px` }}
+                          >
+                            <div className="flex h-8 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-2 text-[11px] text-[hsl(var(--wb-text-muted))]">
+                              <div className="flex items-center gap-2">
+                                <span className="font-medium text-[hsl(var(--wb-text))]">
+                                  Results
+                                </span>
+                                {currentResult && (
+                                  <span>
+                                    {currentResult.rows.length.toLocaleString()} rows
+                                  </span>
+                                )}
+                                {activeTab?.isExecuting && <span>Running...</span>}
+                              </div>
+                              <button
+                                type="button"
+                                className="wb-icon-button h-6 w-6"
+                                onClick={() => setIsResultPanelHidden(true)}
+                                title="Hide Results"
+                              >
+                                <ChevronDown size={14} />
+                              </button>
+                            </div>
+                            <div className="h-[calc(100%-2rem)] min-h-0">
+                              <DataGrid readOnly />
+                            </div>
+                          </div>
+                        </>
+                      )}
+                      {hasQueryResultSurface && isResultPanelHidden && (
+                        <button
+                          type="button"
+                          className="flex h-6 shrink-0 items-center gap-2 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-3 text-left text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))]"
+                          onClick={() => setIsResultPanelHidden(false)}
+                          title="Show Results"
+                        >
+                          <ChevronRight size={12} />
+                          <span className="font-medium text-[hsl(var(--wb-text))]">
+                            Results
+                          </span>
+                          {currentResult && (
+                            <span>
+                              {currentResult.rows.length.toLocaleString()} rows
+                            </span>
+                          )}
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
               )}
             </div>
-
-            {/* Right Panel */}
-            <div
-              className={cn(
-                "border-l border-border/40 bg-muted/10 shrink-0 transition-all duration-300 ease-in-out overflow-hidden flex flex-col",
-                isRightCollapsed
-                  ? "w-0 opacity-0 border-l-0"
-                  : "w-[320px] opacity-100"
-              )}
-            >
-              <div className="h-full min-w-[320px]">
-                <AssistantSidebar />
-              </div>
-            </div>
           </div>
+        </div>
+
+        <div
+          className={cn(
+            "relative z-10 flex h-full shrink-0 flex-col overflow-hidden transition-[width] duration-150 ease-out",
+            isRightDrawerOpen
+              ? "wb-panel rounded-[6px] border border-[hsl(var(--wb-border-subtle))]"
+              : "border-0"
+          )}
+          style={{ width: `${isRightDrawerOpen ? rightSidebarWidth : 0}px` }}
+        >
+          {isRightDrawerOpen && (
+            <>
+              <div
+                className="absolute left-0 top-0 bottom-0 wb-resizer-x z-50"
+                onMouseDown={handleRightDragStart}
+              />
+              <AssistantSidebar />
+            </>
+          )}
         </div>
       </div>
 
-      {/* Bottom: Unified Status Bar spanning full width - content rendered via Portal from components */}
-      <div
-        className={cn(
-          "h-12 w-full flex items-center border-t z-30 transition-colors duration-300 shrink-0",
-          mode === "dark"
-            ? "bg-orange-500/10 text-orange-500 border-orange-500/20"
-            : "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
-        )}
-      >
-        {/* Left slot - for sidebar status (connection info, etc.) - lighter bg */}
-        <div
-          id="status-bar-left"
-          className={cn(
-            "h-full flex items-center shrink-0",
-            mode === "dark" ? "bg-orange-500/5" : "bg-emerald-500/5"
+      {/* Bottom: DataGrip-style path/status line. Component status can still use the right slot. */}
+      <div className="wb-statusbar z-30 flex w-full items-center transition-colors duration-200">
+        <div className="flex min-w-0 items-center gap-1 px-2">
+          <span className="shrink-0">Database</span>
+          {activeConnection && (
+            <>
+              <ChevronRight size={12} className="shrink-0 wb-muted" />
+              <span className="truncate">{activeConnection.name}</span>
+            </>
           )}
-        />
-
-        {/* Right slot - for tab status bar content */}
-        <div id="status-bar-slot" className="flex-1 h-full flex items-center" />
+          {currentSchema && (
+            <>
+              <ChevronRight size={12} className="shrink-0 wb-muted" />
+              <span className="truncate">{currentSchema}</span>
+            </>
+          )}
+          {activeTab && (
+            <>
+              <ChevronRight size={12} className="shrink-0 wb-muted" />
+              <span className="truncate">{activeTab.title}</span>
+            </>
+          )}
+        </div>
+        <div className="ml-auto flex h-full items-center">
+          {isIntrospecting && (
+            <div className="hidden h-full items-center gap-2 border-l border-[hsl(var(--wb-border-subtle))] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] sm:flex">
+              <span className="whitespace-nowrap">Introspecting metadata</span>
+              <span className="wb-progress-track">
+                <span className="wb-progress-bar" />
+              </span>
+            </div>
+          )}
+          <TaskStatusCenter />
+          <div id="status-bar-slot" className="h-full flex items-center" />
+        </div>
       </div>
 
       <CommandPalette />

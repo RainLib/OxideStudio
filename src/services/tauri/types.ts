@@ -192,6 +192,7 @@ export interface TableConstraintChangeResult {
  */
 export interface SavedConnection {
   id: string;
+  projectId?: string;
   name: string;
   driver: DatabaseDriver;
   url: string;

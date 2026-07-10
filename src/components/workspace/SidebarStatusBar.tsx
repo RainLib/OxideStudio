@@ -1,5 +1,6 @@
 import { useConnectionStore } from "@/store/useConnectionStore";
-import { LogOut, Slack } from "lucide-react";
+import { useProjectStore } from "@/store/useProjectStore";
+import { Folder, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -20,6 +21,7 @@ export function SidebarStatusBar({
 }: SidebarStatusBarProps) {
   const { activeConnectionId, connections, disconnect, setActiveConnection } =
     useConnectionStore();
+  const { activeProjectName } = useProjectStore();
   const [open, setOpen] = useState(false);
 
   const activeConnection = connections.find((c) => c.id === activeConnectionId);
@@ -38,13 +40,15 @@ export function SidebarStatusBar({
                 "hover:bg-current/10"
               )}
             >
-              {/* Fixed-width icon area (matches ActivityBar width 50px) */}
-              <div className="w-[50px] h-full flex items-center justify-center shrink-0">
-                <Slack size={18} />
+              <div className="flex h-full shrink-0 items-center gap-1 px-2">
+                <Folder size={13} />
+                <span className="text-[11px] font-medium">
+                  {activeProjectName || "sqls"}
+                </span>
               </div>
 
               {/* Expandable content area */}
-              {isDrawerOpen && (
+              {isDrawerOpen && activeConnection && (
                 <div className="flex-1 flex items-center gap-2 px-2 text-[10px] font-bold overflow-hidden">
                   {/* Connection Info */}
                   <div
@@ -137,6 +141,11 @@ export function SidebarStatusBar({
                 <LogOut size={14} className="mr-2" />
                 Disconnect
               </Button>
+              {connections.length === 0 && (
+                <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
+                  Add a data source from Settings.
+                </div>
+              )}
             </div>
           </PopoverContent>
         </Popover>

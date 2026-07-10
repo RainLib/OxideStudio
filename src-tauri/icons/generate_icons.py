@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-从 logo.jpg 生成所有应用图标 (RGBA 格式)
+从 logo.png/logo.jpg 生成所有应用图标 (RGBA 格式)
 确保所有 PNG 都包含 alpha 通道
 """
 
 from PIL import Image
 import os
+import shutil
+import subprocess
+import tempfile
 
 def generate_icon(source_path, output_path, size):
     """生成指定尺寸的 RGBA PNG 图标"""
@@ -32,7 +35,7 @@ def main():
     # 切换到 icons 目录
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-    source = "logo.jpg"
+    source = "logo.png" if os.path.exists("logo.png") else "logo.jpg"
 
     # 定义所有需要的图标尺寸
     icons = [
@@ -96,19 +99,30 @@ def main():
     # 生成 .ico 文件 (Windows)
     print("Generating .ico file for Windows...")
     try:
-        images = []
-        for size in [16, 32, 48, 64, 128, 256]:
-            img = Image.open(source)
-            if img.mode != 'RGBA':
-                img = img.convert('RGBA')
-            img = img.resize((size, size), Image.Resampling.LANCZOS)
-            images.append(img)
+        ico_sizes = [16, 24, 32, 48, 64, 128, 256]
+        magick = shutil.which("magick")
+        if magick:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_files = []
+                for size in ico_sizes:
+                    temp_file = os.path.join(temp_dir, f"icon_{size}.png")
+                    generate_icon(source, temp_file, size)
+                    temp_files.append(temp_file)
+                subprocess.run([magick, *temp_files, "icon.ico"], check=True)
+        else:
+            images = []
+            for size in ico_sizes:
+                img = Image.open(source)
+                if img.mode != 'RGBA':
+                    img = img.convert('RGBA')
+                img = img.resize((size, size), Image.Resampling.LANCZOS)
+                images.append(img)
 
-        images[0].save(
-            "icon.ico",
-            format='ICO',
-            sizes=[(img.size[0], img.size[1]) for img in images]
-        )
+            images[0].save(
+                "icon.ico",
+                format='ICO',
+                sizes=[(img.size[0], img.size[1]) for img in images]
+            )
         print("✅ Created icon.ico")
     except Exception as e:
         print(f"⚠️  Could not create .ico: {e}")

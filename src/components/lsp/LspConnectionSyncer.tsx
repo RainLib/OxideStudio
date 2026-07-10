@@ -3,7 +3,6 @@ import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useLspClient } from "@/hooks/useLspClient";
-import { lspClient } from "@/services/lsp";
 import {
   databaseService,
   schemaService,
@@ -117,7 +116,19 @@ export function LspConnectionSyncer() {
   const { activeConnectionId, connections } = useConnectionStore();
   const { schemas, tables, currentSchema, metadataVersion } = useSchemaStore();
   const { tabs } = useTabStore();
-  const { isReady } = useLspClient();
+  const activeConnection = connections.find((c) => c.id === activeConnectionId);
+  const {
+    isReady,
+    client: lspClient,
+  } = useLspClient({
+    connectionId: activeConnectionId,
+    driver: activeConnection?.driver,
+    enabled: Boolean(
+      activeConnectionId &&
+        activeConnection &&
+        supportsLspLanguageId(activeConnection.driver)
+    ),
+  });
 
   // Track if we've already sent config for this connection+schema
   const lastConfigRef = useRef<string | null>(null);
@@ -137,7 +148,7 @@ export function LspConnectionSyncer() {
 
     if (!isReady || !activeConnectionId) return;
 
-    const connection = connections.find((c) => c.id === activeConnectionId);
+    const connection = activeConnection;
     if (!connection) return;
 
     if (!supportsLspLanguageId(connection.driver)) {
@@ -465,9 +476,11 @@ export function LspConnectionSyncer() {
     return scheduledSync.cleanup;
   }, [
     activeConnectionId,
+    activeConnection,
     connections,
     tabs,
     isReady,
+    lspClient,
     schemas,
     tables,
     currentSchema,

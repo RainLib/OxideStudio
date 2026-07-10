@@ -74,11 +74,11 @@ export function TabBar() {
   }, [activeTabId]);
 
   return (
-    <div className="flex items-center bg-[#18181b] h-10 w-full overflow-visible border-b border-white/5 pt-1">
+    <div className="flex items-center h-8 w-full overflow-visible border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] shadow-[inset_0_-1px_0_hsl(var(--wb-accent)/0.08)]">
       {/* Scrollable tabs container*/}
       <div
         ref={scrollContainerRef}
-        className="flex-1 flex overflow-x-auto h-full items-end scrollbar-hide"
+        className="flex-1 flex overflow-x-auto h-full items-stretch scrollbar-hide"
         style={{
           scrollbarWidth: "none",
           msOverflowStyle: "none",
@@ -111,10 +111,10 @@ export function TabBar() {
                     }
                   }}
                   className={cn(
-                    "flex items-center gap-2 px-4 h-9 min-w-[120px] max-w-[200px] text-[11px] cursor-pointer select-none group transition-all shrink-0 relative top-px",
+                    "flex items-center gap-1.5 px-3 h-full min-w-[118px] max-w-[220px] text-[11px] cursor-pointer select-none group transition-colors shrink-0 border-r border-[hsl(var(--wb-border-subtle))]",
                     activeTabId === tab.id
-                      ? "bg-[#09090b] text-foreground font-semibold border-t border-x border-white/10 rounded-t-md z-10 shadow-sm relative -bottom-px"
-                      : "bg-transparent text-muted-foreground hover:bg-white/5 hover:text-foreground border-transparent opacity-70 hover:opacity-100"
+                      ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))] font-semibold shadow-[inset_0_1px_0_hsl(var(--wb-accent)/0.34)]"
+                      : "bg-transparent text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
                   )}
                   onClick={() => setActiveTab(tab.id)}
                   onContextMenu={(e) => {
@@ -127,7 +127,7 @@ export function TabBar() {
                   <span className="truncate flex-1">{tab.title}</span>
                   {!tab.isPinned && (
                     <div
-                      className="opacity-0 group-hover:opacity-100 hover:bg-background-elevated rounded p-0.5 transition-opacity"
+                      className="opacity-0 group-hover:opacity-100 hover:bg-[hsl(var(--wb-hover))] rounded-[3px] p-0.5 transition-opacity"
                       onClick={(e) => {
                         e.stopPropagation();
                         closeTab(tab.id);
@@ -230,7 +230,7 @@ export function TabBar() {
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-background-elevated"
+                className="wb-icon-button"
                 title="All tabs"
               >
                 <ChevronDown size={14} />
@@ -257,7 +257,7 @@ export function TabBar() {
                   <>
                     {queryTabs.length > 0 && (
                       <>
-                        <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground font-bold px-2 py-1">
+                        <DropdownMenuLabel className="text-[10px] text-muted-foreground font-semibold px-2 py-1">
                           Queries
                         </DropdownMenuLabel>
                         {queryTabs.map((tab) => (
@@ -298,7 +298,7 @@ export function TabBar() {
                           {idx > 0 && (
                             <DropdownMenuSeparator className="my-1 bg-border" />
                           )}
-                          <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground font-bold px-2 py-1 flex items-center gap-1.5">
+                          <DropdownMenuLabel className="text-[10px] text-muted-foreground font-semibold px-2 py-1 flex items-center gap-1.5">
                             <Database size={11} className="text-primary" />
                             {schema}
                           </DropdownMenuLabel>
@@ -343,7 +343,7 @@ export function TabBar() {
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-background-elevated"
+          className="wb-icon-button h-7 w-7"
           onClick={() =>
             createTab(
               "query",
