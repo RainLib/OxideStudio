@@ -153,4 +153,33 @@ describe("ConnectionForm", () => {
     expect(saveConnection).not.toHaveBeenCalled();
     expect(connect).not.toHaveBeenCalled();
   });
+
+  it("invalidates an imported URL when a connection field changes", async () => {
+    const updateConnectionConfig = vi.fn();
+    useConnectionStore.setState({ updateConnectionConfig });
+
+    await act(async () => {
+      root = createRoot(container);
+      root?.render(<ConnectionForm />);
+      await flushAsyncWork();
+    });
+
+    const hostInput = container.querySelector<HTMLInputElement>("#connection-host");
+    expect(hostInput).toBeTruthy();
+
+    await act(async () => {
+      if (!hostInput) return;
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value"
+      )?.set;
+      valueSetter?.call(hostInput, "database.internal");
+      hostInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    expect(updateConnectionConfig).toHaveBeenCalledWith({
+      host: "database.internal",
+      connectionUrl: "",
+    });
+  });
 });

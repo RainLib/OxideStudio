@@ -1,4 +1,18 @@
-import { Button } from "@/components/ui/button";
+import {
+  Check,
+  ChevronDown,
+  CirclePlay,
+  RotateCcw,
+} from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
 type TransactionMode = "auto" | "manual";
@@ -13,6 +27,11 @@ interface TransactionControlProps {
   onRollback: () => void;
 }
 
+const menuClass =
+  "min-w-[176px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_16px_40px_rgba(0,0,0,0.42)]";
+const itemClass =
+  "h-7 cursor-default rounded-[3px] text-[12px] focus:bg-[hsl(var(--wb-active-strong))] focus:text-[hsl(var(--wb-text))]";
+
 export function TransactionControl({
   mode,
   state,
@@ -22,71 +41,91 @@ export function TransactionControl({
   onRollback,
 }: TransactionControlProps) {
   return (
-    <div className="flex items-center gap-1 px-2 py-1 bg-background-secondary/80 backdrop-blur-sm rounded-md border border-border">
-      {/* Mode Toggle */}
-      <div className="flex items-center gap-0.5 bg-background-primary rounded p-0.5">
-        <button
-          onClick={() => onModeChange("auto")}
-          className={cn(
-            "px-2.5 py-0.5 text-[11px] font-medium rounded transition-all",
-            mode === "auto"
-              ? "bg-background-elevated text-foreground shadow-sm"
-              : "text-muted-foreground hover:text-foreground"
+    <div className="flex h-full items-center gap-0.5">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className="wb-text-button h-6 gap-1 px-1.5 font-normal"
+            title="Transaction Mode"
+          >
+            <span className="wb-muted">Tx:</span>
+            <span>{mode === "auto" ? "Auto" : "Manual"}</span>
+            <ChevronDown size={11} />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className={menuClass}>
+          <DropdownMenuRadioGroup
+            value={mode}
+            onValueChange={(value) => onModeChange(value as TransactionMode)}
+          >
+            <DropdownMenuRadioItem value="auto" className={itemClass}>
+              Auto-commit
+            </DropdownMenuRadioItem>
+            <DropdownMenuRadioItem value="manual" className={itemClass}>
+              Manual commit
+            </DropdownMenuRadioItem>
+          </DropdownMenuRadioGroup>
+          {mode === "manual" && (
+            <>
+              <DropdownMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
+              <DropdownMenuItem
+                className={itemClass}
+                onClick={onBegin}
+                disabled={state === "active"}
+              >
+                <CirclePlay size={13} className="mr-2" />
+                Begin Transaction
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className={itemClass}
+                onClick={onCommit}
+                disabled={state !== "active"}
+              >
+                <Check size={13} className="mr-2" />
+                Commit
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className={itemClass}
+                onClick={onRollback}
+                disabled={state !== "active"}
+              >
+                <RotateCcw size={13} className="mr-2" />
+                Rollback
+              </DropdownMenuItem>
+            </>
           )}
-        >
-          Auto
-        </button>
-        <button
-          onClick={() => onModeChange("manual")}
-          className={cn(
-            "px-2.5 py-0.5 text-[11px] font-medium rounded transition-all",
-            mode === "manual"
-              ? "bg-background-elevated text-foreground shadow-sm"
-              : "text-muted-foreground hover:text-foreground"
-          )}
-        >
-          Manual Commit
-        </button>
-      </div>
+        </DropdownMenuContent>
+      </DropdownMenu>
 
-      {/* Manual Controls */}
       {mode === "manual" && (
         <>
-          <div className="h-4 w-px bg-border mx-1" />
-          <div className="flex items-center gap-1">
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={onBegin}
-              disabled={state === "active"}
-              className={cn(
-                "h-6 px-2 text-[11px] font-medium transition-all",
-                state === "active"
-                  ? "text-green-500 bg-green-500/10"
-                  : "text-muted-foreground hover:text-foreground hover:bg-background-elevated"
-              )}
-            >
-              {state === "active" ? "● Begin" : "Begin"}
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={onCommit}
-              disabled={state !== "active"}
-              className="h-6 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-background-elevated disabled:opacity-40"
-            >
-              Commit
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={onRollback}
-              disabled={state !== "active"}
-              className="h-6 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-background-elevated disabled:opacity-40"
-            >
-              Rollback
-            </Button>
-          </div>
+          <span
+            className={cn(
+              "mx-1 h-1.5 w-1.5 rounded-full",
+              state === "active"
+                ? "bg-emerald-400"
+                : "bg-[hsl(var(--wb-text-muted))] opacity-45"
+            )}
+            title={state === "active" ? "Transaction active" : "No transaction"}
+          />
+          <button
+            type="button"
+            className="wb-icon-button"
+            onClick={state === "active" ? onCommit : onBegin}
+            title={state === "active" ? "Commit" : "Begin Transaction"}
+          >
+            {state === "active" ? <Check size={13} /> : <CirclePlay size={13} />}
+          </button>
+          <button
+            type="button"
+            className="wb-icon-button"
+            onClick={onRollback}
+            disabled={state !== "active"}
+            title="Rollback"
+          >
+            <RotateCcw size={13} />
+          </button>
         </>
       )}
     </div>

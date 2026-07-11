@@ -6,6 +6,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LeftPanel } from "@/components/workspace/LeftPanel";
 import { WorkspacePage } from "@/pages/workspace";
+import { DEFAULT_APP_SETTINGS } from "@/lib/appSettings";
+import { moveSideToolWindow } from "@/lib/workbenchLayout";
+import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
 
 vi.mock("@/theme/useTheme", () => ({
@@ -54,6 +57,7 @@ vi.mock("@/components/workspace/AssistantSidebar", () => ({
 }));
 
 const initialTabState = useTabStore.getState();
+const initialSettingsState = useSettingsStore.getState();
 
 describe("database workspace entry", () => {
   let container: HTMLDivElement;
@@ -68,6 +72,7 @@ describe("database workspace entry", () => {
       activeTabId: null,
       closedTabsStack: [],
     });
+    useSettingsStore.setState({ settings: DEFAULT_APP_SETTINGS });
   });
 
   afterEach(() => {
@@ -75,6 +80,7 @@ describe("database workspace entry", () => {
     root = null;
     container.remove();
     useTabStore.setState(initialTabState, true);
+    useSettingsStore.setState(initialSettingsState, true);
   });
 
   it("renders the database explorer as the left panel without an activity rail", async () => {
@@ -113,5 +119,33 @@ describe("database workspace entry", () => {
         (button) => button.getAttribute("title") === "Toggle AI Assistant"
       )
     ).toBe(true);
+  });
+
+  it("renders side tool windows in their configured dock positions", async () => {
+    useSettingsStore.setState({
+      settings: {
+        ...DEFAULT_APP_SETTINGS,
+        workbench: moveSideToolWindow(
+          DEFAULT_APP_SETTINGS.workbench,
+          "databaseExplorer",
+          "right"
+        ),
+      },
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<WorkspacePage />);
+    });
+
+    const explorerDock = container
+      .querySelector("[data-testid='schema-sidebar']")
+      ?.closest("[data-tool-window-side]");
+    const assistantDock = container
+      .querySelector("[data-testid='assistant-sidebar']")
+      ?.closest("[data-tool-window-side]");
+
+    expect(explorerDock?.getAttribute("data-tool-window-side")).toBe("right");
+    expect(assistantDock?.getAttribute("data-tool-window-side")).toBe("left");
   });
 });

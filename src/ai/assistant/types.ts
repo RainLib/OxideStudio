@@ -14,6 +14,12 @@ export type AssistantIntent =
 export type AssistantTurnInput = {
   message: string;
   selectedText?: string | null;
+  history?: AssistantConversationMessage[];
+};
+
+export type AssistantConversationMessage = {
+  role: "user" | "assistant";
+  content: string;
 };
 
 export type AssistantPlanStep = {

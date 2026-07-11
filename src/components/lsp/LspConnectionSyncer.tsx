@@ -22,6 +22,7 @@ import {
   type CachedLspMetadata,
 } from "@/services/lsp/metadataCache";
 import { dispatchLspConfiguration } from "@/services/lsp/configDispatch";
+import { loadTableMetadata } from "@/services/tableMetadataCache";
 import {
   buildLspFileMappings,
   createLspSyncPlan,
@@ -60,25 +61,19 @@ async function collectionToLspTableDefinitionWithMetadata(
   }
 
   try {
-    const [columns, indexes] = await Promise.all([
-      schemaService.getColumns(connectionId, namespace, collection.name),
-      capabilities.dataModel === "document"
-        ? schemaService
-            .getIndexes(connectionId, namespace, collection.name)
-            .catch((error) => {
-              console.error(
-                `[LSP] Failed to fetch indexes for ${namespace}.${collection.name}:`,
-                error
-              );
-              return [];
-            })
-        : Promise.resolve([]),
-    ]);
+    const metadata = await loadTableMetadata({
+      connectionId,
+      driver: capabilities.driver,
+      schema: namespace,
+      table: collection.name,
+      includeIndexes: capabilities.dataModel === "document",
+      includeConstraints: false,
+    });
     return collectionToLspTableDefinition(
       capabilities,
       collection,
-      columns,
-      indexes
+      metadata.columns,
+      metadata.indexes
     );
   } catch (error) {
     console.error(
@@ -208,39 +203,15 @@ export function LspConnectionSyncer() {
     ): Promise<LspTableDefinition> => {
       try {
         const capabilities = await capabilitiesPromise;
-        const [columns, indexes, constraints] = await Promise.all([
-          schemaService
-            .getColumns(activeConnectionId, schemaName, table.name)
-            .catch((error) => {
-              console.error(
-                `[LSP] Failed to fetch columns for ${schemaName}.${table.name}:`,
-                error
-              );
-              return [];
-            }),
-          capabilities.supportsTableIndexes
-            ? schemaService
-                .getIndexes(activeConnectionId, schemaName, table.name)
-                .catch((error) => {
-                  console.error(
-                    `[LSP] Failed to fetch indexes for ${schemaName}.${table.name}:`,
-                    error
-                  );
-                  return [];
-                })
-            : Promise.resolve([]),
-          capabilities.supportsTableConstraints
-            ? schemaService
-                .getConstraints(activeConnectionId, schemaName, table.name)
-                .catch((error) => {
-                  console.error(
-                    `[LSP] Failed to fetch constraints for ${schemaName}.${table.name}:`,
-                    error
-                  );
-                  return [];
-                })
-            : Promise.resolve([]),
-        ]);
+        const metadata = await loadTableMetadata({
+          connectionId: activeConnectionId,
+          driver: connection.driver,
+          schema: schemaName,
+          table: table.name,
+          includeIndexes: capabilities.supportsTableIndexes,
+          includeConstraints: capabilities.supportsTableConstraints,
+        });
+        const { columns, indexes, constraints } = metadata;
 
         return {
           name: table.name,

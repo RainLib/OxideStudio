@@ -6,6 +6,11 @@ import type { TableExportFormat } from "@/services/tauri/types";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { DEFAULT_DATABASE_DRIVER } from "@/lib/databaseDialect";
 import { useTaskStore } from "@/store/useTaskStore";
+import {
+  invalidateTableMetadata,
+  loadTableDdl,
+  loadViewDefinition,
+} from "@/services/tableMetadataCache";
 
 export function useTableOperations() {
   const { activeConnectionId, connections } = useConnectionStore();
@@ -30,7 +35,7 @@ export function useTableOperations() {
       await loadTables(activeConnectionId, currentSchema, true);
       await useTabStore
         .getState()
-        .refreshTableTabs(activeConnectionId, currentSchema, tableName);
+        .refreshTableTabs(activeConnectionId, currentSchema, tableName, false);
       // toast.success(`Table ${tableName} truncated successfully`);
       console.log(`Table ${tableName} truncated successfully`);
     } catch (e: any) {
@@ -56,6 +61,20 @@ export function useTableOperations() {
         newName,
         objectType
       );
+      await Promise.all([
+        invalidateTableMetadata({
+          connectionId: activeConnectionId,
+          driver,
+          schema: currentSchema,
+          table: oldName,
+        }),
+        invalidateTableMetadata({
+          connectionId: activeConnectionId,
+          driver,
+          schema: currentSchema,
+          table: newName,
+        }),
+      ]);
       console.log(`Table renamed from ${oldName} to ${newName}`);
       await loadTables(activeConnectionId, currentSchema, true);
       useTabStore
@@ -89,6 +108,12 @@ export function useTableOperations() {
         true,
         objectType
       );
+      await invalidateTableMetadata({
+        connectionId: activeConnectionId,
+        driver,
+        schema: currentSchema,
+        table: tableName,
+      });
       await loadTables(activeConnectionId, currentSchema, true);
       closeOpenTableTabs(activeConnectionId, currentSchema, tableName);
       console.log(`Table ${tableName} dropped successfully`);
@@ -140,11 +165,13 @@ export function useTableOperations() {
     const driver = getDriver();
 
     try {
-      return await tableService.getTableDdl(
-        activeConnectionId,
-        driver,
-        currentSchema,
-        tableName,
+      return await loadTableDdl(
+        {
+          connectionId: activeConnectionId,
+          driver,
+          schema: currentSchema,
+          table: tableName,
+        },
         objectType
       );
     } catch (e) {
@@ -160,11 +187,13 @@ export function useTableOperations() {
     if (!activeConnectionId || !currentSchema) return "";
     const driver = getDriver();
 
-    return tableService.getViewDefinition(
-      activeConnectionId,
-      driver,
-      currentSchema,
-      viewName,
+    return loadViewDefinition(
+      {
+        connectionId: activeConnectionId,
+        driver,
+        schema: currentSchema,
+        table: viewName,
+      },
       objectType
     );
   };

@@ -25,9 +25,21 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
         .manage(manager)
         .manage(lsp_state)
         .setup(|app| {
+            #[cfg(desktop)]
+            {
+                let mut updater = tauri_plugin_updater::Builder::new();
+                if let Some(public_key) = option_env!("OXIDE_UPDATER_PUBLIC_KEY")
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    updater = updater.pubkey(public_key);
+                }
+                app.handle().plugin(updater.build())?;
+            }
+
             // Initialize config manager
             let config_manager = ConfigManager::new(app.handle());
             app.manage(config_manager);
@@ -135,6 +147,11 @@ pub fn run() {
             commands::store::delete_resources,
             commands::store::get_resources,
             commands::store::search_resources,
+            // App settings commands
+            commands::settings::get_app_settings,
+            commands::settings::get_app_settings_path,
+            commands::settings::save_app_settings,
+            commands::settings::reset_app_settings,
             // LSP commands
             commands::lsp::lsp_initialize,
             commands::lsp::lsp_shutdown,

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AssistantSidebar } from "@/components/workspace/AssistantSidebar";
 import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
 import { useAiSettingsStore } from "@/store/useAiSettingsStore";
+import { useAiAuditStore } from "@/store/useAiAuditStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
@@ -59,6 +60,7 @@ vi.mock("@/services/tauri", () => ({
 }));
 
 const initialAiSettings = useAiSettingsStore.getState();
+const initialAiAuditState = useAiAuditStore.getState();
 const initialConnectionState = useConnectionStore.getState();
 const initialSchemaState = useSchemaStore.getState();
 const initialTabState = useTabStore.getState();
@@ -90,6 +92,7 @@ describe("AssistantSidebar", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    useAiAuditStore.setState({ entries: [] });
     mocks.cancelQuery.mockResolvedValue("cancelled");
     useAiSettingsStore.setState(
       {
@@ -152,6 +155,7 @@ describe("AssistantSidebar", () => {
     root = null;
     container.remove();
     useAiSettingsStore.setState(initialAiSettings, true);
+    useAiAuditStore.setState(initialAiAuditState, true);
     useConnectionStore.setState(initialConnectionState, true);
     useSchemaStore.setState(initialSchemaState, true);
     useTabStore.setState(initialTabState, true);
@@ -180,6 +184,8 @@ describe("AssistantSidebar", () => {
     });
 
     expect(container.textContent).toContain("query.runReadOnly");
+    expect(container.textContent).toContain("run current query");
+    expect(textarea?.value).toBe("");
 
     await act(async () => {
       buttonWithText(container, "Run Safe")?.dispatchEvent(
@@ -196,6 +202,49 @@ describe("AssistantSidebar", () => {
       expect.any(String)
     );
     expect(container.textContent).toContain("tool calls succeeded");
+    expect(container.textContent).toContain("Activity");
+    expect(container.textContent).toContain("query.runReadOnly");
+    expect(useAiAuditStore.getState().entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolName: "query.runReadOnly",
+          status: "success",
+        }),
+      ])
+    );
+  });
+
+  it("starts a new chat without remounting the assistant panel", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    const textarea = container.querySelector("textarea");
+    await act(async () => {
+      setTextareaValue(textarea!, "inspect current table");
+      await flushAsyncWork();
+    });
+    await act(async () => {
+      buttonWithText(container, "Plan")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true })
+      );
+      await flushAsyncWork();
+    });
+    expect(container.textContent).toContain("inspect current table");
+
+    await act(async () => {
+      container
+        .querySelector('button[aria-label="Start a new assistant chat"]')
+        ?.dispatchEvent(
+          new MouseEvent("click", { bubbles: true, cancelable: true })
+        );
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).not.toContain("inspect current table");
+    expect(container.textContent).toContain("Plan database work");
   });
 
   it("stops an active assistant tool run and cancels the backend query", async () => {

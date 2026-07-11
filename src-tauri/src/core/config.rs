@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -35,6 +36,7 @@ fn default_project_id() -> String {
 
 pub struct ConfigManager {
     config_path: PathBuf,
+    settings_path: PathBuf,
 }
 
 impl ConfigManager {
@@ -46,6 +48,7 @@ impl ConfigManager {
         fs::create_dir_all(&config_dir).ok();
         Self {
             config_path: config_dir.join("config.json"),
+            settings_path: config_dir.join("settings.json"),
         }
     }
 
@@ -61,5 +64,31 @@ impl ConfigManager {
         if let Ok(content) = serde_json::to_string_pretty(config) {
             fs::write(&self.config_path, content).ok();
         }
+    }
+
+    pub fn load_settings(&self) -> Result<Value, String> {
+        if !self.settings_path.exists() {
+            return Ok(Value::Object(Default::default()));
+        }
+
+        let content = fs::read_to_string(&self.settings_path)
+            .map_err(|error| format!("Failed to read settings.json: {error}"))?;
+        serde_json::from_str(&content).map_err(|error| format!("Invalid settings.json: {error}"))
+    }
+
+    pub fn save_settings(&self, settings: &Value) -> Result<(), String> {
+        let content = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
+        fs::write(&self.settings_path, content).map_err(|error| error.to_string())
+    }
+
+    pub fn reset_settings(&self) -> Result<(), String> {
+        if self.settings_path.exists() {
+            fs::remove_file(&self.settings_path).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn settings_path(&self) -> String {
+        self.settings_path.to_string_lossy().into_owned()
     }
 }

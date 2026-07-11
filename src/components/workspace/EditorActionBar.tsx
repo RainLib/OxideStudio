@@ -7,21 +7,29 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { TransactionControl } from "./TransactionControl";
-import { SchemaSelector } from "./SchemaSelector";
 import { format } from "date-fns";
 import {
   ChevronDown,
+  FileCode2,
   History,
-  Paintbrush,
   Play,
+  Save,
   Square,
   Star,
   Trash2,
+  WandSparkles,
 } from "lucide-react";
-import { useRef, useState } from "react";
+import { useState } from "react";
+import { SchemaSelector } from "./SchemaSelector";
+import { TransactionControl } from "./TransactionControl";
 
 type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
@@ -37,6 +45,7 @@ interface EditorActionBarProps {
   onRollbackTransaction: () => void;
   onFormat: () => void;
   onRun: () => void;
+  onRunCurrent: () => void;
   onCancelRun: () => void;
   isExecuting: boolean;
   isConnected: boolean;
@@ -47,6 +56,13 @@ interface EditorActionBarProps {
   onDeleteQuery: (id: string) => void;
   supportsTransactions: boolean;
 }
+
+const dialogClass =
+  "flex max-h-[76vh] max-w-2xl flex-col gap-0 overflow-hidden rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]";
+const menuClass =
+  "min-w-[230px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_16px_40px_rgba(0,0,0,0.42)]";
+const menuItemClass =
+  "h-7 cursor-default rounded-[3px] px-2 text-[12px] focus:bg-[hsl(var(--wb-active-strong))] focus:text-[hsl(var(--wb-text))]";
 
 export function EditorActionBar({
   currentSchema,
@@ -59,6 +75,7 @@ export function EditorActionBar({
   onRollbackTransaction,
   onFormat,
   onRun,
+  onRunCurrent,
   onCancelRun,
   isExecuting,
   isConnected,
@@ -71,21 +88,107 @@ export function EditorActionBar({
 }: EditorActionBarProps) {
   const [isSaveOpen, setIsSaveOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
-  const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
 
   const handleSave = () => {
-    if (saveName.trim()) {
-      onSaveQuery(saveName, ""); // SQL will be passed from parent
-      setSaveName("");
-      setIsSaveOpen(false);
-    }
+    const normalizedName = saveName.trim();
+    if (!normalizedName) return;
+    onSaveQuery(normalizedName, "");
+    setSaveName("");
+    setIsSaveOpen(false);
   };
 
   return (
-    <div className="wb-toolbar flex items-center justify-between">
-      {/* Left Side - Transaction Control */}
-      <div className="flex items-center gap-3">
+    <div className="wb-editor-commandbar justify-between gap-2">
+      <div className="wb-editor-primary-actions flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+        <button
+          type="button"
+          className={cn(
+            "wb-icon-button",
+            isExecuting ? "text-red-400" : "text-emerald-400"
+          )}
+          onClick={isExecuting ? onCancelRun : onRunCurrent}
+          disabled={!isConnected}
+          title={isExecuting ? "Stop Query" : "Run Current Statement (⌘⇧Enter)"}
+        >
+          {isExecuting ? (
+            <Square size={12} className="fill-current" />
+          ) : (
+            <Play size={14} className="fill-current" />
+          )}
+        </button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              className="wb-icon-button h-6 w-4"
+              disabled={!isConnected || isExecuting}
+              title="Run Options"
+            >
+              <ChevronDown size={11} />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className={menuClass}>
+            <DropdownMenuItem className={menuItemClass} onClick={onRunCurrent}>
+              <Play size={13} className="mr-2 text-emerald-400" />
+              Run Current Statement
+              <span className="ml-auto text-[10px] wb-muted">⌘⇧↵</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem className={menuItemClass} onClick={onRun}>
+              <FileCode2 size={13} className="mr-2" />
+              Run Console
+              <span className="ml-auto text-[10px] wb-muted">⌘↵</span>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        <Dialog>
+          <DialogTrigger asChild>
+            <button
+              type="button"
+              className="wb-editor-optional wb-icon-button"
+              title="Query History"
+            >
+              <History size={13} />
+            </button>
+          </DialogTrigger>
+          <DialogContent className={dialogClass}>
+            <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
+              <DialogTitle className="text-[13px]">Query History</DialogTitle>
+            </DialogHeader>
+            <div className="min-h-0 flex-1 overflow-y-auto p-2 custom-scrollbar">
+              {history.length === 0 ? (
+                <div className="p-6 text-center text-[12px] wb-muted">No query history</div>
+              ) : (
+                history.map((item) => (
+                  <button
+                    type="button"
+                    key={item.id}
+                    className="mb-1 flex w-full flex-col gap-1 rounded-[3px] px-3 py-2 text-left hover:bg-[hsl(var(--wb-hover))]"
+                    onClick={() => onLoadQuery(item.sql)}
+                  >
+                    <span className="max-h-20 overflow-hidden whitespace-pre-wrap font-mono text-[11px]">
+                      {item.sql}
+                    </span>
+                    <span className="self-end text-[10px] wb-muted">
+                      {format(new Date(item.timestamp), "MMM d, HH:mm:ss")}
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        <button
+          type="button"
+          className="wb-editor-optional wb-icon-button"
+          onClick={onFormat}
+          title="Format SQL (⌘L)"
+        >
+          <WandSparkles size={13} />
+        </button>
+
+        <span className="wb-editor-optional mx-1 h-4 w-px bg-[hsl(var(--wb-border-subtle))]" />
         {supportsTransactions && (
           <TransactionControl
             mode={transactionMode}
@@ -98,213 +201,91 @@ export function EditorActionBar({
         )}
       </div>
 
-      {/* Right Side - Action Buttons */}
-      <div className="flex items-center gap-2">
-        {/* Schema Selector */}
-        <SchemaSelector
-          currentSchema={currentSchema}
-          onSchemaChange={onSchemaChange}
-        />
-
-        {/* Format Button */}
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={onFormat}
-          className="wb-icon-button"
-          title="Format Query"
-        >
-          <Paintbrush size={14} />
-        </Button>
-
-        {/* History Dialog & Button */}
+      <div className="wb-editor-secondary-actions flex min-w-0 shrink-0 items-center gap-0.5">
         <Dialog>
           <DialogTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-            className="wb-icon-button"
-              title="Query History"
-            >
-              <History size={14} />
-            </Button>
-          </DialogTrigger>
-          <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col bg-[hsl(var(--wb-panel-raised))] border-[hsl(var(--wb-border))] text-[hsl(var(--wb-text))]">
-            <DialogHeader>
-              <DialogTitle>Query History</DialogTitle>
-            </DialogHeader>
-            <div className="flex-1 overflow-y-auto border border-[hsl(var(--wb-border-subtle))] rounded-[4px] bg-[hsl(var(--wb-panel))]">
-              {history.length === 0 && (
-                <div className="p-4 text-center text-gray-500">No history</div>
-              )}
-              {history.map((item) => (
-                <div
-                  key={item.id}
-                  className="p-3 border-b border-border hover:bg-background-tertiary cursor-pointer flex flex-col gap-1"
-                  onClick={() => onLoadQuery(item.sql)}
-                >
-                  <div className="font-mono text-xs text-muted-foreground/80 whitespace-pre-wrap max-h-20 overflow-hidden text-ellipsis">
-                    {item.sql}
-                  </div>
-                  <div className="text-[10px] text-muted-foreground/50 text-right">
-                    {format(new Date(item.timestamp), "MMM d, HH:mm:ss")}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </DialogContent>
-        </Dialog>
-
-        {/* Saved Queries Dialog & Button */}
-        <Dialog>
-          <DialogTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="wb-icon-button"
+            <button
+              type="button"
+              className="wb-editor-library-action wb-icon-button"
               title="Saved Queries"
             >
-              <Star size={14} />
-            </Button>
+              <Star size={13} />
+            </button>
           </DialogTrigger>
-          <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col bg-[hsl(var(--wb-panel-raised))] border-[hsl(var(--wb-border))] text-[hsl(var(--wb-text))]">
-            <DialogHeader>
-              <DialogTitle>Saved Queries</DialogTitle>
+          <DialogContent className={dialogClass}>
+            <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
+              <DialogTitle className="text-[13px]">Saved Queries</DialogTitle>
             </DialogHeader>
-            <div className="flex-1 overflow-y-auto border border-[hsl(var(--wb-border-subtle))] rounded-[4px] bg-[hsl(var(--wb-panel))]">
-              {savedQueries.length === 0 && (
-                <div className="p-4 text-center text-gray-500">
-                  No saved queries
-                </div>
-              )}
-              {savedQueries.map((item) => (
-                <div
-                  key={item.id}
-                  className="p-3 border-b border-border hover:bg-background-tertiary flex items-center gap-2 group"
-                >
+            <div className="min-h-0 flex-1 overflow-y-auto p-2 custom-scrollbar">
+              {savedQueries.length === 0 ? (
+                <div className="p-6 text-center text-[12px] wb-muted">No saved queries</div>
+              ) : (
+                savedQueries.map((item) => (
                   <div
-                    className="flex-1 cursor-pointer"
-                    onClick={() => onLoadQuery(item.sql)}
+                    key={item.id}
+                    className="group mb-1 flex items-center gap-2 rounded-[3px] px-3 py-2 hover:bg-[hsl(var(--wb-hover))]"
                   >
-                    <div className="font-medium text-sm text-foreground">
-                      {item.name}
-                    </div>
-                    <div className="font-mono text-xs text-muted-foreground/60 whitespace-pre-wrap max-h-12 overflow-hidden text-ellipsis opacity-75">
-                      {item.sql}
-                    </div>
+                    <button
+                      type="button"
+                      className="min-w-0 flex-1 text-left"
+                      onClick={() => onLoadQuery(item.sql)}
+                    >
+                      <div className="truncate text-[12px] font-medium">{item.name}</div>
+                      <div className="max-h-12 overflow-hidden whitespace-pre-wrap font-mono text-[10px] wb-muted">
+                        {item.sql}
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      className="wb-icon-button h-6 w-6 opacity-0 group-hover:opacity-100"
+                      onClick={() => onDeleteQuery(item.id)}
+                      title="Delete Saved Query"
+                    >
+                      <Trash2 size={12} />
+                    </button>
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-6 w-6 opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-400 hover:bg-red-500/10"
-                    onClick={() => onDeleteQuery(item.id)}
-                  >
-                    <Trash2 size={12} />
-                  </Button>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </DialogContent>
         </Dialog>
 
-        {/* Save Dialog & Button */}
         <Dialog open={isSaveOpen} onOpenChange={setIsSaveOpen}>
           <DialogTrigger asChild>
-            <Button className="wb-text-button border border-[hsl(var(--wb-border-subtle))]">
-              Save
-            </Button>
+            <button
+              type="button"
+              className="wb-editor-library-action wb-icon-button"
+              title="Save Query"
+            >
+              <Save size={13} />
+            </button>
           </DialogTrigger>
-          <DialogContent className="bg-background-elevated border-border text-foreground">
-            <DialogHeader>
-              <DialogTitle>Save Query</DialogTitle>
+          <DialogContent className="w-[420px] max-w-[calc(100vw-32px)] gap-0 rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+            <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
+              <DialogTitle className="text-[13px]">Save Query</DialogTitle>
             </DialogHeader>
-            <div className="py-4">
+            <div className="px-4 py-4">
               <Input
-                placeholder="Query Name..."
+                autoFocus
+                placeholder="Query name"
                 value={saveName}
-                onChange={(e) => setSaveName(e.target.value)}
-                className="bg-background-tertiary border-border text-foreground focus-visible:ring-primary"
+                onChange={(event) => setSaveName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") handleSave();
+                }}
+                className="wb-field w-full"
               />
             </div>
-            <DialogFooter>
-              <Button
-                onClick={handleSave}
-                className="bg-primary hover:bg-primary/90 text-primary-foreground"
-              >
+            <DialogFooter className="border-t border-[hsl(var(--wb-border-subtle))] px-4 py-3">
+              <Button className="wb-primary-button" onClick={handleSave}>
                 Save
               </Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
 
-        {/* Run Split Button */}
-        <div className="relative flex items-center shadow-sm" ref={dropdownRef}>
-          <Button
-            onClick={isExecuting ? onCancelRun : onRun}
-            disabled={!isConnected}
-            className={cn(
-              "h-7 px-3 bg-[hsl(var(--wb-accent))] text-[hsl(var(--wb-accent-foreground))] hover:brightness-110 text-[11px] font-semibold rounded-l-[4px] rounded-r-none transition-all flex items-center gap-1.5 min-w-[70px]",
-              isExecuting && "bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            )}
-          >
-            {isExecuting ? (
-              <>
-                <Square className="h-3.5 w-3.5 fill-current" />
-                <span>Cancel</span>
-              </>
-            ) : (
-              <>
-                <Play size={14} className="fill-primary text-primary" />
-                <span>Run</span>
-              </>
-            )}
-          </Button>
-          <Button
-            size="icon"
-            onClick={() => setIsRunDropdownOpen(!isRunDropdownOpen)}
-            disabled={isExecuting || !isConnected}
-            className="h-7 w-6 bg-[hsl(var(--wb-accent))] text-[hsl(var(--wb-accent-foreground))] hover:brightness-110 rounded-l-none rounded-r-[4px] transition-all border-l border-black/10"
-          >
-            <ChevronDown size={14} />
-          </Button>
-
-          {/* Custom Dropdown Menu */}
-          {isRunDropdownOpen && (
-            <div className="absolute top-full right-0 mt-1 w-48 bg-background-elevated border border-border rounded-[4px] overflow-hidden flex flex-col py-1 z-50">
-              <button
-                className="px-4 py-2 text-left text-xs text-foreground hover:bg-background-tertiary flex items-center gap-2 transition-colors"
-                onClick={() => {
-                  onRun();
-                  setIsRunDropdownOpen(false);
-                }}
-              >
-                <Play size={12} className="text-primary" /> Run Selection
-              </button>
-              <button
-                className="px-4 py-2 text-left text-xs text-foreground hover:bg-background-tertiary flex items-center gap-2 transition-colors"
-                onClick={() => {
-                  setIsRunDropdownOpen(false);
-                }}
-              >
-                <div className="w-3 h-3 rounded-full border border-muted-foreground flex items-center justify-center text-[8px]">
-                  ?
-                </div>
-                Explain Query
-              </button>
-              <div className="h-px bg-border my-1" />
-              <div className="px-4 py-1.5 text-[10px] text-muted-foreground/60 font-medium">
-                Shortcuts
-              </div>
-              <div className="px-4 py-1 flex justify-between text-[11px] text-muted-foreground/80">
-                <span>Run</span> <span className="opacity-50">Ctrl+Enter</span>
-              </div>
-              <div className="px-4 py-1 flex justify-between text-[11px] text-muted-foreground/80">
-                <span>Format</span>
-                <span className="opacity-50">Shift+Alt+F</span>
-              </div>
-            </div>
-          )}
-        </div>
+        <span className="wb-editor-library-action mx-1 h-4 w-px bg-[hsl(var(--wb-border-subtle))]" />
+        <SchemaSelector currentSchema={currentSchema} onSchemaChange={onSchemaChange} />
       </div>
     </div>
   );

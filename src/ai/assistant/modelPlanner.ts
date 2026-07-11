@@ -227,6 +227,12 @@ function modelPlannerTurn(turn: AssistantTurnInput): AssistantTurnInput {
   return {
     ...turn,
     selectedText: boundedNullableModelText(turn.selectedText),
+    history: turn.history
+      ?.slice(-12)
+      .map((message) => ({
+        ...message,
+        content: boundedRequiredModelText(message.content),
+      })),
   };
 }
 

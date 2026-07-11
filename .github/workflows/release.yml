@@ -2,11 +2,14 @@ name: Release Build
 
 on:
   push:
-    branches:
-      - develop
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag matching package.json, for example v0.2.0"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -59,29 +62,35 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Install frontend dependencies
-        run: npm install
+        run: npm ci
+
+      - name: Validate release version
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        run: node -e "const expected = 'v' + require('./package.json').version; if (process.env.RELEASE_TAG !== expected) { throw new Error('Release tag ' + process.env.RELEASE_TAG + ' must match ' + expected); }"
+
+      - name: Validate updater signing configuration
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.OXIDE_UPDATER_PUBLIC_KEY }}
+        run: node -e "for (const key of ['TAURI_SIGNING_PRIVATE_KEY', 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD', 'OXIDE_UPDATER_PUBLIC_KEY']) { if (!process.env[key]?.trim()) throw new Error('Missing required GitHub Actions secret ' + key); }"
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.OXIDE_UPDATER_PUBLIC_KEY }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "OxideStudio ${{ github.ref_name }}"
-          releaseBody: "See the assets to download this version and install."
-          releaseDraft: true
+          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          releaseName: "OxideStudio __VERSION__"
+          generateReleaseNotes: true
+          releaseDraft: false
           prerelease: false
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+          updaterJsonPreferNsis: true
+          uploadWorkflowArtifacts: true
           args: ${{ matrix.args }}
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: oxide-studio-${{ matrix.name }}
-          path: |
-            src-tauri/target/release/bundle/**/*.dmg
-            src-tauri/target/release/bundle/**/*.app
-            src-tauri/target/release/bundle/**/*.msi
-            src-tauri/target/release/bundle/**/*.exe
-            src-tauri/target/release/bundle/**/*.deb
-            src-tauri/target/release/bundle/**/*.AppImage
-          if-no-files-found: error

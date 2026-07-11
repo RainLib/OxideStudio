@@ -11,6 +11,7 @@ import {
 } from "@/services/lsp";
 import type { Diagnostic } from "@/services/lsp/types";
 import type { DatabaseDriver, QueryResult } from "@/services/tauri/types";
+import { loadTableMetadata } from "@/services/tableMetadataCache";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import {
@@ -621,15 +622,14 @@ async function describeObject(
       "metadata.describeObject"
     );
   if (capabilities.supportsTableBrowsing) {
-    const [columns, indexes, constraints] = await Promise.all([
-      schemaService.getColumns(connectionId, namespace, input.name),
-      capabilities.supportsTableIndexes
-        ? schemaService.getIndexes(connectionId, namespace, input.name)
-        : Promise.resolve([]),
-      capabilities.supportsTableConstraints
-        ? schemaService.getConstraints(connectionId, namespace, input.name)
-        : Promise.resolve([]),
-    ]);
+    const metadata = await loadTableMetadata({
+      connectionId,
+      driver,
+      schema: namespace,
+      table: input.name,
+      includeIndexes: capabilities.supportsTableIndexes,
+      includeConstraints: capabilities.supportsTableConstraints,
+    });
 
     return {
       connectionId,
@@ -637,9 +637,9 @@ async function describeObject(
       name: input.name,
       driver,
       kind: "relation",
-      columns,
-      indexes,
-      constraints,
+      columns: metadata.columns,
+      indexes: metadata.indexes,
+      constraints: metadata.constraints,
       previewQuery: previewTableQuery(driver, namespace, input.name, 100),
     };
   }
@@ -650,14 +650,17 @@ async function describeObject(
   ) {
     const collections = await schemaService.getCollections(connectionId, namespace);
     const collection = collections.find((candidate) => candidate.name === input.name);
-    const [columns, indexes] = await Promise.all([
+    const metadata =
       capabilities.dataModel === "document" || capabilities.dataModel === "search"
-        ? schemaService.getColumns(connectionId, namespace, input.name).catch(() => [])
-        : Promise.resolve([]),
-      capabilities.dataModel === "document"
-        ? schemaService.getIndexes(connectionId, namespace, input.name).catch(() => [])
-        : Promise.resolve([]),
-    ]);
+        ? await loadTableMetadata({
+            connectionId,
+            driver,
+            schema: namespace,
+            table: input.name,
+            includeIndexes: capabilities.dataModel === "document",
+            includeConstraints: false,
+          })
+        : null;
     const previewCollection = collection ?? {
       name: input.name,
       namespace,
@@ -671,8 +674,8 @@ async function describeObject(
       driver,
       kind: collectionKind(capabilities.dataModel),
       collection: collection ?? null,
-      columns,
-      indexes,
+      columns: metadata?.columns || [],
+      indexes: metadata?.indexes || [],
       previewQuery: collectionPreviewQueryTemplateForCapabilities(
         capabilities,
         namespace,

@@ -16,7 +16,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { databaseService, schemaService, tableService } from "@/services/tauri";
+import { databaseService, tableService } from "@/services/tauri";
+import { loadTableMetadata } from "@/services/tableMetadataCache";
 import type {
   AlterColumnValueMode,
   ColumnInfo,
@@ -188,18 +189,22 @@ export function EditColumnsDialog({
     draft.type
   );
 
-  const loadColumns = async () => {
+  const loadColumns = async (force = false) => {
     if (!connectionId || !schema || !tableName) return;
 
     setIsLoading(true);
     setError(null);
     try {
-      const loadedColumns = await schemaService.getColumns(
+      const metadata = await loadTableMetadata({
         connectionId,
+        driver,
         schema,
-        tableName
-      );
-      setColumns(loadedColumns);
+        table: tableName,
+        includeIndexes: false,
+        includeConstraints: false,
+        force,
+      });
+      setColumns(metadata.columns);
     } catch (e: any) {
       setError(e?.message || String(e));
     } finally {
@@ -208,13 +213,34 @@ export function EditColumnsDialog({
   };
 
   const refreshAfterColumnChange = async () => {
-    await loadColumns();
-
     if (connectionId && schema && tableName) {
-      await Promise.all([
-        loadTables(connectionId, schema, true),
-        refreshTableTabs(connectionId, schema, tableName),
-      ]);
+      const hasOpenTableTab = useTabStore.getState().tabs.some(
+        (tab) =>
+          tab.type === "table" &&
+          tab.connectionId === connectionId &&
+          tab.schemaName === schema &&
+          tab.tableName === tableName
+      );
+
+      if (hasOpenTableTab) {
+        await Promise.all([
+          loadTables(connectionId, schema, true),
+          refreshTableTabs(connectionId, schema, tableName),
+        ]);
+        const refreshedTab = useTabStore.getState().tabs.find(
+          (tab) =>
+            tab.type === "table" &&
+            tab.connectionId === connectionId &&
+            tab.schemaName === schema &&
+            tab.tableName === tableName
+        );
+        setColumns(refreshedTab?.tableColumns || []);
+      } else {
+        await Promise.all([
+          loadTables(connectionId, schema, true),
+          loadColumns(true),
+        ]);
+      }
     }
 
     bumpMetadataVersion();

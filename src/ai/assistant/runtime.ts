@@ -92,16 +92,6 @@ export class AssistantRuntime {
         : this.policy;
       const decision = this.registry.evaluate(call.toolName, policy);
 
-      if (!decision.allowed) {
-        results.push({
-          id: call.id,
-          toolName: call.toolName,
-          status: decision.requiresApproval ? "requiresApproval" : "error",
-          error: decision.reason,
-        });
-        continue;
-      }
-
       try {
         const output = await this.registry.executeWithPolicy(
           call.toolName,
@@ -119,8 +109,11 @@ export class AssistantRuntime {
         results.push({
           id: call.id,
           toolName: call.toolName,
-          status: "error",
-          error: err?.message || String(err),
+          status:
+            !decision.allowed && decision.requiresApproval
+              ? "requiresApproval"
+              : "error",
+          error: decision.reason || err?.message || String(err),
         });
       }
     }

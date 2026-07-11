@@ -13,6 +13,7 @@ import { databaseService, tableService } from "@/services/tauri";
 import type { DatabaseCapabilities, DatabaseDriver } from "@/services/tauri";
 import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
 import { useSchemaStore } from "@/store/useSchemaStore";
+import { invalidateTableMetadata } from "@/services/tableMetadataCache";
 
 interface CreateViewDialogProps {
   isOpen: boolean;
@@ -148,6 +149,12 @@ export function CreateViewDialog({
           isEditMode || replaceExisting
         );
       }
+      await invalidateTableMetadata({
+        connectionId,
+        driver,
+        schema,
+        table: viewName,
+      });
       await loadTables(connectionId, schema, true);
       bumpMetadataVersion();
       resetForm();

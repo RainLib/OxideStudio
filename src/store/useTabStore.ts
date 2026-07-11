@@ -6,14 +6,18 @@ import {
   QueryResult,
   tableService,
 } from "@/services/tauri";
-import { schemaService } from "@/services/tauri/schema.service";
 import type {
   ColumnDef,
   ColumnInfo,
+  ConstraintInfo,
   IndexInfo,
   TableFilter,
   TableSort,
 } from "@/services/tauri/types";
+import {
+  loadTableMetadata,
+  type TableMetadataSnapshot,
+} from "@/services/tableMetadataCache";
 import { useHistoryStore } from "./useHistoryStore";
 import { useConnectionStore } from "./useConnectionStore";
 import { useSchemaStore } from "./useSchemaStore";
@@ -119,6 +123,7 @@ export interface TabData {
   isExecuting: boolean;
   runningQueryId?: string | null;
   error: string | null;
+  activeResultIndex?: number;
   isPinned: boolean;
   gridState?: {
     columnFilters: Record<string, { operator: string; value: string }>;
@@ -139,10 +144,14 @@ export interface TabData {
   // Column layout state (per-tab)
   columnWidths?: Record<string, number>;
   columnOrder?: string[];
+  hiddenColumns?: string[];
   // Target schema for query execution
   targetSchema?: string | null;
   tableColumns?: ColumnInfo[];
   tableIndexes?: IndexInfo[];
+  tableConstraints?: ConstraintInfo[];
+  tableMetadataSource?: "cache" | "remote";
+  tableMetadataUpdatedAt?: number;
   isFetchingColumns?: boolean;
   tablePage?: number;
   tablePageSize?: number;
@@ -301,6 +310,8 @@ interface TabState {
     selection: EditorSelectionState | null
   ) => void;
   setLspDiagnostics: (id: string, diagnostics: Diagnostic[]) => void;
+  setActiveResultIndex: (id: string, index: number) => void;
+  closeResultAt: (id: string, index: number) => void;
   runTabQuery: (
     id: string,
     connectionId: string,
@@ -347,13 +358,21 @@ interface TabState {
   // Column layout methods
   setColumnWidth: (tabId: string, columnId: string, width: number) => void;
   setColumnOrder: (tabId: string, columnOrder: string[]) => void;
+  setColumnHidden: (tabId: string, columnId: string, hidden: boolean) => void;
+  showAllColumns: (tabId: string) => void;
+  resetColumnLayout: (tabId: string) => void;
   // Schema selection method
   setTargetSchema: (tabId: string, schema: string | null) => void;
-  fetchTableColumns: (tabId: string) => Promise<void>;
+  setTableMetadata: (
+    tabId: string,
+    metadata: TableMetadataSnapshot
+  ) => void;
+  fetchTableColumns: (tabId: string, force?: boolean) => Promise<void>;
   refreshTableTabs: (
     connectionId: string,
     schemaName: string,
-    tableName: string
+    tableName: string,
+    refreshMetadata?: boolean
   ) => Promise<void>;
   loadTablePage: (
     tabId: string,
@@ -380,6 +399,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       type,
       sql: initialSql,
       results: null,
+      activeResultIndex: 0,
       isExecuting: false,
       error: null,
       isPinned: false,
@@ -487,6 +507,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       schemaName,
       tableName: undefined,
       results: null,
+      activeResultIndex: 0,
       isExecuting: false,
       error: null,
       isPinned: false,
@@ -520,6 +541,7 @@ export const useTabStore = create<TabState>((set, get) => ({
               tableName: newTableName,
               objectType: objectType ?? tab.objectType ?? null,
               results: null,
+              activeResultIndex: 0,
               error: null,
               pendingEdits: new Map(),
               newRowsCount: 0,
@@ -689,6 +711,43 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
   },
 
+  setActiveResultIndex: (id: string, index: number) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) => {
+        if (t.id !== id) return t;
+        const maxIndex = Math.max(0, (t.results?.length ?? 1) - 1);
+        return {
+          ...t,
+          activeResultIndex: Math.max(0, Math.min(index, maxIndex)),
+        };
+      }),
+    }));
+  },
+
+  closeResultAt: (id: string, index: number) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) => {
+        if (t.id !== id || !t.results) return t;
+        const nextResults = t.results.filter((_, resultIndex) => resultIndex !== index);
+        const currentIndex = t.activeResultIndex ?? 0;
+        const nextActiveIndex =
+          nextResults.length === 0
+            ? 0
+            : index < currentIndex
+              ? currentIndex - 1
+              : index === currentIndex
+                ? Math.min(currentIndex, nextResults.length - 1)
+                : currentIndex;
+
+        return {
+          ...t,
+          results: nextResults.length > 0 ? nextResults : null,
+          activeResultIndex: nextActiveIndex,
+        };
+      }),
+    }));
+  },
+
   runTabQuery: async (
     id: string,
     connectionId: string,
@@ -718,6 +777,7 @@ export const useTabStore = create<TabState>((set, get) => ({
               runningQueryId: queryId,
               error: null,
               results: null,
+              activeResultIndex: 0,
             }
           : t
       ),
@@ -768,6 +828,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                 isExecuting: false,
                 runningQueryId: null,
                 results: results || null,
+                activeResultIndex: 0,
               }
             : t
         ),
@@ -1186,7 +1247,25 @@ export const useTabStore = create<TabState>((set, get) => ({
     }
   },
 
-  fetchTableColumns: async (tabId) => {
+  setTableMetadata: (tabId, metadata) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId
+          ? {
+              ...tab,
+              tableColumns: metadata.columns,
+              tableIndexes: metadata.indexes,
+              tableConstraints: metadata.constraints,
+              tableMetadataSource: metadata.source,
+              tableMetadataUpdatedAt: metadata.updatedAt,
+              isFetchingColumns: false,
+            }
+          : tab
+      ),
+    }));
+  },
+
+  fetchTableColumns: async (tabId, force = false) => {
     const tab = get().tabs.find((t) => t.id === tabId);
     console.log("[fetchTableColumns]", {
       tabId,
@@ -1214,24 +1293,34 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
 
     try {
-      const [cols, indexes] = await Promise.all([
-        schemaService.getColumns(connId, tab.schemaName, tab.tableName),
-        schemaService
-          .getIndexes(connId, tab.schemaName, tab.tableName)
-          .catch((error) => {
-            console.warn("[fetchTableColumns] Failed to fetch indexes:", error);
-            return [] as IndexInfo[];
-          }),
-      ]);
-      console.log("[fetchTableColumns] Received metadata:", cols, indexes);
+      const connection = useConnectionStore
+        .getState()
+        .connections.find((item) => item.id === connId);
+      const metadata = await loadTableMetadata({
+        connectionId: connId,
+        driver: connection?.driver || DEFAULT_DATABASE_DRIVER,
+        schema: tab.schemaName,
+        table: tab.tableName,
+        includeIndexes: true,
+        includeConstraints: false,
+        force,
+      });
+      console.log(
+        `[fetchTableColumns] Loaded metadata from ${metadata.source}:`,
+        metadata.columns,
+        metadata.indexes
+      );
 
       set((state) => ({
         tabs: state.tabs.map((t) =>
           t.id === tabId
             ? {
                 ...t,
-                tableColumns: cols,
-                tableIndexes: indexes,
+                tableColumns: metadata.columns,
+                tableIndexes: metadata.indexes,
+                tableConstraints: metadata.constraints,
+                tableMetadataSource: metadata.source,
+                tableMetadataUpdatedAt: metadata.updatedAt,
                 isFetchingColumns: false,
               }
             : t
@@ -1247,7 +1336,12 @@ export const useTabStore = create<TabState>((set, get) => ({
     }
   },
 
-  refreshTableTabs: async (connectionId, schemaName, tableName) => {
+  refreshTableTabs: async (
+    connectionId,
+    schemaName,
+    tableName,
+    refreshMetadata = true
+  ) => {
     const matchingTabs = get().tabs
       .filter(
         (tab) =>
@@ -1270,8 +1364,15 @@ export const useTabStore = create<TabState>((set, get) => ({
         matchingTabs.some((match) => match.id === tab.id)
           ? {
               ...tab,
-              tableColumns: undefined,
-              tableIndexes: undefined,
+              ...(refreshMetadata
+                ? {
+                    tableColumns: undefined,
+                    tableIndexes: undefined,
+                    tableConstraints: undefined,
+                    tableMetadataSource: undefined,
+                    tableMetadataUpdatedAt: undefined,
+                  }
+                : {}),
               isFetchingColumns: false,
               pendingEdits: new Map(),
               newRowsCount: 0,
@@ -1283,7 +1384,9 @@ export const useTabStore = create<TabState>((set, get) => ({
 
     await Promise.all(
       matchingTabs.map(async (tab) => {
-        await get().fetchTableColumns(tab.id);
+        if (refreshMetadata) {
+          await get().fetchTableColumns(tab.id, true);
+        }
         await get().loadTablePage(
           tab.id,
           tab.page,
@@ -1434,6 +1537,36 @@ export const useTabStore = create<TabState>((set, get) => ({
   setColumnOrder: (tabId, columnOrder) => {
     set((state) => ({
       tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, columnOrder } : t)),
+    }));
+  },
+
+  setColumnHidden: (tabId, columnId, hidden) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) => {
+        if (tab.id !== tabId) return tab;
+        const hiddenColumns = new Set(tab.hiddenColumns || []);
+        if (hidden) hiddenColumns.add(columnId);
+        else hiddenColumns.delete(columnId);
+        return { ...tab, hiddenColumns: [...hiddenColumns] };
+      }),
+    }));
+  },
+
+  showAllColumns: (tabId) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId ? { ...tab, hiddenColumns: [] } : tab
+      ),
+    }));
+  },
+
+  resetColumnLayout: (tabId) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId
+          ? { ...tab, columnWidths: {}, columnOrder: [], hiddenColumns: [] }
+          : tab
+      ),
     }));
   },
 

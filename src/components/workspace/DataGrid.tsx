@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useState, useRef } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   DataEditor,
   GridCell,
@@ -6,39 +14,62 @@ import {
   Item,
   Theme,
   GridCellKind,
+  GridColumnIcon,
   EditableGridCell,
   GridSelection,
   CompactSelection,
+  type CellClickedEventArgs,
+  type DataEditorRef,
+  type HeaderClickedEventArgs,
 } from "@glideapps/glide-data-grid";
 import "@glideapps/glide-data-grid/dist/index.css";
 import { useTabStore } from "@/store/useTabStore";
+import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTheme } from "@/theme/useTheme";
 import { createTypedCell, applyFilter, compareValues } from "@/lib/gridUtils";
 import {
-  Check,
+  ArrowDownAZ,
+  ArrowUpAZ,
   Copy,
   Download,
+  Eye,
+  EyeOff,
   FileJson,
-  X as XIcon,
-  Loader2,
-  Plus,
+  RotateCcw,
+  Search,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ColumnFilter } from "./GridFilterRow";
-import { StatusBarPortal } from "./StatusBarPortal";
+import {
+  DataGridContextMenu,
+  type DataGridContextMenuItem,
+} from "./DataGridContextMenu";
 import {
   exportToCsv,
   exportToJson,
   serializeQueryResultSelectionToTsv,
 } from "@/lib/exportUtils";
+import { dataGridMetrics } from "@/lib/dataGridView";
+import { DataGridBusyIndicator } from "./DataGridBusyIndicator";
 
-// In DataGridProps
+export interface DataGridHandle {
+  openSearch: () => void;
+  fitColumns: () => void;
+  deleteSelectedRows: () => Promise<void>;
+}
+
+export interface DataGridSelectionSummary {
+  selectedRowCount: number;
+}
+
 interface DataGridProps {
   globalFilter?: string;
   columnFilters?: ColumnFilter[];
   overrideColumns?: Array<{ name: string; type?: string }>;
   readOnly?: boolean;
+  zoomPercent?: number;
+  onSelectionSummaryChange?: (summary: DataGridSelectionSummary) => void;
 }
 
 function rangeIndexes(start: number, length: number) {
@@ -52,6 +83,34 @@ function exportFilename(title: string | undefined, extension: "csv" | "json") {
     .replace(/[^a-z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return `${safeTitle || "query-result"}.${extension}`;
+}
+
+function columnIconForType(type: string, isPrimaryKey?: boolean) {
+  if (isPrimaryKey) return GridColumnIcon.HeaderRowID;
+
+  const normalized = type.toLowerCase();
+  if (/\b(int|serial|decimal|numeric|real|double|float|money)\b/.test(normalized)) {
+    return GridColumnIcon.HeaderNumber;
+  }
+  if (/\b(bool|boolean|bit)\b/.test(normalized)) {
+    return GridColumnIcon.HeaderBoolean;
+  }
+  if (/\b(timestamp|datetime|date)\b/.test(normalized)) {
+    return GridColumnIcon.HeaderDate;
+  }
+  if (/\btime\b/.test(normalized)) {
+    return GridColumnIcon.HeaderTime;
+  }
+  if (/\b(json|jsonb|xml|object|map)\b/.test(normalized)) {
+    return GridColumnIcon.HeaderCode;
+  }
+  if (/\[\]|\b(array|list|set)\b/.test(normalized)) {
+    return GridColumnIcon.HeaderArray;
+  }
+  if (/\b(uuid|foreign|reference)\b/.test(normalized)) {
+    return GridColumnIcon.HeaderReference;
+  }
+  return GridColumnIcon.HeaderString;
 }
 
 function cssHslVar(name: string, fallback: string) {
@@ -72,12 +131,18 @@ function cssHslVarAlpha(name: string, alpha: number, fallback: string) {
   return value ? `hsl(${value} / ${alpha})` : fallback;
 }
 
-export function DataGrid({
-  globalFilter = "",
-  columnFilters = [],
-  overrideColumns,
-  readOnly = false,
-}: DataGridProps) {
+export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
+function DataGrid(
+  {
+    globalFilter = "",
+    columnFilters = [],
+    overrideColumns,
+    readOnly = false,
+    zoomPercent,
+    onSelectionSummaryChange,
+  },
+  ref
+) {
   const {
     tabs,
     activeTabId,
@@ -85,42 +150,32 @@ export function DataGrid({
     setGridSort,
     setCellEdit,
     setBulkCellEdit,
-    commitEdits,
-    cancelEdits,
     setColumnWidth,
     setColumnOrder,
-    addNewRow,
+    setColumnHidden,
+    showAllColumns,
     deleteRows,
-    fetchTableColumns,
   } = useTabStore();
+  const dataGridSettings = useSettingsStore((state) => state.settings.dataGrid);
+  const copyIncludeHeaders = dataGridSettings.copyIncludeHeaders;
+  const showTypeIcons = dataGridSettings.showTypeIcons;
+  const viewMetrics = dataGridMetrics(
+    dataGridSettings.fontSize,
+    dataGridSettings.rowHeight,
+    zoomPercent ?? dataGridSettings.zoomPercent
+  );
+  const gridScale = viewMetrics.scale;
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
-  useEffect(() => {
-    if (
-      activeTabId &&
-      activeTab?.type === "table" &&
-      (!activeTab.tableColumns || !activeTab.tableIndexes) &&
-      !activeTab.isFetchingColumns
-    ) {
-      fetchTableColumns(activeTabId);
-    }
-  }, [
-    activeTabId,
-    activeTab?.type,
-    activeTab?.tableColumns,
-    activeTab?.tableIndexes,
-    activeTab?.isFetchingColumns,
-    fetchTableColumns,
-  ]);
-
-  const result = activeTab?.results?.[0];
+  const resultIndex = activeTab?.activeResultIndex ?? 0;
+  const result = activeTab?.results?.[resultIndex] ?? activeTab?.results?.[0];
   const error = activeTab?.error;
   const gridState = activeTab?.gridState;
   const pendingEdits = activeTab?.pendingEdits || new Map();
   const isEditable = activeTab?.type === "table" && !readOnly;
-  const hasEdits = isEditable && pendingEdits.size > 0;
   const columnWidths = activeTab?.columnWidths || {};
   const columnOrder = activeTab?.columnOrder || [];
+  const hiddenColumns = activeTab?.hiddenColumns || [];
   const newRowsCount = activeTab?.newRowsCount || 0;
 
   // Row selection state
@@ -128,6 +183,7 @@ export function DataGrid({
     columns: CompactSelection.empty(),
     rows: CompactSelection.empty(),
   });
+  const [showSearch, setShowSearch] = useState(false);
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{
@@ -140,6 +196,7 @@ export function DataGrid({
   }>({ type: null, x: 0, y: 0 });
 
   const gridContainerRef = useRef<HTMLDivElement>(null);
+  const dataEditorRef = useRef<DataEditorRef>(null);
 
   const tableColumns = activeTab?.tableColumns;
 
@@ -153,20 +210,17 @@ export function DataGrid({
         const customWidth = columnWidths[col.name];
 
         let title = col.name || "Unknown";
+        let columnIcon: GridColumnIcon | undefined;
         if (tableColumns) {
           try {
             const meta = tableColumns.find((c) => c.name === col.name);
             if (meta) {
-              let prefix = "";
-              if (meta.is_primary_key) prefix = "🔑 ";
-              else if (meta.is_unique) prefix = "⭐️ ";
-              else if (meta.is_indexed) prefix = "⚡️ ";
-
               let type = meta.data_type || "text";
               if (type === "character varying") type = "varchar";
               if (type === "timestamp without time zone") type = "timestamp";
 
-              title = `${prefix}${col.name} (${type})`;
+              title = `${col.name} (${type})`;
+              columnIcon = columnIconForType(type, meta.is_primary_key);
             }
           } catch (e) {
             console.error("DataGrid: Error generating column header", e);
@@ -176,15 +230,17 @@ export function DataGrid({
         return {
           title,
           id: col.name,
-          width: customWidth || 150,
+          width: Math.round((customWidth || 150) * gridScale),
           icon: isSorted
             ? sortDir === "asc"
               ? "headerSortAsc"
               : "headerSortDesc"
-            : undefined,
+            : showTypeIcons
+              ? columnIcon
+              : undefined,
           hasMenu: true,
         };
-      });
+      }).filter((column) => !hiddenColumns.includes(String(column.id)));
 
       if (!columnOrder || columnOrder.length === 0) {
         return allColumns;
@@ -211,20 +267,22 @@ export function DataGrid({
     // If no result but we have override columns (fallback for empty table view)
     if (overrideColumns && overrideColumns.length > 0) {
       const metaMap = new Map(tableColumns?.map((c) => [c.name, c]) || []);
-      return overrideColumns.map((col) => {
+      return overrideColumns.filter((col) => !hiddenColumns.includes(col.name)).map((col) => {
         let title = col.name;
         const meta = metaMap.get(col.name);
+        let columnIcon: GridColumnIcon | undefined;
         if (meta) {
-          let prefix = "";
-          if (meta.is_primary_key) prefix = "🔑 ";
-          else if (meta.is_unique) prefix = "⭐️ ";
-          else if (meta.is_indexed) prefix = "⚡️ ";
-          title = `${prefix}${col.name} (${meta.data_type})`;
+          title = `${col.name} (${meta.data_type})`;
+          columnIcon = columnIconForType(
+            meta.data_type,
+            meta.is_primary_key
+          );
         }
         return {
           title,
           id: col.name,
-          width: 150,
+          width: Math.round((columnWidths[col.name] || 150) * gridScale),
+          icon: showTypeIcons ? columnIcon : undefined,
           hasMenu: true,
         };
       });
@@ -238,6 +296,9 @@ export function DataGrid({
     columnOrder,
     overrideColumns,
     tableColumns,
+    showTypeIcons,
+    gridScale,
+    hiddenColumns,
   ]);
 
   // Apply filters and sorting
@@ -344,6 +405,12 @@ export function DataGrid({
         .filter((rowIndex): rowIndex is number => rowIndex !== undefined),
     [gridSelection.rows, sortedIndices]
   );
+
+  useEffect(() => {
+    onSelectionSummaryChange?.({
+      selectedRowCount: selectedRowIndexes.length,
+    });
+  }, [onSelectionSummaryChange, selectedRowIndexes.length]);
 
   // Update getCellContent to handle missing result & new rows
   const getCellContent = useCallback(
@@ -471,12 +538,6 @@ export function DataGrid({
       isEditable,
     ]
   );
-
-  // Handle header click - no sorting, just for future actions
-  const onHeaderClicked = useCallback((col: number) => {
-    // Clicking header name doesn't sort anymore
-    console.log("Header clicked (no sort):", col);
-  }, []);
 
   // Handle header menu/arrow click for sorting
   // 'col' is visual index
@@ -613,9 +674,9 @@ export function DataGrid({
   const onColumnResize = useCallback(
     (column: GridColumn, newSize: number) => {
       if (!activeTab || !column.id) return;
-      setColumnWidth(activeTab.id, column.id, newSize);
+      setColumnWidth(activeTab.id, column.id, Math.round(newSize / gridScale));
     },
-    [activeTab, setColumnWidth]
+    [activeTab, gridScale, setColumnWidth]
   );
 
   // Column move handler
@@ -656,7 +717,7 @@ export function DataGrid({
       result,
       rowIndexes,
       columnIndexes,
-      true
+      copyIncludeHeaders
     );
 
     try {
@@ -665,7 +726,7 @@ export function DataGrid({
     } catch (err) {
       console.error("Failed to copy query result:", err);
     }
-  }, [result]);
+  }, [copyIncludeHeaders, result]);
 
   const handleExportCsv = useCallback(() => {
     if (!result) return;
@@ -708,7 +769,8 @@ export function DataGrid({
       const text = serializeQueryResultSelectionToTsv(
         result,
         rowIndexes,
-        columnIndexes
+        columnIndexes,
+        copyIncludeHeaders
       );
 
       if (text) {
@@ -720,7 +782,7 @@ export function DataGrid({
         }
       }
     },
-    [filteredRows, result, sortedIndices, visualColumnIndexToResultIndex]
+    [copyIncludeHeaders, filteredRows, result, sortedIndices, visualColumnIndexToResultIndex]
   );
 
   const supplyEditor = useCallback((cell: GridCell) => {
@@ -757,52 +819,54 @@ export function DataGrid({
     return undefined;
   }, []);
 
-  // Handle right-click on grid overlay
-  const handleContextMenu = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
+  const menuPosition = useCallback((localX: number, localY: number) => {
+    const rect = gridContainerRef.current?.getBoundingClientRect();
+    return {
+      x: (rect?.left ?? 0) + localX,
+      y: (rect?.top ?? 0) + localY,
+    };
+  }, []);
 
-      console.log("Context menu triggered!", { x: e.clientX, y: e.clientY });
+  const onCellContextMenu = useCallback(
+    (cell: Item, event: CellClickedEventArgs) => {
+      if (!result) return;
+      event.preventDefault();
+      const [col, row] = cell;
+      const position = menuPosition(event.localEventX, event.localEventY);
+      const columnName = String(columns[col]?.id || "");
 
-      if (!result || !gridContainerRef.current) return;
-
-      const rect = gridContainerRef.current.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-
-      console.log("Position:", { x, y, rect });
-
-      // Simple heuristic: if y < 40, it's likely a header
-      const isHeader = y < 40;
-
-      if (isHeader) {
-        // Estimate column from x position
-        const estimatedCol = Math.floor(x / 150); // Assume 150px width
-        const columnName = result.columns[estimatedCol]?.name || "";
-        console.log("Header menu:", { estimatedCol, columnName });
-        setContextMenu({
-          type: "header",
-          x: e.clientX,
-          y: e.clientY,
-          col: estimatedCol,
-          columnName,
-        });
-      } else {
-        // Estimate row and column from position
-        const estimatedRow = Math.floor((y - 40) / 34); // Header ~40px, row ~34px
-        const estimatedCol = Math.floor(x / 150);
-        console.log("Cell menu:", { estimatedRow, estimatedCol });
-        setContextMenu({
-          type: "cell",
-          x: e.clientX,
-          y: e.clientY,
-          row: estimatedRow,
-          col: estimatedCol,
-        });
-      }
+      setGridSelection((selection) => ({
+        ...selection,
+        current: {
+          cell,
+          range: { x: col, y: row, width: 1, height: 1 },
+          rangeStack: [],
+        },
+      }));
+      setContextMenu({
+        type: "cell",
+        ...position,
+        row,
+        col,
+        columnName,
+      });
     },
-    [result]
+    [columns, menuPosition, result]
+  );
+
+  const onHeaderContextMenu = useCallback(
+    (col: number, event: HeaderClickedEventArgs) => {
+      if (!result) return;
+      event.preventDefault();
+      const position = menuPosition(event.localEventX, event.localEventY);
+      setContextMenu({
+        type: "header",
+        ...position,
+        col,
+        columnName: String(columns[col]?.id || ""),
+      });
+    },
+    [columns, menuPosition, result]
   );
 
   // Close context menu
@@ -813,29 +877,31 @@ export function DataGrid({
   // Context menu action handlers
   const handleCopyColumnName = useCallback(() => {
     if (contextMenu.columnName) {
-      navigator.clipboard.writeText(contextMenu.columnName);
-      console.log("Copied column name:", contextMenu.columnName);
+      void navigator.clipboard.writeText(contextMenu.columnName);
     }
     closeContextMenu();
   }, [contextMenu, closeContextMenu]);
 
   const handleSortAsc = useCallback(() => {
-    if (!activeTab || !result || contextMenu.col === undefined) return;
-    const column = result.columns[contextMenu.col];
-    if (column) {
-      setGridSort(activeTab.id, column.name, "asc");
+    if (!activeTab || !contextMenu.columnName) return;
+    if (contextMenu.columnName) {
+      setGridSort(activeTab.id, contextMenu.columnName, "asc");
     }
     closeContextMenu();
-  }, [activeTab, result, contextMenu, setGridSort, closeContextMenu]);
+  }, [activeTab, contextMenu.columnName, setGridSort, closeContextMenu]);
 
   const handleSortDesc = useCallback(() => {
-    if (!activeTab || !result || contextMenu.col === undefined) return;
-    const column = result.columns[contextMenu.col];
-    if (column) {
-      setGridSort(activeTab.id, column.name, "desc");
+    if (!activeTab || !contextMenu.columnName) return;
+    if (contextMenu.columnName) {
+      setGridSort(activeTab.id, contextMenu.columnName, "desc");
     }
     closeContextMenu();
-  }, [activeTab, result, contextMenu, setGridSort, closeContextMenu]);
+  }, [activeTab, contextMenu.columnName, setGridSort, closeContextMenu]);
+
+  const handleClearSort = useCallback(() => {
+    if (activeTab) setGridSort(activeTab.id, null, null);
+    closeContextMenu();
+  }, [activeTab, closeContextMenu, setGridSort]);
 
   const handleOpenColumnFilter = useCallback(() => {
     if (!activeTab || !contextMenu.columnName) return;
@@ -861,6 +927,18 @@ export function DataGrid({
     closeContextMenu();
   }, [activeTab, contextMenu.columnName, setGridFilter, closeContextMenu]);
 
+  const handleHideColumn = useCallback(() => {
+    if (!activeTab || !contextMenu.columnName || columns.length <= 1) return;
+    setColumnHidden(activeTab.id, contextMenu.columnName, true);
+    closeContextMenu();
+  }, [activeTab, closeContextMenu, columns.length, contextMenu.columnName, setColumnHidden]);
+
+  const handleShowAllColumns = useCallback(() => {
+    if (!activeTab) return;
+    showAllColumns(activeTab.id);
+    closeContextMenu();
+  }, [activeTab, closeContextMenu, showAllColumns]);
+
   const handleDeleteSelectedRows = useCallback(async () => {
     if (!activeTab || selectedRowIndexes.length === 0) return;
     const confirmed = window.confirm(
@@ -877,9 +955,160 @@ export function DataGrid({
     });
   }, [activeTab, deleteRows, selectedRowIndexes]);
 
+  useImperativeHandle(
+    ref,
+    () => ({
+      openSearch: () => {
+        setShowSearch(true);
+        dataEditorRef.current?.focus();
+      },
+      fitColumns: () => {
+        if (columns.length === 0) return;
+        dataEditorRef.current?.remeasureColumns(
+          CompactSelection.fromSingleSelection([0, columns.length])
+        );
+      },
+      deleteSelectedRows: handleDeleteSelectedRows,
+    }),
+    [columns.length, handleDeleteSelectedRows]
+  );
+
+  const handleQuickFilter = useCallback(() => {
+    if (
+      !activeTab ||
+      !result ||
+      !contextMenu.columnName ||
+      contextMenu.col === undefined ||
+      contextMenu.row === undefined
+    ) {
+      return;
+    }
+    const resultColumnIndex = visualColumnIndexToResultIndex(contextMenu.col);
+    const resultRowIndex = sortedIndices[contextMenu.row];
+    if (resultColumnIndex < 0 || resultRowIndex === undefined) return;
+
+    const value = result.rows[resultRowIndex]?.[resultColumnIndex];
+    setGridFilter(activeTab.id, contextMenu.columnName, {
+      operator: "equals",
+      value: value === null ? "null" : String(value ?? ""),
+    });
+    closeContextMenu();
+  }, [
+    activeTab,
+    closeContextMenu,
+    contextMenu.col,
+    contextMenu.columnName,
+    contextMenu.row,
+    result,
+    setGridFilter,
+    sortedIndices,
+    visualColumnIndexToResultIndex,
+  ]);
+
+  const contextMenuItems = useMemo<DataGridContextMenuItem[]>(() => {
+    if (contextMenu.type === "header") {
+      return [
+        {
+          id: "copy-column-name",
+          label: "Copy Column Name",
+          icon: <Copy size={12} />,
+          onSelect: handleCopyColumnName,
+        },
+        {
+          id: "sort-ascending",
+          label: "Sort Ascending",
+          icon: <ArrowUpAZ size={12} />,
+          separatorBefore: true,
+          onSelect: handleSortAsc,
+        },
+        {
+          id: "sort-descending",
+          label: "Sort Descending",
+          icon: <ArrowDownAZ size={12} />,
+          onSelect: handleSortDesc,
+        },
+        {
+          id: "clear-sort",
+          label: "Clear Sort",
+          icon: <RotateCcw size={12} />,
+          disabled: !gridState?.sortColumn,
+          onSelect: handleClearSort,
+        },
+        {
+          id: "column-filter",
+          label: "Set Column Filter...",
+          icon: <Search size={12} />,
+          separatorBefore: true,
+          onSelect: handleOpenColumnFilter,
+        },
+        {
+          id: "hide-column",
+          label: "Hide Column",
+          icon: <EyeOff size={12} />,
+          disabled: columns.length <= 1,
+          separatorBefore: true,
+          onSelect: handleHideColumn,
+        },
+        {
+          id: "show-all-columns",
+          label: "Show All Columns",
+          icon: <Eye size={12} />,
+          disabled: hiddenColumns.length === 0,
+          onSelect: handleShowAllColumns,
+        },
+      ];
+    }
+    if (contextMenu.type === "cell") {
+      return [
+        {
+          id: "copy-cell",
+          label: "Copy",
+          icon: <Copy size={12} />,
+          shortcut: "⌘C",
+          onSelect: () => void onCopy(gridSelection),
+        },
+        {
+          id: "filter-cell-value",
+          label: "Filter by This Value",
+          icon: <Search size={12} />,
+          onSelect: handleQuickFilter,
+        },
+        {
+          id: "delete-selected-rows",
+          label: "Delete Selected Rows",
+          icon: <Trash2 size={12} />,
+          danger: true,
+          disabled: !isEditable || selectedRowIndexes.length === 0,
+          separatorBefore: true,
+          onSelect: () => void handleDeleteSelectedRows(),
+        },
+      ];
+    }
+    return [];
+  }, [
+    contextMenu.type,
+    gridSelection,
+    gridState?.sortColumn,
+    handleClearSort,
+    handleCopyColumnName,
+    handleDeleteSelectedRows,
+    handleOpenColumnFilter,
+    handleHideColumn,
+    handleShowAllColumns,
+    handleQuickFilter,
+    handleSortAsc,
+    handleSortDesc,
+    isEditable,
+    onCopy,
+    selectedRowIndexes.length,
+    columns.length,
+    hiddenColumns.length,
+  ]);
+
   // Draw borders after cells are rendered
 
   const { mode } = useTheme();
+  const gridFontSize = viewMetrics.fontSize;
   // Keep the canvas palette aligned with the workbench CSS tokens.
   const gridTheme: Partial<Theme> = useMemo(
     () => ({
@@ -952,10 +1181,10 @@ export function DataGrid({
         mode === "dark" ? "#75a7ff" : "#2f65d7"
       ),
 
-      headerFontStyle: "600 13px",
-      baseFontStyle: "13px",
+      headerFontStyle: `600 ${gridFontSize}px`,
+      baseFontStyle: `${gridFontSize}px`,
       fontFamily: "Inter, system-ui, sans-serif",
-      editorFontSize: "13px",
+      editorFontSize: `${gridFontSize}px`,
       lineHeight: 1.45,
 
       bgIconHeader: cssHslVar(
@@ -972,10 +1201,10 @@ export function DataGrid({
       ),
       bgBubbleSelected: "transparent",
 
-      cellHorizontalPadding: 12,
-      cellVerticalPadding: 6,
+      cellHorizontalPadding: Math.max(8, Math.round(10 * gridScale)),
+      cellVerticalPadding: Math.max(4, Math.round(5 * gridScale)),
     }),
-    [mode]
+    [gridFontSize, gridScale, mode]
   );
 
   if (error) {
@@ -1035,20 +1264,24 @@ export function DataGrid({
       <div
         ref={gridContainerRef}
         className="flex-1 overflow-hidden relative"
-        onContextMenu={handleContextMenu}
+        aria-busy={activeTab?.isExecuting || undefined}
       >
         {!result && (!overrideColumns || overrideColumns.length === 0) ? (
-          <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
-            Run a query to see results
-          </div>
+          !activeTab?.isExecuting && (
+            <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
+              Run a query to see results
+            </div>
+          )
         ) : (
           <>
             <DataEditor
+              ref={dataEditorRef}
               getCellContent={getCellContent}
               columns={columns}
               rows={filteredRows.length + newRowsCount}
-              onHeaderClicked={onHeaderClicked}
               onHeaderMenuClick={onHeaderMenuClick}
+              onHeaderContextMenu={onHeaderContextMenu}
+              onCellContextMenu={onCellContextMenu}
               onCellEdited={isEditable ? onCellEdited : undefined}
               provideEditor={supplyEditor}
               onColumnResize={onColumnResize}
@@ -1058,12 +1291,17 @@ export function DataGrid({
               width="100%"
               height="100%"
               theme={gridTheme}
+              rowHeight={viewMetrics.rowHeight}
+              headerHeight={viewMetrics.headerHeight}
+              rowMarkerWidth={viewMetrics.rowMarkerWidth}
               getCellsForSelection={true}
               rowMarkers="clickable-number"
               rowMarkerStartIndex={1}
               gridSelection={gridSelection}
               onGridSelectionChange={setGridSelection}
               keybindings={{ search: true }}
+              showSearch={showSearch}
+              onSearchClose={() => setShowSearch(false)}
             />
             {filteredRows.length === 0 && newRowsCount === 0 && (
               <div className="absolute inset-x-0 top-12 bottom-0 flex items-center justify-center pointer-events-none">
@@ -1077,175 +1315,21 @@ export function DataGrid({
           </>
         )}
 
-        {/* Backdrop for closing menu - only appears when menu is open */}
         {contextMenu.type && (
-          <div
-            className="absolute inset-0"
-            style={{
-              pointerEvents: "auto",
-              zIndex: 40,
-              backgroundColor: "transparent",
-            }}
-            onClick={closeContextMenu}
+          <DataGridContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            items={contextMenuItems}
+            onClose={closeContextMenu}
           />
         )}
 
-        {/* Context Menu Portal */}
-        {contextMenu.type === "header" && contextMenu.columnName && (
-          <div
-            className="fixed z-50"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
-          >
-            <div className="min-w-56 bg-popover border border-border rounded-md shadow-lg p-1">
-              <button
-                onClick={handleCopyColumnName}
-                className="w-full text-left px-2 py-1.5 text-sm text-foreground hover:bg-accent rounded"
-              >
-                Copy Column Name
-              </button>
-              <div className="h-px bg-border my-1" />
-              <button
-                onClick={handleSortAsc}
-                className="w-full text-left px-2 py-1.5 text-sm text-foreground hover:bg-accent rounded"
-              >
-                Sort ascending
-              </button>
-              <button
-                onClick={handleSortDesc}
-                className="w-full text-left px-2 py-1.5 text-sm text-foreground hover:bg-accent rounded"
-              >
-                Sort descending
-              </button>
-              <div className="h-px bg-border my-1" />
-              <button
-                onClick={handleOpenColumnFilter}
-                className="w-full text-left px-2 py-1.5 text-sm text-foreground hover:bg-accent rounded"
-              >
-                Open Column Filter
-              </button>
-            </div>
-          </div>
-        )}
-
-        {contextMenu.type === "cell" && (
-          <div
-            className="fixed z-50"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
-          >
-            <div className="min-w-56 bg-popover border border-border rounded-md shadow-lg p-1">
-              <button
-                onClick={() => {
-                  onCopy(gridSelection);
-                  closeContextMenu();
-                }}
-                className="w-full text-left px-2 py-1.5 text-sm text-foreground hover:bg-accent rounded"
-              >
-                Copy
-                <span className="ml-auto text-xs text-muted-foreground">
-                  ⌘C
-                </span>
-              </button>
-              <button
-                onClick={closeContextMenu}
-                className="w-full text-left px-2 py-1.5 text-sm text-foreground hover:bg-accent rounded"
-              >
-                Quick Filter
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Loading Overlay */}
         {activeTab?.isExecuting && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center bg-[hsl(var(--wb-grid)/0.62)] backdrop-blur-sm animate-in fade-in duration-200">
-            <div className="flex flex-col items-center gap-4 rounded-[8px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] px-8 py-6 shadow-[0_18px_48px_rgba(0,0,0,0.36),0_0_0_1px_hsl(var(--wb-accent)/0.08)]">
-              <div className="relative">
-                <Loader2
-                  size={36}
-                  className="animate-spin text-[hsl(var(--wb-accent))]"
-                />
-                <div className="absolute inset-0 animate-pulse blur-md text-[hsl(var(--wb-accent)/0.32)]">
-                  <Loader2 size={36} />
-                </div>
-              </div>
-              <div className="flex flex-col items-center gap-1.5">
-                <span className="text-base font-bold text-foreground tracking-tight">
-                  {activeTab.type === "table"
-                    ? "Fetching data..."
-                    : "Executing Query..."}
-                </span>
-                <span className="text-[10px] text-muted-foreground font-semibold uppercase tracking-widest">
-                  Please wait
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
-        {activeTab?.type === "table" && (
-          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 rounded-full border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised)/0.88)] p-1.5 shadow-[0_10px_30px_rgba(0,0,0,0.28),0_0_0_1px_hsl(var(--wb-accent)/0.06)] backdrop-blur-md transition-all animate-in slide-in-from-bottom-2">
-            <div className="px-3 text-xs font-medium text-muted-foreground flex items-center gap-2">
-              <span>{filteredRows.length + newRowsCount} rows</span>
-            </div>
-
-            {isEditable && (
-              <>
-                <div className="h-4 w-px bg-border/50" />
-
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => activeTab && addNewRow(activeTab.id)}
-                  className="h-7 px-3 text-xs rounded-full hover:bg-accent"
-                >
-                  <Plus size={14} className="mr-1.5" /> Add Row
-                </Button>
-              </>
-            )}
-
-            {isEditable && selectedRowIndexes.length > 0 && (
-              <>
-                <div className="h-4 w-px bg-border/50" />
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => void handleDeleteSelectedRows()}
-                  className="h-7 px-3 text-xs rounded-full text-destructive hover:bg-destructive/10 hover:text-destructive"
-                >
-                  <Trash2 size={14} className="mr-1.5" /> Delete
-                </Button>
-              </>
-            )}
-          </div>
+          <DataGridBusyIndicator
+            kind={activeTab.type === "table" ? "table" : "query"}
+          />
         )}
       </div>
-
-      {/* Status Bar Portal - Save/Cancel Actions */}
-      <StatusBarPortal>
-        {hasEdits && (
-          <div className="flex items-center gap-2 text-xs h-full w-full justify-end animate-in fade-in slide-in-from-bottom-1">
-            <span className="text-[10px] text-muted-foreground font-medium mr-2">
-              {pendingEdits.size} unsaved changes
-            </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => activeTab && cancelEdits(activeTab.id)}
-              className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-            >
-              <XIcon size={13} className="mr-1.5" />
-              Cancel
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => activeTab && commitEdits(activeTab.id)}
-              className="h-6 px-2 text-xs bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm"
-            >
-              <Check size={13} className="mr-1.5" />
-              Save
-            </Button>
-          </div>
-        )}
-      </StatusBarPortal>
     </div>
   );
-}
+});

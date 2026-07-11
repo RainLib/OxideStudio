@@ -3,18 +3,21 @@ import { WindowControls } from "./WindowControls";
 import {
   Check,
   ChevronDown,
-  ChevronRight,
-  CircleSlash,
-  Download,
+  CircleArrowDown,
+  FileJson2,
   FolderPlus,
-  Keyboard,
-  Palette,
-  Plug,
+  LoaderCircle,
   Plus,
+  RefreshCw,
+  RotateCw,
   Settings,
+  type LucideIcon,
 } from "lucide-react";
 import { SettingsDialog } from "@/components/settings/SettingsDialog";
+import { UpdateDialog } from "@/components/update/UpdateDialog";
+import { useAppUpdatePolling } from "@/hooks/useAppUpdatePolling";
 import { useProjectStore } from "@/store/useProjectStore";
+import { useUpdateStore } from "@/store/useUpdateStore";
 import {
   Popover,
   PopoverContent,
@@ -28,6 +31,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { APP_EVENT_OPEN_SETTINGS, findWorkbenchAction } from "@/lib/actions";
 
 interface AppBarProps {
   /**
@@ -48,6 +52,7 @@ interface AppBarProps {
 
 export function AppBar({ center, right }: AppBarProps) {
   const [showSettings, setShowSettings] = useState(false);
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
@@ -62,6 +67,10 @@ export function AppBar({ center, right }: AppBarProps) {
     setActiveProject,
     createProject,
   } = useProjectStore();
+  const updateStatus = useUpdateStore((state) => state.status);
+  const availableUpdate = useUpdateStore((state) => state.update);
+  const checkForUpdates = useUpdateStore((state) => state.checkForUpdates);
+  useAppUpdatePolling();
   // Detect if we're on macOS
   const isMacOS =
     typeof window !== "undefined" &&
@@ -70,6 +79,12 @@ export function AppBar({ center, right }: AppBarProps) {
   useEffect(() => {
     void loadProjects();
   }, [loadProjects]);
+
+  useEffect(() => {
+    const openSettings = () => setShowSettings(true);
+    window.addEventListener(APP_EVENT_OPEN_SETTINGS, openSettings);
+    return () => window.removeEventListener(APP_EVENT_OPEN_SETTINGS, openSettings);
+  }, []);
 
   const normalizedProjectName = projectName.trim();
   const projectNameExists = useMemo(
@@ -88,6 +103,38 @@ export function AppBar({ center, right }: AppBarProps) {
     setProjectMenuOpen(false);
     setProjectDialogOpen(true);
   };
+
+  const openUpdateDialog = () => {
+    setSettingsMenuOpen(false);
+    setUpdateDialogOpen(true);
+    if (
+      updateStatus === "idle" ||
+      updateStatus === "up-to-date" ||
+      updateStatus === "error" ||
+      updateStatus === "unsupported"
+    ) {
+      void checkForUpdates({ force: true });
+    }
+  };
+
+  const updateMenuLabel = (() => {
+    if (updateStatus === "checking") return "Checking for Updates...";
+    if (updateStatus === "downloading") return "Downloading Update...";
+    if (updateStatus === "downloaded") return "Restart to Update...";
+    if (availableUpdate) return `Update to ${availableUpdate.version}...`;
+    return "Check for Updates...";
+  })();
+
+  const UpdateMenuIcon = (() => {
+    if (updateStatus === "checking" || updateStatus === "downloading") {
+      return LoaderCircle;
+    }
+    if (updateStatus === "downloaded") return RotateCw;
+    if (updateStatus === "available") return CircleArrowDown;
+    return RefreshCw;
+  })();
+  const showUpdateBadge =
+    updateStatus === "available" || updateStatus === "downloaded";
 
   const handleCreateProject = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -118,6 +165,7 @@ export function AppBar({ center, right }: AppBarProps) {
   return (
     <div data-tauri-drag-region className="wb-titlebar flex items-center relative">
       <SettingsDialog open={showSettings} onOpenChange={setShowSettings} />
+      <UpdateDialog open={updateDialogOpen} onOpenChange={setUpdateDialogOpen} />
       <div
         data-tauri-drag-region
         className={`flex h-full items-center shrink-0 ${isMacOS ? "w-20" : "w-3"}`}
@@ -206,43 +254,61 @@ export function AppBar({ center, right }: AppBarProps) {
             {right}
           </div>
         )}
-        <div className="flex items-center gap-0.5 border-l border-[hsl(var(--wb-border-subtle))] pl-1">
+        <div className="flex items-center gap-0.5 pl-0.5">
           <Popover open={settingsMenuOpen} onOpenChange={setSettingsMenuOpen}>
             <PopoverTrigger asChild>
               <button
                 type="button"
-                className="wb-icon-button"
-                title="Settings"
-                aria-label="Settings"
+                className="wb-icon-button relative"
+                title={showUpdateBadge ? "Settings · Update available" : "Settings"}
+                aria-label={showUpdateBadge ? "Settings, update available" : "Settings"}
               >
                 <Settings size={14} />
+                {showUpdateBadge && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute right-[2px] top-[2px] h-1.5 w-1.5 rounded-full bg-[hsl(var(--wb-accent))] shadow-[0_0_0_1px_hsl(var(--wb-titlebar))]"
+                  />
+                )}
               </button>
             </PopoverTrigger>
             <PopoverContent
               align="end"
               sideOffset={6}
-              className="w-[286px] rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[13px] text-[hsl(var(--wb-text))] shadow-[0_18px_44px_rgba(0,0,0,0.46)]"
+              className="w-[238px] rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[13px] text-[hsl(var(--wb-text))] shadow-[0_18px_44px_rgba(0,0,0,0.46)]"
             >
-              <SettingsMenuItem icon={Download} label="Update Performance Testing Plugin..." />
+              <SettingsMenuItem
+                icon={UpdateMenuIcon}
+                iconSpinning={
+                  updateStatus === "checking" || updateStatus === "downloading"
+                }
+                label={updateMenuLabel}
+                badge={
+                  updateStatus === "available" || updateStatus === "downloaded"
+                    ? "New"
+                    : undefined
+                }
+                active={showUpdateBadge}
+                onClick={openUpdateDialog}
+              />
+              <div className="my-1 h-px bg-[hsl(var(--wb-border-subtle))]" />
               <SettingsMenuItem
                 icon={Settings}
                 label="Settings..."
                 shortcut="⌘,"
-                active
                 onClick={() => {
                   setSettingsMenuOpen(false);
                   setShowSettings(true);
                 }}
               />
-              <SettingsMenuItem icon={Plug} label="Plugins..." />
-              <SettingsMenuSeparator />
-              <SettingsMenuItem icon={CircleSlash} label="Backup and Sync..." suffix="Off" mutedSuffix />
-              <SettingsMenuSeparator />
-              <SettingsMenuItem icon={Palette} label="Theme..." />
-              <SettingsMenuItem icon={Keyboard} label="Keymap..." />
-              <SettingsMenuItem label="View Mode..." />
-              <SettingsMenuSeparator />
-              <SettingsMenuItem label="Customize Main Toolbar" trailing />
+              <SettingsMenuItem
+                icon={FileJson2}
+                label="Open settings.json"
+                onClick={() => {
+                  setSettingsMenuOpen(false);
+                  void findWorkbenchAction("settings.openJson")?.run();
+                }}
+              />
             </PopoverContent>
           </Popover>
         </div>
@@ -331,19 +397,17 @@ function SettingsMenuItem({
   icon: Icon,
   label,
   shortcut,
-  suffix,
+  badge,
   active,
-  trailing,
-  mutedSuffix,
+  iconSpinning,
   onClick,
 }: {
-  icon?: typeof Settings;
+  icon?: LucideIcon;
   label: string;
   shortcut?: string;
-  suffix?: string;
+  badge?: string;
   active?: boolean;
-  trailing?: boolean;
-  mutedSuffix?: boolean;
+  iconSpinning?: boolean;
   onClick?: () => void;
 }) {
   return (
@@ -357,32 +421,19 @@ function SettingsMenuItem({
       onClick={onClick}
     >
       <span className="flex w-4 shrink-0 justify-center text-[hsl(var(--wb-text-muted))]">
-        {Icon ? <Icon size={14} /> : null}
+        {Icon ? <Icon size={14} className={iconSpinning ? "animate-spin" : ""} /> : null}
       </span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
+      {badge && (
+        <span className="shrink-0 rounded-[3px] bg-[hsl(var(--wb-accent)/0.16)] px-1.5 py-0.5 text-[10px] font-medium text-[hsl(var(--wb-accent))]">
+          {badge}
+        </span>
+      )}
       {shortcut && (
         <span className="shrink-0 text-[12px] text-[hsl(var(--wb-text-muted))]">
           {shortcut}
         </span>
       )}
-      {suffix && (
-        <span
-          className={`shrink-0 text-[12px] ${
-            mutedSuffix
-              ? "text-[hsl(var(--wb-text-muted))]"
-              : "text-[hsl(var(--wb-text))]"
-          }`}
-        >
-          {suffix}
-        </span>
-      )}
-      {trailing && (
-        <ChevronRight size={13} className="shrink-0 text-[hsl(var(--wb-text-muted))]" />
-      )}
     </button>
   );
-}
-
-function SettingsMenuSeparator() {
-  return <div className="my-1 h-px bg-[hsl(var(--wb-border-subtle))]" />;
 }

@@ -9,12 +9,16 @@ import {
   Plus,
   Pin,
   PinOff,
-  Pencil,
   Download,
   TableProperties,
   Code2,
   Trash2,
   Clipboard,
+  Folder,
+  FolderCog,
+  Network,
+  Search,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,7 +31,9 @@ import {
 } from "@/store/useSchemaStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useProjectStore } from "@/store/useProjectStore";
+import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
+import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
 import { CreateDatabaseDialog } from "./CreateDatabaseDialog";
 import { RenameTableDialog } from "./RenameTableDialog";
 import { DdlViewerDialog } from "./DdlViewerDialog";
@@ -35,14 +41,19 @@ import { EditColumnsDialog } from "./EditColumnsDialog";
 import { CreateViewDialog } from "./CreateViewDialog";
 import { useTableOperations } from "@/hooks/useTableOperations";
 import { databaseService } from "@/services/tauri";
+import { loadTableMetadata } from "@/services/tableMetadataCache";
 import type {
   CollectionInfo,
+  DatabaseDriver,
   FunctionInfo,
   TableInfo,
 } from "@/services/tauri/types";
 import {
   DEFAULT_DATABASE_DRIVER,
+  databaseDriverProfile,
   defaultDatabaseCapabilities,
+  defaultDatabaseName,
+  defaultDatabasePort,
   isMaterializedViewObject,
   isReadOnlyRelationObject,
   isViewObject,
@@ -75,6 +86,11 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import {
+  DatabaseExplorerHeader,
+  DatabaseExplorerToolbar,
+} from "./DatabaseExplorerChrome";
+import { DataSourceDialog } from "./DataSourceDialog";
 
 function routineMatchesFilter(routine: FunctionInfo, filter: string) {
   const normalizedFilter = filter.trim().toLowerCase();
@@ -115,6 +131,9 @@ function connectionRegionStyle(color: string, _active: boolean): CSSProperties {
 }
 
 function MetadataNodeBadge({ state }: { state?: MetadataNodeState }) {
+  const showCacheBadges = useSettingsStore(
+    (store) => store.settings.databaseExplorer.showCacheBadges
+  );
   if (!state || state.status === "idle") return null;
 
   if (state.status === "loading") {
@@ -149,7 +168,7 @@ function MetadataNodeBadge({ state }: { state?: MetadataNodeState }) {
     );
   }
 
-  if (state.source === "cache") {
+  if (state.source === "cache" && showCacheBadges) {
     return (
       <span
         className="shrink-0 rounded-[3px] px-1 text-[9px] leading-4 wb-muted"
@@ -164,8 +183,17 @@ function MetadataNodeBadge({ state }: { state?: MetadataNodeState }) {
 }
 
 export function SchemaSidebar() {
-  const { activeConnectionId, connections, setActiveConnection } =
-    useConnectionStore();
+  const {
+    activeConnectionId,
+    connections,
+    setActiveConnection,
+    createNewConnection,
+    updateConnectionConfig,
+    selectConnection,
+  } = useConnectionStore();
+  const setToolWindowVisible = useWorkbenchLayoutStore(
+    (store) => store.setToolWindowVisible
+  );
   const { activeProjectId } = useProjectStore();
   const {
     isLoading,
@@ -183,6 +211,7 @@ export function SchemaSidebar() {
     connectionSnapshots,
     objectSnapshots,
     hydrateConnectionMetadataFromCache,
+    hydrateSchemaObjectsFromCache,
     forgetConnectionMetadata,
     forgetSchemaMetadata,
     togglePinTable,
@@ -196,6 +225,8 @@ export function SchemaSidebar() {
   } = useSchemaStore();
 
   const [filterText, setFilterText] = useState("");
+  const [isFilterVisible, setIsFilterVisible] = useState(false);
+  const [isDataSourceDialogOpen, setIsDataSourceDialogOpen] = useState(false);
   const [isCreateDbDialogOpen, setIsCreateDbDialogOpen] = useState(false);
   const [isCreateViewDialogOpen, setIsCreateViewDialogOpen] = useState(false);
   const [viewDialogMode, setViewDialogMode] = useState<"create" | "edit">(
@@ -232,6 +263,13 @@ export function SchemaSidebar() {
   const [capabilities, setCapabilities] = useState(() =>
     defaultDatabaseCapabilities(DEFAULT_DATABASE_DRIVER)
   );
+  const databaseExplorerSettings = useSettingsStore(
+    (store) => store.settings.databaseExplorer
+  );
+  const shouldAutoIntrospect =
+    databaseExplorerSettings.refreshMode === "cache-first";
+  const shouldLimitVisibleSchemas =
+    databaseExplorerSettings.showOnlySelectedSchemas;
 
   const {
     truncateTable,
@@ -286,7 +324,7 @@ export function SchemaSidebar() {
       return currentSchema ? [currentSchema] : [];
     }
 
-    if (showAllSchemas) return schemas;
+    if (showAllSchemas || !shouldLimitVisibleSchemas) return schemas;
 
     const rows = schemas.filter((schema) => visibleSchemaSet.has(schema));
     if (
@@ -306,10 +344,11 @@ export function SchemaSidebar() {
     currentSchema,
     preferredVisibleSchema,
     schemas,
+    shouldLimitVisibleSchemas,
     showAllSchemas,
     visibleSchemaSet,
   ]);
-  const schemaCountLabel = showAllSchemas
+  const schemaCountLabel = showAllSchemas || !shouldLimitVisibleSchemas
     ? String(schemas.length)
     : `${schemaRows.length} of ${schemas.length}`;
   const metadataForConnection = (connectionId: string, driver?: string | null) => {
@@ -481,9 +520,18 @@ export function SchemaSidebar() {
 
   useEffect(() => {
     if (activeConnectionId) {
-      loadSchemas(activeConnectionId);
+      if (shouldAutoIntrospect) {
+        loadSchemas(activeConnectionId);
+      } else {
+        void hydrateConnectionMetadataFromCache(activeConnectionId);
+      }
     }
-  }, [activeConnectionId, loadSchemas]);
+  }, [
+    activeConnectionId,
+    hydrateConnectionMetadataFromCache,
+    loadSchemas,
+    shouldAutoIntrospect,
+  ]);
 
   useEffect(() => {
     if (!activeConnectionId) return;
@@ -551,7 +599,9 @@ export function SchemaSidebar() {
             all?: unknown;
             schemas?: unknown;
           };
-          setShowAllSchemas(parsed.all === true);
+          setShowAllSchemas(
+            shouldLimitVisibleSchemas ? parsed.all === true : true
+          );
           setVisibleSchemaNames(
             Array.isArray(parsed.schemas)
               ? parsed.schemas.filter(
@@ -569,12 +619,15 @@ export function SchemaSidebar() {
         const initialSchemas = preferredVisibleSchema
           ? [preferredVisibleSchema]
           : [];
-        setShowAllSchemas(false);
+        setShowAllSchemas(!shouldLimitVisibleSchemas);
         setVisibleSchemaNames(initialSchemas);
         try {
           localStorage.setItem(
             schemaVisibilityStorageKey,
-            JSON.stringify({ all: false, schemas: initialSchemas })
+            JSON.stringify({
+              all: !shouldLimitVisibleSchemas,
+              schemas: initialSchemas,
+            })
           );
         } catch (error) {
           console.warn("Failed to persist initial visible schemas", error);
@@ -586,6 +639,7 @@ export function SchemaSidebar() {
     }
 
     if (
+      shouldLimitVisibleSchemas &&
       !showAllSchemas &&
       visibleSchemaNames.length === 0 &&
       preferredVisibleSchema
@@ -594,6 +648,7 @@ export function SchemaSidebar() {
     }
   }, [
     preferredVisibleSchema,
+    shouldLimitVisibleSchemas,
     schemaVisibilityKey,
     schemaVisibilityStorageKey,
     showAllSchemas,
@@ -601,13 +656,34 @@ export function SchemaSidebar() {
   ]);
 
   useEffect(() => {
-    if (activeConnectionId && currentSchema && canBrowseTables) {
+    if (
+      shouldAutoIntrospect &&
+      activeConnectionId &&
+      currentSchema &&
+      canBrowseTables
+    ) {
       loadTables(activeConnectionId, currentSchema);
     }
-  }, [activeConnectionId, canBrowseTables, currentSchema, loadTables]);
+  }, [
+    activeConnectionId,
+    canBrowseTables,
+    currentSchema,
+    loadTables,
+    shouldAutoIntrospect,
+  ]);
 
   useEffect(() => {
-    if (activeConnectionId && canBrowseCollections) {
+    if (shouldAutoIntrospect || !activeConnectionId || !currentSchema) return;
+    void hydrateSchemaObjectsFromCache(activeConnectionId, currentSchema);
+  }, [
+    activeConnectionId,
+    currentSchema,
+    hydrateSchemaObjectsFromCache,
+    shouldAutoIntrospect,
+  ]);
+
+  useEffect(() => {
+    if (shouldAutoIntrospect && activeConnectionId && canBrowseCollections) {
       loadCollections(activeConnectionId, collectionNamespace);
     }
   }, [
@@ -615,6 +691,7 @@ export function SchemaSidebar() {
     canBrowseCollections,
     collectionNamespace,
     loadCollections,
+    shouldAutoIntrospect,
   ]);
 
   useEffect(() => {
@@ -690,7 +767,68 @@ export function SchemaSidebar() {
     createTableTab,
     createTab,
     runTabQuery,
+    setTableMetadata,
   } = useTabStore();
+
+  const handleNewQueryConsole = () => {
+    const queryNumber = useTabStore
+      .getState()
+      .tabs.filter((tab) => tab.type === "query").length + 1;
+    const connectionName = activeConnection?.name;
+    createTab(
+      "query",
+      connectionName ? `console [${connectionName}]` : `Query #${queryNumber}`,
+      "",
+      {
+        connectionId: activeConnectionId || undefined,
+        schemaName: currentSchema || undefined,
+      }
+    );
+  };
+
+  const handleNewDataSource = (driver: DatabaseDriver) => {
+    createNewConnection();
+    const profile = databaseDriverProfile(driver);
+    updateConnectionConfig({
+      driver,
+      name: `New ${profile.menuLabel} Connection`,
+      port: defaultDatabasePort(driver) || undefined,
+      database: defaultDatabaseName(driver),
+      icon: profile.defaultIcon,
+      connectionUrl: "",
+    });
+    setIsDataSourceDialogOpen(true);
+  };
+
+  const handleOpenConnectionProperties = (connectionId: string) => {
+    selectConnection(connectionId);
+    setIsDataSourceDialogOpen(true);
+  };
+
+  const handleCollapseAll = () => {
+    setExpandedConnectionIds([]);
+    setExpandedSchemaKeys([]);
+    setExpandedObjectGroupKeys([]);
+  };
+
+  const handleExpandActiveConnection = () => {
+    if (!activeConnectionId) return;
+    void hydrateConnectionMetadataFromCache(activeConnectionId);
+    setExpandedConnectionIds((current) =>
+      current.includes(activeConnectionId)
+        ? current
+        : [...current, activeConnectionId]
+    );
+  };
+
+  const handleRevealActiveConnection = () => {
+    handleExpandActiveConnection();
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById(`database-connection-${activeConnectionId}`)
+        ?.scrollIntoView({ block: "nearest" });
+    });
+  };
 
   const handleTableSelect = (tableName: string) => {
     selectTable(tableName);
@@ -1104,6 +1242,9 @@ export function SchemaSidebar() {
     if (connectionId !== activeConnectionId || !isCurrentSchema) {
       await handleSchemaSelect(schema);
     }
+    if (!shouldAutoIntrospect) {
+      await hydrateSchemaObjectsFromCache(connectionId, schema);
+    }
     setExpandedSchemaKeys((current) =>
       current.includes(key) ? current : [...current, key]
     );
@@ -1305,8 +1446,14 @@ export function SchemaSidebar() {
     const isCurrentSchema =
       connectionId === activeConnectionId && schema === currentSchema;
     const schemaObjects = schemaObjectsFor(connectionId, driver, schema);
+    const tableRelations = schemaObjects.tables.filter(
+      (table) => !isViewObject(table.type)
+    );
+    const virtualViews = schemaObjects.tables.filter((table) =>
+      isViewObject(table.type)
+    );
     const schemaObjectCount = canBrowseTables
-      ? schemaObjects.tables.length
+      ? tableRelations.length
       : canBrowseCollections
         ? schemaObjects.collections.length
         : 0;
@@ -1321,27 +1468,56 @@ export function SchemaSidebar() {
       schemaNodeState?.status === "loading" ||
       (isCurrentSchema && isLoading && schemaObjects.tables.length === 0);
 
-    const renderRoutines = () => {
+    const serverObjectsKey = objectGroupKey(
+      connectionId,
+      driver,
+      schema,
+      "server-objects"
+    );
+    const virtualViewsKey = objectGroupKey(
+      connectionId,
+      driver,
+      schema,
+      "virtual-views"
+    );
+
+    const toggleObjectGroup = (key: string) => {
+      setExpandedObjectGroupKeys((current) =>
+        current.includes(key)
+          ? current.filter((item) => item !== key)
+          : [...current, key]
+      );
+    };
+
+    const renderServerObjects = () => {
       if (!activeCapabilities.supportsFunctions) return null;
+      const isExpanded = expandedObjectGroupKeys.includes(serverObjectsKey);
 
       return (
-        <div className="mt-1 border-t border-[hsl(var(--wb-border-subtle))] pt-1">
-          <div className="flex items-center gap-2 px-2 py-1">
-            <span className="text-[10px] font-semibold uppercase wb-muted">
-              Routines
+        <div>
+          <button
+            type="button"
+            className="wb-tree-row w-full gap-1.5 px-0.5 hover:bg-[hsl(var(--wb-hover))]"
+            onClick={() => toggleObjectGroup(serverObjectsKey)}
+          >
+            {isExpanded ? (
+              <ChevronDown size={12} className="shrink-0 wb-muted" />
+            ) : (
+              <ChevronRight size={12} className="shrink-0 wb-muted" />
+            )}
+            <FolderCog size={12} className="shrink-0 text-sky-400/80" />
+            <span className="truncate text-[11px] text-[hsl(var(--wb-text))]">
+              Server Objects
             </span>
-            <span className="rounded-[3px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised))] px-1 text-[9px] wb-muted">
-              {schemaObjects.functions.length}
-            </span>
-          </div>
-          {isCurrentSchema &&
+          </button>
+          {isExpanded && (isCurrentSchema &&
           isFunctionsLoading &&
           schemaObjects.functions.length === 0 ? (
-            <div className="px-2 py-1.5 text-[11px] italic wb-muted">
+            <div className="pl-7 text-[11px] italic wb-muted">
               Loading routines...
             </div>
           ) : schemaObjects.functions.length === 0 ? (
-            <div className="px-2 py-1.5 text-[11px] italic wb-muted">
+            <div className="pl-7 text-[11px] italic wb-muted">
               {filterText
                 ? `No routines match "${filterText}"`
                 : "No routines found"}
@@ -1354,33 +1530,109 @@ export function SchemaSidebar() {
               return (
                 <div
                   key={`${routine.name}:${signature}:${index}`}
-                  className="group rounded-[3px] px-2 py-1.5 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                  className="group ml-4 flex h-6 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
                   title={`${signature} -> ${returnType}`}
                 >
-                  <div className="flex items-center gap-2">
-                    <Code2 size={12} className="shrink-0 opacity-70" />
-                    <span className="min-w-0 flex-1 truncate">
-                      {highlightMatch(routine.name, filterText)}
-                    </span>
-                    <span className="shrink-0 text-[9px] uppercase opacity-50">
-                      {routineKindLabel(routine)}
-                    </span>
-                  </div>
-                  <div className="ml-5 mt-0.5 truncate font-mono text-[10px] text-muted-foreground/70">
-                    {signature}
-                    {returnType && ` -> ${returnType}`}
-                  </div>
+                  <Code2 size={12} className="shrink-0 opacity-70" />
+                  <span className="min-w-0 flex-1 truncate">
+                    {highlightMatch(routine.name, filterText)}
+                  </span>
+                  <span className="shrink-0 text-[9px] uppercase opacity-50">
+                    {routineKindLabel(routine)}
+                  </span>
                 </div>
               );
             })
-          )}
+          ))}
+        </div>
+      );
+    };
+
+    const renderVirtualViews = () => {
+      if (!canBrowseTables || !activeCapabilities.supportsViews) return null;
+      const isExpanded = expandedObjectGroupKeys.includes(virtualViewsKey);
+
+      return (
+        <div>
+          <button
+            type="button"
+            className="wb-tree-row w-full gap-1.5 px-0.5 hover:bg-[hsl(var(--wb-hover))]"
+            onClick={() => toggleObjectGroup(virtualViewsKey)}
+          >
+            {isExpanded ? (
+              <ChevronDown size={12} className="shrink-0 wb-muted" />
+            ) : (
+              <ChevronRight size={12} className="shrink-0 wb-muted" />
+            )}
+            <Folder size={12} className="shrink-0 text-violet-400/85" />
+            <span className="truncate text-[11px] text-[hsl(var(--wb-text))]">
+              virtual views
+            </span>
+            <span className="text-[9px] wb-muted">{virtualViews.length}</span>
+          </button>
+          {isExpanded &&
+            (virtualViews.length === 0 ? (
+              <div className="pl-7 text-[11px] italic wb-muted">No views found</div>
+            ) : (
+              virtualViews.map((view) => {
+                const isSelectedView =
+                  isCurrentSchema && selectedTable === view.name;
+                return (
+                  <ContextMenu key={`${schema}:view:${view.name}`}>
+                    <ContextMenuTrigger asChild>
+                      <div
+                        className={cn(
+                          "group ml-4 flex h-6 cursor-pointer items-center gap-2 rounded-[3px] px-2 text-[11px]",
+                          isSelectedView
+                            ? "wb-tree-row-selected"
+                            : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                        )}
+                        onClick={() =>
+                          void runForSchema(schema, () =>
+                            handleTableSelect(view.name)
+                          )
+                        }
+                        onDoubleClick={() =>
+                          void handleTableDoubleClick(view, schema)
+                        }
+                      >
+                        <TableProperties size={12} className="shrink-0 opacity-75" />
+                        <span className="truncate">{view.name}</span>
+                      </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className={menuContentClass}>
+                      <ContextMenuItem
+                        className={menuItemClass}
+                        onClick={() => void handleTableDoubleClick(view, schema)}
+                      >
+                        Open Data
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        className={menuItemClass}
+                        onClick={() =>
+                          void runForSchema(schema, () => handleDdlClick(view))
+                        }
+                      >
+                        Quick Documentation
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        className={menuItemClass}
+                        onClick={() => void copyText(view.name)}
+                      >
+                        Copy Name
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
+                );
+              })
+            ))}
         </div>
       );
     };
 
     return (
       <div
-        className="ml-4 mt-0.5 border-l border-[hsl(var(--wb-border-subtle))] pb-1 pl-2"
+        className="ml-4 pb-1 pl-2"
         onMouseEnter={() => setIsTablesHovered(true)}
         onMouseLeave={() => setIsTablesHovered(false)}
       >
@@ -1401,7 +1653,7 @@ export function SchemaSidebar() {
             ) : (
               <ChevronRight size={12} className="shrink-0 wb-muted" />
             )}
-            <Table size={12} className="shrink-0 wb-muted" />
+            <Folder size={12} className="shrink-0 text-blue-400/85" />
             <span className="truncate text-[11px] font-medium text-[hsl(var(--wb-text))]">
               {objectSectionLabel}
             </span>
@@ -1545,7 +1797,7 @@ export function SchemaSidebar() {
               <div className="px-2 py-1.5 text-[11px] italic wb-muted">
                 Loading tables...
               </div>
-            ) : schemaObjects.tables.length === 0 ? (
+            ) : tableRelations.length === 0 ? (
               <div className="px-2 py-1.5 text-[11px] italic wb-muted">
                 {filterText
                   ? `No tables match "${filterText}"`
@@ -1553,7 +1805,7 @@ export function SchemaSidebar() {
               </div>
             ) : (
               <div className="space-y-0.5">
-                {schemaObjects.tables.map((table) => {
+                {tableRelations.map((table) => {
                   const isPinned = schemaObjects.pinnedTables.includes(
                     table.name
                   );
@@ -1613,11 +1865,6 @@ export function SchemaSidebar() {
                             {table.name}
                           </span>
                           <div className="flex items-center gap-1">
-                            {table.type && !isPinned && (
-                              <span className="shrink-0 text-[9px] uppercase opacity-50 group-hover:hidden">
-                                {isView ? "view" : table.type}
-                              </span>
-                            )}
                             <Button
                               variant="ghost"
                               size="icon"
@@ -1711,9 +1958,6 @@ export function SchemaSidebar() {
                         >
                           Copy DDL
                         </ContextMenuItem>
-                      <ContextMenuItem className={menuItemClass} disabled>
-                        Paste
-                      </ContextMenuItem>
                     </ContextMenuSubContent>
                   </ContextMenuSub>
 
@@ -1734,6 +1978,27 @@ export function SchemaSidebar() {
                           }
                           if (canBrowseCollections) {
                             await loadCollections(activeConnectionId, schema, true);
+                          }
+                          const metadata = await loadTableMetadata({
+                            connectionId: activeConnectionId,
+                            driver: activeDriver,
+                            schema,
+                            table: table.name,
+                            includeIndexes:
+                              activeCapabilities.supportsTableIndexes,
+                            includeConstraints:
+                              activeCapabilities.supportsTableConstraints,
+                            force: true,
+                          });
+                          for (const tab of useTabStore.getState().tabs) {
+                            if (
+                              tab.type === "table" &&
+                              tab.connectionId === activeConnectionId &&
+                              tab.schemaName === schema &&
+                              tab.tableName === table.name
+                            ) {
+                              setTableMetadata(tab.id, metadata);
+                            }
                           }
                         })
                       }
@@ -1763,11 +2028,6 @@ export function SchemaSidebar() {
                     Quick Documentation
                     <ContextMenuShortcut>F1</ContextMenuShortcut>
                   </ContextMenuItem>
-                  <ContextMenuItem className={menuItemClass} disabled>
-                    Compare Schema Structure With...
-                    <ContextMenuShortcut>⌘D</ContextMenuShortcut>
-                  </ContextMenuItem>
-
                   <ContextMenuSub>
                     <ContextMenuSubTrigger className={menuSubClass}>
                       Navigation
@@ -1793,25 +2053,7 @@ export function SchemaSidebar() {
                       </ContextMenuItem>
                     </ContextMenuSubContent>
                   </ContextMenuSub>
-                  <ContextMenuItem className={menuItemClass} disabled>
-                    Find Usages
-                    <ContextMenuShortcut>⌥F7</ContextMenuShortcut>
-                  </ContextMenuItem>
                   <ContextMenuSeparator className={menuSeparatorClass} />
-
-                  <ContextMenuSub>
-                    <ContextMenuSubTrigger className={menuSubClass}>
-                      Introspection Level
-                    </ContextMenuSubTrigger>
-                    <ContextMenuSubContent className={menuContentClass}>
-                      <ContextMenuItem className={menuItemClass}>
-                        Standard
-                      </ContextMenuItem>
-                      <ContextMenuItem className={menuItemClass} disabled>
-                        Full
-                      </ContextMenuItem>
-                    </ContextMenuSubContent>
-                  </ContextMenuSub>
 
                   <ContextMenuSub>
                     <ContextMenuSubTrigger className={menuSubClass}>
@@ -1934,13 +2176,6 @@ export function SchemaSidebar() {
                       </ContextMenuItem>
                     </ContextMenuSubContent>
                   </ContextMenuSub>
-                  <ContextMenuItem className={menuItemClass} disabled>
-                    Diagrams
-                  </ContextMenuItem>
-                  <ContextMenuSeparator className={menuSeparatorClass} />
-                  <ContextMenuItem className={menuItemClass} disabled>
-                    Diagnostics
-                  </ContextMenuItem>
                   <ContextMenuSeparator className={menuSeparatorClass} />
                     <ContextMenuItem
                       onClick={() =>
@@ -1958,111 +2193,72 @@ export function SchemaSidebar() {
         </div>
       )}
 
-            {renderRoutines()}
           </>
         )}
+        {renderServerObjects()}
+        {renderVirtualViews()}
       </div>
     );
   };
 
     return (
-    <div className="flex flex-col h-full wb-panel">
-      <div className="wb-panel-header h-8 gap-2">
-        <span className="truncate text-[12px] font-semibold">
-          Database Explorer
-        </span>
-        <div className="flex items-center gap-0.5">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="wb-icon-button h-5 w-5"
-            onClick={handleRefresh}
-            title="Synchronize"
-            disabled={isLoading}
+    <div className="flex h-full min-w-0 flex-col">
+      <DatabaseExplorerHeader
+        isLoading={isLoading}
+        onRevealActive={handleRevealActiveConnection}
+        onExpandActive={handleExpandActiveConnection}
+        onCollapseAll={handleCollapseAll}
+        onRefresh={() => void handleRefresh()}
+        onHide={() => setToolWindowVisible("databaseExplorer", false)}
+      />
+
+      <DatabaseExplorerToolbar
+        isLoading={isLoading}
+        namespaceLabel={namespaceLabel}
+        canCreateNamespace={activeCapabilities.supportsCreateDatabase}
+        canCreateTable={Boolean(currentSchema && canBrowseTables)}
+        canCreateView={Boolean(
+          currentSchema && activeCapabilities.supportsViews
+        )}
+        isFilterVisible={isFilterVisible}
+        onNewQueryConsole={handleNewQueryConsole}
+        onNewDataSource={handleNewDataSource}
+        onCreateNamespace={handleCreateDatabase}
+        onCreateTable={handleCreateTable}
+        onCreateView={handleCreateView}
+        onRefresh={() => void handleRefresh()}
+        onToggleFilter={() => setIsFilterVisible((visible) => !visible)}
+      />
+
+      {isFilterVisible && (
+        <div className="relative flex h-7 shrink-0 items-center border-b border-[hsl(var(--wb-border-subtle))] px-1.5">
+          <Search
+            size={12}
+            className="pointer-events-none absolute left-2.5 wb-muted"
+          />
+          <input
+            autoFocus
+            value={filterText}
+            onChange={(event) => setFilterText(event.target.value)}
+            placeholder="Filter database objects"
+            className="h-6 w-full rounded-[3px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] pl-6 pr-6 text-[11px] text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
+          />
+          <button
+            type="button"
+            className="wb-icon-button absolute right-1.5 h-5 w-5"
+            onClick={() => {
+              setFilterText("");
+              setIsFilterVisible(false);
+            }}
+            title="Close Filter"
           >
-            <RefreshCw size={12} className={cn(isLoading && "animate-spin")} />
-          </Button>
+            <X size={11} />
+          </button>
         </div>
-      </div>
+      )}
 
-      <div className="flex h-7 shrink-0 items-center gap-0.5 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-1">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="wb-icon-button"
-          onClick={handleCreateDatabase}
-          title={
-            activeCapabilities.supportsCreateDatabase
-              ? `Create new ${namespaceLabel}`
-              : `${activeCapabilities.displayName} ${namespaceLabel} creation is not supported`
-          }
-          disabled={!activeCapabilities.supportsCreateDatabase}
-        >
-          <Plus size={13} />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="wb-icon-button"
-          onClick={handleRefresh}
-          title={`Refresh ${namespaceLabelPlural}`}
-          disabled={isLoading}
-        >
-          <RefreshCw size={13} className={cn(isLoading && "animate-spin")} />
-        </Button>
-        <span className="mx-1 h-4 w-px bg-[hsl(var(--wb-border-subtle))]" />
-        <Button
-          variant="ghost"
-          size="icon"
-          className="wb-icon-button"
-          onClick={handleCreateTable}
-          title="Create New Table"
-          disabled={!currentSchema || !canBrowseTables}
-        >
-          <Table size={13} />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="wb-icon-button"
-          onClick={handleCreateView}
-          title="Create New View"
-          disabled={!currentSchema || !activeCapabilities.supportsViews}
-        >
-          <Code2 size={13} />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="wb-icon-button"
-          onClick={() => void handleRenameDatabase()}
-          title={
-            !activeCapabilities.supportsRenameDatabase
-              ? `${activeCapabilities.displayName} ${namespaceLabel} rename is not supported`
-              : `Rename ${namespaceLabel}`
-          }
-          disabled={!currentSchema || !activeCapabilities.supportsRenameDatabase}
-        >
-          <Pencil size={13} />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="wb-icon-button hover:text-destructive"
-          onClick={() => void handleDropDatabase()}
-          title={
-            canMutateNamespaces
-              ? `Drop ${namespaceLabel}`
-              : `${activeCapabilities.displayName} ${namespaceLabel} deletion is not supported`
-          }
-          disabled={!currentSchema || !canMutateNamespaces}
-        >
-          <Trash2 size={13} />
-        </Button>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-auto bg-[hsl(var(--wb-panel))] px-1 py-1 custom-scrollbar">
-        <div className="space-y-0.5">
+      <div className="min-h-0 flex-1 overflow-auto px-1 py-1 custom-scrollbar">
+        <div className="space-y-0">
           {connections.length === 0 ? (
             <div className="px-2 py-1.5 text-[11px] italic wb-muted">
               No data sources configured
@@ -2086,6 +2282,7 @@ export function SchemaSidebar() {
 
               return (
                   <div
+                    id={`database-connection-${connection.id}`}
                     key={connection.id}
                     className="rounded-[3px] border border-transparent transition-colors"
                     style={connectionRegionStyle(connectionColor, isActive)}
@@ -2097,8 +2294,8 @@ export function SchemaSidebar() {
                     tabIndex={0}
                     className={cn(
                       "flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] transition-colors",
-                      isActive
-                        ? "text-[hsl(var(--wb-text))]"
+	                      isActive
+	                        ? "wb-tree-row-selected"
                         : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
                     )}
                     onClick={() =>
@@ -2187,40 +2384,11 @@ export function SchemaSidebar() {
                       </ContextMenuItem>
                       <ContextMenuItem
                         className={menuItemClass}
-                        onClick={() => void handleRenameDatabase()}
-                        disabled={
-                          !isActive ||
-                          !currentSchema ||
-                          !activeCapabilities.supportsRenameDatabase
+                        onClick={() =>
+                          handleOpenConnectionProperties(connection.id)
                         }
                       >
-                        Rename...
-                        <ContextMenuShortcut>⇧F6</ContextMenuShortcut>
-                      </ContextMenuItem>
-                      <ContextMenuSeparator className={menuSeparatorClass} />
-                      <ContextMenuSub>
-                        <ContextMenuSubTrigger className={menuSubClass}>
-                          Introspection Level
-                        </ContextMenuSubTrigger>
-                        <ContextMenuSubContent className={menuContentClass}>
-                          <ContextMenuItem className={menuItemClass}>
-                            Standard
-                          </ContextMenuItem>
-                          <ContextMenuItem className={menuItemClass} disabled>
-                            Full
-                          </ContextMenuItem>
-                        </ContextMenuSubContent>
-                      </ContextMenuSub>
-                      <ContextMenuItem className={menuItemClass} disabled>
-                        Diagnostics
-                      </ContextMenuItem>
-                      <ContextMenuSeparator className={menuSeparatorClass} />
-                      <ContextMenuItem
-                        className={cn(menuItemClass, "text-destructive")}
-                        onClick={() => void handleDropDatabase()}
-                        disabled={!isActive || !currentSchema || !canMutateNamespaces}
-                      >
-                        Drop...
+                        Properties...
                       </ContextMenuItem>
                     </ContextMenuContent>
                   </ContextMenu>
@@ -2293,7 +2461,7 @@ export function SchemaSidebar() {
                                         className="shrink-0 wb-muted"
                                       />
                                     )}
-                                    <Database
+                                    <Network
                                       size={12}
                                       className="shrink-0"
                                       style={{ color: connectionColor }}
@@ -2463,6 +2631,10 @@ export function SchemaSidebar() {
         )}
       </div>
 
+      <DataSourceDialog
+        open={isDataSourceDialogOpen}
+        onOpenChange={setIsDataSourceDialogOpen}
+      />
       <CreateDatabaseDialog
         isOpen={isCreateDbDialogOpen}
         onClose={() => setIsCreateDbDialogOpen(false)}

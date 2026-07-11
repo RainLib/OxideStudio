@@ -194,26 +194,64 @@
     @apply h-screen w-screen overflow-hidden font-sans;
     background:
       linear-gradient(
-        180deg,
-        hsl(var(--wb-frame)) 0,
-        hsl(var(--wb-frame)) calc(100% - 34px),
-        hsl(var(--wb-status)) 100%
-      );
+          90deg,
+          hsl(var(--wb-titlebar)) 0,
+          hsl(var(--wb-titlebar)) 360px,
+          hsl(var(--wb-frame)) min(62vw, 960px),
+          hsl(var(--wb-frame)) 100%
+        )
+        top / 100% 76px no-repeat,
+      hsl(var(--wb-frame));
     color: hsl(var(--wb-text));
-    font-size: 12px;
+    font-size: var(--wb-ui-font-size, 12px);
+    isolation: isolate;
+  }
+
+  .workbench-shell :where(.text-xs, .text-\[11px\], .text-\[12px\]) {
+    font-size: var(--wb-ui-font-size, 12px);
   }
 
   .wb-titlebar {
-    @apply h-9 shrink-0 select-none border-b;
-    background:
-      linear-gradient(
-        90deg,
-        hsl(var(--wb-titlebar)) 0,
-        hsl(var(--wb-titlebar)) 320px,
-        hsl(var(--wb-frame)) 560px,
-        hsl(var(--wb-frame)) 100%
-      );
+    @apply h-9 shrink-0 select-none;
+    background: transparent;
+  }
+
+  .wb-workspace-track {
+    @apply flex min-h-0 flex-1 gap-1 overflow-hidden px-1 pb-[3px] pt-[2px];
+    background: transparent;
+  }
+
+  .wb-work-surface,
+  .wb-tool-window {
+    background: hsl(var(--wb-editor));
+    box-shadow: inset 0 0 0 1px hsl(var(--wb-border-subtle) / 0.86);
+  }
+
+  .wb-tool-window {
+    background: hsl(var(--wb-panel));
+    max-width: 32vw;
+  }
+
+  .wb-tool-header {
+    @apply flex h-8 shrink-0 items-center justify-between px-2 text-xs font-semibold;
+    background: transparent;
+    color: hsl(var(--wb-text));
+  }
+
+  .wb-explorer-toolbar,
+  .wb-editor-commandbar {
+    @apply flex h-8 shrink-0 items-center border-y px-1;
+    background: hsl(var(--wb-toolbar) / 0.94);
     border-color: hsl(var(--wb-border-subtle));
+    color: hsl(var(--wb-text-muted));
+  }
+
+  .wb-query-editor {
+    container-type: inline-size;
+  }
+
+  .wb-tree-row {
+    @apply flex h-6 min-w-0 items-center rounded-[3px] text-left transition-colors;
   }
 
   .wb-toolbar {
@@ -229,6 +267,12 @@
     box-shadow: inset 0 1px hsl(var(--wb-accent) / 0.12);
   }
 
+  .wb-table-commandbar {
+    @apply flex h-8 shrink-0 items-center gap-1 overflow-hidden px-2;
+    background: hsl(var(--wb-toolbar));
+    color: hsl(var(--wb-text-muted));
+  }
+
   .wb-panel {
     background: hsl(var(--wb-panel));
     color: hsl(var(--wb-text));
@@ -240,6 +284,11 @@
 
   .wb-grid-surface {
     background: hsl(var(--wb-grid));
+  }
+
+  .wb-data-grid-busy-content {
+    opacity: 0;
+    animation: wb-data-grid-busy-in 120ms ease-out 180ms forwards;
   }
 
   .wb-tree-active-zone {
@@ -271,6 +320,28 @@
   .wb-icon-button[data-active="true"] {
     background: hsl(var(--wb-active-strong));
     color: hsl(var(--wb-text));
+  }
+
+  .wb-title-tool-button {
+    @apply inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[5px] transition-colors;
+    color: hsl(var(--wb-text-muted));
+  }
+
+  .wb-title-tool-button:hover {
+    background: hsl(var(--wb-hover));
+    color: hsl(var(--wb-text));
+  }
+
+  .wb-title-tool-button[data-active="true"] {
+    background: hsl(var(--wb-panel-raised));
+    color: hsl(var(--wb-text));
+    box-shadow:
+      inset 0 0 0 1px hsl(var(--wb-border-subtle)),
+      0 1px 2px hsl(0 0% 0% / 0.18);
+  }
+
+  .wb-panel-active {
+    box-shadow: inset 0 0 0 1px hsl(var(--wb-accent) / 0.2);
   }
 
   .wb-text-button {
@@ -324,14 +395,8 @@
   }
 
   .wb-statusbar {
-    @apply h-6 shrink-0 border-t text-[11px];
-    background:
-      linear-gradient(
-        180deg,
-        hsl(var(--wb-frame) / 0.82),
-        hsl(var(--wb-status))
-      );
-    border-color: hsl(var(--wb-border-subtle));
+    @apply h-[22px] shrink-0 overflow-hidden text-[10px];
+    background: transparent;
     color: hsl(var(--wb-text-muted));
   }
 
@@ -365,6 +430,47 @@
   }
 }
 
+@container (max-width: 560px) {
+  .wb-editor-library-action {
+    display: none;
+  }
+
+  .wb-schema-selector {
+    max-width: 142px;
+  }
+}
+
+@container (max-width: 420px) {
+  .wb-editor-optional {
+    display: none;
+  }
+
+  .wb-schema-selector {
+    max-width: 112px;
+  }
+}
+
+@container (max-width: 320px) {
+  .wb-schema-selector-label,
+  .wb-schema-selector .lucide-chevron-down {
+    display: none;
+  }
+
+  .wb-schema-selector {
+    width: 28px;
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 1100px) {
+  .wb-editor-status-secondary,
+  .wb-editor-status-lsp {
+    display: none;
+  }
+}
+
 @keyframes wb-progress-slide {
   0% {
     transform: translateX(-110%);
@@ -375,11 +481,35 @@
   }
 }
 
+@keyframes wb-data-grid-busy-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
   .wb-progress-bar {
     animation: none;
     opacity: 0.7;
     transform: none;
     width: 100%;
+  }
+
+  .wb-data-grid-busy-content {
+    animation: none;
+    opacity: 1;
   }
 }

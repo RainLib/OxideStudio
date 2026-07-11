@@ -121,6 +121,34 @@ describe("table editing store", () => {
     expect(tab?.pendingEdits?.size).toBe(1);
   });
 
+  it("resets persisted column widths and order", () => {
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          columnWidths: { email: 280 },
+          columnOrder: ["email"],
+          hiddenColumns: ["email"],
+        },
+      ],
+    });
+
+    useTabStore.getState().resetColumnLayout("tab-1");
+
+    const tab = useTabStore.getState().tabs.find((item) => item.id === "tab-1");
+    expect(tab?.columnWidths).toEqual({});
+    expect(tab?.columnOrder).toEqual([]);
+    expect(tab?.hiddenColumns).toEqual([]);
+  });
+
+  it("tracks column visibility per table tab", () => {
+    useTabStore.getState().setColumnHidden("tab-1", "email", true);
+    expect(useTabStore.getState().tabs[0]?.hiddenColumns).toEqual(["email"]);
+
+    useTabStore.getState().showAllColumns("tab-1");
+    expect(useTabStore.getState().tabs[0]?.hiddenColumns).toEqual([]);
+  });
+
   it("surfaces a tab error when deleting rows without a primary key", async () => {
     await useTabStore.getState().deleteRows("tab-1", [0]);
 

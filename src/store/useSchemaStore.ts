@@ -54,6 +54,10 @@ interface SchemaState {
   snapshotActiveMetadata: () => void;
   restoreConnectionSnapshot: (connectionId: string) => boolean;
   hydrateConnectionMetadataFromCache: (connectionId: string) => Promise<boolean>;
+  hydrateSchemaObjectsFromCache: (
+    connectionId: string,
+    schema: string
+  ) => Promise<boolean>;
   forgetConnectionMetadata: (connectionId: string) => Promise<void>;
   forgetSchemaMetadata: (connectionId: string, schema: string) => Promise<void>;
   setMetadataNodeState: (
@@ -563,6 +567,129 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     }
   },
 
+  hydrateSchemaObjectsFromCache: async (connectionId: string, schema: string) => {
+    if (!connectionId || !schema) return false;
+
+    const activeDriver = getConnectionDriver(connectionId);
+    const schemaResourceId = getSchemaResourceId(
+      connectionId,
+      schema,
+      activeDriver
+    );
+    const nodeKey = getSchemaMetadataNodeKey(connectionId, activeDriver, schema);
+
+    try {
+      const cachedResources = await storeService.getResources(
+        connectionId,
+        schemaResourceId
+      );
+      const cachedTables = resourcesToTables(
+        cachedResources,
+        schema,
+        activeDriver
+      );
+      const cachedCollections = resourcesToCollections(
+        cachedResources,
+        schema,
+        activeDriver
+      );
+      const cachedFunctions = resourcesToFunctions(
+        cachedResources,
+        activeDriver
+      );
+      const hasCachedTableGroup = hasCacheMarker(
+        cachedResources,
+        TABLE_CACHE_KIND,
+        activeDriver
+      );
+      const hasCachedCollectionGroup = hasCacheMarker(
+        cachedResources,
+        COLLECTION_CACHE_KIND,
+        activeDriver
+      );
+      const hasCachedFunctionGroup = hasCacheMarker(
+        cachedResources,
+        FUNCTION_CACHE_KIND,
+        activeDriver
+      );
+      const hasAnyCachedObject =
+        cachedTables.length > 0 ||
+        cachedCollections.length > 0 ||
+        cachedFunctions.length > 0 ||
+        hasCachedTableGroup ||
+        hasCachedCollectionGroup ||
+        hasCachedFunctionGroup;
+
+      if (!hasAnyCachedObject) {
+        get().setMetadataNodeState(nodeKey, {
+          status: "stale",
+          source: "cache",
+          message: "No cached object metadata. Use Refresh to introspect.",
+        });
+        return false;
+      }
+
+      const savedPins = readPinnedTables(connectionId, schema, activeDriver);
+      const objectKey = getObjectSnapshotKey(connectionId, activeDriver, schema);
+      const objectLoadKey =
+        cachedTables.length > 0 || hasCachedTableGroup
+          ? getObjectLoadKey(connectionId, activeDriver, schema, "tables")
+          : cachedCollections.length > 0 || hasCachedCollectionGroup
+            ? getObjectLoadKey(connectionId, activeDriver, schema, "collections")
+            : getObjectLoadKey(connectionId, activeDriver, schema, "functions");
+
+      set((state) => {
+        const isActiveSchema =
+          useConnectionStore.getState().activeConnectionId === connectionId &&
+          state.currentSchema === schema;
+
+        return {
+          objectSnapshots: {
+            ...state.objectSnapshots,
+            [objectKey]: {
+              tables: cachedTables,
+              collections: cachedCollections,
+              functions: cachedFunctions,
+              pinnedTables: savedPins,
+              selectedTable: isActiveSchema ? state.selectedTable : null,
+              lastLoadedObjectKey: objectLoadKey,
+            },
+          },
+          ...(isActiveSchema
+            ? {
+                tables: cachedTables,
+                collections: cachedCollections,
+                functions: cachedFunctions,
+                pinnedTables: savedPins,
+                lastLoadedObjectKey: objectLoadKey,
+                isLoading: false,
+                isCollectionsLoading: false,
+                isFunctionsLoading: false,
+              }
+            : {}),
+        };
+      });
+      get().setMetadataNodeState(nodeKey, {
+        status: "ready",
+        source: "cache",
+        message: `${(
+          cachedTables.length +
+          cachedCollections.length +
+          cachedFunctions.length
+        ).toLocaleString()} objects from cache`,
+      });
+      return true;
+    } catch (error) {
+      console.warn("Store: Failed to hydrate schema objects from cache", error);
+      get().setMetadataNodeState(nodeKey, {
+        status: "error",
+        source: "cache",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  },
+
   forgetConnectionMetadata: async (connectionId: string) => {
     const activeDriver = getConnectionDriver(connectionId);
     await storeService.deleteResources(connectionId);
@@ -625,6 +752,14 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       connectionId,
       schema,
       activeDriver
+    );
+    const schemaResources = await storeService
+      .getResources(connectionId, schemaResourceId)
+      .catch(() => []);
+    await Promise.all(
+      schemaResources.map((resource) =>
+        storeService.deleteResources(connectionId, resource.id)
+      )
     );
     await storeService.deleteResources(connectionId, schemaResourceId);
 

@@ -19,10 +19,12 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { useEffect, useRef, useState } from "react";
+import { useConnectionStore } from "@/store/useConnectionStore";
+import { useSchemaStore } from "@/store/useSchemaStore";
 
 const TabIcon = ({ type }: { type: TabType }) => {
-  if (type === "table") return <TableIcon size={12} className="text-primary" />;
-  return <Terminal size={12} className="text-blue-500" />;
+  if (type === "table") return <TableIcon size={12} className="wb-muted" />;
+  return <Terminal size={12} className="text-sky-400" />;
 };
 
 export function TabBar() {
@@ -39,10 +41,30 @@ export function TabBar() {
     togglePinTab,
     createTab,
   } = useTabStore();
+  const { activeConnectionId, connections } = useConnectionStore();
+  const currentSchema = useSchemaStore((state) => state.currentSchema);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [hasOverflow, setHasOverflow] = useState(false);
   const tabRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const [contextMenuTabId, setContextMenuTabId] = useState<string | null>(null);
+  const activeConnection = connections.find(
+    (connection) => connection.id === activeConnectionId
+  );
+
+  const createQueryConsole = () => {
+    const queryNumber = tabs.filter((tab) => tab.type === "query").length + 1;
+    createTab(
+      "query",
+      activeConnection
+        ? `console [${activeConnection.name}]`
+        : `Query #${queryNumber}`,
+      "",
+      {
+        connectionId: activeConnectionId || undefined,
+        schemaName: currentSchema || undefined,
+      }
+    );
+  };
 
   // Check for overflow
   useEffect(() => {
@@ -344,12 +366,8 @@ export function TabBar() {
           variant="ghost"
           size="icon"
           className="wb-icon-button h-7 w-7"
-          onClick={() =>
-            createTab(
-              "query",
-              `Query #${tabs.filter((t) => t.type === "query").length + 1}`
-            )
-          }
+          onClick={createQueryConsole}
+          title="New Query Console"
         >
           <Plus size={14} />
         </Button>

@@ -1,34 +1,15 @@
 import {
-  useConnectionStore,
-  ConnectionConfig,
-} from "@/store/useConnectionStore";
-import { Button } from "@/components/ui/button";
-import {
-  CheckCircle2,
   AlertCircle,
+  Check,
+  CheckCircle2,
+  Database,
   Eye,
   EyeOff,
-  Globe,
-  Database,
-  Lock,
   Loader2,
-  Tag,
-  X,
-  Plus,
-  Upload,
+  RotateCcw,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { cn } from "@/lib/utils";
-import { Switch } from "@/components/ui/switch";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-  DialogFooter,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+import { useEffect, useMemo, useState } from "react";
+import { DataSourceList } from "./DataSourceList";
 import {
   Select,
   SelectContent,
@@ -36,17 +17,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Badge } from "@/components/ui/badge";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import * as LucideIcons from "lucide-react";
-import React from "react";
-import { parseConnectionUrl } from "@/lib/connectionUrlParser";
+  buildConnectionUrl,
+  parseConnectionUrl,
+} from "@/lib/connectionUrlParser";
 import {
-  connectionUrlScheme,
   databaseDriverProfile,
   defaultConnectionIcon,
   defaultDatabaseCapabilities,
@@ -54,41 +29,43 @@ import {
   defaultDatabasePort,
   supportedDatabaseDriverProfiles,
 } from "@/lib/databaseDialect";
+import { cn } from "@/lib/utils";
 import {
   databaseService,
   type DatabaseCapabilities,
   type DatabaseDriver,
 } from "@/services/tauri";
+import {
+  useConnectionStore,
+  type ConnectionConfig,
+} from "@/store/useConnectionStore";
 
-import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
-
-// Predefined colors
-const COLORS = [
-  "#f39c12", // Orange
-  "#e74c3c", // Red
-  "#8e44ad", // Purple
-  "#3498db", // Blue
-  "#2ecc71", // Green
-  "#1abc9c", // Teal
-  "#34495e", // Navy
-  "#95a5a6", // Grey
+const CONNECTION_COLORS = [
+  "#d9904f",
+  "#d95b5b",
+  "#9b72cf",
+  "#5b8dd6",
+  "#5fb878",
+  "#49a9a2",
+  "#7b8798",
+  "#b0b5bd",
 ];
 
-// Predefined icons
-const ICONS = [
-  "Database",
-  "Server",
-  "Cloud",
-  "HardDrive",
-  "Box",
-  "Layers",
-  "LayoutGrid",
-  "Settings",
-  "Terminal",
-  "Code",
-  "Cpu",
-  "Activity",
-];
+type FormSection = "general" | "ssl" | "advanced";
+type ConnectionStatus = {
+  type: "success" | "error" | "loading";
+  message: string;
+} | null;
+
+interface ConnectionFormProps {
+  onConnected?: () => void;
+  onCancel?: () => void;
+}
+
+const fieldClass =
+  "h-7 w-full rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 text-[12px] text-[hsl(var(--wb-text))] outline-none transition-colors placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]";
+const labelClass =
+  "flex h-7 items-center justify-end pr-3 text-[11px] text-[hsl(var(--wb-text-muted))]";
 
 function fallbackDriverCapabilities() {
   return supportedDatabaseDriverProfiles().map((profile) =>
@@ -96,46 +73,42 @@ function fallbackDriverCapabilities() {
   );
 }
 
-export function ConnectionForm() {
+function uniqueConnections(
+  connections: ConnectionConfig[],
+  selectedConnection: ConnectionConfig | null
+) {
+  if (!selectedConnection) return connections;
+  if (connections.some((item) => item.id === selectedConnection.id)) {
+    return connections.map((item) =>
+      item.id === selectedConnection.id ? selectedConnection : item
+    );
+  }
+  return [selectedConnection, ...connections];
+}
+
+export function ConnectionForm({
+  onConnected,
+  onCancel,
+}: ConnectionFormProps = {}) {
   const {
+    connections,
     selectedConnection,
+    selectConnection,
+    createNewConnection,
+    updateConnectionConfig,
     saveConnection,
     connect,
     testConnection,
-    updateConnectionConfig,
   } = useConnectionStore();
-
-  const [testStatus, setTestStatus] = useState<{
-    type: "success" | "error" | "loading";
-    msg: string;
-  } | null>(null);
-
+  const [section, setSection] = useState<FormSection>("general");
   const [showPassword, setShowPassword] = useState(false);
-  const [importUrl, setImportUrl] = useState("");
-  const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [tagInput, setTagInput] = useState("");
+  const [status, setStatus] = useState<ConnectionStatus>(null);
+  const [isSaving, setIsSaving] = useState(false);
   const [driverCapabilities, setDriverCapabilities] =
     useState<DatabaseCapabilities[]>(fallbackDriverCapabilities);
-  const uploadIconRef = useRef<HTMLInputElement>(null);
-  const driverOptions = useMemo(() => {
-    const seenDrivers = new Set<string>();
-    return [...driverCapabilities, ...fallbackDriverCapabilities()]
-      .filter((capabilities) => {
-        const driver = String(capabilities.driver);
-        if (seenDrivers.has(driver)) return false;
-        seenDrivers.add(driver);
-        return true;
-      })
-      .map((capabilities) => ({
-        capabilities,
-        profile: databaseDriverProfile(capabilities.driver),
-      }));
-  }, [driverCapabilities]);
 
   useEffect(() => {
     let cancelled = false;
-
     databaseService
       .listDatabaseCapabilities()
       .then((capabilities) => {
@@ -143,705 +116,471 @@ export function ConnectionForm() {
           setDriverCapabilities(capabilities);
         }
       })
-      .catch((error) => {
-        console.warn("Failed to load database capabilities:", error);
-        if (!cancelled) {
-          setDriverCapabilities(fallbackDriverCapabilities());
-        }
+      .catch(() => {
+        if (!cancelled) setDriverCapabilities(fallbackDriverCapabilities());
       });
-
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const PREDEFINED_TAGS = [
-    "Production",
-    "Staging",
-    "Development",
-    "Personal",
-    "Work",
-    "Test",
-  ];
+  useEffect(() => {
+    setStatus(null);
+    setSection("general");
+  }, [selectedConnection?.id]);
+
+  const driverProfiles = useMemo(() => {
+    const profiles = new Map(
+      supportedDatabaseDriverProfiles().map((profile) => [
+        String(profile.driver),
+        profile,
+      ])
+    );
+    driverCapabilities.forEach((capabilities) => {
+      profiles.set(
+        String(capabilities.driver),
+        databaseDriverProfile(capabilities.driver)
+      );
+    });
+    return Array.from(profiles.values());
+  }, [driverCapabilities]);
+
+  const dataSources = useMemo(
+    () => uniqueConnections(connections, selectedConnection),
+    [connections, selectedConnection]
+  );
 
   if (!selectedConnection) {
-    return <QueryShortcuts />;
+    return (
+      <div className="flex h-full items-center justify-center text-[12px] wb-muted">
+        Select or create a data source
+      </div>
+    );
   }
 
-  const selectedDriverDefaultPort = defaultDatabasePort(
-    selectedConnection.driver
-  );
-  const selectedDriverDefaultDatabase =
-    defaultDatabaseName(selectedConnection.driver) || "database";
-  const importExampleUrl = `${connectionUrlScheme(
-    selectedConnection.driver
-  )}://user:pass@host${
-    selectedDriverDefaultPort ? `:${selectedDriverDefaultPort}` : ""
-  }/${selectedDriverDefaultDatabase}`;
+  const profile = databaseDriverProfile(selectedConnection.driver);
+  const capabilities = defaultDatabaseCapabilities(selectedConnection.driver);
+  const generatedUrl = buildConnectionUrl({
+    driver: selectedConnection.driver,
+    host: selectedConnection.host,
+    port: selectedConnection.port,
+    user: selectedConnection.user,
+    password: selectedConnection.password,
+    database: selectedConnection.database,
+    sslMode: selectedConnection.sslMode || "disable",
+  });
+  const displayedUrl = selectedConnection.connectionUrl?.trim() || generatedUrl;
 
-  const parseConnectionString = (url: string): Partial<ConnectionConfig> => {
-    const parsed = parseConnectionUrl(url);
-    if (!parsed) {
-      console.error("Failed to parse connection string");
-      return {};
-    }
-
-    return {
-      driver: parsed.driver,
-      host: parsed.host,
-      port: parsed.port,
-      user: parsed.user || "",
-      password: parsed.password || "",
-      database: parsed.database || "",
-      sslMode: parsed.sslMode,
-      connectionUrl: url,
-    };
+  const updateField = (
+    field: keyof ConnectionConfig,
+    value: ConnectionConfig[keyof ConnectionConfig],
+    invalidateUrl = false
+  ) => {
+    updateConnectionConfig({
+      [field]: value,
+      ...(invalidateUrl ? { connectionUrl: "" } : {}),
+    });
+    setStatus(null);
   };
 
-  const handleImport = () => {
-    if (!importUrl.trim()) return;
-    const updates = parseConnectionString(importUrl.trim());
-    if (Object.keys(updates).length > 0) {
-      updateConnectionConfig(updates);
-    }
-    setImportUrl("");
-    setIsImportDialogOpen(false);
-  };
-
-  const handleChange = (field: keyof ConnectionConfig, value: any) => {
-    updateConnectionConfig({ [field]: value });
-  };
-
-  const handleDriverChange = (driver: DatabaseDriver) => {
+  const changeDriver = (driver: DatabaseDriver) => {
     const previousDriver = selectedConnection.driver;
     const previousDefaultPort = defaultDatabasePort(previousDriver);
     const previousDefaultDatabase = defaultDatabaseName(previousDriver);
     const previousDefaultIcon = defaultConnectionIcon(previousDriver);
-    const nextDefaultPort = defaultDatabasePort(driver);
-    const nextDefaultDatabase = defaultDatabaseName(driver);
-    const nextDefaultIcon = databaseDriverProfile(driver).defaultIcon;
+    const nextProfile = databaseDriverProfile(driver);
 
-    const updates: Partial<ConnectionConfig> = { driver };
-    if (
-      !selectedConnection.port ||
-      selectedConnection.port === previousDefaultPort
-    ) {
-      updates.port = nextDefaultPort || undefined;
-    }
-    if (
-      selectedConnection.database === undefined ||
-      selectedConnection.database === previousDefaultDatabase
-    ) {
-      updates.database = nextDefaultDatabase;
-    }
-    if (
-      !selectedConnection.icon ||
-      selectedConnection.icon === previousDefaultIcon
-    ) {
-      updates.icon = nextDefaultIcon;
-    }
-
-    updateConnectionConfig(updates);
+    updateConnectionConfig({
+      driver,
+      port:
+        !selectedConnection.port || selectedConnection.port === previousDefaultPort
+          ? defaultDatabasePort(driver) || undefined
+          : selectedConnection.port,
+      database:
+        selectedConnection.database === undefined ||
+        selectedConnection.database === previousDefaultDatabase
+          ? defaultDatabaseName(driver)
+          : selectedConnection.database,
+      icon:
+        !selectedConnection.icon || selectedConnection.icon === previousDefaultIcon
+          ? nextProfile.defaultIcon
+          : selectedConnection.icon,
+      connectionUrl: "",
+    });
+    setStatus(null);
   };
 
-  const handleAddTag = (tag: string) => {
-    const trimmed = tag.trim();
-    if (!trimmed) return;
-    const currentTags = selectedConnection.tags || [];
-    if (currentTags.includes(trimmed)) {
-      setTagInput("");
-      return;
-    }
-    handleChange("tags", [...currentTags, trimmed]);
-    setTagInput("");
+  const createDataSource = (driver: DatabaseDriver) => {
+    createNewConnection();
+    const nextProfile = databaseDriverProfile(driver);
+    updateConnectionConfig({
+      driver,
+      name: `New ${nextProfile.menuLabel} Connection`,
+      port: defaultDatabasePort(driver) || undefined,
+      database: defaultDatabaseName(driver),
+      icon: nextProfile.defaultIcon,
+      connectionUrl: "",
+    });
   };
 
-  const handleRemoveTag = (tagToRemove: string) => {
-    const currentTags = selectedConnection.tags || [];
-    handleChange(
-      "tags",
-      currentTags.filter((t: string) => t !== tagToRemove)
+  const updateConnectionUrl = (value: string) => {
+    const parsed = parseConnectionUrl(value);
+    updateConnectionConfig(
+      parsed
+        ? {
+            connectionUrl: value,
+            driver: parsed.driver,
+            host: parsed.host,
+            port: parsed.port,
+            user: parsed.user || "",
+            password: parsed.password || "",
+            database: parsed.database || "",
+            sslMode: parsed.sslMode,
+          }
+        : { connectionUrl: value }
     );
-  };
-
-  const handleIconUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        handleChange("icon", reader.result as string); // Save as base64
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  // Helper to render dynamic icon
-  const renderIcon = (iconName?: string, size: number = 20) => {
-    if (!iconName) {
-      const Icon = LucideIcons.Database;
-      return <Icon size={size} strokeWidth={1.5} />;
-    }
-
-    // Check if it is a base64 image (upload)
-    if (iconName.startsWith("data:image")) {
-      return (
-        <img
-          src={iconName}
-          alt="icon"
-          style={{ width: size, height: size, objectFit: "contain" }}
-        />
-      );
-    }
-
-    // Check if it's a valid Lucide icon
-    const IconComponent = (LucideIcons as any)[iconName];
-    if (IconComponent) {
-      return <IconComponent size={size} strokeWidth={1.5} />;
-    }
-
-    // Otherwise treat as text
-    return (
-      <span
-        style={{ fontSize: size * 0.6 }}
-        className="font-bold font-mono leading-none truncate"
-      >
-        {iconName.slice(0, 3)}
-      </span>
-    );
+    setStatus(null);
   };
 
   const handleTest = async () => {
-    setTestStatus({ type: "loading", msg: "Testing connection..." });
+    setStatus({ type: "loading", message: "Testing connection..." });
     try {
       const error = await testConnection(selectedConnection);
-      if (error) {
-        setTestStatus({ type: "error", msg: error });
-      } else {
-        setTestStatus({ type: "success", msg: "Connection available" });
-        setTimeout(() => setTestStatus(null), 3000);
-      }
-    } catch (error: any) {
-      setTestStatus({ type: "error", msg: error?.message || String(error) });
+      setStatus(
+        error
+          ? { type: "error", message: error }
+          : { type: "success", message: "Connection successful" }
+      );
+    } catch (error) {
+      setStatus({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   };
 
-  const handleSave = async () => {
-    await saveConnection(selectedConnection);
+  const handleApply = async () => {
+    setIsSaving(true);
+    try {
+      await saveConnection(selectedConnection);
+      setStatus({ type: "success", message: "Settings saved" });
+    } catch (error) {
+      setStatus({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  const handleConnect = async () => {
-    setIsConnecting(true);
+  const handleConfirm = async () => {
+    setIsSaving(true);
     try {
-      await handleSave();
+      await saveConnection(selectedConnection);
       const error = await connect(selectedConnection);
       if (error) {
-        setTestStatus({ type: "error", msg: error });
+        setStatus({ type: "error", message: error });
+      } else {
+        onConnected?.();
       }
+    } catch (error) {
+      setStatus({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
     } finally {
-      setIsConnecting(false);
+      setIsSaving(false);
     }
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden bg-[hsl(var(--wb-editor))]">
-      <div className="flex-1 overflow-y-auto p-3 custom-scrollbar">
-        <div className="w-full max-w-5xl mx-auto flex flex-col min-h-0">
-          {/* Header Section */}
-          <div className="mb-3 flex flex-col gap-1">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3 flex-1 mr-4">
-                {/* Icon Selector */}
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <div
-                      className={cn(
-                        "w-8 h-8 rounded-[4px] flex items-center justify-center cursor-pointer transition-colors border border-transparent hover:border-[hsl(var(--wb-border))]",
-                        !selectedConnection.icon &&
-                          !selectedConnection.color &&
-                          "bg-secondary/50"
-                      )}
-                      style={{
-                        backgroundColor: selectedConnection.color
-                          ? `${selectedConnection.color}20`
-                          : undefined,
-                        color: selectedConnection.color || undefined,
-                      }}
-                    >
-                      {renderIcon(selectedConnection.icon, 24)}
-                    </div>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-72 p-3" align="start">
-                    <div className="space-y-4">
-                      {/* Icon Grid */}
-                      <div className="space-y-2">
-                        <label className="text-xs font-semibold text-muted-foreground">
-                          Icon
-                        </label>
-                        <div className="grid grid-cols-6 gap-2">
-                          {ICONS.map((icon) => (
-                            <div
-                              key={icon}
-                              onClick={() => handleChange("icon", icon)}
-                              className={cn(
-                                "w-8 h-8 rounded-md flex items-center justify-center cursor-pointer hover:bg-secondary transition-colors",
-                                selectedConnection.icon === icon &&
-                                  "bg-secondary text-primary"
-                              )}
-                            >
-                              {renderIcon(icon, 16)}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
+    <div className="flex h-full min-h-0 bg-[hsl(var(--wb-editor))]">
+      <DataSourceList
+        dataSources={dataSources}
+        selectedConnectionId={selectedConnection.id}
+        driverProfiles={driverProfiles}
+        onSelect={selectConnection}
+        onCreate={createDataSource}
+      />
 
-                      {/* Text Icon Input */}
-                      <div className="space-y-2">
-                        <label className="text-xs font-semibold text-muted-foreground">
-                          Text Icon
-                        </label>
-                        <Input
-                          placeholder="e.g. DEV, PROD, 🚀"
-                          value={
-                            !selectedConnection.icon?.startsWith(
-                              "data:image"
-                            ) &&
-                            !ICONS.includes(selectedConnection.icon || "") &&
-                            !(LucideIcons as any)[selectedConnection.icon || ""]
-                              ? selectedConnection.icon || ""
-                              : ""
-                          }
-                          onChange={(e) => handleChange("icon", e.target.value)}
-                          maxLength={3}
-                          className="h-8 text-xs font-mono"
-                        />
-                      </div>
+      <section className="flex min-w-0 flex-1 flex-col">
+        <header className="flex h-11 shrink-0 items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-3">
+          <Database size={15} className={profile.iconClassName} />
+          <input
+            value={selectedConnection.name}
+            onChange={(event) => updateField("name", event.target.value)}
+            className="h-7 min-w-0 flex-1 rounded-[4px] border border-transparent bg-transparent px-2 text-[13px] font-semibold text-[hsl(var(--wb-text))] outline-none hover:border-[hsl(var(--wb-border-subtle))] focus:border-[hsl(var(--wb-accent))] focus:bg-[hsl(var(--wb-editor))]"
+            aria-label="Data source name"
+          />
+          <span className="shrink-0 text-[10px] uppercase wb-muted">
+            {capabilities.displayName}
+          </span>
+        </header>
 
-                      {/* Upload & Color */}
-                      <div className="pt-2 border-t border-border/50 space-y-4">
-                        <div className="space-y-2">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="w-full text-xs h-7"
-                            onClick={() => uploadIconRef.current?.click()}
-                          >
-                            <Upload size={12} className="mr-2" /> Upload Image
-                          </Button>
-                          <input
-                            type="file"
-                            accept="image/*"
-                            className="hidden"
-                            ref={uploadIconRef}
-                            onChange={handleIconUpload}
-                          />
-                        </div>
-
-                        <div className="space-y-2">
-                          <label className="text-xs font-semibold text-muted-foreground">
-                            Color
-                          </label>
-                          <div className="grid grid-cols-8 gap-2">
-                            {COLORS.map((color) => (
-                              <div
-                                key={color}
-                                onClick={() => handleChange("color", color)}
-                                className={cn(
-                                  "w-6 h-6 rounded-full cursor-pointer hover:scale-110 transition-transform border border-transparent",
-                                  selectedConnection.color === color &&
-                                    "ring-2 ring-offset-2 ring-offset-background ring-primary border-white"
-                                )}
-                                style={{ backgroundColor: color }}
-                              />
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </PopoverContent>
-                </Popover>
-
-                <Input
-                  className="text-lg font-semibold text-[hsl(var(--wb-text))] bg-transparent border-none p-0 h-8 focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:opacity-40 hover:bg-[hsl(var(--wb-hover))] transition-colors cursor-text px-2 rounded-[4px]"
-                  placeholder="New Connection"
-                  value={selectedConnection?.name || ""}
-                  onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                    handleChange("name", e.target.value)
-                  }
-                />
-              </div>
-              <Dialog
-                open={isImportDialogOpen}
-                onOpenChange={setIsImportDialogOpen}
-              >
-                <DialogTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="wb-text-button border border-[hsl(var(--wb-border-subtle))]"
-                  >
-                    <Globe size={14} /> Import URL
-                  </Button>
-                </DialogTrigger>
-                <DialogContent className="sm:max-w-md">
-                  <DialogHeader>
-                    <DialogTitle>Import Connection</DialogTitle>
-                  </DialogHeader>
-                  <div className="space-y-4 py-4">
-                    <p className="text-sm text-muted-foreground">
-                      Paste your connection URL (e.g.{" "}
-                      {connectionUrlScheme(selectedConnection.driver)}://...)
-                    </p>
-                    <Input
-                      placeholder={importExampleUrl}
-                      value={importUrl}
-                      onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                        setImportUrl(e.target.value)
-                      }
-                      className="font-mono text-sm"
-                    />
-                  </div>
-                  <DialogFooter>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      onClick={() => setIsImportDialogOpen(false)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button type="button" onClick={handleImport}>
-                      Import
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
-            </div>
-            <p className="text-xs wb-muted ml-10">
-              Configure your database connection details below.
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            {/* Section: Driver & Security & Tags */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
-              <section className="space-y-4">
-                <h3 className="wb-section-title flex items-center gap-2">
-                  <Database size={14} /> Database type
-                </h3>
-                <Select
-                  value={selectedConnection?.driver || ""}
-                  onValueChange={(value) =>
-                    handleDriverChange(value as DatabaseDriver)
-                  }
-                >
-                  <SelectTrigger className="w-full bg-background/50 border-input/60 focus:border-primary/50 h-10">
-                    <SelectValue placeholder="Select type" />
-                  </SelectTrigger>
-                  <SelectContent className="bg-background-elevated border-border text-foreground">
-                    {driverOptions.map(({ capabilities, profile }) => (
-                      <SelectItem
-                        key={capabilities.driver}
-                        value={capabilities.driver}
-                      >
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={cn("inline-flex", profile.iconClassName)}
-                          >
-                            {renderIcon(profile.defaultIcon, 14)}
-                          </span>
-                          <span>
-                            {capabilities.displayName || profile.menuLabel}
-                          </span>
-                        </div>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-
-                {/* Security nested here to save top-level space if needed, or keeping it distinct */}
-                <div className="pt-2">
-                  <h3 className="text-[11px] font-semibold text-muted-foreground/80 mb-2 ml-1">
-                    Security settings
-                  </h3>
-                  <div className="flex items-center justify-between wb-form-panel">
-                    <div className="text-xs font-medium">SSL Connection</div>
-                    <Switch
-                      checked={selectedConnection?.sslMode === "require"}
-                      onCheckedChange={(checked) =>
-                        handleChange("sslMode", checked ? "require" : "disable")
-                      }
-                    />
-                  </div>
-                </div>
-              </section>
-
-              <section className="space-y-4">
-                <h3 className="wb-section-title flex items-center gap-2">
-                  <Tag size={14} /> Tags
-                </h3>
-                <div className="space-y-3 wb-form-panel group">
-                  {/* Active Tags */}
-                  <div className="flex flex-wrap gap-2 min-h-[24px]">
-                    {selectedConnection.tags?.map((tag: string) => (
-                      <Badge
-                        key={tag}
-                        variant="secondary"
-                        className="bg-primary/10 text-primary border-primary/20 hover:bg-primary/20 pl-2 pr-1 py-0.5 gap-1 transition-all"
-                      >
-                        {tag}
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveTag(tag)}
-                          className="hover:bg-primary/20 rounded-[3px] p-0.5 transition-colors"
-                        >
-                          <X size={10} />
-                        </button>
-                      </Badge>
-                    ))}
-                    {(!selectedConnection.tags ||
-                      selectedConnection.tags.length === 0) && (
-                      <span className="text-xs text-muted-foreground/40 italic ml-1 select-none">
-                        No tags added
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Tag Input */}
-                  <div className="flex gap-2">
-                    <div className="relative flex-1">
-                      <Input
-                        className="bg-background/40 border-input/40 focus:border-primary/40 h-8 text-xs pl-7"
-                        placeholder="Add tag..."
-                        value={tagInput}
-                        onChange={(e) => setTagInput(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault();
-                            handleAddTag(tagInput);
-                          }
-                        }}
-                      />
-                      <Tag
-                        size={12}
-                        className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/40"
-                      />
-                    </div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-8 w-8 p-0 hover:bg-primary/10 hover:text-primary transition-colors border border-transparent hover:border-primary/20"
-                      onClick={() => handleAddTag(tagInput)}
-                    >
-                      <Plus size={14} />
-                    </Button>
-                  </div>
-
-                  {/* Suggestions */}
-                  <div className="flex flex-wrap gap-1.5 pt-1">
-                    {PREDEFINED_TAGS.filter(
-                      (t: string) => !selectedConnection.tags?.includes(t)
-                    )
-                      .slice(0, 4)
-                      .map((tag: string) => (
-                        <button
-                          type="button"
-                          key={tag}
-                          onClick={() => handleAddTag(tag)}
-                          className="text-[10px] px-2 py-0.5 rounded-[3px] border border-border/40 text-muted-foreground/60 hover:border-primary/30 hover:text-primary hover:bg-primary/5 transition-colors"
-                        >
-                          + {tag}
-                        </button>
-                      ))}
-                  </div>
-                </div>
-              </section>
-            </div>
-
-            <div className="h-px bg-[hsl(var(--wb-border-subtle))]" />
-
-            {/* Section: Connection Parameters */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {/* Left Column: Network & Database */}
-              {/* Left Column: Network & Database */}
-              <div className="space-y-6">
-                <section className="space-y-3">
-                  <h3 className="wb-section-title flex items-center gap-2 mb-2">
-                    <Globe size={12} /> Network and database
-                  </h3>
-
-                  <div className="wb-form-panel space-y-3">
-                    <div className="grid grid-cols-4 gap-3">
-                      <div className="col-span-3 space-y-1.5">
-                        <label className="text-xs font-medium text-muted-foreground ml-1">
-                          Host
-                        </label>
-                        <Input
-                          className="bg-background/50 border-input/60 focus:border-primary/50 font-mono h-9"
-                          placeholder="localhost"
-                          value={selectedConnection?.host || ""}
-                          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                            handleChange("host", e.target.value)
-                          }
-                        />
-                      </div>
-                      <div className="col-span-1 space-y-1.5">
-                        <label className="text-xs font-medium text-muted-foreground ml-1">
-                          Port
-                        </label>
-                        <Input
-                          className="bg-background/50 border-input/60 focus:border-primary/50 font-mono h-9"
-                          type="number"
-                          placeholder={String(
-                            defaultDatabasePort(selectedConnection.driver) || ""
-                          )}
-                          value={selectedConnection?.port || ""}
-                          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                            handleChange("port", parseInt(e.target.value))
-                          }
-                        />
-                      </div>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground ml-1">
-                        Database Name
-                      </label>
-                      <Input
-                        className="bg-background/50 border-input/60 focus:border-primary/50 h-9"
-                        placeholder={
-                          defaultDatabaseName(selectedConnection.driver) ||
-                          "database"
-                        }
-                        value={selectedConnection?.database || ""}
-                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                          handleChange("database", e.target.value)
-                        }
-                      />
-                    </div>
-                  </div>
-                </section>
-              </div>
-
-              {/* Right Column: Authentication */}
-              <section className="space-y-3">
-                <h3 className="wb-section-title flex items-center gap-2 mb-2">
-                  <Lock size={12} /> Authentication
-                </h3>
-                <div className="space-y-4 wb-form-panel">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground ml-1">
-                        Username
-                      </label>
-                      <Input
-                        className="bg-background/50 border-input/60 focus:border-primary/50 h-9"
-	                        placeholder="user"
-                        value={selectedConnection?.user || ""}
-                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                          handleChange("user", e.target.value)
-                        }
-                        autoComplete="off"
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground ml-1">
-                        Password
-                      </label>
-                      <div className="relative">
-                        <Input
-                          type={showPassword ? "text" : "password"}
-                          className="bg-background/50 border-input/60 focus:border-primary/50 pr-8 h-9"
-                          placeholder="••••••••"
-                          value={selectedConnection?.password || ""}
-                          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                            handleChange("password", e.target.value)
-                          }
-                          autoComplete="off"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowPassword(!showPassword)}
-                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-foreground transition-colors"
-                        >
-                          {showPassword ? (
-                            <EyeOff size={12} />
-                          ) : (
-                            <Eye size={12} />
-                          )}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </section>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Footer Actions */}
-      <div className="h-12 bg-[hsl(var(--wb-toolbar))] border-t border-[hsl(var(--wb-border-subtle))] flex items-center justify-center z-10 shrink-0">
-        <div className="w-full max-w-5xl flex items-center justify-between px-3">
-          <div className="flex items-center gap-4">
-            <Button
+        <nav className="flex h-9 shrink-0 items-end gap-1 border-b border-[hsl(var(--wb-border-subtle))] px-3">
+          {(
+            [
+              ["general", "General"],
+              ["ssl", "SSH/SSL"],
+              ["advanced", "Advanced"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
               type="button"
-              variant="ghost"
-              onClick={handleTest}
-              disabled={testStatus?.type === "loading"}
-              className="wb-text-button"
+              key={value}
+              className={cn(
+                "relative flex h-8 items-center px-3 text-[12px]",
+                section === value
+                  ? "text-[hsl(var(--wb-text))] after:absolute after:bottom-0 after:left-2 after:right-2 after:h-0.5 after:bg-[hsl(var(--wb-accent))]"
+                  : "text-[hsl(var(--wb-text-muted))] hover:text-[hsl(var(--wb-text))]"
+              )}
+              onClick={() => setSection(value)}
             >
-              {testStatus?.type === "loading" ? (
-                <Loader2 size={16} className="animate-spin mr-2" />
+              {label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
+          {section === "general" && (
+            <div className="mx-auto grid w-full max-w-[720px] grid-cols-[132px_minmax(0,1fr)] gap-y-2 px-6 py-5">
+              <label className={labelClass} htmlFor="connection-host">Host</label>
+              <div className="grid grid-cols-[minmax(0,1fr)_116px] gap-2">
+                <input
+                  id="connection-host"
+                  value={selectedConnection.host || ""}
+                  onChange={(event) =>
+                    updateField("host", event.target.value, true)
+                  }
+                  className={fieldClass}
+                  placeholder="localhost"
+                />
+                <div className="grid grid-cols-[30px_minmax(0,1fr)] items-center gap-2">
+                  <span className="text-right text-[11px] wb-muted">Port</span>
+                  <input
+                    type="number"
+                    value={selectedConnection.port || ""}
+                    onChange={(event) =>
+                      updateField(
+                        "port",
+                        event.target.value ? Number(event.target.value) : undefined,
+                        true
+                      )
+                    }
+                    className={fieldClass}
+                    placeholder={String(defaultDatabasePort(selectedConnection.driver) || "")}
+                    aria-label="Port"
+                  />
+                </div>
+              </div>
+
+              <label className={labelClass} htmlFor="connection-user">User</label>
+              <input
+                id="connection-user"
+                value={selectedConnection.user || ""}
+                onChange={(event) =>
+                  updateField("user", event.target.value, true)
+                }
+                className={fieldClass}
+                autoComplete="off"
+              />
+
+              <label className={labelClass} htmlFor="connection-password">Password</label>
+              <div className="relative">
+                <input
+                  id="connection-password"
+                  type={showPassword ? "text" : "password"}
+                  value={selectedConnection.password || ""}
+                  onChange={(event) =>
+                    updateField("password", event.target.value, true)
+                  }
+                  className={cn(fieldClass, "pr-8")}
+                  autoComplete="off"
+                />
+                <button
+                  type="button"
+                  className="wb-icon-button absolute right-0.5 top-0.5"
+                  onClick={() => setShowPassword((visible) => !visible)}
+                  title={showPassword ? "Hide Password" : "Show Password"}
+                >
+                  {showPassword ? <EyeOff size={12} /> : <Eye size={12} />}
+                </button>
+              </div>
+
+              <label className={labelClass} htmlFor="connection-database">
+                Database
+              </label>
+              <input
+                id="connection-database"
+                value={selectedConnection.database || ""}
+                onChange={(event) =>
+                  updateField("database", event.target.value, true)
+                }
+                className={fieldClass}
+                placeholder={defaultDatabaseName(selectedConnection.driver) || "database"}
+              />
+
+              <label className={labelClass} htmlFor="connection-url">URL</label>
+              <div className="relative">
+                <input
+                  id="connection-url"
+                  value={displayedUrl}
+                  onChange={(event) => updateConnectionUrl(event.target.value)}
+                  className={cn(fieldClass, "pr-8 font-mono text-[11px]")}
+                />
+                {selectedConnection.connectionUrl && (
+                  <button
+                    type="button"
+                    className="wb-icon-button absolute right-0.5 top-0.5"
+                    onClick={() => updateField("connectionUrl", "")}
+                    title="Rebuild URL from fields"
+                  >
+                    <RotateCcw size={12} />
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {section === "ssl" && (
+            <div className="mx-auto grid w-full max-w-[720px] grid-cols-[132px_minmax(0,1fr)] gap-y-2 px-6 py-5">
+              <span className={labelClass}>SSL mode</span>
+              <Select
+                value={selectedConnection.sslMode || "disable"}
+                onValueChange={(value) => updateField("sslMode", value, true)}
+              >
+                <SelectTrigger className={fieldClass}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                  <SelectItem value="disable">Disable</SelectItem>
+                  <SelectItem value="prefer">Prefer</SelectItem>
+                  <SelectItem value="require">Require</SelectItem>
+                  <SelectItem value="verify-ca">Verify CA</SelectItem>
+                  <SelectItem value="verify-full">Verify full</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
+          {section === "advanced" && (
+            <div className="mx-auto grid w-full max-w-[720px] grid-cols-[132px_minmax(0,1fr)] gap-y-3 px-6 py-5">
+              <span className={labelClass}>Driver</span>
+              <Select
+                value={selectedConnection.driver}
+                onValueChange={(value) => changeDriver(value as DatabaseDriver)}
+              >
+                <SelectTrigger className={fieldClass}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                  {driverProfiles.map((item) => (
+                    <SelectItem key={item.driver} value={item.driver}>
+                      {item.menuLabel}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              <span className={labelClass}>Color</span>
+              <div className="flex h-7 items-center gap-2">
+                {CONNECTION_COLORS.map((color) => (
+                  <button
+                    type="button"
+                    key={color}
+                    className={cn(
+                      "h-4 w-4 rounded-full border border-white/10 transition-transform hover:scale-110",
+                      selectedConnection.color === color &&
+                        "ring-2 ring-[hsl(var(--wb-accent))] ring-offset-2 ring-offset-[hsl(var(--wb-editor))]"
+                    )}
+                    style={{ backgroundColor: color }}
+                    onClick={() => updateField("color", color)}
+                    aria-label={`Connection color ${color}`}
+                  />
+                ))}
+              </div>
+
+              <label className={labelClass} htmlFor="connection-tags">Tags</label>
+              <input
+                id="connection-tags"
+                value={(selectedConnection.tags || []).join(", ")}
+                onChange={(event) =>
+                  updateField(
+                    "tags",
+                    event.target.value
+                      .split(",")
+                      .map((tag) => tag.trim())
+                      .filter(Boolean)
+                  )
+                }
+                className={fieldClass}
+                placeholder="development, local"
+              />
+            </div>
+          )}
+        </div>
+
+        <footer className="flex h-12 shrink-0 items-center justify-between border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <button
+              type="button"
+              className="wb-text-button h-7 border border-[hsl(var(--wb-border))] px-3 text-[12px] text-[hsl(var(--wb-text))]"
+              onClick={() => void handleTest()}
+              disabled={status?.type === "loading"}
+            >
+              {status?.type === "loading" ? (
+                <Loader2 size={13} className="animate-spin" />
               ) : (
-                <CheckCircle2 size={16} className="mr-2" />
+                <CheckCircle2 size={13} />
               )}
               Test Connection
-            </Button>
-            {testStatus && testStatus.type !== "loading" && (
+            </button>
+            {status && (
               <span
                 className={cn(
-                  "text-xs font-medium animate-in fade-in flex items-center gap-1.5",
-                  testStatus.type === "success"
-                    ? "text-green-500"
-                    : "text-destructive"
+                  "flex min-w-0 items-center gap-1.5 truncate text-[11px]",
+                  status.type === "success"
+                    ? "text-emerald-400"
+                    : status.type === "error"
+                      ? "text-red-400"
+                      : "wb-muted"
                 )}
               >
-                {testStatus.type === "success" ? (
-                  <CheckCircle2 size={14} />
-                ) : (
-                  <AlertCircle size={14} />
-                )}
-                {testStatus.msg}
+                {status.type === "success" && <Check size={12} />}
+                {status.type === "error" && <AlertCircle size={12} />}
+                <span className="truncate">{status.message}</span>
               </span>
             )}
           </div>
 
-          <div className="flex items-center gap-3">
-            <Button
+          <div className="flex shrink-0 items-center gap-2">
+            <button
               type="button"
-              variant="secondary"
-              onClick={handleSave}
-              className="wb-text-button border border-[hsl(var(--wb-border-subtle))]"
+              className="wb-text-button h-7 px-3 text-[12px]"
+              onClick={onCancel}
             >
-              Save Draft
-            </Button>
-            <Button
+              Cancel
+            </button>
+            <button
               type="button"
-              onClick={handleConnect}
-              disabled={isConnecting}
-              className="wb-primary-button min-w-[120px]"
+              className="wb-text-button h-7 border border-[hsl(var(--wb-border))] px-3 text-[12px] text-[hsl(var(--wb-text))]"
+              onClick={() => void handleApply()}
+              disabled={isSaving}
             >
-              {isConnecting ? (
-                <Loader2 size={16} className="animate-spin mr-2" />
-              ) : (
-                "Connect"
-              )}
-            </Button>
+              Apply
+            </button>
+            <button
+              type="button"
+              className="wb-primary-button h-7 min-w-[64px] justify-center text-[12px]"
+              onClick={() => void handleConfirm()}
+              disabled={isSaving || !selectedConnection.name.trim()}
+            >
+              {isSaving ? <Loader2 size={13} className="animate-spin" /> : "OK"}
+            </button>
           </div>
-        </div>
-      </div>
+        </footer>
+      </section>
     </div>
   );
 }

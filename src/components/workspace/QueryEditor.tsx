@@ -3,12 +3,13 @@ import { useHistoryStore } from "@/store/useHistoryStore";
 import { useSavedQueryStore } from "@/store/useSavedQueryStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
+import { useSettingsStore } from "@/store/useSettingsStore";
 import { EditorActionBar } from "./EditorActionBar";
 import { QUERY_EDITOR_OPTIONS } from "./queryEditorOptions";
 import { ThemeContext } from "@/theme/ThemeProvider";
 import Editor, { useMonaco } from "@monaco-editor/react";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useRef, useState, useContext } from "react";
+import { useEffect, useRef, useState, useContext, useMemo } from "react";
 // import { queryService, schemaService } from "@/services/tauri";
 import { useLspClient } from "@/hooks/useLspClient";
 import {
@@ -51,8 +52,11 @@ import {
   APP_EVENT_RUN_QUERY,
   APP_EVENT_RUN_CURRENT,
   APP_EVENT_FORMAT_SQL,
-} from "@/hooks/useShortcuts";
+} from "@/lib/actions";
 import { editorExecutionConfirmation } from "@/lib/sqlExecutionGate";
+import { StatusBarPortal } from "./StatusBarPortal";
+import { LockKeyhole } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
@@ -165,6 +169,7 @@ export function QueryEditor() {
     useSchemaStore();
   const history = useHistoryStore((s) => s.history);
   const { savedQueries, saveQuery, deleteQuery } = useSavedQueryStore();
+  const editorSettings = useSettingsStore((state) => state.settings.editor);
 
   // const [saveName, setSaveName] = useState("");
   // const [isSaveOpen, setIsSaveOpen] = useState(false);
@@ -174,6 +179,7 @@ export function QueryEditor() {
   const [transactionStates, setTransactionStates] = useState<
     Record<string, TransactionState>
   >({});
+  const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
   // const dropdownRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<any>(null);
   const activeTabIdRef = useRef<string | null>(activeTabId);
@@ -610,6 +616,7 @@ export function QueryEditor() {
   // useEffect(() => { ... }, []);
 
   const confirmEditorExecution = (sql: string) => {
+    if (!editorSettings.confirmDestructiveSql) return true;
     const confirmation = editorExecutionConfirmation(sql, driver);
     if (!confirmation.required) return true;
     return window.confirm(confirmation.message || "Execute this query?");
@@ -779,6 +786,16 @@ export function QueryEditor() {
   };
 
   const { mode } = (useContext(ThemeContext) as any) || { mode: "dark" };
+  const editorOptions = useMemo(
+    () => ({
+      ...QUERY_EDITOR_OPTIONS,
+      fontSize: editorSettings.fontSize,
+      tabSize: editorSettings.tabSize,
+      wordWrap: editorSettings.wordWrap,
+      minimap: { enabled: editorSettings.minimap },
+    }),
+    [editorSettings.fontSize, editorSettings.minimap, editorSettings.tabSize, editorSettings.wordWrap]
+  );
 
   // Update Monaco theme when app theme changes
   useEffect(() => {
@@ -789,7 +806,7 @@ export function QueryEditor() {
   if (!activeTab) return null;
 
   return (
-    <div className="relative h-full w-full bg-[hsl(var(--wb-editor))] flex flex-col">
+    <div className="wb-query-editor relative flex h-full w-full flex-col bg-[hsl(var(--wb-editor))]">
       <EditorActionBar
         currentSchema={activeTab.targetSchema ?? currentSchema}
         onSchemaChange={handleSchemaChange}
@@ -801,6 +818,7 @@ export function QueryEditor() {
         onRollbackTransaction={handleRollbackTransaction}
         onFormat={handleFormat}
         onRun={handleRun}
+        onRunCurrent={handleRunCurrent}
         onCancelRun={handleCancelRun}
         isExecuting={activeTab.isExecuting}
         isConnected={!!effectiveConnectionId}
@@ -832,6 +850,11 @@ export function QueryEditor() {
                 const model = editor.getModel();
                 if (!tabId || !model || !event.selection) return;
 
+                setCursorPosition({
+                  line: event.selection.positionLineNumber,
+                  column: event.selection.positionColumn,
+                });
+
                 const selectedText = model.getValueInRange(event.selection);
                 setEditorSelection(
                   tabId,
@@ -847,6 +870,13 @@ export function QueryEditor() {
                 );
               }
             );
+            const initialPosition = editor.getPosition();
+            if (initialPosition) {
+              setCursorPosition({
+                line: initialPosition.lineNumber,
+                column: initialPosition.column,
+              });
+            }
             monaco.editor.setTheme(mode === "light" ? "vs" : "oxide-dark");
 
           }}
@@ -863,13 +893,49 @@ export function QueryEditor() {
                 "editor.selectionBackground": "#2c4573",
                 "editor.inactiveSelectionBackground": "#263247",
                 "editor.lineHighlightBackground": "#24272d",
+                "editorIndentGuide.background1": "#2a2d33",
+                "editorIndentGuide.activeBackground1": "#414754",
+                "editorRuler.foreground": "#2b2e34",
+                "editorGutter.background": "#1c1d20",
               },
             });
           }}
           // Theme is updated via useEffect to ensure it responds to context
-          options={QUERY_EDITOR_OPTIONS}
+          options={editorOptions}
         />
       </div>
+      <StatusBarPortal>
+        <div className="flex h-full items-center text-[10px] text-[hsl(var(--wb-text-muted))]">
+          <span className="whitespace-nowrap px-2">
+            {cursorPosition.line}:{cursorPosition.column}
+          </span>
+          <span className="wb-editor-status-secondary whitespace-nowrap px-2">LF</span>
+          <span className="wb-editor-status-secondary whitespace-nowrap px-2">UTF-8</span>
+          <span className="wb-editor-status-secondary whitespace-nowrap px-2">
+            {editorSettings.tabSize} spaces
+          </span>
+          <span
+            className="flex h-full w-7 items-center justify-center"
+            title="SQL execution is permission-gated"
+          >
+            <LockKeyhole size={11} />
+          </span>
+          {canUseLsp && (
+            <span
+              className="wb-editor-status-lsp flex items-center gap-1 whitespace-nowrap px-2"
+              title="LSP status"
+            >
+              <span
+                className={cn(
+                  "h-1.5 w-1.5 rounded-full",
+                  lspReady ? "bg-emerald-400" : "bg-amber-400"
+                )}
+              />
+              SQL
+            </span>
+          )}
+        </div>
+      </StatusBarPortal>
     </div>
   );
 }

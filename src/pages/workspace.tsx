@@ -7,122 +7,135 @@ import { AssistantSidebar } from "@/components/workspace/AssistantSidebar";
 import { TabBar } from "@/components/workspace/TabBar";
 import { TableDataView } from "@/components/workspace/TableDataView";
 import { CreateTableTab } from "@/components/workspace/CreateTableTab";
-import { TaskStatusCenter } from "@/components/workspace/TaskStatusCenter";
+import { SideToolWindow } from "@/components/workspace/SideToolWindow";
+import {
+  WorkbenchGlobalTools,
+  WorkbenchStatusBar,
+  WorkbenchTitleTools,
+} from "@/components/workspace/WorkbenchChrome";
 import { useTabStore } from "@/store/useTabStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
+import { useSettingsStore } from "@/store/useSettingsStore";
+import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
 import { CommandPalette } from "@/components/workspace/CommandPalette";
 import { cn } from "@/lib/utils";
+import type { WorkbenchSide } from "@/lib/appSettings";
+import {
+  toolWindowAtSide,
+  type SideToolWindowId,
+} from "@/lib/workbenchLayout";
 import {
   ChevronDown,
   ChevronRight,
-  PanelLeft,
-  PanelLeftClose,
-  PanelRight,
-  PanelRightClose,
+  X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import {
+  useEffect,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 
 export function WorkspacePage() {
-  const { tabs, activeTabId } = useTabStore();
+  const { tabs, activeTabId, setActiveResultIndex, closeResultAt } = useTabStore();
   const { connections, activeConnectionId } = useConnectionStore();
+  const appSettings = useSettingsStore((state) => state.settings);
+  const workbenchSettings = appSettings.workbench;
+  const layout = workbenchSettings.layout;
+  const toolWindows = workbenchSettings.toolWindows;
+  const {
+    setToolWindowVisible,
+    setLeftWidth,
+    setRightWidth,
+    setBottomHeight,
+    setActiveToolWindow,
+  } = useWorkbenchLayoutStore();
   const {
     currentSchema,
     isLoading: isSchemaLoading,
     isCollectionsLoading,
     isFunctionsLoading,
   } = useSchemaStore();
-  const activeTab = tabs.find((t) => t.id === activeTabId);
-  const activeConnection = connections.find((c) => c.id === activeConnectionId);
-  const isIntrospecting =
-    isSchemaLoading || isCollectionsLoading || isFunctionsLoading;
-
-  const currentResult = Array.isArray(activeTab?.results)
-    ? activeTab?.results[0]
-    : activeTab?.results;
-
-  // Layout State
-  const [isLeftDrawerOpen, setIsLeftDrawerOpen] = useState(true);
-  const [isRightDrawerOpen, setIsRightDrawerOpen] = useState(true);
-  const [sidebarWidth, setSidebarWidth] = useState(400); // Fixed pixel width
-  const [rightSidebarWidth, setRightSidebarWidth] = useState(360);
-  const [resultPanelHeight, setResultPanelHeight] = useState(320);
-  const [isResultPanelHidden, setIsResultPanelHidden] = useState(false);
+  const activeTab = tabs.find((tab) => tab.id === activeTabId);
+  const activeConnection = connections.find(
+    (connection) => connection.id === activeConnectionId
+  );
+  const queryResults = activeTab?.results ?? [];
+  const activeResultIndex = Math.min(
+    activeTab?.activeResultIndex ?? 0,
+    Math.max(0, queryResults.length - 1)
+  );
+  const currentResult = queryResults[activeResultIndex];
   const isQueryTab =
     activeTab?.type !== "table" && activeTab?.type !== "create_table";
   const hasQueryResultSurface =
     Boolean(isQueryTab && activeTab) &&
     Boolean(currentResult || activeTab?.isExecuting || activeTab?.error);
-  const showQueryResultPanel = hasQueryResultSurface && !isResultPanelHidden;
+  const isIntrospecting =
+    isSchemaLoading || isCollectionsLoading || isFunctionsLoading;
+  const isDatabaseExplorerOpen =
+    toolWindows.databaseExplorer.enabled && layout.visibility.databaseExplorer;
+  const isAssistantOpen =
+    toolWindows.assistant.enabled && layout.visibility.assistant;
+  const showQueryResultPanel =
+    toolWindows.results.enabled &&
+    hasQueryResultSurface &&
+    layout.visibility.results;
+  const showCollapsedResults =
+    toolWindows.results.enabled &&
+    hasQueryResultSurface &&
+    !layout.visibility.results;
+  const leftToolWindow = toolWindowAtSide(toolWindows, "left");
+  const rightToolWindow = toolWindowAtSide(toolWindows, "right");
+  const activePanelClass = "wb-panel-active";
 
   useEffect(() => {
-    if (hasQueryResultSurface) {
-      setIsResultPanelHidden(false);
+    if (hasQueryResultSurface && toolWindows.results.enabled) {
+      setToolWindowVisible("results", true);
     }
-  }, [activeTab?.id, activeTab?.isExecuting, currentResult, hasQueryResultSurface]);
+  }, [hasQueryResultSurface, setToolWindowVisible, toolWindows.results.enabled]);
 
-  const handleDragStart = (e: React.MouseEvent) => {
-    const startX = e.clientX;
-    const startWidth = sidebarWidth;
+  const handleSideDragStart = (
+    event: ReactMouseEvent,
+    side: WorkbenchSide,
+    id: SideToolWindowId
+  ) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = side === "left" ? layout.leftWidth : layout.rightWidth;
 
     const handleDrag = (moveEvent: MouseEvent) => {
-      const deltaX = moveEvent.clientX - startX;
-      const newWidth = Math.max(0, startWidth + deltaX);
-
-      if (newWidth < 160) {
-        setIsLeftDrawerOpen(false);
-        setSidebarWidth(400);
+      const nextWidth =
+        side === "left"
+          ? startWidth + moveEvent.clientX - startX
+          : startWidth + startX - moveEvent.clientX;
+      if (nextWidth < 160) {
+        setToolWindowVisible(id, false);
+      } else if (side === "left") {
+        setLeftWidth(nextWidth);
       } else {
-        setSidebarWidth(Math.min(newWidth, 680));
+        setRightWidth(nextWidth);
       }
     };
 
     const handleDragEnd = () => {
       document.removeEventListener("mousemove", handleDrag);
       document.removeEventListener("mouseup", handleDragEnd);
+      document.body.style.cursor = "default";
     };
 
     document.addEventListener("mousemove", handleDrag);
     document.addEventListener("mouseup", handleDragEnd);
+    document.body.style.cursor = "col-resize";
   };
 
-  const handleRightDragStart = (e: React.MouseEvent) => {
-    const startX = e.clientX;
-    const startWidth = rightSidebarWidth;
+  const handleVerticalDragStart = (event: ReactMouseEvent) => {
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = layout.bottomHeight;
 
     const handleDrag = (moveEvent: MouseEvent) => {
-      const deltaX = startX - moveEvent.clientX;
-      const newWidth = Math.max(0, startWidth + deltaX);
-
-      if (newWidth < 180) {
-        setIsRightDrawerOpen(false);
-        setRightSidebarWidth(360);
-      } else {
-        setRightSidebarWidth(Math.min(newWidth, 560));
-      }
-    };
-
-    const handleDragEnd = () => {
-      document.removeEventListener("mousemove", handleDrag);
-      document.removeEventListener("mouseup", handleDragEnd);
-    };
-
-    document.addEventListener("mousemove", handleDrag);
-    document.addEventListener("mouseup", handleDragEnd);
-  };
-
-  const handleVerticalDragStart = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const startHeight = resultPanelHeight;
-
-    const handleDrag = (moveEvent: MouseEvent) => {
-      const deltaY = startY - moveEvent.clientY;
-      const newHeight = Math.max(
-        140,
-        Math.min(startHeight + deltaY, window.innerHeight - 220)
-      );
-      setResultPanelHeight(newHeight);
+      setBottomHeight(startHeight + startY - moveEvent.clientY);
     };
 
     const handleDragEnd = () => {
@@ -136,58 +149,90 @@ export function WorkspacePage() {
     document.body.style.cursor = "row-resize";
   };
 
+  const renderSideToolWindow = (
+    id: SideToolWindowId,
+    side: WorkbenchSide
+  ) => {
+    const width = side === "left" ? layout.leftWidth : layout.rightWidth;
+    const isOpen =
+      id === "databaseExplorer"
+        ? isDatabaseExplorerOpen
+        : isAssistantOpen;
+    const isActive = layout.activeToolWindow === id;
+    const handleDragStart = (event: ReactMouseEvent) =>
+      handleSideDragStart(event, side, id);
+
+    if (id === "databaseExplorer") {
+      return (
+        <LeftPanel
+          key={id}
+          side={side}
+          isDrawerOpen={isOpen}
+          sidebarWidth={width}
+          onDragStart={handleDragStart}
+          isActive={isActive}
+          onFocusPanel={() => setActiveToolWindow(id)}
+        />
+      );
+    }
+
+    return (
+      <SideToolWindow
+        key={id}
+        side={side}
+        isOpen={isOpen}
+        width={width}
+        isActive={isActive}
+        onFocus={() => setActiveToolWindow(id)}
+        onDragStart={handleDragStart}
+      >
+        <AssistantSidebar />
+      </SideToolWindow>
+    );
+  };
+
   return (
-    <div className="workbench-shell flex flex-col">
+    <div
+      className="workbench-shell flex flex-col"
+      style={
+        {
+          "--wb-ui-font-size": `${appSettings.appearance.uiFontSize}px`,
+        } as CSSProperties
+      }
+    >
       <AppBar
+        center={
+          <WorkbenchTitleTools
+            databaseExplorerOpen={isDatabaseExplorerOpen}
+            databaseExplorerSide={toolWindows.databaseExplorer.side}
+            assistantOpen={isAssistantOpen}
+            assistantSide={toolWindows.assistant.side}
+            onToggleDatabaseExplorer={() =>
+              setToolWindowVisible(
+                "databaseExplorer",
+                !isDatabaseExplorerOpen
+              )
+            }
+            onToggleAssistant={() =>
+              setToolWindowVisible("assistant", !isAssistantOpen)
+            }
+          />
+        }
         right={
-          <div className="flex items-center gap-0.5">
-            <button
-              type="button"
-              className="wb-icon-button"
-              onClick={() => setIsLeftDrawerOpen(!isLeftDrawerOpen)}
-              title="Toggle Left Panel"
-            >
-              {isLeftDrawerOpen ? (
-                <PanelLeftClose size={14} />
-              ) : (
-                <PanelLeft size={14} />
-              )}
-            </button>
-            <button
-              type="button"
-              className="wb-icon-button"
-              onClick={() => setIsRightDrawerOpen(!isRightDrawerOpen)}
-              title="Toggle AI Assistant"
-            >
-              {isRightDrawerOpen ? (
-                <PanelRightClose size={14} />
-              ) : (
-                <PanelRight size={14} />
-              )}
-            </button>
-          </div>
+          <WorkbenchGlobalTools />
         }
       />
 
-      <div className="flex flex-1 gap-1 overflow-hidden bg-[hsl(var(--wb-frame))] p-1">
-        {/* Unified Left Panel */}
-        <LeftPanel
-          isDrawerOpen={isLeftDrawerOpen}
-          sidebarWidth={sidebarWidth}
-          onDragStart={handleDragStart}
-        />
+      <main className="wb-workspace-track">
+        {renderSideToolWindow(leftToolWindow, "left")}
 
-        {/* Main Content Area + Right Panel with Unified Bottom StatusBar */}
-        <div className="relative z-10 flex min-w-0 flex-1 flex-col overflow-hidden rounded-[6px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))]">
-          {/* Top: Content Areas */}
-          <div className="flex flex-1 min-h-0">
-            {/* Main Editor Area */}
-            <div className="flex-1 min-w-0 flex flex-col">
+        <div className="wb-work-surface relative z-10 flex min-w-0 flex-1 flex-col overflow-hidden rounded-[6px]">
+          <div className="flex min-h-0 flex-1">
+            <div className="flex min-w-0 flex-1 flex-col">
               {tabs.length === 0 ? (
                 <QueryShortcuts />
               ) : (
-                <div className="flex flex-col h-full min-w-0 gap-1 bg-[hsl(var(--wb-editor))] z-10">
-                  {/* Main functionality area */}
+                <div className="z-10 flex h-full min-w-0 flex-col gap-1 bg-[hsl(var(--wb-editor))]">
                   <div className="z-20">
                     <TabBar />
                   </div>
@@ -201,38 +246,147 @@ export function WorkspacePage() {
                       schemaName={activeTab.schemaName || ""}
                     />
                   ) : (
-                    <div className="flex flex-col h-full min-h-0 gap-1 relative">
-                      <div className="min-h-[160px] flex-1 flex flex-col overflow-hidden">
+                    <div className="relative flex h-full min-h-0 flex-col gap-1">
+                      <div
+                        className={cn(
+                          "flex min-h-[160px] flex-1 flex-col overflow-hidden",
+                          layout.activeToolWindow === "editor" && activePanelClass
+                        )}
+                        onFocus={() => setActiveToolWindow("editor")}
+                      >
                         <QueryEditor />
                       </div>
 
                       {showQueryResultPanel && (
                         <>
                           <div
-                            className="wb-resizer-y z-50 relative group"
+                            className="wb-resizer-y relative z-50"
                             onMouseDown={handleVerticalDragStart}
                           />
-
                           <div
-                            className="min-h-[140px] shrink-0 overflow-hidden rounded-b-[6px] border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-grid))]"
-                            style={{ height: `${resultPanelHeight}px` }}
+                            className={cn(
+                              "min-h-[140px] shrink-0 overflow-hidden rounded-b-[6px] border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-grid))]",
+                              layout.activeToolWindow === "results" &&
+                                activePanelClass
+                            )}
+                            style={{ height: `${layout.bottomHeight}px` }}
+                            onFocus={() => setActiveToolWindow("results")}
                           >
                             <div className="flex h-8 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-2 text-[11px] text-[hsl(var(--wb-text-muted))]">
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium text-[hsl(var(--wb-text))]">
+                              <div className="flex min-w-0 items-center gap-1.5">
+                                <span className="mr-1 font-medium text-[hsl(var(--wb-text))]">
                                   Results
                                 </span>
+                                {queryResults.length > 1 ? (
+                                  <div className="flex min-w-0 items-center gap-0.5">
+                                    {queryResults.map((result, index) => (
+                                      <button
+                                        key={`${activeTab?.id}:result:${index}`}
+                                        type="button"
+                                        className={cn(
+                                          "group/result flex h-5 max-w-[150px] items-center gap-1 rounded-[3px] pl-2 pr-1 text-[10px] hover:bg-[hsl(var(--wb-hover))]",
+                                          index === activeResultIndex
+                                            ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+                                            : "text-[hsl(var(--wb-text-muted))]"
+                                        )}
+                                        onClick={() =>
+                                          activeTab &&
+                                          setActiveResultIndex(activeTab.id, index)
+                                        }
+                                        title={`${result.rows.length.toLocaleString()} rows`}
+                                      >
+                                        <span className="truncate">
+                                          Result {index + 1}
+                                        </span>
+                                        <span
+                                          role="button"
+                                          tabIndex={0}
+                                          className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[2px] opacity-60 hover:bg-[hsl(var(--wb-hover))] hover:opacity-100"
+                                          title="Close result"
+                                          onClick={(event) => {
+                                            event.stopPropagation();
+                                            if (activeTab) {
+                                              closeResultAt(activeTab.id, index);
+                                            }
+                                          }}
+                                          onKeyDown={(event) => {
+                                            if (
+                                              event.key === "Enter" ||
+                                              event.key === " "
+                                            ) {
+                                              event.preventDefault();
+                                              event.stopPropagation();
+                                              if (activeTab) {
+                                                closeResultAt(activeTab.id, index);
+                                              }
+                                            }
+                                          }}
+                                        >
+                                          <X size={10} />
+                                        </span>
+                                      </button>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="group/result flex h-5 items-center gap-1 rounded-[3px] bg-[hsl(var(--wb-active-strong))] pl-2 pr-1 text-[10px] text-[hsl(var(--wb-text))]"
+                                    onClick={() =>
+                                      activeTab &&
+                                      setActiveResultIndex(activeTab.id, 0)
+                                    }
+                                  >
+                                    <span>Result</span>
+                                    {currentResult && (
+                                      <span
+                                        role="button"
+                                        tabIndex={0}
+                                        className="flex h-3.5 w-3.5 items-center justify-center rounded-[2px] opacity-60 hover:bg-[hsl(var(--wb-hover))] hover:opacity-100"
+                                        title="Close result"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          if (activeTab) {
+                                            closeResultAt(activeTab.id, 0);
+                                          }
+                                        }}
+                                        onKeyDown={(event) => {
+                                          if (
+                                            event.key === "Enter" ||
+                                            event.key === " "
+                                          ) {
+                                            event.preventDefault();
+                                            event.stopPropagation();
+                                            if (activeTab) {
+                                              closeResultAt(activeTab.id, 0);
+                                            }
+                                          }
+                                        }}
+                                      >
+                                        <X size={10} />
+                                      </span>
+                                    )}
+                                  </button>
+                                )}
                                 {currentResult && (
-                                  <span>
+                                  <span className="whitespace-nowrap text-[10px]">
                                     {currentResult.rows.length.toLocaleString()} rows
                                   </span>
                                 )}
-                                {activeTab?.isExecuting && <span>Running...</span>}
+                                {activeTab?.isExecuting && (
+                                  <span className="whitespace-nowrap">Running...</span>
+                                )}
+                                {activeTab?.error && (
+                                  <span className="truncate text-[hsl(var(--destructive))]">
+                                    {activeTab.error}
+                                  </span>
+                                )}
                               </div>
                               <button
                                 type="button"
                                 className="wb-icon-button h-6 w-6"
-                                onClick={() => setIsResultPanelHidden(true)}
+                                onClick={() =>
+                                  setToolWindowVisible("results", false)
+                                }
                                 title="Hide Results"
                               >
                                 <ChevronDown size={14} />
@@ -244,11 +398,12 @@ export function WorkspacePage() {
                           </div>
                         </>
                       )}
-                      {hasQueryResultSurface && isResultPanelHidden && (
+
+                      {showCollapsedResults && (
                         <button
                           type="button"
                           className="flex h-6 shrink-0 items-center gap-2 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-3 text-left text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))]"
-                          onClick={() => setIsResultPanelHidden(false)}
+                          onClick={() => setToolWindowVisible("results", true)}
                           title="Show Results"
                         >
                           <ChevronRight size={12} />
@@ -270,63 +425,19 @@ export function WorkspacePage() {
           </div>
         </div>
 
-        <div
-          className={cn(
-            "relative z-10 flex h-full shrink-0 flex-col overflow-hidden transition-[width] duration-150 ease-out",
-            isRightDrawerOpen
-              ? "wb-panel rounded-[6px] border border-[hsl(var(--wb-border-subtle))]"
-              : "border-0"
-          )}
-          style={{ width: `${isRightDrawerOpen ? rightSidebarWidth : 0}px` }}
-        >
-          {isRightDrawerOpen && (
-            <>
-              <div
-                className="absolute left-0 top-0 bottom-0 wb-resizer-x z-50"
-                onMouseDown={handleRightDragStart}
-              />
-              <AssistantSidebar />
-            </>
-          )}
-        </div>
-      </div>
+        {renderSideToolWindow(rightToolWindow, "right")}
+      </main>
 
-      {/* Bottom: DataGrip-style path/status line. Component status can still use the right slot. */}
-      <div className="wb-statusbar z-30 flex w-full items-center transition-colors duration-200">
-        <div className="flex min-w-0 items-center gap-1 px-2">
-          <span className="shrink-0">Database</span>
-          {activeConnection && (
-            <>
-              <ChevronRight size={12} className="shrink-0 wb-muted" />
-              <span className="truncate">{activeConnection.name}</span>
-            </>
-          )}
-          {currentSchema && (
-            <>
-              <ChevronRight size={12} className="shrink-0 wb-muted" />
-              <span className="truncate">{currentSchema}</span>
-            </>
-          )}
-          {activeTab && (
-            <>
-              <ChevronRight size={12} className="shrink-0 wb-muted" />
-              <span className="truncate">{activeTab.title}</span>
-            </>
-          )}
-        </div>
-        <div className="ml-auto flex h-full items-center">
-          {isIntrospecting && (
-            <div className="hidden h-full items-center gap-2 border-l border-[hsl(var(--wb-border-subtle))] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] sm:flex">
-              <span className="whitespace-nowrap">Introspecting metadata</span>
-              <span className="wb-progress-track">
-                <span className="wb-progress-bar" />
-              </span>
-            </div>
-          )}
-          <TaskStatusCenter />
-          <div id="status-bar-slot" className="h-full flex items-center" />
-        </div>
-      </div>
+      <WorkbenchStatusBar
+        activeConnectionName={activeConnection?.name}
+        currentSchema={currentSchema}
+        activeTabTitle={activeTab?.title}
+        isIntrospecting={isIntrospecting}
+        assistantOpen={isAssistantOpen}
+        onToggleAssistant={() =>
+          setToolWindowVisible("assistant", !isAssistantOpen)
+        }
+      />
 
       <CommandPalette />
     </div>

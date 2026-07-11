@@ -17,7 +17,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { schemaService } from "@/services/tauri";
-import type { ColumnInfo, TableInfo } from "@/services/tauri/types";
+import { loadTableMetadata } from "@/services/tableMetadataCache";
+import type {
+  ColumnInfo,
+  DatabaseDriver,
+  TableInfo,
+} from "@/services/tauri/types";
 
 type ConstraintMode = "foreignKey" | "unique" | "primaryKey" | "check";
 
@@ -25,6 +30,7 @@ interface CreateConstraintDialogProps {
   isOpen: boolean;
   onClose: () => void;
   connectionId: string;
+  driver: DatabaseDriver;
   schema: string;
   tableName: string;
   columns: ColumnInfo[];
@@ -90,6 +96,7 @@ export function CreateConstraintDialog({
   isOpen,
   onClose,
   connectionId,
+  driver,
   schema,
   tableName,
   columns,
@@ -171,17 +178,23 @@ export function CreateConstraintDialog({
   useEffect(() => {
     if (!isOpen || !connectionId || !schema || !referencedTable) return;
 
-    schemaService
-      .getColumns(connectionId, schema, referencedTable)
-      .then((loadedColumns) => {
-        setReferencedColumns(loadedColumns);
+    loadTableMetadata({
+      connectionId,
+      driver,
+      schema,
+      table: referencedTable,
+      includeIndexes: false,
+      includeConstraints: false,
+    })
+      .then((metadata) => {
+        setReferencedColumns(metadata.columns);
       })
       .catch((err) => {
         setError(err?.message || String(err));
         setReferencedColumns([]);
         setReferencedColumnMap({});
       });
-  }, [isOpen, connectionId, schema, referencedTable]);
+  }, [isOpen, connectionId, driver, schema, referencedTable]);
 
   useEffect(() => {
     if (!isOpen || mode !== "foreignKey") return;

@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { Bot, Circle, Database, ShieldCheck } from "lucide-react";
+import { Bot, Circle, Database, ShieldCheck, SquarePen } from "lucide-react";
 import type { ReactNode } from "react";
 
 interface AssistantHeaderProps {
@@ -8,6 +8,7 @@ interface AssistantHeaderProps {
   plannerDetail: string;
   isConfigured: boolean;
   isRunning: boolean;
+  onNewChat: () => void;
 }
 
 export function AssistantHeader({
@@ -16,6 +17,7 @@ export function AssistantHeader({
   plannerDetail,
   isConfigured,
   isRunning,
+  onNewChat,
 }: AssistantHeaderProps) {
   return (
     <div className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))]">
@@ -26,19 +28,31 @@ export function AssistantHeader({
             AI Assistant
           </span>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5 text-[10px] text-[hsl(var(--wb-text-muted))]">
-          <Circle
-            size={7}
-            className={cn(
-              "fill-current",
-              isRunning
-                ? "text-amber-400"
-                : isConfigured
-                  ? "text-emerald-400"
-                  : "text-[hsl(var(--wb-text-muted))]"
-            )}
-          />
-          <span>{isRunning ? "Running" : isConfigured ? "Ready" : "Fallback"}</span>
+        <div className="flex shrink-0 items-center gap-1 text-[10px] text-[hsl(var(--wb-text-muted))]">
+          <div className="mr-1 flex items-center gap-1.5">
+            <Circle
+              size={7}
+              className={cn(
+                "fill-current",
+                isRunning
+                  ? "text-amber-400"
+                  : isConfigured
+                    ? "text-emerald-400"
+                    : "text-[hsl(var(--wb-text-muted))]"
+              )}
+            />
+            <span>{isRunning ? "Running" : isConfigured ? "Ready" : "Fallback"}</span>
+          </div>
+          <button
+            type="button"
+            className="wb-icon-button h-6 w-6"
+            onClick={onNewChat}
+            disabled={isRunning}
+            title="New chat"
+            aria-label="Start a new assistant chat"
+          >
+            <SquarePen size={12} />
+          </button>
         </div>
       </div>
       <div className="space-y-1 border-t border-[hsl(var(--wb-border-subtle))] px-2 py-1.5">

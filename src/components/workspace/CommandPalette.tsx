@@ -1,160 +1,159 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Command } from "cmdk";
 import { useTabStore } from "@/store/useTabStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import {
-  Search,
-  Database,
-  Terminal,
-  FilePlus,
-  XCircle,
-  Clock,
-} from "lucide-react";
+  APP_EVENT_OPEN_COMMAND_PALETTE,
+  workbenchActions,
+} from "@/lib/actions";
+import { formatKeybinding } from "@/lib/keybindings";
+import { useSettingsStore } from "@/store/useSettingsStore";
+import { Database, Search, Terminal } from "lucide-react";
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
-  const { tabs, setActiveTab, createTab, closeTab } = useTabStore();
+  const { tabs, setActiveTab } = useTabStore();
   const { connections, selectConnection } = useConnectionStore();
+  const keymap = useSettingsStore((state) => state.settings.keymap);
+  const actions = useMemo(() => workbenchActions(), []);
 
   useEffect(() => {
-    const down = (e: KeyboardEvent) => {
-      if (e.key === "p" && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        setOpen((open) => !open);
-      }
+    const openPalette = () => setOpen(true);
+    window.addEventListener(APP_EVENT_OPEN_COMMAND_PALETTE, openPalette);
+    window.addEventListener("oxide:command-palette-open", openPalette);
+    return () => {
+      window.removeEventListener(APP_EVENT_OPEN_COMMAND_PALETTE, openPalette);
+      window.removeEventListener("oxide:command-palette-open", openPalette);
     };
-
-    document.addEventListener("keydown", down);
-    return () => document.removeEventListener("keydown", down);
   }, []);
 
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-100 flex items-start justify-center pt-[15vh] p-4 bg-background/40 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="fixed inset-0" onClick={() => setOpen(false)} />
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/25 px-4 pt-[14vh]">
+      <button
+        type="button"
+        className="fixed inset-0 cursor-default"
+        aria-label="Close command palette"
+        onClick={() => setOpen(false)}
+      />
       <Command
-        className="relative w-full max-w-2xl bg-popover border border-border rounded-xl shadow-2xl overflow-hidden animate-in slide-in-from-top-4 duration-300"
-        onKeyDown={(e) => {
-          if (e.key === "Escape") setOpen(false);
+        className="relative w-full max-w-[680px] overflow-hidden rounded-[7px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[12px] text-[hsl(var(--wb-text))] shadow-[0_22px_70px_rgba(0,0,0,0.48)]"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setOpen(false);
         }}
       >
-        <div className="flex items-center px-4 border-b border-border/50">
-          <Search className="mr-3 h-4 w-4 text-muted-foreground shrink-0" />
+        <div className="flex h-10 items-center border-b border-[hsl(var(--wb-border-subtle))] px-3">
+          <Search className="mr-2 h-4 w-4 shrink-0 text-[hsl(var(--wb-text-muted))]" />
           <Command.Input
-            placeholder="Search tabs, connections, or commands..."
-            className="flex h-12 w-full bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            placeholder="Search actions, tabs, or connections"
+            className="h-full min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-[hsl(var(--wb-text-muted))]"
           />
-          <kbd className="hidden sm:inline-flex h-5 select-none items-center gap-1 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground opacity-100">
-            ESC
+          <kbd className="ml-2 rounded-[3px] border border-[hsl(var(--wb-border))] px-1.5 py-0.5 font-mono text-[10px] text-[hsl(var(--wb-text-muted))]">
+            Esc
           </kbd>
         </div>
 
-        <Command.List className="max-h-[350px] overflow-y-auto overflow-x-hidden custom-scrollbar p-2">
-          <Command.Empty className="py-12 text-center text-sm text-muted-foreground flex flex-col items-center gap-2">
-            <Search className="h-8 w-8 opacity-20" />
-            No results found.
+        <Command.List className="custom-scrollbar max-h-[420px] overflow-y-auto p-1.5">
+          <Command.Empty className="px-3 py-8 text-center text-[12px] text-[hsl(var(--wb-text-muted))]">
+            No matching command.
           </Command.Empty>
 
-          <Command.Group
-            heading={
-              <span className="px-2 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
-                Active Tabs
-              </span>
-            }
-          >
-            {tabs.map((tab) => (
-              <Command.Item
-                key={tab.id}
-                onSelect={() => {
-                  setActiveTab(tab.id);
-                  setOpen(false);
-                }}
-                className="flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer aria-selected:bg-accent aria-selected:text-accent-foreground transition-all duration-150"
-              >
-                <Terminal className="h-4 w-4 text-primary/60" />
-                <div className="flex-1 overflow-hidden">
-                  <span className="text-sm font-medium truncate inline-block w-full">
-                    {tab.title}
+          <Command.Group heading={<GroupHeading>Actions</GroupHeading>}>
+            {actions.map((action) => (
+              <ActionCommandItem
+                key={action.id}
+                action={action}
+                binding={keymap[action.id]?.[0]}
+                onSelect={() => setOpen(false)}
+              />
+            ))}
+          </Command.Group>
+
+          {tabs.length > 0 && (
+            <Command.Group heading={<GroupHeading>Tabs</GroupHeading>}>
+              {tabs.map((tab) => (
+                <Command.Item
+                  key={tab.id}
+                  value={`tab ${tab.title} ${tab.type}`}
+                  onSelect={() => {
+                    setActiveTab(tab.id);
+                    setOpen(false);
+                  }}
+                  className="flex h-8 cursor-default items-center gap-2 rounded-[4px] px-2 aria-selected:bg-[hsl(var(--wb-active-strong))]"
+                >
+                  <Terminal size={13} className="text-[hsl(var(--wb-text-muted))]" />
+                  <span className="min-w-0 flex-1 truncate">{tab.title}</span>
+                  <span className="text-[10px] text-[hsl(var(--wb-text-muted))]">
+                    {tab.type}
                   </span>
-                  <p className="text-[10px] text-muted-foreground truncate">
-                    {tab.type === "query" ? "SQL Query" : "Table View"}
-                  </p>
-                </div>
-              </Command.Item>
-            ))}
-          </Command.Group>
+                </Command.Item>
+              ))}
+            </Command.Group>
+          )}
 
-          <Command.Group
-            heading={
-              <span className="px-2 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-widest mt-2">
-                Actions
-              </span>
-            }
-          >
-            <Command.Item
-              onSelect={() => {
-                createTab("query", "New Query", "");
-                setOpen(false);
-              }}
-              className="flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer aria-selected:bg-accent aria-selected:text-accent-foreground"
-            >
-              <FilePlus className="h-4 w-4" />
-              <span className="text-sm">New Query Tab</span>
-              <kbd className="ml-auto text-[10px] opacity-50 font-mono">⌘T</kbd>
-            </Command.Item>
-            <Command.Item
-              onSelect={() => {
-                if (tabs.length > 0) {
-                  const lastTab = tabs[tabs.length - 1];
-                  if (lastTab) closeTab(lastTab.id);
-                }
-                setOpen(false);
-              }}
-              className="flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer aria-selected:bg-accent aria-selected:text-accent-foreground"
-            >
-              <XCircle className="h-4 w-4 text-destructive/60" />
-              <span className="text-sm text-destructive/80">
-                Close Active Tab
-              </span>
-              <kbd className="ml-auto text-[10px] opacity-50 font-mono">⌘W</kbd>
-            </Command.Item>
-          </Command.Group>
-
-          <Command.Group
-            heading={
-              <span className="px-2 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-widest mt-2">
-                Connections
-              </span>
-            }
-          >
-            {connections.map((conn) => (
-              <Command.Item
-                key={conn.id}
-                onSelect={() => {
-                  selectConnection(conn.id);
-                  setOpen(false);
-                }}
-                className="flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer aria-selected:bg-accent aria-selected:text-accent-foreground"
-              >
-                <Database className="h-4 w-4 text-blue-500/60" />
-                <span className="text-sm truncate">{conn.name}</span>
-              </Command.Item>
-            ))}
-          </Command.Group>
+          {connections.length > 0 && (
+            <Command.Group heading={<GroupHeading>Connections</GroupHeading>}>
+              {connections.map((connection) => (
+                <Command.Item
+                  key={connection.id}
+                  value={`connection ${connection.name} ${connection.driver}`}
+                  onSelect={() => {
+                    selectConnection(connection.id);
+                    setOpen(false);
+                  }}
+                  className="flex h-8 cursor-default items-center gap-2 rounded-[4px] px-2 aria-selected:bg-[hsl(var(--wb-active-strong))]"
+                >
+                  <Database size={13} className="text-[hsl(var(--wb-text-muted))]" />
+                  <span className="min-w-0 flex-1 truncate">{connection.name}</span>
+                  <span className="text-[10px] uppercase text-[hsl(var(--wb-text-muted))]">
+                    {connection.driver}
+                  </span>
+                </Command.Item>
+              ))}
+            </Command.Group>
+          )}
         </Command.List>
-
-        <div className="flex items-center justify-between px-4 py-3 border-t border-border/50 bg-muted/5">
-          <p className="text-[10px] text-muted-foreground/50 font-mono">
-            Press <kbd className="bg-muted px-1 rounded">TAB</kbd> to navigate
-          </p>
-          <div className="flex gap-2">
-            <span className="flex items-center gap-1 text-[10px] text-muted-foreground px-1.5 py-0.5 rounded-md bg-muted/30">
-              <Clock size={10} /> Recents
-            </span>
-          </div>
-        </div>
       </Command>
     </div>
+  );
+}
+
+function GroupHeading({ children }: { children: ReactNode }) {
+  return (
+    <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-normal text-[hsl(var(--wb-text-muted))]">
+      {children}
+    </div>
+  );
+}
+
+function ActionCommandItem({
+  action,
+  binding,
+  onSelect,
+}: {
+  action: ReturnType<typeof workbenchActions>[number];
+  binding?: string;
+  onSelect: () => void;
+}) {
+  return (
+    <Command.Item
+      value={`${action.title} ${action.group} ${action.id}`}
+      onSelect={() => {
+        void action.run();
+        onSelect();
+      }}
+      className="flex h-8 cursor-default items-center gap-2 rounded-[4px] px-2 aria-selected:bg-[hsl(var(--wb-active-strong))]"
+    >
+      <span className="min-w-0 flex-1 truncate">{action.title}</span>
+      <span className="text-[10px] text-[hsl(var(--wb-text-muted))]">
+        {action.group}
+      </span>
+      {binding && (
+        <kbd className="rounded-[3px] border border-[hsl(var(--wb-border))] px-1.5 py-0.5 font-mono text-[10px] text-[hsl(var(--wb-text-muted))]">
+          {formatKeybinding(binding)}
+        </kbd>
+      )}
+    </Command.Item>
   );
 }

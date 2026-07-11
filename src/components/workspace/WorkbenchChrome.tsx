@@ -1,0 +1,157 @@
+import { APP_EVENT_OPEN_COMMAND_PALETTE } from "@/lib/actions";
+import type { WorkbenchSide } from "@/lib/appSettings";
+import { cn } from "@/lib/utils";
+import { useProjectStore } from "@/store/useProjectStore";
+import {
+  ChevronRight,
+  Database,
+  Search,
+  Sparkles,
+  SquareTerminal,
+} from "lucide-react";
+import { TaskStatusCenter } from "./TaskStatusCenter";
+
+interface WorkbenchTitleToolsProps {
+  databaseExplorerOpen: boolean;
+  databaseExplorerSide: WorkbenchSide;
+  assistantOpen: boolean;
+  assistantSide: WorkbenchSide;
+  onToggleDatabaseExplorer: () => void;
+  onToggleAssistant: () => void;
+}
+
+export function WorkbenchTitleTools({
+  databaseExplorerOpen,
+  databaseExplorerSide,
+  assistantOpen,
+  assistantSide,
+  onToggleDatabaseExplorer,
+  onToggleAssistant,
+}: WorkbenchTitleToolsProps) {
+  return (
+    <div className="flex h-7 items-center gap-0.5" aria-label="Tool windows">
+      <button
+        type="button"
+        className="wb-title-tool-button"
+        data-active={databaseExplorerOpen}
+        aria-pressed={databaseExplorerOpen}
+        onClick={onToggleDatabaseExplorer}
+        title={`Toggle Database Explorer (${databaseExplorerSide})`}
+      >
+        <Database size={15} />
+      </button>
+      <button
+        type="button"
+        className="wb-title-tool-button"
+        data-active={assistantOpen}
+        aria-pressed={assistantOpen}
+        onClick={onToggleAssistant}
+        title={`Toggle AI Assistant (${assistantSide})`}
+      >
+        <Sparkles size={15} />
+      </button>
+    </div>
+  );
+}
+
+export function WorkbenchGlobalTools() {
+  return (
+    <button
+      type="button"
+      className="wb-icon-button"
+      onClick={() =>
+        window.dispatchEvent(new CustomEvent(APP_EVENT_OPEN_COMMAND_PALETTE))
+      }
+      title="Search Everywhere"
+      aria-label="Search Everywhere"
+    >
+      <Search size={15} />
+    </button>
+  );
+}
+
+interface WorkbenchStatusBarProps {
+  activeConnectionName?: string;
+  currentSchema?: string | null;
+  activeTabTitle?: string;
+  isIntrospecting: boolean;
+  assistantOpen: boolean;
+  onToggleAssistant: () => void;
+}
+
+export function WorkbenchStatusBar({
+  activeConnectionName,
+  currentSchema,
+  activeTabTitle,
+  isIntrospecting,
+  assistantOpen,
+  onToggleAssistant,
+}: WorkbenchStatusBarProps) {
+  const activeProjectName = useProjectStore((state) => state.activeProjectName);
+  const hasEditorContext = Boolean(activeTabTitle);
+
+  return (
+    <footer
+      className="wb-statusbar z-30 flex w-full items-center transition-colors duration-200"
+      aria-label="Workbench status"
+    >
+      <div className="flex min-w-0 items-center gap-1 px-2">
+        {hasEditorContext ? (
+          <>
+            <span className="shrink-0">Database</span>
+            {activeConnectionName && (
+              <>
+                <ChevronRight size={11} className="shrink-0 wb-muted" />
+                <span className="truncate">{activeConnectionName}</span>
+              </>
+            )}
+            {currentSchema && (
+              <>
+                <ChevronRight size={11} className="shrink-0 wb-muted" />
+                <span className="truncate">{currentSchema}</span>
+              </>
+            )}
+            <ChevronRight size={11} className="shrink-0 wb-muted" />
+            <span className="truncate">{activeTabTitle}</span>
+          </>
+        ) : (
+          <>
+            <SquareTerminal
+              size={12}
+              className="shrink-0 text-[hsl(var(--wb-accent))]"
+            />
+            <span className="truncate">{activeProjectName || "sqls"}</span>
+          </>
+        )}
+      </div>
+
+      <div className="ml-auto flex h-full min-w-0 items-center overflow-hidden">
+        {isIntrospecting && (
+          <div className="hidden h-full items-center gap-2 px-2 text-[11px] text-[hsl(var(--wb-text-muted))] sm:flex">
+            <span className="whitespace-nowrap">Introspecting metadata</span>
+            <span className="wb-progress-track">
+              <span className="wb-progress-bar" />
+            </span>
+          </div>
+        )}
+        <TaskStatusCenter />
+        <div
+          id="status-bar-slot"
+          className="flex h-full min-w-0 items-center overflow-hidden"
+        />
+        <button
+          type="button"
+          className={cn(
+            "flex h-full w-7 shrink-0 items-center justify-center text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
+            assistantOpen && "text-emerald-400"
+          )}
+          onClick={onToggleAssistant}
+          aria-pressed={assistantOpen}
+          title="Toggle AI Assistant"
+        >
+          <Sparkles size={12} />
+        </button>
+      </div>
+    </footer>
+  );
+}

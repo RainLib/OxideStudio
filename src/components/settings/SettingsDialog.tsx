@@ -1,4 +1,4 @@
-import { useContext, useMemo, useState } from "react";
+import { useContext, useMemo, useState, type ReactNode } from "react";
 import {
   Dialog,
   DialogContent,
@@ -12,99 +12,110 @@ import {
   type AiPlannerKind,
   useAiSettingsStore,
 } from "@/store/useAiSettingsStore";
+import { useSettingsStore } from "@/store/useSettingsStore";
 import { ThemeContext } from "@/theme/ThemeProvider";
+import { cn } from "@/lib/utils";
+import { keymapConflicts, normalizeKeybinding } from "@/lib/keybindings";
 import {
+  findWorkbenchAction,
+  type WorkbenchActionId,
+  workbenchActions,
+} from "@/lib/actions";
+import type { AppSettings, WorkbenchSide } from "@/lib/appSettings";
+import { moveSideToolWindow } from "@/lib/workbenchLayout";
+import {
+  Bot,
+  Braces,
   ChevronDown,
   ChevronRight,
   Database,
   Palette,
-  Plug,
   Search,
   Settings2,
-  Wrench,
+  TextCursorInput,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
-import {
-  lspLanguageId,
-  supportedDatabaseDriverProfiles,
-  supportsLspLanguageId,
-} from "@/lib/databaseDialect";
 
 interface SettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-type SettingsSection = "appearance" | "ai" | "intelligence" | "plugins";
+type SettingsSection =
+  | "appearance"
+  | "workbench"
+  | "keymap"
+  | "editor"
+  | "dataEditor"
+  | "databaseExplorer"
+  | "ai";
 
-const settingsTree: Array<{
+type SettingsTreeGroup = {
   id: string;
   label: string;
-  icon?: typeof Database;
-  children?: Array<{
-    id: SettingsSection | string;
+  icon: typeof Database;
+  children: Array<{
+    id: SettingsSection;
     label: string;
-    section?: SettingsSection;
+    section: SettingsSection;
   }>;
-  section?: SettingsSection;
-}> = [
-  {
-    id: "database",
-    label: "Database",
-    icon: Database,
-    children: [
-      { id: "database-general", label: "General" },
-      { id: "database-intelligence", label: "Intelligence", section: "intelligence" },
-    ],
-  },
+};
+
+const settingsTree: SettingsTreeGroup[] = [
   {
     id: "appearance-behavior",
     label: "Appearance & Behavior",
     icon: Palette,
     children: [
       { id: "appearance", label: "Appearance", section: "appearance" },
-      { id: "menus", label: "Menus and Toolbars" },
-      { id: "system-settings", label: "System Settings" },
-      { id: "file-colors", label: "File Colors" },
-      { id: "notifications", label: "Notifications" },
+      { id: "workbench", label: "Workbench", section: "workbench" },
+      { id: "keymap", label: "Keymap", section: "keymap" },
     ],
   },
-  { id: "keymap", label: "Keymap" },
-  { id: "editor", label: "Editor" },
-  { id: "plugins", label: "Plugins", icon: Plug, section: "plugins" },
-  { id: "version-control", label: "Version Control" },
-  { id: "languages", label: "Languages" },
+  {
+    id: "editor",
+    label: "Editor",
+    icon: TextCursorInput,
+    children: [
+      { id: "editor", label: "Editor", section: "editor" },
+      { id: "dataEditor", label: "Data Editor and Viewer", section: "dataEditor" },
+    ],
+  },
+  {
+    id: "database",
+    label: "Database",
+    icon: Database,
+    children: [
+      {
+        id: "databaseExplorer",
+        label: "Database Explorer",
+        section: "databaseExplorer",
+      },
+    ],
+  },
   {
     id: "tools",
     label: "Tools",
-    icon: Wrench,
+    icon: Bot,
     children: [{ id: "ai", label: "AI Assistant", section: "ai" }],
   },
-  { id: "backup-sync", label: "Backup and Sync" },
-  { id: "advanced", label: "Advanced Settings" },
 ];
 
 const sectionMeta: Record<SettingsSection, { group: string; title: string }> = {
-  appearance: {
-    group: "Appearance & Behavior",
-    title: "Appearance",
-  },
-  ai: {
-    group: "Tools",
-    title: "AI Assistant",
-  },
-  intelligence: {
-    group: "Database",
-    title: "Intelligence",
-  },
-  plugins: {
-    group: "Plugins",
-    title: "Plugins",
-  },
+  appearance: { group: "Appearance & Behavior", title: "Appearance" },
+  workbench: { group: "Appearance & Behavior", title: "Workbench" },
+  keymap: { group: "Appearance & Behavior", title: "Keymap" },
+  editor: { group: "Editor", title: "Editor" },
+  dataEditor: { group: "Editor", title: "Data Editor and Viewer" },
+  databaseExplorer: { group: "Database", title: "Database Explorer" },
+  ai: { group: "Tools", title: "AI Assistant" },
 };
 
 export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const themeContext = useContext(ThemeContext);
+  const appSettings = useSettingsStore((state) => state.settings);
+  const settingsError = useSettingsStore((state) => state.error);
+  const updateSettings = useSettingsStore((state) => state.updateSettings);
+  const resetSettings = useSettingsStore((state) => state.resetSettings);
   const aiEnabled = useAiSettingsStore((state) => state.enabled);
   const aiBaseUrl = useAiSettingsStore((state) => state.baseUrl);
   const aiModel = useAiSettingsStore((state) => state.model);
@@ -117,8 +128,9 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     useState<SettingsSection>("appearance");
   const [filterText, setFilterText] = useState("");
   const [expandedGroups, setExpandedGroups] = useState<string[]>([
-    "database",
     "appearance-behavior",
+    "editor",
+    "database",
     "tools",
   ]);
   const [aiTestState, setAiTestState] = useState<{
@@ -131,27 +143,34 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     const filter = filterText.trim().toLowerCase();
     if (!filter) return settingsTree;
 
-    const matches: typeof settingsTree = [];
-    settingsTree.forEach((item) => {
-      const itemMatches = item.label.toLowerCase().includes(filter);
-      const children = item.children?.filter((child) =>
-        child.label.toLowerCase().includes(filter)
-      );
-
-      if (itemMatches || (children && children.length > 0)) {
-        matches.push({
+    return settingsTree
+      .map((item) => {
+        const itemMatches = item.label.toLowerCase().includes(filter);
+        const children = item.children.filter((child) =>
+          child.label.toLowerCase().includes(filter)
+        );
+        if (!itemMatches && children.length === 0) return null;
+        return {
           ...item,
           children: itemMatches ? item.children : children,
-        });
-      }
-    });
-    return matches;
+        };
+      })
+      .filter((item): item is SettingsTreeGroup => Boolean(item));
   }, [filterText]);
 
   if (!themeContext) return null;
   const { mode, setTheme } = themeContext;
-  const canTestAi = Boolean(aiBaseUrl.trim() && aiModel.trim());
   const currentMeta = sectionMeta[activeSection];
+  const canTestAi = Boolean(aiBaseUrl.trim() && aiModel.trim());
+
+  const updateAppSettings = (updates: Partial<AppSettings>) => {
+    void updateSettings(updates);
+  };
+
+  const handlePlannerChange = (plannerKind: AiPlannerKind) => {
+    updateAiSettings({ plannerKind });
+    updateAppSettings({ ai: { ...appSettings.ai, plannerKind } });
+  };
 
   const handleTestAiProvider = async () => {
     setAiTestState(null);
@@ -177,18 +196,6 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     }
   };
 
-  const toggleGroup = (groupId: string) => {
-    setExpandedGroups((current) =>
-      current.includes(groupId)
-        ? current.filter((id) => id !== groupId)
-        : [...current, groupId]
-    );
-  };
-
-  const selectSection = (section?: SettingsSection) => {
-    if (section) setActiveSection(section);
-  };
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="h-[720px] max-h-[calc(100vh-28px)] w-[980px] max-w-[calc(100vw-28px)] gap-0 overflow-hidden rounded-[8px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] p-0 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_24px_70px_rgba(0,0,0,0.46)]">
@@ -197,7 +204,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
             Settings
           </DialogTitle>
           <DialogDescription className="sr-only">
-            Configure appearance, database intelligence, plugins, and AI assistant preferences.
+            Configure workbench layout, keymap, editor, database explorer, data grid, and AI assistant preferences.
           </DialogDescription>
         </DialogHeader>
 
@@ -215,15 +222,21 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
               </div>
             </div>
 
-            <nav className="min-h-0 flex-1 overflow-y-auto px-1 py-1 custom-scrollbar">
+            <nav className="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-1 py-1">
               {visibleTree.map((item) => (
                 <SettingsTreeItem
                   key={item.id}
                   item={item}
                   activeSection={activeSection}
                   expanded={expandedGroups.includes(item.id) || Boolean(filterText)}
-                  onToggle={() => toggleGroup(item.id)}
-                  onSelect={selectSection}
+                  onToggle={() =>
+                    setExpandedGroups((current) =>
+                      current.includes(item.id)
+                        ? current.filter((id) => id !== item.id)
+                        : [...current, item.id]
+                    )
+                  }
+                  onSelect={setActiveSection}
                 />
               ))}
             </nav>
@@ -236,15 +249,60 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                 <ChevronRight size={13} className="text-[hsl(var(--wb-text-muted))]" />
                 <span className="truncate">{currentMeta.title}</span>
               </div>
-              <div className="flex items-center gap-2 text-[16px] text-[hsl(var(--wb-text-muted))]">
-                <span className="opacity-45">←</span>
-                <span className="opacity-35">→</span>
+              <div className="flex items-center gap-1 text-[hsl(var(--wb-text-muted))]">
+                <SettingsIconButton
+                  title="Open settings.json"
+                  onClick={() => void findWorkbenchAction("settings.openJson")?.run()}
+                >
+                  <Braces size={14} />
+                </SettingsIconButton>
+                <SettingsIconButton title="Reset Settings" onClick={() => void resetSettings()}>
+                  <Settings2 size={14} />
+                </SettingsIconButton>
               </div>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 custom-scrollbar">
+            {settingsError && (
+              <div
+                role="alert"
+                className="border-b border-[hsl(var(--destructive)/0.35)] bg-[hsl(var(--destructive)/0.08)] px-4 py-2 text-[11px] text-[hsl(var(--destructive))]"
+              >
+                {settingsError}
+              </div>
+            )}
+
+            <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-4">
               {activeSection === "appearance" && (
-                <AppearanceSettings mode={mode} setTheme={setTheme} />
+                <AppearanceSettings
+                  mode={mode}
+                  setTheme={setTheme}
+                  settings={appSettings}
+                  onUpdate={updateAppSettings}
+                />
+              )}
+              {activeSection === "workbench" && (
+                <WorkbenchSettings
+                  settings={appSettings}
+                  onUpdate={updateAppSettings}
+                />
+              )}
+              {activeSection === "keymap" && (
+                <KeymapSettings settings={appSettings} onUpdate={updateAppSettings} />
+              )}
+              {activeSection === "editor" && (
+                <EditorSettings settings={appSettings} onUpdate={updateAppSettings} />
+              )}
+              {activeSection === "dataEditor" && (
+                <DataEditorSettings
+                  settings={appSettings}
+                  onUpdate={updateAppSettings}
+                />
+              )}
+              {activeSection === "databaseExplorer" && (
+                <DatabaseExplorerSettings
+                  settings={appSettings}
+                  onUpdate={updateAppSettings}
+                />
               )}
               {activeSection === "ai" && (
                 <AiSettings
@@ -256,14 +314,13 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   aiPlannerKind={aiPlannerKind}
                   setAiEnabled={setAiEnabled}
                   updateAiSettings={updateAiSettings}
+                  onPlannerChange={handlePlannerChange}
                   canTestAi={canTestAi}
                   isTestingAi={isTestingAi}
                   aiTestState={aiTestState}
                   onTest={handleTestAiProvider}
                 />
               )}
-              {activeSection === "intelligence" && <IntelligenceSettings />}
-              {activeSection === "plugins" && <PluginSettings />}
             </div>
           </main>
         </div>
@@ -287,64 +344,46 @@ function SettingsTreeItem({
   onToggle,
   onSelect,
 }: {
-  item: (typeof settingsTree)[number];
+  item: SettingsTreeGroup;
   activeSection: SettingsSection;
   expanded: boolean;
   onToggle: () => void;
-  onSelect: (section?: SettingsSection) => void;
+  onSelect: (section: SettingsSection) => void;
 }) {
   const Icon = item.icon;
-  const hasChildren = Boolean(item.children?.length);
-  const itemActive = Boolean(item.section && item.section === activeSection);
-
   return (
     <div>
       <button
         type="button"
-        className={cn(
-          "flex h-6 w-full items-center gap-1 rounded-[3px] px-1.5 text-left text-[12px] font-semibold",
-          itemActive
-            ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
-            : "text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))]"
-        )}
-        onClick={() => (hasChildren ? onToggle() : onSelect(item.section))}
+        className="flex h-6 w-full items-center gap-1 rounded-[3px] px-1.5 text-left text-[12px] font-semibold text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))]"
+        onClick={onToggle}
       >
-        {hasChildren ? (
-          expanded ? (
-            <ChevronDown size={13} className="shrink-0 text-[hsl(var(--wb-text-muted))]" />
-          ) : (
-            <ChevronRight size={13} className="shrink-0 text-[hsl(var(--wb-text-muted))]" />
-          )
+        {expanded ? (
+          <ChevronDown size={13} className="shrink-0 text-[hsl(var(--wb-text-muted))]" />
         ) : (
-          <span className="w-[13px]" />
+          <ChevronRight size={13} className="shrink-0 text-[hsl(var(--wb-text-muted))]" />
         )}
-        {Icon && <Icon size={13} className="shrink-0 text-[hsl(var(--wb-text-muted))]" />}
+        <Icon size={13} className="shrink-0 text-[hsl(var(--wb-text-muted))]" />
         <span className="truncate">{item.label}</span>
       </button>
 
-      {hasChildren && expanded && (
+      {expanded && (
         <div>
-          {item.children?.map((child) => {
-            const childActive = child.section === activeSection;
-            return (
-              <button
-                key={child.id}
-                type="button"
-                className={cn(
-                  "flex h-6 w-full items-center rounded-[3px] pl-12 pr-2 text-left text-[12px]",
-                  childActive
-                    ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
-                    : child.section
-                      ? "text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))]"
-                      : "text-[hsl(var(--wb-text-muted))]"
-                )}
-                onClick={() => onSelect(child.section)}
-                disabled={!child.section}
-              >
-                <span className="truncate">{child.label}</span>
-              </button>
-            );
-          })}
+          {item.children.map((child) => (
+            <button
+              key={child.id}
+              type="button"
+              className={cn(
+                "flex h-6 w-full items-center rounded-[3px] pl-12 pr-2 text-left text-[12px]",
+                child.section === activeSection
+                  ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+                  : "text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))]"
+              )}
+              onClick={() => onSelect(child.section)}
+            >
+              <span className="truncate">{child.label}</span>
+            </button>
+          ))}
         </div>
       )}
     </div>
@@ -354,12 +393,19 @@ function SettingsTreeItem({
 function AppearanceSettings({
   mode,
   setTheme,
+  settings,
+  onUpdate,
 }: {
   mode: string;
   setTheme: (mode: "light" | "dark" | "system") => void;
+  settings: AppSettings;
+  onUpdate: (updates: Partial<AppSettings>) => void;
 }) {
+  const appearance = settings.appearance;
+
   return (
     <SettingsPanel>
+      <SettingsDivider title="Theme" first />
       <SettingRow label="Theme:">
         <select
           value={mode}
@@ -372,50 +418,432 @@ function AppearanceSettings({
           <option value="light">Light</option>
           <option value="system">Sync with OS</option>
         </select>
-        <CheckboxLabel label="Sync with OS" checked={mode === "system"} onChange={() => setTheme(mode === "system" ? "dark" : "system")} />
-        <Settings2 size={14} className="text-[hsl(var(--wb-text-muted))]" />
+        <CheckboxLabel
+          label="Sync with OS"
+          checked={mode === "system"}
+          onChange={() => setTheme(mode === "system" ? "dark" : "system")}
+        />
       </SettingRow>
-
-      <SettingRow label="Editor color scheme:">
-        <select className={cn(selectClass, "w-[194px]")} value={mode === "light" ? "light" : "dark"} onChange={(event) => setTheme(event.target.value === "light" ? "light" : "dark")}>
+      <SettingRow label="Editor scheme:">
+        <select
+          className={selectClass}
+          value={mode === "light" ? "light" : "dark"}
+          onChange={(event) =>
+            setTheme(event.target.value === "light" ? "light" : "dark")
+          }
+        >
           <option value="dark">Dark</option>
           <option value="light">Light</option>
         </select>
-        <Settings2 size={14} className="text-[hsl(var(--wb-text-muted))]" />
       </SettingRow>
+      <SettingsDivider title="Interface" />
+      <SettingRow label="UI font size:">
+        <NumberInput
+          value={appearance.uiFontSize}
+          min={10}
+          max={20}
+          onChange={(uiFontSize) =>
+            onUpdate({ appearance: { ...appearance, uiFontSize } })
+          }
+        />
+        <span className="settings-hint">Database Explorer, tabs, toolbars, and AI</span>
+      </SettingRow>
+    </SettingsPanel>
+  );
+}
 
-      <div className="mt-4">
-        <CheckboxLabel label="Different tool window background" />
-        <p className="ml-6 mt-1 text-[12px] text-[hsl(var(--wb-text-muted))]">
-          Use lighter color in the dark theme and darker color in the light theme as a background.
-        </p>
-      </div>
+function WorkbenchSettings({
+  settings,
+  onUpdate,
+}: {
+  settings: AppSettings;
+  onUpdate: (updates: Partial<AppSettings>) => void;
+}) {
+  const { layout, toolWindows } = settings.workbench;
+  const updateLayout = (patch: Partial<AppSettings["workbench"]["layout"]>) =>
+    onUpdate({ workbench: { ...settings.workbench, layout: { ...layout, ...patch } } });
+  const updateToolWindowEnabled = (
+    id: keyof AppSettings["workbench"]["toolWindows"],
+    enabled: boolean
+  ) =>
+    onUpdate({
+      workbench: {
+        ...settings.workbench,
+        toolWindows: {
+          ...toolWindows,
+          [id]: { ...toolWindows[id], enabled },
+        },
+      },
+    });
+  const updateVisibility = (
+    id: keyof AppSettings["workbench"]["layout"]["visibility"],
+    visible: boolean
+  ) =>
+    updateLayout({
+      visibility: {
+        ...layout.visibility,
+        [id]: visible,
+      },
+    });
+  const updateSide = (
+    id: "databaseExplorer" | "assistant",
+    side: WorkbenchSide
+  ) => onUpdate({ workbench: moveSideToolWindow(settings.workbench, id, side) });
 
-      <SettingsDivider title="Accessibility" />
-      <SettingRow label="Zoom:">
-        <select className="h-7 w-[80px] rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] px-2 text-[12px] outline-none">
-          <option>100%</option>
-          <option>125%</option>
-          <option>150%</option>
+  return (
+    <SettingsPanel>
+      <SettingsDivider title="Tool Windows" first />
+      <SettingRow label="Database Explorer:">
+        <CheckboxLabel
+          label="Enabled"
+          checked={toolWindows.databaseExplorer.enabled}
+          onChange={() =>
+            updateToolWindowEnabled(
+              "databaseExplorer",
+              !toolWindows.databaseExplorer.enabled
+            )
+          }
+        />
+        <CheckboxLabel
+          label="Open"
+          checked={layout.visibility.databaseExplorer}
+          onChange={() =>
+            updateVisibility(
+              "databaseExplorer",
+              !layout.visibility.databaseExplorer
+            )
+          }
+        />
+        <select
+          className={cn(selectClass, "w-[120px]")}
+          value={toolWindows.databaseExplorer.side}
+          onChange={(event) =>
+            updateSide("databaseExplorer", event.target.value as WorkbenchSide)
+          }
+        >
+          <option value="left">Left</option>
+          <option value="right">Right</option>
         </select>
-        <span className="text-[12px] text-[hsl(var(--wb-text-muted))]">
-          Change with ^` or ^`-. Set to 100% with ^`0
-        </span>
       </SettingRow>
-      <CheckboxLabel label="Use custom font:" detail="Inter" />
-      <CheckboxLabel label="Support screen readers" detail="Requires restart" />
-      <CheckboxLabel label="Use contrast scrollbars" />
-      <CheckboxLabel label="Adjust colors for red-green vision deficiency" detail="How it works" />
+      <SettingRow label="AI Assistant:">
+        <CheckboxLabel
+          label="Enabled"
+          checked={toolWindows.assistant.enabled}
+          onChange={() =>
+            updateToolWindowEnabled("assistant", !toolWindows.assistant.enabled)
+          }
+        />
+        <CheckboxLabel
+          label="Open"
+          checked={layout.visibility.assistant}
+          onChange={() =>
+            updateVisibility("assistant", !layout.visibility.assistant)
+          }
+        />
+        <select
+          className={cn(selectClass, "w-[120px]")}
+          value={toolWindows.assistant.side}
+          onChange={(event) =>
+            updateSide("assistant", event.target.value as WorkbenchSide)
+          }
+        >
+          <option value="left">Left</option>
+          <option value="right">Right</option>
+        </select>
+      </SettingRow>
+      <SettingRow label="Query Results:">
+        <CheckboxLabel
+          label="Enabled"
+          checked={toolWindows.results.enabled}
+          onChange={() =>
+            updateToolWindowEnabled("results", !toolWindows.results.enabled)
+          }
+        />
+        <CheckboxLabel
+          label="Open after execution"
+          checked={layout.visibility.results}
+          onChange={() =>
+            updateVisibility("results", !layout.visibility.results)
+          }
+        />
+        <span className="settings-hint">Bottom</span>
+      </SettingRow>
 
-      <SettingsDivider title="UI Options" />
-      <div className="grid grid-cols-2 gap-x-10 gap-y-2">
-        <CheckboxLabel label="Compact mode" />
-        <CheckboxLabel label="Drag-and-drop with Alt pressed only" />
-        <CheckboxLabel label="Always show full path in window header" />
-        <CheckboxLabel label="Smooth scrolling" checked />
-        <CheckboxLabel label="Use project colors in main toolbar" checked />
-        <CheckboxLabel label="Enable mnemonics in controls" checked />
+      <SettingsDivider title="Sizes" />
+      <SettingRow label="Left width:">
+        <NumberInput
+          value={layout.leftWidth}
+          min={240}
+          max={760}
+          onChange={(leftWidth) => updateLayout({ leftWidth })}
+        />
+        <span className="settings-hint">Database Explorer</span>
+      </SettingRow>
+      <SettingRow label="Right width:">
+        <NumberInput
+          value={layout.rightWidth}
+          min={260}
+          max={640}
+          onChange={(rightWidth) => updateLayout({ rightWidth })}
+        />
+        <span className="settings-hint">AI Assistant</span>
+      </SettingRow>
+      <SettingRow label="Bottom height:">
+        <NumberInput
+          value={layout.bottomHeight}
+          min={140}
+          max={720}
+          onChange={(bottomHeight) => updateLayout({ bottomHeight })}
+        />
+        <span className="settings-hint">Query results</span>
+      </SettingRow>
+    </SettingsPanel>
+  );
+}
+
+function KeymapSettings({
+  settings,
+  onUpdate,
+}: {
+  settings: AppSettings;
+  onUpdate: (updates: Partial<AppSettings>) => void;
+}) {
+  const actions = useMemo(() => workbenchActions(), []);
+  const conflicts = keymapConflicts(settings.keymap);
+  const conflictBindings = new Set(conflicts.map((conflict) => conflict.binding));
+
+  const updateBinding = (actionId: WorkbenchActionId, value: string) => {
+    onUpdate({
+      keymap: {
+        ...settings.keymap,
+        [actionId]: value.trim() ? [value.trim()] : [],
+      },
+    });
+  };
+
+  return (
+    <SettingsPanel>
+      <SettingsDivider title="Keymap" first />
+      {conflicts.length > 0 && (
+        <div className="mb-3 rounded-[4px] border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-200">
+          {conflicts.length} shortcut conflict{conflicts.length > 1 ? "s" : ""} found.
+        </div>
+      )}
+      <div className="overflow-hidden rounded-[4px] border border-[hsl(var(--wb-border))]">
+        {actions.map((action) => {
+          const value = settings.keymap[action.id]?.[0] ?? "";
+          const hasConflict = value && conflictBindings.has(normalizeKeybinding(value));
+          return (
+            <div
+              key={action.id}
+              className="grid grid-cols-[1fr_130px_180px] items-center gap-3 border-b border-[hsl(var(--wb-border-subtle))] px-3 py-1.5 last:border-b-0"
+            >
+              <div className="min-w-0">
+                <div className="truncate font-medium">{action.title}</div>
+                <div className="text-[11px] text-[hsl(var(--wb-text-muted))]">
+                  {action.id}
+                </div>
+              </div>
+              <div className="text-[11px] text-[hsl(var(--wb-text-muted))]">
+                {action.group}
+              </div>
+              <input
+                value={value}
+                onChange={(event) =>
+                  updateBinding(action.id, event.target.value)
+                }
+                className={cn(inputClass, "w-full font-mono text-[11px]", hasConflict && "border-amber-500/70")}
+                spellCheck={false}
+              />
+            </div>
+          );
+        })}
       </div>
+    </SettingsPanel>
+  );
+}
+
+function EditorSettings({
+  settings,
+  onUpdate,
+}: {
+  settings: AppSettings;
+  onUpdate: (updates: Partial<AppSettings>) => void;
+}) {
+  const editor = settings.editor;
+  const updateEditor = (patch: Partial<AppSettings["editor"]>) =>
+    onUpdate({ editor: { ...editor, ...patch } });
+
+  return (
+    <SettingsPanel>
+      <SettingsDivider title="SQL Editor" first />
+      <SettingRow label="Font size:">
+        <NumberInput
+          value={editor.fontSize}
+          min={10}
+          max={24}
+          onChange={(fontSize) => updateEditor({ fontSize })}
+        />
+      </SettingRow>
+      <SettingRow label="Tab size:">
+        <NumberInput
+          value={editor.tabSize}
+          min={2}
+          max={8}
+          onChange={(tabSize) => updateEditor({ tabSize })}
+        />
+      </SettingRow>
+      <SettingRow label="Word wrap:">
+        <select
+          className={selectClass}
+          value={editor.wordWrap}
+          onChange={(event) =>
+            updateEditor({
+              wordWrap: event.target.value as AppSettings["editor"]["wordWrap"],
+            })
+          }
+        >
+          <option value="off">Off</option>
+          <option value="on">On</option>
+          <option value="wordWrapColumn">At column</option>
+          <option value="bounded">Bounded</option>
+        </select>
+      </SettingRow>
+      <CheckboxLabel
+        label="Show minimap"
+        checked={editor.minimap}
+        onChange={() => updateEditor({ minimap: !editor.minimap })}
+      />
+      <CheckboxLabel
+        label="Confirm destructive SQL before execution"
+        checked={editor.confirmDestructiveSql}
+        onChange={() =>
+          updateEditor({ confirmDestructiveSql: !editor.confirmDestructiveSql })
+        }
+      />
+    </SettingsPanel>
+  );
+}
+
+function DataEditorSettings({
+  settings,
+  onUpdate,
+}: {
+  settings: AppSettings;
+  onUpdate: (updates: Partial<AppSettings>) => void;
+}) {
+  const dataGrid = settings.dataGrid;
+  const updateDataGrid = (patch: Partial<AppSettings["dataGrid"]>) =>
+    onUpdate({ dataGrid: { ...dataGrid, ...patch } });
+
+  return (
+    <SettingsPanel>
+      <SettingsDivider title="Data Grid" first />
+      <SettingRow label="Font size:">
+        <NumberInput
+          value={dataGrid.fontSize}
+          min={10}
+          max={20}
+          onChange={(fontSize) => updateDataGrid({ fontSize })}
+        />
+      </SettingRow>
+      <SettingRow label="Row height:">
+        <NumberInput
+          value={dataGrid.rowHeight}
+          min={22}
+          max={48}
+          onChange={(rowHeight) => updateDataGrid({ rowHeight })}
+        />
+      </SettingRow>
+      <SettingRow label="Default zoom:">
+        <NumberInput
+          value={dataGrid.zoomPercent}
+          min={70}
+          max={160}
+          step={10}
+          onChange={(zoomPercent) => updateDataGrid({ zoomPercent })}
+        />
+        <span className="settings-hint">Percent</span>
+      </SettingRow>
+      <SettingRow label="Default page size:">
+        <NumberInput
+          value={dataGrid.pageSize}
+          min={50}
+          max={5000}
+          onChange={(pageSize) => updateDataGrid({ pageSize })}
+        />
+      </SettingRow>
+      <CheckboxLabel
+        label="Open table data read-only by default"
+        checked={dataGrid.readOnlyByDefault}
+        onChange={() =>
+          updateDataGrid({ readOnlyByDefault: !dataGrid.readOnlyByDefault })
+        }
+      />
+      <CheckboxLabel
+        label="Copy selected cells with headers"
+        checked={dataGrid.copyIncludeHeaders}
+        onChange={() =>
+          updateDataGrid({ copyIncludeHeaders: !dataGrid.copyIncludeHeaders })
+        }
+      />
+      <CheckboxLabel
+        label="Show column type icons"
+        checked={dataGrid.showTypeIcons}
+        onChange={() => updateDataGrid({ showTypeIcons: !dataGrid.showTypeIcons })}
+      />
+    </SettingsPanel>
+  );
+}
+
+function DatabaseExplorerSettings({
+  settings,
+  onUpdate,
+}: {
+  settings: AppSettings;
+  onUpdate: (updates: Partial<AppSettings>) => void;
+}) {
+  const databaseExplorer = settings.databaseExplorer;
+  const updateDatabaseExplorer = (
+    patch: Partial<AppSettings["databaseExplorer"]>
+  ) =>
+    onUpdate({ databaseExplorer: { ...databaseExplorer, ...patch } });
+
+  return (
+    <SettingsPanel>
+      <SettingsDivider title="Introspection" first />
+      <SettingRow label="Refresh mode:">
+        <select
+          className={selectClass}
+          value={databaseExplorer.refreshMode}
+          onChange={(event) =>
+            updateDatabaseExplorer({
+              refreshMode: event.target.value as AppSettings["databaseExplorer"]["refreshMode"],
+            })
+          }
+        >
+          <option value="cache-first">Use local cache first</option>
+          <option value="manual">Manual refresh only</option>
+        </select>
+      </SettingRow>
+      <CheckboxLabel
+        label="Show only selected schemas"
+        checked={databaseExplorer.showOnlySelectedSchemas}
+        onChange={() =>
+          updateDatabaseExplorer({
+            showOnlySelectedSchemas: !databaseExplorer.showOnlySelectedSchemas,
+          })
+        }
+      />
+      <CheckboxLabel
+        label="Show metadata cache badges"
+        checked={databaseExplorer.showCacheBadges}
+        onChange={() =>
+          updateDatabaseExplorer({
+            showCacheBadges: !databaseExplorer.showCacheBadges,
+          })
+        }
+      />
     </SettingsPanel>
   );
 }
@@ -429,6 +857,7 @@ function AiSettings({
   aiPlannerKind,
   setAiEnabled,
   updateAiSettings,
+  onPlannerChange,
   canTestAi,
   isTestingAi,
   aiTestState,
@@ -448,6 +877,7 @@ function AiSettings({
     apiKey: string;
     timeoutMs: number;
   }>) => void;
+  onPlannerChange: (plannerKind: AiPlannerKind) => void;
   canTestAi: boolean;
   isTestingAi: boolean;
   aiTestState: { status: "success" | "error"; message: string } | null;
@@ -460,26 +890,25 @@ function AiSettings({
         label="Enable AI assistant"
         checked={aiEnabled}
         onChange={() => setAiEnabled(!aiEnabled)}
-        detail="Off keeps local deterministic planning."
+        detail="Disabled mode keeps deterministic local planning."
       />
       <SettingRow label="Planner:">
         <select
           className={cn(selectClass, "w-[260px]")}
           value={aiPlannerKind}
           onChange={(event) =>
-            updateAiSettings({
-              plannerKind: event.target.value as AiPlannerKind,
-            })
+            onPlannerChange(event.target.value as AiPlannerKind)
           }
         >
           <option value="model">Model planner</option>
           <option value="langgraph">LangGraph planner plugin</option>
           <option value="local">Local deterministic planner</option>
         </select>
-        <span className="text-[12px] text-[hsl(var(--wb-text-muted))]">
-          LangGraph uses @langchain/langgraph and falls back locally.
-        </span>
       </SettingRow>
+      <p className="mb-3 ml-[162px] max-w-[68ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
+        LangGraph planner uses @langchain/langgraph and falls back to local planning
+        when the model provider is unavailable.
+      </p>
       <SettingRow label="Base URL:">
         <SettingsInput
           value={aiBaseUrl}
@@ -503,15 +932,12 @@ function AiSettings({
         />
       </SettingRow>
       <SettingRow label="Timeout ms:">
-        <input
-          type="number"
-          min={1000}
-          step={1000}
+        <NumberInput
           value={aiTimeoutMs}
-          onChange={(event) =>
-            updateAiSettings({ timeoutMs: Number(event.target.value) || 30_000 })
-          }
-          className={cn(inputClass, "w-[120px]")}
+          min={1000}
+          max={120000}
+          step={1000}
+          onChange={(timeoutMs) => updateAiSettings({ timeoutMs })}
         />
       </SettingRow>
 
@@ -536,61 +962,8 @@ function AiSettings({
   );
 }
 
-function IntelligenceSettings() {
-  return (
-    <SettingsPanel>
-      <SettingsDivider title="Built-in database intelligence" first />
-      <p className="mb-3 max-w-[72ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
-        LSP sessions are loaded for the active supported database type. External providers can be attached later through the plugin interface.
-      </p>
-      <div className="overflow-hidden rounded-[4px] border border-[hsl(var(--wb-border))]">
-        {supportedDatabaseDriverProfiles().map((profile) => {
-          const supported = supportsLspLanguageId(profile.driver);
-          return (
-            <div
-              key={profile.driver}
-              className="grid grid-cols-[1fr_120px_90px] items-center gap-3 border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2 last:border-b-0"
-            >
-              <div className="min-w-0">
-                <div className="truncate text-[12px] font-medium">
-                  {profile.menuLabel}
-                </div>
-                <div className="text-[11px] text-[hsl(var(--wb-text-muted))]">
-                  {supported ? `Language: ${lspLanguageId(profile.driver)}` : "No built-in profile"}
-                </div>
-              </div>
-              <div className="text-[11px] text-[hsl(var(--wb-text-muted))]">
-                Bundled
-              </div>
-              <div
-                className={cn(
-                  "text-[11px] font-medium",
-                  supported ? "text-emerald-400" : "text-[hsl(var(--wb-text-muted))]"
-                )}
-              >
-                {supported ? "Auto" : "Off"}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </SettingsPanel>
-  );
-}
-
-function PluginSettings() {
-  return (
-    <SettingsPanel>
-      <SettingsDivider title="Plugins" first />
-      <div className="flex h-24 items-center rounded-[4px] border border-dashed border-[hsl(var(--wb-border))] px-3 text-[12px] text-[hsl(var(--wb-text-muted))]">
-        Plugin management will appear here when extension packaging is enabled.
-      </div>
-    </SettingsPanel>
-  );
-}
-
-function SettingsPanel({ children }: { children: React.ReactNode }) {
-  return <div className="max-w-[760px] pb-10">{children}</div>;
+function SettingsPanel({ children }: { children: ReactNode }) {
+  return <div className="max-w-[780px] pb-10">{children}</div>;
 }
 
 function SettingsDivider({
@@ -613,7 +986,7 @@ function SettingRow({
   children,
 }: {
   label: string;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   return (
     <div className="mb-3 grid grid-cols-[150px_1fr] items-center gap-3">
@@ -630,11 +1003,13 @@ function CheckboxLabel({
   checked,
   detail,
   onChange,
+  readOnly,
 }: {
   label: string;
   checked?: boolean;
   detail?: string;
   onChange?: () => void;
+  readOnly?: boolean;
 }) {
   return (
     <label className="flex min-h-7 items-center gap-2 text-[12px] text-[hsl(var(--wb-text))]">
@@ -642,7 +1017,7 @@ function CheckboxLabel({
         type="checkbox"
         checked={checked || false}
         onChange={onChange}
-        readOnly={!onChange}
+        readOnly={readOnly || !onChange}
         className="h-4 w-4 rounded-[3px] border border-[hsl(var(--wb-border))] accent-[hsl(var(--wb-accent))]"
       />
       <span>{label}</span>
@@ -679,13 +1054,60 @@ function SettingsInput({
   );
 }
 
+function NumberInput({
+  value,
+  min,
+  max,
+  step = 1,
+  onChange,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <input
+      type="number"
+      min={min}
+      max={max}
+      step={step}
+      value={value}
+      onChange={(event) => onChange(Number(event.target.value) || min)}
+      className={cn(inputClass, "w-[120px]")}
+    />
+  );
+}
+
+function SettingsIconButton({
+  children,
+  title,
+  onClick,
+}: {
+  children: ReactNode;
+  title: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      className="flex h-7 w-7 items-center justify-center rounded-[4px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+    >
+      {children}
+    </button>
+  );
+}
+
 function SettingsButton({
   children,
   intent = "secondary",
   disabled,
   onClick,
 }: {
-  children: React.ReactNode;
+  children: ReactNode;
   intent?: "primary" | "secondary";
   disabled?: boolean;
   onClick?: () => void;

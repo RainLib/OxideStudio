@@ -3,7 +3,9 @@ import { useTabStore } from "@/store/useTabStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTaskStore } from "@/store/useTaskStore";
-import { databaseService, schemaService, tableService } from "@/services/tauri";
+import { useSettingsStore } from "@/store/useSettingsStore";
+import { databaseService, tableService } from "@/services/tauri";
+import { loadTableMetadata } from "@/services/tableMetadataCache";
 import type {
   ColumnInfo,
   ConstraintInfo,
@@ -12,23 +14,26 @@ import type {
   TableExportFormat,
 } from "@/services/tauri/types";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { DataGrid } from "./DataGrid";
+import {
+  DataGrid,
+  type DataGridHandle,
+  type DataGridSelectionSummary,
+} from "./DataGrid";
 import { GridFilterRow } from "./GridFilterRow";
+import { TableDataToolbar } from "./TableDataToolbar";
 import { Button } from "@/components/ui/button";
 import {
   ChevronLeft,
   ChevronRight,
-  Download,
-  FileJson,
+  ChevronsLeft,
+  ChevronsRight,
   KeyRound,
   Link2,
   ListTree,
   Pencil,
   Plus,
-  RefreshCw,
   TableProperties,
   Trash2,
-  Upload,
 } from "lucide-react";
 import { CreateConstraintDialog } from "./CreateConstraintDialog";
 import { CreateIndexDialog } from "./CreateIndexDialog";
@@ -39,9 +44,11 @@ import {
   defaultDatabaseCapabilities,
   isReadOnlyRelationObject,
 } from "@/lib/databaseDialect";
+import { stepGridZoom } from "@/lib/dataGridView";
 
 export function TableDataView() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const dataGridRef = useRef<DataGridHandle>(null);
   const {
     tabs,
     activeTabId,
@@ -49,10 +56,17 @@ export function TableDataView() {
     setVisualFilters,
     setSqlFilter,
     loadTablePage,
+    addNewRow,
+    commitEdits,
+    cancelEdits,
+    resetColumnLayout,
+    setTableMetadata,
   } = useTabStore();
   const { activeConnectionId, connections } = useConnectionStore();
   const { bumpMetadataVersion } = useSchemaStore();
   const { startTask, updateTask, finishTask, failTask } = useTaskStore();
+  const dataGridSettings = useSettingsStore((state) => state.settings.dataGrid);
+  const defaultPageSize = dataGridSettings.pageSize;
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const tabConnectionId = activeTab?.connectionId || activeConnectionId;
   const activeConnection = connections.find((c) => c.id === tabConnectionId);
@@ -84,6 +98,25 @@ export function TableDataView() {
   const [isIndexSubmitting, setIsIndexSubmitting] = useState(false);
   const [isConstraintDialogOpen, setIsConstraintDialogOpen] = useState(false);
   const [isConstraintSubmitting, setIsConstraintSubmitting] = useState(false);
+  const [isEditingEnabled, setIsEditingEnabled] = useState(
+    !dataGridSettings.readOnlyByDefault
+  );
+  const [gridZoomPercent, setGridZoomPercent] = useState(
+    dataGridSettings.zoomPercent
+  );
+  const [gridSelectionSummary, setGridSelectionSummary] =
+    useState<DataGridSelectionSummary>({ selectedRowCount: 0 });
+  const structureRequestRef = useRef(0);
+  const isGridReadOnly = isReadOnlyRelation || !isEditingEnabled;
+
+  useEffect(() => {
+    setIsEditingEnabled(!dataGridSettings.readOnlyByDefault);
+  }, [activeTab?.id, dataGridSettings.readOnlyByDefault]);
+
+  useEffect(() => {
+    setGridZoomPercent(dataGridSettings.zoomPercent);
+    setGridSelectionSummary({ selectedRowCount: 0 });
+  }, [activeTab?.id, dataGridSettings.zoomPercent]);
 
   useEffect(() => {
     let cancelled = false;
@@ -105,7 +138,7 @@ export function TableDataView() {
     };
   }, [driver]);
 
-  const refreshStructure = useCallback(async () => {
+  const refreshStructure = useCallback(async (force = false) => {
     if (
       activeTab?.type !== "table" ||
       !tabConnectionId ||
@@ -115,6 +148,9 @@ export function TableDataView() {
       return;
     }
 
+    const requestId = structureRequestRef.current + 1;
+    structureRequestRef.current = requestId;
+    const tabId = activeTab.id;
     setIsMetadataLoading(true);
     setMetadataError(null);
     setMetadataColumns([]);
@@ -123,48 +159,45 @@ export function TableDataView() {
     setTableConstraints([]);
 
     try {
-      const [columns, indexes, constraints] = await Promise.all([
-        schemaService.getColumns(
-          tabConnectionId,
-          activeTab.schemaName,
-          activeTab.tableName
-        ),
-        activeCapabilities.supportsTableIndexes
-          ? schemaService.getIndexes(
-              tabConnectionId,
-              activeTab.schemaName,
-              activeTab.tableName
-            )
-          : Promise.resolve([]),
-        activeCapabilities.supportsTableConstraints
-          ? schemaService.getConstraints(
-              tabConnectionId,
-              activeTab.schemaName,
-              activeTab.tableName
-            )
-          : Promise.resolve([]),
-      ]);
-      setMetadataColumns(columns);
+      const metadata = await loadTableMetadata({
+        connectionId: tabConnectionId,
+        driver,
+        schema: activeTab.schemaName,
+        table: activeTab.tableName,
+        includeIndexes: activeCapabilities.supportsTableIndexes,
+        includeConstraints: activeCapabilities.supportsTableConstraints,
+        force,
+      });
+      setTableMetadata(tabId, metadata);
+      if (structureRequestRef.current !== requestId) return;
+
+      setMetadataColumns(metadata.columns);
       setFallbackColumns(
-        columns.map((column) => ({
+        metadata.columns.map((column) => ({
           name: column.name,
           type: column.data_type,
         }))
       );
-      setTableIndexes(indexes);
-      setTableConstraints(constraints);
+      setTableIndexes(metadata.indexes);
+      setTableConstraints(metadata.constraints);
     } catch (err: any) {
+      if (structureRequestRef.current !== requestId) return;
       setMetadataError(err?.message || String(err));
       console.error("Failed to fetch table metadata:", err);
     } finally {
-      setIsMetadataLoading(false);
+      if (structureRequestRef.current === requestId) {
+        setIsMetadataLoading(false);
+      }
     }
   }, [
+    activeTab?.id,
     activeTab?.type,
     activeTab?.schemaName,
     activeTab?.tableName,
     activeCapabilities.supportsTableConstraints,
     activeCapabilities.supportsTableIndexes,
+    driver,
+    setTableMetadata,
     tabConnectionId,
   ]);
 
@@ -186,7 +219,7 @@ export function TableDataView() {
 
   // Fetch structure metadata for empty headers, save logic, and table inspection.
   useEffect(() => {
-    void refreshStructure();
+    void refreshStructure(false);
   }, [activeTab?.id, refreshStructure]);
 
   if (!activeTab || activeTab.type !== "table") return null;
@@ -231,7 +264,7 @@ export function TableDataView() {
   };
 
   const page = activeTab.tablePage || 0;
-  const pageSize = activeTab.tablePageSize || 500;
+  const pageSize = activeTab.tablePageSize || defaultPageSize;
   const totalRows = activeTab.tableTotalRows;
   const visibleRows = result?.rows.length || 0;
   const startRow = totalRows && visibleRows > 0 ? page * pageSize + 1 : 0;
@@ -242,6 +275,12 @@ export function TableDataView() {
     !activeTab.isExecuting &&
     visibleRows === pageSize &&
     (totalRows == null || (page + 1) * pageSize < totalRows);
+  const lastPage =
+    totalRows == null ? null : Math.max(0, Math.ceil(totalRows / pageSize) - 1);
+  const canLast = lastPage != null && page < lastPage && !activeTab.isExecuting;
+  const hasEdits =
+    (activeTab.pendingEdits?.size || 0) > 0 ||
+    (activeTab.newRowsCount || 0) > 0;
   const metadataPrimaryKeyColumns = metadataColumns
     .filter((column) => column.is_primary_key)
     .map((column) => column.name);
@@ -284,9 +323,21 @@ export function TableDataView() {
     }
   };
 
+  const handleFirst = () => {
+    if (canPrevious) {
+      void loadTablePage(activeTab.id, 0);
+    }
+  };
+
   const handleNext = () => {
     if (canNext) {
       void loadTablePage(activeTab.id, page + 1);
+    }
+  };
+
+  const handleLast = () => {
+    if (canLast && lastPage != null) {
+      void loadTablePage(activeTab.id, lastPage);
     }
   };
 
@@ -482,7 +533,7 @@ export function TableDataView() {
         unique
       );
       setIsIndexDialogOpen(false);
-      await refreshStructure();
+      await refreshStructure(true);
       bumpMetadataVersion();
     } catch (err: any) {
       setMetadataError(err?.message || String(err));
@@ -516,7 +567,7 @@ export function TableDataView() {
         activeTab.tableName,
         index.name
       );
-      await refreshStructure();
+      await refreshStructure(true);
       bumpMetadataVersion();
     } catch (err: any) {
       setMetadataError(err?.message || String(err));
@@ -550,7 +601,7 @@ export function TableDataView() {
         index.name,
         trimmedName
       );
-      await refreshStructure();
+      await refreshStructure(true);
       bumpMetadataVersion();
     } catch (err: any) {
       setMetadataError(err?.message || String(err));
@@ -584,7 +635,7 @@ export function TableDataView() {
         columns
       );
       setIsConstraintDialogOpen(false);
-      await refreshStructure();
+      await refreshStructure(true);
       bumpMetadataVersion();
     } catch (err: any) {
       setMetadataError(err?.message || String(err));
@@ -620,7 +671,7 @@ export function TableDataView() {
         columns
       );
       setIsConstraintDialogOpen(false);
-      await refreshStructure();
+      await refreshStructure(true);
       bumpMetadataVersion();
     } catch (err: any) {
       setMetadataError(err?.message || String(err));
@@ -655,7 +706,7 @@ export function TableDataView() {
         expression
       );
       setIsConstraintDialogOpen(false);
-      await refreshStructure();
+      await refreshStructure(true);
       bumpMetadataVersion();
     } catch (err: any) {
       setMetadataError(err?.message || String(err));
@@ -699,7 +750,7 @@ export function TableDataView() {
         request.onUpdate
       );
       setIsConstraintDialogOpen(false);
-      await refreshStructure();
+      await refreshStructure(true);
       bumpMetadataVersion();
     } catch (err: any) {
       setMetadataError(err?.message || String(err));
@@ -732,7 +783,7 @@ export function TableDataView() {
         activeTab.tableName,
         constraint.name
       );
-      await refreshStructure();
+      await refreshStructure(true);
       bumpMetadataVersion();
     } catch (err: any) {
       setMetadataError(err?.message || String(err));
@@ -740,7 +791,71 @@ export function TableDataView() {
   };
 
   return (
-    <div className="flex flex-col h-full wb-grid-surface">
+    <div
+      className="flex flex-col h-full wb-grid-surface"
+      onKeyDownCapture={(event) => {
+        if (!event.metaKey && !event.ctrlKey) return;
+        if (event.key === "+" || event.key === "=") {
+          event.preventDefault();
+          setGridZoomPercent((value) => stepGridZoom(value, 1));
+        } else if (event.key === "-") {
+          event.preventDefault();
+          setGridZoomPercent((value) => stepGridZoom(value, -1));
+        } else if (event.key === "0") {
+          event.preventDefault();
+          setGridZoomPercent(dataGridSettings.zoomPercent);
+        }
+      }}
+      onWheelCapture={(event) => {
+        if (!event.metaKey && !event.ctrlKey) return;
+        event.preventDefault();
+        setGridZoomPercent((value) =>
+          stepGridZoom(value, event.deltaY < 0 ? 1 : -1)
+        );
+      }}
+    >
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".csv,text/csv"
+        className="hidden"
+        onChange={(event) => {
+          const file = event.currentTarget.files?.[0];
+          event.currentTarget.value = "";
+          if (file) {
+            void handleImportCsv(file);
+          }
+        }}
+      />
+
+      <TableDataToolbar
+        isExecuting={activeTab.isExecuting}
+        readOnly={isReadOnlyRelation}
+        editingEnabled={isEditingEnabled}
+        hasEdits={hasEdits}
+        selectedRowCount={gridSelectionSummary.selectedRowCount}
+        zoomPercent={gridZoomPercent}
+        onRefresh={handleRefresh}
+        onAddRow={() => addNewRow(activeTab.id)}
+        onDeleteRows={() => void dataGridRef.current?.deleteSelectedRows()}
+        onSave={() => void commitEdits(activeTab.id)}
+        onRevert={() => cancelEdits(activeTab.id)}
+        onSearch={() => dataGridRef.current?.openSearch()}
+        onFitColumns={() => dataGridRef.current?.fitColumns()}
+        onResetColumns={() => resetColumnLayout(activeTab.id)}
+        onZoomOut={() =>
+          setGridZoomPercent((value) => stepGridZoom(value, -1))
+        }
+        onZoomReset={() => setGridZoomPercent(dataGridSettings.zoomPercent)}
+        onZoomIn={() =>
+          setGridZoomPercent((value) => stepGridZoom(value, 1))
+        }
+        onToggleEditing={() => setIsEditingEnabled((value) => !value)}
+        onImport={() => importInputRef.current?.click()}
+        onExportCsv={() => void handleExport("csv")}
+        onExportJson={() => void handleExport("json")}
+      />
+
       {/* Query Builder Filter Row */}
       {(result || fallbackColumns.length > 0) && (
         <GridFilterRow
@@ -757,21 +872,7 @@ export function TableDataView() {
         />
       )}
 
-      <div className="shrink-0 border-b wb-data-toolbar px-3 py-2">
-        <div className="flex min-w-0 items-center justify-between gap-3">
-          <input
-            ref={importInputRef}
-            type="file"
-            accept=".csv,text/csv"
-            className="hidden"
-            onChange={(event) => {
-              const file = event.currentTarget.files?.[0];
-              event.currentTarget.value = "";
-              if (file) {
-                void handleImportCsv(file);
-              }
-            }}
-          />
+      <div className="flex h-8 shrink-0 items-center justify-between gap-3 border-b wb-data-toolbar px-3">
           <div className="flex min-w-0 flex-1 items-center gap-3 text-xs text-[hsl(var(--wb-text-muted))]">
             <span className="flex min-w-0 items-center gap-1.5">
               <TableProperties size={13} className="shrink-0" />
@@ -801,44 +902,6 @@ export function TableDataView() {
               variant="ghost"
               size="sm"
               className="h-7 shrink-0 px-2 text-xs text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))]"
-              onClick={() => importInputRef.current?.click()}
-              disabled={activeTab.isExecuting || isReadOnlyRelation}
-              title={
-                isReadOnlyRelation
-                  ? "Import is disabled for read-only objects"
-                  : "Import CSV into this table"
-              }
-            >
-              <Upload size={13} className="mr-1.5" />
-              Import
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 shrink-0 px-2 text-xs text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))]"
-              onClick={() => void handleExport("csv")}
-              disabled={activeTab.isExecuting}
-              title="Export table data as CSV"
-            >
-              <Download size={13} className="mr-1.5" />
-              CSV
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 shrink-0 px-2 text-xs text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))]"
-              onClick={() => void handleExport("json")}
-              disabled={activeTab.isExecuting}
-              title="Export table data as JSON"
-            >
-              <FileJson size={13} className="mr-1.5" />
-              JSON
-            </Button>
-            <div className="mx-1 h-4 w-px bg-[hsl(var(--wb-border-subtle))]" />
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 shrink-0 px-2 text-xs text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))]"
               onClick={() => setShowStructure((value) => !value)}
               title="Toggle table structure"
             >
@@ -846,18 +909,17 @@ export function TableDataView() {
               Structure
             </Button>
           </div>
-        </div>
+      </div>
         {metadataError && (
-          <div className="mt-1 truncate text-xs text-destructive">
+          <div className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] px-3 py-1 text-xs text-destructive">
             {metadataError}
           </div>
         )}
         {isMetadataLoading && !metadataError && (
-          <div className="mt-1 text-xs text-[hsl(var(--wb-text-muted))]">
+          <div className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] px-3 py-1 text-xs text-[hsl(var(--wb-text-muted))]">
             Loading structure...
           </div>
         )}
-      </div>
 
       {showStructure && (
         <div className="grid max-h-44 shrink-0 grid-cols-3 gap-4 overflow-auto border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 py-2 text-xs">
@@ -1029,75 +1091,58 @@ export function TableDataView() {
         </div>
       )}
 
-      <div className="h-9 shrink-0 border-b wb-data-toolbar flex items-center justify-between px-3">
-        <div className="text-xs text-[hsl(var(--wb-text-muted))]">
-          {totalRows == null
-            ? `${visibleRows.toLocaleString()} rows`
-            : `${startRow.toLocaleString()}-${endRow.toLocaleString()} of ${totalRows.toLocaleString()}`}
-        </div>
-        <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="wb-icon-button h-7 w-7"
-            disabled={activeTab.isExecuting}
-            onClick={() => void handleExport("csv")}
-            title="Export CSV"
+      {/* Main Grid View */}
+      <div className="relative flex-1 min-h-0 wb-grid-surface">
+        <DataGrid
+          ref={dataGridRef}
+          overrideColumns={fallbackColumns}
+          readOnly={isGridReadOnly}
+          zoomPercent={gridZoomPercent}
+          onSelectionSummaryChange={setGridSelectionSummary}
+        />
+        <div className="absolute bottom-3 left-1/2 z-40 flex h-8 -translate-x-1/2 items-center gap-0.5 rounded-[6px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised)/0.94)] px-1 shadow-[0_8px_22px_rgba(0,0,0,0.26)] backdrop-blur-sm">
+          <button
+            type="button"
+            className="wb-icon-button"
+            disabled={!canPrevious}
+            onClick={handleFirst}
+            title="First page"
           >
-            <Download size={14} />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="wb-icon-button h-7 w-7"
-            disabled={activeTab.isExecuting}
-            onClick={() => void handleExport("json")}
-            title="Export JSON"
-          >
-            <FileJson size={14} />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="wb-icon-button h-7 w-7"
-            disabled={activeTab.isExecuting}
-            onClick={handleRefresh}
-            title="Refresh page"
-          >
-            <RefreshCw size={14} />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="wb-icon-button h-7 w-7"
+            <ChevronsLeft size={13} />
+          </button>
+          <button
+            type="button"
+            className="wb-icon-button"
             disabled={!canPrevious}
             onClick={handlePrevious}
             title="Previous page"
           >
-            <ChevronLeft size={14} />
-          </Button>
-          <span className="min-w-14 text-center text-xs text-[hsl(var(--wb-text-muted))]">
-            {page + 1}
+            <ChevronLeft size={13} />
+          </button>
+          <span className="min-w-[112px] px-2 text-center text-[10px] tabular-nums text-[hsl(var(--wb-text-muted))]">
+            {totalRows == null
+              ? `${visibleRows.toLocaleString()} rows`
+              : `${startRow.toLocaleString()}-${endRow.toLocaleString()} of ${totalRows.toLocaleString()}`}
           </span>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="wb-icon-button h-7 w-7"
+          <button
+            type="button"
+            className="wb-icon-button"
             disabled={!canNext}
             onClick={handleNext}
             title="Next page"
           >
-            <ChevronRight size={14} />
-          </Button>
+            <ChevronRight size={13} />
+          </button>
+          <button
+            type="button"
+            className="wb-icon-button"
+            disabled={!canLast}
+            onClick={handleLast}
+            title="Last page"
+          >
+            <ChevronsRight size={13} />
+          </button>
         </div>
-      </div>
-
-      {/* Main Grid View */}
-      <div className="flex-1 min-h-0 wb-grid-surface">
-        <DataGrid
-          overrideColumns={fallbackColumns}
-          readOnly={isReadOnlyRelation}
-        />
       </div>
       <CreateIndexDialog
         isOpen={isIndexDialogOpen}
@@ -1111,6 +1156,7 @@ export function TableDataView() {
         isOpen={isConstraintDialogOpen}
         onClose={() => setIsConstraintDialogOpen(false)}
         connectionId={tabConnectionId || ""}
+        driver={driver}
         schema={activeTab.schemaName || ""}
         tableName={activeTab.tableName || ""}
         columns={metadataColumns}

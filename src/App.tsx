@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { ThemeProvider } from "@/theme";
 import { useConnectionStore } from "@/store/useConnectionStore";
+import { useSettingsStore } from "@/store/useSettingsStore";
 import { useShortcuts } from "@/hooks/useShortcuts";
 import { WorkspacePage } from "@/pages/workspace";
 import { Loader2 } from "lucide-react";
@@ -9,13 +10,28 @@ import { LspConnectionSyncer } from "@/components/lsp";
 function App() {
   // All hooks must be called before any conditional returns
   const { loadConnections, isLoading } = useConnectionStore();
+  const { loadSettings } = useSettingsStore();
 
   // Register app-wide shortcuts (not system-wide, only when app is focused)
   useShortcuts();
 
   useEffect(() => {
-    loadConnections();
-  }, [loadConnections]);
+    void loadSettings().finally(() => loadConnections());
+  }, [loadConnections, loadSettings]);
+
+  useEffect(() => {
+    const reloadExternalSettings = () => {
+      if (document.visibilityState === "visible") {
+        void loadSettings();
+      }
+    };
+    window.addEventListener("focus", reloadExternalSettings);
+    document.addEventListener("visibilitychange", reloadExternalSettings);
+    return () => {
+      window.removeEventListener("focus", reloadExternalSettings);
+      document.removeEventListener("visibilitychange", reloadExternalSettings);
+    };
+  }, [loadSettings]);
 
   if (isLoading) {
     return (

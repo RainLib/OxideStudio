@@ -1,6 +1,6 @@
 # OxideStudio 🚀
 
-![Release Build](https://github.com/LikeRainDay/OxideStudio/actions/workflows/release.yml/badge.svg)
+![Release Build](https://github.com/RainLib/OxideStudio/actions/workflows/release.yml/badge.svg)
 
 **OxideStudio** 是一个基于 Rust 和 Tauri 重构的高性能、低内存占用的开源数据库客户端。
 
@@ -10,12 +10,12 @@
 
 ## ✨ 核心优势
 
-- **🚀 极速启动**: 得益于 Rust 后端，冷启动速度相比 Electron 应用提升 300%+。
-- **📦 轻量安装**: 安装包体积仅约 10MB（相比原版减少 90%+）。
-- **💾 低内存占用**: 运行时内存占用通常在 50MB 以下，极致节省系统资源。
+- **🗄️ 多数据库支持**: 支持 PostgreSQL、MySQL、SQLite、SQL Server、MongoDB、Redis 和 Elasticsearch。
 - **🎨 现代化 UI**: 基于 React + Tailwind CSS + Shadcn UI，提供丝滑的操作体验。
 - **📊 高性能表格**: 使用 Glide Data Grid 渲染引擎，支持百万级数据虚拟滚动不卡顿。
 - **💻 专业编辑器**: 集成 Monaco Editor (VS Code 同款)，支持 SQL 语法高亮、折叠及智能补全。
+- **🧠 智能辅助**: 内置可审批的 AI 工具调用、CLI/MCP 接口和操作审计。
+- **🔄 安全更新**: 支持签名校验的跨平台应用内更新。
 
 ---
 
@@ -24,7 +24,7 @@
 ### 后端 (Rust Process)
 
 - **Tauri v2**: 跨平台应用框架。
-- **SQLx**: 异步数据库访问层，支持 PostgreSQL, MySQL, SQLite, SQL Server。
+- **SQLx 与原生驱动**: 提供关系型数据库及 MongoDB、Redis、Elasticsearch 的统一访问能力。
 - **Tokio**: 高性能异步运行时。
 - **Anyhow/Thiserror**: 严谨的错误处理。
 
@@ -96,17 +96,16 @@ npm run tauri build
 
 ### 触发条件
 
-工作流会在以下情况下自动运行：
+工作流会在以下情况下运行：
 
-- 推送代码到 `main` 或 `develop` 分支
-- 创建新的版本标签（如 `v0.1.0`）
-- 手动触发（在 GitHub Actions 页面）
+- 推送版本标签（如 `v0.2.0`）
+- 在 GitHub Actions 页面手动触发，并填写与应用版本一致的标签
 
 ### 下载构建产物
 
 1. 访问仓库的 **Actions** 页面
-2. 选择最新的 **Release Build** 工作流
-3. 在 **Artifacts** 部分下载对应平台的安装包：
+2. 打开对应版本的 GitHub Release
+3. 下载对应平台的安装包：
    - **Windows**: `.msi` 或 `.exe` 安装程序
    - **macOS**: `.dmg` 磁盘镜像
    - **Linux**: `.deb` 或 `.AppImage`
@@ -120,7 +119,9 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-工作流会自动创建 GitHub Release 草稿，并附带所有平台的构建产物。
+标签必须与 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json`
+中的版本一致。工作流会发布安装包、更新签名和 `latest.json`。签名密钥配置见
+[`docs/UPDATES.md`](docs/UPDATES.md)。
 
 ---
 
@@ -130,12 +131,17 @@ git push origin v0.1.0
 OxideStudio/
 ├── src/                # 前端 (React) 源码
 │   ├── components/    # 共享 UI 组件
-│   ├── lib/           # 工具函数 (cn, utils)
-│   └── assets/        # 静态资源
+│   ├── ai/            # AI 助手运行时、规划器与工具
+│   ├── services/      # Tauri、LSP 与应用服务
+│   ├── store/         # Zustand 状态管理
+│   └── lib/           # 通用工具与领域模型
 ├── src-tauri/          # 后端 (Rust) 源码
 │   ├── src/           # Rust 核心逻辑 (lib.rs, main.rs)
 │   ├── capabilities/  # Tauri 权限配置
 │   └── Cargo.toml      # Rust 依赖配置
+├── vendor/sql-lsp/     # 内置 SQL/NoSQL Language Server 子模块
+├── tests/frontend/     # Vitest 前端测试
+├── docs/               # 架构、开发与发布文档
 ├── .vscode/            # VS Code 编辑器配置
 └── components.json     # Shadcn UI 配置
 ```
@@ -145,10 +151,11 @@ OxideStudio/
 ## 🗺️ 路线图
 
 - [x] Phase 1: 核心环境搭建与技术选型
-- [ ] Phase 2: 后端驱动层 (SQLx) 与通讯协议抽象
-- [ ] Phase 3: SQL 执行引擎与 Glide Data Grid 数据展示
-- [ ] Phase 4: SSH 隧道实现 (russh)
-- [ ] Phase 5: 数据库管理 (表结构编辑、导入导出)
+- [x] Phase 2: 后端驱动层与通讯协议抽象
+- [x] Phase 3: SQL 执行引擎与 Glide Data Grid 数据展示
+- [x] Phase 4: SQL/NoSQL 智能补全与 AI 工具集成
+- [x] Phase 5: 表数据与结构管理、导入导出
+- [ ] Phase 6: SSH 隧道与更多数据库驱动
 
 ---
 

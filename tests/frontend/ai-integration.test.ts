@@ -784,6 +784,48 @@ describe("AI tool input validation", () => {
       }),
     ]);
   });
+
+  it("audits assistant policy blocks before returning approval status", async () => {
+    const registry = createTestRegistry();
+    const auditEntries: AiToolAuditEntry[] = [];
+    const runtime = createAssistantRuntime({
+      registry,
+      createContext: () => ({
+        ...createContext(),
+        audit: (entry) => auditEntries.push(entry),
+      }),
+      policy: DEFAULT_AI_TOOL_POLICY,
+    });
+
+    const context = {
+      ...createContext(),
+      audit: (entry: AiToolAuditEntry) => auditEntries.push(entry),
+    };
+    const results = await runtime.executeToolCalls(
+      [
+        {
+          id: "blocked-write",
+          toolName: "demo.write",
+          input: { value: "blocked" },
+        },
+      ],
+      context
+    );
+
+    expect(results).toEqual([
+      expect.objectContaining({
+        id: "blocked-write",
+        status: "requiresApproval",
+      }),
+    ]);
+    expect(auditEntries).toEqual([
+      expect.objectContaining({
+        toolName: "demo.write",
+        permissions: ["write"],
+        status: "blocked",
+      }),
+    ]);
+  });
 });
 
 describe("LangGraph planner bridge", () => {
@@ -976,10 +1018,16 @@ describe("model assistant planner", () => {
     await runtime.prepareTurnAsync({
       message: "inspect selected query",
       selectedText: largeSelection,
+      history: Array.from({ length: 14 }, (_, index) => ({
+        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        content: index === 13 ? largeSelection : `message ${index}`,
+      })),
     });
 
     expect(captured?.turn.selectedText).toContain("[truncated]");
     expect(captured?.turn.selectedText?.length).toBeLessThan(largeSelection.length);
+    expect(captured?.turn.history).toHaveLength(12);
+    expect(captured?.turn.history?.at(-1)?.content).toContain("[truncated]");
     expect(captured?.context.activeTab?.sql).toContain("[truncated]");
     expect(captured?.context.activeTab?.sql?.length).toBeLessThan(largeSql.length);
     expect(captured?.context.activeTab?.selection?.text).toContain("[truncated]");

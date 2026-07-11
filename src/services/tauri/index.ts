@@ -22,6 +22,7 @@ export * from "./ai.service";
 export * from "./database.service";
 export * from "./query.service";
 export * from "./schema.service";
+export * from "./settings.service";
 export * from "./store.service";
 export * from "./table.service";
 export * from "./transaction.service";
