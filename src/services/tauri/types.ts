@@ -190,6 +190,20 @@ export interface TableConstraintChangeResult {
 /**
  * 保存的连接配置
  */
+export type SshAuthMethod = "password" | "privateKey";
+
+export interface SshTunnelConfig {
+  enabled: boolean;
+  host: string;
+  port: number;
+  username: string;
+  authMethod: SshAuthMethod;
+  password?: string;
+  privateKeyPath?: string;
+  privateKeyPassphrase?: string;
+  strictHostKeyChecking: boolean;
+}
+
 export interface SavedConnection {
   id: string;
   projectId?: string;
@@ -201,6 +215,9 @@ export interface SavedConnection {
   user?: string;
   password?: string;
   database?: string;
+  connectionUrl?: string;
+  sslMode?: string;
+  sshTunnel?: SshTunnelConfig;
   tags?: string[];
   icon?: string;
   color?: string;
@@ -224,6 +241,12 @@ export interface CollectionInfo {
   namespace?: string | null;
   type?: string | null;
   documentCount?: number | null;
+}
+
+export interface CollectionPage {
+  items: CollectionInfo[];
+  nextCursor?: string | null;
+  total?: number | null;
 }
 
 /**

@@ -1,8 +1,7 @@
-import React, { useCallback, useEffect } from "react";
-import { GridColumn } from "@glideapps/glide-data-grid";
-import { Plus, Code, Table, Search, Trash2 } from "lucide-react";
+import { useCallback, useEffect } from "react";
+import type { GridColumn } from "@glideapps/glide-data-grid";
+import { Code2, Filter, Plus, Search, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -50,7 +49,10 @@ const operatorLabels: Record<FilterOperator, string> = {
   "<=": "<=",
 };
 
-export const GridFilterRow: React.FC<GridFilterRowProps> = ({
+const filterButtonClass =
+  "inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-[3px] px-1.5 text-[10px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:opacity-40";
+
+export function GridFilterRow({
   columns,
   mode,
   visualFilters,
@@ -59,277 +61,215 @@ export const GridFilterRow: React.FC<GridFilterRowProps> = ({
   onVisualFiltersChange,
   onSqlFilterChange,
   onSearch,
-}) => {
-  // Ensure we always have at least one filter in visual mode, and that it has a valid column
+}: GridFilterRowProps) {
   useEffect(() => {
-    if (mode === "visual") {
-      // 1. If we have no filters, and we have columns, add the first one default
-      if (visualFilters.length === 0 && columns.length > 0) {
-        const firstColumn = columns[0]?.id || columns[0]?.title || "";
-        onVisualFiltersChange([
-          {
-            column: firstColumn,
-            operator: "equals",
-            value: "",
-            logic: undefined,
-          },
-        ]);
-        return;
-      }
-
-      // 2. If existing filters have empty columns, but we have columns available, populate them
-      if (visualFilters.length > 0 && columns.length > 0) {
-        const firstColumn = columns[0]?.id || columns[0]?.title || "";
-        const needsUpdate = visualFilters.some((f) => !f.column);
-
-        if (needsUpdate) {
-          const updated = visualFilters.map((f) => {
-            if (!f.column) {
-              return { ...f, column: firstColumn };
-            }
-            return f;
-          });
-          onVisualFiltersChange(updated);
-        }
-      }
+    if (mode !== "visual" || columns.length === 0) return;
+    const firstColumn = String(columns[0]?.id || columns[0]?.title || "");
+    if (visualFilters.length === 0) {
+      onVisualFiltersChange([
+        { column: firstColumn, operator: "equals", value: "" },
+      ]);
+      return;
     }
-  }, [mode, visualFilters, columns, onVisualFiltersChange]);
+    if (visualFilters.some((filter) => !filter.column)) {
+      onVisualFiltersChange(
+        visualFilters.map((filter) =>
+          filter.column ? filter : { ...filter, column: firstColumn }
+        )
+      );
+    }
+  }, [columns, mode, onVisualFiltersChange, visualFilters]);
 
-  const handleAddFilter = useCallback(() => {
-    const firstColumn = columns[0]?.id || columns[0]?.title || "";
-    const newFilter: ColumnFilter = {
-      column: firstColumn,
-      operator: "equals",
-      value: "",
-      logic: "AND",
-    };
-    onVisualFiltersChange([...visualFilters, newFilter]);
-  }, [columns, visualFilters, onVisualFiltersChange]);
+  const updateFilter = useCallback(
+    (index: number, patch: Partial<ColumnFilter>) => {
+      onVisualFiltersChange(
+        visualFilters.map((filter, rowIndex) =>
+          rowIndex === index ? { ...filter, ...patch } : filter
+        )
+      );
+    },
+    [onVisualFiltersChange, visualFilters]
+  );
 
-  const handleRemoveFilter = useCallback(
+  const addFilter = useCallback(() => {
+    const firstColumn = String(columns[0]?.id || columns[0]?.title || "");
+    onVisualFiltersChange([
+      ...visualFilters,
+      { column: firstColumn, operator: "equals", value: "", logic: "AND" },
+    ]);
+  }, [columns, onVisualFiltersChange, visualFilters]);
+
+  const removeFilter = useCallback(
     (index: number) => {
-      // Don't allow removing the first filter
-      if (index === 0) return;
-      const updated = visualFilters.filter((_, i) => i !== index);
-      onVisualFiltersChange(updated);
+      onVisualFiltersChange(
+        visualFilters.filter((_filter, rowIndex) => rowIndex !== index)
+      );
     },
-    [visualFilters, onVisualFiltersChange]
+    [onVisualFiltersChange, visualFilters]
   );
 
-  const handleToggleLogic = useCallback(
-    (index: number) => {
-      // First filter logic cannot be toggled
-      if (index === 0) return;
-
-      const updated = [...visualFilters];
-      const current = updated[index];
-      if (current) {
-        updated[index] = {
-          ...current,
-          logic: current.logic === "AND" ? "OR" : "AND",
-        };
-      }
-      onVisualFiltersChange(updated);
-    },
-    [visualFilters, onVisualFiltersChange]
-  );
-
-  const handleColumnChange = useCallback(
-    (index: number, column: string) => {
-      const updated = [...visualFilters];
-      const current = updated[index];
-      if (current) {
-        updated[index] = {
-          ...current,
-          column,
-        };
-      }
-      onVisualFiltersChange(updated);
-    },
-    [visualFilters, onVisualFiltersChange]
-  );
-
-  const handleOperatorChange = useCallback(
-    (index: number, operator: FilterOperator) => {
-      const updated = [...visualFilters];
-      const current = updated[index];
-      if (current) {
-        updated[index] = {
-          ...current,
-          operator,
-        };
-      }
-      onVisualFiltersChange(updated);
-    },
-    [visualFilters, onVisualFiltersChange]
-  );
-
-  const handleValueChange = useCallback(
-    (index: number, value: string) => {
-      const updated = [...visualFilters];
-      const current = updated[index];
-      if (current) {
-        updated[index] = {
-          ...current,
-          value,
-        };
-      }
-      onVisualFiltersChange(updated);
-    },
-    [visualFilters, onVisualFiltersChange]
-  );
+  if (mode === "sql") {
+    return (
+      <div className="flex h-8 shrink-0 items-center gap-1 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-1.5">
+        <button
+          type="button"
+          className={filterButtonClass}
+          onClick={() => onModeChange("visual")}
+          title="Use column filters"
+        >
+          <Code2 size={12} />
+          WHERE
+        </button>
+        <Input
+          value={sqlFilter}
+          onChange={(event) => onSqlFilterChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") onSearch?.();
+          }}
+          placeholder="SQL condition, for example: status = 'active'"
+          aria-label="SQL WHERE condition"
+          spellCheck={false}
+          className="h-6 min-w-0 flex-1 border-transparent bg-transparent px-2 font-mono text-[11px] focus-visible:border-[hsl(var(--wb-border))] focus-visible:ring-0"
+        />
+        {sqlFilter && (
+          <button
+            type="button"
+            className={filterButtonClass}
+            onClick={() => onSqlFilterChange("")}
+            title="Clear condition"
+            aria-label="Clear SQL condition"
+          >
+            <X size={12} />
+          </button>
+        )}
+        <button
+          type="button"
+          className={filterButtonClass}
+          onClick={onSearch}
+          title="Apply WHERE condition"
+        >
+          <Search size={12} />
+          Apply
+        </button>
+      </div>
+    );
+  }
 
   return (
-    <div className="border-b wb-data-toolbar px-2 py-2">
-      <div className="flex flex-col gap-2">
-        {/* Row 1: Mode/Logic + Filter Inputs */}
-        {mode === "sql" ? (
-          <div className="flex items-center gap-2">
-            <div className="w-[48px] shrink-0">
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => onModeChange("visual")}
-                className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                title="Switch to Visual mode"
+    <div className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-1.5 py-1">
+      <div className="space-y-1">
+        {visualFilters.map((filter, index) => (
+          <div key={index} className="flex h-6 min-w-0 items-center gap-1">
+            {index === 0 ? (
+              <button
+                type="button"
+                className={filterButtonClass}
+                onClick={() => onModeChange("sql")}
+                title="Write a SQL WHERE condition"
               >
-                <Code size={16} />
-              </Button>
-            </div>
-            <Input
-              type="text"
-              placeholder="WHERE clause (e.g. id > 10)"
-              value={sqlFilter}
-              onChange={(e) => onSqlFilterChange(e.target.value)}
-              className="h-7 flex-1 text-xs font-mono bg-[hsl(var(--wb-editor))] border-[hsl(var(--wb-border))]"
-            />
-            <Button
-              variant="default"
-              size="icon"
-              onClick={onSearch}
-              className="h-7 w-7 bg-primary text-primary-foreground hover:bg-primary/90"
-              title="Search"
+                <Filter size={12} />
+                WHERE
+              </button>
+            ) : (
+              <button
+                type="button"
+                className={`${filterButtonClass} w-[52px] font-mono`}
+                onClick={() =>
+                  updateFilter(index, {
+                    logic: filter.logic === "OR" ? "AND" : "OR",
+                  })
+                }
+                title="Toggle AND / OR"
+              >
+                {filter.logic || "AND"}
+              </button>
+            )}
+
+            <Select
+              value={filter.column}
+              onValueChange={(column) => updateFilter(index, { column })}
             >
-              <Search size={14} />
-            </Button>
+              <SelectTrigger className="h-6 w-[160px] shrink-0 border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] px-2 text-[11px]">
+                <SelectValue placeholder="Column" />
+              </SelectTrigger>
+              <SelectContent>
+                {columns.map((column) => {
+                  const id = String(column.id || column.title);
+                  return (
+                    <SelectItem key={id} value={id}>
+                      {column.title}
+                    </SelectItem>
+                  );
+                })}
+              </SelectContent>
+            </Select>
+
+            <Select
+              value={filter.operator}
+              onValueChange={(operator) =>
+                updateFilter(index, { operator: operator as FilterOperator })
+              }
+            >
+              <SelectTrigger className="h-6 w-[104px] shrink-0 border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] px-2 text-[11px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {Object.entries(operatorLabels).map(([operator, label]) => (
+                  <SelectItem key={operator} value={operator}>
+                    {label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <Input
+              value={filter.value}
+              onChange={(event) =>
+                updateFilter(index, { value: event.target.value })
+              }
+              onKeyDown={(event) => {
+                if (event.key === "Enter") onSearch?.();
+              }}
+              placeholder="Value"
+              aria-label={`Filter value for ${filter.column}`}
+              className="h-6 min-w-[120px] flex-1 border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] px-2 text-[11px] focus-visible:ring-0"
+            />
+
+            {index === 0 ? (
+              <>
+                <button
+                  type="button"
+                  className={filterButtonClass}
+                  onClick={addFilter}
+                  title="Add condition"
+                  aria-label="Add filter condition"
+                >
+                  <Plus size={12} />
+                </button>
+                <button
+                  type="button"
+                  className={filterButtonClass}
+                  onClick={onSearch}
+                  title="Apply filters"
+                >
+                  <Search size={12} />
+                  Apply
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className={filterButtonClass}
+                onClick={() => removeFilter(index)}
+                title="Remove condition"
+                aria-label="Remove filter condition"
+              >
+                <X size={12} />
+              </button>
+            )}
           </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {visualFilters.map((filter, index) => {
-              const isFirst = index === 0;
-              return (
-                <div key={index} className="flex items-center gap-2">
-                  {/* Left Column: Mode Toggle (Row 0) or Logic Toggle (Row > 0) */}
-                  <div className="w-[48px] shrink-0 flex items-center justify-start">
-                    {isFirst ? (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => onModeChange("sql")}
-                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                        title="Switch to SQL mode"
-                      >
-                        <Table size={16} />
-                      </Button>
-                    ) : (
-                      <button
-                        onClick={() => handleToggleLogic(index)}
-                        className="text-[10px] font-bold font-mono px-1.5 py-0.5 rounded-[3px] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text-muted))] hover:text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] border border-[hsl(var(--wb-border))] uppercase w-8 text-center transition-colors"
-                      >
-                        {filter.logic || "AND"}
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Filter Inputs Group */}
-                  <div className="flex-1 flex items-center gap-2 rounded-[4px] border border-transparent bg-[hsl(var(--wb-editor)/0.42)] p-1 transition-colors hover:border-[hsl(var(--wb-border))]">
-                    <div className="min-w-[120px]">
-                      <Select
-                        value={filter.column}
-                        onValueChange={(val) => handleColumnChange(index, val)}
-                      >
-                        <SelectTrigger className="h-7 text-xs bg-[hsl(var(--wb-editor))] border-[hsl(var(--wb-border))] px-2">
-                          <SelectValue placeholder="Column" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {columns.map((col) => {
-                            const colId = col.id || col.title;
-                            return (
-                              <SelectItem key={colId} value={colId}>
-                                {col.title}
-                              </SelectItem>
-                            );
-                          })}
-                        </SelectContent>
-                      </Select>
-                    </div>
-
-                    <div className="w-[100px]">
-                      <Select
-                        value={filter.operator}
-                        onValueChange={(val) =>
-                          handleOperatorChange(index, val as FilterOperator)
-                        }
-                      >
-                        <SelectTrigger className="h-7 text-xs bg-[hsl(var(--wb-editor))] border-[hsl(var(--wb-border))] px-2">
-                          <SelectValue placeholder="Op" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {Object.entries(operatorLabels).map(([op, label]) => (
-                            <SelectItem key={op} value={op}>
-                              {label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-
-                    <Input
-                      type="text"
-                      placeholder="Value"
-                      value={filter.value}
-                      onChange={(e) => handleValueChange(index, e.target.value)}
-                      className="h-7 flex-1 text-xs bg-[hsl(var(--wb-editor))] border-[hsl(var(--wb-border))] text-[hsl(var(--wb-text))] placeholder:text-[hsl(var(--wb-text-muted))] min-w-[100px]"
-                    />
-
-                    {/* Right Action: Delete (if >0) OR Add+Search (if 0) */}
-                    {isFirst ? (
-                      <div className="flex items-center gap-1 ml-1">
-                        <Button
-                          variant="secondary"
-                          size="icon"
-                          onClick={handleAddFilter}
-                          className="h-7 w-7"
-                          title="Add Filter"
-                        >
-                          <Plus size={14} />
-                        </Button>
-                        <Button
-                          variant="default"
-                          size="icon"
-                          onClick={onSearch}
-                          className="h-7 w-7 bg-primary text-primary-foreground hover:bg-primary/90"
-                          title="Search"
-                        >
-                          <Search size={14} />
-                        </Button>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => handleRemoveFilter(index)}
-                        className="h-7 w-7 flex items-center justify-center text-[hsl(var(--wb-text-muted))] hover:text-red-400 hover:bg-[hsl(var(--wb-hover))] rounded transition-colors ml-1"
-                        title="Remove filter"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+        ))}
       </div>
     </div>
   );
-};
+}

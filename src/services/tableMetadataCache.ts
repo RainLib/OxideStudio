@@ -13,10 +13,15 @@ import type {
 
 const TABLE_METADATA_CACHE_KIND = "TABLE_METADATA_CACHE";
 const TABLE_METADATA_CACHE_VERSION = 1;
+const DATABASE_SCOPED_TABLE_METADATA_CACHE_VERSION = 2;
+const ACTIVE_PROJECT_KEY = "oxide-studio-active-project";
+const DEFAULT_PROJECT_ID = "sqls";
 
 export interface TableMetadataIdentity {
+  projectId?: string;
   connectionId: string;
   driver: DatabaseDriver;
+  databaseName?: string;
   schema: string;
   table: string;
 }
@@ -39,7 +44,9 @@ export interface TableMetadataSnapshot {
 
 interface StoredTableMetadata {
   version: number;
+  projectId?: string;
   driver: DatabaseDriver;
+  databaseName?: string;
   schema: string;
   table: string;
   columns?: ColumnInfo[];
@@ -54,7 +61,29 @@ interface StoredTableMetadata {
 const metadataLoads = new Map<string, Promise<TableMetadataSnapshot>>();
 const cacheWrites = new Map<string, Promise<StoredTableMetadata>>();
 
-function tableCacheKey(identity: TableMetadataIdentity) {
+type ResolvedTableMetadataIdentity = TableMetadataIdentity & {
+  projectId: string;
+};
+
+function activeProjectId() {
+  try {
+    return localStorage.getItem(ACTIVE_PROJECT_KEY) || DEFAULT_PROJECT_ID;
+  } catch {
+    return DEFAULT_PROJECT_ID;
+  }
+}
+
+function resolveIdentity<T extends TableMetadataIdentity>(
+  identity: T
+): T & ResolvedTableMetadataIdentity {
+  return {
+    ...identity,
+    projectId: identity.projectId || activeProjectId(),
+    databaseName: identity.databaseName || undefined,
+  };
+}
+
+function legacyTableCacheKey(identity: TableMetadataIdentity) {
   return [
     identity.connectionId,
     identity.driver,
@@ -63,14 +92,40 @@ function tableCacheKey(identity: TableMetadataIdentity) {
   ].join(":");
 }
 
+function tableCacheKey(identity: ResolvedTableMetadataIdentity) {
+  if (!identity.databaseName) return legacyTableCacheKey(identity);
+
+  return `oxide:table-metadata:v2:${encodeURIComponent(
+    JSON.stringify([
+      identity.projectId,
+      identity.connectionId,
+      identity.driver,
+      identity.databaseName,
+      identity.schema,
+      identity.table,
+    ])
+  )}`;
+}
+
+function scopedTableCacheKey(identity: ResolvedTableMetadataIdentity) {
+  return `${encodeURIComponent(identity.projectId)}:${tableCacheKey(identity)}`;
+}
+
+function cacheVersion(identity: TableMetadataIdentity) {
+  return identity.databaseName
+    ? DATABASE_SCOPED_TABLE_METADATA_CACHE_VERSION
+    : TABLE_METADATA_CACHE_VERSION;
+}
+
 function metadataLoadKey(options: LoadTableMetadataOptions) {
-  return `${tableCacheKey(options)}:indexes:${
+  const identity = resolveIdentity(options);
+  return `${scopedTableCacheKey(identity)}:indexes:${
     options.includeIndexes !== false
   }:constraints:${options.includeConstraints !== false}`;
 }
 
 export function tableMetadataParentId(identity: TableMetadataIdentity) {
-  return tableCacheKey(identity);
+  return tableCacheKey(resolveIdentity(identity));
 }
 
 function tableMetadataResourceId(identity: TableMetadataIdentity) {
@@ -79,15 +134,19 @@ function tableMetadataResourceId(identity: TableMetadataIdentity) {
 
 function parseCachedMetadata(
   resource: Resource | undefined,
-  identity: TableMetadataIdentity
+  identity: ResolvedTableMetadataIdentity
 ): StoredTableMetadata | null {
   const metadata = resource?.metadata as Partial<StoredTableMetadata> | undefined;
   if (
     !metadata ||
-    metadata.version !== TABLE_METADATA_CACHE_VERSION ||
+    metadata.version !== cacheVersion(identity) ||
     metadata.driver !== identity.driver ||
+    (metadata.databaseName || undefined) !== identity.databaseName ||
     metadata.schema !== identity.schema ||
-    metadata.table !== identity.table
+    metadata.table !== identity.table ||
+    (identity.databaseName &&
+      (metadata.projectId !== identity.projectId ||
+        resource?.project_id !== identity.projectId))
   ) {
     return null;
   }
@@ -98,15 +157,17 @@ function parseCachedMetadata(
 export async function readCachedTableMetadata(
   identity: TableMetadataIdentity
 ): Promise<(StoredTableMetadata & { updatedAt: number }) | null> {
+  const resolvedIdentity = resolveIdentity(identity);
   try {
     const resources = await storeService.getResources(
-      identity.connectionId,
-      tableMetadataParentId(identity)
+      resolvedIdentity.connectionId,
+      tableMetadataParentId(resolvedIdentity),
+      resolvedIdentity.projectId
     );
     const resource = resources.find(
       (item) => item.kind === TABLE_METADATA_CACHE_KIND
     );
-    const metadata = parseCachedMetadata(resource, identity);
+    const metadata = parseCachedMetadata(resource, resolvedIdentity);
     return metadata
       ? { ...metadata, updatedAt: resource?.last_updated || 0 }
       : null;
@@ -119,34 +180,41 @@ async function persistTableMetadata(
   identity: TableMetadataIdentity,
   patch: Partial<StoredTableMetadata>
 ): Promise<StoredTableMetadata> {
-  const key = tableCacheKey(identity);
+  const resolvedIdentity = resolveIdentity(identity);
+  const key = scopedTableCacheKey(resolvedIdentity);
   const previousWrite = cacheWrites.get(key) || Promise.resolve(null);
   const nextWrite = previousWrite
     .catch(() => null)
     .then(async () => {
-      const current = await readCachedTableMetadata(identity);
+      const current = await readCachedTableMetadata(resolvedIdentity);
       const metadata: StoredTableMetadata = {
-        version: TABLE_METADATA_CACHE_VERSION,
-        driver: identity.driver,
-        schema: identity.schema,
-        table: identity.table,
         ...(current || {}),
+        version: cacheVersion(resolvedIdentity),
+        projectId: resolvedIdentity.projectId,
+        driver: resolvedIdentity.driver,
+        databaseName: resolvedIdentity.databaseName,
+        schema: resolvedIdentity.schema,
+        table: resolvedIdentity.table,
         ...patch,
       };
       delete (metadata as Partial<StoredTableMetadata> & { updatedAt?: number })
         .updatedAt;
 
-      await storeService.saveResources([
-        {
-          id: tableMetadataResourceId(identity),
-          connection_id: identity.connectionId,
-          parent_id: tableMetadataParentId(identity),
-          kind: TABLE_METADATA_CACHE_KIND,
-          name: identity.table,
-          metadata,
-          last_updated: Date.now(),
-        },
-      ]);
+      await storeService.saveResources(
+        [
+          {
+            id: tableMetadataResourceId(resolvedIdentity),
+            project_id: resolvedIdentity.projectId,
+            connection_id: resolvedIdentity.connectionId,
+            parent_id: tableMetadataParentId(resolvedIdentity),
+            kind: TABLE_METADATA_CACHE_KIND,
+            name: resolvedIdentity.table,
+            metadata,
+            last_updated: Date.now(),
+          },
+        ],
+        resolvedIdentity.projectId
+      );
       return metadata;
     });
 
@@ -178,6 +246,7 @@ async function loadTableMetadataRemote(
   options: LoadTableMetadataOptions,
   cached: (StoredTableMetadata & { updatedAt: number }) | null
 ): Promise<TableMetadataSnapshot> {
+  const resolvedOptions = resolveIdentity(options);
   const includeIndexes = options.includeIndexes !== false;
   const includeConstraints = options.includeConstraints !== false;
   const shouldLoadColumns = options.force || !Array.isArray(cached?.columns);
@@ -188,23 +257,52 @@ async function loadTableMetadataRemote(
     (options.force || !Array.isArray(cached?.constraints));
 
   const columnsPromise = shouldLoadColumns
-    ? schemaService.getColumns(
-        options.connectionId,
-        options.schema,
-        options.table
-      )
+    ? resolvedOptions.databaseName
+      ? schemaService.getDatabaseColumns(
+          resolvedOptions.connectionId,
+          resolvedOptions.databaseName,
+          resolvedOptions.schema,
+          resolvedOptions.table
+        )
+      : schemaService.getColumns(
+          resolvedOptions.connectionId,
+          resolvedOptions.schema,
+          resolvedOptions.table
+        )
     : Promise.resolve(cached?.columns || []);
   const indexesPromise = shouldLoadIndexes
-    ? schemaService
-        .getIndexes(options.connectionId, options.schema, options.table)
+    ? (resolvedOptions.databaseName
+        ? schemaService.getDatabaseIndexes(
+            resolvedOptions.connectionId,
+            resolvedOptions.databaseName,
+            resolvedOptions.schema,
+            resolvedOptions.table
+          )
+        : schemaService.getIndexes(
+            resolvedOptions.connectionId,
+            resolvedOptions.schema,
+            resolvedOptions.table
+          )
+      )
         .catch((error) => {
           console.warn("Failed to refresh cached table indexes", error);
           return cached?.indexes || [];
         })
     : Promise.resolve(cached?.indexes || []);
   const constraintsPromise = shouldLoadConstraints
-    ? schemaService
-        .getConstraints(options.connectionId, options.schema, options.table)
+    ? (resolvedOptions.databaseName
+        ? schemaService.getDatabaseConstraints(
+            resolvedOptions.connectionId,
+            resolvedOptions.databaseName,
+            resolvedOptions.schema,
+            resolvedOptions.table
+          )
+        : schemaService.getConstraints(
+            resolvedOptions.connectionId,
+            resolvedOptions.schema,
+            resolvedOptions.table
+          )
+      )
         .catch((error) => {
           console.warn("Failed to refresh cached table constraints", error);
           return cached?.constraints || [];
@@ -228,7 +326,7 @@ async function loadTableMetadataRemote(
   }
 
   try {
-    await persistTableMetadata(options, patch);
+    await persistTableMetadata(resolvedOptions, patch);
   } catch (error) {
     console.warn("Failed to persist table metadata cache", error);
   }
@@ -247,7 +345,8 @@ async function loadTableMetadataRemote(
 export async function loadTableMetadata(
   options: LoadTableMetadataOptions
 ): Promise<TableMetadataSnapshot> {
-  const cached = await readCachedTableMetadata(options);
+  const resolvedOptions = resolveIdentity(options);
+  const cached = await readCachedTableMetadata(resolvedOptions);
   const cacheSatisfiesRequest = Boolean(
     !options.force &&
       Array.isArray(cached?.columns) &&
@@ -259,13 +358,13 @@ export async function loadTableMetadata(
     return cachedSnapshot(cached);
   }
 
-  const key = metadataLoadKey(options);
+  const key = metadataLoadKey(resolvedOptions);
   if (!options.force) {
     const pending = metadataLoads.get(key);
     if (pending) return pending;
   }
 
-  const load = loadTableMetadataRemote(options, cached);
+  const load = loadTableMetadataRemote(resolvedOptions, cached);
   metadataLoads.set(key, load);
   try {
     return await load;
@@ -281,7 +380,8 @@ export async function loadTableDdl(
   objectType?: string | null,
   force = false
 ): Promise<string> {
-  const cached = await readCachedTableMetadata(identity);
+  const resolvedIdentity = resolveIdentity(identity);
+  const cached = await readCachedTableMetadata(resolvedIdentity);
   const normalizedObjectType = objectType || null;
   if (
     !force &&
@@ -292,14 +392,15 @@ export async function loadTableDdl(
   }
 
   const ddl = await tableService.getTableDdl(
-    identity.connectionId,
-    identity.driver,
-    identity.schema,
-    identity.table,
-    objectType
+    resolvedIdentity.connectionId,
+    resolvedIdentity.driver,
+    resolvedIdentity.schema,
+    resolvedIdentity.table,
+    objectType,
+    resolvedIdentity.databaseName
   );
   try {
-    await persistTableMetadata(identity, {
+    await persistTableMetadata(resolvedIdentity, {
       ddl,
       ddlObjectType: normalizedObjectType,
     });
@@ -314,7 +415,14 @@ export async function loadViewDefinition(
   objectType?: string | null,
   force = false
 ): Promise<string> {
-  const cached = await readCachedTableMetadata(identity);
+  const resolvedIdentity = resolveIdentity(identity);
+  if (resolvedIdentity.databaseName) {
+    throw new Error(
+      `View definitions are unavailable for read-only database "${resolvedIdentity.databaseName}".`
+    );
+  }
+
+  const cached = await readCachedTableMetadata(resolvedIdentity);
   const normalizedObjectType = objectType || null;
   if (
     !force &&
@@ -325,14 +433,14 @@ export async function loadViewDefinition(
   }
 
   const definition = await tableService.getViewDefinition(
-    identity.connectionId,
-    identity.driver,
-    identity.schema,
-    identity.table,
+    resolvedIdentity.connectionId,
+    resolvedIdentity.driver,
+    resolvedIdentity.schema,
+    resolvedIdentity.table,
     objectType
   );
   try {
-    await persistTableMetadata(identity, {
+    await persistTableMetadata(resolvedIdentity, {
       viewDefinition: definition,
       viewObjectType: normalizedObjectType,
     });
@@ -345,11 +453,13 @@ export async function loadViewDefinition(
 export async function invalidateTableMetadata(
   identity: TableMetadataIdentity
 ): Promise<void> {
+  const resolvedIdentity = resolveIdentity(identity);
   try {
     await storeService.deleteResources(
-      identity.connectionId,
-      tableMetadataParentId(identity),
-      TABLE_METADATA_CACHE_KIND
+      resolvedIdentity.connectionId,
+      tableMetadataParentId(resolvedIdentity),
+      TABLE_METADATA_CACHE_KIND,
+      resolvedIdentity.projectId
     );
   } catch (error) {
     console.warn("Failed to invalidate table metadata cache", error);

@@ -89,6 +89,14 @@ pub struct CollectionInfo {
     pub document_count: Option<u64>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionPage {
+    pub items: Vec<CollectionInfo>,
+    pub next_cursor: Option<String>,
+    pub total: Option<u64>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ColumnInfo {
     pub name: String,

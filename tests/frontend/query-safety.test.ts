@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyAiQuerySafety,
+  redisSelectedDatabase,
   looksAiQueryDestructive,
   looksAiQueryReadOnly,
 } from "@/lib/querySafety";
@@ -21,6 +22,42 @@ describe("AI query safety classification", () => {
     expect(looksAiQueryReadOnly("select * from users for update", "postgres")).toBe(
       false
     );
+    expect(
+      classifyAiQuerySafety(
+        "select pg_write_file('/tmp/x', 'data')",
+        "postgres"
+      )
+    ).toBe("write");
+    expect(
+      classifyAiQuerySafety("select pg_terminate_backend(42)", "postgres")
+    ).toBe("destructive");
+    expect(
+      looksAiQueryReadOnly("select * into backup_users from users", "postgres")
+    ).toBe(false);
+    expect(
+      looksAiQueryReadOnly(
+        "select email into outfile '/tmp/users.csv' from users",
+        "mysql"
+      )
+    ).toBe(false);
+    expect(
+      looksAiQueryReadOnly(
+        "WITH active AS (SELECT * FROM users) SELECT * INTO backup_users FROM active",
+        "postgres"
+      )
+    ).toBe(false);
+    expect(
+      looksAiQueryReadOnly(
+        "SELECT '{}'::jsonb #> '{}'; COMMIT; DELETE FROM users",
+        "postgres"
+      )
+    ).toBe(false);
+    expect(
+      looksAiQueryReadOnly(
+        "SELECT 1--1; COMMIT; DELETE FROM users",
+        "mysql"
+      )
+    ).toBe(false);
   });
 
   it("accepts only explicit MongoDB reads and rejects unsafe unknown shapes", () => {
@@ -120,6 +157,12 @@ describe("AI query safety classification", () => {
       "destructive"
     );
     expect(classifyAiQuerySafety("SCRIPT FLUSH", "redis")).toBe("destructive");
+  });
+
+  it("tracks the final Redis SELECT database in a command batch", () => {
+    expect(redisSelectedDatabase("SELECT 2\nSET user:1 Ada")).toBe("2");
+    expect(redisSelectedDatabase("SELECT 2; SELECT '7'; GET user:1")).toBe("7");
+    expect(redisSelectedDatabase("# SELECT 9\nGET user:1")).toBeNull();
   });
 
   it("classifies Elasticsearch HTTP-style requests and JSON bodies", () => {

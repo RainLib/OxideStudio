@@ -2,6 +2,7 @@ use super::driver::DatabaseDriver;
 use super::protocol::{
     ColumnInfo, ConstraintInfo, FunctionInfo, IndexInfo, ParameterizedStatement, QueryParameter,
 };
+use super::ssh::SshTunnel;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,9 +10,20 @@ use tokio::sync::Mutex;
 
 pub struct ConnectionManager {
     // thread-safe map of active connections
-    connections: Arc<Mutex<HashMap<String, Arc<dyn DatabaseDriver>>>>,
+    connections: Arc<Mutex<HashMap<String, ManagedConnection>>>,
     // Store active schema per connection
     active_schemas: Arc<Mutex<HashMap<String, String>>>,
+}
+
+struct ManagedConnection {
+    driver: Arc<dyn DatabaseDriver>,
+    ssh_tunnel: Option<SshTunnel>,
+}
+
+impl Default for ConnectionManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConnectionManager {
@@ -26,7 +38,7 @@ impl ConnectionManager {
         let conns = self.connections.lock().await;
         conns
             .get(id)
-            .cloned()
+            .map(|connection| connection.driver.clone())
             .ok_or_else(|| anyhow!("Connection not found: {}", id))
     }
 
@@ -36,7 +48,7 @@ impl ConnectionManager {
         }
     }
 
-    pub async fn remove_connection(&self, id: &str) -> Option<Arc<dyn DatabaseDriver>> {
+    async fn remove_connection(&self, id: &str) -> Option<ManagedConnection> {
         let mut conns = self.connections.lock().await;
         let removed = conns.remove(id);
         drop(conns);
@@ -49,20 +61,38 @@ impl ConnectionManager {
         id: String,
         driver: Box<dyn DatabaseDriver>,
     ) -> Result<()> {
+        self.replace_connection_with_tunnel(id, driver, None).await
+    }
+
+    pub async fn replace_connection_with_tunnel(
+        &self,
+        id: String,
+        driver: Box<dyn DatabaseDriver>,
+        ssh_tunnel: Option<SshTunnel>,
+    ) -> Result<()> {
         let old_driver = {
             let mut conns = self.connections.lock().await;
-            conns.insert(id.clone(), Arc::from(driver))
+            conns.insert(
+                id.clone(),
+                ManagedConnection {
+                    driver: Arc::from(driver),
+                    ssh_tunnel,
+                },
+            )
         };
 
         self.clear_schema_context(&id).await;
 
         if let Some(old_driver) = old_driver {
-            if let Err(error) = old_driver.disconnect().await {
+            if let Err(error) = old_driver.driver.disconnect().await {
                 tracing::warn!(
                     "Failed to disconnect replaced connection {} after new driver was installed: {}",
                     id,
                     error
                 );
+            }
+            if let Some(tunnel) = old_driver.ssh_tunnel {
+                tunnel.shutdown().await;
             }
         }
 
@@ -70,12 +100,16 @@ impl ConnectionManager {
     }
 
     pub async fn disconnect_connection(&self, id: &str) -> Result<()> {
-        let driver = self
+        let mut connection = self
             .remove_connection(id)
             .await
             .ok_or_else(|| anyhow!("Connection not found: {}", id))?;
 
-        driver.disconnect().await
+        let result = connection.driver.disconnect().await;
+        if let Some(tunnel) = connection.ssh_tunnel.take() {
+            tunnel.shutdown().await;
+        }
+        result
     }
 
     pub async fn clear_schema_context(&self, id: &str) {
@@ -99,6 +133,13 @@ impl ConnectionManager {
     pub async fn ping(&self, id: &str) -> Result<()> {
         let driver = self.get_driver(id).await?;
         driver.ping().await
+    }
+
+    pub async fn statement_scan_dialect(
+        &self,
+        id: &str,
+    ) -> Result<Option<super::statement::StatementScanDialect>> {
+        Ok(self.get_driver(id).await?.statement_scan_dialect())
     }
 
     /// Execute a query
@@ -165,6 +206,45 @@ impl ConnectionManager {
         driver.query_parameterized(sql, params).await
     }
 
+    /// Execute a query against one explicitly selected server database. This
+    /// bypasses the connection's primary database and active schema context.
+    pub async fn query_database(
+        &self,
+        id: &str,
+        database: &str,
+        sql: &str,
+    ) -> Result<Vec<super::protocol::QueryResult>> {
+        let driver = self.get_driver(id).await?;
+        driver.query_database(database, sql).await
+    }
+
+    pub async fn query_database_with_context(
+        &self,
+        id: &str,
+        database: &str,
+        sql: &str,
+        schema: Option<&str>,
+        query_id: Option<&str>,
+    ) -> Result<Vec<super::protocol::QueryResult>> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .query_database_with_context_tracked(query_id, database, sql, schema)
+            .await
+    }
+
+    pub async fn query_database_parameterized(
+        &self,
+        id: &str,
+        database: &str,
+        sql: &str,
+        params: &[QueryParameter],
+    ) -> Result<Vec<super::protocol::QueryResult>> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .query_database_parameterized(database, sql, params)
+            .await
+    }
+
     pub async fn execute_parameterized_batch(
         &self,
         id: &str,
@@ -172,6 +252,18 @@ impl ConnectionManager {
     ) -> Result<Vec<u64>> {
         let driver = self.get_driver(id).await?;
         driver.execute_parameterized_batch(statements).await
+    }
+
+    pub async fn execute_database_parameterized_batch(
+        &self,
+        id: &str,
+        database: &str,
+        statements: &[ParameterizedStatement],
+    ) -> Result<Vec<u64>> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .execute_database_parameterized_batch(database, statements)
+            .await
     }
 
     pub async fn begin_transaction(
@@ -196,10 +288,23 @@ impl ConnectionManager {
         driver.rollback_transaction(transaction_id).await
     }
 
-    /// Get schemas
+    /// Get databases visible from the connected server.
+    pub async fn get_databases(&self, id: &str) -> Result<Vec<String>> {
+        let driver = self.get_driver(id).await?;
+        driver.get_databases().await
+    }
+
+    /// Get schemas in the currently connected database.
     pub async fn get_schemas(&self, id: &str) -> Result<Vec<String>> {
         let driver = self.get_driver(id).await?;
         driver.get_schemas().await
+    }
+
+    /// Get schemas from an explicitly selected database without changing the
+    /// connection's active query/schema context.
+    pub async fn get_database_schemas(&self, id: &str, database: &str) -> Result<Vec<String>> {
+        let driver = self.get_driver(id).await?;
+        driver.get_database_schemas(database).await
     }
 
     /// Get tables
@@ -212,6 +317,16 @@ impl ConnectionManager {
         driver.get_tables(schema).await
     }
 
+    pub async fn get_database_tables(
+        &self,
+        id: &str,
+        database: &str,
+        schema: &str,
+    ) -> Result<Vec<super::protocol::TableInfo>> {
+        let driver = self.get_driver(id).await?;
+        driver.get_database_tables(database, schema).await
+    }
+
     pub async fn get_collections(
         &self,
         id: &str,
@@ -219,6 +334,20 @@ impl ConnectionManager {
     ) -> Result<Vec<super::protocol::CollectionInfo>> {
         let driver = self.get_driver(id).await?;
         driver.get_collections(namespace).await
+    }
+
+    pub async fn get_collections_page(
+        &self,
+        id: &str,
+        namespace: &str,
+        cursor: Option<&str>,
+        limit: usize,
+        filter: Option<&str>,
+    ) -> Result<super::protocol::CollectionPage> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .get_collections_page(namespace, cursor, limit, filter)
+            .await
     }
 
     /// Get columns
@@ -232,9 +361,31 @@ impl ConnectionManager {
         driver.get_columns(schema, table).await
     }
 
+    pub async fn get_database_columns(
+        &self,
+        id: &str,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ColumnInfo>> {
+        let driver = self.get_driver(id).await?;
+        driver.get_database_columns(database, schema, table).await
+    }
+
     pub async fn get_indexes(&self, id: &str, schema: &str, table: &str) -> Result<Vec<IndexInfo>> {
         let driver = self.get_driver(id).await?;
         driver.get_indexes(schema, table).await
+    }
+
+    pub async fn get_database_indexes(
+        &self,
+        id: &str,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        let driver = self.get_driver(id).await?;
+        driver.get_database_indexes(database, schema, table).await
     }
 
     pub async fn get_constraints(
@@ -247,9 +398,32 @@ impl ConnectionManager {
         driver.get_constraints(schema, table).await
     }
 
+    pub async fn get_database_constraints(
+        &self,
+        id: &str,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ConstraintInfo>> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .get_database_constraints(database, schema, table)
+            .await
+    }
+
     pub async fn get_functions(&self, id: &str, schema: &str) -> Result<Vec<FunctionInfo>> {
         let driver = self.get_driver(id).await?;
         driver.get_functions(schema).await
+    }
+
+    pub async fn get_database_functions(
+        &self,
+        id: &str,
+        database: &str,
+        schema: &str,
+    ) -> Result<Vec<FunctionInfo>> {
+        let driver = self.get_driver(id).await?;
+        driver.get_database_functions(database, schema).await
     }
 
     pub async fn set_current_schema(&self, connection_id: &str, schema: &str) -> Result<()> {
@@ -281,6 +455,154 @@ mod tests {
         entered: Arc<AtomicUsize>,
         both_entered: Arc<Notify>,
         release: Arc<Notify>,
+    }
+
+    struct DatabaseDiscoveryDriver;
+
+    #[async_trait]
+    impl DatabaseDriver for DatabaseDiscoveryDriver {
+        async fn connect(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn disconnect(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn ping(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn query(&self, _sql: &str) -> Result<Vec<QueryResult>> {
+            Ok(Vec::new())
+        }
+
+        async fn query_database(&self, database: &str, sql: &str) -> Result<Vec<QueryResult>> {
+            Ok(vec![QueryResult::execution(
+                &format!("{database}:{sql}"),
+                0,
+            )])
+        }
+
+        async fn query_database_with_context_tracked(
+            &self,
+            query_id: Option<&str>,
+            database: &str,
+            sql: &str,
+            schema: Option<&str>,
+        ) -> Result<Vec<QueryResult>> {
+            Ok(vec![QueryResult::execution(
+                &format!(
+                    "{database}:{}:{}:{sql}",
+                    schema.unwrap_or(""),
+                    query_id.unwrap_or("")
+                ),
+                0,
+            )])
+        }
+
+        async fn query_database_parameterized(
+            &self,
+            database: &str,
+            sql: &str,
+            params: &[QueryParameter],
+        ) -> Result<Vec<QueryResult>> {
+            Ok(vec![QueryResult::execution(
+                &format!("{database}:{sql}"),
+                params.len() as u64,
+            )])
+        }
+
+        async fn get_databases(&self) -> Result<Vec<String>> {
+            Ok(vec!["app".to_string(), "analytics".to_string()])
+        }
+
+        async fn get_schemas(&self) -> Result<Vec<String>> {
+            Ok(vec!["public".to_string()])
+        }
+
+        async fn get_database_schemas(&self, database: &str) -> Result<Vec<String>> {
+            Ok(vec![format!("{database}_schema")])
+        }
+
+        async fn get_database_tables(
+            &self,
+            database: &str,
+            schema: &str,
+        ) -> Result<Vec<TableInfo>> {
+            Ok(vec![TableInfo {
+                name: format!("{database}_{schema}_table"),
+                schema: Some(schema.to_string()),
+                table_type: Some("BASE TABLE".to_string()),
+                comment: None,
+            }])
+        }
+
+        async fn get_database_functions(
+            &self,
+            database: &str,
+            schema: &str,
+        ) -> Result<Vec<FunctionInfo>> {
+            Ok(vec![FunctionInfo {
+                name: format!("{database}_{schema}_function"),
+                routine_type: Some("function".to_string()),
+                parameters: Vec::new(),
+                return_type: "void".to_string(),
+                description: None,
+            }])
+        }
+
+        async fn get_database_columns(
+            &self,
+            database: &str,
+            schema: &str,
+            table: &str,
+        ) -> Result<Vec<ColumnInfo>> {
+            Ok(vec![ColumnInfo {
+                name: format!("{database}_{schema}_{table}_column"),
+                data_type: "text".to_string(),
+                is_nullable: true,
+                is_primary_key: false,
+                is_unique: false,
+                is_indexed: false,
+                is_auto_increment: false,
+                default_value: None,
+                comment: None,
+            }])
+        }
+
+        async fn get_database_indexes(
+            &self,
+            database: &str,
+            schema: &str,
+            table: &str,
+        ) -> Result<Vec<IndexInfo>> {
+            Ok(vec![IndexInfo {
+                name: format!("{database}_{schema}_{table}_index"),
+                columns: vec!["id".to_string()],
+                is_unique: false,
+                is_primary: false,
+                index_type: None,
+                definition: None,
+            }])
+        }
+
+        async fn get_database_constraints(
+            &self,
+            database: &str,
+            schema: &str,
+            table: &str,
+        ) -> Result<Vec<ConstraintInfo>> {
+            Ok(vec![ConstraintInfo {
+                name: format!("{database}_{schema}_{table}_constraint"),
+                constraint_type: "CHECK".to_string(),
+                columns: Vec::new(),
+                referenced_schema: None,
+                referenced_table: None,
+                referenced_columns: Vec::new(),
+                definition: None,
+            }])
+        }
     }
 
     impl BlockingDriver {
@@ -533,6 +855,99 @@ mod tests {
 
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn database_discovery_is_distinct_from_schema_discovery() {
+        let manager = ConnectionManager::new();
+        manager
+            .add_connection("conn".to_string(), Box::new(DatabaseDiscoveryDriver))
+            .await;
+
+        assert_eq!(
+            manager.get_databases("conn").await.unwrap(),
+            vec!["app".to_string(), "analytics".to_string()]
+        );
+        assert_eq!(
+            manager.get_schemas("conn").await.unwrap(),
+            vec!["public".to_string()]
+        );
+        assert_eq!(
+            manager
+                .get_database_schemas("conn", "analytics")
+                .await
+                .unwrap(),
+            vec!["analytics_schema".to_string()]
+        );
+
+        let tables = manager
+            .get_database_tables("conn", "analytics", "reporting")
+            .await
+            .unwrap();
+        assert_eq!(tables[0].name, "analytics_reporting_table");
+        assert_eq!(tables[0].schema.as_deref(), Some("reporting"));
+
+        let functions = manager
+            .get_database_functions("conn", "analytics", "reporting")
+            .await
+            .unwrap();
+        assert_eq!(functions[0].name, "analytics_reporting_function");
+
+        let query = manager
+            .query_database("conn", "analytics", "SELECT 1")
+            .await
+            .unwrap();
+        assert_eq!(
+            query[0].statement_type.as_deref(),
+            Some("analytics:SELECT 1")
+        );
+
+        let contextual_query = manager
+            .query_database_with_context(
+                "conn",
+                "analytics",
+                "SELECT * FROM events",
+                Some("reporting"),
+                Some("query-1"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            contextual_query[0].statement_type.as_deref(),
+            Some("analytics:reporting:query-1:SELECT * FROM events")
+        );
+
+        let parameterized = manager
+            .query_database_parameterized(
+                "conn",
+                "analytics",
+                "SELECT $1",
+                &[QueryParameter {
+                    value: serde_json::json!(1),
+                    data_type: Some("integer".to_string()),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(parameterized[0].rows_affected, Some(1));
+
+        let columns = manager
+            .get_database_columns("conn", "analytics", "reporting", "events")
+            .await
+            .unwrap();
+        assert_eq!(columns[0].name, "analytics_reporting_events_column");
+
+        let indexes = manager
+            .get_database_indexes("conn", "analytics", "reporting", "events")
+            .await
+            .unwrap();
+        assert_eq!(indexes[0].name, "analytics_reporting_events_index");
+
+        let constraints = manager
+            .get_database_constraints("conn", "analytics", "reporting", "events")
+            .await
+            .unwrap();
+        assert_eq!(constraints[0].name, "analytics_reporting_events_constraint");
     }
 
     #[tokio::test]

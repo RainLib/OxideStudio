@@ -34,6 +34,8 @@ export function looksAiQueryReadOnly(
     return looksReadOnlyElasticsearchRequest(query);
   }
 
+  if (containsDangerousSqlFunction(query)) return false;
+
   const mutatingSqlPrefixes = [
     "alter",
     "call",
@@ -55,8 +57,8 @@ export function looksAiQueryReadOnly(
     "vacuum",
   ];
 
-  const statements = splitSqlStatements(query);
-  if (statements.length === 0) return false;
+  const statements = splitSqlStatements(query, normalizedDriver);
+  if (statements.length !== 1) return false;
   return statements.every((statement) =>
     looksReadOnlySqlStatement(statement, mutatingSqlPrefixes)
   );
@@ -85,7 +87,84 @@ export function looksAiQueryDestructive(
     return looksDestructiveElasticsearchRequest(query);
   }
 
-  return splitSqlStatements(query).some(looksDestructiveSqlStatement);
+  if (containsDestructiveSqlFunction(query)) return true;
+
+  return splitSqlStatements(query, normalizedDriver).some(
+    looksDestructiveSqlStatement
+  );
+}
+
+export function redisSelectedDatabase(query: string) {
+  let selected: string | null = null;
+  for (const line of parseRedisCommandLines(query)) {
+    const match = line.match(/^\s*SELECT\s+["']?(\d+)["']?\s*$/i);
+    if (match?.[1]) selected = match[1];
+  }
+  return selected;
+}
+
+const DANGEROUS_SQL_FUNCTIONS = [
+  "benchmark",
+  "dblink_connect",
+  "dblink_connect_u",
+  "dblink_exec",
+  "get_lock",
+  "last_insert_id",
+  "load_file",
+  "lo_export",
+  "master_pos_wait",
+  "nextval",
+  "pg_advisory_lock",
+  "pg_advisory_unlock",
+  "pg_advisory_unlock_all",
+  "pg_advisory_xact_lock",
+  "pg_backup_start",
+  "pg_backup_stop",
+  "pg_cancel_backend",
+  "pg_create_restore_point",
+  "pg_logical_emit_message",
+  "pg_notify",
+  "pg_promote",
+  "pg_reload_conf",
+  "pg_rotate_logfile",
+  "pg_switch_wal",
+  "pg_terminate_backend",
+  "pg_try_advisory_lock",
+  "pg_try_advisory_xact_lock",
+  "pg_write_file",
+  "release_all_locks",
+  "release_lock",
+  "set_config",
+  "setval",
+  "sleep",
+  "source_pos_wait",
+  "sys_eval",
+  "sys_exec",
+] as const;
+
+const DESTRUCTIVE_SQL_FUNCTIONS = [
+  "pg_promote",
+  "pg_reload_conf",
+  "pg_terminate_backend",
+  "sys_exec",
+] as const;
+
+function containsDangerousSqlFunction(sql: string) {
+  return containsSqlFunctionName(sql, DANGEROUS_SQL_FUNCTIONS);
+}
+
+function containsDestructiveSqlFunction(sql: string) {
+  return containsSqlFunctionName(sql, DESTRUCTIVE_SQL_FUNCTIONS);
+}
+
+function containsSqlFunctionName(sql: string, names: readonly string[]) {
+  const normalized = sql.toLowerCase();
+  return names.some((name) => {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(
+      `(?:^|[^a-z0-9_$])(?:[\"\`]?)${escaped}(?:[\"\`]?)\\s*\\(`
+    ).test(normalized);
+  });
 }
 
 function looksReadOnlySqlStatement(
@@ -108,6 +187,12 @@ function looksReadOnlySqlStatement(
     firstKeyword === "with"
   ) {
     if (/\bfor\s+(update|no\s+key\s+update|share|key\s+share)\b/.test(normalized)) {
+      return false;
+    }
+    if (
+      /\binto\b/.test(normalized) ||
+      /\block\s+in\s+share\s+mode\b/.test(normalized)
+    ) {
       return false;
     }
     return !mutatingSqlPrefixes.some((keyword) =>
@@ -136,16 +221,33 @@ function looksDestructiveSqlStatement(statement: string) {
   );
 }
 
-function splitSqlStatements(query: string) {
+function splitSqlStatements(query: string, driver?: string | null) {
   const statements: string[] = [];
   let current = "";
   let quote: "'" | '"' | "`" | null = null;
   let lineComment = false;
-  let blockComment = false;
+  let blockCommentDepth = 0;
+  let dollarQuoteTag: string | null = null;
+  const normalizedDriver = String(driver || "").trim().toLowerCase();
+  const isMysql = normalizedDriver === "mysql" || normalizedDriver === "mariadb";
+  const isPostgres = ["postgres", "postgresql", "pgsql", "psql"].includes(
+    normalizedDriver
+  );
 
   for (let index = 0; index < query.length; index += 1) {
     const char = query[index]!;
     const next = query[index + 1] ?? "";
+
+    if (dollarQuoteTag) {
+      if (query.startsWith(dollarQuoteTag, index)) {
+        current += " ".repeat(dollarQuoteTag.length);
+        index += dollarQuoteTag.length - 1;
+        dollarQuoteTag = null;
+      } else {
+        current += char === "\n" || char === "\r" ? char : " ";
+      }
+      continue;
+    }
 
     if (lineComment) {
       if (char === "\n" || char === "\r") {
@@ -155,28 +257,48 @@ function splitSqlStatements(query: string) {
       continue;
     }
 
-    if (blockComment) {
+    if (blockCommentDepth > 0) {
+      if (isPostgres && char === "/" && next === "*") {
+        blockCommentDepth += 1;
+        index += 1;
+        continue;
+      }
       if (char === "*" && next === "/") {
-        blockComment = false;
+        blockCommentDepth -= 1;
         index += 1;
         current += " ";
       }
       continue;
     }
 
-    if (!quote && char === "-" && next === "-") {
+    if (
+      !quote &&
+      char === "-" &&
+      next === "-" &&
+      (!isMysql || /\s/.test(query[index + 2] ?? ""))
+    ) {
       lineComment = true;
       index += 1;
       continue;
     }
-    if (!quote && char === "#") {
+    if (!quote && isMysql && char === "#") {
       lineComment = true;
       continue;
     }
     if (!quote && char === "/" && next === "*") {
-      blockComment = true;
+      blockCommentDepth = 1;
       index += 1;
       continue;
+    }
+
+    if (!quote && isPostgres && char === "$") {
+      const tag = query.slice(index).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/)?.[0];
+      if (tag) {
+        dollarQuoteTag = tag;
+        current += " ".repeat(tag.length);
+        index += tag.length - 1;
+        continue;
+      }
     }
 
     if (quote) {

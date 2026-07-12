@@ -18,7 +18,8 @@ export async function executeQuery(
   sql: string,
   schema?: string,
   transactionId?: string,
-  queryId?: string
+  queryId?: string,
+  database?: string
 ): Promise<QueryResult[]> {
   return invokeWithInterceptors<QueryResult[]>("execute_query", {
     connectionId,
@@ -26,11 +27,26 @@ export async function executeQuery(
     schema,
     transactionId,
     queryId,
+    database,
   });
 }
 
 export async function cancelQuery(queryId: string): Promise<string> {
   return invokeWithInterceptors<string>("cancel_query", {
+    queryId,
+  });
+}
+
+export async function executeReadOnlyQuery(
+  connectionId: string,
+  sql: string,
+  schema?: string,
+  queryId?: string
+): Promise<QueryResult[]> {
+  return invokeWithInterceptors<QueryResult[]>("execute_read_only_query", {
+    connectionId,
+    sql,
+    schema,
     queryId,
   });
 }
@@ -56,6 +72,7 @@ export async function getSqlCompletion(
  */
 export const queryService = {
   executeQuery,
+  executeReadOnlyQuery,
   cancelQuery,
   getSqlCompletion,
 };

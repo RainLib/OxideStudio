@@ -37,6 +37,7 @@ import {
   FileJson,
   RotateCcw,
   Search,
+  CircleSlash2,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -52,6 +53,10 @@ import {
 } from "@/lib/exportUtils";
 import { dataGridMetrics } from "@/lib/dataGridView";
 import { DataGridBusyIndicator } from "./DataGridBusyIndicator";
+import {
+  resultColumnGridId,
+  resultColumnIndexByGridId,
+} from "@/lib/gridColumns";
 
 export interface DataGridHandle {
   openSearch: () => void;
@@ -192,6 +197,7 @@ function DataGrid(
     y: number;
     col?: number;
     row?: number;
+    columnId?: string;
     columnName?: string;
   }>({ type: null, x: 0, y: 0 });
 
@@ -204,10 +210,11 @@ function DataGrid(
   const columns = useMemo<GridColumn[]>(() => {
     // If we have a result, use its columns
     if (result && result.columns.length > 0) {
-      const allColumns = result.columns.map((col) => {
-        const isSorted = gridState?.sortColumn === col.name;
+      const allColumns = result.columns.map((col, index) => {
+        const columnId = resultColumnGridId(result.columns, index);
+        const isSorted = gridState?.sortColumn === columnId;
         const sortDir = gridState?.sortDirection;
-        const customWidth = columnWidths[col.name];
+        const customWidth = columnWidths[columnId] ?? columnWidths[col.name];
 
         let title = col.name || "Unknown";
         let columnIcon: GridColumnIcon | undefined;
@@ -229,7 +236,7 @@ function DataGrid(
 
         return {
           title,
-          id: col.name,
+          id: columnId,
           width: Math.round((customWidth || 150) * gridScale),
           icon: isSorted
             ? sortDir === "asc"
@@ -361,7 +368,7 @@ function DataGrid(
     if (localFilterEntries.length > 0) {
       indices = indices.filter((rowIndex) =>
         localFilterEntries.every(([column, filter]) => {
-          const colIndex = result.columns.findIndex((c) => c.name === column);
+          const colIndex = resultColumnIndexByGridId(result.columns, column);
           if (colIndex === -1) return true;
 
           return applyFilter(result.rows[rowIndex]?.[colIndex], {
@@ -379,8 +386,9 @@ function DataGrid(
       gridState?.sortDirection &&
       result
     ) {
-      const colIndex = result.columns.findIndex(
-        (c) => c.name === gridState.sortColumn
+      const colIndex = resultColumnIndexByGridId(
+        result.columns,
+        gridState.sortColumn
       );
       if (colIndex >= 0) {
         indices.sort((a, b) => {
@@ -479,8 +487,9 @@ function DataGrid(
       // Determine original column index
       let originalColIndex = -1;
       if (result && result.columns.length > 0) {
-        originalColIndex = result.columns.findIndex(
-          (c) => c.name === visualColumn.id
+        originalColIndex = resultColumnIndexByGridId(
+          result.columns,
+          visualColumn.id
         );
       } else if (overrideColumns) {
         originalColIndex = overrideColumns.findIndex(
@@ -510,7 +519,7 @@ function DataGrid(
         }
       }
 
-      const baseCell = createTypedCell(val !== null ? val : "", isEditable);
+      const baseCell = createTypedCell(val, isEditable);
       const gridCell = { ...baseCell };
 
       // Force editable for compatible types
@@ -551,8 +560,11 @@ function DataGrid(
       const visualColumn = columns[col];
       if (!visualColumn) return;
 
-      // Find original column from visual column ID (name)
-      const column = result.columns.find((c) => c.name === visualColumn.id);
+      const originalColumnIndex = resultColumnIndexByGridId(
+        result.columns,
+        visualColumn.id
+      );
+      const column = result.columns[originalColumnIndex];
       if (!column) return;
 
       const currentSort = gridState?.sortColumn;
@@ -560,7 +572,8 @@ function DataGrid(
 
       let newDirection: "asc" | "desc" | null = "asc";
 
-      if (currentSort === column.name) {
+      const columnId = String(visualColumn.id);
+      if (currentSort === columnId) {
         // Cycling: asc -> desc -> none
         if (currentDir === "asc") {
           newDirection = "desc";
@@ -571,7 +584,7 @@ function DataGrid(
 
       setGridSort(
         activeTab.id,
-        newDirection ? column.name : null,
+        newDirection ? columnId : null,
         newDirection
       );
     },
@@ -607,7 +620,7 @@ function DataGrid(
 
         let origColIdx = -1;
         if (result && result.columns.length > 0) {
-          origColIdx = result.columns.findIndex((col) => col.name === vCol.id);
+          origColIdx = resultColumnIndexByGridId(result.columns, vCol.id);
         } else if (overrideColumns) {
           origColIdx = overrideColumns.findIndex((col) => col.name === vCol.id);
         }
@@ -701,9 +714,7 @@ function DataGrid(
       if (!result) return -1;
       const visualColumn = columns[visualColumnIndex];
       if (!visualColumn) return -1;
-      return result.columns.findIndex(
-        (column) => column.name === visualColumn.id
-      );
+      return resultColumnIndexByGridId(result.columns, visualColumn.id);
     },
     [columns, result]
   );
@@ -833,7 +844,12 @@ function DataGrid(
       event.preventDefault();
       const [col, row] = cell;
       const position = menuPosition(event.localEventX, event.localEventY);
-      const columnName = String(columns[col]?.id || "");
+      const columnId = String(columns[col]?.id || "");
+      const originalColumnIndex = resultColumnIndexByGridId(
+        result.columns,
+        columnId
+      );
+      const columnName = result.columns[originalColumnIndex]?.name || columnId;
 
       setGridSelection((selection) => ({
         ...selection,
@@ -848,6 +864,7 @@ function DataGrid(
         ...position,
         row,
         col,
+        columnId,
         columnName,
       });
     },
@@ -859,11 +876,17 @@ function DataGrid(
       if (!result) return;
       event.preventDefault();
       const position = menuPosition(event.localEventX, event.localEventY);
+      const columnId = String(columns[col]?.id || "");
+      const originalColumnIndex = resultColumnIndexByGridId(
+        result.columns,
+        columnId
+      );
       setContextMenu({
         type: "header",
         ...position,
         col,
-        columnName: String(columns[col]?.id || ""),
+        columnId,
+        columnName: result.columns[originalColumnIndex]?.name || columnId,
       });
     },
     [columns, menuPosition, result]
@@ -883,20 +906,20 @@ function DataGrid(
   }, [contextMenu, closeContextMenu]);
 
   const handleSortAsc = useCallback(() => {
-    if (!activeTab || !contextMenu.columnName) return;
-    if (contextMenu.columnName) {
-      setGridSort(activeTab.id, contextMenu.columnName, "asc");
+    if (!activeTab || !contextMenu.columnId) return;
+    if (contextMenu.columnId) {
+      setGridSort(activeTab.id, contextMenu.columnId, "asc");
     }
     closeContextMenu();
-  }, [activeTab, contextMenu.columnName, setGridSort, closeContextMenu]);
+  }, [activeTab, contextMenu.columnId, setGridSort, closeContextMenu]);
 
   const handleSortDesc = useCallback(() => {
-    if (!activeTab || !contextMenu.columnName) return;
-    if (contextMenu.columnName) {
-      setGridSort(activeTab.id, contextMenu.columnName, "desc");
+    if (!activeTab || !contextMenu.columnId) return;
+    if (contextMenu.columnId) {
+      setGridSort(activeTab.id, contextMenu.columnId, "desc");
     }
     closeContextMenu();
-  }, [activeTab, contextMenu.columnName, setGridSort, closeContextMenu]);
+  }, [activeTab, contextMenu.columnId, setGridSort, closeContextMenu]);
 
   const handleClearSort = useCallback(() => {
     if (activeTab) setGridSort(activeTab.id, null, null);
@@ -904,10 +927,10 @@ function DataGrid(
   }, [activeTab, closeContextMenu, setGridSort]);
 
   const handleOpenColumnFilter = useCallback(() => {
-    if (!activeTab || !contextMenu.columnName) return;
+    if (!activeTab || !contextMenu.columnId) return;
 
     const currentValue =
-      activeTab.gridState?.columnFilters?.[contextMenu.columnName]?.value || "";
+      activeTab.gridState?.columnFilters?.[contextMenu.columnId]?.value || "";
     const nextValue = window.prompt(
       `Filter "${contextMenu.columnName}" contains:`,
       currentValue
@@ -921,17 +944,17 @@ function DataGrid(
     const value = nextValue.trim();
     setGridFilter(
       activeTab.id,
-      contextMenu.columnName,
+      contextMenu.columnId,
       value ? { operator: "contains", value } : undefined
     );
     closeContextMenu();
-  }, [activeTab, contextMenu.columnName, setGridFilter, closeContextMenu]);
+  }, [activeTab, contextMenu.columnId, contextMenu.columnName, setGridFilter, closeContextMenu]);
 
   const handleHideColumn = useCallback(() => {
-    if (!activeTab || !contextMenu.columnName || columns.length <= 1) return;
-    setColumnHidden(activeTab.id, contextMenu.columnName, true);
+    if (!activeTab || !contextMenu.columnId || columns.length <= 1) return;
+    setColumnHidden(activeTab.id, contextMenu.columnId, true);
     closeContextMenu();
-  }, [activeTab, closeContextMenu, columns.length, contextMenu.columnName, setColumnHidden]);
+  }, [activeTab, closeContextMenu, columns.length, contextMenu.columnId, setColumnHidden]);
 
   const handleShowAllColumns = useCallback(() => {
     if (!activeTab) return;
@@ -977,7 +1000,7 @@ function DataGrid(
     if (
       !activeTab ||
       !result ||
-      !contextMenu.columnName ||
+      !contextMenu.columnId ||
       contextMenu.col === undefined ||
       contextMenu.row === undefined
     ) {
@@ -988,7 +1011,7 @@ function DataGrid(
     if (resultColumnIndex < 0 || resultRowIndex === undefined) return;
 
     const value = result.rows[resultRowIndex]?.[resultColumnIndex];
-    setGridFilter(activeTab.id, contextMenu.columnName, {
+    setGridFilter(activeTab.id, contextMenu.columnId, {
       operator: "equals",
       value: value === null ? "null" : String(value ?? ""),
     });
@@ -997,13 +1020,52 @@ function DataGrid(
     activeTab,
     closeContextMenu,
     contextMenu.col,
-    contextMenu.columnName,
+    contextMenu.columnId,
     contextMenu.row,
     result,
     setGridFilter,
     sortedIndices,
     visualColumnIndexToResultIndex,
   ]);
+
+  const handleSetCellNull = useCallback(() => {
+    if (
+      !activeTab ||
+      !isEditable ||
+      contextMenu.col === undefined ||
+      contextMenu.row === undefined
+    ) {
+      return;
+    }
+
+    const colIndex = visualColumnIndexToResultIndex(contextMenu.col);
+    const rowIndex =
+      contextMenu.row >= filteredRows.length
+        ? -1 - (contextMenu.row - filteredRows.length)
+        : sortedIndices[contextMenu.row];
+    if (colIndex < 0 || rowIndex === undefined) return;
+
+    setCellEdit(activeTab.id, rowIndex, colIndex, null);
+    closeContextMenu();
+  }, [
+    activeTab,
+    closeContextMenu,
+    contextMenu.col,
+    contextMenu.row,
+    filteredRows.length,
+    isEditable,
+    setCellEdit,
+    sortedIndices,
+    visualColumnIndexToResultIndex,
+  ]);
+
+  const contextColumnAllowsNull = useMemo(() => {
+    if (!contextMenu.columnName || !tableColumns) return true;
+    return (
+      tableColumns.find((column) => column.name === contextMenu.columnName)
+        ?.is_nullable !== false
+    );
+  }, [contextMenu.columnName, tableColumns]);
 
   const contextMenuItems = useMemo<DataGridContextMenuItem[]>(() => {
     if (contextMenu.type === "header") {
@@ -1074,6 +1136,14 @@ function DataGrid(
           onSelect: handleQuickFilter,
         },
         {
+          id: "set-cell-null",
+          label: "Set NULL",
+          icon: <CircleSlash2 size={12} />,
+          disabled: !isEditable || !contextColumnAllowsNull,
+          separatorBefore: true,
+          onSelect: handleSetCellNull,
+        },
+        {
           id: "delete-selected-rows",
           label: "Delete Selected Rows",
           icon: <Trash2 size={12} />,
@@ -1096,9 +1166,11 @@ function DataGrid(
     handleHideColumn,
     handleShowAllColumns,
     handleQuickFilter,
+    handleSetCellNull,
     handleSortAsc,
     handleSortDesc,
     isEditable,
+    contextColumnAllowsNull,
     onCopy,
     selectedRowIndexes.length,
     columns.length,
@@ -1216,7 +1288,7 @@ function DataGrid(
   }
 
   return (
-    <div className="flex flex-col h-full wb-grid-surface">
+    <div className="wb-data-grid flex h-full flex-col wb-grid-surface">
       {activeTab?.type !== "table" && result && (
         <div className="h-9 shrink-0 border-b wb-data-toolbar flex items-center gap-2 px-3">
           <div className="text-xs text-muted-foreground">
@@ -1300,6 +1372,7 @@ function DataGrid(
               gridSelection={gridSelection}
               onGridSelectionChange={setGridSelection}
               keybindings={{ search: true }}
+              experimental={{ scrollbarWidthOverride: 10 }}
               showSearch={showSearch}
               onSearchClose={() => setShowSearch(false)}
             />

@@ -1,5 +1,4 @@
 import { cn } from "@/lib/utils";
-import { GRID_ZOOM_MAX, GRID_ZOOM_MIN } from "@/lib/dataGridView";
 import {
   Check,
   Columns3,
@@ -13,8 +12,6 @@ import {
   Trash2,
   Undo2,
   Upload,
-  ZoomIn,
-  ZoomOut,
   Download,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -22,10 +19,12 @@ import type { ReactNode } from "react";
 interface TableDataToolbarProps {
   isExecuting: boolean;
   readOnly: boolean;
+  exportDisabled?: boolean;
   editingEnabled: boolean;
   hasEdits: boolean;
+  editedCellCount: number;
+  newRowCount: number;
   selectedRowCount: number;
-  zoomPercent: number;
   onRefresh: () => void;
   onAddRow: () => void;
   onDeleteRows: () => void;
@@ -34,9 +33,6 @@ interface TableDataToolbarProps {
   onSearch: () => void;
   onFitColumns: () => void;
   onResetColumns: () => void;
-  onZoomOut: () => void;
-  onZoomReset: () => void;
-  onZoomIn: () => void;
   onToggleEditing: () => void;
   onImport: () => void;
   onExportCsv: () => void;
@@ -46,10 +42,12 @@ interface TableDataToolbarProps {
 export function TableDataToolbar({
   isExecuting,
   readOnly,
+  exportDisabled = false,
   editingEnabled,
   hasEdits,
+  editedCellCount,
+  newRowCount,
   selectedRowCount,
-  zoomPercent,
   onRefresh,
   onAddRow,
   onDeleteRows,
@@ -58,9 +56,6 @@ export function TableDataToolbar({
   onSearch,
   onFitColumns,
   onResetColumns,
-  onZoomOut,
-  onZoomReset,
-  onZoomIn,
   onToggleEditing,
   onImport,
   onExportCsv,
@@ -69,7 +64,7 @@ export function TableDataToolbar({
   const mutationDisabled = isExecuting || readOnly || !editingEnabled;
 
   return (
-    <div className="wb-table-commandbar">
+    <div className="wb-table-commandbar h-8 border-b border-[hsl(var(--wb-border-subtle))] px-1.5">
       <div className="no-scrollbar flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
         <ToolbarButton title="Refresh data" onClick={onRefresh} disabled={isExecuting}>
           <RefreshCw size={14} className={cn(isExecuting && "animate-spin")} />
@@ -90,12 +85,41 @@ export function TableDataToolbar({
         >
           <Trash2 size={14} />
         </ToolbarButton>
-        <ToolbarButton title="Submit changes" onClick={onSave} disabled={!hasEdits || isExecuting}>
-          <Check size={14} />
-        </ToolbarButton>
-        <ToolbarButton title="Revert changes" onClick={onRevert} disabled={!hasEdits || isExecuting}>
-          <Undo2 size={14} />
-        </ToolbarButton>
+        {hasEdits ? (
+          <>
+            <button
+              type="button"
+              className="ml-1 inline-flex h-6 shrink-0 items-center gap-1.5 rounded-[3px] bg-[hsl(var(--wb-accent))] px-2 text-[10px] font-medium text-[hsl(var(--wb-accent-foreground))] hover:brightness-110 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:opacity-50"
+              title="Submit changes to the database"
+              aria-label="Submit changes"
+              onClick={onSave}
+              disabled={readOnly || isExecuting}
+            >
+              <Check size={12} />
+              Submit {editedCellCount + newRowCount}
+            </button>
+            <button
+              type="button"
+              className="inline-flex h-6 shrink-0 items-center gap-1 px-1.5 text-[10px] wb-muted hover:text-[hsl(var(--wb-text))] disabled:opacity-50"
+              title="Revert unsaved changes"
+              aria-label="Revert changes"
+              onClick={onRevert}
+              disabled={isExecuting}
+            >
+              <Undo2 size={12} />
+              Revert
+            </button>
+          </>
+        ) : (
+          <>
+            <ToolbarButton title="Submit changes" onClick={onSave} disabled>
+              <Check size={14} />
+            </ToolbarButton>
+            <ToolbarButton title="Revert changes" onClick={onRevert} disabled>
+              <Undo2 size={14} />
+            </ToolbarButton>
+          </>
+        )}
         <ToolbarSeparator />
         <ToolbarButton title="Find in data grid" onClick={onSearch}>
           <Search size={14} />
@@ -106,35 +130,12 @@ export function TableDataToolbar({
         <ToolbarButton title="Reset column layout" onClick={onResetColumns}>
           <RotateCcw size={14} />
         </ToolbarButton>
-        <ToolbarSeparator />
-        <ToolbarButton
-          title="Zoom out (Ctrl/Cmd -)"
-          onClick={onZoomOut}
-          disabled={zoomPercent <= GRID_ZOOM_MIN}
-        >
-          <ZoomOut size={14} />
-        </ToolbarButton>
-        <button
-          type="button"
-          className="h-6 w-12 shrink-0 rounded-[3px] text-center text-[10px] tabular-nums text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
-          onClick={onZoomReset}
-          title="Reset grid zoom"
-        >
-          {zoomPercent}%
-        </button>
-        <ToolbarButton
-          title="Zoom in (Ctrl/Cmd +)"
-          onClick={onZoomIn}
-          disabled={zoomPercent >= GRID_ZOOM_MAX}
-        >
-          <ZoomIn size={14} />
-        </ToolbarButton>
       </div>
 
       <div className="flex shrink-0 items-center gap-0.5">
         <ToolbarSeparator />
         <ToolbarButton
-          title={readOnly ? "This object is read-only" : editingEnabled ? "Disable editing" : "Enable editing"}
+          title={readOnly ? "This object is read-only" : editingEnabled ? "Editing enabled" : "Enable editing"}
           onClick={onToggleEditing}
           disabled={readOnly}
           active={editingEnabled && !readOnly}
@@ -148,10 +149,18 @@ export function TableDataToolbar({
         <ToolbarButton title="Import CSV" onClick={onImport} disabled={mutationDisabled}>
           <Upload size={14} />
         </ToolbarButton>
-        <ToolbarButton title="Export CSV" onClick={onExportCsv} disabled={isExecuting}>
+        <ToolbarButton
+          title="Export CSV"
+          onClick={onExportCsv}
+          disabled={isExecuting || exportDisabled}
+        >
           <Download size={14} />
         </ToolbarButton>
-        <ToolbarButton title="Export JSON" onClick={onExportJson} disabled={isExecuting}>
+        <ToolbarButton
+          title="Export JSON"
+          onClick={onExportJson}
+          disabled={isExecuting || exportDisabled}
+        >
           <FileJson size={14} />
         </ToolbarButton>
       </div>

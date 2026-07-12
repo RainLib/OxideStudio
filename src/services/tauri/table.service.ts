@@ -28,7 +28,8 @@ export async function previewTablePage(
   pageSize = 500,
   filterSql?: string,
   filters?: TableFilter[],
-  sort?: TableSort
+  sort?: TableSort,
+  databaseName?: string
 ): Promise<TablePageResult> {
   return invokeWithInterceptors<TablePageResult>("preview_table_page", {
     connectionId,
@@ -40,6 +41,7 @@ export async function previewTablePage(
     filterSql,
     filters,
     sort,
+    database: databaseName,
   });
 }
 
@@ -126,7 +128,8 @@ export async function mutateTableRows(
   table: string,
   inserts: Array<Record<string, unknown>> = [],
   updates: TableRowUpdate[] = [],
-  deletes: TableRowDelete[] = []
+  deletes: TableRowDelete[] = [],
+  databaseName?: string
 ): Promise<TableMutationResult> {
   return invokeWithInterceptors<TableMutationResult>("mutate_table_rows", {
     connectionId,
@@ -136,6 +139,7 @@ export async function mutateTableRows(
     inserts,
     updates,
     deletes,
+    database: databaseName,
   });
 }
 
@@ -440,7 +444,8 @@ export async function getTableDdl(
   driver: DatabaseDriver,
   schema: string,
   table: string,
-  objectType?: string | null
+  objectType?: string | null,
+  databaseName?: string
 ): Promise<string> {
   return invokeWithInterceptors<string>("get_table_ddl", {
     connectionId,
@@ -448,6 +453,7 @@ export async function getTableDdl(
     schema,
     table,
     objectType,
+    database: databaseName,
   });
 }
 

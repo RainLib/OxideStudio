@@ -3,6 +3,7 @@ import {
   loadTableDdl,
   loadTableMetadata,
   loadViewDefinition,
+  tableMetadataParentId,
   type TableMetadataIdentity,
 } from "@/services/tableMetadataCache";
 import type { ColumnInfo, ConstraintInfo, IndexInfo } from "@/services/tauri/types";
@@ -12,8 +13,11 @@ const mocks = vi.hoisted(() => ({
   saveResources: vi.fn(),
   deleteResources: vi.fn(),
   getColumns: vi.fn(),
+  getDatabaseColumns: vi.fn(),
   getIndexes: vi.fn(),
+  getDatabaseIndexes: vi.fn(),
   getConstraints: vi.fn(),
+  getDatabaseConstraints: vi.fn(),
   getTableDdl: vi.fn(),
   getViewDefinition: vi.fn(),
 }));
@@ -26,8 +30,11 @@ vi.mock("@/services/tauri", () => ({
   },
   schemaService: {
     getColumns: mocks.getColumns,
+    getDatabaseColumns: mocks.getDatabaseColumns,
     getIndexes: mocks.getIndexes,
+    getDatabaseIndexes: mocks.getDatabaseIndexes,
     getConstraints: mocks.getConstraints,
+    getDatabaseConstraints: mocks.getDatabaseConstraints,
   },
   tableService: {
     getTableDdl: mocks.getTableDdl,
@@ -88,6 +95,38 @@ function cachedResource(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function cachedDatabaseResource(
+  databaseName: string,
+  projectId = "project-a"
+) {
+  const databaseIdentity: TableMetadataIdentity = {
+    ...identity,
+    projectId,
+    databaseName,
+  };
+  const parentId = tableMetadataParentId(databaseIdentity);
+  return {
+    id: `${parentId}:TABLE_METADATA_CACHE`,
+    project_id: projectId,
+    connection_id: identity.connectionId,
+    parent_id: parentId,
+    kind: "TABLE_METADATA_CACHE",
+    name: identity.table,
+    metadata: {
+      version: 2,
+      projectId,
+      driver: identity.driver,
+      databaseName,
+      schema: identity.schema,
+      table: identity.table,
+      columns,
+      indexes,
+      constraints,
+    },
+    last_updated: 4321,
+  };
+}
+
 describe("table metadata cache", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -95,8 +134,11 @@ describe("table metadata cache", () => {
     mocks.saveResources.mockResolvedValue(undefined);
     mocks.deleteResources.mockResolvedValue(undefined);
     mocks.getColumns.mockResolvedValue(columns);
+    mocks.getDatabaseColumns.mockResolvedValue(columns);
     mocks.getIndexes.mockResolvedValue(indexes);
+    mocks.getDatabaseIndexes.mockResolvedValue(indexes);
     mocks.getConstraints.mockResolvedValue(constraints);
+    mocks.getDatabaseConstraints.mockResolvedValue(constraints);
     mocks.getTableDdl.mockResolvedValue("CREATE TABLE users (id int primary key);");
     mocks.getViewDefinition.mockResolvedValue("select id from users");
   });
@@ -123,17 +165,21 @@ describe("table metadata cache", () => {
 
     expect(metadata.source).toBe("remote");
     expect(mocks.getColumns).toHaveBeenCalledOnce();
-    expect(mocks.saveResources).toHaveBeenCalledWith([
-      expect.objectContaining({
-        kind: "TABLE_METADATA_CACHE",
-        parent_id: "postgres-1:postgres:public:users",
-        metadata: expect.objectContaining({
-          columns,
-          indexes: [],
-          constraints: [],
+    expect(mocks.saveResources).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          project_id: "sqls",
+          kind: "TABLE_METADATA_CACHE",
+          parent_id: "postgres-1:postgres:public:users",
+          metadata: expect.objectContaining({
+            columns,
+            indexes: [],
+            constraints: [],
+          }),
         }),
-      }),
-    ]);
+      ],
+      "sqls"
+    );
   });
 
   it("does not mark metadata groups as cached when they were not requested", async () => {
@@ -182,5 +228,124 @@ describe("table metadata cache", () => {
     ).resolves.toBe("cached view query");
     expect(mocks.getTableDdl).not.toHaveBeenCalled();
     expect(mocks.getViewDefinition).not.toHaveBeenCalled();
+  });
+
+  it("loads and stores metadata under an explicit project and database", async () => {
+    const databaseIdentity: TableMetadataIdentity = {
+      ...identity,
+      projectId: "project-a",
+      databaseName: "analytics",
+    };
+
+    const metadata = await loadTableMetadata(databaseIdentity);
+
+    expect(metadata.source).toBe("remote");
+    expect(mocks.getColumns).not.toHaveBeenCalled();
+    expect(mocks.getIndexes).not.toHaveBeenCalled();
+    expect(mocks.getConstraints).not.toHaveBeenCalled();
+    expect(mocks.getDatabaseColumns).toHaveBeenCalledWith(
+      "postgres-1",
+      "analytics",
+      "public",
+      "users"
+    );
+    expect(mocks.getDatabaseIndexes).toHaveBeenCalledWith(
+      "postgres-1",
+      "analytics",
+      "public",
+      "users"
+    );
+    expect(mocks.getDatabaseConstraints).toHaveBeenCalledWith(
+      "postgres-1",
+      "analytics",
+      "public",
+      "users"
+    );
+    expect(mocks.getResources).toHaveBeenCalledWith(
+      "postgres-1",
+      tableMetadataParentId(databaseIdentity),
+      "project-a"
+    );
+    expect(mocks.saveResources).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          project_id: "project-a",
+          parent_id: tableMetadataParentId(databaseIdentity),
+          metadata: expect.objectContaining({
+            version: 2,
+            projectId: "project-a",
+            databaseName: "analytics",
+          }),
+        }),
+      ],
+      "project-a"
+    );
+  });
+
+  it("loads and caches DDL from an explicitly selected PostgreSQL database", async () => {
+    const databaseIdentity: TableMetadataIdentity = {
+      ...identity,
+      projectId: "project-a",
+      databaseName: "analytics",
+    };
+
+    await expect(
+      loadTableDdl(databaseIdentity, "BASE TABLE")
+    ).resolves.toContain("CREATE TABLE");
+
+    expect(mocks.getTableDdl).toHaveBeenCalledWith(
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      "BASE TABLE",
+      "analytics"
+    );
+    expect(mocks.saveResources).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          project_id: "project-a",
+          parent_id: tableMetadataParentId(databaseIdentity),
+          metadata: expect.objectContaining({
+            databaseName: "analytics",
+            ddl: expect.stringContaining("CREATE TABLE"),
+          }),
+        }),
+      ],
+      "project-a"
+    );
+  });
+
+  it("does not reuse same-named table metadata from another database", async () => {
+    mocks.getResources.mockResolvedValue([
+      cachedDatabaseResource("analytics"),
+    ]);
+
+    const metadata = await loadTableMetadata({
+      ...identity,
+      projectId: "project-a",
+      databaseName: "archive",
+    });
+
+    expect(metadata.source).toBe("remote");
+    expect(mocks.getDatabaseColumns).toHaveBeenCalledWith(
+      "postgres-1",
+      "archive",
+      "public",
+      "users"
+    );
+    expect(
+      tableMetadataParentId({
+        ...identity,
+        projectId: "project-a",
+        databaseName: "archive",
+      })
+    ).not.toBe(
+      tableMetadataParentId({
+        ...identity,
+        projectId: "project-a",
+        databaseName: "analytics",
+      })
+    );
   });
 });

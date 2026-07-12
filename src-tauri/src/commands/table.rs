@@ -5,6 +5,7 @@ use crate::core::{
         ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult,
         Response,
     },
+    statement::{validate_sql_filter_expression, StatementScanDialect},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -167,6 +168,23 @@ fn schema_option(schema: &str) -> Option<&str> {
     } else {
         Some(schema)
     }
+}
+
+fn validated_raw_filter_sql(
+    kind: DatabaseKind,
+    filter_sql: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(filter_sql) = filter_sql.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    let dialect = match kind {
+        DatabaseKind::Postgres => StatementScanDialect::Postgres,
+        DatabaseKind::Mysql => StatementScanDialect::Mysql,
+    };
+    validate_sql_filter_expression(filter_sql, dialect)?;
+
+    Ok(Some(filter_sql.to_string()))
 }
 
 fn object_type_is_view(object_type: Option<&str>) -> bool {
@@ -835,7 +853,7 @@ fn build_alter_table_column_statements(
             }
 
             if let Some(is_not_null) = changes.is_not_null {
-                if is_not_null != !existing.is_nullable {
+                if is_not_null == existing.is_nullable {
                     let action = if is_not_null {
                         "SET NOT NULL"
                     } else {
@@ -1172,6 +1190,7 @@ fn build_create_check_constraint_statement(
     Ok(kind.add_check_constraint_query(schema_option(schema), table, constraint, expression))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_create_foreign_key_statement(
     kind: DatabaseKind,
     schema: &str,
@@ -1363,28 +1382,37 @@ fn build_table_order_by(
     columns: &BTreeMap<String, ColumnInfo>,
     sort: Option<&TableSort>,
 ) -> Result<Option<String>, String> {
-    let Some(sort) = sort else {
-        return Ok(None);
-    };
+    let mut order = Vec::new();
+    let mut requested_column = None;
 
-    let column_name = sort.column.trim();
-    if column_name.is_empty() {
-        return Ok(None);
+    if let Some(sort) = sort {
+        let column_name = sort.column.trim();
+        if !column_name.is_empty() {
+            column_for(columns, column_name)?;
+            let direction = match sort.direction.trim().to_ascii_lowercase().as_str() {
+                "asc" => Some("ASC"),
+                "desc" => Some("DESC"),
+                "" => None,
+                other => return Err(format!("Unsupported sort direction: {other}")),
+            };
+            if let Some(direction) = direction {
+                order.push(format!(
+                    "{} {direction}",
+                    kind.quote_identifier(column_name)
+                ));
+                requested_column = Some(column_name);
+            }
+        }
     }
 
-    column_for(columns, column_name)?;
+    for column in columns.values().filter(|column| column.is_primary_key) {
+        if requested_column == Some(column.name.as_str()) {
+            continue;
+        }
+        order.push(format!("{} ASC", kind.quote_identifier(&column.name)));
+    }
 
-    let direction = match sort.direction.trim().to_ascii_lowercase().as_str() {
-        "asc" => "ASC",
-        "desc" => "DESC",
-        "" => return Ok(None),
-        other => return Err(format!("Unsupported sort direction: {other}")),
-    };
-
-    Ok(Some(format!(
-        "{} {direction}",
-        kind.quote_identifier(column_name)
-    )))
+    Ok((!order.is_empty()).then(|| order.join(", ")))
 }
 
 fn build_insert_mutation(
@@ -1395,7 +1423,12 @@ fn build_insert_mutation(
     values: &BTreeMap<String, Value>,
 ) -> Result<(String, Vec<QueryParameter>), String> {
     if values.is_empty() {
-        return Err("Insert row has no values".to_string());
+        let table = kind.qualified_table(schema_option(schema), table);
+        let sql = match kind {
+            DatabaseKind::Postgres => format!("INSERT INTO {table} DEFAULT VALUES;"),
+            DatabaseKind::Mysql => format!("INSERT INTO {table} () VALUES ();"),
+        };
+        return Ok((sql, Vec::new()));
     }
 
     let mut names = Vec::new();
@@ -1668,6 +1701,114 @@ async fn ensure_resolved_relation_operation_allowed(
     Ok(object_type)
 }
 
+async fn ensure_target_relation_operation_allowed(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    schema: &str,
+    object_name: &str,
+    operation: RelationOperation,
+) -> Result<Option<String>, String> {
+    if let Some(database) = database {
+        let object_type = manager
+            .get_database_tables(connection_id, database, schema)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|table| table.name == object_name)
+            .and_then(|table| table.table_type);
+        ensure_relation_operation_allowed(object_name, object_type.as_deref(), operation)?;
+        return Ok(object_type);
+    }
+
+    ensure_resolved_relation_operation_allowed(
+        manager,
+        connection_id,
+        schema,
+        object_name,
+        operation,
+    )
+    .await
+}
+
+async fn get_target_columns(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<ColumnInfo>, anyhow::Error> {
+    match database {
+        Some(database) => {
+            manager
+                .get_database_columns(connection_id, database, schema, table)
+                .await
+        }
+        None => manager.get_columns(connection_id, schema, table).await,
+    }
+}
+
+async fn query_target(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    sql: &str,
+) -> Result<Vec<QueryResult>, anyhow::Error> {
+    match database {
+        Some(database) => manager.query_database(connection_id, database, sql).await,
+        None => manager.query(connection_id, sql, None, None, None).await,
+    }
+}
+
+async fn query_target_parameterized(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    sql: &str,
+    params: &[QueryParameter],
+) -> Result<Vec<QueryResult>, anyhow::Error> {
+    match database {
+        Some(database) => {
+            manager
+                .query_database_parameterized(connection_id, database, sql, params)
+                .await
+        }
+        None => {
+            manager
+                .query_parameterized(connection_id, sql, params)
+                .await
+        }
+    }
+}
+
+async fn execute_target_parameterized_batch(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    statements: &[ParameterizedStatement],
+) -> Result<Vec<u64>, anyhow::Error> {
+    match database {
+        Some(database) => {
+            manager
+                .execute_database_parameterized_batch(connection_id, database, statements)
+                .await
+        }
+        None => {
+            manager
+                .execute_parameterized_batch(connection_id, statements)
+                .await
+        }
+    }
+}
+
+fn preview_metadata_required(
+    structured_filters: Option<&[TableFilter]>,
+    requested_sort: Option<&TableSort>,
+) -> bool {
+    structured_filters.is_some() || requested_sort.is_some()
+}
+
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn preview_table_page(
     manager: State<'_, ConnectionManager>,
@@ -1675,6 +1816,7 @@ pub async fn preview_table_page(
     driver: String,
     schema: String,
     table: String,
+    database: Option<String>,
     page: Option<u32>,
     page_size: Option<u32>,
     filter_sql: Option<String>,
@@ -1683,6 +1825,7 @@ pub async fn preview_table_page(
 ) -> Result<Response<TablePageResult>, String> {
     let result: Result<TablePageResult, String> = async {
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+        let database = database.as_deref();
         let page = page.unwrap_or(0);
         let page_size = page_size
             .unwrap_or(DEFAULT_PAGE_SIZE)
@@ -1699,13 +1842,14 @@ pub async fn preview_table_page(
             })
             .filter(|filters| !filters.is_empty());
         let requested_sort = sort.as_ref().filter(|sort| !sort.column.trim().is_empty());
-        let columns = if structured_filters.is_some() || requested_sort.is_some() {
+        let metadata_required =
+            preview_metadata_required(structured_filters.as_deref(), requested_sort);
+        let columns = if metadata_required {
             Some(
-                manager
-                    .get_columns(&connection_id, &schema, &table)
+                get_target_columns(&manager, &connection_id, database, &schema, &table)
                     .await
                     .map(column_lookup)
-                    .map_err(|e| e.to_string())?,
+                    .map_err(|error| error.to_string())?,
             )
         } else {
             None
@@ -1729,14 +1873,14 @@ pub async fn preview_table_page(
             };
 
             let count_sql = kind.count_table_query(schema_option(&schema), &table, filter);
-            let total_rows = manager
-                .query_parameterized(&connection_id, &count_sql, &params)
-                .await
-                .ok()
-                .and_then(|results| results.first().cloned())
-                .and_then(|result| result.rows.first().cloned())
-                .and_then(|row| row.first().cloned())
-                .and_then(|value| value_to_u64(&value));
+            let total_rows =
+                query_target_parameterized(&manager, &connection_id, database, &count_sql, &params)
+                    .await
+                    .ok()
+                    .and_then(|results| results.first().cloned())
+                    .and_then(|result| result.rows.first().cloned())
+                    .and_then(|row| row.first().cloned())
+                    .and_then(|value| value_to_u64(&value));
 
             let page_sql = kind.paged_table_query_with_order(
                 schema_option(&schema),
@@ -1746,21 +1890,18 @@ pub async fn preview_table_page(
                 page_size,
                 offset,
             );
-            let results = manager
-                .query_parameterized(&connection_id, &page_sql, &params)
-                .await
-                .map_err(|e| e.to_string())?;
+            let results =
+                query_target_parameterized(&manager, &connection_id, database, &page_sql, &params)
+                    .await
+                    .map_err(|e| e.to_string())?;
 
             (total_rows, results)
         } else {
-            let filter = filter_sql
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
+            let validated_filter = validated_raw_filter_sql(kind, filter_sql.as_deref())?;
+            let filter = validated_filter.as_deref();
 
             let count_sql = kind.count_table_query(schema_option(&schema), &table, filter);
-            let total_rows = manager
-                .query(&connection_id, &count_sql, None, None, None)
+            let total_rows = query_target(&manager, &connection_id, database, &count_sql)
                 .await
                 .ok()
                 .and_then(|results| results.first().cloned())
@@ -1776,8 +1917,7 @@ pub async fn preview_table_page(
                 page_size,
                 offset,
             );
-            let results = manager
-                .query(&connection_id, &page_sql, None, None, None)
+            let results = query_target(&manager, &connection_id, database, &page_sql)
                 .await
                 .map_err(|e| e.to_string())?;
 
@@ -1803,6 +1943,7 @@ pub async fn preview_table_page(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn export_table_data(
     app: AppHandle,
@@ -1823,11 +1964,6 @@ pub async fn export_table_data(
         let page_size = page_size
             .unwrap_or(DEFAULT_PAGE_SIZE)
             .clamp(1, MAX_PAGE_SIZE);
-        let raw_filter = filter_sql
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string);
         let structured_filters = filters
             .as_deref()
             .map(|filters| {
@@ -1839,16 +1975,11 @@ pub async fn export_table_data(
             })
             .filter(|filters| !filters.is_empty());
         let requested_sort = sort.as_ref().filter(|sort| !sort.column.trim().is_empty());
-        let columns_metadata = if structured_filters.is_some() || requested_sort.is_some() {
-            Some(
-                manager
-                    .get_columns(&connection_id, &schema, &table)
-                    .await
-                    .map(column_lookup)
-                    .map_err(|e| e.to_string())?,
-            )
-        } else {
-            None
+        let metadata_required = structured_filters.is_some() || requested_sort.is_some();
+        let columns_metadata = match manager.get_columns(&connection_id, &schema, &table).await {
+            Ok(columns) => Some(column_lookup(columns)),
+            Err(error) if metadata_required => return Err(error.to_string()),
+            Err(_) => None,
         };
         let order_clause = if let Some(columns) = columns_metadata.as_ref() {
             build_table_order_by(kind, columns, requested_sort)?
@@ -1870,7 +2001,11 @@ pub async fn export_table_data(
             };
             (filter_clause, params, true)
         } else {
-            (raw_filter, Vec::new(), false)
+            (
+                validated_raw_filter_sql(kind, filter_sql.as_deref())?,
+                Vec::new(),
+                false,
+            )
         };
         let filter = filter_clause.as_deref();
         let file_path = export_file_path(&app, &schema, &table, format)?;
@@ -1989,6 +2124,7 @@ pub async fn export_table_data(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn mutate_table_rows(
     manager: State<'_, ConnectionManager>,
@@ -1996,22 +2132,24 @@ pub async fn mutate_table_rows(
     driver: String,
     schema: String,
     table: String,
+    database: Option<String>,
     inserts: Vec<BTreeMap<String, Value>>,
     updates: Vec<TableRowUpdate>,
     deletes: Vec<TableRowDelete>,
 ) -> Result<Response<TableMutationResult>, String> {
     let result: Result<TableMutationResult, String> = async {
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
-        ensure_resolved_relation_operation_allowed(
+        let database = database.as_deref();
+        ensure_target_relation_operation_allowed(
             &manager,
             &connection_id,
+            database,
             &schema,
             &table,
             RelationOperation::DataMutation,
         )
         .await?;
-        let columns = manager
-            .get_columns(&connection_id, &schema, &table)
+        let columns = get_target_columns(&manager, &connection_id, database, &schema, &table)
             .await
             .map(column_lookup)
             .map_err(|e| e.to_string())?;
@@ -2040,10 +2178,10 @@ pub async fn mutate_table_rows(
             statements.push(ParameterizedStatement { sql, params });
         }
 
-        let affected = manager
-            .execute_parameterized_batch(&connection_id, &statements)
-            .await
-            .map_err(|e| e.to_string())?;
+        let affected =
+            execute_target_parameterized_batch(&manager, &connection_id, database, &statements)
+                .await
+                .map_err(|e| e.to_string())?;
 
         Ok(summarize_mutation_affected(
             &affected,
@@ -2359,6 +2497,7 @@ pub async fn alter_table_column(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn create_table_index(
     manager: State<'_, ConnectionManager>,
@@ -2657,6 +2796,7 @@ pub async fn create_table_check_constraint(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn create_table_foreign_key(
     manager: State<'_, ConnectionManager>,
@@ -3015,6 +3155,7 @@ pub async fn get_table_ddl(
     schema: String,
     table: String,
     object_type: Option<String>,
+    database: Option<String>,
 ) -> Result<Response<String>, String> {
     let result: Result<String, String> = async {
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
@@ -3022,16 +3163,30 @@ pub async fn get_table_ddl(
         if table_name.is_empty() {
             return Err("Object name is required".to_string());
         }
-        let object_type =
-            resolve_object_type(&manager, &connection_id, &schema, table_name, object_type).await?;
+        let database = database.as_deref();
+        let object_type = if let Some(explicit_type) = object_type
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            Some(explicit_type)
+        } else if let Some(database) = database {
+            manager
+                .get_database_tables(&connection_id, database, &schema)
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|candidate| candidate.name == table_name)
+                .and_then(|candidate| candidate.table_type)
+        } else {
+            resolve_object_type(&manager, &connection_id, &schema, table_name, None).await?
+        };
         let is_view = object_type_is_view(object_type.as_deref());
         let is_materialized_view = object_type_is_materialized_view(object_type.as_deref());
 
         if let Some(sql) =
             kind.show_create_relation_query(schema_option(&schema), table_name, is_view)
         {
-            let results = manager
-                .query(&connection_id, &sql, None, None, None)
+            let results = query_target(&manager, &connection_id, database, &sql)
                 .await
                 .map_err(|e| e.to_string())?;
             let ddl = results
@@ -3045,8 +3200,7 @@ pub async fn get_table_ddl(
 
         if is_view {
             let sql = view_definition_query(kind, &schema, table_name);
-            let results = manager
-                .query(&connection_id, &sql, None, None, None)
+            let results = query_target(&manager, &connection_id, database, &sql)
                 .await
                 .map_err(|e| e.to_string())?;
             let definition = results
@@ -3076,18 +3230,35 @@ pub async fn get_table_ddl(
             ));
         }
 
-        let columns = manager
-            .get_columns(&connection_id, &schema, table_name)
+        let columns = get_target_columns(&manager, &connection_id, database, &schema, table_name)
             .await
             .map_err(|e| e.to_string())?;
-        let constraints = manager
-            .get_constraints(&connection_id, &schema, table_name)
-            .await
-            .unwrap_or_default();
-        let indexes = manager
-            .get_indexes(&connection_id, &schema, table_name)
-            .await
-            .unwrap_or_default();
+        let constraints = match database {
+            Some(database) => {
+                manager
+                    .get_database_constraints(&connection_id, database, &schema, table_name)
+                    .await
+            }
+            None => {
+                manager
+                    .get_constraints(&connection_id, &schema, table_name)
+                    .await
+            }
+        }
+        .unwrap_or_default();
+        let indexes = match database {
+            Some(database) => {
+                manager
+                    .get_database_indexes(&connection_id, database, &schema, table_name)
+                    .await
+            }
+            None => {
+                manager
+                    .get_indexes(&connection_id, &schema, table_name)
+                    .await
+            }
+        }
+        .unwrap_or_default();
 
         if columns.is_empty() {
             return Ok("-- DDL not found: table has no column metadata".to_string());
@@ -3121,17 +3292,229 @@ mod tests {
         build_drop_table_index_statement, build_insert_mutation,
         build_rename_table_column_statement, build_rename_table_index_statement,
         build_structured_filter_where, build_table_order_by, build_update_mutation, column_lookup,
-        csv_escape, generate_postgres_materialized_view_ddl, generate_postgres_table_ddl,
-        generate_postgres_view_ddl, object_label_from_type, object_type_is_foreign_table,
-        object_type_is_materialized_view, object_type_is_view, postgres_view_definition_query,
-        relation_operation_allowed, sanitize_file_part, summarize_mutation_affected, value_to_u64,
-        view_definition_query, AlterColumnValueMode, AlterTableColumn, CreateTableColumn,
-        RelationOperation, TableFilter, TableRowUpdate, TableSort,
+        csv_escape, execute_target_parameterized_batch, generate_postgres_materialized_view_ddl,
+        generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
+        object_label_from_type, object_type_is_foreign_table, object_type_is_materialized_view,
+        object_type_is_view, postgres_view_definition_query, preview_metadata_required,
+        query_target, query_target_parameterized, relation_operation_allowed, sanitize_file_part,
+        summarize_mutation_affected, validated_raw_filter_sql, value_to_u64, view_definition_query,
+        AlterColumnValueMode, AlterTableColumn, CreateTableColumn, RelationOperation, TableFilter,
+        TableRowUpdate, TableSort,
     };
-    use crate::core::dialect::DatabaseKind;
-    use crate::core::protocol::{ColumnInfo, ConstraintInfo, IndexInfo};
+    use crate::core::{
+        dialect::DatabaseKind,
+        driver::DatabaseDriver,
+        manager::ConnectionManager,
+        protocol::{
+            ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter,
+            QueryResult,
+        },
+    };
+    use anyhow::Result;
+    use async_trait::async_trait;
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    struct PreviewTargetDriver;
+
+    fn target_column(name: &str) -> ColumnInfo {
+        ColumnInfo {
+            name: name.to_string(),
+            data_type: "text".to_string(),
+            is_nullable: true,
+            is_primary_key: false,
+            is_unique: false,
+            is_indexed: false,
+            is_auto_increment: false,
+            default_value: None,
+            comment: None,
+        }
+    }
+
+    #[async_trait]
+    impl DatabaseDriver for PreviewTargetDriver {
+        async fn connect(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn disconnect(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn ping(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn query(&self, _sql: &str) -> Result<Vec<QueryResult>> {
+            Ok(vec![QueryResult::execution("primary", 0)])
+        }
+
+        async fn query_database(&self, database: &str, _sql: &str) -> Result<Vec<QueryResult>> {
+            Ok(vec![QueryResult::execution(database, 0)])
+        }
+
+        async fn query_parameterized(
+            &self,
+            _sql: &str,
+            params: &[QueryParameter],
+        ) -> Result<Vec<QueryResult>> {
+            Ok(vec![QueryResult::execution(
+                "primary-parameterized",
+                params.len() as u64,
+            )])
+        }
+
+        async fn query_database_parameterized(
+            &self,
+            database: &str,
+            _sql: &str,
+            params: &[QueryParameter],
+        ) -> Result<Vec<QueryResult>> {
+            Ok(vec![QueryResult::execution(
+                &format!("{database}-parameterized"),
+                params.len() as u64,
+            )])
+        }
+
+        async fn execute_parameterized_batch(
+            &self,
+            statements: &[ParameterizedStatement],
+        ) -> Result<Vec<u64>> {
+            Ok(vec![1; statements.len()])
+        }
+
+        async fn execute_database_parameterized_batch(
+            &self,
+            database: &str,
+            statements: &[ParameterizedStatement],
+        ) -> Result<Vec<u64>> {
+            Ok(vec![database.len() as u64; statements.len()])
+        }
+
+        async fn get_columns(&self, _schema: &str, _table: &str) -> Result<Vec<ColumnInfo>> {
+            Ok(vec![target_column("primary")])
+        }
+
+        async fn get_database_columns(
+            &self,
+            database: &str,
+            _schema: &str,
+            _table: &str,
+        ) -> Result<Vec<ColumnInfo>> {
+            Ok(vec![target_column(database)])
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_helpers_preserve_explicit_database_scope() {
+        let manager = ConnectionManager::new();
+        manager
+            .add_connection("conn".to_string(), Box::new(PreviewTargetDriver))
+            .await;
+
+        let primary_columns = get_target_columns(&manager, "conn", None, "public", "events")
+            .await
+            .unwrap();
+        let scoped_columns =
+            get_target_columns(&manager, "conn", Some("analytics"), "public", "events")
+                .await
+                .unwrap();
+        assert_eq!(primary_columns[0].name, "primary");
+        assert_eq!(scoped_columns[0].name, "analytics");
+
+        let primary_query = query_target(&manager, "conn", None, "SELECT 1")
+            .await
+            .unwrap();
+        let scoped_query = query_target(&manager, "conn", Some("analytics"), "SELECT 1")
+            .await
+            .unwrap();
+        assert_eq!(primary_query[0].statement_type.as_deref(), Some("primary"));
+        assert_eq!(scoped_query[0].statement_type.as_deref(), Some("analytics"));
+
+        let params = [QueryParameter {
+            value: json!(1),
+            data_type: Some("integer".to_string()),
+        }];
+        let primary_parameterized =
+            query_target_parameterized(&manager, "conn", None, "SELECT $1", &params)
+                .await
+                .unwrap();
+        let scoped_parameterized =
+            query_target_parameterized(&manager, "conn", Some("analytics"), "SELECT $1", &params)
+                .await
+                .unwrap();
+        assert_eq!(
+            primary_parameterized[0].statement_type.as_deref(),
+            Some("primary-parameterized")
+        );
+        assert_eq!(
+            scoped_parameterized[0].statement_type.as_deref(),
+            Some("analytics-parameterized")
+        );
+
+        let statements = [ParameterizedStatement {
+            sql: "UPDATE events SET name = $1".to_string(),
+            params: Vec::new(),
+        }];
+        assert_eq!(
+            execute_target_parameterized_batch(&manager, "conn", None, &statements)
+                .await
+                .unwrap(),
+            vec![1]
+        );
+        assert_eq!(
+            execute_target_parameterized_batch(&manager, "conn", Some("analytics"), &statements)
+                .await
+                .unwrap(),
+            vec![9]
+        );
+    }
+
+    #[test]
+    fn preview_skips_column_metadata_without_structured_filters_or_sort() {
+        let filters = [TableFilter {
+            column: "status".to_string(),
+            operator: "eq".to_string(),
+            value: "active".to_string(),
+            logic: None,
+        }];
+        let sort = TableSort {
+            column: "id".to_string(),
+            direction: "asc".to_string(),
+        };
+
+        assert!(!preview_metadata_required(None, None));
+        assert!(preview_metadata_required(Some(&filters), None));
+        assert!(preview_metadata_required(None, Some(&sort)));
+    }
+
+    #[test]
+    fn validates_raw_table_filters_before_query_composition() {
+        assert_eq!(
+            validated_raw_filter_sql(
+                DatabaseKind::Postgres,
+                Some("WHERE status = 'active;pending'")
+            )
+            .unwrap()
+            .as_deref(),
+            Some("WHERE status = 'active;pending'")
+        );
+        assert!(validated_raw_filter_sql(
+            DatabaseKind::Postgres,
+            Some("id = 1; DELETE FROM users")
+        )
+        .is_err());
+        assert!(validated_raw_filter_sql(
+            DatabaseKind::Mysql,
+            Some("id = 1 UNION SELECT password FROM users")
+        )
+        .is_err());
+        assert!(validated_raw_filter_sql(
+            DatabaseKind::Postgres,
+            Some("id IN (SELECT id FROM admins)")
+        )
+        .is_err());
+    }
 
     #[test]
     fn generates_postgres_table_ddl_from_columns() {
@@ -3355,6 +3738,31 @@ SELECT id FROM users WHERE active;"#
     }
 
     #[test]
+    fn builds_default_values_inserts_for_empty_rows() {
+        let columns = BTreeMap::new();
+        let values = BTreeMap::new();
+
+        let (postgres_sql, postgres_params) = build_insert_mutation(
+            DatabaseKind::Postgres,
+            "public",
+            "events",
+            &columns,
+            &values,
+        )
+        .unwrap();
+        assert_eq!(
+            postgres_sql,
+            r#"INSERT INTO "public"."events" DEFAULT VALUES;"#
+        );
+        assert!(postgres_params.is_empty());
+
+        let (mysql_sql, mysql_params) =
+            build_insert_mutation(DatabaseKind::Mysql, "app", "events", &columns, &values).unwrap();
+        assert_eq!(mysql_sql, "INSERT INTO `app`.`events` () VALUES ();");
+        assert!(mysql_params.is_empty());
+    }
+
+    #[test]
     fn builds_postgres_update_with_casted_parameters() {
         let columns = column_lookup(vec![
             ColumnInfo {
@@ -3570,6 +3978,61 @@ SELECT id FROM users WHERE active;"#
             }),
         )
         .is_err());
+
+        let stable_columns = column_lookup(vec![
+            ColumnInfo {
+                name: "tenant_id".to_string(),
+                data_type: "integer".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                is_unique: false,
+                is_indexed: true,
+                default_value: None,
+                is_auto_increment: false,
+                comment: None,
+            },
+            ColumnInfo {
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                is_unique: false,
+                is_indexed: true,
+                default_value: None,
+                is_auto_increment: false,
+                comment: None,
+            },
+            ColumnInfo {
+                name: "created_at".to_string(),
+                data_type: "timestamp".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                is_unique: false,
+                is_indexed: true,
+                default_value: None,
+                is_auto_increment: false,
+                comment: None,
+            },
+        ]);
+        assert_eq!(
+            build_table_order_by(DatabaseKind::Postgres, &stable_columns, None)
+                .unwrap()
+                .as_deref(),
+            Some(r#""id" ASC, "tenant_id" ASC"#)
+        );
+        assert_eq!(
+            build_table_order_by(
+                DatabaseKind::Postgres,
+                &stable_columns,
+                Some(&TableSort {
+                    column: "created_at".to_string(),
+                    direction: "desc".to_string(),
+                }),
+            )
+            .unwrap()
+            .as_deref(),
+            Some(r#""created_at" DESC, "id" ASC, "tenant_id" ASC"#)
+        );
     }
 
     #[test]

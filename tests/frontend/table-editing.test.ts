@@ -1,3 +1,6 @@
+/**
+ * @vitest-environment happy-dom
+ */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useTabStore } from "@/store/useTabStore";
@@ -64,10 +67,21 @@ function column(
 
 describe("table editing store", () => {
   beforeEach(() => {
-    mocks.mutateTableRows.mockClear();
-    mocks.getColumns.mockClear();
-    mocks.getIndexes.mockClear();
-    mocks.previewTablePage.mockClear();
+    mocks.mutateTableRows.mockReset().mockResolvedValue({
+      inserted: 0,
+      updated: 0,
+      deleted: 0,
+      rowsAffected: 0,
+    });
+    mocks.getColumns.mockReset().mockResolvedValue([]);
+    mocks.getIndexes.mockReset().mockResolvedValue([]);
+    mocks.previewTablePage.mockReset().mockResolvedValue({
+      result: { columns: [], rows: [] },
+      page: 0,
+      pageSize: 500,
+      totalRows: 0,
+    });
+    vi.stubGlobal("confirm", vi.fn(() => true));
 
     useConnectionStore.setState({
       connections: [
@@ -198,6 +212,368 @@ describe("table editing store", () => {
     );
   });
 
+  it("keeps same-named table tabs isolated by PostgreSQL database", () => {
+    useTabStore.setState({ tabs: [], activeTabId: null });
+
+    const analyticsTab = useTabStore
+      .getState()
+      .findOrCreateTableTab(
+        "postgres-1",
+        "public",
+        "users",
+        "BASE TABLE",
+        "analytics"
+      );
+    const archiveTab = useTabStore
+      .getState()
+      .findOrCreateTableTab(
+        "postgres-1",
+        "public",
+        "users",
+        "BASE TABLE",
+        "archive"
+      );
+    const reusedAnalyticsTab = useTabStore
+      .getState()
+      .findOrCreateTableTab(
+        "postgres-1",
+        "public",
+        "users",
+        "VIEW",
+        "analytics"
+      );
+
+    expect(archiveTab).not.toBe(analyticsTab);
+    expect(reusedAnalyticsTab).toBe(analyticsTab);
+    expect(useTabStore.getState().tabs).toHaveLength(2);
+    expect(
+      useTabStore.getState().tabs.find((tab) => tab.id === analyticsTab)
+    ).toMatchObject({
+      title: "users · analytics",
+      databaseName: "analytics",
+      objectType: "VIEW",
+    });
+    expect(
+      useTabStore.getState().tabs.find((tab) => tab.id === archiveTab)
+    ).toMatchObject({ title: "users · archive", databaseName: "archive" });
+  });
+
+  it("passes an explicit PostgreSQL database when loading a table page", async () => {
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          databaseName: "analytics",
+          pendingEdits: new Map(),
+        },
+      ],
+    });
+
+    await useTabStore.getState().loadTablePage("tab-1", 0);
+
+    expect(mocks.previewTablePage).toHaveBeenCalledWith(
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      0,
+      500,
+      undefined,
+      undefined,
+      undefined,
+      "analytics"
+    );
+  });
+
+  it("routes save and delete mutations to the selected PostgreSQL database", async () => {
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          databaseName: "analytics",
+          tableColumns: [column("email", { primary: true })],
+          tableIndexes: [],
+        },
+      ],
+    });
+
+    await useTabStore.getState().commitEdits("tab-1");
+
+    expect(mocks.mutateTableRows).toHaveBeenNthCalledWith(
+      1,
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      [],
+      [
+        {
+          key: { email: "old@example.test" },
+          values: { email: "new@example.test" },
+        },
+      ],
+      [],
+      "analytics"
+    );
+
+    useTabStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === "tab-1"
+          ? {
+              ...tab,
+              results: [
+                {
+                  columns: [{ name: "email", data_type: "text" }],
+                  rows: [["new@example.test"]],
+                },
+              ],
+              pendingEdits: new Map(),
+            }
+          : tab
+      ),
+    }));
+    await useTabStore.getState().deleteRows("tab-1", [0]);
+
+    expect(mocks.mutateTableRows).toHaveBeenNthCalledWith(
+      2,
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      [],
+      [],
+      [{ key: { email: "new@example.test" } }],
+      "analytics"
+    );
+  });
+
+  it("retargets and refreshes only table tabs in the requested database", async () => {
+    const baseTab = useTabStore.getState().tabs[0]!;
+    useTabStore.setState({
+      tabs: [
+        {
+          ...baseTab,
+          id: "analytics-tab",
+          databaseName: "analytics",
+          pendingEdits: new Map(),
+        },
+        {
+          ...baseTab,
+          id: "archive-tab",
+          databaseName: "archive",
+          pendingEdits: new Map(),
+        },
+      ],
+    });
+
+    await useTabStore
+      .getState()
+      .refreshTableTabs("postgres-1", "public", "users", false, "analytics");
+
+    expect(mocks.previewTablePage).toHaveBeenCalledTimes(1);
+    expect(mocks.previewTablePage).toHaveBeenCalledWith(
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      0,
+      500,
+      undefined,
+      undefined,
+      undefined,
+      "analytics"
+    );
+
+    useTabStore
+      .getState()
+      .retargetTableTabs(
+        "postgres-1",
+        "public",
+        "users",
+        "accounts",
+        undefined,
+        "analytics"
+      );
+
+    expect(
+      useTabStore.getState().tabs.find((tab) => tab.id === "analytics-tab")
+        ?.tableName
+    ).toBe("accounts");
+    expect(
+      useTabStore.getState().tabs.find((tab) => tab.id === "archive-tab")
+        ?.tableName
+    ).toBe("users");
+  });
+
+  it("consumes inserted row drafts when saving succeeds but refreshing fails", async () => {
+    mocks.previewTablePage.mockRejectedValueOnce(new Error("database timeout"));
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          tableIndexes: [],
+          pendingEdits: new Map([["-1:0", "created@example.test"]]),
+          newRowsCount: 1,
+        },
+      ],
+    });
+
+    await useTabStore.getState().commitEdits("tab-1");
+
+    let tab = useTabStore.getState().tabs[0]!;
+    expect(mocks.mutateTableRows).toHaveBeenCalledTimes(1);
+    expect(mocks.mutateTableRows).toHaveBeenCalledWith(
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      [{ email: "created@example.test" }],
+      [],
+      []
+    );
+    expect(tab.pendingEdits?.size).toBe(0);
+    expect(tab.newRowsCount).toBe(0);
+    expect(tab.error).toContain("Changes were saved");
+    expect(tab.error).toContain("Click Refresh");
+    expect(tab.error).toContain("database timeout");
+    expect(tab.error).not.toContain("Save failed");
+
+    await useTabStore.getState().commitEdits("tab-1");
+
+    tab = useTabStore.getState().tabs[0]!;
+    expect(mocks.mutateTableRows).toHaveBeenCalledTimes(1);
+    expect(tab.pendingEdits?.size).toBe(0);
+    expect(tab.newRowsCount).toBe(0);
+  });
+
+  it("inserts an untouched new row using database defaults", async () => {
+    mocks.mutateTableRows.mockResolvedValueOnce({
+      inserted: 1,
+      updated: 0,
+      deleted: 0,
+      rowsAffected: 1,
+    });
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          tableIndexes: [],
+          pendingEdits: new Map(),
+          newRowsCount: 1,
+          tableTotalRows: 10,
+        },
+      ],
+    });
+
+    await useTabStore.getState().commitEdits("tab-1");
+
+    const tab = useTabStore.getState().tabs[0]!;
+    expect(mocks.mutateTableRows).toHaveBeenCalledWith(
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      [{}],
+      [],
+      []
+    );
+    expect(tab.pendingEdits?.size).toBe(0);
+    expect(tab.newRowsCount).toBe(0);
+  });
+
+  it("submits edited and untouched new rows together", async () => {
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          tableIndexes: [],
+          pendingEdits: new Map([["-1:0", "created@example.test"]]),
+          newRowsCount: 2,
+          tableTotalRows: 10,
+        },
+      ],
+    });
+
+    await useTabStore.getState().commitEdits("tab-1");
+
+    const tab = useTabStore.getState().tabs[0]!;
+    expect(mocks.mutateTableRows).toHaveBeenCalledTimes(1);
+    expect(mocks.mutateTableRows).toHaveBeenCalledWith(
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      [{ email: "created@example.test" }, {}],
+      [],
+      []
+    );
+    expect(tab.pendingEdits?.size).toBe(0);
+    expect(tab.newRowsCount).toBe(0);
+  });
+
+  it("locks table drafts while a save mutation is in flight", async () => {
+    let resolveMutation!: (value: {
+      inserted: number;
+      updated: number;
+      deleted: number;
+      rowsAffected: number;
+    }) => void;
+    mocks.mutateTableRows.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveMutation = resolve;
+        })
+    );
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          tableIndexes: [],
+          pendingEdits: new Map([["-1:0", "original@example.test"]]),
+          newRowsCount: 1,
+        },
+      ],
+    });
+
+    const savePromise = useTabStore.getState().commitEdits("tab-1");
+    expect(useTabStore.getState().tabs[0]?.isExecuting).toBe(true);
+
+    useTabStore
+      .getState()
+      .setCellEdit("tab-1", -1, 0, "changed-during-save@example.test");
+    expect(useTabStore.getState().tabs[0]?.pendingEdits).toEqual(
+      new Map([["-1:0", "original@example.test"]])
+    );
+
+    resolveMutation({ inserted: 1, updated: 0, deleted: 0, rowsAffected: 1 });
+    await savePromise;
+    expect(useTabStore.getState().tabs[0]?.isExecuting).toBe(false);
+  });
+
+  it("keeps drafts retryable when the save mutation itself fails", async () => {
+    mocks.mutateTableRows.mockRejectedValueOnce(new Error("write rejected"));
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          tableIndexes: [],
+          pendingEdits: new Map([["-1:0", "created@example.test"]]),
+          newRowsCount: 1,
+        },
+      ],
+    });
+
+    await useTabStore.getState().commitEdits("tab-1");
+
+    const tab = useTabStore.getState().tabs[0]!;
+    expect(mocks.previewTablePage).not.toHaveBeenCalled();
+    expect(tab.pendingEdits).toEqual(
+      new Map([["-1:0", "created@example.test"]])
+    );
+    expect(tab.newRowsCount).toBe(1);
+    expect(tab.error).toBe("Save failed: write rejected");
+  });
+
   it("fetches missing index metadata before saving existing row edits", async () => {
     const columns = [column("email"), column("name")];
     mocks.getColumns.mockResolvedValueOnce(columns);
@@ -288,6 +664,62 @@ describe("table editing store", () => {
     );
   });
 
+  it("consumes deleted rows locally when deleting succeeds but refreshing fails", async () => {
+    mocks.previewTablePage.mockRejectedValueOnce(new Error("network unavailable"));
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          tableColumns: [column("id", { primary: true }), column("email")],
+          tableIndexes: [
+            {
+              name: "users_pkey",
+              columns: ["id"],
+              is_unique: true,
+              is_primary: true,
+            },
+          ],
+          results: [
+            {
+              columns: [
+                { name: "id", data_type: "int4" },
+                { name: "email", data_type: "text" },
+              ],
+              rows: [
+                [1, "first@example.test"],
+                [2, "second@example.test"],
+              ],
+            },
+          ],
+          tableTotalRows: 2,
+          pendingEdits: new Map([["0:1", "deleted-row-draft@example.test"]]),
+          newRowsCount: 0,
+        },
+      ],
+    });
+
+    await useTabStore.getState().deleteRows("tab-1", [0]);
+
+    const tab = useTabStore.getState().tabs[0]!;
+    expect(mocks.mutateTableRows).toHaveBeenCalledWith(
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      [],
+      [],
+      [{ key: { id: 1 } }]
+    );
+    expect(tab.results?.[0]?.rows).toEqual([[2, "second@example.test"]]);
+    expect(tab.pendingEdits?.size).toBe(0);
+    expect(tab.newRowsCount).toBe(0);
+    expect(tab.tableTotalRows).toBe(1);
+    expect(tab.error).toContain("Rows were deleted");
+    expect(tab.error).toContain("Click Refresh");
+    expect(tab.error).toContain("network unavailable");
+    expect(tab.error).not.toContain("Delete rows failed");
+  });
+
   it("refreshes open table tabs with fresh metadata after structure changes", async () => {
     const columns = [column("id", { primary: true }), column("email")];
     const indexes: IndexInfo[] = [
@@ -351,7 +783,7 @@ describe("table editing store", () => {
       500,
       "email is not null",
       undefined,
-      undefined
+      { column: "id", direction: "asc" }
     );
     expect(tab.tableColumns).toEqual(columns);
     expect(tab.tableIndexes).toEqual(indexes);
@@ -393,20 +825,88 @@ describe("table editing store", () => {
     expect(tab.results?.[0]?.rows).toEqual([["fresh@example.test"]]);
   });
 
-  it("clears stale pending edits after deleting rows and reloading table data", async () => {
-    mocks.previewTablePage.mockResolvedValueOnce({
-      result: {
-        columns: [
-          { name: "id", data_type: "int4" },
-          { name: "email", data_type: "text" },
-        ],
-        rows: [],
-      },
-      page: 0,
-      pageSize: 500,
-      totalRows: 0,
-    });
+  it("keeps drafts and avoids loading when page replacement is declined", async () => {
+    vi.mocked(confirm).mockReturnValueOnce(false);
 
+    const loaded = await useTabStore.getState().loadTablePage("tab-1", 1);
+
+    const tab = useTabStore.getState().tabs[0]!;
+    expect(loaded).toBe(false);
+    expect(mocks.previewTablePage).not.toHaveBeenCalled();
+    expect(tab.pendingEdits).toEqual(
+      new Map([["0:0", "new@example.test"]])
+    );
+    expect(tab.tablePage).toBeUndefined();
+    expect(vi.mocked(confirm).mock.calls[0]?.[0]).toContain("Submit Changes");
+  });
+
+  it("does not apply a server sort when discarding drafts is declined", async () => {
+    vi.mocked(confirm).mockReturnValueOnce(false);
+
+    const sorted = await useTabStore
+      .getState()
+      .setGridSort("tab-1", "email", "asc");
+
+    const tab = useTabStore.getState().tabs[0]!;
+    expect(sorted).toBe(false);
+    expect(mocks.previewTablePage).not.toHaveBeenCalled();
+    expect(tab.gridState?.sortColumn).toBeUndefined();
+    expect(tab.pendingEdits?.size).toBe(1);
+  });
+
+  it("protects table drafts when closing and does not restore discarded drafts", () => {
+    vi.mocked(confirm).mockReturnValueOnce(false);
+    useTabStore.getState().closeTab("tab-1");
+    expect(useTabStore.getState().tabs).toHaveLength(1);
+
+    vi.mocked(confirm).mockReturnValueOnce(true);
+    useTabStore.getState().closeTab("tab-1");
+    expect(useTabStore.getState().tabs).toHaveLength(0);
+    expect(useTabStore.getState().closedTabsStack[0]?.pendingEdits?.size).toBe(0);
+
+    useTabStore.getState().reopenTab();
+    expect(useTabStore.getState().tabs[0]?.pendingEdits?.size).toBe(0);
+  });
+
+  it("preserves table drafts while switching between tabs", () => {
+    useTabStore.setState((state) => ({
+      tabs: [
+        ...state.tabs,
+        {
+          id: "tab-2",
+          title: "Query",
+          type: "query",
+          sql: "SELECT 1",
+          results: null,
+          isExecuting: false,
+          error: null,
+          isPinned: false,
+        },
+      ],
+    }));
+
+    useTabStore.getState().setActiveTab("tab-2");
+    useTabStore.getState().setActiveTab("tab-1");
+
+    expect(useTabStore.getState().tabs[0]?.pendingEdits).toEqual(
+      new Map([["0:0", "new@example.test"]])
+    );
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("keeps drafts when a table-wide metadata refresh is declined", async () => {
+    vi.mocked(confirm).mockReturnValueOnce(false);
+
+    await useTabStore
+      .getState()
+      .refreshTableTabs("postgres-1", "public", "users");
+
+    expect(mocks.getColumns).not.toHaveBeenCalled();
+    expect(mocks.previewTablePage).not.toHaveBeenCalled();
+    expect(useTabStore.getState().tabs[0]?.pendingEdits?.size).toBe(1);
+  });
+
+  it("preserves unrelated new rows after deleting existing rows", async () => {
     useTabStore.setState({
       tabs: [
         {
@@ -448,6 +948,8 @@ describe("table editing store", () => {
       [{ key: { id: 1 } }]
     );
     expect(tab.pendingEdits?.size).toBe(0);
-    expect(tab.newRowsCount).toBe(0);
+    expect(tab.newRowsCount).toBe(1);
+    expect(mocks.previewTablePage).not.toHaveBeenCalled();
+    expect(tab.error).toContain("Other unsaved table changes were preserved");
   });
 });

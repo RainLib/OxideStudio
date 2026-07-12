@@ -5,15 +5,20 @@ use crate::core::protocol::{
     ParameterizedStatement, QueryParameter, QueryResult, TableInfo,
 };
 use crate::core::statement::{
-    execution_mode, execution_statement_kind, has_multiple_statements, QueryExecutionMode,
+    execution_mode, execution_statement_kind, split_sql_statements, QueryExecutionMode,
     StatementScanDialect,
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use sqlx::pool::PoolConnection;
-use sqlx::postgres::{PgArguments, PgConnectOptions, PgPoolOptions, PgRow};
+use sqlx::postgres::types::{Oid, PgInterval, PgTimeTz};
+use sqlx::postgres::{
+    PgArguments, PgConnectOptions, PgPoolOptions, PgRow, PgTypeInfo, PgTypeKind, PgValueFormat,
+};
 use sqlx::query::Query;
-use sqlx::{Column, ConnectOptions, Executor, Pool, Postgres, Row, TypeInfo};
+use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use sqlx::types::{BigDecimal, Uuid};
+use sqlx::{Column, ConnectOptions, Executor, Pool, Postgres, Row, TypeInfo, ValueRef};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -23,12 +28,25 @@ use tokio::time::timeout;
 
 type PostgresTransactionSession = Arc<Mutex<PoolConnection<Postgres>>>;
 const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+const METADATA_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const METADATA_QUERY_TIMEOUT: Duration = Duration::from_secs(20);
+const METADATA_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const METADATA_POOL_MAX_LIFETIME: Duration = Duration::from_secs(300);
+
+struct PostgresMetadataPool {
+    database: String,
+    pool: Pool<Postgres>,
+}
 
 pub struct PostgresDriver {
     pub pool: Mutex<Option<Pool<Postgres>>>,
     pub connection_string: String,
     pub transaction_sessions: Mutex<HashMap<String, PostgresTransactionSession>>,
     pub active_queries: StdMutex<HashMap<String, i32>>,
+    /// A single cached pool for read-only Database Explorer metadata. Holding
+    /// this mutex across a metadata query serializes database switches, so the
+    /// driver can never create more than one additional PostgreSQL connection.
+    metadata_pool: Mutex<Option<PostgresMetadataPool>>,
 }
 
 struct PostgresTrackedQueryGuard<'a> {
@@ -55,6 +73,7 @@ impl PostgresDriver {
             connection_string: connection_string.to_string(),
             transaction_sessions: Mutex::new(HashMap::new()),
             active_queries: StdMutex::new(HashMap::new()),
+            metadata_pool: Mutex::new(None),
         }
     }
 
@@ -63,9 +82,363 @@ impl PostgresDriver {
         pool.clone().ok_or_else(|| anyhow!("Not connected"))
     }
 
-    fn process_rows(&self, rows: Vec<PgRow>) -> Result<Vec<QueryResult>> {
+    fn metadata_connect_options(&self, database: &str) -> Result<PgConnectOptions> {
+        if database.is_empty() {
+            return Err(anyhow!("PostgreSQL database name cannot be empty"));
+        }
+        if database.contains('\0') {
+            return Err(anyhow!("PostgreSQL database name cannot contain NUL bytes"));
+        }
+
+        Ok(PgConnectOptions::from_str(&self.connection_string)?
+            .database(database)
+            .disable_statement_logging()
+            .statement_cache_capacity(0)
+            .to_owned())
+    }
+
+    async fn ensure_metadata_pool(
+        &self,
+        slot: &mut Option<PostgresMetadataPool>,
+        database: &str,
+    ) -> Result<Pool<Postgres>> {
+        if let Some(cached) = slot.as_ref() {
+            if cached.database == database && !cached.pool.is_closed() {
+                return Ok(cached.pool.clone());
+            }
+        }
+
+        if let Some(stale) = slot.take() {
+            if timeout(POOL_CLOSE_TIMEOUT, stale.pool.close())
+                .await
+                .is_err()
+            {
+                let stale_database = stale.database.clone();
+                *slot = Some(stale);
+                return Err(anyhow!(
+                    "Timed out closing PostgreSQL metadata connection for database '{}'; database switch was cancelled",
+                    stale_database
+                ));
+            }
+        }
+
+        let options = self.metadata_connect_options(database)?;
+        let connect = PgPoolOptions::new()
+            .min_connections(0)
+            .max_connections(1)
+            .acquire_timeout(METADATA_CONNECT_TIMEOUT)
+            .idle_timeout(Some(METADATA_POOL_IDLE_TIMEOUT))
+            .max_lifetime(Some(METADATA_POOL_MAX_LIFETIME))
+            .connect_with(options);
+        let pool = timeout(METADATA_CONNECT_TIMEOUT, connect)
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "Timed out connecting to PostgreSQL database '{}' for metadata",
+                    database
+                )
+            })??;
+
+        *slot = Some(PostgresMetadataPool {
+            database: database.to_string(),
+            pool: pool.clone(),
+        });
+        Ok(pool)
+    }
+
+    async fn schemas_on_pool(pool: &Pool<Postgres>) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast') ORDER BY schema_name",
+        )
+        .persistent(false)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| row.try_get(0).unwrap_or_default())
+            .collect())
+    }
+
+    async fn tables_on_pool(pool: &Pool<Postgres>, schema: &str) -> Result<Vec<TableInfo>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                c.relname AS table_name,
+                CASE c.relkind
+                    WHEN 'r' THEN 'BASE TABLE'
+                    WHEN 'p' THEN 'PARTITIONED TABLE'
+                    WHEN 'v' THEN 'VIEW'
+                    WHEN 'm' THEN 'MATERIALIZED VIEW'
+                    WHEN 'f' THEN 'FOREIGN TABLE'
+                    ELSE c.relkind::text
+                END AS table_type,
+                obj_description(c.oid, 'pg_class') AS comment
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = $1
+              AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+            ORDER BY c.relname
+            "#,
+        )
+        .bind(schema)
+        .persistent(false)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| TableInfo {
+                name: row.try_get("table_name").unwrap_or_default(),
+                schema: Some(schema.to_string()),
+                table_type: row.try_get("table_type").ok(),
+                comment: row.try_get("comment").ok(),
+            })
+            .collect())
+    }
+
+    async fn functions_on_pool(pool: &Pool<Postgres>, schema: &str) -> Result<Vec<FunctionInfo>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                p.proname AS function_name,
+                pg_get_function_arguments(p.oid) AS arguments,
+                CASE
+                    WHEN p.prokind = 'p' THEN 'procedure'
+                    ELSE 'function'
+                END AS routine_type,
+                CASE
+                    WHEN p.prokind = 'p' THEN 'void'
+                    ELSE pg_get_function_result(p.oid)
+                END AS return_type,
+                obj_description(p.oid, 'pg_proc') AS description
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = $1
+              AND p.prokind IN ('f', 'p')
+            ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)
+            "#,
+        )
+        .bind(schema)
+        .persistent(false)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let arguments = row.try_get::<String, _>("arguments").unwrap_or_default();
+                FunctionInfo {
+                    name: row.try_get("function_name").unwrap_or_default(),
+                    routine_type: row.try_get("routine_type").ok(),
+                    parameters: parse_postgres_function_parameters(&arguments),
+                    return_type: row
+                        .try_get("return_type")
+                        .unwrap_or_else(|_| "unknown".to_string()),
+                    description: row.try_get("description").ok(),
+                }
+            })
+            .collect())
+    }
+
+    async fn columns_on_pool(
+        pool: &Pool<Postgres>,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ColumnInfo>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                a.attname AS column_name,
+                format_type(a.atttypid, a.atttypmod) AS data_type,
+                NOT a.attnotnull AS is_nullable,
+                pg_get_expr(ad.adbin, ad.adrelid) AS column_default,
+                (
+                    a.attidentity <> ''
+                    OR COALESCE(pg_get_expr(ad.adbin, ad.adrelid), '') LIKE 'nextval(%'
+                ) AS is_auto_increment,
+                d.description AS column_comment,
+                EXISTS (
+                    SELECT 1
+                    FROM pg_constraint con
+                    WHERE con.conrelid = t.oid
+                      AND con.contype = 'p'
+                      AND a.attnum = ANY(con.conkey)
+                ) as is_primary_key,
+                EXISTS (
+                    SELECT 1
+                    FROM pg_constraint con
+                    WHERE con.conrelid = t.oid
+                      AND con.contype IN ('p', 'u')
+                      AND a.attnum = ANY(con.conkey)
+                ) as is_unique,
+                EXISTS (
+                    SELECT 1
+                    FROM pg_index i
+                    WHERE i.indrelid = t.oid
+                      AND a.attnum = ANY(i.indkey)
+                ) as is_indexed
+            FROM pg_class t
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            JOIN pg_attribute a ON a.attrelid = t.oid
+            LEFT JOIN pg_attrdef ad ON ad.adrelid = t.oid AND ad.adnum = a.attnum
+            LEFT JOIN pg_description d ON d.objoid = t.oid AND d.objsubid = a.attnum
+            WHERE n.nspname = $1
+              AND t.relname = $2
+              AND t.relkind IN ('r', 'p', 'v', 'm', 'f')
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            ORDER BY a.attnum
+            "#,
+        )
+        .bind(schema)
+        .bind(table)
+        .persistent(false)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let is_nullable = row.try_get::<bool, _>("is_nullable").unwrap_or(true);
+                let is_primary_key = row.try_get::<bool, _>("is_primary_key").unwrap_or(false);
+                let is_unique = row.try_get::<bool, _>("is_unique").unwrap_or(false);
+                let is_indexed = row.try_get::<bool, _>("is_indexed").unwrap_or(false);
+
+                ColumnInfo {
+                    name: row.try_get("column_name").unwrap_or_default(),
+                    data_type: row.try_get("data_type").unwrap_or_default(),
+                    is_nullable,
+                    is_primary_key,
+                    is_unique,
+                    is_indexed,
+                    is_auto_increment: row.try_get("is_auto_increment").unwrap_or(false),
+                    default_value: row.try_get("column_default").ok(),
+                    comment: row.try_get("column_comment").ok(),
+                }
+            })
+            .collect())
+    }
+
+    async fn indexes_on_pool(
+        pool: &Pool<Postgres>,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                i.relname AS index_name,
+                ix.indisunique,
+                ix.indisprimary,
+                am.amname AS index_type,
+                pg_get_indexdef(ix.indexrelid) AS definition,
+                COALESCE((
+                    SELECT array_agg(a.attname ORDER BY keys.ordinality)
+                    FROM unnest(ix.indkey) WITH ORDINALITY AS keys(attnum, ordinality)
+                    JOIN pg_attribute a
+                      ON a.attrelid = ix.indrelid
+                     AND a.attnum = keys.attnum
+                    WHERE keys.attnum > 0
+                ), ARRAY[]::text[]) AS columns
+            FROM pg_class t
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            JOIN pg_index ix ON ix.indrelid = t.oid
+            JOIN pg_class i ON i.oid = ix.indexrelid
+            JOIN pg_am am ON am.oid = i.relam
+            WHERE n.nspname = $1 AND t.relname = $2
+            ORDER BY ix.indisprimary DESC, ix.indisunique DESC, i.relname
+            "#,
+        )
+        .bind(schema)
+        .bind(table)
+        .persistent(false)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| IndexInfo {
+                name: row.try_get("index_name").unwrap_or_default(),
+                columns: row.try_get("columns").unwrap_or_default(),
+                is_unique: row.try_get("indisunique").unwrap_or(false),
+                is_primary: row.try_get("indisprimary").unwrap_or(false),
+                index_type: row.try_get("index_type").ok(),
+                definition: row.try_get("definition").ok(),
+            })
+            .collect())
+    }
+
+    async fn constraints_on_pool(
+        pool: &Pool<Postgres>,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ConstraintInfo>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                c.conname AS constraint_name,
+                CASE c.contype
+                    WHEN 'p' THEN 'PRIMARY KEY'
+                    WHEN 'f' THEN 'FOREIGN KEY'
+                    WHEN 'u' THEN 'UNIQUE'
+                    WHEN 'c' THEN 'CHECK'
+                    WHEN 'x' THEN 'EXCLUDE'
+                    ELSE c.contype::text
+                END AS constraint_type,
+                pg_get_constraintdef(c.oid) AS definition,
+                COALESCE((
+                    SELECT array_agg(a.attname ORDER BY keys.ordinality)
+                    FROM unnest(c.conkey) WITH ORDINALITY AS keys(attnum, ordinality)
+                    JOIN pg_attribute a
+                      ON a.attrelid = c.conrelid
+                     AND a.attnum = keys.attnum
+                ), ARRAY[]::text[]) AS columns,
+                ref_ns.nspname AS referenced_schema,
+                ref_table.relname AS referenced_table,
+                COALESCE((
+                    SELECT array_agg(a.attname ORDER BY keys.ordinality)
+                    FROM unnest(c.confkey) WITH ORDINALITY AS keys(attnum, ordinality)
+                    JOIN pg_attribute a
+                      ON a.attrelid = c.confrelid
+                     AND a.attnum = keys.attnum
+                ), ARRAY[]::text[]) AS referenced_columns
+            FROM pg_constraint c
+            JOIN pg_class t ON t.oid = c.conrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            LEFT JOIN pg_class ref_table ON ref_table.oid = c.confrelid
+            LEFT JOIN pg_namespace ref_ns ON ref_ns.oid = ref_table.relnamespace
+            WHERE n.nspname = $1 AND t.relname = $2
+            ORDER BY c.contype, c.conname
+            "#,
+        )
+        .bind(schema)
+        .bind(table)
+        .persistent(false)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| ConstraintInfo {
+                name: row.try_get("constraint_name").unwrap_or_default(),
+                constraint_type: row.try_get("constraint_type").unwrap_or_default(),
+                columns: row.try_get("columns").unwrap_or_default(),
+                referenced_schema: row.try_get("referenced_schema").ok(),
+                referenced_table: row.try_get("referenced_table").ok(),
+                referenced_columns: row.try_get("referenced_columns").unwrap_or_default(),
+                definition: row.try_get("definition").ok(),
+            })
+            .collect())
+    }
+
+    fn process_rows(
+        &self,
+        rows: Vec<PgRow>,
+        empty_columns: Vec<ColumnDef>,
+    ) -> Result<Vec<QueryResult>> {
         if rows.is_empty() {
-            return Ok(vec![]);
+            return Ok(vec![QueryResult::rows(empty_columns, Vec::new())]);
         }
 
         let first_row = &rows[0];
@@ -91,30 +464,150 @@ impl PostgresDriver {
         Ok(vec![QueryResult::rows(columns, data_rows)])
     }
 
-    async fn query_on_pool(&self, sql: &str, pool: &Pool<Postgres>) -> Result<Vec<QueryResult>> {
-        if has_multiple_statements(sql, StatementScanDialect::Postgres) {
-            return match execution_mode(sql) {
-                QueryExecutionMode::ReturnsRows => {
-                    let rows = sqlx::raw_sql(sql).fetch_all(pool).await?;
-                    self.process_rows(rows)
-                }
-                QueryExecutionMode::AffectsRows => {
-                    let result = sqlx::raw_sql(sql).execute(pool).await?;
-                    Ok(vec![QueryResult::execution(
-                        execution_statement_kind(sql).as_str(),
-                        result.rows_affected(),
-                    )])
-                }
-            };
-        }
+    async fn process_pool_rows(
+        &self,
+        sql: &str,
+        rows: Vec<PgRow>,
+        pool: &Pool<Postgres>,
+    ) -> Result<Vec<QueryResult>> {
+        let columns = if rows.is_empty() {
+            pool.describe(sql)
+                .await
+                .map(|description| {
+                    description
+                        .columns()
+                        .iter()
+                        .map(|column| ColumnDef {
+                            name: column.name().to_string(),
+                            data_type: column.type_info().name().to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.process_rows(rows, columns)
+    }
 
+    async fn process_connection_rows(
+        &self,
+        sql: &str,
+        rows: Vec<PgRow>,
+        conn: &mut sqlx::PgConnection,
+    ) -> Result<Vec<QueryResult>> {
+        let columns = if rows.is_empty() {
+            (&mut *conn)
+                .describe(sql)
+                .await
+                .map(|description| {
+                    description
+                        .columns()
+                        .iter()
+                        .map(|column| ColumnDef {
+                            name: column.name().to_string(),
+                            data_type: column.type_info().name().to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.process_rows(rows, columns)
+    }
+
+    async fn query_single_on_pool(
+        &self,
+        sql: &str,
+        pool: &Pool<Postgres>,
+    ) -> Result<Vec<QueryResult>> {
         match execution_mode(sql) {
             QueryExecutionMode::ReturnsRows => {
                 let rows = sqlx::query(sql).persistent(false).fetch_all(pool).await?;
-                self.process_rows(rows)
+                self.process_pool_rows(sql, rows, pool).await
             }
             QueryExecutionMode::AffectsRows => {
                 let result = sqlx::query(sql).persistent(false).execute(pool).await?;
+                Ok(vec![QueryResult::execution(
+                    execution_statement_kind(sql).as_str(),
+                    result.rows_affected(),
+                )])
+            }
+        }
+    }
+
+    async fn query_on_pool(&self, sql: &str, pool: &Pool<Postgres>) -> Result<Vec<QueryResult>> {
+        let statements = split_sql_statements(sql, StatementScanDialect::Postgres);
+        if statements.is_empty() {
+            return Ok(Vec::new());
+        }
+        if statements.len() <= 1 {
+            return self.query_single_on_pool(statements[0], pool).await;
+        }
+
+        let mut connection = pool.acquire().await?;
+        // A script may change session or transaction state. Never return that connection to the
+        // pool if execution is cancelled between statements or the script leaves a transaction
+        // open; dropping it closes the backend connection instead.
+        connection.close_on_drop();
+        let mut results = Vec::with_capacity(statements.len());
+        for statement in statements {
+            results.extend(
+                self.query_single_on_connection(statement, &mut connection)
+                    .await?,
+            );
+        }
+        Ok(results)
+    }
+
+    async fn query_parameterized_on_pool(
+        &self,
+        sql: &str,
+        params: &[QueryParameter],
+        pool: &Pool<Postgres>,
+    ) -> Result<Vec<QueryResult>> {
+        match execution_mode(sql) {
+            QueryExecutionMode::ReturnsRows => {
+                let mut query = sqlx::query(sql).persistent(false);
+                for param in params {
+                    query = bind_pg_parameter(query, param)?;
+                }
+                let rows = query.fetch_all(pool).await?;
+                self.process_pool_rows(sql, rows, pool).await
+            }
+            QueryExecutionMode::AffectsRows => {
+                let mut query = sqlx::query(sql).persistent(false);
+                for param in params {
+                    query = bind_pg_parameter(query, param)?;
+                }
+                let result = query.execute(pool).await?;
+                Ok(vec![QueryResult::execution(
+                    execution_statement_kind(sql).as_str(),
+                    result.rows_affected(),
+                )])
+            }
+        }
+    }
+
+    async fn query_single_on_connection(
+        &self,
+        sql: &str,
+        conn: &mut sqlx::PgConnection,
+    ) -> Result<Vec<QueryResult>> {
+        match execution_mode(sql) {
+            QueryExecutionMode::ReturnsRows => {
+                let rows = sqlx::query(sql)
+                    .persistent(false)
+                    .fetch_all(&mut *conn)
+                    .await?;
+                self.process_connection_rows(sql, rows, conn).await
+            }
+            QueryExecutionMode::AffectsRows => {
+                let result = sqlx::query(sql)
+                    .persistent(false)
+                    .execute(&mut *conn)
+                    .await?;
                 Ok(vec![QueryResult::execution(
                     execution_statement_kind(sql).as_str(),
                     result.rows_affected(),
@@ -128,41 +621,19 @@ impl PostgresDriver {
         sql: &str,
         conn: &mut sqlx::PgConnection,
     ) -> Result<Vec<QueryResult>> {
-        if has_multiple_statements(sql, StatementScanDialect::Postgres) {
-            return match execution_mode(sql) {
-                QueryExecutionMode::ReturnsRows => {
-                    let rows = (&mut *conn).fetch_all(sql).await?;
-                    self.process_rows(rows)
-                }
-                QueryExecutionMode::AffectsRows => {
-                    let result = (&mut *conn).execute(sql).await?;
-                    Ok(vec![QueryResult::execution(
-                        execution_statement_kind(sql).as_str(),
-                        result.rows_affected(),
-                    )])
-                }
-            };
+        let statements = split_sql_statements(sql, StatementScanDialect::Postgres);
+        if statements.is_empty() {
+            return Ok(Vec::new());
+        }
+        if statements.len() <= 1 {
+            return self.query_single_on_connection(statements[0], conn).await;
         }
 
-        match execution_mode(sql) {
-            QueryExecutionMode::ReturnsRows => {
-                let rows = sqlx::query(sql)
-                    .persistent(false)
-                    .fetch_all(&mut *conn)
-                    .await?;
-                self.process_rows(rows)
-            }
-            QueryExecutionMode::AffectsRows => {
-                let result = sqlx::query(sql)
-                    .persistent(false)
-                    .execute(&mut *conn)
-                    .await?;
-                Ok(vec![QueryResult::execution(
-                    execution_statement_kind(sql).as_str(),
-                    result.rows_affected(),
-                )])
-            }
+        let mut results = Vec::with_capacity(statements.len());
+        for statement in statements {
+            results.extend(self.query_single_on_connection(statement, conn).await?);
         }
+        Ok(results)
     }
 
     async fn track_query_on_connection<'a>(
@@ -365,6 +836,10 @@ fn parse_postgres_function_parameters(arguments: &str) -> Vec<FunctionParameterI
 
 #[async_trait]
 impl DatabaseDriver for PostgresDriver {
+    fn statement_scan_dialect(&self) -> Option<StatementScanDialect> {
+        Some(StatementScanDialect::Postgres)
+    }
+
     async fn connect(&mut self) -> Result<()> {
         let options = PgConnectOptions::from_str(&self.connection_string)?
             .disable_statement_logging()
@@ -378,23 +853,33 @@ impl DatabaseDriver for PostgresDriver {
             .await?;
 
         let old_pool = self.pool.get_mut().replace(pool);
+        let old_metadata_pool = self.metadata_pool.get_mut().take();
         if let Some(old_pool) = old_pool {
             Self::close_pool_with_timeout(old_pool).await;
+        }
+        if let Some(old_metadata_pool) = old_metadata_pool {
+            Self::close_pool_with_timeout(old_metadata_pool.pool).await;
         }
 
         Ok(())
     }
 
     async fn disconnect(&self) -> Result<()> {
+        // Database-scoped metadata calls take this lock before checking the
+        // primary pool. Taking it first here prevents a new auxiliary pool
+        // from being created while disconnect is in progress.
+        let mut metadata_pool = self.metadata_pool.lock().await;
         let pool = {
             let mut pool = self.pool.lock().await;
             pool.take()
         };
+        let metadata_pool_to_close = metadata_pool.take();
+        drop(metadata_pool);
 
         let active_queries = self.drain_active_query_backends();
         if !active_queries.is_empty() {
             if let Some(pool) = &pool {
-                self.cancel_tracked_queries_on_pool(&pool, active_queries)
+                self.cancel_tracked_queries_on_pool(pool, active_queries)
                     .await;
             } else {
                 tracing::warn!(
@@ -420,6 +905,9 @@ impl DatabaseDriver for PostgresDriver {
         if let Some(pool) = pool {
             Self::close_pool_with_timeout(pool).await;
         }
+        if let Some(metadata_pool) = metadata_pool_to_close {
+            Self::close_pool_with_timeout(metadata_pool.pool).await;
+        }
         Ok(())
     }
 
@@ -437,11 +925,84 @@ impl DatabaseDriver for PostgresDriver {
         self.query_on_pool(sql, &pool).await
     }
 
+    async fn query_database(&self, database: &str, sql: &str) -> Result<Vec<QueryResult>> {
+        let mut metadata_pool = self.metadata_pool.lock().await;
+        self.get_pool().await?;
+        let pool = self
+            .ensure_metadata_pool(&mut metadata_pool, database)
+            .await?;
+
+        timeout(METADATA_QUERY_TIMEOUT, self.query_on_pool(sql, &pool))
+            .await
+            .map_err(|_| anyhow!("Timed out querying PostgreSQL database '{}'", database))?
+    }
+
+    async fn query_database_with_context_tracked(
+        &self,
+        query_id: Option<&str>,
+        database: &str,
+        sql: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<QueryResult>> {
+        let mut metadata_pool = self.metadata_pool.lock().await;
+        self.get_pool().await?;
+        let pool = self
+            .ensure_metadata_pool(&mut metadata_pool, database)
+            .await?;
+        let mut conn = pool.acquire().await?;
+        if split_sql_statements(sql, StatementScanDialect::Postgres).len() > 1 {
+            conn.close_on_drop();
+        }
+
+        if let Some(schema) = schema.filter(|value| !value.trim().is_empty()) {
+            let search_path = DatabaseKind::Postgres.quote_identifier(schema);
+            sqlx::query("SELECT set_config('search_path', $1, false)")
+                .bind(search_path)
+                .persistent(false)
+                .execute(&mut *conn)
+                .await?;
+        }
+
+        let tracked_query = self.track_query_on_connection(query_id, &mut conn).await?;
+        let query_result = self.query_on_connection(sql, &mut conn).await;
+        drop(tracked_query);
+
+        let reset_result = if schema.is_some() {
+            Some(
+                sqlx::query("RESET search_path")
+                    .persistent(false)
+                    .execute(&mut *conn)
+                    .await,
+            )
+        } else {
+            None
+        };
+
+        match query_result {
+            Ok(rows) => {
+                if let Some(reset_result) = reset_result {
+                    reset_result?;
+                }
+                Ok(rows)
+            }
+            Err(query_error) => {
+                if let Some(Err(reset_error)) = reset_result {
+                    tracing::warn!(
+                        "Failed to reset PostgreSQL search_path for database '{}': {}",
+                        database,
+                        reset_error
+                    );
+                }
+                Err(query_error)
+            }
+        }
+    }
+
     async fn execute_parameterized(&self, sql: &str, params: &[QueryParameter]) -> Result<u64> {
         let pool = self.get_pool().await?;
         let mut query = sqlx::query(sql).persistent(false);
         for param in params {
-            query = bind_pg_parameter(query, param);
+            query = bind_pg_parameter(query, param)?;
         }
         let result = query.execute(&pool).await?;
         Ok(result.rows_affected())
@@ -453,27 +1014,32 @@ impl DatabaseDriver for PostgresDriver {
         params: &[QueryParameter],
     ) -> Result<Vec<QueryResult>> {
         let pool = self.get_pool().await?;
-        match execution_mode(sql) {
-            QueryExecutionMode::ReturnsRows => {
-                let mut query = sqlx::query(sql).persistent(false);
-                for param in params {
-                    query = bind_pg_parameter(query, param);
-                }
-                let rows = query.fetch_all(&pool).await?;
-                self.process_rows(rows)
-            }
-            QueryExecutionMode::AffectsRows => {
-                let mut query = sqlx::query(sql).persistent(false);
-                for param in params {
-                    query = bind_pg_parameter(query, param);
-                }
-                let result = query.execute(&pool).await?;
-                Ok(vec![QueryResult::execution(
-                    execution_statement_kind(sql).as_str(),
-                    result.rows_affected(),
-                )])
-            }
-        }
+        self.query_parameterized_on_pool(sql, params, &pool).await
+    }
+
+    async fn query_database_parameterized(
+        &self,
+        database: &str,
+        sql: &str,
+        params: &[QueryParameter],
+    ) -> Result<Vec<QueryResult>> {
+        let mut metadata_pool = self.metadata_pool.lock().await;
+        self.get_pool().await?;
+        let pool = self
+            .ensure_metadata_pool(&mut metadata_pool, database)
+            .await?;
+
+        timeout(
+            METADATA_QUERY_TIMEOUT,
+            self.query_parameterized_on_pool(sql, params, &pool),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Timed out running a parameterized query on PostgreSQL database '{}'",
+                database
+            )
+        })?
     }
 
     async fn execute_parameterized_batch(
@@ -495,7 +1061,7 @@ impl DatabaseDriver for PostgresDriver {
         for statement in statements {
             let mut query = sqlx::query(&statement.sql).persistent(false);
             for param in &statement.params {
-                query = bind_pg_parameter(query, param);
+                query = bind_pg_parameter(query, param)?;
             }
 
             match query.execute(&mut *conn).await {
@@ -523,6 +1089,59 @@ impl DatabaseDriver for PostgresDriver {
         Ok(rows_affected)
     }
 
+    async fn execute_database_parameterized_batch(
+        &self,
+        database: &str,
+        statements: &[ParameterizedStatement],
+    ) -> Result<Vec<u64>> {
+        if statements.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut metadata_pool = self.metadata_pool.lock().await;
+        self.get_pool().await?;
+        let pool = self
+            .ensure_metadata_pool(&mut metadata_pool, database)
+            .await?;
+        let mut conn = pool.acquire().await?;
+        sqlx::query("BEGIN")
+            .persistent(false)
+            .execute(&mut *conn)
+            .await?;
+
+        let mut rows_affected = Vec::with_capacity(statements.len());
+        for statement in statements {
+            let mut query = sqlx::query(&statement.sql).persistent(false);
+            for param in &statement.params {
+                query = bind_pg_parameter(query, param)?;
+            }
+
+            match query.execute(&mut *conn).await {
+                Ok(result) => rows_affected.push(result.rows_affected()),
+                Err(error) => {
+                    if let Err(rollback_error) = sqlx::query("ROLLBACK")
+                        .persistent(false)
+                        .execute(&mut *conn)
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to rollback PostgreSQL mutation batch on database '{}': {}",
+                            database,
+                            rollback_error
+                        );
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+
+        sqlx::query("COMMIT")
+            .persistent(false)
+            .execute(&mut *conn)
+            .await?;
+        Ok(rows_affected)
+    }
+
     async fn query_tracked(&self, query_id: Option<&str>, sql: &str) -> Result<Vec<QueryResult>> {
         if query_id.is_none() {
             return self.query(sql).await;
@@ -530,6 +1149,9 @@ impl DatabaseDriver for PostgresDriver {
 
         let pool = self.get_pool().await?;
         let mut conn = pool.acquire().await?;
+        if split_sql_statements(sql, StatementScanDialect::Postgres).len() > 1 {
+            conn.close_on_drop();
+        }
         let tracked_query = self.track_query_on_connection(query_id, &mut conn).await?;
         let result = self.query_on_connection(sql, &mut conn).await;
         drop(tracked_query);
@@ -539,6 +1161,9 @@ impl DatabaseDriver for PostgresDriver {
     async fn query_with_context(&self, sql: &str, schema: &str) -> Result<Vec<QueryResult>> {
         let pool = self.get_pool().await?;
         let mut conn = pool.acquire().await?;
+        if split_sql_statements(sql, StatementScanDialect::Postgres).len() > 1 {
+            conn.close_on_drop();
+        }
         let search_path = DatabaseKind::Postgres.quote_identifier(schema);
 
         sqlx::query("SELECT set_config('search_path', $1, false)")
@@ -563,7 +1188,7 @@ impl DatabaseDriver for PostgresDriver {
                 if let Err(reset_error) = reset_result {
                     tracing::warn!("Failed to reset PostgreSQL search_path: {}", reset_error);
                 }
-                Err(query_error.into())
+                Err(query_error)
             }
         }
     }
@@ -580,6 +1205,9 @@ impl DatabaseDriver for PostgresDriver {
 
         let pool = self.get_pool().await?;
         let mut conn = pool.acquire().await?;
+        if split_sql_statements(sql, StatementScanDialect::Postgres).len() > 1 {
+            conn.close_on_drop();
+        }
         let search_path = DatabaseKind::Postgres.quote_identifier(schema);
 
         sqlx::query("SELECT set_config('search_path', $1, false)")
@@ -606,7 +1234,7 @@ impl DatabaseDriver for PostgresDriver {
                 if let Err(reset_error) = reset_result {
                     tracing::warn!("Failed to reset PostgreSQL search_path: {}", reset_error);
                 }
-                Err(query_error.into())
+                Err(query_error)
             }
         }
     }
@@ -667,7 +1295,7 @@ impl DatabaseDriver for PostgresDriver {
         let session = self.get_transaction_session(session_id).await?;
         let mut conn = session.lock().await;
 
-        self.query_on_connection(sql, &mut **conn).await
+        self.query_on_connection(sql, &mut conn).await
     }
 
     async fn query_transaction_tracked(
@@ -683,10 +1311,8 @@ impl DatabaseDriver for PostgresDriver {
         let session = self.get_transaction_session(session_id).await?;
         let mut conn = session.lock().await;
 
-        let tracked_query = self
-            .track_query_on_connection(query_id, &mut **conn)
-            .await?;
-        let result = self.query_on_connection(sql, &mut **conn).await;
+        let tracked_query = self.track_query_on_connection(query_id, &mut conn).await?;
+        let result = self.query_on_connection(sql, &mut conn).await;
         drop(tracked_query);
         result
     }
@@ -740,288 +1366,193 @@ impl DatabaseDriver for PostgresDriver {
         Ok(())
     }
 
+    async fn get_databases(&self) -> Result<Vec<String>> {
+        let pool = self.get_pool().await?;
+        let databases = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT datname
+            FROM pg_catalog.pg_database
+            WHERE datallowconn
+              AND NOT datistemplate
+            ORDER BY datname
+            "#,
+        )
+        .persistent(false)
+        .fetch_all(&pool)
+        .await?;
+
+        Ok(databases)
+    }
+
     async fn get_schemas(&self) -> Result<Vec<String>> {
         let pool = self.get_pool().await?;
-        let rows = sqlx::query("SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast') ORDER BY schema_name")
-            .persistent(false)
-            .fetch_all(&pool)
+        Self::schemas_on_pool(&pool).await
+    }
+
+    async fn get_database_schemas(&self, database: &str) -> Result<Vec<String>> {
+        let mut metadata_pool = self.metadata_pool.lock().await;
+        self.get_pool().await?;
+        let pool = self
+            .ensure_metadata_pool(&mut metadata_pool, database)
             .await?;
 
-        let schemas: Vec<String> = rows
-            .iter()
-            .map(|r| r.try_get(0).unwrap_or_default())
-            .collect();
-
-        Ok(schemas)
+        timeout(METADATA_QUERY_TIMEOUT, Self::schemas_on_pool(&pool))
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "Timed out loading schemas from PostgreSQL database '{}'",
+                    database
+                )
+            })?
     }
 
     async fn get_tables(&self, schema: &str) -> Result<Vec<TableInfo>> {
         let pool = self.get_pool().await?;
-        let rows = sqlx::query(
-            r#"
-            SELECT
-                c.relname AS table_name,
-                CASE c.relkind
-                    WHEN 'r' THEN 'BASE TABLE'
-                    WHEN 'p' THEN 'PARTITIONED TABLE'
-                    WHEN 'v' THEN 'VIEW'
-                    WHEN 'm' THEN 'MATERIALIZED VIEW'
-                    WHEN 'f' THEN 'FOREIGN TABLE'
-                    ELSE c.relkind::text
-                END AS table_type,
-                obj_description(c.oid, 'pg_class') AS comment
-            FROM pg_class c
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = $1
-              AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
-            ORDER BY c.relname
-            "#,
-        )
-        .bind(schema)
-        .persistent(false)
-        .fetch_all(&pool)
-        .await?;
+        Self::tables_on_pool(&pool, schema).await
+    }
 
-        let tables = rows
-            .iter()
-            .map(|r| TableInfo {
-                name: r.try_get("table_name").unwrap_or_default(),
-                schema: Some(schema.to_string()),
-                table_type: r.try_get("table_type").ok(),
-                comment: r.try_get("comment").ok(),
-            })
-            .collect();
+    async fn get_database_tables(&self, database: &str, schema: &str) -> Result<Vec<TableInfo>> {
+        let mut metadata_pool = self.metadata_pool.lock().await;
+        self.get_pool().await?;
+        let pool = self
+            .ensure_metadata_pool(&mut metadata_pool, database)
+            .await?;
 
-        Ok(tables)
+        timeout(METADATA_QUERY_TIMEOUT, Self::tables_on_pool(&pool, schema))
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "Timed out loading tables from PostgreSQL database '{}', schema '{}'",
+                    database,
+                    schema
+                )
+            })?
     }
 
     async fn get_columns(&self, schema: &str, table: &str) -> Result<Vec<ColumnInfo>> {
         let pool = self.get_pool().await?;
-        let rows = sqlx::query(
-            r#"
-            SELECT
-                a.attname AS column_name,
-                format_type(a.atttypid, a.atttypmod) AS data_type,
-                NOT a.attnotnull AS is_nullable,
-                pg_get_expr(ad.adbin, ad.adrelid) AS column_default,
-                (
-                    a.attidentity <> ''
-                    OR COALESCE(pg_get_expr(ad.adbin, ad.adrelid), '') LIKE 'nextval(%'
-                ) AS is_auto_increment,
-                d.description AS column_comment,
-                EXISTS (
-                    SELECT 1
-                    FROM pg_constraint con
-                    WHERE con.conrelid = t.oid
-                      AND con.contype = 'p'
-                      AND a.attnum = ANY(con.conkey)
-                ) as is_primary_key,
-                EXISTS (
-                    SELECT 1
-                    FROM pg_constraint con
-                    WHERE con.conrelid = t.oid
-                      AND con.contype IN ('p', 'u')
-                      AND a.attnum = ANY(con.conkey)
-                ) as is_unique,
-                EXISTS (
-                    SELECT 1
-                    FROM pg_index i
-                    WHERE i.indrelid = t.oid
-                      AND a.attnum = ANY(i.indkey)
-                ) as is_indexed
-            FROM pg_class t
-            JOIN pg_namespace n ON n.oid = t.relnamespace
-            JOIN pg_attribute a ON a.attrelid = t.oid
-            LEFT JOIN pg_attrdef ad ON ad.adrelid = t.oid AND ad.adnum = a.attnum
-            LEFT JOIN pg_description d ON d.objoid = t.oid AND d.objsubid = a.attnum
-            WHERE n.nspname = $1
-              AND t.relname = $2
-              AND t.relkind IN ('r', 'p', 'v', 'm', 'f')
-              AND a.attnum > 0
-              AND NOT a.attisdropped
-            ORDER BY a.attnum
-            "#,
+        Self::columns_on_pool(&pool, schema, table).await
+    }
+
+    async fn get_database_columns(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ColumnInfo>> {
+        let mut metadata_pool = self.metadata_pool.lock().await;
+        self.get_pool().await?;
+        let pool = self
+            .ensure_metadata_pool(&mut metadata_pool, database)
+            .await?;
+
+        timeout(
+            METADATA_QUERY_TIMEOUT,
+            Self::columns_on_pool(&pool, schema, table),
         )
-        .bind(schema)
-        .bind(table)
-        .persistent(false)
-        .fetch_all(&pool)
-        .await?;
-
-        let cols = rows
-            .iter()
-            .map(|r| {
-                let is_nullable = r.try_get::<bool, _>("is_nullable").unwrap_or(true);
-                let is_primary_key = r.try_get::<bool, _>("is_primary_key").unwrap_or(false);
-                let is_unique = r.try_get::<bool, _>("is_unique").unwrap_or(false);
-                let is_indexed = r.try_get::<bool, _>("is_indexed").unwrap_or(false);
-
-                ColumnInfo {
-                    name: r.try_get("column_name").unwrap_or_default(),
-                    data_type: r.try_get("data_type").unwrap_or_default(),
-                    is_nullable,
-                    is_primary_key,
-                    is_unique,
-                    is_indexed,
-                    is_auto_increment: r.try_get("is_auto_increment").unwrap_or(false),
-                    default_value: r.try_get("column_default").ok(),
-                    comment: r.try_get("column_comment").ok(),
-                }
-            })
-            .collect();
-
-        Ok(cols)
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Timed out loading columns from PostgreSQL database '{}', table '{}.{}'",
+                database,
+                schema,
+                table
+            )
+        })?
     }
 
     async fn get_indexes(&self, schema: &str, table: &str) -> Result<Vec<IndexInfo>> {
         let pool = self.get_pool().await?;
-        let rows = sqlx::query(
-            r#"
-            SELECT
-                i.relname AS index_name,
-                ix.indisunique,
-                ix.indisprimary,
-                am.amname AS index_type,
-                pg_get_indexdef(ix.indexrelid) AS definition,
-                COALESCE((
-                    SELECT array_agg(a.attname ORDER BY keys.ordinality)
-                    FROM unnest(ix.indkey) WITH ORDINALITY AS keys(attnum, ordinality)
-                    JOIN pg_attribute a
-                      ON a.attrelid = ix.indrelid
-                     AND a.attnum = keys.attnum
-                    WHERE keys.attnum > 0
-                ), ARRAY[]::text[]) AS columns
-            FROM pg_class t
-            JOIN pg_namespace n ON n.oid = t.relnamespace
-            JOIN pg_index ix ON ix.indrelid = t.oid
-            JOIN pg_class i ON i.oid = ix.indexrelid
-            JOIN pg_am am ON am.oid = i.relam
-            WHERE n.nspname = $1 AND t.relname = $2
-            ORDER BY ix.indisprimary DESC, ix.indisunique DESC, i.relname
-            "#,
-        )
-        .bind(schema)
-        .bind(table)
-        .persistent(false)
-        .fetch_all(&pool)
-        .await?;
+        Self::indexes_on_pool(&pool, schema, table).await
+    }
 
-        Ok(rows
-            .iter()
-            .map(|row| IndexInfo {
-                name: row.try_get("index_name").unwrap_or_default(),
-                columns: row.try_get("columns").unwrap_or_default(),
-                is_unique: row.try_get("indisunique").unwrap_or(false),
-                is_primary: row.try_get("indisprimary").unwrap_or(false),
-                index_type: row.try_get("index_type").ok(),
-                definition: row.try_get("definition").ok(),
-            })
-            .collect())
+    async fn get_database_indexes(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<IndexInfo>> {
+        let mut metadata_pool = self.metadata_pool.lock().await;
+        self.get_pool().await?;
+        let pool = self
+            .ensure_metadata_pool(&mut metadata_pool, database)
+            .await?;
+
+        timeout(
+            METADATA_QUERY_TIMEOUT,
+            Self::indexes_on_pool(&pool, schema, table),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Timed out loading indexes from PostgreSQL database '{}', table '{}.{}'",
+                database,
+                schema,
+                table
+            )
+        })?
     }
 
     async fn get_constraints(&self, schema: &str, table: &str) -> Result<Vec<ConstraintInfo>> {
         let pool = self.get_pool().await?;
-        let rows = sqlx::query(
-            r#"
-            SELECT
-                c.conname AS constraint_name,
-                CASE c.contype
-                    WHEN 'p' THEN 'PRIMARY KEY'
-                    WHEN 'f' THEN 'FOREIGN KEY'
-                    WHEN 'u' THEN 'UNIQUE'
-                    WHEN 'c' THEN 'CHECK'
-                    WHEN 'x' THEN 'EXCLUDE'
-                    ELSE c.contype::text
-                END AS constraint_type,
-                pg_get_constraintdef(c.oid) AS definition,
-                COALESCE((
-                    SELECT array_agg(a.attname ORDER BY keys.ordinality)
-                    FROM unnest(c.conkey) WITH ORDINALITY AS keys(attnum, ordinality)
-                    JOIN pg_attribute a
-                      ON a.attrelid = c.conrelid
-                     AND a.attnum = keys.attnum
-                ), ARRAY[]::text[]) AS columns,
-                ref_ns.nspname AS referenced_schema,
-                ref_table.relname AS referenced_table,
-                COALESCE((
-                    SELECT array_agg(a.attname ORDER BY keys.ordinality)
-                    FROM unnest(c.confkey) WITH ORDINALITY AS keys(attnum, ordinality)
-                    JOIN pg_attribute a
-                      ON a.attrelid = c.confrelid
-                     AND a.attnum = keys.attnum
-                ), ARRAY[]::text[]) AS referenced_columns
-            FROM pg_constraint c
-            JOIN pg_class t ON t.oid = c.conrelid
-            JOIN pg_namespace n ON n.oid = t.relnamespace
-            LEFT JOIN pg_class ref_table ON ref_table.oid = c.confrelid
-            LEFT JOIN pg_namespace ref_ns ON ref_ns.oid = ref_table.relnamespace
-            WHERE n.nspname = $1 AND t.relname = $2
-            ORDER BY c.contype, c.conname
-            "#,
-        )
-        .bind(schema)
-        .bind(table)
-        .persistent(false)
-        .fetch_all(&pool)
-        .await?;
+        Self::constraints_on_pool(&pool, schema, table).await
+    }
 
-        Ok(rows
-            .iter()
-            .map(|row| ConstraintInfo {
-                name: row.try_get("constraint_name").unwrap_or_default(),
-                constraint_type: row.try_get("constraint_type").unwrap_or_default(),
-                columns: row.try_get("columns").unwrap_or_default(),
-                referenced_schema: row.try_get("referenced_schema").ok(),
-                referenced_table: row.try_get("referenced_table").ok(),
-                referenced_columns: row.try_get("referenced_columns").unwrap_or_default(),
-                definition: row.try_get("definition").ok(),
-            })
-            .collect())
+    async fn get_database_constraints(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ConstraintInfo>> {
+        let mut metadata_pool = self.metadata_pool.lock().await;
+        self.get_pool().await?;
+        let pool = self
+            .ensure_metadata_pool(&mut metadata_pool, database)
+            .await?;
+
+        timeout(
+            METADATA_QUERY_TIMEOUT,
+            Self::constraints_on_pool(&pool, schema, table),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Timed out loading constraints from PostgreSQL database '{}', table '{}.{}'",
+                database,
+                schema,
+                table
+            )
+        })?
     }
 
     async fn get_functions(&self, schema: &str) -> Result<Vec<FunctionInfo>> {
         let pool = self.get_pool().await?;
-        let rows = sqlx::query(
-            r#"
-            SELECT
-                p.proname AS function_name,
-                pg_get_function_arguments(p.oid) AS arguments,
-                CASE
-                    WHEN p.prokind = 'p' THEN 'procedure'
-                    ELSE 'function'
-                END AS routine_type,
-                CASE
-                    WHEN p.prokind = 'p' THEN 'void'
-                    ELSE pg_get_function_result(p.oid)
-                END AS return_type,
-                obj_description(p.oid, 'pg_proc') AS description
-            FROM pg_proc p
-            JOIN pg_namespace n ON n.oid = p.pronamespace
-            WHERE n.nspname = $1
-              AND p.prokind IN ('f', 'p')
-            ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)
-            "#,
-        )
-        .bind(schema)
-        .persistent(false)
-        .fetch_all(&pool)
-        .await?;
+        Self::functions_on_pool(&pool, schema).await
+    }
 
-        Ok(rows
-            .iter()
-            .map(|row| {
-                let arguments = row.try_get::<String, _>("arguments").unwrap_or_default();
-                FunctionInfo {
-                    name: row.try_get("function_name").unwrap_or_default(),
-                    routine_type: row.try_get("routine_type").ok(),
-                    parameters: parse_postgres_function_parameters(&arguments),
-                    return_type: row
-                        .try_get("return_type")
-                        .unwrap_or_else(|_| "unknown".to_string()),
-                    description: row.try_get("description").ok(),
-                }
-            })
-            .collect())
+    async fn get_database_functions(
+        &self,
+        database: &str,
+        schema: &str,
+    ) -> Result<Vec<FunctionInfo>> {
+        let mut metadata_pool = self.metadata_pool.lock().await;
+        self.get_pool().await?;
+        let pool = self
+            .ensure_metadata_pool(&mut metadata_pool, database)
+            .await?;
+
+        timeout(
+            METADATA_QUERY_TIMEOUT,
+            Self::functions_on_pool(&pool, schema),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Timed out loading routines from PostgreSQL database '{}', schema '{}'",
+                database,
+                schema
+            )
+        })?
     }
 
     async fn set_current_schema(&self, schema: &str) -> Result<()> {
@@ -1039,102 +1570,455 @@ impl DatabaseDriver for PostgresDriver {
     }
 }
 
+const JS_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
+
+fn json_i64(value: i64) -> serde_json::Value {
+    if (-JS_SAFE_INTEGER_MAX..=JS_SAFE_INTEGER_MAX).contains(&value) {
+        serde_json::Value::Number(value.into())
+    } else {
+        serde_json::Value::String(value.to_string())
+    }
+}
+
+fn json_u64(value: u64) -> serde_json::Value {
+    if value <= JS_SAFE_INTEGER_MAX as u64 {
+        serde_json::Value::Number(value.into())
+    } else {
+        serde_json::Value::String(value.to_string())
+    }
+}
+
+fn non_finite_float_text(value: f64) -> &'static str {
+    if value.is_nan() {
+        "NaN"
+    } else if value.is_sign_positive() {
+        "Infinity"
+    } else {
+        "-Infinity"
+    }
+}
+
+fn json_f32(value: f32) -> serde_json::Value {
+    if value.is_finite() {
+        value
+            .to_string()
+            .parse::<serde_json::Number>()
+            .map(serde_json::Value::Number)
+            .expect("finite f32 values always have a valid JSON representation")
+    } else {
+        serde_json::Value::String(non_finite_float_text(f64::from(value)).into())
+    }
+}
+
+fn json_f64(value: f64) -> serde_json::Value {
+    serde_json::Number::from_f64(value)
+        .map(serde_json::Value::Number)
+        .unwrap_or_else(|| serde_json::Value::String(non_finite_float_text(value).into()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn hex_decode(value: &str) -> Result<Vec<u8>> {
+    let value = value
+        .strip_prefix("\\x")
+        .or_else(|| value.strip_prefix("0x"))
+        .unwrap_or(value);
+    if !value.len().is_multiple_of(2) {
+        return Err(anyhow!(
+            "Hex-encoded binary values must contain an even number of digits"
+        ));
+    }
+
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("hex pairs are always UTF-8");
+            u8::from_str_radix(pair, 16)
+                .map_err(|_| anyhow!("Invalid hex byte in binary value: {pair}"))
+        })
+        .collect()
+}
+
+fn binary_json(bytes: &[u8]) -> serde_json::Value {
+    serde_json::Value::String(format!("\\x{}", hex_encode(bytes)))
+}
+
+fn pg_effective_type_name(type_info: &PgTypeInfo) -> String {
+    match type_info.kind() {
+        PgTypeKind::Domain(base) => pg_effective_type_name(base),
+        PgTypeKind::Array(element) => format!("{}[]", pg_effective_type_name(element)),
+        _ => type_info.name().to_ascii_uppercase(),
+    }
+}
+
+fn pg_type_is_enum(type_info: &PgTypeInfo) -> bool {
+    match type_info.kind() {
+        PgTypeKind::Enum(_) => true,
+        PgTypeKind::Domain(base) => pg_type_is_enum(base),
+        _ => false,
+    }
+}
+
+fn pg_array_element_is_enum(type_info: &PgTypeInfo) -> bool {
+    match type_info.kind() {
+        PgTypeKind::Array(element) => pg_type_is_enum(element),
+        PgTypeKind::Domain(base) => pg_array_element_is_enum(base),
+        _ => false,
+    }
+}
+
+fn pg_interval_text(value: PgInterval) -> String {
+    format!(
+        "{} mons {} days {} microseconds",
+        value.months, value.days, value.microseconds
+    )
+}
+
+fn pg_timetz_text(value: PgTimeTz) -> String {
+    format!("{}{}", value.time, value.offset)
+}
+
+fn optional_values_to_json<T>(
+    values: Vec<Option<T>>,
+    map: impl Fn(T) -> serde_json::Value,
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        values
+            .into_iter()
+            .map(|value| value.map(&map).unwrap_or(serde_json::Value::Null))
+            .collect(),
+    )
+}
+
+fn pg_numeric_scale(bytes: &[u8]) -> Option<i64> {
+    let scale = u16::from_be_bytes([*bytes.get(6)?, *bytes.get(7)?]);
+    Some(i64::from(scale))
+}
+
+fn pg_numeric_array_scales(row: &PgRow, index: usize) -> Vec<Option<i64>> {
+    let Ok(raw) = row.try_get_raw(index) else {
+        return Vec::new();
+    };
+    if raw.format() != PgValueFormat::Binary {
+        return Vec::new();
+    }
+    let Ok(bytes) = raw.as_bytes() else {
+        return Vec::new();
+    };
+    let Some(ndim_bytes) = bytes.get(0..4) else {
+        return Vec::new();
+    };
+    let ndim = i32::from_be_bytes(ndim_bytes.try_into().expect("four-byte slice"));
+    let Ok(ndim) = usize::try_from(ndim) else {
+        return Vec::new();
+    };
+    let Some(mut offset) = 12usize.checked_add(ndim.saturating_mul(8)) else {
+        return Vec::new();
+    };
+    if offset > bytes.len() {
+        return Vec::new();
+    }
+
+    let mut scales = Vec::new();
+    while let Some(length_bytes) = bytes.get(offset..offset + 4) {
+        let length = i32::from_be_bytes(length_bytes.try_into().expect("four-byte slice"));
+        offset += 4;
+        if length == -1 {
+            scales.push(None);
+            continue;
+        }
+        let Ok(length) = usize::try_from(length) else {
+            return Vec::new();
+        };
+        let Some(end) = offset.checked_add(length) else {
+            return Vec::new();
+        };
+        let Some(value) = bytes.get(offset..end) else {
+            return Vec::new();
+        };
+        scales.push(pg_numeric_scale(value));
+        offset = end;
+    }
+    scales
+}
+
+fn pg_numeric_text(value: BigDecimal, scale: Option<i64>) -> serde_json::Value {
+    let value = scale.map_or(value.clone(), |scale| value.with_scale(scale));
+    serde_json::Value::String(value.to_plain_string())
+}
+
+fn pg_fallback_value(row: &PgRow, index: usize, type_info: &PgTypeInfo) -> serde_json::Value {
+    let Ok(raw) = row.try_get_raw(index) else {
+        return serde_json::Value::String(format!(
+            "<unreadable PostgreSQL {} value>",
+            type_info.name()
+        ));
+    };
+    if raw.is_null() {
+        return serde_json::Value::Null;
+    }
+
+    if raw.format() == PgValueFormat::Text || pg_type_is_enum(type_info) {
+        if let Ok(value) = raw.as_str() {
+            return serde_json::Value::String(value.to_string());
+        }
+    }
+
+    raw.as_bytes().map(binary_json).unwrap_or_else(|_| {
+        serde_json::Value::String(format!(
+            "<unreadable PostgreSQL {} value>",
+            type_info.name()
+        ))
+    })
+}
+
 fn decode_pg_value(row: &PgRow, index: usize) -> serde_json::Value {
     let col = row.column(index);
     let type_info = col.type_info();
-    let type_name = type_info.name();
+    if row
+        .try_get_raw(index)
+        .map(|value| value.is_null())
+        .unwrap_or(false)
+    {
+        return serde_json::Value::Null;
+    }
 
-    // Helper macro to try getting a type, returning Null if it fails (silently)
-    // In a real debug scenario, we might want to log this error.
-    macro_rules! try_get {
-        ($ty:ty) => {
-            match row.try_get::<$ty, _>(index) {
-                Ok(v) => serde_json::to_value(v).unwrap_or(serde_json::Value::Null),
-                Err(_) => serde_json::Value::Null,
-            }
+    macro_rules! decode {
+        ($ty:ty, $map:expr) => {
+            row.try_get_unchecked::<$ty, _>(index)
+                .map($map)
+                .unwrap_or_else(|_| pg_fallback_value(row, index, type_info))
         };
     }
 
-    match type_name {
-        "BOOL" | "bool" => try_get!(bool),
-        "INT2" | "int2" => try_get!(i16), // smallint
-        "INT4" | "int4" => try_get!(i32), // integer
-        "INT8" | "int8" => try_get!(i64), // bigint
-        "FLOAT4" | "float4" => try_get!(f32),
-        "FLOAT8" | "float8" => try_get!(f64),
-        "NUMERIC" | "numeric" => {
-            // sqlx maps numeric to BigDecimal, which might not serialize directly to JSON number easily without extra crates.
-            // safely cast to f64 for display, or string to preserve precision.
-            // For simplicity in this display-focused app, let's try string first to convert, then f64.
-            // Actually, sqlx recommend crate `rust_decimal`. Without it, let's just get as string?
-            // Fallback: try to get as f64 locally if possible, or string.
-            // Safest for generalized tools: String representation of the number.
-            // BUT, users want to sort potentially.
-            // Let's try `rust_decimal::Decimal` if available, but we don't have it in dependencies maybe?
-            // Let's just assume string for accuracy or f64 for convenience.
-            // If we try `row.try_get::<f64, _>(index)`, sqlx often allows numeric->f64 conversion.
-            if let Ok(v) = row.try_get::<f64, _>(index) {
-                serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
-            } else {
-                // Fallback to string if f64 conversion fails (e.g. too big)
-                if let Ok(v) = row.try_get::<String, _>(index) {
-                    serde_json::Value::String(v)
-                } else {
-                    serde_json::Value::Null
-                }
-            }
+    macro_rules! decode_array {
+        ($ty:ty, $map:expr) => {
+            row.try_get_unchecked::<Vec<Option<$ty>>, _>(index)
+                .map(|values| optional_values_to_json(values, $map))
+                .unwrap_or_else(|_| pg_fallback_value(row, index, type_info))
+        };
+    }
+
+    match pg_effective_type_name(type_info).as_str() {
+        "BOOL" => decode!(bool, serde_json::Value::Bool),
+        "CHAR" => decode!(i8, |value| json_i64(i64::from(value))),
+        "INT2" => decode!(i16, |value| json_i64(i64::from(value))),
+        "INT4" => decode!(i32, |value| json_i64(i64::from(value))),
+        "INT8" => decode!(i64, json_i64),
+        "OID" => decode!(Oid, |value| json_u64(u64::from(value.0))),
+        "XID" | "CID" => decode!(i32, |value| json_u64(u64::from(value as u32))),
+        "FLOAT4" => decode!(f32, json_f32),
+        "FLOAT8" => decode!(f64, json_f64),
+        "NUMERIC" => {
+            let scale = row
+                .try_get_raw(index)
+                .ok()
+                .filter(|raw| raw.format() == PgValueFormat::Binary)
+                .and_then(|raw| raw.as_bytes().ok())
+                .and_then(pg_numeric_scale);
+            decode!(BigDecimal, |value| pg_numeric_text(value, scale))
         }
-        "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "text" | "varchar" | "char"
-        | "bpchar" | "name" => {
-            try_get!(String)
+        "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "UNKNOWN" | "CITEXT" | "XML" => {
+            decode!(String, serde_json::Value::String)
         }
-        "JSON" | "JSONB" | "json" | "jsonb" => match row.try_get::<serde_json::Value, _>(index) {
-            Ok(v) => v,
-            Err(_) => serde_json::Value::Null,
-        },
-        "UUID" | "uuid" => {
-            // UUID provided by sqlx::types::Uuid
-            // Try fetching as string mostly works for UUID in sqlx if features enabled, otherwise need Uuid type.
-            // Let's try string representation directly.
-            if let Ok(v) = row.try_get::<String, _>(index) {
-                serde_json::Value::String(v)
-            } else {
-                // Try getting raw Uuid and to_string? - Requires uuid crate dependency in main
-                // Simplest fallback for unknown types is usually checking if we can get it as String.
-                // SQLx `Row::try_get` for `String` works for many types that implement Display.
-                serde_json::Value::Null
-            }
+        "JSON" | "JSONB" => decode!(serde_json::Value, |value| value),
+        "UUID" => decode!(Uuid, |value| serde_json::Value::String(value.to_string())),
+        "DATE" => decode!(NaiveDate, |value| serde_json::Value::String(
+            value.to_string()
+        )),
+        "TIME" => decode!(NaiveTime, |value| serde_json::Value::String(
+            value.to_string()
+        )),
+        "TIMESTAMP" => decode!(NaiveDateTime, |value| serde_json::Value::String(
+            value.to_string()
+        )),
+        "TIMESTAMPTZ" => decode!(DateTime<Utc>, |value| serde_json::Value::String(
+            value.to_rfc3339()
+        )),
+        "TIMETZ" => decode!(PgTimeTz, |value| serde_json::Value::String(pg_timetz_text(
+            value
+        ))),
+        "INTERVAL" => decode!(PgInterval, |value| serde_json::Value::String(
+            pg_interval_text(value)
+        )),
+        "BYTEA" => decode!(Vec<u8>, |value| binary_json(&value)),
+        "BOOL[]" => decode_array!(bool, serde_json::Value::Bool),
+        "CHAR[]" => decode_array!(i8, |value| json_i64(i64::from(value))),
+        "INT2[]" => decode_array!(i16, |value| json_i64(i64::from(value))),
+        "INT4[]" => decode_array!(i32, |value| json_i64(i64::from(value))),
+        "INT8[]" => decode_array!(i64, json_i64),
+        "OID[]" => decode_array!(Oid, |value| json_u64(u64::from(value.0))),
+        "XID[]" | "CID[]" => {
+            decode_array!(i32, |value| json_u64(u64::from(value as u32)))
         }
-        "TIMESTAMPTZ" | "TIMESTAMP" | "DATE" | "TIME" | "timestamptz" | "timestamp" | "date"
-        | "time" => {
-            // Try formatting as string.
-            // SQLx often maps these to `chrono` types.
-            if let Ok(v) = row.try_get::<String, _>(index) {
-                serde_json::Value::String(v)
-            } else {
-                // If string retrieve fails, maybe it's because we need to decode to chrono, then stringify.
-                // But typically string work. If not, returning Null is safer than panic.
-                serde_json::Value::Null
-            }
+        "FLOAT4[]" => decode_array!(f32, json_f32),
+        "FLOAT8[]" => decode_array!(f64, json_f64),
+        "NUMERIC[]" => row
+            .try_get_unchecked::<Vec<Option<BigDecimal>>, _>(index)
+            .map(|values| {
+                let scales = pg_numeric_array_scales(row, index);
+                serde_json::Value::Array(
+                    values
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, value)| {
+                            value
+                                .map(|value| {
+                                    pg_numeric_text(value, scales.get(index).copied().flatten())
+                                })
+                                .unwrap_or(serde_json::Value::Null)
+                        })
+                        .collect(),
+                )
+            })
+            .unwrap_or_else(|_| pg_fallback_value(row, index, type_info)),
+        "TEXT[]" | "VARCHAR[]" | "BPCHAR[]" | "NAME[]" | "CITEXT[]" | "XML[]" => {
+            decode_array!(String, serde_json::Value::String)
         }
-        _ => {
-            // "Catch-all": Try to read as String. This handles ENUMs, UUIDs (often), custom types etc.
-            if let Ok(v) = row.try_get::<String, _>(index) {
-                serde_json::Value::String(v)
-            } else {
-                // If we really can't get it, return a placeholder describing the type so the user knows.
-                serde_json::Value::String(format!("<{}>", type_name))
-            }
+        "JSON[]" | "JSONB[]" => decode_array!(serde_json::Value, |value| value),
+        "UUID[]" => decode_array!(Uuid, |value| serde_json::Value::String(value.to_string())),
+        "DATE[]" => decode_array!(NaiveDate, |value| serde_json::Value::String(
+            value.to_string()
+        )),
+        "TIME[]" => decode_array!(NaiveTime, |value| serde_json::Value::String(
+            value.to_string()
+        )),
+        "TIMESTAMP[]" => decode_array!(NaiveDateTime, |value| serde_json::Value::String(
+            value.to_string()
+        )),
+        "TIMESTAMPTZ[]" => decode_array!(DateTime<Utc>, |value| serde_json::Value::String(
+            value.to_rfc3339()
+        )),
+        "TIMETZ[]" => decode_array!(PgTimeTz, |value| serde_json::Value::String(pg_timetz_text(
+            value
+        ))),
+        "INTERVAL[]" => decode_array!(PgInterval, |value| serde_json::Value::String(
+            pg_interval_text(value)
+        )),
+        "BYTEA[]" => decode_array!(Vec<u8>, |value| binary_json(&value)),
+        _ if pg_type_is_enum(type_info) => {
+            decode!(String, serde_json::Value::String)
         }
+        _ if pg_array_element_is_enum(type_info) => {
+            decode_array!(String, serde_json::Value::String)
+        }
+        _ => pg_fallback_value(row, index, type_info),
+    }
+}
+
+fn pg_array_element_literal(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Array(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(pg_array_element_literal)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        serde_json::Value::String(value) => {
+            format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+        }
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::Object(_) => {
+            let value = serde_json::to_string(value).unwrap_or_default();
+            format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+        }
+    }
+}
+
+fn pg_array_literal(value: &serde_json::Value) -> Result<String> {
+    let parsed;
+    let values = match value {
+        serde_json::Value::Array(values) => values,
+        serde_json::Value::String(value) if value.trim_start().starts_with('[') => {
+            parsed = serde_json::from_str::<serde_json::Value>(value)
+                .map_err(|error| anyhow!("Invalid JSON array value: {error}"))?;
+            parsed
+                .as_array()
+                .ok_or_else(|| anyhow!("Expected a JSON array value"))?
+        }
+        serde_json::Value::String(value) if value.trim_start().starts_with('{') => {
+            return Ok(value.clone());
+        }
+        _ => return Err(anyhow!("PostgreSQL array values must be JSON arrays")),
+    };
+
+    Ok(format!(
+        "{{{}}}",
+        values
+            .iter()
+            .map(pg_array_element_literal)
+            .collect::<Vec<_>>()
+            .join(",")
+    ))
+}
+
+fn is_pg_array_type(data_type: Option<&str>) -> bool {
+    data_type
+        .map(str::trim)
+        .is_some_and(|data_type| data_type.ends_with("[]"))
+}
+
+fn is_pg_binary_type(data_type: Option<&str>) -> bool {
+    data_type.is_some_and(|data_type| {
+        data_type
+            .trim()
+            .split('(')
+            .next()
+            .unwrap_or("")
+            .eq_ignore_ascii_case("bytea")
+    })
+}
+
+fn binary_parameter_bytes(value: &serde_json::Value) -> Result<Vec<u8>> {
+    match value {
+        serde_json::Value::String(value) if value.starts_with("\\x") || value.starts_with("0x") => {
+            hex_decode(value)
+        }
+        serde_json::Value::String(value) => Ok(value.as_bytes().to_vec()),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|value| u8::try_from(value).ok())
+                    .ok_or_else(|| anyhow!("Binary byte arrays may only contain integers 0..255"))
+            })
+            .collect(),
+        _ => Err(anyhow!(
+            "Binary parameters must be hex strings, text, or byte arrays"
+        )),
     }
 }
 
 fn bind_pg_parameter<'q>(
     query: Query<'q, Postgres, PgArguments>,
     param: &QueryParameter,
-) -> Query<'q, Postgres, PgArguments> {
-    match &param.value {
-        serde_json::Value::Null => query.bind(Option::<String>::None),
+) -> Result<Query<'q, Postgres, PgArguments>> {
+    if param.value.is_null() {
+        return Ok(query.bind(Option::<String>::None));
+    }
+    if is_pg_array_type(param.data_type.as_deref()) {
+        return Ok(query.bind(pg_array_literal(&param.value)?));
+    }
+    if is_pg_binary_type(param.data_type.as_deref()) {
+        return Ok(query.bind(binary_parameter_bytes(&param.value)?));
+    }
+
+    Ok(match &param.value {
+        serde_json::Value::Null => unreachable!("NULL parameters return above"),
         serde_json::Value::Bool(value) => query.bind(*value),
         serde_json::Value::Number(value) => {
             if is_integral_type(param.data_type.as_deref()) {
@@ -1155,9 +2039,9 @@ fn bind_pg_parameter<'q>(
         }
         serde_json::Value::String(value) => query.bind(value.clone()),
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            query.bind(serde_json::to_string(&param.value).unwrap_or_default())
+            query.bind(serde_json::to_string(&param.value)?)
         }
-    }
+    })
 }
 
 fn is_integral_type(data_type: Option<&str>) -> bool {
@@ -1183,8 +2067,99 @@ fn is_integral_type(data_type: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::statement::has_multiple_statements;
     use dotenvy::dotenv;
     use std::env;
+
+    #[test]
+    fn empty_postgres_rows_preserve_described_columns() {
+        let driver = PostgresDriver::new("postgres://user:pass@localhost/db");
+        let results = driver
+            .process_rows(
+                Vec::new(),
+                vec![
+                    ColumnDef {
+                        name: "id".to_string(),
+                        data_type: "INT8".to_string(),
+                    },
+                    ColumnDef {
+                        name: "email".to_string(),
+                        data_type: "TEXT".to_string(),
+                    },
+                ],
+            )
+            .expect("empty rows should produce a query result");
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].rows.is_empty());
+        assert_eq!(results[0].columns.len(), 2);
+        assert_eq!(results[0].columns[0].name, "id");
+        assert_eq!(results[0].columns[0].data_type, "INT8");
+        assert_eq!(results[0].columns[1].name, "email");
+        assert_eq!(results[0].columns[1].data_type, "TEXT");
+    }
+
+    #[test]
+    fn postgres_json_integers_only_use_numbers_inside_javascript_safe_range() {
+        assert_eq!(
+            json_i64(JS_SAFE_INTEGER_MAX),
+            serde_json::json!(9_007_199_254_740_991_i64)
+        );
+        assert_eq!(
+            json_i64(JS_SAFE_INTEGER_MAX + 1),
+            serde_json::json!("9007199254740992")
+        );
+        assert_eq!(
+            json_i64(i64::MIN),
+            serde_json::json!("-9223372036854775808")
+        );
+        assert_eq!(
+            json_u64(u64::MAX),
+            serde_json::json!("18446744073709551615")
+        );
+    }
+
+    #[test]
+    fn postgres_binary_hex_representation_is_reversible() {
+        let bytes = vec![0x00, 0x7f, 0x80, 0xff];
+        assert_eq!(binary_json(&bytes), serde_json::json!("\\x007f80ff"));
+        assert_eq!(hex_decode("\\x007f80ff").unwrap(), bytes);
+        assert!(hex_decode("\\x0").is_err());
+        assert!(hex_decode("\\xzz").is_err());
+    }
+
+    #[test]
+    fn postgres_float_representation_keeps_f32_shape_and_special_values() {
+        assert_eq!(json_f32(0.1), serde_json::json!(0.1));
+        assert_eq!(json_f32(f32::NAN), serde_json::json!("NaN"));
+        assert_eq!(json_f64(f64::INFINITY), serde_json::json!("Infinity"));
+        assert_eq!(json_f64(f64::NEG_INFINITY), serde_json::json!("-Infinity"));
+    }
+
+    #[test]
+    fn postgres_array_json_is_converted_to_native_literal_for_round_trip() {
+        assert_eq!(
+            pg_array_literal(&serde_json::json!([1, "two", null, "a\\\"b", {"x": 1}])).unwrap(),
+            r#"{1,"two",NULL,"a\\\"b","{\"x\":1}"}"#
+        );
+        assert_eq!(
+            pg_array_literal(&serde_json::json!("{1,2,NULL}")).unwrap(),
+            "{1,2,NULL}"
+        );
+        assert!(pg_array_literal(&serde_json::json!("not an array")).is_err());
+    }
+
+    #[test]
+    fn postgres_interval_representation_keeps_all_wire_components() {
+        assert_eq!(
+            pg_interval_text(PgInterval {
+                months: 14,
+                days: -3,
+                microseconds: 1_234_567,
+            }),
+            "14 mons -3 days 1234567 microseconds"
+        );
+    }
 
     #[test]
     fn parses_postgres_function_arguments() {
@@ -1277,6 +2252,23 @@ mod tests {
         assert_eq!(driver.active_query_backend("q1"), Some(42));
     }
 
+    #[test]
+    fn metadata_options_select_database_without_rewriting_connection_url() {
+        let driver = PostgresDriver::new(
+            "postgres://user:pass@db.internal:5432/source?sslmode=require&application_name=oxide",
+        );
+
+        let options = driver
+            .metadata_connect_options("customer data")
+            .expect("metadata options should preserve the base connection settings");
+
+        assert_eq!(options.get_database(), Some("customer data"));
+        assert_eq!(options.get_host(), "db.internal");
+        assert_eq!(options.get_port(), 5432);
+        assert!(driver.metadata_connect_options("").is_err());
+        assert!(driver.metadata_connect_options("bad\0name").is_err());
+    }
+
     #[tokio::test]
     async fn disconnect_clears_and_closes_postgres_pool() {
         let driver = PostgresDriver::new("postgres://user:pass@localhost/db");
@@ -1288,10 +2280,23 @@ mod tests {
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy_with(options);
+        let metadata_options = driver
+            .metadata_connect_options("analytics")
+            .expect("metadata connection options should parse");
+        let metadata_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(metadata_options);
 
         {
             let mut current_pool = driver.pool.lock().await;
             *current_pool = Some(pool.clone());
+        }
+        {
+            let mut current_metadata_pool = driver.metadata_pool.lock().await;
+            *current_metadata_pool = Some(PostgresMetadataPool {
+                database: "analytics".to_string(),
+                pool: metadata_pool.clone(),
+            });
         }
 
         driver
@@ -1301,6 +2306,8 @@ mod tests {
 
         assert!(driver.pool.lock().await.is_none());
         assert!(pool.is_closed());
+        assert!(driver.metadata_pool.lock().await.is_none());
+        assert!(metadata_pool.is_closed());
     }
 
     #[test]

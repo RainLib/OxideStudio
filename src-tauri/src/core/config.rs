@@ -4,6 +4,56 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SshTunnelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub host: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    pub username: String,
+    #[serde(default = "default_ssh_auth_method")]
+    pub auth_method: String,
+    pub password: Option<String>,
+    pub private_key_path: Option<String>,
+    pub private_key_passphrase: Option<String>,
+    #[serde(default = "default_strict_host_key_checking")]
+    pub strict_host_key_checking: bool,
+}
+
+impl std::fmt::Debug for SshTunnelConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SshTunnelConfig")
+            .field("enabled", &self.enabled)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("auth_method", &self.auth_method)
+            .field("password", &self.password.as_ref().map(|_| "****"))
+            .field("private_key_path", &self.private_key_path)
+            .field(
+                "private_key_passphrase",
+                &self.private_key_passphrase.as_ref().map(|_| "****"),
+            )
+            .field("strict_host_key_checking", &self.strict_host_key_checking)
+            .finish()
+    }
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
+fn default_ssh_auth_method() -> String {
+    "password".to_string()
+}
+
+fn default_strict_host_key_checking() -> bool {
+    true
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct AppConfig {
     pub connections: Vec<SavedConnection>,
@@ -25,6 +75,7 @@ pub struct SavedConnection {
     pub database: Option<String>,
     pub connection_url: Option<String>,
     pub ssl_mode: Option<String>,
+    pub ssh_tunnel: Option<SshTunnelConfig>,
     pub tags: Option<Vec<String>>,
     pub icon: Option<String>,
     pub color: Option<String>,
@@ -90,5 +141,39 @@ impl ConfigManager {
 
     pub fn settings_path(&self) -> String {
         self.settings_path.to_string_lossy().into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_saved_connection_without_ssh_tunnel_remains_compatible() {
+        let connection: SavedConnection = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "name": "Postgres",
+            "driver": "postgres",
+            "url": "postgres://localhost/app"
+        }))
+        .unwrap();
+
+        assert_eq!(connection.project_id, "sqls");
+        assert!(connection.ssh_tunnel.is_none());
+    }
+
+    #[test]
+    fn ssh_tunnel_defaults_to_strict_host_key_checking() {
+        let config: SshTunnelConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "host": "bastion.example.com",
+            "username": "deploy",
+            "password": "secret"
+        }))
+        .unwrap();
+
+        assert_eq!(config.port, 22);
+        assert_eq!(config.auth_method, "password");
+        assert!(config.strict_host_key_checking);
     }
 }

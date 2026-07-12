@@ -1,8 +1,10 @@
 /// 查询执行相关 commands
 use crate::core::{
+    dialect::DatabaseKind,
     manager::ConnectionManager,
     parser::{CompletionContext, SqlParser},
     protocol::{QueryResult, Response},
+    statement::{validate_read_only_sql, StatementScanDialect},
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -58,9 +60,111 @@ pub async fn execute_query(
     schema: Option<String>,
     transaction_id: Option<String>,
     query_id: Option<String>,
+    database: Option<String>,
 ) -> Result<Response<Vec<QueryResult>>, String> {
     println!("Executing query on connection: {}", connection_id);
 
+    execute_query_with_cancellation(
+        &manager,
+        &cancellation,
+        connection_id,
+        sql,
+        schema,
+        transaction_id,
+        query_id,
+        database,
+    )
+    .await
+}
+
+/// Execute one assistant-approved SQL read behind a backend-enforced read-only
+/// transaction. This command intentionally does not accept transaction ids.
+#[tauri::command]
+pub async fn execute_read_only_query(
+    manager: State<'_, ConnectionManager>,
+    cancellation: State<'_, QueryCancellationState>,
+    connection_id: String,
+    sql: String,
+    schema: Option<String>,
+    query_id: Option<String>,
+) -> Result<Response<Vec<QueryResult>>, String> {
+    let dialect = manager
+        .statement_scan_dialect(&connection_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Read-only SQL execution is unsupported for this driver".to_string())?;
+    let kind = match dialect {
+        StatementScanDialect::Postgres => DatabaseKind::Postgres,
+        StatementScanDialect::Mysql => DatabaseKind::Mysql,
+    };
+    if let Err(reason) = validate_read_only_sql(&sql, dialect) {
+        return Ok(Response::err("READ_ONLY_QUERY_REJECTED", reason));
+    }
+
+    let script = read_only_transaction_script(kind, &sql);
+    let mut response = execute_query_with_cancellation(
+        &manager,
+        &cancellation,
+        connection_id,
+        script,
+        schema,
+        None,
+        query_id,
+        None,
+    )
+    .await?;
+    if let Some(results) = response.data.take() {
+        response.data = Some(strip_read_only_transaction_results(results));
+    }
+    Ok(response)
+}
+
+fn read_only_transaction_script(kind: DatabaseKind, sql: &str) -> String {
+    let begin = match kind {
+        DatabaseKind::Postgres => "BEGIN READ ONLY;",
+        DatabaseKind::Mysql => "START TRANSACTION READ ONLY;",
+    };
+    format!("{begin}\n{}\n;\nROLLBACK;", sql.trim())
+}
+
+fn strip_read_only_transaction_results(mut results: Vec<QueryResult>) -> Vec<QueryResult> {
+    let first = results
+        .first()
+        .and_then(|result| result.statement_type.as_deref());
+    let last = results
+        .last()
+        .and_then(|result| result.statement_type.as_deref());
+    if first.is_some_and(|kind| {
+        kind.eq_ignore_ascii_case("BEGIN") || kind.eq_ignore_ascii_case("START")
+    }) && last.is_some_and(|kind| kind.eq_ignore_ascii_case("ROLLBACK"))
+    {
+        results.remove(0);
+        results.pop();
+    }
+    results
+}
+
+async fn execute_query_with_cancellation(
+    manager: &ConnectionManager,
+    cancellation: &QueryCancellationState,
+    connection_id: String,
+    sql: String,
+    schema: Option<String>,
+    transaction_id: Option<String>,
+    query_id: Option<String>,
+    database: Option<String>,
+) -> Result<Response<Vec<QueryResult>>, String> {
+    let database = database.filter(|value| !value.trim().is_empty());
+    if database.is_some()
+        && transaction_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Ok(Response::err(
+            "CROSS_DATABASE_TRANSACTION_UNSUPPORTED",
+            "Manual transactions are unavailable for a PostgreSQL database selected through the editor.",
+        ));
+    }
     let query_id = query_id.filter(|value| !value.trim().is_empty());
     let mut cancel_rx = if let Some(query_id) = query_id.as_ref() {
         match cancellation.register(query_id, &connection_id).await {
@@ -73,9 +177,33 @@ pub async fn execute_query(
         None
     };
 
+    let execute = || async {
+        if let Some(database) = database.as_deref() {
+            manager
+                .query_database_with_context(
+                    &connection_id,
+                    database,
+                    &sql,
+                    schema.as_deref(),
+                    query_id.as_deref(),
+                )
+                .await
+        } else {
+            manager
+                .query(
+                    &connection_id,
+                    &sql,
+                    schema.clone(),
+                    transaction_id.clone(),
+                    query_id.clone(),
+                )
+                .await
+        }
+    };
+
     let result = if let Some(cancel_rx) = cancel_rx.as_mut() {
         tokio::select! {
-            result = manager.query(&connection_id, &sql, schema, transaction_id, query_id.clone()) => {
+            result = execute() => {
                 result.map(Response::ok)
             }
             _ = cancel_rx.changed() => {
@@ -83,10 +211,7 @@ pub async fn execute_query(
             }
         }
     } else {
-        manager
-            .query(&connection_id, &sql, schema, transaction_id, None)
-            .await
-            .map(Response::ok)
+        execute().await.map(Response::ok)
     };
 
     if let Some(query_id) = query_id {
@@ -177,5 +302,26 @@ mod tests {
         assert!(duplicate.is_err());
         assert!(state.take("query-1").await.is_some());
         assert!(state.register("query-1", "connection-2").await.is_ok());
+    }
+
+    #[test]
+    fn read_only_script_uses_driver_transaction_and_hides_control_results() {
+        assert_eq!(
+            read_only_transaction_script(DatabaseKind::Postgres, "SELECT 1"),
+            "BEGIN READ ONLY;\nSELECT 1\n;\nROLLBACK;"
+        );
+        assert_eq!(
+            read_only_transaction_script(DatabaseKind::Mysql, "SELECT 1;"),
+            "START TRANSACTION READ ONLY;\nSELECT 1;\n;\nROLLBACK;"
+        );
+
+        let results = vec![
+            QueryResult::execution("BEGIN", 0),
+            QueryResult::rows(Vec::new(), vec![vec![serde_json::json!(1)]]),
+            QueryResult::execution("ROLLBACK", 0),
+        ];
+        let stripped = strip_read_only_transaction_results(results);
+        assert_eq!(stripped.len(), 1);
+        assert_eq!(stripped[0].rows, vec![vec![serde_json::json!(1)]]);
     }
 }

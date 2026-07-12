@@ -2,11 +2,22 @@ import { invokeWithInterceptors } from "./client";
 import type {
   TableInfo,
   CollectionInfo,
+  CollectionPage,
   ColumnInfo,
   ConstraintInfo,
   FunctionInfo,
   IndexInfo,
 } from "./types";
+
+/**
+ * Get databases visible from the connected server.
+ * PostgreSQL databases are intentionally separate from schemas.
+ */
+export async function getDatabases(connectionId: string): Promise<string[]> {
+  return invokeWithInterceptors<string[]>("get_databases", {
+    connectionId,
+  });
+}
 
 /**
  * Schema 和表结构服务
@@ -21,6 +32,20 @@ import type {
 export async function getSchemas(connectionId: string): Promise<string[]> {
   return invokeWithInterceptors<string[]>("get_schemas", {
     connectionId,
+  });
+}
+
+/**
+ * Get schemas from an explicitly selected server database. This is read-only
+ * metadata discovery and does not change the active query database.
+ */
+export async function getDatabaseSchemas(
+  connectionId: string,
+  database: string
+): Promise<string[]> {
+  return invokeWithInterceptors<string[]>("get_database_schemas", {
+    connectionId,
+    database,
   });
 }
 
@@ -50,6 +75,34 @@ export async function getCollections(
   });
 }
 
+export async function getCollectionsPage(
+  connectionId: string,
+  namespace: string,
+  cursor?: string | null,
+  limit = 100,
+  filter?: string | null
+): Promise<CollectionPage> {
+  return invokeWithInterceptors<CollectionPage>("get_collections_page", {
+    connectionId,
+    namespace,
+    cursor: cursor || null,
+    limit,
+    filter: filter || null,
+  });
+}
+
+export async function getDatabaseTables(
+  connectionId: string,
+  database: string,
+  schema: string
+): Promise<TableInfo[]> {
+  return invokeWithInterceptors<TableInfo[]>("get_database_tables", {
+    connectionId,
+    database,
+    schema,
+  });
+}
+
 /**
  * 获取指定表的列信息
  * @param connectionId - 连接 ID
@@ -69,6 +122,20 @@ export async function getColumns(
   });
 }
 
+export async function getDatabaseColumns(
+  connectionId: string,
+  database: string,
+  schema: string,
+  table: string
+): Promise<ColumnInfo[]> {
+  return invokeWithInterceptors<ColumnInfo[]>("get_database_columns", {
+    connectionId,
+    database,
+    schema,
+    table,
+  });
+}
+
 export async function getIndexes(
   connectionId: string,
   schema: string,
@@ -76,6 +143,20 @@ export async function getIndexes(
 ): Promise<IndexInfo[]> {
   return invokeWithInterceptors<IndexInfo[]>("get_indexes", {
     connectionId,
+    schema,
+    table,
+  });
+}
+
+export async function getDatabaseIndexes(
+  connectionId: string,
+  database: string,
+  schema: string,
+  table: string
+): Promise<IndexInfo[]> {
+  return invokeWithInterceptors<IndexInfo[]>("get_database_indexes", {
+    connectionId,
+    database,
     schema,
     table,
   });
@@ -99,6 +180,35 @@ export async function getFunctions(
 ): Promise<FunctionInfo[]> {
   return invokeWithInterceptors<FunctionInfo[]>("get_functions", {
     connectionId,
+    schema,
+  });
+}
+
+export async function getDatabaseConstraints(
+  connectionId: string,
+  database: string,
+  schema: string,
+  table: string
+): Promise<ConstraintInfo[]> {
+  return invokeWithInterceptors<ConstraintInfo[]>(
+    "get_database_constraints",
+    {
+      connectionId,
+      database,
+      schema,
+      table,
+    }
+  );
+}
+
+export async function getDatabaseFunctions(
+  connectionId: string,
+  database: string,
+  schema: string
+): Promise<FunctionInfo[]> {
+  return invokeWithInterceptors<FunctionInfo[]>("get_database_functions", {
+    connectionId,
+    database,
     schema,
   });
 }
@@ -179,13 +289,21 @@ export async function refreshTables(
  * Schema 服务对象
  */
 export const schemaService = {
+  getDatabases,
   getSchemas,
+  getDatabaseSchemas,
   getTables,
+  getDatabaseTables,
   getCollections,
+  getCollectionsPage,
   getColumns,
+  getDatabaseColumns,
   getIndexes,
+  getDatabaseIndexes,
   getConstraints,
+  getDatabaseConstraints,
   getFunctions,
+  getDatabaseFunctions,
   setCurrentSchema,
   getCachedSchemas,
   refreshSchemas,

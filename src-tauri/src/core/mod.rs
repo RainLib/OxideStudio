@@ -7,5 +7,6 @@ pub mod manager;
 pub mod parser;
 pub mod protocol;
 pub mod redaction;
+pub mod ssh;
 pub mod statement;
 pub mod store;

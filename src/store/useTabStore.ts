@@ -28,7 +28,10 @@ import {
   defaultDatabaseCapabilities,
   supportsTableWorkspace,
 } from "@/lib/databaseDialect";
-import { classifyAiQuerySafety } from "@/lib/querySafety";
+import {
+  classifyAiQuerySafety,
+  redisSelectedDatabase,
+} from "@/lib/querySafety";
 import type { Diagnostic } from "@/services/lsp/types";
 import {
   extractSchemaContextChange,
@@ -76,7 +79,10 @@ async function refreshMetadataAfterQuery(
     await Promise.all(tasks);
   };
 
-  const selectedSchema = extractSchemaContextChange(sql);
+  const selectedSchema =
+    capabilities.dataModel === "keyValue"
+      ? redisSelectedDatabase(sql)
+      : extractSchemaContextChange(sql);
 
   if (selectedSchema) {
     await schemaStore.setCurrentSchema(selectedSchema);
@@ -115,6 +121,13 @@ export interface TabData {
   type: TabType;
   sql: string;
   connectionId?: string;
+  /**
+   * An explicitly selected database on the same server connection.
+   *
+   * PostgreSQL query and table tabs use this when targeting a database that
+   * differs from the one configured on the saved connection.
+   */
+  databaseName?: string;
   tableName?: string;
   schemaName?: string;
   objectType?: string | null;
@@ -160,6 +173,110 @@ export interface TabData {
   tableFilters?: TableFilter[] | null;
   editorSelection?: EditorSelectionState | null;
   lspDiagnostics?: Diagnostic[];
+  fileProjectId?: string;
+  fileRootPath?: string;
+  fileRelativePath?: string;
+  fileRevision?: string;
+  isDirty?: boolean;
+  fileError?: string | null;
+}
+
+function fileNameFromPath(relativePath: string) {
+  const segments = relativePath.split("/").filter(Boolean);
+  return segments[segments.length - 1] || relativePath;
+}
+
+export function hasPendingTableChanges(
+  tab: Pick<TabData, "type" | "pendingEdits" | "newRowsCount">
+) {
+  return (
+    tab.type === "table" &&
+    ((tab.pendingEdits?.size || 0) > 0 || (tab.newRowsCount || 0) > 0)
+  );
+}
+
+export function hasUnsavedTabChanges(
+  tab: Pick<
+    TabData,
+    | "type"
+    | "fileRelativePath"
+    | "isDirty"
+    | "pendingEdits"
+    | "newRowsCount"
+  >
+) {
+  return Boolean(tab.fileRelativePath && tab.isDirty) || hasPendingTableChanges(tab);
+}
+
+function confirmDiscardTabChanges(tabs: TabData[], action: string) {
+  const dirtyFiles = tabs.filter((tab) => tab.fileRelativePath && tab.isDirty);
+  const dirtyTables = tabs.filter(hasPendingTableChanges);
+  if (dirtyFiles.length === 0 && dirtyTables.length === 0) return true;
+  if (typeof window === "undefined" || typeof window.confirm !== "function") {
+    return false;
+  }
+
+  const details: string[] = [];
+  if (dirtyFiles.length > 0) {
+    const names = dirtyFiles
+      .slice(0, 3)
+      .map((tab) => tab.fileRelativePath)
+      .join(", ");
+    const remaining = dirtyFiles.length - Math.min(3, dirtyFiles.length);
+    details.push(
+      `${dirtyFiles.length} project file${dirtyFiles.length === 1 ? "" : "s"}: ${names}${
+        remaining > 0 ? ` and ${remaining} more` : ""
+      }`
+    );
+  }
+  if (dirtyTables.length > 0) {
+    const editedCells = dirtyTables.reduce(
+      (total, tab) => total + (tab.pendingEdits?.size || 0),
+      0
+    );
+    const newRows = dirtyTables.reduce(
+      (total, tab) => total + (tab.newRowsCount || 0),
+      0
+    );
+    details.push(
+      `${dirtyTables.length} table tab${dirtyTables.length === 1 ? "" : "s"} (${editedCells} edited cell${
+        editedCells === 1 ? "" : "s"
+      }, ${newRows} new row${newRows === 1 ? "" : "s"})`
+    );
+  }
+
+  return window.confirm(
+    `Unsaved changes will be discarded when you ${action}.\n\n${details.join(
+      "\n"
+    )}\n\nUse Submit Changes or save the file first to keep them. Select OK to discard, or Cancel to stay.`
+  );
+}
+
+function tableTabAfterDiscardingDrafts(tab: TabData) {
+  return hasPendingTableChanges(tab)
+    ? { ...tab, pendingEdits: new Map<string, any>(), newRowsCount: 0 }
+    : tab;
+}
+
+export function confirmDiscardTableChanges(tabId: string, action: string) {
+  const tab = useTabStore.getState().tabs.find((item) => item.id === tabId);
+  return !tab || confirmDiscardTabChanges([tab], action);
+}
+
+function normalizedDatabaseName(databaseName: string | null | undefined) {
+  return databaseName === "" || databaseName == null
+    ? undefined
+    : databaseName;
+}
+
+function tabMatchesDatabase(
+  tab: Pick<TabData, "databaseName">,
+  databaseName: string | null | undefined
+) {
+  return (
+    normalizedDatabaseName(tab.databaseName) ===
+    normalizedDatabaseName(databaseName)
+  );
 }
 
 export function querySchemaContextForTab(
@@ -256,6 +373,128 @@ function missingMutationKeyMessage(action: "update" | "delete", table: string) {
   return `Cannot ${operation} "${table}" because no primary key or usable unique index is available.`;
 }
 
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function mutationRefreshError(operation: "save" | "delete", details?: string | null) {
+  const completedAction = operation === "save" ? "Changes were saved" : "Rows were deleted";
+  const detailSuffix = details ? ` Details: ${details}` : "";
+  return `${completedAction}, but the table could not be refreshed. Click Refresh to load the latest data.${detailSuffix}`;
+}
+
+function mutationPreservedDraftsMessage(operation: "save" | "delete") {
+  const completedAction = operation === "save" ? "Changes were saved" : "Rows were deleted";
+  return `${completedAction}. Other unsaved table changes were preserved; submit or revert them before refreshing.`;
+}
+
+function resultsAfterSubmittedEdits(
+  results: QueryResult[] | null,
+  submittedEdits: Map<string, any>
+) {
+  if (!results?.[0] || submittedEdits.size === 0) return results;
+
+  const rows = results[0].rows.map((row) => [...row]);
+  for (const [key, value] of submittedEdits) {
+    const separatorIndex = key.indexOf(":");
+    const rowIndex = Number.parseInt(key.slice(0, separatorIndex), 10);
+    const columnIndex = Number.parseInt(key.slice(separatorIndex + 1), 10);
+    if (
+      separatorIndex === -1 ||
+      Number.isNaN(rowIndex) ||
+      Number.isNaN(columnIndex) ||
+      rowIndex < 0 ||
+      !rows[rowIndex]
+    ) {
+      continue;
+    }
+    rows[rowIndex]![columnIndex] = value;
+  }
+
+  return results.map((result, index) =>
+    index === 0 ? { ...result, rows } : result
+  );
+}
+
+function pendingEditsAfterRowDeletion(
+  pendingEdits: Map<string, any> | undefined,
+  deletedRowIndexes: number[]
+) {
+  const nextEdits = new Map<string, any>();
+  const deletedRows = new Set(deletedRowIndexes);
+
+  for (const [key, value] of pendingEdits || []) {
+    const separatorIndex = key.indexOf(":");
+    const rowIndex = Number.parseInt(key.slice(0, separatorIndex), 10);
+    const columnIndex = key.slice(separatorIndex + 1);
+
+    if (separatorIndex === -1 || Number.isNaN(rowIndex) || rowIndex < 0) {
+      nextEdits.set(key, value);
+      continue;
+    }
+    if (deletedRows.has(rowIndex)) continue;
+
+    const precedingDeletedRows = deletedRowIndexes.filter(
+      (deletedRowIndex) => deletedRowIndex < rowIndex
+    ).length;
+    nextEdits.set(`${rowIndex - precedingDeletedRows}:${columnIndex}`, value);
+  }
+
+  return nextEdits;
+}
+
+function tableDraftsAfterSuccessfulSave(
+  pendingEdits: Map<string, any> | undefined,
+  newRowsCount: number | undefined,
+  submittedEdits: Map<string, any>,
+  insertedRowIndexes: Set<number>
+) {
+  const insertedOffsets = Array.from(insertedRowIndexes)
+    .map((rowIndex) => -rowIndex - 1)
+    .filter((offset) => offset >= 0 && offset < (newRowsCount || 0))
+    .sort((left, right) => left - right);
+  const insertedOffsetSet = new Set(insertedOffsets);
+  const nextEdits = new Map<string, any>();
+
+  for (const [key, value] of pendingEdits || []) {
+    const separatorIndex = key.indexOf(":");
+    const rowIndex = Number.parseInt(key.slice(0, separatorIndex), 10);
+    const columnIndex = key.slice(separatorIndex + 1);
+
+    if (separatorIndex === -1 || Number.isNaN(rowIndex)) {
+      nextEdits.set(key, value);
+      continue;
+    }
+
+    if (rowIndex >= 0) {
+      if (submittedEdits.has(key) && Object.is(submittedEdits.get(key), value)) {
+        continue;
+      }
+      nextEdits.set(key, value);
+      continue;
+    }
+
+    const rowOffset = -rowIndex - 1;
+    if (insertedOffsetSet.has(rowOffset)) continue;
+
+    const precedingInsertedRows = insertedOffsets.filter(
+      (insertedOffset) => insertedOffset < rowOffset
+    ).length;
+    nextEdits.set(`${-1 - (rowOffset - precedingInsertedRows)}:${columnIndex}`, value);
+  }
+
+  return {
+    pendingEdits: nextEdits,
+    newRowsCount: Math.max(0, (newRowsCount || 0) - insertedOffsets.length),
+  };
+}
+
+interface TablePageLoadOptions {
+  discardAction?: string;
+  discardDraftsConfirmed?: boolean;
+  sortOverride?: TableSort | null;
+}
+
 interface TabState {
   tabs: TabData[];
   activeTabId: string | null;
@@ -268,7 +507,17 @@ interface TabState {
     metadata?: Partial<
       Pick<
         TabData,
-        "connectionId" | "tableName" | "schemaName" | "objectType" | "filters"
+        | "connectionId"
+        | "databaseName"
+        | "tableName"
+        | "schemaName"
+        | "objectType"
+        | "filters"
+        | "fileProjectId"
+        | "fileRootPath"
+        | "fileRelativePath"
+        | "fileRevision"
+        | "isDirty"
       >
     >
   ) => string;
@@ -276,7 +525,8 @@ interface TabState {
     connectionId: string,
     schemaName: string,
     tableName: string,
-    objectType?: string | null
+    objectType?: string | null,
+    databaseName?: string
   ) => string;
   findOrCreateObjectQueryTab: (
     connectionId: string,
@@ -292,9 +542,31 @@ interface TabState {
     schemaName: string,
     oldTableName: string,
     newTableName: string,
-    objectType?: string | null
+    objectType?: string | null,
+    databaseName?: string
   ) => void;
   updateTabTitle: (id: string, title: string) => void;
+  openProjectFileTab: (
+    projectId: string,
+    relativePath: string,
+    content: string,
+    revision: string,
+    rootPath?: string | null
+  ) => string;
+  markProjectFileSaved: (
+    id: string,
+    revision: string,
+    savedContent?: string
+  ) => void;
+  renameProjectFileTabs: (
+    projectId: string,
+    oldRelativePath: string,
+    newRelativePath: string
+  ) => void;
+  discardProjectFileTabs: (
+    projectId: string,
+    relativePath: string
+  ) => void;
   closeTab: (id: string) => void;
   forceCloseTab: (id: string) => void;
   closeOtherTabs: (id: string) => void;
@@ -328,7 +600,7 @@ interface TabState {
     tabId: string,
     column: string | null,
     direction: "asc" | "desc" | null
-  ) => void;
+  ) => Promise<boolean>;
   setCellEdit: (
     tabId: string,
     rowIndex: number,
@@ -363,6 +635,7 @@ interface TabState {
   resetColumnLayout: (tabId: string) => void;
   // Schema selection method
   setTargetSchema: (tabId: string, schema: string | null) => void;
+  setTargetDatabase: (tabId: string, database: string | null) => void;
   setTableMetadata: (
     tabId: string,
     metadata: TableMetadataSnapshot
@@ -372,14 +645,16 @@ interface TabState {
     connectionId: string,
     schemaName: string,
     tableName: string,
-    refreshMetadata?: boolean
+    refreshMetadata?: boolean,
+    databaseName?: string
   ) => Promise<void>;
   loadTablePage: (
     tabId: string,
     page?: number,
     filterSql?: string | null,
-    filters?: TableFilter[] | null
-  ) => Promise<void>;
+    filters?: TableFilter[] | null,
+    options?: TablePageLoadOptions
+  ) => Promise<boolean>;
 }
 
 export const useTabStore = create<TabState>((set, get) => ({
@@ -418,9 +693,11 @@ export const useTabStore = create<TabState>((set, get) => ({
     connectionId: string,
     schemaName: string,
     tableName: string,
-    objectType?: string | null
+    objectType?: string | null,
+    databaseName?: string
   ) => {
     const { tabs } = get();
+    const normalizedDatabase = normalizedDatabaseName(databaseName);
 
     // Find existing tab with same schema+table
     const existingTab = tabs.find(
@@ -428,7 +705,8 @@ export const useTabStore = create<TabState>((set, get) => ({
         tab.type === "table" &&
         tab.connectionId === connectionId &&
         tab.tableName === tableName &&
-        tab.schemaName === schemaName
+        tab.schemaName === schemaName &&
+        tabMatchesDatabase(tab, normalizedDatabase)
     );
 
     if (existingTab) {
@@ -444,9 +722,16 @@ export const useTabStore = create<TabState>((set, get) => ({
       return existingTab.id;
     }
 
+    // Include the remote database in the title so same-named tables remain
+    // distinguishable when several PostgreSQL databases are open at once.
+    const title = normalizedDatabase
+      ? `${tableName} · ${normalizedDatabase}`
+      : tableName;
+
     // Create new tab if no match found
-    return get().createTab("table", tableName, "", {
+    return get().createTab("table", title, "", {
       connectionId,
+      databaseName: normalizedDatabase,
       tableName,
       schemaName,
       objectType: objectType || null,
@@ -527,14 +812,16 @@ export const useTabStore = create<TabState>((set, get) => ({
     schemaName: string,
     oldTableName: string,
     newTableName: string,
-    objectType?: string | null
+    objectType?: string | null,
+    databaseName?: string
   ) => {
     set((state) => ({
       tabs: state.tabs.map((tab) =>
         tab.type === "table" &&
         tab.connectionId === connectionId &&
         tab.schemaName === schemaName &&
-        tab.tableName === oldTableName
+        tab.tableName === oldTableName &&
+        tabMatchesDatabase(tab, databaseName)
           ? {
               ...tab,
               title: newTableName,
@@ -559,12 +846,109 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
   },
 
+  openProjectFileTab: (
+    projectId,
+    relativePath,
+    content,
+    revision,
+    rootPath
+  ) => {
+    const existing = get().tabs.find(
+      (tab) =>
+        tab.fileProjectId === projectId &&
+        tab.fileRelativePath === relativePath &&
+        (!rootPath || !tab.fileRootPath || tab.fileRootPath === rootPath)
+    );
+    if (existing) {
+      set({ activeTabId: existing.id });
+      return existing.id;
+    }
+
+    return get().createTab("query", fileNameFromPath(relativePath), content, {
+      fileProjectId: projectId,
+      fileRootPath: rootPath || undefined,
+      fileRelativePath: relativePath,
+      fileRevision: revision,
+      isDirty: false,
+    });
+  },
+
+  markProjectFileSaved: (id, revision, savedContent) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === id
+          ? {
+              ...tab,
+              fileRevision: revision,
+              isDirty:
+                savedContent === undefined ? false : tab.sql !== savedContent,
+              fileError: null,
+            }
+          : tab
+      ),
+    }));
+  },
+
+  renameProjectFileTabs: (
+    projectId,
+    oldRelativePath,
+    newRelativePath
+  ) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) => {
+        if (
+          tab.fileProjectId !== projectId ||
+          !tab.fileRelativePath ||
+          (tab.fileRelativePath !== oldRelativePath &&
+            !tab.fileRelativePath.startsWith(`${oldRelativePath}/`))
+        ) {
+          return tab;
+        }
+        const nextPath = `${newRelativePath}${tab.fileRelativePath.slice(oldRelativePath.length)}`;
+        return {
+          ...tab,
+          fileRelativePath: nextPath,
+          title: fileNameFromPath(nextPath),
+        };
+      }),
+    }));
+  },
+
+  discardProjectFileTabs: (projectId, relativePath) => {
+    set((state) => {
+      const shouldDiscard = (tab: TabData) =>
+        tab.fileProjectId === projectId &&
+        Boolean(tab.fileRelativePath) &&
+        (!relativePath ||
+          tab.fileRelativePath === relativePath ||
+          tab.fileRelativePath!.startsWith(`${relativePath}/`));
+      const discardedIds = new Set(
+        state.tabs.filter(shouldDiscard).map((tab) => tab.id)
+      );
+      if (discardedIds.size === 0) return state;
+
+      const tabs = state.tabs.filter((tab) => !discardedIds.has(tab.id));
+      const activeTabId =
+        state.activeTabId && discardedIds.has(state.activeTabId)
+          ? tabs[tabs.length - 1]?.id || null
+          : state.activeTabId;
+      return {
+        tabs,
+        activeTabId,
+        closedTabsStack: state.closedTabsStack.filter(
+          (tab) => !shouldDiscard(tab)
+        ),
+      };
+    });
+  },
+
   closeTab: (id: string) => {
     set((state) => {
       const tab = state.tabs.find((t) => t.id === id);
       if (!tab) return state;
       // Don't close pinned tabs with regular close
       if (tab.isPinned) return state;
+      if (!confirmDiscardTabChanges([tab], "close the tab")) return state;
 
       const newTabs = state.tabs.filter((t) => t.id !== id);
       let newActiveId = state.activeTabId;
@@ -579,7 +963,10 @@ export const useTabStore = create<TabState>((set, get) => ({
       return {
         tabs: newTabs,
         activeTabId: newActiveId,
-        closedTabsStack: [tab, ...state.closedTabsStack].slice(0, 20), // Keep last 20
+        closedTabsStack: [
+          tableTabAfterDiscardingDrafts(tab),
+          ...state.closedTabsStack,
+        ].slice(0, 20), // Keep last 20
       };
     });
   },
@@ -588,6 +975,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     set((state) => {
       const tab = state.tabs.find((t) => t.id === id);
       if (!tab) return state;
+      if (!confirmDiscardTabChanges([tab], "close the tab")) return state;
 
       const newTabs = state.tabs.filter((t) => t.id !== id);
       let newActiveId = state.activeTabId;
@@ -602,21 +990,30 @@ export const useTabStore = create<TabState>((set, get) => ({
       return {
         tabs: newTabs,
         activeTabId: newActiveId,
-        closedTabsStack: [tab, ...state.closedTabsStack].slice(0, 20),
+        closedTabsStack: [
+          tableTabAfterDiscardingDrafts(tab),
+          ...state.closedTabsStack,
+        ].slice(0, 20),
       };
     });
   },
 
   closeOtherTabs: (id: string) => {
-    set((state) => ({
-      tabs: state.tabs.filter((t) => t.id === id || t.isPinned),
-      activeTabId: id,
-    }));
+    set((state) => {
+      const closing = state.tabs.filter((tab) => tab.id !== id && !tab.isPinned);
+      if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
+      return {
+        tabs: state.tabs.filter((tab) => tab.id === id || tab.isPinned),
+        activeTabId: id,
+      };
+    });
   },
 
   closeAllTabs: () => {
     set((state) => {
       const pinnedTabs = state.tabs.filter((t) => t.isPinned);
+      const closing = state.tabs.filter((tab) => !tab.isPinned);
+      if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
       return {
         tabs: pinnedTabs,
         activeTabId: pinnedTabs.length > 0 ? pinnedTabs[0]!.id : null,
@@ -628,6 +1025,8 @@ export const useTabStore = create<TabState>((set, get) => ({
     set((state) => {
       const index = state.tabs.findIndex((t) => t.id === id);
       if (index === -1) return state;
+      const closing = state.tabs.slice(0, index).filter((tab) => !tab.isPinned);
+      if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
 
       const newTabs = [
         ...state.tabs.slice(0, index).filter((t) => t.isPinned),
@@ -642,6 +1041,10 @@ export const useTabStore = create<TabState>((set, get) => ({
     set((state) => {
       const index = state.tabs.findIndex((t) => t.id === id);
       if (index === -1) return state;
+      const closing = state.tabs
+        .slice(index + 1)
+        .filter((tab) => !tab.isPinned);
+      if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
 
       const newTabs = [
         ...state.tabs.slice(0, index + 1),
@@ -691,7 +1094,18 @@ export const useTabStore = create<TabState>((set, get) => ({
 
   updateTabSql: (id: string, sql: string) => {
     set((state) => ({
-      tabs: state.tabs.map((t) => (t.id === id ? { ...t, sql } : t)),
+      tabs: state.tabs.map((tab) =>
+        tab.id === id
+          ? {
+              ...tab,
+              sql,
+              isDirty: tab.fileRelativePath
+                ? tab.isDirty || tab.sql !== sql
+                : tab.isDirty,
+              fileError: tab.fileRelativePath ? null : tab.fileError,
+            }
+          : tab
+      ),
     }));
   },
 
@@ -802,9 +1216,10 @@ export const useTabStore = create<TabState>((set, get) => ({
       const results = await queryService.executeQuery(
         connectionId,
         sqlToRun,
-        schemaContext || undefined,
+        tab.databaseName ? undefined : schemaContext || undefined,
         transactionId,
-        queryId
+        queryId,
+        tab.databaseName
       );
 
       // Add to history if it's the full tab SQL and successful
@@ -904,7 +1319,18 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
   },
 
-  setGridSort: (tabId, column, direction) => {
+  setGridSort: async (tabId, column, direction) => {
+    const tab = get().tabs.find((item) => item.id === tabId);
+    if (!tab) return false;
+
+    if (tab.type === "table") {
+      return get().loadTablePage(tabId, 0, undefined, undefined, {
+        discardAction: "sort the table",
+        sortOverride:
+          column && direction ? { column, direction } : null,
+      });
+    }
+
     set((state) => ({
       tabs: state.tabs.map((t) => {
         if (t.id !== tabId) return t;
@@ -923,17 +1349,14 @@ export const useTabStore = create<TabState>((set, get) => ({
         };
       }),
     }));
-
-    const tab = get().tabs.find((t) => t.id === tabId);
-    if (tab?.type === "table") {
-      void get().loadTablePage(tabId, 0);
-    }
+    return true;
   },
 
   setCellEdit: (tabId, rowIndex, colIndex, value) => {
     set((state) => ({
       tabs: state.tabs.map((t) => {
         if (t.id !== tabId) return t;
+        if (t.isExecuting) return t;
         const pendingEdits = new Map(t.pendingEdits || new Map());
         const key = `${rowIndex}:${colIndex}`;
         pendingEdits.set(key, value);
@@ -946,6 +1369,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     set((state) => ({
       tabs: state.tabs.map((t) => {
         if (t.id !== tabId) return t;
+        if (t.isExecuting) return t;
         const pendingEdits = new Map(t.pendingEdits || new Map());
 
         edits.forEach(({ rowIndex, colIndex, value }) => {
@@ -961,7 +1385,14 @@ export const useTabStore = create<TabState>((set, get) => ({
   commitEdits: async (tabId) => {
     const state = get();
     const tab = state.tabs.find((t) => t.id === tabId);
-    if (!tab || !tab.pendingEdits || tab.pendingEdits.size === 0) return;
+    if (
+      !tab ||
+      tab.isExecuting ||
+      ((!tab.pendingEdits || tab.pendingEdits.size === 0) &&
+        (tab.newRowsCount || 0) === 0)
+    ) {
+      return;
+    }
 
     const schema = tab.schemaName;
     const table = tab.tableName;
@@ -996,7 +1427,15 @@ export const useTabStore = create<TabState>((set, get) => ({
     }
 
     // Check row identity columns (using refreshed state)
-    const currentTab = get().tabs.find((t) => t.id === tabId)!;
+    const currentTab = get().tabs.find((t) => t.id === tabId);
+    if (
+      !currentTab ||
+      currentTab.isExecuting ||
+      ((!currentTab.pendingEdits || currentTab.pendingEdits.size === 0) &&
+        (currentTab.newRowsCount || 0) === 0)
+    ) {
+      return;
+    }
     const resultColumns = currentTab.results?.[0]?.columns || [];
     const keyColumns = mutationKeyColumns(
       currentTab.tableColumns,
@@ -1005,12 +1444,16 @@ export const useTabStore = create<TabState>((set, get) => ({
     );
 
     const editsByRow = new Map<number, Record<number, any>>();
-    for (const [key, value] of currentTab.pendingEdits!.entries()) {
+    for (const [key, value] of currentTab.pendingEdits || []) {
       const [rStr, cStr] = key.split(":");
       const r = parseInt(rStr!);
       const c = parseInt(cStr!);
       if (!editsByRow.has(r)) editsByRow.set(r, {});
       editsByRow.get(r)![c] = value;
+    }
+    for (let offset = 0; offset < (currentTab.newRowsCount || 0); offset += 1) {
+      const rowIndex = -1 - offset;
+      if (!editsByRow.has(rowIndex)) editsByRow.set(rowIndex, {});
     }
 
     const hasExistingRowEdits = Array.from(editsByRow.keys()).some(
@@ -1044,24 +1487,29 @@ export const useTabStore = create<TabState>((set, get) => ({
       key: Record<string, unknown>;
       values: Record<string, unknown>;
     }> = [];
+    const submittedEdits = new Map<string, any>();
+    const insertedRowIndexes = new Set<number>();
 
     for (const [rowIndex, rowEdits] of editsByRow.entries()) {
-      if (colDefs.length === 0) continue;
-
       if (rowIndex < 0) {
         const values: Record<string, unknown> = {};
+        const saveableEdits: Array<[string, any]> = [];
 
         for (const [cIdx, val] of Object.entries(rowEdits)) {
           const colName = colDefs[parseInt(cIdx)]?.name;
           if (colName) {
             values[colName] = val;
+            saveableEdits.push([`${rowIndex}:${cIdx}`, val]);
           }
         }
 
-        if (Object.keys(values).length > 0) {
-          inserts.push(values);
-        }
+        inserts.push(values);
+        insertedRowIndexes.add(rowIndex);
+        saveableEdits.forEach(([key, value]) =>
+          submittedEdits.set(key, value)
+        );
       } else {
+        if (colDefs.length === 0) continue;
         if (keyColumns.length === 0) {
           console.warn("No row mutation key found for table:", table);
           continue;
@@ -1071,10 +1519,12 @@ export const useTabStore = create<TabState>((set, get) => ({
         if (!originalRow || resultColumns.length === 0) continue;
 
         const values: Record<string, unknown> = {};
+        const saveableEdits: Array<[string, any]> = [];
         for (const [cIdx, val] of Object.entries(rowEdits)) {
           const colName = colDefs[parseInt(cIdx)]?.name;
           if (colName) {
             values[colName] = val;
+            saveableEdits.push([`${rowIndex}:${cIdx}`, val]);
           }
         }
 
@@ -1082,6 +1532,9 @@ export const useTabStore = create<TabState>((set, get) => ({
 
         if (Object.keys(values).length > 0 && key) {
           updates.push({ key, values });
+          saveableEdits.forEach(([editKey, value]) =>
+            submittedEdits.set(editKey, value)
+          );
         }
       }
     }
@@ -1098,18 +1551,24 @@ export const useTabStore = create<TabState>((set, get) => ({
       return;
     }
 
-    try {
-      if (!connId) {
-        const message = "No connection ID found for table mutation.";
-        console.error(message);
-        set((state) => ({
-          tabs: state.tabs.map((t) =>
-            t.id === tabId ? { ...t, error: message } : t
-          ),
-        }));
-        return;
-      }
+    if (!connId) {
+      const message = "No connection ID found for table mutation.";
+      console.error(message);
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId ? { ...t, error: message } : t
+        ),
+      }));
+      return;
+    }
 
+    set((state) => ({
+      tabs: state.tabs.map((item) =>
+        item.id === tabId ? { ...item, isExecuting: true, error: null } : item
+      ),
+    }));
+
+    try {
       await tableService.mutateTableRows(
         connId,
         driver,
@@ -1117,45 +1576,103 @@ export const useTabStore = create<TabState>((set, get) => ({
         table,
         inserts,
         updates,
-        []
+        [],
+        ...(currentTab.databaseName ? [currentTab.databaseName] : [])
       );
-
-      // Success - clear edits and refresh the current table page.
-      if (tab.type === "table") {
-        await state.loadTablePage(
-          tabId,
-          tab.tablePage ?? 0,
-          tab.tableFilterSql ?? null,
-          tab.tableFilters ?? null
-        );
-      } else {
-        await state.runTabQuery(tabId, connId);
-      }
-
-      // Clear edits
+    } catch (e) {
+      console.error("Save failed:", e);
+      const message = errorMessage(e);
       set((state) => ({
         tabs: state.tabs.map((t) =>
           t.id === tabId
-            ? { ...t, pendingEdits: new Map(), newRowsCount: 0, error: null }
+            ? { ...t, isExecuting: false, error: `Save failed: ${message}` }
             : t
         ),
       }));
-    } catch (e) {
-      console.error("Save failed:", e);
-      const message = e instanceof Error ? e.message : String(e);
+      return;
+    }
+
+    // The mutation is durable at this point. Consume its drafts before the
+    // independent, best-effort refresh so retrying cannot submit them again.
+    set((state) => ({
+      tabs: state.tabs.map((t) => {
+        if (t.id !== tabId) return t;
+        const remainingDrafts = tableDraftsAfterSuccessfulSave(
+          t.pendingEdits,
+          t.newRowsCount,
+          submittedEdits,
+          insertedRowIndexes
+        );
+        return {
+          ...t,
+          ...remainingDrafts,
+          results: resultsAfterSubmittedEdits(t.results, submittedEdits),
+          tableTotalRows:
+            typeof t.tableTotalRows === "number"
+              ? t.tableTotalRows + insertedRowIndexes.size
+              : t.tableTotalRows,
+          isExecuting: false,
+          error: null,
+        };
+      }),
+    }));
+
+    const tabAfterSave = get().tabs.find((item) => item.id === tabId);
+    if (tabAfterSave && hasPendingTableChanges(tabAfterSave)) {
+      const message = mutationPreservedDraftsMessage("save");
       set((state) => ({
-        tabs: state.tabs.map((t) =>
-          t.id === tabId ? { ...t, error: `Save failed: ${message}` } : t
+        tabs: state.tabs.map((item) =>
+          item.id === tabId ? { ...item, error: message } : item
         ),
       }));
-      // Don't clear edits on error
+      return;
+    }
+
+    let refreshSucceeded = false;
+    let refreshFailure: string | null = null;
+    try {
+      if (tab.type === "table") {
+        refreshSucceeded = await state.loadTablePage(
+          tabId,
+          tab.tablePage ?? 0,
+          tab.tableFilterSql ?? null,
+          tab.tableFilters ?? null,
+          { discardDraftsConfirmed: true }
+        );
+      } else {
+        await state.runTabQuery(tabId, connId);
+        const refreshedTab = get().tabs.find((item) => item.id === tabId);
+        refreshSucceeded = !refreshedTab?.error;
+      }
+    } catch (e) {
+      refreshFailure = errorMessage(e);
+    }
+
+    if (!refreshSucceeded) {
+      const refreshedTab = get().tabs.find((item) => item.id === tabId);
+      const message = mutationRefreshError(
+        "save",
+        refreshFailure || refreshedTab?.error
+      );
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId ? { ...t, error: message } : t
+        ),
+      }));
     }
   },
 
   deleteRows: async (tabId, rowIndexes) => {
     const state = get();
     const tab = state.tabs.find((t) => t.id === tabId);
-    if (!tab || tab.type !== "table" || rowIndexes.length === 0) return;
+    if (
+      !tab ||
+      tab.type !== "table" ||
+      tab.isExecuting ||
+      rowIndexes.length === 0
+    ) {
+      return;
+    }
 
     const schema = tab.schemaName;
     const table = tab.tableName;
@@ -1167,7 +1684,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     }
 
     const currentTab = get().tabs.find((t) => t.id === tabId);
-    if (!currentTab) return;
+    if (!currentTab || currentTab.isExecuting) return;
 
     const keyColumns = mutationKeyColumns(
       currentTab.tableColumns,
@@ -1198,6 +1715,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     const driver = connection?.driver || DEFAULT_DATABASE_DRIVER;
     const uniqueRowIndexes = Array.from(new Set(rowIndexes)).sort((a, b) => a - b);
     const deletes: Array<{ key: Record<string, unknown> }> = [];
+    const deletedRowIndexes: number[] = [];
 
     for (const rowIndex of uniqueRowIndexes) {
       const row = result.rows[rowIndex];
@@ -1207,6 +1725,7 @@ export const useTabStore = create<TabState>((set, get) => ({
 
       if (key) {
         deletes.push({ key });
+        deletedRowIndexes.push(rowIndex);
       }
     }
 
@@ -1220,6 +1739,12 @@ export const useTabStore = create<TabState>((set, get) => ({
       return;
     }
 
+    set((state) => ({
+      tabs: state.tabs.map((item) =>
+        item.id === tabId ? { ...item, isExecuting: true, error: null } : item
+      ),
+    }));
+
     try {
       await tableService.mutateTableRows(
         connId,
@@ -1228,20 +1753,93 @@ export const useTabStore = create<TabState>((set, get) => ({
         table,
         [],
         [],
-        deletes
-      );
-      await state.loadTablePage(
-        tabId,
-        currentTab.tablePage ?? 0,
-        currentTab.tableFilterSql ?? null,
-        currentTab.tableFilters ?? null
+        deletes,
+        ...(currentTab.databaseName ? [currentTab.databaseName] : [])
       );
     } catch (e) {
       console.error("Delete rows failed:", e);
-      const message = e instanceof Error ? e.message : String(e);
+      const message = errorMessage(e);
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === tabId ? { ...t, error: `Delete rows failed: ${message}` } : t
+          t.id === tabId
+            ? {
+                ...t,
+                isExecuting: false,
+                error: `Delete rows failed: ${message}`,
+              }
+            : t
+        ),
+      }));
+      return;
+    }
+
+    // Remove the successfully deleted rows immediately. If refreshing fails,
+    // the same row identities are no longer available for a duplicate delete.
+    set((state) => ({
+      tabs: state.tabs.map((t) => {
+        if (t.id !== tabId) return t;
+
+        const nextResults = t.results?.map((queryResult, resultIndex) =>
+          resultIndex === 0
+            ? {
+                ...queryResult,
+                rows: queryResult.rows.filter(
+                  (_row, rowIndex) => !deletedRowIndexes.includes(rowIndex)
+                ),
+              }
+            : queryResult
+        );
+        return {
+          ...t,
+          results: nextResults ?? t.results,
+          pendingEdits: pendingEditsAfterRowDeletion(
+            t.pendingEdits,
+            deletedRowIndexes
+          ),
+          tableTotalRows:
+            typeof t.tableTotalRows === "number"
+              ? Math.max(0, t.tableTotalRows - deletes.length)
+              : t.tableTotalRows,
+          isExecuting: false,
+          error: null,
+        };
+      }),
+    }));
+
+    const tabAfterDelete = get().tabs.find((item) => item.id === tabId);
+    if (tabAfterDelete && hasPendingTableChanges(tabAfterDelete)) {
+      const message = mutationPreservedDraftsMessage("delete");
+      set((state) => ({
+        tabs: state.tabs.map((item) =>
+          item.id === tabId ? { ...item, error: message } : item
+        ),
+      }));
+      return;
+    }
+
+    let refreshSucceeded = false;
+    let refreshFailure: string | null = null;
+    try {
+      refreshSucceeded = await state.loadTablePage(
+        tabId,
+        currentTab.tablePage ?? 0,
+        currentTab.tableFilterSql ?? null,
+        currentTab.tableFilters ?? null,
+        { discardDraftsConfirmed: true }
+      );
+    } catch (e) {
+      refreshFailure = errorMessage(e);
+    }
+
+    if (!refreshSucceeded) {
+      const refreshedTab = get().tabs.find((item) => item.id === tabId);
+      const message = mutationRefreshError(
+        "delete",
+        refreshFailure || refreshedTab?.error
+      );
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId ? { ...t, error: message } : t
         ),
       }));
     }
@@ -1299,6 +1897,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       const metadata = await loadTableMetadata({
         connectionId: connId,
         driver: connection?.driver || DEFAULT_DATABASE_DRIVER,
+        databaseName: tab.databaseName,
         schema: tab.schemaName,
         table: tab.tableName,
         includeIndexes: true,
@@ -1340,16 +1939,18 @@ export const useTabStore = create<TabState>((set, get) => ({
     connectionId,
     schemaName,
     tableName,
-    refreshMetadata = true
+    refreshMetadata = true,
+    databaseName
   ) => {
-    const matchingTabs = get().tabs
-      .filter(
+    const matchingTableTabs = get().tabs.filter(
         (tab) =>
           tab.type === "table" &&
           tab.connectionId === connectionId &&
           tab.schemaName === schemaName &&
-          tab.tableName === tableName
-      )
+          tab.tableName === tableName &&
+          tabMatchesDatabase(tab, databaseName)
+      );
+    const matchingTabs = matchingTableTabs
       .map((tab) => ({
         id: tab.id,
         page: tab.tablePage ?? 0,
@@ -1358,6 +1959,14 @@ export const useTabStore = create<TabState>((set, get) => ({
       }));
 
     if (matchingTabs.length === 0) return;
+    if (
+      !confirmDiscardTabChanges(
+        matchingTableTabs,
+        `refresh ${schemaName}.${tableName}`
+      )
+    ) {
+      return;
+    }
 
     set((state) => ({
       tabs: state.tabs.map((tab) =>
@@ -1372,10 +1981,9 @@ export const useTabStore = create<TabState>((set, get) => ({
                     tableMetadataSource: undefined,
                     tableMetadataUpdatedAt: undefined,
                   }
-                : {}),
+              : {}),
               isFetchingColumns: false,
-              pendingEdits: new Map(),
-              newRowsCount: 0,
+              isExecuting: true,
               error: null,
             }
           : tab
@@ -1391,16 +1999,27 @@ export const useTabStore = create<TabState>((set, get) => ({
           tab.id,
           tab.page,
           tab.filterSql,
-          tab.filters
+          tab.filters,
+          { discardDraftsConfirmed: true }
         );
       })
     );
   },
 
-  loadTablePage: async (tabId, page, filterSql, filters) => {
+  loadTablePage: async (tabId, page, filterSql, filters, options) => {
     const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab || tab.type !== "table" || !tab.connectionId || !tab.schemaName || !tab.tableName) {
-      return;
+      return false;
+    }
+
+    if (
+      !options?.discardDraftsConfirmed &&
+      !confirmDiscardTabChanges(
+        [tab],
+        options?.discardAction || "reload the table data"
+      )
+    ) {
+      return false;
     }
 
     const connection = useConnectionStore
@@ -1417,13 +2036,23 @@ export const useTabStore = create<TabState>((set, get) => ({
     });
     const nextFilterSql = filterSql === undefined ? tab.tableFilterSql : filterSql;
     const nextFilters = filters === undefined ? tab.tableFilters : filters;
-    const tableSort: TableSort | undefined =
-      tab.gridState?.sortColumn && tab.gridState?.sortDirection
+    const hasSortOverride = options?.sortOverride !== undefined;
+    const requestedTableSort: TableSort | undefined = hasSortOverride
+      ? options.sortOverride || undefined
+      : tab.gridState?.sortColumn && tab.gridState?.sortDirection
         ? {
             column: tab.gridState.sortColumn,
             direction: tab.gridState.sortDirection,
           }
         : undefined;
+    const primaryKeySort = tab.tableColumns?.find(
+      (column) => column.is_primary_key
+    );
+    const tableSort: TableSort | undefined =
+      requestedTableSort ||
+      (primaryKeySort
+        ? { column: primaryKeySort.name, direction: "asc" }
+        : undefined);
 
     set((state) => ({
       tabs: state.tabs.map((t) =>
@@ -1432,17 +2061,30 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
 
     try {
-      const pageResult = await tableService.previewTablePage(
-        tab.connectionId,
-        driver,
-        tab.schemaName,
-        tab.tableName,
-        nextPage,
-        pageSize,
-        nextFilterSql || undefined,
-        nextFilters || undefined,
-        tableSort
-      );
+      const pageResult = tab.databaseName
+        ? await tableService.previewTablePage(
+            tab.connectionId,
+            driver,
+            tab.schemaName,
+            tab.tableName,
+            nextPage,
+            pageSize,
+            nextFilterSql || undefined,
+            nextFilters || undefined,
+            tableSort,
+            tab.databaseName
+          )
+        : await tableService.previewTablePage(
+            tab.connectionId,
+            driver,
+            tab.schemaName,
+            tab.tableName,
+            nextPage,
+            pageSize,
+            nextFilterSql || undefined,
+            nextFilters || undefined,
+            tableSort
+          );
 
       set((state) => ({
         tabs: state.tabs.map((t) =>
@@ -1458,6 +2100,19 @@ export const useTabStore = create<TabState>((set, get) => ({
                 tableFilters: nextFilters || null,
                 pendingEdits: new Map(),
                 newRowsCount: 0,
+                ...(hasSortOverride
+                  ? {
+                      gridState: {
+                        ...(t.gridState || {
+                          columnFilters: {},
+                          sortColumn: null,
+                          sortDirection: null,
+                        }),
+                        sortColumn: options?.sortOverride?.column || null,
+                        sortDirection: options?.sortOverride?.direction || null,
+                      },
+                    }
+                  : {}),
               }
             : t
         ),
@@ -1468,6 +2123,7 @@ export const useTabStore = create<TabState>((set, get) => ({
           pageResult.result.rows.length === 1 ? "" : "s"
         }`
       );
+      return true;
     } catch (e: any) {
       taskStore.failTask(taskId, e.message || String(e));
       set((state) => ({
@@ -1477,6 +2133,7 @@ export const useTabStore = create<TabState>((set, get) => ({
             : t
         ),
       }));
+      return false;
     }
   },
 
@@ -1491,7 +2148,9 @@ export const useTabStore = create<TabState>((set, get) => ({
   addNewRow: (tabId) => {
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.id === tabId ? { ...t, newRowsCount: (t.newRowsCount || 0) + 1 } : t
+        t.id === tabId && !t.isExecuting
+          ? { ...t, newRowsCount: (t.newRowsCount || 0) + 1 }
+          : t
       ),
     }));
   },
@@ -1577,4 +2236,30 @@ export const useTabStore = create<TabState>((set, get) => ({
       ),
     }));
   },
+
+  setTargetDatabase: (tabId, database) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId
+          ? { ...tab, databaseName: normalizedDatabaseName(database) }
+          : tab
+      ),
+    }));
+  },
 }));
+
+export function confirmDiscardAllTabChanges(action: string) {
+  return confirmDiscardTabChanges(useTabStore.getState().tabs, action);
+}
+
+export function confirmDiscardProjectFileChanges(
+  projectId: string,
+  action: string
+) {
+  return confirmDiscardTabChanges(
+    useTabStore
+      .getState()
+      .tabs.filter((tab) => tab.fileProjectId === projectId),
+    action
+  );
+}

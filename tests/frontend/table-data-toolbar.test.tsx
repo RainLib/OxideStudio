@@ -18,10 +18,10 @@ describe("TableDataToolbar", () => {
     container?.remove();
   });
 
-  it("routes visible grid commands and exposes zoom state", async () => {
+  it("routes the compact data editor commands", async () => {
     const onSearch = vi.fn();
     const onFitColumns = vi.fn();
-    const onZoomIn = vi.fn();
+    const onResetColumns = vi.fn();
     const noop = vi.fn();
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -34,8 +34,9 @@ describe("TableDataToolbar", () => {
           readOnly={false}
           editingEnabled
           hasEdits={false}
+          editedCellCount={0}
+          newRowCount={0}
           selectedRowCount={0}
-          zoomPercent={100}
           onRefresh={noop}
           onAddRow={noop}
           onDeleteRows={noop}
@@ -43,10 +44,7 @@ describe("TableDataToolbar", () => {
           onRevert={noop}
           onSearch={onSearch}
           onFitColumns={onFitColumns}
-          onResetColumns={noop}
-          onZoomOut={noop}
-          onZoomReset={noop}
-          onZoomIn={onZoomIn}
+          onResetColumns={onResetColumns}
           onToggleEditing={noop}
           onImport={noop}
           onExportCsv={noop}
@@ -55,7 +53,6 @@ describe("TableDataToolbar", () => {
       );
     });
 
-    expect(container.textContent).toContain("100%");
     expect(
       container.querySelector<HTMLButtonElement>('[aria-label="Select rows to delete"]')
         ?.disabled
@@ -65,12 +62,66 @@ describe("TableDataToolbar", () => {
       container.querySelector<HTMLButtonElement>('[aria-label="Find in data grid"]')?.click();
       container.querySelector<HTMLButtonElement>('[aria-label="Fit all columns"]')?.click();
       container
-        .querySelector<HTMLButtonElement>('[aria-label^="Zoom in"]')
+        .querySelector<HTMLButtonElement>('[aria-label="Reset column layout"]')
         ?.click();
     });
 
     expect(onSearch).toHaveBeenCalledOnce();
     expect(onFitColumns).toHaveBeenCalledOnce();
-    expect(onZoomIn).toHaveBeenCalledOnce();
+    expect(onResetColumns).toHaveBeenCalledOnce();
+  });
+
+  it("disables mutation and unscoped transfer actions in read-only mode", async () => {
+    const noop = vi.fn();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <TableDataToolbar
+          isExecuting={false}
+          readOnly
+          exportDisabled
+          editingEnabled
+          hasEdits
+          editedCellCount={2}
+          newRowCount={1}
+          selectedRowCount={2}
+          onRefresh={noop}
+          onAddRow={noop}
+          onDeleteRows={noop}
+          onSave={noop}
+          onRevert={noop}
+          onSearch={noop}
+          onFitColumns={noop}
+          onResetColumns={noop}
+          onToggleEditing={noop}
+          onImport={noop}
+          onExportCsv={noop}
+          onExportJson={noop}
+        />
+      );
+    });
+
+    for (const label of [
+      "Add row",
+      "Delete 2 selected rows",
+      "Submit changes",
+      "This object is read-only",
+      "Import CSV",
+      "Export CSV",
+      "Export JSON",
+    ]) {
+      expect(
+        container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)
+          ?.disabled
+      ).toBe(true);
+    }
+
+    expect(
+      container.querySelector<HTMLButtonElement>('[aria-label="Refresh data"]')
+        ?.disabled
+    ).toBe(false);
   });
 });
