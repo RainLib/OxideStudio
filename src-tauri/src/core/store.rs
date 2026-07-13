@@ -337,6 +337,33 @@ impl MetaStore {
         }))
     }
 
+    pub async fn delete_project(&self, id: &str) -> Result<()> {
+        if id == "sqls" {
+            anyhow::bail!("the default project cannot be deleted");
+        }
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM resources WHERE project_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM connections WHERE project_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query("DELETE FROM projects WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            anyhow::bail!("project not found: {id}");
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn set_project_root(&self, id: &str, root_path: Option<&str>) -> Result<Project> {
         let now = current_timestamp_millis();
         let result = sqlx::query("UPDATE projects SET root_path = ?, updated_at = ? WHERE id = ?")
@@ -739,5 +766,68 @@ mod tests {
         assert!(columns
             .iter()
             .any(|row| row.get::<String, _>("name") == "root_path"));
+    }
+
+    #[tokio::test]
+    async fn deletes_project_connections_and_cached_resources_without_touching_default() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = MetaStore { pool };
+        store.init().await.unwrap();
+
+        let project = Project {
+            id: "workspace".to_string(),
+            name: "Workspace".to_string(),
+            root_path: Some("/tmp/workspace".to_string()),
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.save_project(&project).await.unwrap();
+        store
+            .save_connection(&SavedConnection {
+                id: "connection".to_string(),
+                project_id: project.id.clone(),
+                name: "Database".to_string(),
+                driver: "postgres".to_string(),
+                config: serde_json::json!({}),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .unwrap();
+        store
+            .save_resources(
+                &project.id,
+                &[Resource {
+                    id: "schema".to_string(),
+                    project_id: project.id.clone(),
+                    connection_id: "connection".to_string(),
+                    parent_id: None,
+                    kind: "SCHEMA".to_string(),
+                    name: "public".to_string(),
+                    metadata: serde_json::json!({}),
+                    last_updated: 1,
+                }],
+            )
+            .await
+            .unwrap();
+
+        store.delete_project(&project.id).await.unwrap();
+
+        assert!(store.get_project(&project.id).await.unwrap().is_none());
+        assert!(store.get_connections(&project.id).await.unwrap().is_empty());
+        let resource_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM resources WHERE project_id = ?")
+                .bind(&project.id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(resource_count, 0);
+
+        assert!(store.delete_project("sqls").await.is_err());
+        assert!(store.get_project("sqls").await.unwrap().is_some());
     }
 }

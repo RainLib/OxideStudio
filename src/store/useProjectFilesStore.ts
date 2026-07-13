@@ -4,6 +4,7 @@ import {
   normalizeProjectRelativePath,
   projectFilesService,
   type ProjectFileEntry,
+  type ProjectFilePreview,
   type ProjectFileRead,
 } from "@/services/tauri/project-files.service";
 import { useProjectStore } from "@/store/useProjectStore";
@@ -51,6 +52,7 @@ export interface ProjectFilesState {
   collapseDirectory: (relativePath: string) => void;
   toggleDirectory: (relativePath: string) => Promise<void>;
   readFile: (relativePath: string) => Promise<ProjectFileRead>;
+  readPreview: (relativePath: string) => Promise<ProjectFilePreview>;
   createFile: (
     relativePath: string,
     content?: string
@@ -533,6 +535,24 @@ export const useProjectFilesStore = create<ProjectFilesState>((set, get) => {
           }));
         }
         return document;
+      } catch (error) {
+        set({ error: describeError(error) });
+        throw error;
+      } finally {
+        finishOperation();
+      }
+    },
+
+    readPreview: async (relativePath) => {
+      const normalizedPath = normalizeProjectRelativePath(relativePath);
+      const context = requireConfiguredContext();
+      beginOperation();
+      try {
+        return await projectFilesService.readProjectFilePreview(
+          context.projectId,
+          normalizedPath,
+          context.rootPath
+        );
       } catch (error) {
         set({ error: describeError(error) });
         throw error;

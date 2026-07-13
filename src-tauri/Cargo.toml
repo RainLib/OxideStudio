@@ -58,6 +58,7 @@ russh = { version = "0.62.2", default-features = false, features = ["ring", "rsa
 url = "2.5"
 sha2 = "0.10"
 tempfile = "3"
+base64 = "0.22"
 
 [dev-dependencies]
 dotenvy = "0.15.7"

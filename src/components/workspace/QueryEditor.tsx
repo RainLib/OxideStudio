@@ -59,7 +59,7 @@ import {
 } from "@/lib/actions";
 import { editorExecutionConfirmation } from "@/lib/sqlExecutionGate";
 import { StatusBarPortal } from "./StatusBarPortal";
-import { LockKeyhole, Save } from "lucide-react";
+import { Image as ImageIcon, LockKeyhole, Save } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { normalizeKeybinding } from "@/lib/keybindings";
 import { redactSecretString } from "@/lib/redaction";
@@ -81,7 +81,11 @@ import {
 import { extractSqlParameters } from "@/lib/sqlParameters";
 import { SqlParametersPanel } from "./SqlParametersPanel";
 import { aiService } from "@/services/tauri/ai.service";
-import { projectFilesService } from "@/services/tauri/project-files.service";
+import {
+  projectFilesService,
+  supportsProjectFilePreview,
+} from "@/services/tauri/project-files.service";
+import { ProjectFileImagePreview } from "./ProjectFileImagePreview";
 import {
   boundedInlineContext,
   cleanInlineSuggestion,
@@ -359,9 +363,11 @@ export function QueryEditor({
     postgresDatabaseDiscovery.connectionId,
     postgresDatabaseDiscovery.databases,
   ]);
-  const activeProjectFileLanguage = activeTab?.fileRelativePath
-    ? projectFileLanguage(activeTab.fileRelativePath, driver)
-    : null;
+  const isProjectFilePreview = Boolean(activeTab?.filePreview);
+  const activeProjectFileLanguage =
+    activeTab?.fileRelativePath && !isProjectFilePreview
+      ? projectFileLanguage(activeTab.fileRelativePath, driver)
+      : null;
   const documentLanguageId =
     activeProjectFileLanguage?.lspLanguageId || lspLanguageId(driver);
   const documentUri = activeTab
@@ -372,10 +378,12 @@ export function QueryEditor({
   const editorLanguageId =
     activeProjectFileLanguage?.editorLanguageId || queryEditorLanguageId(driver);
   const canUseLsp =
+    !isProjectFilePreview &&
     supportsLspLanguageId(driver) &&
     (!activeProjectFileLanguage || activeProjectFileLanguage.usesDatabaseLsp);
   const canExecuteDocument =
-    !activeProjectFileLanguage || activeProjectFileLanguage.executable;
+    !isProjectFilePreview &&
+    (!activeProjectFileLanguage || activeProjectFileLanguage.executable);
   const capabilities = defaultDatabaseCapabilities(driver);
   const supportsTransactions =
     capabilities.supportsTransactions && !activeTab?.databaseName;
@@ -407,6 +415,14 @@ export function QueryEditor({
   useEffect(() => {
     setParameterExecution(null);
   }, [effectiveTabId]);
+
+  useEffect(() => {
+    if (!isProjectFilePreview) return;
+    selectionDisposableRef.current?.dispose();
+    selectionDisposableRef.current = null;
+    editorRef.current = null;
+    setMountedEditor(null);
+  }, [isProjectFilePreview]);
 
   useEffect(() => {
     return () => {
@@ -458,6 +474,21 @@ export function QueryEditor({
         const files = useProjectFilesStore.getState();
         files.syncActiveProject();
         try {
+          if (supportsProjectFilePreview(relativePath)) {
+            const preview = await files.readPreview(relativePath);
+            useTabStore
+              .getState()
+              .openProjectFilePreviewTab(
+                files.projectId,
+                preview.relativePath,
+                preview.mediaType,
+                preview.dataBase64,
+                preview.revision,
+                preview.size,
+                files.rootPath
+              );
+            return;
+          }
           const document = await files.readFile(relativePath);
           useTabStore
             .getState()
@@ -1563,7 +1594,20 @@ export function QueryEditor({
       onFocusCapture={onActivate}
       onPointerDown={onActivate}
     >
-      {activeProjectFileLanguage && !canExecuteDocument ? (
+      {isProjectFilePreview && activeTab.filePreview ? (
+        <div className="wb-editor-commandbar justify-between gap-2">
+          <div
+            className="flex min-w-0 items-center gap-1.5 truncate text-[10px] wb-muted"
+            title={activeTab.fileRelativePath}
+          >
+            <ImageIcon size={12} className="shrink-0 text-violet-400" />
+            <span className="truncate">{activeTab.fileRelativePath}</span>
+          </div>
+          <span className="shrink-0 text-[9px] uppercase tracking-wide wb-muted">
+            Image preview · Read only
+          </span>
+        </div>
+      ) : activeProjectFileLanguage && !canExecuteDocument ? (
         <div className="wb-editor-commandbar justify-between gap-2">
           <div className="min-w-0 truncate text-[10px] wb-muted" title={activeTab.fileRelativePath}>
             {activeTab.fileRelativePath}
@@ -1629,7 +1673,7 @@ export function QueryEditor({
         />
       )}
 
-      {parameterExecution && (
+      {!isProjectFilePreview && parameterExecution && (
         <SqlParametersPanel
           sql={parameterExecution.sql}
           dialect={driver}
@@ -1648,129 +1692,142 @@ export function QueryEditor({
 
       {/* Editor */}
       <div className="flex-1 min-h-0">
-        <Editor
-          height="100%"
-          defaultLanguage="sql"
-          language={editorLanguageId}
-          path={documentUri}
-          keepCurrentModel
-          value={activeTab.sql}
-          onChange={(value) => updateTabSql(activeTab.id, value || "")}
-          onMount={(editor, monaco) => {
-            editorRef.current = editor;
-            setMountedEditor(editor);
-            inlineKeysContextRef.current = editor.createContextKey(
-              "oxideInlineCompletionKeysEnabled",
-              editorSettings.keybindingMode !== "vim"
-            );
-            selectionDisposableRef.current?.dispose();
-            selectionDisposableRef.current = editor.onDidChangeCursorSelection(
-              (event: any) => {
-                const tabId = activeTabIdRef.current;
-                const model = editor.getModel();
-                if (!tabId || !model || !event.selection) return;
+        {activeTab.filePreview?.kind === "image" ? (
+          <ProjectFileImagePreview
+            dataUrl={activeTab.filePreview.dataUrl}
+            fileName={activeTab.title}
+            mediaType={activeTab.filePreview.mediaType}
+            size={activeTab.filePreview.size}
+          />
+        ) : (
+          <Editor
+            height="100%"
+            defaultLanguage="sql"
+            language={editorLanguageId}
+            path={documentUri}
+            keepCurrentModel
+            value={activeTab.sql}
+            onChange={(value) => updateTabSql(activeTab.id, value || "")}
+            onMount={(editor, monaco) => {
+              editorRef.current = editor;
+              setMountedEditor(editor);
+              inlineKeysContextRef.current = editor.createContextKey(
+                "oxideInlineCompletionKeysEnabled",
+                editorSettings.keybindingMode !== "vim"
+              );
+              selectionDisposableRef.current?.dispose();
+              selectionDisposableRef.current =
+                editor.onDidChangeCursorSelection((event: any) => {
+                  const tabId = activeTabIdRef.current;
+                  const model = editor.getModel();
+                  if (!tabId || !model || !event.selection) return;
 
-                setCursorPosition({
-                  line: event.selection.positionLineNumber,
-                  column: event.selection.positionColumn,
+                  setCursorPosition({
+                    line: event.selection.positionLineNumber,
+                    column: event.selection.positionColumn,
+                  });
+
+                  const selectedText = model.getValueInRange(event.selection);
+                  setEditorSelection(
+                    tabId,
+                    selectedText.trim()
+                      ? {
+                          text: selectedText,
+                          startLineNumber: event.selection.startLineNumber,
+                          startColumn: event.selection.startColumn,
+                          endLineNumber: event.selection.endLineNumber,
+                          endColumn: event.selection.endColumn,
+                        }
+                      : null
+                  );
                 });
-
-                const selectedText = model.getValueInRange(event.selection);
-                setEditorSelection(
-                  tabId,
-                  selectedText.trim()
-                    ? {
-                        text: selectedText,
-                        startLineNumber: event.selection.startLineNumber,
-                        startColumn: event.selection.startColumn,
-                        endLineNumber: event.selection.endLineNumber,
-                        endColumn: event.selection.endColumn,
-                      }
-                    : null
-                );
+              const initialPosition = editor.getPosition();
+              if (initialPosition) {
+                setCursorPosition({
+                  line: initialPosition.lineNumber,
+                  column: initialPosition.column,
+                });
               }
-            );
-            const initialPosition = editor.getPosition();
-            if (initialPosition) {
-              setCursorPosition({
-                line: initialPosition.lineNumber,
-                column: initialPosition.column,
+              monaco.editor.setTheme(mode === "light" ? "vs" : "oxide-dark");
+            }}
+            beforeMount={(monaco) => {
+              // Optional: Define a custom theme that perfectly matches our app's background
+              monaco.editor.defineTheme("oxide-dark", {
+                base: "vs-dark",
+                inherit: true,
+                rules: [],
+                colors: {
+                  "editor.background": "#1c1d20",
+                  "editorLineNumber.foreground": "#6f7786",
+                  "editorCursor.foreground": "#75a7ff",
+                  "editor.selectionBackground": "#2c4573",
+                  "editor.inactiveSelectionBackground": "#263247",
+                  "editor.lineHighlightBackground": "#24272d",
+                  "editorIndentGuide.background1": "#2a2d33",
+                  "editorIndentGuide.activeBackground1": "#414754",
+                  "editorRuler.foreground": "#2b2e34",
+                  "editorGutter.background": "#1c1d20",
+                },
               });
-            }
-            monaco.editor.setTheme(mode === "light" ? "vs" : "oxide-dark");
-
-          }}
-          beforeMount={(monaco) => {
-            // Optional: Define a custom theme that perfectly matches our app's background
-            monaco.editor.defineTheme("oxide-dark", {
-              base: "vs-dark",
-              inherit: true,
-              rules: [],
-              colors: {
-                "editor.background": "#1c1d20",
-                "editorLineNumber.foreground": "#6f7786",
-                "editorCursor.foreground": "#75a7ff",
-                "editor.selectionBackground": "#2c4573",
-                "editor.inactiveSelectionBackground": "#263247",
-                "editor.lineHighlightBackground": "#24272d",
-                "editorIndentGuide.background1": "#2a2d33",
-                "editorIndentGuide.activeBackground1": "#414754",
-                "editorRuler.foreground": "#2b2e34",
-                "editorGutter.background": "#1c1d20",
-              },
-            });
-          }}
-          // Theme is updated via useEffect to ensure it responds to context
-          options={editorOptions}
-        />
+            }}
+            // Theme is updated via useEffect to ensure it responds to context
+            options={editorOptions}
+          />
+        )}
       </div>
-      {isActivePane && <StatusBarPortal>
-        <div className="flex h-full items-center text-[10px] text-[hsl(var(--wb-text-muted))]">
-          <span className="whitespace-nowrap px-2">
-            {cursorPosition.line}:{cursorPosition.column}
-          </span>
-          <span className="wb-editor-status-secondary whitespace-nowrap px-2">LF</span>
-          <span className="wb-editor-status-secondary whitespace-nowrap px-2">UTF-8</span>
-          <span className="wb-editor-status-secondary whitespace-nowrap px-2">
-            {editorSettings.tabSize} spaces
-          </span>
-          {editorSettings.keybindingMode === "vim" && (
-            <span
-              ref={vimStatusNodeRef}
-              className="min-w-28 max-w-72 flex-1 truncate px-2 font-mono text-[9px] text-[hsl(var(--wb-accent))] [&_input]:h-5 [&_input]:max-w-48 [&_input]:border-0 [&_input]:bg-transparent [&_input]:font-mono [&_input]:text-[hsl(var(--wb-text))] [&_input]:outline-none"
-              aria-label="Vim status"
-            />
-          )}
-          {editorSettings.inlineCompletion.enabled && (
-            <span
-              className="wb-editor-status-secondary whitespace-nowrap px-2"
-              title="Inline completion status"
-            >
-              AI {inlineCompletionStatus}
+      {isActivePane && !isProjectFilePreview && (
+        <StatusBarPortal>
+          <div className="flex h-full items-center text-[10px] text-[hsl(var(--wb-text-muted))]">
+            <span className="whitespace-nowrap px-2">
+              {cursorPosition.line}:{cursorPosition.column}
             </span>
-          )}
-          <span
-            className="flex h-full w-7 items-center justify-center"
-            title="SQL execution is permission-gated"
-          >
-            <LockKeyhole size={11} />
-          </span>
-          {canUseLsp && (
-            <span
-              className="wb-editor-status-lsp flex items-center gap-1 whitespace-nowrap px-2"
-              title="LSP status"
-            >
+            <span className="wb-editor-status-secondary whitespace-nowrap px-2">
+              LF
+            </span>
+            <span className="wb-editor-status-secondary whitespace-nowrap px-2">
+              UTF-8
+            </span>
+            <span className="wb-editor-status-secondary whitespace-nowrap px-2">
+              {editorSettings.tabSize} spaces
+            </span>
+            {editorSettings.keybindingMode === "vim" && (
               <span
-                className={cn(
-                  "h-1.5 w-1.5 rounded-full",
-                  lspReady ? "bg-emerald-400" : "bg-amber-400"
-                )}
+                ref={vimStatusNodeRef}
+                className="min-w-28 max-w-72 flex-1 truncate px-2 font-mono text-[9px] text-[hsl(var(--wb-accent))] [&_input]:h-5 [&_input]:max-w-48 [&_input]:border-0 [&_input]:bg-transparent [&_input]:font-mono [&_input]:text-[hsl(var(--wb-text))] [&_input]:outline-none"
+                aria-label="Vim status"
               />
-              SQL
+            )}
+            {editorSettings.inlineCompletion.enabled && (
+              <span
+                className="wb-editor-status-secondary whitespace-nowrap px-2"
+                title="Inline completion status"
+              >
+                AI {inlineCompletionStatus}
+              </span>
+            )}
+            <span
+              className="flex h-full w-7 items-center justify-center"
+              title="SQL execution is permission-gated"
+            >
+              <LockKeyhole size={11} />
             </span>
-          )}
-        </div>
-      </StatusBarPortal>}
+            {canUseLsp && (
+              <span
+                className="wb-editor-status-lsp flex items-center gap-1 whitespace-nowrap px-2"
+                title="LSP status"
+              >
+                <span
+                  className={cn(
+                    "h-1.5 w-1.5 rounded-full",
+                    lspReady ? "bg-emerald-400" : "bg-amber-400"
+                  )}
+                />
+                SQL
+              </span>
+            )}
+          </div>
+        </StatusBarPortal>
+      )}
     </div>
   );
 }

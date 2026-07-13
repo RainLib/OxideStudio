@@ -6,6 +6,7 @@ import { useTabStore } from "@/store/useTabStore";
 
 const mocks = vi.hoisted(() => ({
   saveProject: vi.fn(async () => undefined),
+  deleteProject: vi.fn(async () => undefined),
   getProjects: vi.fn(async () => []),
   loadConnections: vi.fn(async () => []),
   disconnect: vi.fn(async () => "ok"),
@@ -26,6 +27,7 @@ vi.mock("@/services/tauri", () => ({
 vi.mock("@/services/tauri/store.service", () => ({
   storeService: {
     saveProject: mocks.saveProject,
+    deleteProject: mocks.deleteProject,
     getProjects: mocks.getProjects,
   },
 }));
@@ -67,10 +69,13 @@ describe("project store", () => {
   });
 
   it("creates and activates a project with a non-ascii name", async () => {
-    const project = await useProjectStore.getState().createProject("测试项目");
+    const project = await useProjectStore
+      .getState()
+      .createProject("测试项目", "/workspace/测试项目");
 
     expect(project).toMatchObject({
       name: "测试项目",
+      root_path: "/workspace/测试项目",
     });
     expect(project.id).toMatch(/^project-/);
     expect(project.id).not.toBe("sqls");
@@ -78,12 +83,78 @@ describe("project store", () => {
       expect.objectContaining({
         id: project.id,
         name: "测试项目",
+        root_path: "/workspace/测试项目",
       })
     );
     expect(useProjectStore.getState()).toMatchObject({
       activeProjectId: project.id,
       activeProjectName: "测试项目",
     });
+  });
+
+  it("rejects a project directory that is already linked", async () => {
+    useProjectStore.setState({
+      projects: [
+        {
+          id: "existing",
+          name: "Existing",
+          root_path: "C:\\workspace\\database",
+          created_at: 0,
+          updated_at: 0,
+        },
+      ],
+    });
+
+    await expect(
+      useProjectStore
+        .getState()
+        .createProject("Alias", "c:/workspace/database/")
+    ).rejects.toThrow("already linked");
+    expect(mocks.saveProject).not.toHaveBeenCalled();
+  });
+
+  it("deletes the active project and switches to the default workspace", async () => {
+    useProjectStore.setState({
+      projects: [
+        { id: "sqls", name: "sqls", created_at: 0, updated_at: 0 },
+        {
+          id: "workspace",
+          name: "Workspace Alias",
+          root_path: "/workspace/database",
+          created_at: 1,
+          updated_at: 1,
+        },
+      ],
+      activeProjectId: "workspace",
+      activeProjectName: "Workspace Alias",
+    });
+    useConnectionStore.setState({
+      connections: [
+        { id: "old", name: "Old", driver: "postgres", url: "postgres://old" },
+      ],
+      activeConnectionId: "old",
+      connectedConnectionIds: ["old"],
+      isConnected: true,
+    });
+    mocks.loadConnections.mockResolvedValueOnce([]);
+
+    await useProjectStore.getState().deleteProject("workspace");
+
+    expect(mocks.deleteProject).toHaveBeenCalledWith("workspace");
+    expect(useProjectStore.getState()).toMatchObject({
+      projects: [expect.objectContaining({ id: "sqls" })],
+      activeProjectId: "sqls",
+      activeProjectName: "sqls",
+    });
+    expect(useConnectionStore.getState().connections).toEqual([]);
+    expect(mocks.disconnect).toHaveBeenCalledWith("old");
+  });
+
+  it("does not delete the default project", async () => {
+    await expect(
+      useProjectStore.getState().deleteProject("sqls")
+    ).rejects.toThrow("default project");
+    expect(mocks.deleteProject).not.toHaveBeenCalled();
   });
 
   it("keeps the active project when a dirty file cannot be discarded", () => {

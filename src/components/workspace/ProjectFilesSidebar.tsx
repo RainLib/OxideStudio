@@ -27,6 +27,7 @@ import {
   useTabStore,
 } from "@/store/useTabStore";
 import { open } from "@tauri-apps/plugin-dialog";
+import { supportsProjectFilePreview } from "@/services/tauri/project-files.service";
 import {
   AlertTriangle,
   ChevronDown,
@@ -37,6 +38,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  Image as ImageIcon,
   LoaderCircle,
   MoreHorizontal,
   RefreshCw,
@@ -120,7 +122,12 @@ function ProjectFileNode({
   disabled = false,
 }: ProjectFileNodeProps) {
   const isDirectory = node.kind === "directory";
-  const FileIcon = isSqlFile(node.name) ? FileCode2 : FileText;
+  const isImage = supportsProjectFilePreview(node.name);
+  const FileIcon = isImage
+    ? ImageIcon
+    : isSqlFile(node.name)
+      ? FileCode2
+      : FileText;
 
   return (
     <>
@@ -164,7 +171,11 @@ function ProjectFileNode({
               size={13}
               className={cn(
                 "shrink-0",
-                isSqlFile(node.name) ? "text-sky-400" : "wb-muted"
+                isImage
+                  ? "text-violet-400"
+                  : isSqlFile(node.name)
+                    ? "text-sky-400"
+                    : "wb-muted"
               )}
             />
           )}
@@ -249,6 +260,7 @@ export function ProjectFilesSidebar() {
     loadTree,
     toggleDirectory,
     readFile,
+    readPreview,
     createFile,
     createDirectory,
     writeFile,
@@ -360,6 +372,21 @@ export function ProjectFilesSidebar() {
     if (node.isSymlink) return;
 
     try {
+      if (supportsProjectFilePreview(node.relativePath)) {
+        const preview = await readPreview(node.relativePath);
+        useTabStore
+          .getState()
+          .openProjectFilePreviewTab(
+            activeProjectId,
+            preview.relativePath,
+            preview.mediaType,
+            preview.dataBase64,
+            preview.revision,
+            preview.size,
+            rootPath
+          );
+        return;
+      }
       const document = await readFile(node.relativePath);
       useTabStore
         .getState()

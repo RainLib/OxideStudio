@@ -46,6 +46,10 @@ export const storeService = {
     return await invoke("get_projects");
   },
 
+  deleteProject: async (projectId: string): Promise<void> => {
+    return await invoke("delete_project", { projectId });
+  },
+
   // Connection operations
   saveConnection: async (connection: SavedConnection): Promise<void> => {
     return await invoke("save_connection", { connection });

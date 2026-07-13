@@ -16,6 +16,7 @@
 
 - **🗄️ 多数据库支持**: 支持 PostgreSQL、MySQL、SQLite、SQL Server、MongoDB、Redis 和 Elasticsearch。
 - **🔌 数据源管理**: 可在 Database Explorer 中新建、编辑、刷新和安全移除数据源。
+- **📁 项目工作区**: 将项目关联到本地目录，支持自动目录命名、显示别名、文件编辑和常见图片预览。
 - **🎨 现代化 UI**: 基于 React + Tailwind CSS + Shadcn UI，提供丝滑的操作体验。
 - **📊 高性能表格**: 使用 Glide Data Grid 渲染引擎，支持百万级数据虚拟滚动不卡顿。
 - **💻 专业编辑器**: 集成 Monaco Editor (VS Code 同款)，支持 SQL 语法高亮、折叠及智能补全。

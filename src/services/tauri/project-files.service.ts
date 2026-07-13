@@ -18,6 +18,14 @@ export interface ProjectFileRead {
   revision: string;
 }
 
+export interface ProjectFilePreview {
+  relativePath: string;
+  mediaType: string;
+  dataBase64: string;
+  revision: string;
+  size: number;
+}
+
 export interface ProjectFileWriteResult {
   relativePath: string;
   revision: string;
@@ -125,6 +133,34 @@ function normalizeRead(result: ProjectFileRead): ProjectFileRead {
   };
 }
 
+function normalizePreview(result: ProjectFilePreview): ProjectFilePreview {
+  return {
+    ...result,
+    relativePath: normalizeProjectRelativePath(result.relativePath),
+  };
+}
+
+const PROJECT_IMAGE_PREVIEW_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "ico",
+  "svg",
+  "avif",
+]);
+
+export function supportsProjectFilePreview(relativePath: string): boolean {
+  const name = relativePath.split("/").pop() || relativePath;
+  const dot = name.lastIndexOf(".");
+  return (
+    dot >= 0 &&
+    PROJECT_IMAGE_PREVIEW_EXTENSIONS.has(name.slice(dot + 1).toLowerCase())
+  );
+}
+
 function normalizeWrite(result: ProjectFileWriteResult): ProjectFileWriteResult {
   return {
     ...result,
@@ -193,6 +229,22 @@ export const projectFilesService = {
       ...expectedRootArgument(expectedRoot),
     });
     return normalizeRead(result);
+  },
+
+  readProjectFilePreview: async (
+    projectId: string,
+    relativePath: string,
+    expectedRoot?: string | null
+  ): Promise<ProjectFilePreview> => {
+    const result = await invoke<ProjectFilePreview>(
+      "read_project_file_preview",
+      {
+        projectId: requireProjectId(projectId),
+        relativePath: normalizeProjectRelativePath(relativePath),
+        ...expectedRootArgument(expectedRoot),
+      }
+    );
+    return normalizePreview(result);
   },
 
   createProjectFile: async (

@@ -5,7 +5,9 @@ export async function saveProjectFileTab(tabId?: string | null) {
   const tabStore = useTabStore.getState();
   const resolvedTabId = tabId || tabStore.activeTabId;
   const tab = tabStore.tabs.find((candidate) => candidate.id === resolvedTabId);
-  if (!tab?.fileRelativePath || !tab.fileProjectId) return false;
+  if (!tab?.fileRelativePath || !tab.fileProjectId || tab.filePreview) {
+    return false;
+  }
 
   const files = useProjectFilesStore.getState();
   files.syncActiveProject();

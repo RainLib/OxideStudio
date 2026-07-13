@@ -29,7 +29,8 @@ interface ProjectState {
   isLoading: boolean;
   loadProjects: () => Promise<void>;
   setActiveProject: (projectId: string) => boolean;
-  createProject: (name: string) => Promise<Project>;
+  createProject: (name: string, rootPath?: string | null) => Promise<Project>;
+  deleteProject: (projectId: string) => Promise<void>;
 }
 
 function readActiveProjectId() {
@@ -107,6 +108,20 @@ function projectIdFromName(name: string) {
   return `${slug || "project"}-${suffix}`;
 }
 
+function normalizedProjectRootPath(rootPath?: string | null) {
+  const trimmed = rootPath?.trim();
+  if (!trimmed) return null;
+  if (/^[\\/]+$/.test(trimmed) || /^[a-zA-Z]:[\\/]$/.test(trimmed)) {
+    return trimmed;
+  }
+  const normalized = trimmed.replace(/[\\/]+$/, "");
+  return normalized || null;
+}
+
+function projectRootKey(rootPath?: string | null) {
+  return normalizedProjectRootPath(rootPath)?.replace(/\\/g, "/").toLowerCase();
+}
+
 export const useProjectStore = create<ProjectState>((set, get) => ({
   projects: [DEFAULT_PROJECT],
   activeProjectId: readActiveProjectId(),
@@ -172,19 +187,32 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     return true;
   },
 
-  createProject: async (name: string) => {
+  createProject: async (name: string, rootPath?: string | null) => {
     const trimmedName = name.trim();
     if (!trimmedName) {
       throw new Error("Project name is required");
     }
+    const normalizedRootPath = normalizedProjectRootPath(rootPath);
+    const rootKey = projectRootKey(normalizedRootPath);
+    if (
+      rootKey &&
+      get().projects.some(
+        (project) => projectRootKey(project.root_path) === rootKey
+      )
+    ) {
+      throw new Error("This directory is already linked to another project.");
+    }
     if (!confirmDiscardAllTabChanges("switch to the new project")) {
-      throw new Error("Project creation was cancelled to keep unsaved files open.");
+      throw new Error(
+        "Project creation was cancelled to keep unsaved files open."
+      );
     }
 
     const now = Date.now();
     const project: Project = {
       id: projectIdFromName(trimmedName),
       name: trimmedName,
+      root_path: normalizedRootPath,
       created_at: now,
       updated_at: now,
     };
@@ -203,5 +231,56 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }));
     });
     return project;
+  },
+
+  deleteProject: async (projectId: string) => {
+    if (projectId === DEFAULT_PROJECT.id) {
+      throw new Error("The default project cannot be deleted.");
+    }
+
+    const state = get();
+    const project = state.projects.find((item) => item.id === projectId);
+    if (!project) return;
+    const isActiveProject = state.activeProjectId === projectId;
+    if (
+      isActiveProject &&
+      !confirmDiscardAllTabChanges("delete the active project")
+    ) {
+      throw new Error("Project deletion was cancelled to keep unsaved files open.");
+    }
+
+    await storeService.deleteProject(projectId);
+
+    const remainingProjects = state.projects.filter(
+      (item) => item.id !== projectId
+    );
+    if (!isActiveProject) {
+      set({ projects: remainingProjects });
+      return;
+    }
+
+    const fallbackProject =
+      remainingProjects.find((item) => item.id === DEFAULT_PROJECT.id) ||
+      remainingProjects[0] ||
+      DEFAULT_PROJECT;
+    let fallbackConnections: Awaited<
+      ReturnType<typeof readProjectConnections>
+    > = [];
+    try {
+      fallbackConnections = await readProjectConnections(fallbackProject.id);
+    } catch (error) {
+      console.warn("Failed to load fallback project connections", error);
+    }
+
+    latestProjectSwitch += 1;
+    replaceProjectWorkspace(fallbackProject, fallbackConnections, () => {
+      set({
+        projects:
+          remainingProjects.length > 0 ? remainingProjects : [DEFAULT_PROJECT],
+        activeProjectId: fallbackProject.id,
+        activeProjectName: fallbackProject.name,
+        isLoading: false,
+      });
+    });
   },
 }));

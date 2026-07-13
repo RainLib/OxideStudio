@@ -33,6 +33,28 @@ pub async fn get_project(
 }
 
 #[tauri::command]
+pub async fn delete_project(
+    meta_store: State<'_, MetaStore>,
+    config_manager: State<'_, ConfigManager>,
+    project_id: String,
+) -> Result<(), String> {
+    meta_store
+        .delete_project(&project_id)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    // Legacy connection records are still a migration source. Remove the
+    // deleted project's entries so they cannot be imported again later.
+    let mut legacy_config = config_manager.load();
+    legacy_config
+        .connections
+        .retain(|connection| connection.project_id != project_id);
+    config_manager.save(&legacy_config);
+
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn save_connection(
     meta_store: State<'_, MetaStore>,
     connection: SavedConnection,

@@ -12,6 +12,7 @@ import {
   ChevronDown,
   Database,
   FileCode2,
+  Image as ImageIcon,
   Pin,
   PanelLeft,
   PanelRight,
@@ -38,8 +39,17 @@ import {
   type EditorSplitDirection,
 } from "@/store/useEditorGroupStore";
 
-const TabIcon = ({ type, isFile }: { type: TabType; isFile?: boolean }) => {
+const TabIcon = ({
+  type,
+  isFile,
+  isImage,
+}: {
+  type: TabType;
+  isFile?: boolean;
+  isImage?: boolean;
+}) => {
   if (type === "table") return <TableIcon size={12} className="wb-muted" />;
+  if (isImage) return <ImageIcon size={12} className="text-violet-400" />;
   if (isFile) return <FileCode2 size={12} className="text-sky-400" />;
   return <Terminal size={12} className="text-sky-400" />;
 };
@@ -190,7 +200,11 @@ export function TabBar({
                   }}
                 >
                   {tab.isPinned && <Pin size={10} className="text-primary" />}
-                  <TabIcon type={tab.type} isFile={Boolean(tab.fileRelativePath)} />
+                  <TabIcon
+                    type={tab.type}
+                    isFile={Boolean(tab.fileRelativePath)}
+                    isImage={Boolean(tab.filePreview)}
+                  />
                   <span
                     className="truncate flex-1"
                     title={tab.fileRelativePath || tab.title}
@@ -376,6 +390,7 @@ export function TabBar({
                             <TabIcon
                               type={tab.type}
                               isFile={Boolean(tab.fileRelativePath)}
+                              isImage={Boolean(tab.filePreview)}
                             />
                             <span className="truncate flex-1">{tab.title}</span>
                             {hasUnsavedTabChanges(tab) && (
@@ -427,6 +442,7 @@ export function TabBar({
                               <TabIcon
                                 type={tab.type}
                                 isFile={Boolean(tab.fileRelativePath)}
+                                isImage={Boolean(tab.filePreview)}
                               />
                               <span className="truncate flex-1">
                                 {tab.title}

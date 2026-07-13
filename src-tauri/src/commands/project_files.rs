@@ -1,11 +1,12 @@
 use crate::core::store::{MetaStore, Project};
 use anyhow::{anyhow, bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{self, Metadata, Permissions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::UNIX_EPOCH;
@@ -21,6 +22,7 @@ const COMPLETION_FILE_LIMIT: usize = 5_000;
 const COMPLETION_FILE_SIZE_LIMIT: u64 = 256 * 1024;
 const COMPLETION_INDEX_SIZE_LIMIT: usize = 20 * 1024 * 1024;
 const COMPLETION_CONTEXT_SIZE_LIMIT: usize = 8 * 1024;
+const PROJECT_FILE_PREVIEW_SIZE_LIMIT: u64 = 25 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -46,6 +48,16 @@ pub struct ProjectFileRead {
     pub relative_path: String,
     pub content: String,
     pub revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFilePreview {
+    pub relative_path: String,
+    pub media_type: String,
+    pub data_base64: String,
+    pub revision: String,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -160,6 +172,48 @@ impl ProjectRoot {
             relative_path: relative.wire_path,
             content,
             revision,
+        })
+    }
+
+    fn read_file_preview(&self, relative_path: &str) -> Result<ProjectFilePreview> {
+        let relative = validate_relative_path(relative_path, false)?;
+        let path = self.resolve_existing(&relative)?;
+        let metadata = fs::metadata(&path)?;
+        if !metadata.is_file() {
+            bail!("project path is not a file: {}", relative.wire_path);
+        }
+
+        let media_type = project_file_preview_media_type(&path).ok_or_else(|| {
+            anyhow!(
+                "project file preview is not supported: {}",
+                relative.wire_path
+            )
+        })?;
+        if metadata.len() > PROJECT_FILE_PREVIEW_SIZE_LIMIT {
+            bail!(
+                "project file is too large to preview (maximum 25 MiB): {}",
+                relative.wire_path
+            );
+        }
+
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        fs::File::open(&path)
+            .with_context(|| format!("failed to open project file: {}", relative.wire_path))?
+            .take(PROJECT_FILE_PREVIEW_SIZE_LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("failed to read project file: {}", relative.wire_path))?;
+        if bytes.len() as u64 > PROJECT_FILE_PREVIEW_SIZE_LIMIT {
+            bail!(
+                "project file is too large to preview (maximum 25 MiB): {}",
+                relative.wire_path
+            );
+        }
+        Ok(ProjectFilePreview {
+            relative_path: relative.wire_path,
+            media_type: media_type.to_string(),
+            data_base64: BASE64_STANDARD.encode(&bytes),
+            revision: content_revision(&bytes),
+            size: bytes.len() as u64,
         })
     }
 
@@ -673,6 +727,21 @@ fn content_revision(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn project_file_preview_media_type(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        "ico" => Some("image/x-icon"),
+        "svg" => Some("image/svg+xml"),
+        "avif" => Some("image/avif"),
+        _ => None,
+    }
+}
+
 fn system_time_millis(time: std::time::SystemTime) -> Option<i64> {
     time.duration_since(UNIX_EPOCH)
         .ok()
@@ -872,6 +941,19 @@ pub async fn read_project_file(
     project_root(&meta_store, &project_id, expected_root.as_deref())
         .await?
         .read_file(&relative_path)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn read_project_file_preview(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+    relative_path: String,
+    expected_root: Option<String>,
+) -> Result<ProjectFilePreview, String> {
+    project_root(&meta_store, &project_id, expected_root.as_deref())
+        .await?
+        .read_file_preview(&relative_path)
         .map_err(|error| error.to_string())
 }
 
@@ -1084,6 +1166,35 @@ mod tests {
         root.delete_entry("queries/final.sql", false).unwrap();
         root.delete_entry("queries", false).unwrap();
         assert!(!temp.path().join("queries").exists());
+    }
+
+    #[test]
+    fn project_file_preview_reads_supported_images_without_utf8_decoding() {
+        let temp = TempDir::new().unwrap();
+        let root = ProjectRoot::new(temp.path()).unwrap();
+        let bytes = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff];
+        fs::write(temp.path().join("preview.png"), bytes).unwrap();
+
+        let preview = root.read_file_preview("preview.png").unwrap();
+        assert_eq!(preview.relative_path, "preview.png");
+        assert_eq!(preview.media_type, "image/png");
+        assert_eq!(preview.data_base64, BASE64_STANDARD.encode(bytes));
+        assert_eq!(preview.revision, content_revision(&bytes));
+        assert_eq!(preview.size, bytes.len() as u64);
+        assert!(root.read_file("preview.png").is_err());
+    }
+
+    #[test]
+    fn project_file_preview_rejects_unsupported_binary_files() {
+        let temp = TempDir::new().unwrap();
+        let root = ProjectRoot::new(temp.path()).unwrap();
+        fs::write(temp.path().join("archive.bin"), [0xff, 0x00]).unwrap();
+
+        let error = root
+            .read_file_preview("archive.bin")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("preview is not supported"), "{error}");
     }
 
     #[test]

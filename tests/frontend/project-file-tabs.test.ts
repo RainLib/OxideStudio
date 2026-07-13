@@ -70,6 +70,56 @@ describe("project file tab lifecycle", () => {
     });
   });
 
+  it("opens image previews as reusable read-only project tabs", async () => {
+    const firstId = useTabStore
+      .getState()
+      .openProjectFilePreviewTab(
+        "project-1",
+        "images/diagram.png",
+        "image/png",
+        "aW1hZ2U=",
+        "revision-1",
+        5,
+        "C:/workspace/root-a"
+      );
+    const secondId = useTabStore
+      .getState()
+      .openProjectFilePreviewTab(
+        "project-1",
+        "images/diagram.png",
+        "image/png",
+        "bmV3LWltYWdl",
+        "revision-2",
+        9,
+        "C:/workspace/root-a"
+      );
+
+    expect(secondId).toBe(firstId);
+    expect(useTabStore.getState().tabs).toHaveLength(1);
+    expect(useTabStore.getState().tabs[0]).toMatchObject({
+      title: "diagram.png",
+      sql: "",
+      fileRevision: "revision-2",
+      filePreview: {
+        kind: "image",
+        mediaType: "image/png",
+        dataUrl: "data:image/png;base64,bmV3LWltYWdl",
+        size: 9,
+      },
+      isDirty: false,
+    });
+
+    useTabStore.getState().updateTabSql(firstId, "must stay read only");
+    expect(useTabStore.getState().tabs[0]).toMatchObject({
+      sql: "",
+      isDirty: false,
+    });
+    const writeFile = vi.fn();
+    useProjectFilesStore.setState({ writeFile });
+    await expect(saveProjectFileTab(firstId)).resolves.toBe(false);
+    expect(writeFile).not.toHaveBeenCalled();
+  });
+
   it("prevents closing a dirty file when discard is declined", () => {
     const id = useTabStore.getState().openProjectFileTab(
       "project-1",

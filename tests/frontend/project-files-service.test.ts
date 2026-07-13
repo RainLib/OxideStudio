@@ -3,6 +3,7 @@ import {
   ProjectFileRevisionConflictError,
   normalizeProjectRelativePath,
   projectFilesService,
+  supportsProjectFilePreview,
 } from "@/services/tauri/project-files.service";
 
 const mocks = vi.hoisted(() => ({
@@ -43,6 +44,13 @@ describe("project files service", () => {
         revision: "revision-1",
       })
       .mockResolvedValueOnce({
+        relativePath: "images\\diagram.png",
+        mediaType: "image/png",
+        dataBase64: "iVBORw==",
+        revision: "revision-image",
+        size: 4,
+      })
+      .mockResolvedValueOnce({
         relativePath: "queries\\new.sql",
         revision: "revision-2",
       })
@@ -77,6 +85,11 @@ describe("project files service", () => {
       "project-1",
       "queries\\daily.sql"
     );
+    const preview = await projectFilesService.readProjectFilePreview(
+      "project-1",
+      "images\\diagram.png",
+      "C:\\workspace"
+    );
     await projectFilesService.createProjectFile(
       "project-1",
       "queries\\new.sql",
@@ -103,6 +116,7 @@ describe("project files service", () => {
 
     expect(entries[0]?.relativePath).toBe("queries/daily.sql");
     expect(read.relativePath).toBe("queries/daily.sql");
+    expect(preview.relativePath).toBe("images/diagram.png");
     expect(mocks.invoke.mock.calls).toEqual([
       [
         "set_project_root",
@@ -115,6 +129,14 @@ describe("project files service", () => {
       [
         "read_project_file",
         { projectId: "project-1", relativePath: "queries/daily.sql" },
+      ],
+      [
+        "read_project_file_preview",
+        {
+          projectId: "project-1",
+          relativePath: "images/diagram.png",
+          expectedRoot: "C:\\workspace",
+        },
       ],
       [
         "create_project_file",
@@ -176,6 +198,13 @@ describe("project files service", () => {
       "must be relative"
     );
     expect(mocks.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("recognizes image formats handled by the editor preview", () => {
+    expect(supportsProjectFilePreview("images/diagram.PNG")).toBe(true);
+    expect(supportsProjectFilePreview("icons/logo.svg")).toBe(true);
+    expect(supportsProjectFilePreview("data/archive.bin")).toBe(false);
+    expect(supportsProjectFilePreview("notes/image.png.txt")).toBe(false);
   });
 
   it("requests bounded project completion context explicitly", async () => {

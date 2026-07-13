@@ -115,6 +115,13 @@ export interface EditorSelectionState {
   endColumn: number;
 }
 
+export interface ProjectFileImagePreview {
+  kind: "image";
+  mediaType: string;
+  dataUrl: string;
+  size: number;
+}
+
 export interface TabData {
   id: string;
   title: string;
@@ -177,6 +184,7 @@ export interface TabData {
   fileRootPath?: string;
   fileRelativePath?: string;
   fileRevision?: string;
+  filePreview?: ProjectFileImagePreview;
   isDirty?: boolean;
   fileError?: string | null;
 }
@@ -517,6 +525,7 @@ interface TabState {
         | "fileRootPath"
         | "fileRelativePath"
         | "fileRevision"
+        | "filePreview"
         | "isDirty"
       >
     >
@@ -551,6 +560,15 @@ interface TabState {
     relativePath: string,
     content: string,
     revision: string,
+    rootPath?: string | null
+  ) => string;
+  openProjectFilePreviewTab: (
+    projectId: string,
+    relativePath: string,
+    mediaType: string,
+    dataBase64: string,
+    revision: string,
+    size: number,
     rootPath?: string | null
   ) => string;
   markProjectFileSaved: (
@@ -873,6 +891,57 @@ export const useTabStore = create<TabState>((set, get) => ({
     });
   },
 
+  openProjectFilePreviewTab: (
+    projectId,
+    relativePath,
+    mediaType,
+    dataBase64,
+    revision,
+    size,
+    rootPath
+  ) => {
+    const existing = get().tabs.find(
+      (tab) =>
+        tab.fileProjectId === projectId &&
+        tab.fileRelativePath === relativePath &&
+        (!rootPath || !tab.fileRootPath || tab.fileRootPath === rootPath)
+    );
+    const filePreview: ProjectFileImagePreview = {
+      kind: "image",
+      mediaType,
+      dataUrl: `data:${mediaType};base64,${dataBase64}`,
+      size,
+    };
+
+    if (existing) {
+      set((state) => ({
+        activeTabId: existing.id,
+        tabs: state.tabs.map((tab) =>
+          tab.id === existing.id
+            ? {
+                ...tab,
+                sql: "",
+                fileRevision: revision,
+                filePreview,
+                isDirty: false,
+                fileError: null,
+              }
+            : tab
+        ),
+      }));
+      return existing.id;
+    }
+
+    return get().createTab("query", fileNameFromPath(relativePath), "", {
+      fileProjectId: projectId,
+      fileRootPath: rootPath || undefined,
+      fileRelativePath: relativePath,
+      fileRevision: revision,
+      filePreview,
+      isDirty: false,
+    });
+  },
+
   markProjectFileSaved: (id, revision, savedContent) => {
     set((state) => ({
       tabs: state.tabs.map((tab) =>
@@ -1095,7 +1164,7 @@ export const useTabStore = create<TabState>((set, get) => ({
   updateTabSql: (id: string, sql: string) => {
     set((state) => ({
       tabs: state.tabs.map((tab) =>
-        tab.id === id
+        tab.id === id && !tab.filePreview
           ? {
               ...tab,
               sql,
