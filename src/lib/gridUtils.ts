@@ -40,6 +40,13 @@ export function formatValue(value: any, type?: DataType): string {
         return String(value);
       }
     default:
+      if (typeof value === "object") {
+        try {
+          return JSON.stringify(value);
+        } catch {
+          return String(value);
+        }
+      }
       return String(value);
   }
 }
@@ -78,7 +85,7 @@ export function createTypedCell(value: any, allowOverlay = true): GridCell {
     kind: GridCellKind.Text,
     allowOverlay,
     displayData,
-    data: String(value),
+    data: type === "null" ? "" : displayData,
     themeOverride,
     contentAlign: type === "number" ? "right" : "left",
   };

@@ -211,7 +211,7 @@ describe("LSP sync plan", () => {
     });
 
     expect(first).not.toEqual(second);
-    expect(first).toContain("email:string");
-    expect(second).toContain("username:string");
+    expect(first).toContain('\\"name\\":\\"email\\"');
+    expect(second).toContain('\\"name\\":\\"username\\"');
   });
 });

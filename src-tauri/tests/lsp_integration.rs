@@ -2387,6 +2387,7 @@ async fn completion_items_at(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn assert_completion_text_edit(
     lsp: &mut LspProcess,
     uri: &str,

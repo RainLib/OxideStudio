@@ -36,8 +36,8 @@ describe("WorkbenchChrome", () => {
       root.render(
         <WorkbenchStatusBar
           isIntrospecting={false}
-          assistantOpen={false}
-          onToggleAssistant={vi.fn()}
+          secondaryPanelOpen={false}
+          onToggleSecondaryPanel={vi.fn()}
         />
       );
     });
@@ -52,8 +52,8 @@ describe("WorkbenchChrome", () => {
           currentSchema="public"
           activeTabTitle="Query #1"
           isIntrospecting={false}
-          assistantOpen={false}
-          onToggleAssistant={vi.fn()}
+          secondaryPanelOpen={false}
+          onToggleSecondaryPanel={vi.fn()}
         />
       );
     });
@@ -67,6 +67,7 @@ describe("WorkbenchChrome", () => {
   it("keeps title tool buttons wired to their tool windows", async () => {
     const onToggleDatabaseExplorer = vi.fn();
     const onToggleAssistant = vi.fn();
+    const onToggleFiles = vi.fn();
 
     await act(async () => {
       root = createRoot(container);
@@ -74,10 +75,12 @@ describe("WorkbenchChrome", () => {
         <WorkbenchTitleTools
           databaseExplorerOpen
           databaseExplorerSide="left"
-          assistantOpen={false}
+          secondaryPanelOpen={false}
+          secondaryPanelView="assistant"
           assistantSide="right"
           onToggleDatabaseExplorer={onToggleDatabaseExplorer}
           onToggleAssistant={onToggleAssistant}
+          onToggleFiles={onToggleFiles}
         />
       );
     });
@@ -85,14 +88,17 @@ describe("WorkbenchChrome", () => {
     const buttons = container.querySelectorAll("button");
     expect(buttons[0]?.getAttribute("aria-pressed")).toBe("true");
     expect(buttons[1]?.getAttribute("aria-pressed")).toBe("false");
+    expect(buttons[2]?.getAttribute("aria-pressed")).toBe("false");
 
     await act(async () => {
       buttons[0]?.click();
       buttons[1]?.click();
+      buttons[2]?.click();
     });
 
     expect(onToggleDatabaseExplorer).toHaveBeenCalledOnce();
     expect(onToggleAssistant).toHaveBeenCalledOnce();
+    expect(onToggleFiles).toHaveBeenCalledOnce();
   });
 
   it("opens the command palette from the global search control", async () => {

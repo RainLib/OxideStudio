@@ -1,0 +1,301 @@
+import { useEffect, useRef, useState } from "react";
+import {
+  AlertCircle,
+  ChevronDown,
+  ChevronRight,
+  Folder,
+  Network,
+  RefreshCw,
+  Table,
+  TableProperties,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import { isViewObject } from "@/lib/databaseDialect";
+import { schemaService } from "@/services/tauri";
+import type { TableInfo } from "@/services/tauri/types";
+
+type SchemaLoadStatus = "idle" | "loading" | "success" | "error";
+
+interface SchemaLoadState {
+  status: SchemaLoadStatus;
+  tables: TableInfo[];
+  error: string | null;
+}
+
+interface PostgresRemoteDatabaseContentsProps {
+  connectionId: string;
+  database: string;
+  schemas: string[];
+  connectionColor: string;
+  filterText?: string;
+  onTablesLoaded?: (schema: string, tables: TableInfo[]) => void;
+  onOpenTable: (
+    database: string,
+    schema: string,
+    table: TableInfo
+  ) => void | Promise<void>;
+}
+
+function loadErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return String(error || "Schema metadata could not be loaded");
+}
+
+export function PostgresRemoteDatabaseContents({
+  connectionId,
+  database,
+  schemas,
+  connectionColor,
+  filterText = "",
+  onTablesLoaded,
+  onOpenTable,
+}: PostgresRemoteDatabaseContentsProps) {
+  const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [schemaLoads, setSchemaLoads] = useState<Record<string, SchemaLoadState>>(
+    {}
+  );
+  const mountedRef = useRef(true);
+  const requestVersionsRef = useRef<Record<string, number>>({});
+  const inFlightSchemasRef = useRef<Set<string>>(new Set());
+  const contextVersionRef = useRef(0);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    contextVersionRef.current += 1;
+    setExpandedSchemas(new Set());
+    setSchemaLoads({});
+    requestVersionsRef.current = {};
+    inFlightSchemasRef.current.clear();
+  }, [connectionId, database]);
+
+  const loadTables = async (schema: string) => {
+    if (inFlightSchemasRef.current.has(schema)) return;
+    inFlightSchemasRef.current.add(schema);
+    const requestVersion = (requestVersionsRef.current[schema] || 0) + 1;
+    const contextVersion = contextVersionRef.current;
+    requestVersionsRef.current[schema] = requestVersion;
+    setSchemaLoads((current) => ({
+      ...current,
+      [schema]: {
+        status: "loading",
+        tables: current[schema]?.tables || [],
+        error: null,
+      },
+    }));
+
+    try {
+      const tables = await schemaService.getDatabaseTables(
+        connectionId,
+        database,
+        schema
+      );
+      if (
+        !mountedRef.current ||
+        contextVersionRef.current !== contextVersion ||
+        requestVersionsRef.current[schema] !== requestVersion
+      ) {
+        return;
+      }
+      setSchemaLoads((current) => ({
+        ...current,
+        [schema]: { status: "success", tables, error: null },
+      }));
+      onTablesLoaded?.(schema, tables);
+    } catch (error) {
+      if (
+        !mountedRef.current ||
+        contextVersionRef.current !== contextVersion ||
+        requestVersionsRef.current[schema] !== requestVersion
+      ) {
+        return;
+      }
+      setSchemaLoads((current) => ({
+        ...current,
+        [schema]: {
+          status: "error",
+          tables: current[schema]?.tables || [],
+          error: loadErrorMessage(error),
+        },
+      }));
+    } finally {
+      if (
+        contextVersionRef.current === contextVersion &&
+        requestVersionsRef.current[schema] === requestVersion
+      ) {
+        inFlightSchemasRef.current.delete(schema);
+      }
+    }
+  };
+
+  const toggleSchema = (schema: string) => {
+    const willExpand = !expandedSchemas.has(schema);
+    setExpandedSchemas((current) => {
+      const next = new Set(current);
+      if (next.has(schema)) next.delete(schema);
+      else next.add(schema);
+      return next;
+    });
+
+    const loadState = schemaLoads[schema];
+    if (
+      willExpand &&
+      loadState?.status !== "loading" &&
+      loadState?.status !== "success"
+    ) {
+      void loadTables(schema);
+    }
+  };
+
+  const normalizedFilter = filterText.trim().toLocaleLowerCase();
+  const visibleSchemas = normalizedFilter
+    ? schemas.filter(
+        (schema) =>
+          schema.toLocaleLowerCase().includes(normalizedFilter) ||
+          schemaLoads[schema]?.tables.some((table) =>
+            table.name.toLocaleLowerCase().includes(normalizedFilter)
+          )
+      )
+    : schemas;
+
+  if (schemas.length === 0) {
+    return (
+      <div className="min-h-6 px-1.5 py-1 text-[10px] wb-muted">
+        No schemas found
+      </div>
+    );
+  }
+
+  if (visibleSchemas.length === 0) {
+    return (
+      <div className="min-h-6 px-1.5 py-1 text-[10px] wb-muted">
+        No schemas match “{filterText.trim()}”
+      </div>
+    );
+  }
+
+  return (
+    <div data-postgres-remote-database={database} className="min-w-0">
+      {visibleSchemas.map((schema) => {
+        const isExpanded = expandedSchemas.has(schema);
+        const loadState = schemaLoads[schema] || {
+          status: "idle" as const,
+          tables: [],
+          error: null,
+        };
+        const schemaMatchesFilter = schema
+          .toLocaleLowerCase()
+          .includes(normalizedFilter);
+        const visibleTables = normalizedFilter && !schemaMatchesFilter
+          ? loadState.tables.filter((table) =>
+              table.name.toLocaleLowerCase().includes(normalizedFilter)
+            )
+          : loadState.tables;
+
+        return (
+          <div key={schema} className="min-w-0">
+            <button
+              type="button"
+              aria-expanded={isExpanded}
+              aria-busy={loadState.status === "loading" || undefined}
+              onClick={() => toggleSchema(schema)}
+              className="flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))]"
+              title={`${isExpanded ? "Collapse" : "Expand"} ${database}.${schema}`}
+            >
+              {isExpanded ? (
+                <ChevronDown size={12} className="shrink-0 wb-muted" />
+              ) : (
+                <ChevronRight size={12} className="shrink-0 wb-muted" />
+              )}
+              <Network
+                size={12}
+                className="shrink-0"
+                style={{ color: connectionColor }}
+              />
+              <span className="truncate">{schema}</span>
+            </button>
+
+            {isExpanded && (
+              <div className="ml-[11px] border-l border-[hsl(var(--wb-border-subtle))] pl-2">
+                <div className="flex h-5 min-w-0 items-center gap-1 px-1.5 text-[10px] font-medium wb-muted">
+                  <Folder size={11} className="shrink-0" />
+                  <span className="truncate">tables</span>
+                  {loadState.status === "success" && (
+                    <span className="ml-auto text-[9px] tabular-nums">
+                      {visibleTables.length}
+                    </span>
+                  )}
+                </div>
+
+                {loadState.status === "loading" && (
+                  <div
+                    role="status"
+                    className="flex h-6 items-center gap-1.5 px-1.5 text-[10px] wb-muted"
+                  >
+                    <RefreshCw size={10} className="animate-spin" />
+                    Loading tables…
+                  </div>
+                )}
+
+                {loadState.status === "error" && (
+                  <div
+                    role="alert"
+                    className="flex min-h-6 min-w-0 items-center gap-1 px-1.5 py-0.5 text-[10px] text-destructive"
+                  >
+                    <AlertCircle size={11} className="shrink-0" />
+                    <span className="min-w-0 flex-1 truncate" title={loadState.error || undefined}>
+                      {loadState.error}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void loadTables(schema)}
+                      className="h-5 shrink-0 rounded-[3px] px-1 font-medium hover:bg-[hsl(var(--wb-hover))]"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+
+                {loadState.status === "success" && visibleTables.length === 0 && (
+                  <div className="min-h-6 px-1.5 py-1 text-[10px] wb-muted">
+                    {normalizedFilter ? "No matching tables" : "No tables found"}
+                  </div>
+                )}
+
+                {loadState.status === "success" &&
+                  visibleTables.map((table) => {
+                    const isView = isViewObject(table.type);
+                    const ObjectIcon = isView ? TableProperties : Table;
+                    return (
+                      <button
+                        type="button"
+                        key={table.name}
+                        data-postgres-remote-table={`${database}.${schema}.${table.name}`}
+                        onClick={() => void onOpenTable(database, schema, table)}
+                        className={cn(
+                          "flex h-6 w-full min-w-0 cursor-pointer items-center gap-2 rounded-[3px] px-2 text-left text-[11px]",
+                          "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
+                          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))]"
+                        )}
+                        title={`Open ${database}.${schema}.${table.name} data (read-only)`}
+                      >
+                        <ObjectIcon size={12} className="shrink-0 opacity-75" />
+                        <span className="truncate">{table.name}</span>
+                      </button>
+                    );
+                  })}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}

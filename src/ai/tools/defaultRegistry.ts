@@ -21,6 +21,7 @@ import {
 } from "@/store/useTabStore";
 import {
   lspLanguageId,
+  normalizeDatabaseDriverName,
   previewTableQuery,
   supportsLspLanguageId,
 } from "@/lib/databaseDialect";
@@ -130,19 +131,19 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
     describeObject: async (input, context) => describeObject(input, context),
 
     runReadOnlyQuery: async (input, context) => {
-      const { connectionId, namespace } = resolveQueryExecutionTarget(
+      const { connectionId, namespace, driver } = resolveQueryExecutionTarget(
         input.connectionId,
         input.namespace,
         context,
         "query.runReadOnly"
       );
 
-      const results = await executeWorkspaceQuery(
+      const results = await executeReadOnlyWorkspaceQuery(
         connectionId,
         input.query,
         namespace,
+        driver,
         context,
-        "query.runReadOnly"
       );
       return limitQueryResults(results, input.limit ?? 200);
     },
@@ -753,7 +754,7 @@ function resolveQueryExecutionTarget(
     context.activeNamespace ||
     undefined;
 
-  return { connectionId, namespace };
+  return { connectionId, namespace, driver };
 }
 
 function inferActiveQueryNamespace(
@@ -830,6 +831,51 @@ async function executeWorkspaceQuery(
   } finally {
     isSettled = true;
     abortSignal?.removeEventListener("abort", abortHandler);
+  }
+}
+
+async function executeReadOnlyWorkspaceQuery(
+  connectionId: string,
+  query: string,
+  namespace: string | undefined,
+  driver: DatabaseDriver,
+  context: AiToolExecutionContext
+) {
+  const normalizedDriver =
+    normalizeDatabaseDriverName(String(driver)) ||
+    String(driver).trim().toLowerCase();
+  if (normalizedDriver !== "postgres" && normalizedDriver !== "mysql") {
+    return executeWorkspaceQuery(
+      connectionId,
+      query,
+      namespace,
+      context,
+      "query.runReadOnly"
+    );
+  }
+
+  const queryId = createCancellableAiQueryId(context, "query.runReadOnly");
+  if (context.abortSignal?.aborted) {
+    throw new Error("AI tool execution aborted");
+  }
+
+  let isSettled = false;
+  const abortHandler = () => {
+    if (isSettled || !queryId) return;
+    void queryService.cancelQuery(queryId).catch(() => undefined);
+  };
+  context.abortSignal?.addEventListener("abort", abortHandler, { once: true });
+
+  try {
+    return await queryService.executeReadOnlyQuery(
+      connectionId,
+      query,
+      namespace,
+      queryId
+    );
+  } finally {
+    isSettled = true;
+    context.abortSignal?.removeEventListener("abort", abortHandler);
   }
 }
 

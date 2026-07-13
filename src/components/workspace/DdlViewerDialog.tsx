@@ -35,7 +35,10 @@ export function DdlViewerDialog({
         <DialogHeader>
           <DialogTitle>DDL: {tableName}</DialogTitle>
         </DialogHeader>
-        <div className="flex-1 overflow-auto bg-muted p-4 rounded-md font-mono text-xs whitespace-pre-wrap relative group">
+        <div
+          className="group relative flex-1 overflow-auto rounded-md bg-muted p-4 font-mono text-xs whitespace-pre-wrap"
+          data-text-selectable="true"
+        >
           {ddl}
           <Button
             variant="ghost"

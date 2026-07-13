@@ -32,6 +32,8 @@ pub struct Resource {
 pub struct Project {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub root_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -107,6 +109,7 @@ impl MetaStore {
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
+                root_path TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
@@ -114,6 +117,7 @@ impl MetaStore {
         )
         .execute(&self.pool)
         .await?;
+        self.migrate_projects_root_path().await?;
 
         let now = current_timestamp_millis();
         sqlx::query(
@@ -194,6 +198,24 @@ impl MetaStore {
         Ok(())
     }
 
+    async fn migrate_projects_root_path(&self) -> Result<()> {
+        let columns = sqlx::query("PRAGMA table_info(projects)")
+            .fetch_all(&self.pool)
+            .await?;
+        let has_root_path = columns
+            .iter()
+            .any(|row| row.get::<String, _>("name") == "root_path");
+
+        if has_root_path {
+            return Ok(());
+        }
+
+        sqlx::query("ALTER TABLE projects ADD COLUMN root_path TEXT")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn migrate_resources_project_scope(&self) -> Result<()> {
         let columns = sqlx::query("PRAGMA table_info(resources)")
             .fetch_all(&self.pool)
@@ -264,15 +286,17 @@ impl MetaStore {
     pub async fn save_project(&self, project: &Project) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO projects (id, name, created_at, updated_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO projects (id, name, root_path, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
+                root_path = excluded.root_path,
                 updated_at = excluded.updated_at
             "#,
         )
         .bind(&project.id)
         .bind(&project.name)
+        .bind(&project.root_path)
         .bind(project.created_at)
         .bind(project.updated_at)
         .execute(&self.pool)
@@ -290,11 +314,45 @@ impl MetaStore {
             projects.push(Project {
                 id: rec.get("id"),
                 name: rec.get("name"),
+                root_path: rec.get("root_path"),
                 created_at: rec.get("created_at"),
                 updated_at: rec.get("updated_at"),
             });
         }
         Ok(projects)
+    }
+
+    pub async fn get_project(&self, id: &str) -> Result<Option<Project>> {
+        let rec = sqlx::query("SELECT * FROM projects WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        Ok(rec.map(|rec| Project {
+            id: rec.get("id"),
+            name: rec.get("name"),
+            root_path: rec.get("root_path"),
+            created_at: rec.get("created_at"),
+            updated_at: rec.get("updated_at"),
+        }))
+    }
+
+    pub async fn set_project_root(&self, id: &str, root_path: Option<&str>) -> Result<Project> {
+        let now = current_timestamp_millis();
+        let result = sqlx::query("UPDATE projects SET root_path = ?, updated_at = ? WHERE id = ?")
+            .bind(root_path)
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            anyhow::bail!("project not found: {id}");
+        }
+
+        self.get_project(id)
+            .await?
+            .with_context(|| format!("project disappeared after updating its root: {id}"))
     }
 
     pub async fn save_connection(&self, conn: &SavedConnection) -> Result<()> {
@@ -527,13 +585,11 @@ impl MetaStore {
                 .await?;
             }
             (None, None) => {
-                sqlx::query(
-                    "DELETE FROM resources WHERE project_id = ? AND connection_id = ?",
-                )
-                .bind(project_id)
-                .bind(connection_id)
-                .execute(&self.pool)
-                .await?;
+                sqlx::query("DELETE FROM resources WHERE project_id = ? AND connection_id = ?")
+                    .bind(project_id)
+                    .bind(connection_id)
+                    .execute(&self.pool)
+                    .await?;
             }
         }
 
@@ -631,5 +687,57 @@ impl MetaStore {
             })
         }
         Ok(resources)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn migrates_legacy_projects_with_nullable_root_path() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO projects (id, name, created_at, updated_at) VALUES ('legacy', 'Legacy', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let store = MetaStore { pool };
+        store.init().await.unwrap();
+
+        let legacy = store.get_project("legacy").await.unwrap().unwrap();
+        assert_eq!(legacy.root_path, None);
+        let updated = store
+            .set_project_root("legacy", Some("C:/workspace"))
+            .await
+            .unwrap();
+        assert_eq!(updated.root_path.as_deref(), Some("C:/workspace"));
+
+        let columns = sqlx::query("PRAGMA table_info(projects)")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        assert!(columns
+            .iter()
+            .any(|row| row.get::<String, _>("name") == "root_path"));
     }
 }

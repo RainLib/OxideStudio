@@ -5,6 +5,8 @@ import { useProjectStore } from "@/store/useProjectStore";
 import {
   ChevronRight,
   Database,
+  FolderTree,
+  PanelRight,
   Search,
   Sparkles,
   SquareTerminal,
@@ -14,19 +16,23 @@ import { TaskStatusCenter } from "./TaskStatusCenter";
 interface WorkbenchTitleToolsProps {
   databaseExplorerOpen: boolean;
   databaseExplorerSide: WorkbenchSide;
-  assistantOpen: boolean;
+  secondaryPanelOpen: boolean;
+  secondaryPanelView: "assistant" | "files";
   assistantSide: WorkbenchSide;
   onToggleDatabaseExplorer: () => void;
   onToggleAssistant: () => void;
+  onToggleFiles: () => void;
 }
 
 export function WorkbenchTitleTools({
   databaseExplorerOpen,
   databaseExplorerSide,
-  assistantOpen,
+  secondaryPanelOpen,
+  secondaryPanelView,
   assistantSide,
   onToggleDatabaseExplorer,
   onToggleAssistant,
+  onToggleFiles,
 }: WorkbenchTitleToolsProps) {
   return (
     <div className="flex h-7 items-center gap-0.5" aria-label="Tool windows">
@@ -43,12 +49,22 @@ export function WorkbenchTitleTools({
       <button
         type="button"
         className="wb-title-tool-button"
-        data-active={assistantOpen}
-        aria-pressed={assistantOpen}
+        data-active={secondaryPanelOpen && secondaryPanelView === "assistant"}
+        aria-pressed={secondaryPanelOpen && secondaryPanelView === "assistant"}
         onClick={onToggleAssistant}
         title={`Toggle AI Assistant (${assistantSide})`}
       >
         <Sparkles size={15} />
+      </button>
+      <button
+        type="button"
+        className="wb-title-tool-button"
+        data-active={secondaryPanelOpen && secondaryPanelView === "files"}
+        aria-pressed={secondaryPanelOpen && secondaryPanelView === "files"}
+        onClick={onToggleFiles}
+        title={`Toggle Project Files (${assistantSide})`}
+      >
+        <FolderTree size={15} />
       </button>
     </div>
   );
@@ -75,8 +91,8 @@ interface WorkbenchStatusBarProps {
   currentSchema?: string | null;
   activeTabTitle?: string;
   isIntrospecting: boolean;
-  assistantOpen: boolean;
-  onToggleAssistant: () => void;
+  secondaryPanelOpen: boolean;
+  onToggleSecondaryPanel: () => void;
 }
 
 export function WorkbenchStatusBar({
@@ -84,8 +100,8 @@ export function WorkbenchStatusBar({
   currentSchema,
   activeTabTitle,
   isIntrospecting,
-  assistantOpen,
-  onToggleAssistant,
+  secondaryPanelOpen,
+  onToggleSecondaryPanel,
 }: WorkbenchStatusBarProps) {
   const activeProjectName = useProjectStore((state) => state.activeProjectName);
   const hasEditorContext = Boolean(activeTabTitle);
@@ -143,13 +159,13 @@ export function WorkbenchStatusBar({
           type="button"
           className={cn(
             "flex h-full w-7 shrink-0 items-center justify-center text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
-            assistantOpen && "text-emerald-400"
+            secondaryPanelOpen && "text-[hsl(var(--wb-accent))]"
           )}
-          onClick={onToggleAssistant}
-          aria-pressed={assistantOpen}
-          title="Toggle AI Assistant"
+          onClick={onToggleSecondaryPanel}
+          aria-pressed={secondaryPanelOpen}
+          title="Toggle Secondary Panel"
         >
-          <Sparkles size={12} />
+          <PanelRight size={12} />
         </button>
       </div>
     </footer>

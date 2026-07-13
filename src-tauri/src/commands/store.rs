@@ -19,6 +19,17 @@ pub async fn get_projects(meta_store: State<'_, MetaStore>) -> Result<Vec<Projec
 }
 
 #[tauri::command]
+pub async fn get_project(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+) -> Result<Option<Project>, String> {
+    meta_store
+        .get_project(&project_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn save_connection(
     meta_store: State<'_, MetaStore>,
     connection: SavedConnection,

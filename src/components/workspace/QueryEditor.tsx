@@ -52,19 +52,99 @@ import {
   APP_EVENT_RUN_QUERY,
   APP_EVENT_RUN_CURRENT,
   APP_EVENT_FORMAT_SQL,
+  APP_EVENT_INLINE_COMPLETION_ACCEPT,
+  APP_EVENT_INLINE_COMPLETION_ACCEPT_NEXT_WORD,
+  APP_EVENT_INLINE_COMPLETION_HIDE,
+  APP_EVENT_INLINE_COMPLETION_TRIGGER,
 } from "@/lib/actions";
 import { editorExecutionConfirmation } from "@/lib/sqlExecutionGate";
 import { StatusBarPortal } from "./StatusBarPortal";
-import { LockKeyhole } from "lucide-react";
+import { LockKeyhole, Save } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { normalizeKeybinding } from "@/lib/keybindings";
+import { redactSecretString } from "@/lib/redaction";
+import {
+  attachVimMode,
+  restoreStandardEditorState,
+  type VimModeController,
+} from "@/lib/vimMode";
+import { saveProjectFileTab } from "@/lib/projectFileTabs";
+import { useProjectFilesStore } from "@/store/useProjectFilesStore";
+import { useProjectStore } from "@/store/useProjectStore";
+import { usePostgresDatabaseDiscovery } from "@/hooks/usePostgresDatabaseDiscovery";
+import { postgresConnectionDatabaseName } from "./PostgresDatabaseTree";
+import { useAiSettingsStore } from "@/store/useAiSettingsStore";
+import {
+  projectFileLanguage,
+  projectFileModelUri,
+} from "@/lib/projectFileLanguage";
+import { extractSqlParameters } from "@/lib/sqlParameters";
+import { SqlParametersPanel } from "./SqlParametersPanel";
+import { aiService } from "@/services/tauri/ai.service";
+import { projectFilesService } from "@/services/tauri/project-files.service";
+import {
+  boundedInlineContext,
+  cleanInlineSuggestion,
+  inlineCompletionCacheKey,
+  InlineCompletionCache,
+  localInlineSuggestion,
+  shouldRequestAiInlineCompletion,
+  type InlineCompletionStatus,
+} from "@/lib/inlineCompletion";
 
 type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
+type ParameterExecutionRequest = {
+  tabId: string;
+  connectionId: string;
+  sql: string;
+  transactionId?: string;
+};
 const LSP_PROVIDER_LANGUAGES = ["sql", "json", "plaintext"] as const;
 
 function isSupportedLspModelUri(uri: string) {
   const identity = extractLspDocumentIdentity(uri);
   return Boolean(identity?.driver && supportsLspLanguageId(identity.driver));
+}
+
+function createInlineCompletionRequestId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `inline-${crypto.randomUUID()}`;
+  }
+  return `inline-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
+}
+
+function toMonacoKeybinding(monaco: any, binding: string) {
+  const parts = normalizeKeybinding(binding).split("+").filter(Boolean);
+  const key = parts.pop();
+  if (!key) return null;
+  const namedKeys: Record<string, number | undefined> = {
+    tab: monaco.KeyCode.Tab,
+    enter: monaco.KeyCode.Enter,
+    escape: monaco.KeyCode.Escape,
+    space: monaco.KeyCode.Space,
+    arrowleft: monaco.KeyCode.LeftArrow,
+    arrowright: monaco.KeyCode.RightArrow,
+    arrowup: monaco.KeyCode.UpArrow,
+    arrowdown: monaco.KeyCode.DownArrow,
+    "\\": monaco.KeyCode.Backslash,
+  };
+  const keyCode =
+    namedKeys[key] ||
+    (key.length === 1 && /[a-z]/.test(key)
+      ? monaco.KeyCode[`Key${key.toUpperCase()}`]
+      : key.length === 1 && /\d/.test(key)
+        ? monaco.KeyCode[`Digit${key}`]
+        : undefined);
+  if (!keyCode) return null;
+  return (
+    keyCode |
+    (parts.includes("mod") ? monaco.KeyMod.CtrlCmd : 0) |
+    (parts.includes("alt") ? monaco.KeyMod.Alt : 0) |
+    (parts.includes("shift") ? monaco.KeyMod.Shift : 0)
+  );
 }
 
 function isPublishDiagnosticsParams(
@@ -153,7 +233,17 @@ export async function syncLspModelBeforeCompletion(options: {
   await client.didOpen(uri, text, version, languageId);
 }
 
-export function QueryEditor() {
+interface QueryEditorProps {
+  tabId?: string | null;
+  isActivePane?: boolean;
+  onActivate?: () => void;
+}
+
+export function QueryEditor({
+  tabId,
+  isActivePane = true,
+  onActivate,
+}: QueryEditorProps = {}) {
   const {
     tabs,
     activeTabId,
@@ -161,15 +251,39 @@ export function QueryEditor() {
     runTabQuery,
     cancelTabQuery,
     setTargetSchema,
+    setTargetDatabase,
     setEditorSelection,
     setLspDiagnostics,
   } = useTabStore(); // line 15...
-  const { activeConnectionId, connections } = useConnectionStore();
-  const { currentSchema, loadSchemas, loadTables, bumpMetadataVersion } =
-    useSchemaStore();
+  const activeConnectionId = useConnectionStore(
+    (state) => state.activeConnectionId
+  );
+  const connections = useConnectionStore((state) => state.connections);
+  const connectedConnectionIds = useConnectionStore(
+    (state) => state.connectedConnectionIds
+  );
+  const activeProjectId = useProjectStore((state) => state.activeProjectId);
+  const currentSchema = useSchemaStore((state) => state.currentSchema);
+  const metadataVersion = useSchemaStore((state) => state.metadataVersion);
+  const loadSchemas = useSchemaStore((state) => state.loadSchemas);
+  const loadTables = useSchemaStore((state) => state.loadTables);
+  const bumpMetadataVersion = useSchemaStore(
+    (state) => state.bumpMetadataVersion
+  );
   const history = useHistoryStore((s) => s.history);
   const { savedQueries, saveQuery, deleteQuery } = useSavedQueryStore();
   const editorSettings = useSettingsStore((state) => state.settings.editor);
+  const keymap = useSettingsStore((state) => state.settings.keymap);
+  const aiEnabled = useAiSettingsStore((state) => state.enabled);
+  const aiProviderConfig = useAiSettingsStore((state) => state.providerConfig);
+  const inlineCompletionProtocol = useAiSettingsStore(
+    (state) => state.inlineCompletionProtocol
+  );
+  const inlineCompletionModel = useAiSettingsStore(
+    (state) => state.inlineCompletionModel
+  );
+  const projectId = useProjectFilesStore((state) => state.projectId);
+  const projectRootPath = useProjectFilesStore((state) => state.rootPath);
 
   // const [saveName, setSaveName] = useState("");
   // const [isSaveOpen, setIsSaveOpen] = useState(false);
@@ -180,28 +294,91 @@ export function QueryEditor() {
     Record<string, TransactionState>
   >({});
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
+  const [parameterExecution, setParameterExecution] =
+    useState<ParameterExecutionRequest | null>(null);
+  const [inlineCompletionStatus, setInlineCompletionStatus] =
+    useState<InlineCompletionStatus>("off");
   // const dropdownRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<any>(null);
-  const activeTabIdRef = useRef<string | null>(activeTabId);
+  const [mountedEditor, setMountedEditor] = useState<any>(null);
+  const effectiveTabId = tabId === undefined ? activeTabId : tabId;
+  const activeTabIdRef = useRef<string | null>(effectiveTabId);
   const selectionDisposableRef = useRef<{ dispose: () => void } | null>(null);
+  const vimControllerRef = useRef<VimModeController | null>(null);
+  const vimModeRef = useRef("NORMAL");
+  const inlineKeysContextRef = useRef<{ set: (value: boolean) => void } | null>(
+    null
+  );
+  const vimStatusNodeRef = useRef<HTMLSpanElement | null>(null);
   const openedDocumentsRef = useRef<Set<string>>(new Set());
   const documentVersionsRef = useRef<Map<string, number>>(new Map());
+  const inlineCompletionCacheRef = useRef(new InlineCompletionCache());
+  const inlineCompletionAbortRef = useRef<AbortController | null>(null);
+  const inlineCompletionListenersRef = useRef(new Set<() => void>());
   const activeTransactionsRef = useRef<Map<string, QueryTransactionSession>>(
     new Map()
   );
 
-  const activeTab = tabs.find((t) => t.id === activeTabId);
+  const activeTab = tabs.find((t) => t.id === effectiveTabId);
   const effectiveConnectionId = activeTab?.connectionId || activeConnectionId;
   const activeConnection = connections.find((c) => c.id === effectiveConnectionId);
   const driver = activeConnection?.driver || DEFAULT_DATABASE_DRIVER;
-  const documentLanguageId = lspLanguageId(driver);
+  const configuredPostgresDatabase =
+    activeConnection?.driver === "postgres"
+      ? postgresConnectionDatabaseName(activeConnection)
+      : null;
+  const postgresDatabaseDiscovery = usePostgresDatabaseDiscovery({
+    projectId: activeProjectId,
+    connectionId: effectiveConnectionId || null,
+    driver: activeConnection?.driver,
+    isConnectionReady: Boolean(
+      effectiveConnectionId && connectedConnectionIds.includes(effectiveConnectionId)
+    ),
+    refreshVersion: metadataVersion,
+  });
+  const postgresDatabases = useMemo(() => {
+    if (!configuredPostgresDatabase) return [];
+    const discovered =
+      postgresDatabaseDiscovery.connectionId === effectiveConnectionId
+        ? postgresDatabaseDiscovery.databases
+        : [];
+    return [configuredPostgresDatabase, ...discovered]
+      .filter(
+        (database, index, rows) =>
+          Boolean(database) && rows.indexOf(database) === index
+      )
+      .sort((left, right) =>
+        left.localeCompare(right, undefined, {
+          sensitivity: "base",
+          numeric: true,
+        })
+      );
+  }, [
+    configuredPostgresDatabase,
+    effectiveConnectionId,
+    postgresDatabaseDiscovery.connectionId,
+    postgresDatabaseDiscovery.databases,
+  ]);
+  const activeProjectFileLanguage = activeTab?.fileRelativePath
+    ? projectFileLanguage(activeTab.fileRelativePath, driver)
+    : null;
+  const documentLanguageId =
+    activeProjectFileLanguage?.lspLanguageId || lspLanguageId(driver);
   const documentUri = activeTab
-    ? getLspDocumentUri(activeTab.id, driver, documentLanguageId)
+    ? activeProjectFileLanguage && !activeProjectFileLanguage.usesDatabaseLsp
+      ? projectFileModelUri(activeTab.id, activeProjectFileLanguage)
+      : getLspDocumentUri(activeTab.id, driver, documentLanguageId)
     : "";
-  const editorLanguageId = queryEditorLanguageId(driver);
-  const canUseLsp = supportsLspLanguageId(driver);
+  const editorLanguageId =
+    activeProjectFileLanguage?.editorLanguageId || queryEditorLanguageId(driver);
+  const canUseLsp =
+    supportsLspLanguageId(driver) &&
+    (!activeProjectFileLanguage || activeProjectFileLanguage.usesDatabaseLsp);
+  const canExecuteDocument =
+    !activeProjectFileLanguage || activeProjectFileLanguage.executable;
   const capabilities = defaultDatabaseCapabilities(driver);
-  const supportsTransactions = capabilities.supportsTransactions;
+  const supportsTransactions =
+    capabilities.supportsTransactions && !activeTab?.databaseName;
   const activeDocumentSql = activeTab?.sql || "";
   const monaco = useMonaco();
   const {
@@ -216,17 +393,228 @@ export function QueryEditor() {
   const activeTransactionState = activeTab
     ? transactionStates[activeTab.id] || "idle"
     : "idle";
+  const parameterTargetSql =
+    activeTab?.editorSelection?.text?.trim() || activeTab?.sql || "";
+  const parameterCount = useMemo(
+    () => extractSqlParameters(parameterTargetSql, driver).length,
+    [driver, parameterTargetSql]
+  );
 
   useEffect(() => {
-    activeTabIdRef.current = activeTabId;
-  }, [activeTabId]);
+    activeTabIdRef.current = effectiveTabId;
+  }, [effectiveTabId]);
+
+  useEffect(() => {
+    setParameterExecution(null);
+  }, [effectiveTabId]);
 
   useEffect(() => {
     return () => {
       selectionDisposableRef.current?.dispose();
       selectionDisposableRef.current = null;
+      inlineKeysContextRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    vimControllerRef.current?.dispose();
+    vimControllerRef.current = null;
+    vimModeRef.current = "INSERT";
+    inlineKeysContextRef.current?.set(true);
+
+    if (mountedEditor) restoreStandardEditorState(mountedEditor);
+
+    if (
+      editorSettings.keybindingMode !== "vim" ||
+      !mountedEditor ||
+      !isActivePane
+    ) {
+      return;
+    }
+
+    let disposed = false;
+    let attachedController: VimModeController | null = null;
+    void attachVimMode({
+      editor: mountedEditor,
+      statusNode: vimStatusNodeRef.current,
+      leader: editorSettings.vim.leader,
+      mappings: editorSettings.vim.mappings,
+      onModeChange: (mode) => {
+        vimModeRef.current = mode;
+        inlineKeysContextRef.current?.set(mode === "INSERT");
+      },
+      onWrite: () =>
+        saveProjectFileTab(activeTabIdRef.current || undefined),
+      onQuit: () => {
+        const activeId = activeTabIdRef.current;
+        if (activeId) useTabStore.getState().closeTab(activeId);
+      },
+      onWriteQuit: async () => {
+        const tabId = activeTabIdRef.current;
+        if (!tabId || !(await saveProjectFileTab(tabId))) return;
+        useTabStore.getState().closeTab(tabId);
+      },
+      onEdit: async (relativePath) => {
+        const files = useProjectFilesStore.getState();
+        files.syncActiveProject();
+        try {
+          const document = await files.readFile(relativePath);
+          useTabStore
+            .getState()
+            .openProjectFileTab(
+              files.projectId,
+              document.relativePath,
+              document.content,
+              document.revision,
+              files.rootPath
+            );
+        } catch (error) {
+          const tabId = activeTabIdRef.current;
+          if (!tabId) return;
+          const message = error instanceof Error ? error.message : String(error);
+          useTabStore.setState((state) => ({
+            tabs: state.tabs.map((tab) =>
+              tab.id === tabId
+                ? { ...tab, fileError: `Failed to open file: ${message}` }
+                : tab
+            ),
+          }));
+        }
+      },
+    })
+      .then((controller) => {
+        if (disposed) {
+          controller.dispose();
+          return;
+        }
+        attachedController = controller;
+        vimControllerRef.current = controller;
+      })
+      .catch((error) => {
+        if (disposed) return;
+        console.error("Failed to initialize Vim mode", error);
+        if (vimStatusNodeRef.current) {
+          vimStatusNodeRef.current.textContent = "VIM unavailable";
+        }
+      });
+
+    return () => {
+      disposed = true;
+      attachedController?.dispose();
+      if (vimControllerRef.current === attachedController) {
+        vimControllerRef.current = null;
+      }
+      vimModeRef.current = "INSERT";
+      inlineKeysContextRef.current?.set(true);
+      restoreStandardEditorState(mountedEditor);
+    };
+  }, [
+    editorSettings.keybindingMode,
+    editorSettings.vim.leader,
+    editorSettings.vim.mappings,
+    isActivePane,
+    mountedEditor,
+  ]);
+
+  useEffect(() => {
+    inlineKeysContextRef.current?.set(
+      editorSettings.keybindingMode !== "vim" || vimModeRef.current === "INSERT"
+    );
+  }, [editorSettings.keybindingMode, mountedEditor]);
+
+  useEffect(() => {
+    if (!isActivePane || !mountedEditor) return;
+    const run = (command: string) => {
+      if (
+        editorSettings.keybindingMode === "vim" &&
+        vimModeRef.current !== "INSERT"
+      ) {
+        return;
+      }
+      mountedEditor.trigger("oxide-inline-completion", command, null);
+    };
+    const handlers: Array<[string, () => void]> = [
+      [APP_EVENT_INLINE_COMPLETION_TRIGGER, () => run("editor.action.inlineSuggest.trigger")],
+      [APP_EVENT_INLINE_COMPLETION_ACCEPT, () => run("editor.action.inlineSuggest.commit")],
+      [
+        APP_EVENT_INLINE_COMPLETION_ACCEPT_NEXT_WORD,
+        () => run("editor.action.inlineSuggest.acceptNextWord"),
+      ],
+      [APP_EVENT_INLINE_COMPLETION_HIDE, () => run("editor.action.inlineSuggest.hide")],
+    ];
+    handlers.forEach(([event, handler]) => window.addEventListener(event, handler));
+    return () => {
+      handlers.forEach(([event, handler]) =>
+        window.removeEventListener(event, handler)
+      );
+    };
+  }, [editorSettings.keybindingMode, isActivePane, mountedEditor]);
+
+  useEffect(() => {
+    if (!monaco) return;
+    const visibleWhen =
+      "oxideInlineCompletionKeysEnabled && editorTextFocus && inlineSuggestionVisible && !suggestWidgetVisible";
+    const rules: Array<{
+      keybinding: number;
+      command?: string | null;
+      when?: string;
+    }> = [];
+    const addRules = (actionId: string, command: string, when: string) => {
+      for (const binding of keymap[actionId] || []) {
+        const keybinding = toMonacoKeybinding(monaco, binding);
+        if (keybinding) rules.push({ keybinding, command, when });
+      }
+    };
+    addRules(
+      "editor.inlineCompletion.trigger",
+      "editor.action.inlineSuggest.trigger",
+      "oxideInlineCompletionKeysEnabled && editorTextFocus"
+    );
+    addRules(
+      "editor.inlineCompletion.accept",
+      "editor.action.inlineSuggest.commit",
+      visibleWhen
+    );
+    addRules(
+      "editor.inlineCompletion.acceptNextWord",
+      "editor.action.inlineSuggest.acceptNextWord",
+      visibleWhen
+    );
+    addRules(
+      "editor.inlineCompletion.hide",
+      "editor.action.inlineSuggest.hide",
+      visibleWhen
+    );
+
+    const normalizedAccept = (keymap["editor.inlineCompletion.accept"] || []).map(
+      normalizeKeybinding
+    );
+    const normalizedWord = (
+      keymap["editor.inlineCompletion.acceptNextWord"] || []
+    ).map(normalizeKeybinding);
+    const normalizedHide = (keymap["editor.inlineCompletion.hide"] || []).map(
+      normalizeKeybinding
+    );
+    if (!normalizedAccept.includes("tab")) {
+      rules.push({ keybinding: monaco.KeyCode.Tab, command: null, when: visibleWhen });
+    }
+    if (!normalizedWord.includes("mod+arrowright")) {
+      rules.push({
+        keybinding: monaco.KeyMod.CtrlCmd | monaco.KeyCode.RightArrow,
+        command: null,
+        when: visibleWhen,
+      });
+    }
+    if (!normalizedHide.includes("escape")) {
+      rules.push({
+        keybinding: monaco.KeyCode.Escape,
+        command: null,
+        when: visibleWhen,
+      });
+    }
+    const disposable = monaco.editor.addKeybindingRules(rules);
+    return () => disposable.dispose();
+  }, [keymap, monaco]);
 
   const getTransactionId = () => {
     if (!activeTab || !effectiveConnectionId) return null;
@@ -367,7 +755,7 @@ export function QueryEditor() {
 
   // Register LSP providers (completion, hover, navigation, formatting)
   useEffect(() => {
-    if (!monaco || !lspReady) return;
+    if (!isActivePane || !monaco || !lspReady) return;
 
     console.log("[QueryEditor] Registering LSP providers");
 
@@ -559,7 +947,281 @@ export function QueryEditor() {
         ...formattingDisposables,
       ].forEach((disposable) => disposable.dispose());
     };
-  }, [monaco, lspReady, lspClient]);
+  }, [isActivePane, monaco, lspReady, lspClient]);
+
+  useEffect(() => {
+    const settings = editorSettings.inlineCompletion;
+    if (
+      !isActivePane ||
+      !monaco ||
+      !lspReady ||
+      !settings.enabled ||
+      !canUseLsp
+    ) {
+      inlineCompletionAbortRef.current?.abort();
+      setInlineCompletionStatus(settings.enabled ? "offline" : "off");
+      return;
+    }
+
+    let disposed = false;
+    const emitInlineCompletionChange = () => {
+      inlineCompletionListenersRef.current.forEach((listener) => listener());
+    };
+    const disposables = LSP_PROVIDER_LANGUAGES.map((language) =>
+      monaco.languages.registerInlineCompletionsProvider(language, {
+        displayName: "OxideStudio AI",
+        debounceDelayMs: 300,
+        onDidChangeInlineCompletions: (listener: () => void) => {
+          inlineCompletionListenersRef.current.add(listener);
+          return {
+            dispose: () => inlineCompletionListenersRef.current.delete(listener),
+          };
+        },
+        provideInlineCompletions: async (
+          model: any,
+          position: any,
+          context: any,
+          token: any
+        ) => {
+          const uri = model.uri.toString();
+          if (
+            disposed ||
+            uri !== documentUri ||
+            !isSupportedLspModelUri(uri) ||
+            context.selectedSuggestionInfo
+          ) {
+            return { items: [] };
+          }
+          const explicit =
+            context.triggerKind ===
+            monaco.languages.InlineCompletionTriggerKind.Explicit;
+          const selection = mountedEditor?.getSelection?.();
+          const hasSelection = Boolean(selection && !selection.isEmpty());
+          const offset = model.getOffsetAt(position);
+          const value = model.getValue();
+          const bounded = boundedInlineContext(value, offset);
+          if (
+            !shouldRequestAiInlineCompletion({
+              prefix: bounded.prefix,
+              hasSelection,
+              automatic: settings.automaticSuggestions,
+              explicit,
+            })
+          ) {
+            return { items: [] };
+          }
+
+          const modelVersion = model.getVersionId();
+          await syncLspModelBeforeCompletion({
+            uri,
+            model,
+            languageId: documentLanguageId,
+            client: lspClient,
+            openedDocuments: openedDocumentsRef.current,
+            documentVersions: documentVersionsRef.current,
+          });
+          if (token.isCancellationRequested || model.getVersionId() !== modelVersion) {
+            return { items: [] };
+          }
+          const lspContext = await lspClient.getInlineCompletionContext(
+            uri,
+            position.lineNumber - 1,
+            position.column - 1
+          );
+          const localText = localInlineSuggestion(bounded.prefix, lspContext);
+          const inlineResult = (text: string) => {
+            if (!text) return { items: [] };
+            const insertText =
+              text.includes("\n") &&
+              position.column < model.getLineMaxColumn(position.lineNumber)
+                ? text.split("\n", 1)[0]
+                : text;
+            return {
+              items: insertText
+                ? [
+                    {
+                      insertText,
+                      range: new monaco.Range(
+                        position.lineNumber,
+                        position.column,
+                        position.lineNumber,
+                        position.column
+                      ),
+                      completeBracketPairs: true,
+                    },
+                  ]
+                : [],
+            };
+          };
+
+          const provider = aiProviderConfig();
+          if (!aiEnabled || !provider) {
+            setInlineCompletionStatus(localText ? "local" : "offline");
+            return inlineResult(localText);
+          }
+          const aiLspContext = settings.includeSchemaMetadata
+            ? lspContext
+            : {
+                dialect: lspContext.dialect,
+                clause: lspContext.clause,
+                expectedKinds: lspContext.expectedKinds,
+                diagnostics: lspContext.diagnostics,
+                errorCount: lspContext.errorCount,
+              };
+          const requestBase = {
+            protocol: inlineCompletionProtocol,
+            config: {
+              ...provider,
+              model: inlineCompletionModel.trim() || provider.model,
+              timeoutMs: 4_000,
+            },
+            prefix: redactSecretString(bounded.prefix),
+            suffix: redactSecretString(bounded.suffix),
+            languageId: documentLanguageId,
+            dialect: driver,
+            ...(activeTab?.fileRelativePath
+              ? { filePath: activeTab.fileRelativePath }
+              : {}),
+            lspContext: aiLspContext,
+            relatedSnippets: [] as Array<{
+              relativePath: string;
+              content: string;
+            }>,
+          };
+          const baseCacheKey = inlineCompletionCacheKey(requestBase);
+          const cached = settings.includeProjectContext
+            ? undefined
+            : inlineCompletionCacheRef.current.get(baseCacheKey);
+          if (cached !== undefined) {
+            setInlineCompletionStatus("ai");
+            return inlineResult(cached);
+          }
+
+          inlineCompletionAbortRef.current?.abort();
+          const abortController = new AbortController();
+          inlineCompletionAbortRef.current = abortController;
+          token.onCancellationRequested(() => abortController.abort());
+          setInlineCompletionStatus("thinking");
+          const aiPromise = (async () => {
+            try {
+              const relatedSnippets =
+                settings.includeProjectContext && projectId && projectRootPath
+                  ? await projectFilesService.getCompletionContext({
+                      projectId,
+                      expectedRoot: projectRootPath,
+                      activeFile: activeTab?.fileRelativePath,
+                      query: bounded.prefix,
+                      referencedObjects: lspContext.referencedObjects,
+                    })
+                  : [];
+              if (abortController.signal.aborted) return "";
+              const request = {
+                ...requestBase,
+                requestId: createInlineCompletionRequestId(),
+                relatedSnippets: relatedSnippets.map((snippet) => ({
+                  ...snippet,
+                  content: redactSecretString(snippet.content),
+                })),
+              };
+              const cacheKey = inlineCompletionCacheKey(request);
+              const cachedWithProject = inlineCompletionCacheRef.current.get(cacheKey);
+              if (cachedWithProject !== undefined) return cachedWithProject;
+              const result = await aiService.inlineCompletion(
+                request,
+                abortController.signal
+              );
+              if (
+                abortController.signal.aborted ||
+                model.getVersionId() !== modelVersion
+              ) {
+                return "";
+              }
+              const completion = cleanInlineSuggestion(
+                result.text,
+                bounded.prefix,
+                bounded.suffix
+              );
+              if (!completion) return "";
+              const nextText = `${value.slice(0, offset)}${completion}${value.slice(offset)}`;
+              const nextDiagnostics = await lspClient.validateInlineCompletion(
+                uri,
+                nextText
+              );
+              const baselineErrors =
+                lspContext.errorCount ??
+                (lspContext.diagnostics || []).filter(
+                  (diagnostic) => diagnostic.severity === 1
+                ).length;
+              const nextErrors = nextDiagnostics.filter(
+                (diagnostic) => diagnostic.severity === 1
+              ).length;
+              if (nextErrors > baselineErrors) return "";
+              inlineCompletionCacheRef.current.set(cacheKey, completion);
+              if (!settings.includeProjectContext) {
+                inlineCompletionCacheRef.current.set(baseCacheKey, completion);
+              }
+              if (!disposed) {
+                setInlineCompletionStatus("ai");
+                emitInlineCompletionChange();
+              }
+              return completion;
+            } catch (error) {
+              if (!abortController.signal.aborted && !disposed) {
+                setInlineCompletionStatus(localText ? "local" : "offline");
+                console.debug("[InlineCompletion] AI provider unavailable", error);
+              }
+              return "";
+            } finally {
+              if (inlineCompletionAbortRef.current === abortController) {
+                inlineCompletionAbortRef.current = null;
+              }
+            }
+          })();
+
+          if (!localText) {
+            return inlineResult(await aiPromise);
+          }
+          const fastAiText = await Promise.race([
+            aiPromise,
+            new Promise<string>((resolve) =>
+              window.setTimeout(() => resolve(""), 120)
+            ),
+          ]);
+          if (fastAiText) return inlineResult(fastAiText);
+          setInlineCompletionStatus("local");
+          void aiPromise;
+          return inlineResult(localText);
+        },
+        disposeInlineCompletions: () => undefined,
+      })
+    );
+
+    return () => {
+      disposed = true;
+      inlineCompletionAbortRef.current?.abort();
+      inlineCompletionAbortRef.current = null;
+      disposables.forEach((disposable) => disposable.dispose());
+      inlineCompletionListenersRef.current.clear();
+    };
+  }, [
+    activeTab?.fileRelativePath,
+    aiEnabled,
+    aiProviderConfig,
+    canUseLsp,
+    documentLanguageId,
+    documentUri,
+    driver,
+    editorSettings.inlineCompletion,
+    inlineCompletionModel,
+    inlineCompletionProtocol,
+    isActivePane,
+    lspClient,
+    lspReady,
+    monaco,
+    mountedEditor,
+    projectId,
+    projectRootPath,
+  ]);
 
   useEffect(() => {
     if (!monaco || !lspReady) return;
@@ -622,15 +1284,53 @@ export function QueryEditor() {
     return window.confirm(confirmation.message || "Execute this query?");
   };
 
+  const transactionIdForExecution = () =>
+    supportsTransactions &&
+    transactionMode === "manual" &&
+    activeTransactionState === "active"
+      ? getTransactionId() || undefined
+      : undefined;
+
+  const requestParameterizedExecution = (
+    sql: string,
+    transactionId?: string
+  ) => {
+    if (
+      !activeTab ||
+      !effectiveConnectionId ||
+      extractSqlParameters(sql, driver).length === 0
+    ) {
+      return false;
+    }
+
+    setParameterExecution({
+      tabId: activeTab.id,
+      connectionId: effectiveConnectionId,
+      sql,
+      transactionId,
+    });
+    return true;
+  };
+
+  const currentEditorExecutionSql = () => {
+    const editor = editorRef.current;
+    const selection = editor?.getSelection();
+    const model = editor?.getModel();
+    if (!selection || !model) return activeTab?.sql || "";
+
+    const selectedText = model.getValueInRange(selection);
+    return selectedText && selectedText.trim()
+      ? selectedText
+      : model.getValue();
+  };
+
   const handleRun = () => {
-    if (effectiveConnectionId && activeTab) {
-      if (!confirmEditorExecution(activeTab.sql)) return;
-      const transactionId =
-        supportsTransactions &&
-        transactionMode === "manual" &&
-        activeTransactionState === "active"
-          ? getTransactionId() || undefined
-          : undefined;
+    if (canExecuteDocument && effectiveConnectionId && activeTab) {
+      const sql = editorRef.current?.getModel()?.getValue() ?? activeTab.sql;
+      const transactionId = transactionIdForExecution();
+      if (requestParameterizedExecution(sql, transactionId)) return;
+      if (!confirmEditorExecution(sql)) return;
+      updateTabSql(activeTab.id, sql);
       runTabQuery(activeTab.id, effectiveConnectionId, undefined, transactionId);
     }
   };
@@ -642,32 +1342,60 @@ export function QueryEditor() {
   };
 
   const handleRunCurrent = () => {
-    if (!effectiveConnectionId || !activeTab || !editorRef.current) return;
+    if (
+      !canExecuteDocument ||
+      !effectiveConnectionId ||
+      !activeTab ||
+      !editorRef.current
+    ) {
+      return;
+    }
 
     const selection = editorRef.current.getSelection();
     const model = editorRef.current.getModel();
     if (!selection || !model) return;
 
     const selectedText = model.getValueInRange(selection);
-    const transactionId =
-      supportsTransactions &&
-      transactionMode === "manual" &&
-      activeTransactionState === "active"
-        ? getTransactionId() || undefined
-        : undefined;
+    const transactionId = transactionIdForExecution();
 
     // If something is selected, run only that.
     if (selectedText && selectedText.trim()) {
+      if (requestParameterizedExecution(selectedText, transactionId)) return;
       if (!confirmEditorExecution(selectedText)) return;
       runTabQuery(activeTab.id, effectiveConnectionId, selectedText, transactionId);
     } else {
       // Otherwise run the full tab query
-      if (!confirmEditorExecution(activeTab.sql)) return;
+      const sql = model.getValue();
+      if (requestParameterizedExecution(sql, transactionId)) return;
+      if (!confirmEditorExecution(sql)) return;
+      updateTabSql(activeTab.id, sql);
       runTabQuery(activeTab.id, effectiveConnectionId, undefined, transactionId);
     }
   };
 
+  const handleConfigureParameters = () => {
+    requestParameterizedExecution(
+      currentEditorExecutionSql(),
+      transactionIdForExecution()
+    );
+  };
+
+  const handleRunParameterizedSql = (compiledSql: string) => {
+    if (!parameterExecution) return;
+    if (!confirmEditorExecution(compiledSql)) return;
+
+    void runTabQuery(
+      parameterExecution.tabId,
+      parameterExecution.connectionId,
+      compiledSql,
+      parameterExecution.transactionId
+    );
+    setParameterExecution(null);
+  };
+
   useEffect(() => {
+    if (!isActivePane) return;
+
     const onRun = () => handleRun();
     const onRunCurrent = () => handleRunCurrent();
     const onFormat = () => handleFormat();
@@ -685,7 +1413,9 @@ export function QueryEditor() {
     activeConnectionId,
     activeTab,
     activeTransactionState,
+    canExecuteDocument,
     effectiveConnectionId,
+    isActivePane,
     runTabQuery,
     supportsTransactions,
     transactionMode,
@@ -695,6 +1425,14 @@ export function QueryEditor() {
     if (activeTab) {
       setTargetSchema(activeTab.id, schema);
     }
+  };
+
+  const handleDatabaseChange = (database: string) => {
+    if (!activeTab || !configuredPostgresDatabase) return;
+    setTargetDatabase(
+      activeTab.id,
+      database === configuredPostgresDatabase ? null : database
+    );
   };
 
   const handleFormat = () => {
@@ -793,8 +1531,22 @@ export function QueryEditor() {
       tabSize: editorSettings.tabSize,
       wordWrap: editorSettings.wordWrap,
       minimap: { enabled: editorSettings.minimap },
+      inlineSuggest: { enabled: editorSettings.inlineCompletion.enabled },
+      lineNumbers:
+        editorSettings.keybindingMode === "vim" &&
+        editorSettings.vim.relativeLineNumbers
+          ? ("relative" as const)
+          : ("on" as const),
     }),
-    [editorSettings.fontSize, editorSettings.minimap, editorSettings.tabSize, editorSettings.wordWrap]
+    [
+      editorSettings.fontSize,
+      editorSettings.keybindingMode,
+      editorSettings.inlineCompletion.enabled,
+      editorSettings.minimap,
+      editorSettings.tabSize,
+      editorSettings.vim.relativeLineNumbers,
+      editorSettings.wordWrap,
+    ]
   );
 
   // Update Monaco theme when app theme changes
@@ -806,31 +1558,93 @@ export function QueryEditor() {
   if (!activeTab) return null;
 
   return (
-    <div className="wb-query-editor relative flex h-full w-full flex-col bg-[hsl(var(--wb-editor))]">
-      <EditorActionBar
-        currentSchema={activeTab.targetSchema ?? currentSchema}
-        onSchemaChange={handleSchemaChange}
-        transactionMode={transactionMode}
-        transactionState={activeTransactionState}
-        onTransactionModeChange={handleTransactionModeChange}
-        onBeginTransaction={handleBeginTransaction}
-        onCommitTransaction={handleCommitTransaction}
-        onRollbackTransaction={handleRollbackTransaction}
-        onFormat={handleFormat}
-        onRun={handleRun}
-        onRunCurrent={handleRunCurrent}
-        onCancelRun={handleCancelRun}
-        isExecuting={activeTab.isExecuting}
-        isConnected={!!effectiveConnectionId}
-        history={history}
-        savedQueries={savedQueries}
-        onLoadQuery={(sql: string) => updateTabSql(activeTab.id, sql)}
-        onSaveQuery={(_name: string, _sql: string) =>
-          saveQuery(_name, activeTab.sql)
-        }
-        onDeleteQuery={deleteQuery}
-        supportsTransactions={supportsTransactions}
-      />
+    <div
+      className="wb-query-editor relative flex h-full w-full flex-col bg-[hsl(var(--wb-editor))]"
+      onFocusCapture={onActivate}
+      onPointerDown={onActivate}
+    >
+      {activeProjectFileLanguage && !canExecuteDocument ? (
+        <div className="wb-editor-commandbar justify-between gap-2">
+          <div className="min-w-0 truncate text-[10px] wb-muted" title={activeTab.fileRelativePath}>
+            {activeTab.fileRelativePath}
+            <span className="ml-2 uppercase opacity-70">
+              {activeProjectFileLanguage.editorLanguageId}
+            </span>
+          </div>
+          <button
+            type="button"
+            className={cn(
+              "wb-text-button h-6 shrink-0 gap-1.5 px-2 text-[10px]",
+              activeTab.isDirty && "text-[hsl(var(--wb-accent))]"
+            )}
+            onClick={() => void saveProjectFileTab(activeTab.id)}
+            disabled={!activeTab.isDirty}
+            title={activeTab.isDirty ? "Save Project File (Ctrl+S)" : "Project File Saved"}
+          >
+            <Save size={12} />
+            Save
+          </button>
+        </div>
+      ) : (
+        <EditorActionBar
+          connectionId={effectiveConnectionId}
+          currentSchema={activeTab.targetSchema ?? currentSchema}
+          onSchemaChange={handleSchemaChange}
+          databases={driver === "postgres" ? postgresDatabases : undefined}
+          currentDatabase={
+            driver === "postgres"
+              ? activeTab.databaseName || configuredPostgresDatabase
+              : null
+          }
+          onDatabaseChange={
+            driver === "postgres" ? handleDatabaseChange : undefined
+          }
+          isDatabaseRefreshing={postgresDatabaseDiscovery.isRefreshing}
+          databaseSelectionDisabled={activeTransactionState === "active"}
+          transactionMode={transactionMode}
+          transactionState={activeTransactionState}
+          onTransactionModeChange={handleTransactionModeChange}
+          onBeginTransaction={handleBeginTransaction}
+          onCommitTransaction={handleCommitTransaction}
+          onRollbackTransaction={handleRollbackTransaction}
+          onFormat={handleFormat}
+          onRun={handleRun}
+          onRunCurrent={handleRunCurrent}
+          onCancelRun={handleCancelRun}
+          isExecuting={activeTab.isExecuting}
+          isConnected={Boolean(effectiveConnectionId && canExecuteDocument)}
+          history={history}
+          savedQueries={savedQueries}
+          onLoadQuery={(sql: string) => updateTabSql(activeTab.id, sql)}
+          onSaveQuery={(_name: string, _sql: string) =>
+            saveQuery(_name, activeTab.sql)
+          }
+          onDeleteQuery={deleteQuery}
+          supportsTransactions={supportsTransactions && canExecuteDocument}
+          isProjectFile={Boolean(activeTab.fileRelativePath)}
+          isFileDirty={Boolean(activeTab.isDirty)}
+          onSaveFile={() => void saveProjectFileTab(activeTab.id)}
+          parameterCount={canExecuteDocument ? parameterCount : 0}
+          onConfigureParameters={handleConfigureParameters}
+        />
+      )}
+
+      {parameterExecution && (
+        <SqlParametersPanel
+          sql={parameterExecution.sql}
+          dialect={driver}
+          isConnected={Boolean(effectiveConnectionId && canExecuteDocument)}
+          isExecuting={activeTab.isExecuting}
+          onClose={() => setParameterExecution(null)}
+          onRun={handleRunParameterizedSql}
+        />
+      )}
+
+      {activeTab.fileError && (
+        <div className="flex min-h-7 items-center border-b border-red-500/25 bg-red-500/10 px-3 text-[10px] text-red-200">
+          {activeTab.fileError}
+        </div>
+      )}
 
       {/* Editor */}
       <div className="flex-1 min-h-0">
@@ -839,10 +1653,16 @@ export function QueryEditor() {
           defaultLanguage="sql"
           language={editorLanguageId}
           path={documentUri}
+          keepCurrentModel
           value={activeTab.sql}
           onChange={(value) => updateTabSql(activeTab.id, value || "")}
           onMount={(editor, monaco) => {
             editorRef.current = editor;
+            setMountedEditor(editor);
+            inlineKeysContextRef.current = editor.createContextKey(
+              "oxideInlineCompletionKeysEnabled",
+              editorSettings.keybindingMode !== "vim"
+            );
             selectionDisposableRef.current?.dispose();
             selectionDisposableRef.current = editor.onDidChangeCursorSelection(
               (event: any) => {
@@ -904,7 +1724,7 @@ export function QueryEditor() {
           options={editorOptions}
         />
       </div>
-      <StatusBarPortal>
+      {isActivePane && <StatusBarPortal>
         <div className="flex h-full items-center text-[10px] text-[hsl(var(--wb-text-muted))]">
           <span className="whitespace-nowrap px-2">
             {cursorPosition.line}:{cursorPosition.column}
@@ -914,6 +1734,21 @@ export function QueryEditor() {
           <span className="wb-editor-status-secondary whitespace-nowrap px-2">
             {editorSettings.tabSize} spaces
           </span>
+          {editorSettings.keybindingMode === "vim" && (
+            <span
+              ref={vimStatusNodeRef}
+              className="min-w-28 max-w-72 flex-1 truncate px-2 font-mono text-[9px] text-[hsl(var(--wb-accent))] [&_input]:h-5 [&_input]:max-w-48 [&_input]:border-0 [&_input]:bg-transparent [&_input]:font-mono [&_input]:text-[hsl(var(--wb-text))] [&_input]:outline-none"
+              aria-label="Vim status"
+            />
+          )}
+          {editorSettings.inlineCompletion.enabled && (
+            <span
+              className="wb-editor-status-secondary whitespace-nowrap px-2"
+              title="Inline completion status"
+            >
+              AI {inlineCompletionStatus}
+            </span>
+          )}
           <span
             className="flex h-full w-7 items-center justify-center"
             title="SQL execution is permission-gated"
@@ -935,7 +1770,7 @@ export function QueryEditor() {
             </span>
           )}
         </div>
-      </StatusBarPortal>
+      </StatusBarPortal>}
     </div>
   );
 }

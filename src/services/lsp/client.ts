@@ -9,6 +9,7 @@ import type {
   Range,
   TextEdit,
 } from "./types";
+import type { InlineLspContext } from "@/services/tauri/ai.service";
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -290,6 +291,64 @@ class LspClient {
       return parseLocations(response);
     } catch (error) {
       console.error("[LSP] ✗ References failed:", error);
+      return [];
+    }
+  }
+
+  async getInlineCompletionContext(
+    uri: string,
+    line: number,
+    character: number
+  ): Promise<InlineLspContext> {
+    if (!this.initialized) return {};
+    try {
+      const response = await invoke<unknown>(
+        "lsp_inline_completion_context",
+        {
+          request: {
+            ...this.requestSessionPayload(),
+            uri,
+            line,
+            character,
+          },
+        }
+      );
+      return isObject(response) ? (response as InlineLspContext) : {};
+    } catch (error) {
+      console.error("[LSP] Inline completion context failed:", error);
+      return {};
+    }
+  }
+
+  async validateInlineCompletion(
+    uri: string,
+    text: string
+  ): Promise<Array<{ severity?: number; message: string }>> {
+    if (!this.initialized) return [];
+    try {
+      const response = await invoke<unknown>(
+        "lsp_validate_inline_completion",
+        {
+          request: {
+            ...this.requestSessionPayload(),
+            uri,
+            text,
+          },
+        }
+      );
+      if (!Array.isArray(response)) return [];
+      return response
+        .filter(
+          (item): item is Record<string, unknown> =>
+            isObject(item) && typeof item.message === "string"
+        )
+        .map((item) => ({
+          severity:
+            typeof item.severity === "number" ? item.severity : undefined,
+          message: item.message as string,
+        }));
+    } catch (error) {
+      console.error("[LSP] Inline completion validation failed:", error);
       return [];
     }
   }

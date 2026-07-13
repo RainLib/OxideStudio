@@ -1,11 +1,12 @@
 /// 连接管理相关 commands
 use crate::core::{
-    config::{ConfigManager, SavedConnection as ConfigSavedConnection},
+    config::{ConfigManager, SavedConnection as ConfigSavedConnection, SshTunnelConfig},
     dialect::database_capabilities_for_driver,
     driver::DatabaseDriver,
     manager::ConnectionManager,
     protocol::Response,
     redaction::redact_connection_url,
+    ssh::SshTunnel,
     store::{MetaStore, SavedConnection as StoreSavedConnection},
 };
 use crate::drivers::connect_driver;
@@ -74,6 +75,7 @@ fn config_connection_from_store(
             database: None,
             connection_url: None,
             ssl_mode: None,
+            ssh_tunnel: None,
             tags: None,
             icon: None,
             color: None,
@@ -89,6 +91,7 @@ pub async fn connect_db(
     connection_id: String,
     driver: String,
     url: String,
+    ssh_tunnel: Option<SshTunnelConfig>,
 ) -> Result<Response<String>, String> {
     let result: Result<String, String> = async {
         tracing::info!(
@@ -100,7 +103,11 @@ pub async fn connect_db(
         let capabilities =
             database_capabilities_for_driver(&driver).map_err(|error| error.to_string())?;
 
-        let db_driver = connect_driver(&driver, &url)
+        let (connection_url, ssh_tunnel) = SshTunnel::prepare(&driver, &url, ssh_tunnel.as_ref())
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let db_driver = connect_driver(&driver, &connection_url)
             .await
             .map_err(|error| error.to_string())?;
 
@@ -108,7 +115,7 @@ pub async fn connect_db(
 
         // Replace existing connection with the same ID and close the old driver.
         manager
-            .replace_connection(connection_id.clone(), db_driver)
+            .replace_connection_with_tunnel(connection_id.clone(), db_driver, ssh_tunnel)
             .await
             .map_err(|e| format!("Failed to replace connection: {}", e))?;
 
@@ -127,7 +134,11 @@ pub async fn connect_db(
 
 /// 测试数据库连接，不注册为当前工作区连接
 #[tauri::command]
-pub async fn test_db_connection(driver: String, url: String) -> Result<Response<String>, String> {
+pub async fn test_db_connection(
+    driver: String,
+    url: String,
+    ssh_tunnel: Option<SshTunnelConfig>,
+) -> Result<Response<String>, String> {
     let result: Result<String, String> = async {
         tracing::info!(
             "Testing database connection: driver={}, url={}",
@@ -137,7 +148,10 @@ pub async fn test_db_connection(driver: String, url: String) -> Result<Response<
 
         let capabilities =
             database_capabilities_for_driver(&driver).map_err(|error| error.to_string())?;
-        let db_driver = connect_driver(&driver, &url)
+        let (connection_url, _ssh_tunnel) = SshTunnel::prepare(&driver, &url, ssh_tunnel.as_ref())
+            .await
+            .map_err(|error| error.to_string())?;
+        let db_driver = connect_driver(&driver, &connection_url)
             .await
             .map_err(|error| error.to_string())?;
 

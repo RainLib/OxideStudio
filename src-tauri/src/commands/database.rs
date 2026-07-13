@@ -64,10 +64,18 @@ fn create_database_sql(
     database: &str,
     charset: Option<&str>,
     collation: Option<&str>,
+    owner: Option<&str>,
 ) -> Result<String, String> {
     let database = ensure_mutable_namespace(kind, database)?;
     let mut sql = match kind {
-        DatabaseKind::Postgres => format!("CREATE SCHEMA {}", kind.quote_identifier(database)),
+        DatabaseKind::Postgres => {
+            let mut sql = format!("CREATE SCHEMA {}", kind.quote_identifier(database));
+            if let Some(owner) = owner.map(str::trim).filter(|value| !value.is_empty()) {
+                sql.push_str(" AUTHORIZATION ");
+                sql.push_str(&kind.quote_identifier(owner));
+            }
+            sql
+        }
         DatabaseKind::Mysql => format!("CREATE DATABASE {}", kind.quote_identifier(database)),
     };
 
@@ -159,15 +167,26 @@ pub async fn create_database(
     database: String,
     charset: Option<String>,
     collation: Option<String>,
+    owner: Option<String>,
 ) -> Result<Response<String>, String> {
     let result: Result<String, String> = async {
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
-        let sql = create_database_sql(kind, &database, charset.as_deref(), collation.as_deref())?;
+        let sql = create_database_sql(
+            kind,
+            &database,
+            charset.as_deref(),
+            collation.as_deref(),
+            owner.as_deref(),
+        )?;
         manager
             .query(&connection_id, &sql, None, None, None)
             .await
             .map_err(|e| e.to_string())?;
-        Ok(format!("Database {} created", database.trim()))
+        let label = match kind {
+            DatabaseKind::Postgres => "Schema",
+            DatabaseKind::Mysql => "Database",
+        };
+        Ok(format!("{label} {} created", database.trim()))
     }
     .await;
 
@@ -248,7 +267,7 @@ mod tests {
     #[test]
     fn builds_driver_specific_create_database_sql() {
         assert_eq!(
-            create_database_sql(DatabaseKind::Postgres, "app", None, None).unwrap(),
+            create_database_sql(DatabaseKind::Postgres, "app", None, None, None).unwrap(),
             r#"CREATE SCHEMA "app";"#
         );
         assert_eq!(
@@ -256,7 +275,8 @@ mod tests {
                 DatabaseKind::Mysql,
                 "app",
                 Some("utf8mb4"),
-                Some("utf8mb4_general_ci")
+                Some("utf8mb4_general_ci"),
+                None
             )
             .unwrap(),
             "CREATE DATABASE `app` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;"
@@ -266,7 +286,23 @@ mod tests {
     #[test]
     fn rejects_unsafe_charset_tokens() {
         assert!(
-            create_database_sql(DatabaseKind::Mysql, "app", Some("utf8mb4;DROP"), None).is_err()
+            create_database_sql(DatabaseKind::Mysql, "app", Some("utf8mb4;DROP"), None, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn builds_postgres_schema_authorization() {
+        assert_eq!(
+            create_database_sql(
+                DatabaseKind::Postgres,
+                "app data",
+                None,
+                None,
+                Some("app owner")
+            )
+            .unwrap(),
+            r#"CREATE SCHEMA "app data" AUTHORIZATION "app owner";"#
         );
     }
 

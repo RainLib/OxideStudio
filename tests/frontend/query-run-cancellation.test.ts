@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
+import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
 
 const mocks = vi.hoisted(() => ({
   executeQuery: vi.fn(async () => []),
@@ -100,7 +101,8 @@ describe("query run cancellation store", () => {
       "SELECT 1",
       "public",
       undefined,
-      expect.stringMatching(/^tab-1:/)
+      expect.stringMatching(/^tab-1:/),
+      undefined
     );
 
     const tab = useTabStore.getState().tabs[0]!;
@@ -128,5 +130,80 @@ describe("query run cancellation store", () => {
     expect(tab.isExecuting).toBe(true);
     expect(tab.runningQueryId).toBe("tab-1:running");
     expect(tab.error).toContain("Failed to cancel query: transport down");
+  });
+
+  it("passes the selected PostgreSQL database to query execution", async () => {
+    useTabStore.getState().setTargetDatabase("tab-1", "analytics");
+
+    await useTabStore.getState().runTabQuery("tab-1", "postgres-1");
+
+    expect(mocks.executeQuery).toHaveBeenCalledWith(
+      "postgres-1",
+      "SELECT 1",
+      undefined,
+      undefined,
+      expect.stringMatching(/^tab-1:/),
+      "analytics"
+    );
+  });
+
+  it("refreshes Redis keys and follows SELECT database changes after writes", async () => {
+    const loadSchemas = vi.fn(async () => undefined);
+    const loadCollections = vi.fn(async () => undefined);
+    const setCurrentSchema = vi.fn(async () => undefined);
+    const bumpMetadataVersion = vi.fn();
+    mocks.getDatabaseCapabilities.mockResolvedValueOnce(
+      defaultDatabaseCapabilities("redis")
+    );
+    useConnectionStore.setState({
+      connections: [
+        {
+          id: "redis-1",
+          name: "Redis",
+          driver: "redis",
+          url: "redis://localhost:6379/0",
+          database: "0",
+        },
+      ],
+      activeConnectionId: "redis-1",
+      isConnected: true,
+    });
+    useSchemaStore.setState({
+      currentSchema: "0",
+      schemas: ["0"],
+      loadSchemas,
+      loadCollections,
+      setCurrentSchema,
+      bumpMetadataVersion,
+    });
+    useTabStore.setState({
+      activeTabId: "redis-tab",
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          id: "redis-tab",
+          title: "Redis command",
+          sql: "SELECT 2; SET user:1 Ada",
+          connectionId: "redis-1",
+          schemaName: "0",
+        },
+      ],
+    });
+
+    await useTabStore.getState().runTabQuery("redis-tab", "redis-1");
+    for (let index = 0; index < 8; index += 1) await Promise.resolve();
+
+    expect(mocks.executeQuery).toHaveBeenCalledWith(
+      "redis-1",
+      "SELECT 2; SET user:1 Ada",
+      "0",
+      undefined,
+      expect.stringMatching(/^redis-tab:/),
+      undefined
+    );
+    expect(setCurrentSchema).toHaveBeenCalledWith("2");
+    expect(loadCollections).toHaveBeenCalledWith("redis-1", "2", true);
+    expect(loadSchemas).not.toHaveBeenCalled();
+    expect(bumpMetadataVersion).toHaveBeenCalled();
   });
 });

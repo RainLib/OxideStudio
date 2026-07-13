@@ -1,18 +1,39 @@
 use crate::core::{
     driver::DatabaseDriver,
-    protocol::{CollectionInfo, ColumnDef, QueryResult},
+    protocol::{CollectionInfo, CollectionPage, ColumnDef, QueryResult},
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use redis::{aio::ConnectionManager, Value as RedisValue};
 use serde_json::{json, Value};
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+
+const REDIS_SCAN_CURSOR_TTL: Duration = Duration::from_secs(60);
+const REDIS_SCAN_CURSOR_LIMIT: usize = 64;
+const REDIS_SCAN_PAGE_BYTE_LIMIT: usize = 256 * 1024;
+const REDIS_KEY_FILTER_BYTE_LIMIT: usize = 512;
+
+struct RedisKeyScanState {
+    database: String,
+    redis_cursor: u64,
+    started: bool,
+    pending: VecDeque<String>,
+    total: Option<u64>,
+    match_pattern: Option<String>,
+    last_used: Instant,
+}
 
 pub struct RedisDriver {
     url: String,
     client: redis::Client,
     connection: Mutex<Option<ConnectionManager>>,
     active_database: Mutex<String>,
+    operation_lock: Mutex<()>,
+    scan_cursors: Mutex<HashMap<String, RedisKeyScanState>>,
+    next_scan_cursor: AtomicU64,
 }
 
 impl RedisDriver {
@@ -23,6 +44,9 @@ impl RedisDriver {
             client,
             connection: Mutex::new(None),
             active_database: Mutex::new(redis_database_label(url)),
+            operation_lock: Mutex::new(()),
+            scan_cursors: Mutex::new(HashMap::new()),
+            next_scan_cursor: AtomicU64::new(1),
         })
     }
 
@@ -32,6 +56,61 @@ impl RedisDriver {
             .await
             .clone()
             .ok_or_else(|| anyhow!("Redis connection is not established"))
+    }
+
+    async fn take_scan_state(
+        &self,
+        token: Option<&str>,
+        database: &str,
+        match_pattern: Option<&str>,
+    ) -> Result<RedisKeyScanState> {
+        let Some(token) = token else {
+            return Ok(RedisKeyScanState {
+                database: database.to_string(),
+                redis_cursor: 0,
+                started: false,
+                pending: VecDeque::new(),
+                total: None,
+                match_pattern: match_pattern.map(str::to_string),
+                last_used: Instant::now(),
+            });
+        };
+
+        let now = Instant::now();
+        let mut cursors = self.scan_cursors.lock().await;
+        cursors.retain(|_, state| now.duration_since(state.last_used) <= REDIS_SCAN_CURSOR_TTL);
+        let state = cursors
+            .remove(token)
+            .ok_or_else(|| anyhow!("Redis key cursor expired; refresh the key list"))?;
+        if state.database != database {
+            return Err(anyhow!("Redis key cursor belongs to another database"));
+        }
+        if state.match_pattern.as_deref() != match_pattern {
+            return Err(anyhow!("Redis key cursor belongs to another filter"));
+        }
+        Ok(state)
+    }
+
+    async fn store_scan_state(&self, mut state: RedisKeyScanState) -> String {
+        state.last_used = Instant::now();
+        let token = format!(
+            "redis-scan-{}",
+            self.next_scan_cursor.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut cursors = self.scan_cursors.lock().await;
+        let now = Instant::now();
+        cursors.retain(|_, item| now.duration_since(item.last_used) <= REDIS_SCAN_CURSOR_TTL);
+        if cursors.len() >= REDIS_SCAN_CURSOR_LIMIT {
+            if let Some(oldest) = cursors
+                .iter()
+                .min_by_key(|(_, item)| item.last_used)
+                .map(|(key, _)| key.clone())
+            {
+                cursors.remove(&oldest);
+            }
+        }
+        cursors.insert(token.clone(), state);
+        token
     }
 
     async fn execute_tokens_on(
@@ -126,12 +205,14 @@ impl DatabaseDriver for RedisDriver {
 
         *self.connection.lock().await = Some(manager);
         *self.active_database.lock().await = default_database;
+        self.scan_cursors.lock().await.clear();
         Ok(())
     }
 
     async fn disconnect(&self) -> Result<()> {
         *self.connection.lock().await = None;
         *self.active_database.lock().await = redis_database_label(&self.url);
+        self.scan_cursors.lock().await.clear();
         Ok(())
     }
 
@@ -145,11 +226,13 @@ impl DatabaseDriver for RedisDriver {
     }
 
     async fn query(&self, sql: &str) -> Result<Vec<QueryResult>> {
+        let _operation = self.operation_lock.lock().await;
         let mut connection = self.connection().await?;
         self.query_on_connection(&mut connection, sql).await
     }
 
     async fn query_with_context(&self, sql: &str, schema: &str) -> Result<Vec<QueryResult>> {
+        let _operation = self.operation_lock.lock().await;
         let mut connection = self.connection().await?;
         self.select_database_on(&mut connection, schema).await?;
         self.query_on_connection(&mut connection, sql).await
@@ -157,12 +240,27 @@ impl DatabaseDriver for RedisDriver {
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
         let mut connection = self.connection().await?;
-        let configured_count = redis_database_count(&mut connection).await.unwrap_or(16);
         let active_database = self.active_database.lock().await.clone();
-        Ok(redis_database_labels(configured_count, &active_database))
+        Ok(redis_non_empty_database_labels(&mut connection, &active_database).await)
     }
 
     async fn get_collections(&self, namespace: &str) -> Result<Vec<CollectionInfo>> {
+        // Keep the legacy API bounded too. Any caller that has not migrated to
+        // cursor pages must never trigger a full keyspace scan implicitly.
+        Ok(self
+            .get_collections_page(namespace, None, 100, None)
+            .await?
+            .items)
+    }
+
+    async fn get_collections_page(
+        &self,
+        namespace: &str,
+        cursor: Option<&str>,
+        limit: usize,
+        filter: Option<&str>,
+    ) -> Result<CollectionPage> {
+        let _operation = self.operation_lock.lock().await;
         let mut connection = self.connection().await?;
         let database = if namespace.trim().is_empty() {
             self.active_database.lock().await.clone()
@@ -170,77 +268,133 @@ impl DatabaseDriver for RedisDriver {
             validate_redis_database_label(namespace)?
         };
         self.select_database_on(&mut connection, &database).await?;
-        let mut cursor = 0_u64;
-        let mut keys = Vec::new();
 
-        loop {
-            let (next_cursor, mut batch) = redis::cmd("SCAN")
-                .arg(cursor)
+        let limit = limit.clamp(1, 1_000);
+        let match_pattern = redis_key_match_pattern(filter)?;
+        let mut state = self
+            .take_scan_state(cursor, &database, match_pattern.as_deref())
+            .await?;
+        if state.total.is_none() && match_pattern.is_none() {
+            state.total = redis::cmd("DBSIZE")
+                .query_async::<u64>(&mut connection)
+                .await
+                .ok();
+        }
+
+        // At most one SCAN round trip is admitted per page. Redis may return
+        // more than COUNT; overflow remains behind an opaque backend token so
+        // the IPC payload and React tree are still strictly bounded.
+        if state.pending.len() < limit && (!state.started || state.redis_cursor != 0) {
+            let mut scan = redis::cmd("SCAN");
+            scan.arg(state.redis_cursor);
+            if let Some(pattern) = &match_pattern {
+                scan.arg("MATCH").arg(pattern);
+            }
+            let (next_cursor, batch) = scan
                 .arg("COUNT")
-                .arg(500)
+                .arg(limit)
                 .query_async::<(u64, Vec<String>)>(&mut connection)
                 .await
-                .context("Redis SCAN failed")?;
-
-            keys.append(&mut batch);
-            if next_cursor == 0 || keys.len() >= 1_000 {
-                break;
-            }
-            cursor = next_cursor;
+                .context("Redis SCAN page failed")?;
+            state.started = true;
+            state.redis_cursor = next_cursor;
+            state.pending.extend(batch);
         }
 
-        keys.truncate(1_000);
+        let mut keys = drain_scan_page(&mut state.pending, limit, REDIS_SCAN_PAGE_BYTE_LIMIT);
         keys.sort();
+        keys.dedup();
 
-        let mut collections = Vec::with_capacity(keys.len());
-        for key in keys {
-            let key_type = redis::cmd("TYPE")
-                .arg(&key)
-                .query_async::<String>(&mut connection)
-                .await
-                .unwrap_or_else(|_| "unknown".to_string());
-            let document_count = redis_key_cardinality(&mut connection, &key, &key_type).await;
-            collections.push(CollectionInfo {
-                name: key,
+        let key_types = redis_key_types(&mut connection, &keys).await;
+        let items = keys
+            .into_iter()
+            .zip(key_types)
+            .map(|(name, collection_type)| CollectionInfo {
+                name,
                 namespace: Some(database.clone()),
-                collection_type: Some(key_type),
-                document_count,
-            });
-        }
+                collection_type: Some(collection_type),
+                document_count: None,
+            })
+            .collect();
+        let total = state.total;
+        let next_cursor = if !state.pending.is_empty() || state.redis_cursor != 0 {
+            Some(self.store_scan_state(state).await)
+        } else {
+            None
+        };
 
-        Ok(collections)
+        Ok(CollectionPage {
+            items,
+            next_cursor,
+            total,
+        })
     }
 
     async fn set_current_schema(&self, schema: &str) -> Result<()> {
+        let _operation = self.operation_lock.lock().await;
         let mut connection = self.connection().await?;
         self.select_database_on(&mut connection, schema).await?;
         Ok(())
     }
 }
 
-async fn redis_key_cardinality(
-    connection: &mut ConnectionManager,
-    key: &str,
-    key_type: &str,
-) -> Option<u64> {
-    let command = redis_cardinality_command(key_type)?;
-    redis::cmd(command)
-        .arg(key)
-        .query_async::<u64>(connection)
-        .await
-        .ok()
+fn drain_scan_page(pending: &mut VecDeque<String>, limit: usize, byte_limit: usize) -> Vec<String> {
+    let limit = limit.max(1);
+    let mut keys = Vec::with_capacity(limit.min(pending.len()));
+    let mut bytes = 0_usize;
+    while keys.len() < limit {
+        let Some(key) = pending.pop_front() else {
+            break;
+        };
+        if key.len() > byte_limit {
+            continue;
+        }
+        if !keys.is_empty() && bytes.saturating_add(key.len()) > byte_limit {
+            pending.push_front(key);
+            break;
+        }
+        bytes = bytes.saturating_add(key.len());
+        keys.push(key);
+    }
+    keys
 }
 
-fn redis_cardinality_command(key_type: &str) -> Option<&'static str> {
-    match key_type.to_ascii_lowercase().as_str() {
-        "string" => Some("STRLEN"),
-        "hash" => Some("HLEN"),
-        "list" => Some("LLEN"),
-        "set" => Some("SCARD"),
-        "zset" => Some("ZCARD"),
-        "stream" => Some("XLEN"),
-        _ => None,
+async fn redis_key_types(connection: &mut ConnectionManager, keys: &[String]) -> Vec<String> {
+    let mut types = Vec::with_capacity(keys.len());
+    for chunk in keys.chunks(500) {
+        let mut pipeline = redis::pipe();
+        for key in chunk {
+            pipeline.cmd("TYPE").arg(key);
+        }
+        match pipeline.query_async::<Vec<String>>(connection).await {
+            Ok(chunk_types) if chunk_types.len() == chunk.len() => types.extend(chunk_types),
+            _ => types.extend((0..chunk.len()).map(|_| "unknown".to_string())),
+        }
     }
+    types
+}
+
+fn redis_key_match_pattern(filter: Option<&str>) -> Result<Option<String>> {
+    let Some(filter) = filter.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if filter.len() > REDIS_KEY_FILTER_BYTE_LIMIT {
+        return Err(anyhow!(
+            "Redis key filter exceeds {} UTF-8 bytes",
+            REDIS_KEY_FILTER_BYTE_LIMIT
+        ));
+    }
+
+    let mut pattern = String::with_capacity(filter.len() + 2);
+    pattern.push('*');
+    for character in filter.chars() {
+        if matches!(character, '*' | '?' | '[' | ']' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('*');
+    Ok(Some(pattern))
 }
 
 fn redis_database_label(url: &str) -> String {
@@ -265,31 +419,46 @@ fn validate_redis_database_label(value: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
-fn redis_database_labels(configured_count: usize, active_database: &str) -> Vec<String> {
-    let count = configured_count.clamp(1, 1024);
-    let mut labels = (0..count)
-        .map(|index| index.to_string())
-        .collect::<Vec<_>>();
-    if let Ok(active_index) = active_database.trim().parse::<usize>() {
-        if active_index >= count {
-            labels.push(active_index.to_string());
+fn parse_redis_keyspace_databases(info: &str, active_database: &str) -> Vec<String> {
+    let mut indexes = BTreeSet::new();
+    for line in info.lines().map(str::trim) {
+        let Some((database, statistics)) = line.split_once(':') else {
+            continue;
+        };
+        let Some(index) = database
+            .strip_prefix("db")
+            .and_then(|value| value.parse().ok())
+        else {
+            continue;
+        };
+        let has_keys = statistics
+            .split(',')
+            .find_map(|item| item.strip_prefix("keys="))
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|count| count > 0);
+        if has_keys {
+            indexes.insert(index);
         }
     }
-    labels
+    if let Ok(active_index) = active_database.trim().parse::<usize>() {
+        indexes.insert(active_index);
+    }
+    if indexes.is_empty() {
+        indexes.insert(0);
+    }
+    indexes.into_iter().map(|index| index.to_string()).collect()
 }
 
-async fn redis_database_count(connection: &mut ConnectionManager) -> Option<usize> {
-    let values = redis::cmd("CONFIG")
-        .arg("GET")
-        .arg("databases")
-        .query_async::<Vec<String>>(connection)
+async fn redis_non_empty_database_labels(
+    connection: &mut ConnectionManager,
+    active_database: &str,
+) -> Vec<String> {
+    let info = redis::cmd("INFO")
+        .arg("keyspace")
+        .query_async::<String>(connection)
         .await
-        .ok()?;
-    values
-        .windows(2)
-        .find(|window| window[0].eq_ignore_ascii_case("databases"))
-        .and_then(|window| window[1].parse::<usize>().ok())
-        .filter(|count| *count > 0)
+        .unwrap_or_default();
+    parse_redis_keyspace_databases(&info, active_database)
 }
 
 fn split_redis_commands(input: &str) -> Result<Vec<Vec<String>>> {
@@ -557,36 +726,63 @@ mod tests {
         assert!(validate_redis_database_label("app").is_err());
         assert!(validate_redis_database_label("1;FLUSHDB").is_err());
 
+        let info =
+            "# Keyspace\r\ndb0:keys=2,expires=0,avg_ttl=0\r\ndb3:keys=1,expires=0,avg_ttl=0\r\n";
         assert_eq!(
-            redis_database_labels(4, "2"),
-            vec![
-                "0".to_string(),
-                "1".to_string(),
-                "2".to_string(),
-                "3".to_string()
-            ]
+            parse_redis_keyspace_databases(info, "3"),
+            vec!["0".to_string(), "3".to_string()]
         );
         assert_eq!(
-            redis_database_labels(4, "8"),
-            vec![
-                "0".to_string(),
-                "1".to_string(),
-                "2".to_string(),
-                "3".to_string(),
-                "8".to_string()
-            ]
+            parse_redis_keyspace_databases(info, "8"),
+            vec!["0".to_string(), "3".to_string(), "8".to_string()]
+        );
+        assert_eq!(
+            parse_redis_keyspace_databases("# Keyspace\r\n", "0"),
+            vec!["0".to_string()]
         );
     }
 
     #[test]
-    fn maps_key_types_to_cardinality_commands() {
-        assert_eq!(redis_cardinality_command("string"), Some("STRLEN"));
-        assert_eq!(redis_cardinality_command("hash"), Some("HLEN"));
-        assert_eq!(redis_cardinality_command("list"), Some("LLEN"));
-        assert_eq!(redis_cardinality_command("set"), Some("SCARD"));
-        assert_eq!(redis_cardinality_command("zset"), Some("ZCARD"));
-        assert_eq!(redis_cardinality_command("stream"), Some("XLEN"));
-        assert_eq!(redis_cardinality_command("none"), None);
+    fn scan_overflow_is_drained_in_hard_bounded_pages_without_loss() {
+        let expected = (0..1_005)
+            .map(|index| format!("key:{index}"))
+            .collect::<Vec<_>>();
+        let mut pending = VecDeque::from(expected.clone());
+        let mut actual = Vec::new();
+
+        while !pending.is_empty() {
+            let page = drain_scan_page(&mut pending, 100, REDIS_SCAN_PAGE_BYTE_LIMIT);
+            assert!(page.len() <= 100);
+            actual.extend(page);
+        }
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn scan_page_respects_serialized_key_byte_budget() {
+        let mut pending = VecDeque::from(vec![
+            "a".repeat(120_000),
+            "b".repeat(120_000),
+            "c".repeat(120_000),
+        ]);
+
+        let page = drain_scan_page(&mut pending, 100, REDIS_SCAN_PAGE_BYTE_LIMIT);
+
+        assert_eq!(page.len(), 2);
+        assert!(page.iter().map(String::len).sum::<usize>() <= REDIS_SCAN_PAGE_BYTE_LIMIT);
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn redis_key_filters_use_escaped_literal_substring_patterns() {
+        assert_eq!(redis_key_match_pattern(None).unwrap(), None);
+        assert_eq!(redis_key_match_pattern(Some("   ")).unwrap(), None);
+        assert_eq!(
+            redis_key_match_pattern(Some(r" user:*?[x]\ ")).unwrap(),
+            Some(r"*user:\*\?\[x\]\\*".to_string())
+        );
+        assert!(redis_key_match_pattern(Some(&"x".repeat(513))).is_err());
     }
 
     #[tokio::test]

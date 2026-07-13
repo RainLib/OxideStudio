@@ -2,7 +2,18 @@
 
 .DEFAULT_GOAL := help
 
+ifeq ($(OS),Windows_NT)
+SHELL := cmd.exe
+.SHELLFLAGS := /C
+DEV_ENV := set OXIDE_SKIP_SQL_LSP_PREPARE=1&&
+LSP_BUILD_COMMAND := node scripts/prepare-sql-lsp.mjs
+REMOVE_DIST := if exist dist rmdir /S /Q dist
+else
 SHELL := /bin/bash
+DEV_ENV := OXIDE_SKIP_SQL_LSP_PREPARE=1
+LSP_BUILD_COMMAND := node scripts/prepare-sql-lsp.mjs
+REMOVE_DIST := rm -rf dist
+endif
 NPM ?= npm
 CARGO ?= cargo
 AI_BIN ?= ./node_modules/.bin/tsx
@@ -20,8 +31,7 @@ COLOR_YELLOW := \033[33m
 COLOR_BLUE := \033[34m
 
 help: ## Show available project commands.
-	@printf "$(COLOR_BOLD)$(COLOR_BLUE)OxideStudio project commands$(COLOR_RESET)\n\n"
-	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  $(COLOR_GREEN)%-20s$(COLOR_RESET) %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@node scripts/make-help.mjs $(firstword $(MAKEFILE_LIST))
 
 setup: submodules install ## Prepare submodules and Node dependencies.
 
@@ -32,10 +42,10 @@ submodules: ## Initialize and update git submodules.
 	git submodule update --init --recursive
 
 dev: lsp-build ## Start the Tauri desktop app in development mode.
-	OXIDE_SKIP_SQL_LSP_PREPARE=1 $(NPM) run tauri -- dev $(TAURI_DEV_ARGS)
+	$(DEV_ENV) $(NPM) run tauri -- dev $(TAURI_DEV_ARGS)
 
 dev-no-watch: lsp-build ## Start Tauri dev without the Rust file watcher.
-	OXIDE_SKIP_SQL_LSP_PREPARE=1 $(NPM) run tauri -- dev --no-watch
+	$(DEV_ENV) $(NPM) run tauri -- dev --no-watch
 
 start: dev ## Alias for make dev.
 
@@ -74,7 +84,7 @@ cargo-check: ## Check the Tauri backend without producing final binaries.
 	$(CARGO) check --manifest-path $(TAURI_MANIFEST)
 
 lsp-build: ## Build or copy the SQL LSP binary into src-tauri/binaries.
-	bash src-tauri/build_prepare.sh
+	$(LSP_BUILD_COMMAND)
 
 ai: ## Run the Oxide AI CLI. Usage: make ai ARGS="tools list"
 	$(NPM) run ai -- $(ARGS)
@@ -98,11 +108,20 @@ ai-plan: ## Generate a deterministic AI plan. Usage: make ai-plan AI_MESSAGE="in
 	$(NPM) run ai -- assistant plan --message "$(AI_MESSAGE)"
 
 clean: ## Remove frontend and Rust build outputs.
-	rm -rf dist
+	$(REMOVE_DIST)
 	$(CARGO) clean --manifest-path $(TAURI_MANIFEST)
 	$(CARGO) clean --manifest-path $(LSP_MANIFEST)
 
 info: ## Print toolchain and project information.
+ifeq ($(OS),Windows_NT)
+	@echo Project: OxideStudio
+	@echo Root: $(ROOT_DIR)
+	@$(NPM) --version
+	@$(CARGO) --version
+	@rustc --version
+	@echo Tauri manifest: $(TAURI_MANIFEST)
+	@echo SQL LSP manifest: $(LSP_MANIFEST)
+else
 	@printf "$(COLOR_BOLD)$(COLOR_BLUE)Project$(COLOR_RESET): OxideStudio\n"
 	@echo "Root: $(ROOT_DIR)"
 	@echo "Node: $$($(NPM) --version)"
@@ -110,3 +129,4 @@ info: ## Print toolchain and project information.
 	@echo "Rust: $$(rustc --version)"
 	@echo "Tauri manifest: $(TAURI_MANIFEST)"
 	@echo "SQL LSP manifest: $(LSP_MANIFEST)"
+endif

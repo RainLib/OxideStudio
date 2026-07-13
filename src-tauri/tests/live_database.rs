@@ -275,6 +275,76 @@ async fn postgres_flow(
 ) -> Result<()> {
     manager.set_current_schema(connection_id, schema).await?;
 
+    let lossless_values = manager
+        .query_parameterized(
+            connection_id,
+            r#"
+            SELECT
+                $1::numeric AS exact_numeric,
+                $2::bigint AS max_bigint,
+                $3::uuid AS uuid_value,
+                $4::date AS date_value,
+                $5::timestamp AS timestamp_value,
+                $6::timestamptz AS timestamptz_value,
+                $7::bytea AS binary_value,
+                $8::bigint[] AS bigint_array,
+                $9::numeric[] AS numeric_array
+            "#,
+            &[
+                param(
+                    json!("12345678901234567890.12345678901234567890"),
+                    "numeric",
+                ),
+                param(json!("9223372036854775807"), "bigint"),
+                param(json!("123e4567-e89b-12d3-a456-426614174000"), "uuid"),
+                param(json!("2024-02-03"), "date"),
+                param(json!("2024-02-03 04:05:06.123456"), "timestamp"),
+                param(json!("2024-02-03T04:05:06.123456Z"), "timestamptz"),
+                param(json!("\\x00ff10"), "bytea"),
+                param(json!(["9223372036854775807", null, 42]), "bigint[]"),
+                param(
+                    json!(["12345678901234567890.1234567890", null, "-0.0000000001"]),
+                    "numeric[]",
+                ),
+            ],
+        )
+        .await?;
+    let lossless_result = lossless_values
+        .first()
+        .context("PostgreSQL lossless query should return one result")?;
+    let lossless_row = lossless_result
+        .rows
+        .first()
+        .context("PostgreSQL lossless query should return one row")?;
+    let value =
+        |name: &str| -> Result<&Value> { Ok(&lossless_row[column_index(lossless_result, name)?]) };
+    assert_eq!(
+        value("exact_numeric")?,
+        &json!("12345678901234567890.12345678901234567890")
+    );
+    assert_eq!(value("max_bigint")?, &json!("9223372036854775807"));
+    assert_eq!(
+        value("uuid_value")?,
+        &json!("123e4567-e89b-12d3-a456-426614174000")
+    );
+    assert_eq!(value("date_value")?, &json!("2024-02-03"));
+    assert_eq!(
+        value("timestamp_value")?,
+        &json!("2024-02-03 04:05:06.123456")
+    );
+    assert!(value("timestamptz_value")?
+        .as_str()
+        .is_some_and(|value| value.starts_with("2024-02-03T04:05:06.123456")));
+    assert_eq!(value("binary_value")?, &json!("\\x00ff10"));
+    assert_eq!(
+        value("bigint_array")?,
+        &json!(["9223372036854775807", null, 42])
+    );
+    assert_eq!(
+        value("numeric_array")?,
+        &json!(["12345678901234567890.1234567890", null, "-0.0000000001"])
+    );
+
     manager
         .query(
             connection_id,
@@ -291,6 +361,45 @@ async fn postgres_flow(
             None,
         )
         .await?;
+
+    let empty_results = manager
+        .query(
+            connection_id,
+            "SELECT id, email FROM accounts WHERE false;",
+            Some(schema.to_string()),
+            None,
+            Some("postgres-live-empty-result".to_string()),
+        )
+        .await?;
+    assert_eq!(empty_results.len(), 1);
+    assert!(empty_results[0].rows.is_empty());
+    assert_eq!(
+        empty_results[0]
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "email"]
+    );
+
+    let script_results = manager
+        .query(
+            connection_id,
+            "CREATE TEMP TABLE oxide_script_state(value text); \
+             INSERT INTO oxide_script_state(value) VALUES ('same connection'); \
+             SELECT value AS script_value FROM oxide_script_state; \
+             DROP TABLE oxide_script_state;",
+            Some(schema.to_string()),
+            None,
+            Some("postgres-live-result-script".to_string()),
+        )
+        .await?;
+    assert_eq!(script_results.len(), 4);
+    assert_eq!(script_results[0].statement_type.as_deref(), Some("CREATE"));
+    assert_eq!(script_results[1].statement_type.as_deref(), Some("INSERT"));
+    assert_eq!(script_results[2].columns[0].name, "script_value");
+    assert_eq!(script_results[2].rows[0][0], json!("same connection"));
+    assert_eq!(script_results[3].statement_type.as_deref(), Some("DROP"));
     manager
         .query(
             connection_id,
@@ -309,6 +418,7 @@ async fn postgres_flow(
             None,
         )
         .await?;
+
     manager
         .query(
             connection_id,
@@ -622,6 +732,56 @@ async fn mysql_flow(
 ) -> Result<()> {
     manager.set_current_schema(connection_id, database).await?;
 
+    let lossless_values = manager
+        .query_parameterized(
+            connection_id,
+            r#"
+            SELECT
+                CAST(? AS DECIMAL(65, 30)) AS exact_decimal,
+                CAST(? AS UNSIGNED) AS max_unsigned,
+                CAST(? AS SIGNED) AS min_signed,
+                CAST(? AS DATE) AS date_value,
+                CAST(? AS DATETIME(6)) AS datetime_value,
+                CAST(? AS TIME(6)) AS time_value,
+                CAST(? AS BINARY(3)) AS binary_value
+            "#,
+            &[
+                param(
+                    json!("123456789012345678901234567890.123456789012345678901234567890"),
+                    "decimal(65,30)",
+                ),
+                param(json!("18446744073709551615"), "bigint unsigned"),
+                param(json!("-9223372036854775808"), "bigint"),
+                param(json!("2024-02-03"), "date"),
+                param(json!("2024-02-03 04:05:06.123456"), "datetime(6)"),
+                param(json!("-838:59:58.123456"), "time(6)"),
+                param(json!("0x00ff10"), "binary(3)"),
+            ],
+        )
+        .await?;
+    let lossless_result = lossless_values
+        .first()
+        .context("MySQL lossless query should return one result")?;
+    let lossless_row = lossless_result
+        .rows
+        .first()
+        .context("MySQL lossless query should return one row")?;
+    let value =
+        |name: &str| -> Result<&Value> { Ok(&lossless_row[column_index(lossless_result, name)?]) };
+    assert_eq!(
+        value("exact_decimal")?,
+        &json!("123456789012345678901234567890.123456789012345678901234567890")
+    );
+    assert_eq!(value("max_unsigned")?, &json!("18446744073709551615"));
+    assert_eq!(value("min_signed")?, &json!("-9223372036854775808"));
+    assert_eq!(value("date_value")?, &json!("2024-02-03"));
+    assert_eq!(
+        value("datetime_value")?,
+        &json!("2024-02-03 04:05:06.123456")
+    );
+    assert_eq!(value("time_value")?, &json!("-838:59:58.123456"));
+    assert_eq!(value("binary_value")?, &json!("0x00ff10"));
+
     manager
         .query(
             connection_id,
@@ -638,6 +798,46 @@ async fn mysql_flow(
             Some("mysql-live-create-table".to_string()),
         )
         .await?;
+
+    let empty_results = manager
+        .query(
+            connection_id,
+            "SELECT id, email FROM accounts WHERE false;",
+            Some(database.to_string()),
+            None,
+            Some("mysql-live-empty-result".to_string()),
+        )
+        .await?;
+    assert_eq!(empty_results.len(), 1);
+    assert!(empty_results[0].rows.is_empty());
+    assert_eq!(
+        empty_results[0]
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "email"]
+    );
+
+    let script_results = manager
+        .query(
+            connection_id,
+            "CREATE TEMPORARY TABLE oxide_script_state(value VARCHAR(64)); \
+             INSERT INTO oxide_script_state(value) VALUES ('same connection'); \
+             SELECT value AS script_value FROM oxide_script_state; \
+             DROP TEMPORARY TABLE oxide_script_state;",
+            Some(database.to_string()),
+            None,
+            Some("mysql-live-result-script".to_string()),
+        )
+        .await?;
+    assert_eq!(script_results.len(), 4);
+    assert_eq!(script_results[0].statement_type.as_deref(), Some("CREATE"));
+    assert_eq!(script_results[1].statement_type.as_deref(), Some("INSERT"));
+    assert_eq!(script_results[2].columns[0].name, "script_value");
+    assert_eq!(script_results[2].rows[0][0], json!("same connection"));
+    assert_eq!(script_results[3].statement_type.as_deref(), Some("DROP"));
+
     manager
         .query(
             connection_id,
@@ -677,10 +877,14 @@ async fn mysql_flow(
         .query(
             connection_id,
             r#"
+            DELIMITER //
             CREATE FUNCTION calculate_score(user_id INT, bonus INT)
             RETURNS INT
             DETERMINISTIC
-            RETURN user_id + bonus;
+            BEGIN
+                RETURN user_id + bonus;
+            END//
+            DELIMITER ;
             "#,
             Some(database.to_string()),
             None,

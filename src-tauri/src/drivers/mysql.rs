@@ -5,13 +5,16 @@ use crate::core::protocol::{
 };
 use crate::core::statement::{
     classify_statement, execution_mode, execution_statement_kind, has_multiple_statements,
-    QueryExecutionMode, StatementKind, StatementScanDialect,
+    split_sql_statements, QueryExecutionMode, StatementKind, StatementScanDialect,
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use sqlx::mysql::types::MySqlTime;
 use sqlx::mysql::{MySqlArguments, MySqlConnectOptions, MySqlPoolOptions, MySqlRow};
 use sqlx::pool::PoolConnection;
 use sqlx::query::Query;
+use sqlx::types::chrono::{NaiveDate, NaiveDateTime};
+use sqlx::types::BigDecimal;
 use sqlx::{Column, ConnectOptions, Executor, MySql, Pool, Row, TypeInfo};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -85,10 +88,17 @@ fn mysql_requires_unprepared(sql: &str) -> bool {
         | StatementKind::Use
         | StatementKind::Show
         | StatementKind::Explain
-        | StatementKind::Describe => true,
+        | StatementKind::Describe
+        | StatementKind::Begin
+        | StatementKind::Start
+        | StatementKind::Commit
+        | StatementKind::Rollback
+        | StatementKind::Savepoint
+        | StatementKind::Release => true,
         _ => {
             let normalized = sql.trim_start().to_ascii_uppercase();
-            normalized.starts_with("BEGIN")
+            normalized.starts_with("/*!")
+                || normalized.starts_with("BEGIN")
                 || normalized.starts_with("START TRANSACTION")
                 || normalized.starts_with("COMMIT")
                 || normalized.starts_with("ROLLBACK")
@@ -164,9 +174,13 @@ impl MysqlDriver {
         Ok(new_pool)
     }
 
-    fn process_rows(&self, rows: Vec<MySqlRow>) -> Result<Vec<QueryResult>> {
+    fn process_rows(
+        &self,
+        rows: Vec<MySqlRow>,
+        empty_columns: Vec<ColumnDef>,
+    ) -> Result<Vec<QueryResult>> {
         if rows.is_empty() {
-            return Ok(vec![]);
+            return Ok(vec![QueryResult::rows(empty_columns, Vec::new())]);
         }
 
         let first_row = &rows[0];
@@ -192,11 +206,85 @@ impl MysqlDriver {
         Ok(vec![QueryResult::rows(columns, data_rows)])
     }
 
+    async fn process_pool_rows(
+        &self,
+        sql: &str,
+        rows: Vec<MySqlRow>,
+        pool: &Pool<MySql>,
+    ) -> Result<Vec<QueryResult>> {
+        let columns = if rows.is_empty() {
+            pool.describe(sql)
+                .await
+                .map(|description| {
+                    description
+                        .columns()
+                        .iter()
+                        .map(|column| ColumnDef {
+                            name: column.name().to_string(),
+                            data_type: column.type_info().name().to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.process_rows(rows, columns)
+    }
+
+    async fn process_connection_rows(
+        &self,
+        sql: &str,
+        rows: Vec<MySqlRow>,
+        conn: &mut sqlx::MySqlConnection,
+    ) -> Result<Vec<QueryResult>> {
+        let columns = if rows.is_empty() {
+            (&mut *conn)
+                .describe(sql)
+                .await
+                .map(|description| {
+                    description
+                        .columns()
+                        .iter()
+                        .map(|column| ColumnDef {
+                            name: column.name().to_string(),
+                            data_type: column.type_info().name().to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.process_rows(rows, columns)
+    }
+
     async fn query_on_pool(&self, sql: &str, pool: &Pool<MySql>) -> Result<Vec<QueryResult>> {
+        let statements = split_sql_statements(sql, StatementScanDialect::Mysql);
+        if statements.is_empty() {
+            return Ok(Vec::new());
+        }
+        if statements.len() > 1 {
+            let mut connection = pool.acquire().await?;
+            // A script may change session or transaction state. Never return that connection to
+            // the pool if execution is cancelled between statements or the script leaves a
+            // transaction open; dropping it closes the backend connection instead.
+            connection.close_on_drop();
+            let mut results = Vec::with_capacity(statements.len());
+            for statement in statements {
+                results.extend(
+                    self.query_single_on_connection(statement, &mut connection)
+                        .await?,
+                );
+            }
+            return Ok(results);
+        }
+        let sql = statements[0];
+
         match execution_mode(sql) {
             QueryExecutionMode::ReturnsRows => {
                 let rows = sqlx::raw_sql(sql).fetch_all(pool).await?;
-                self.process_rows(rows)
+                self.process_pool_rows(sql, rows, pool).await
             }
             QueryExecutionMode::AffectsRows => {
                 let result = sqlx::raw_sql(sql).execute(pool).await?;
@@ -208,7 +296,7 @@ impl MysqlDriver {
         }
     }
 
-    async fn query_on_connection(
+    async fn query_single_on_connection(
         &self,
         sql: &str,
         conn: &mut sqlx::MySqlConnection,
@@ -217,7 +305,7 @@ impl MysqlDriver {
             return match execution_mode(sql) {
                 QueryExecutionMode::ReturnsRows => {
                     let rows = (&mut *conn).fetch_all(sql).await?;
-                    self.process_rows(rows)
+                    self.process_connection_rows(sql, rows, conn).await
                 }
                 QueryExecutionMode::AffectsRows => {
                     let result = (&mut *conn).execute(sql).await?;
@@ -235,7 +323,7 @@ impl MysqlDriver {
                     .persistent(false)
                     .fetch_all(&mut *conn)
                     .await?;
-                self.process_rows(rows)
+                self.process_connection_rows(sql, rows, conn).await
             }
             QueryExecutionMode::AffectsRows => {
                 let result = sqlx::query(sql)
@@ -248,6 +336,26 @@ impl MysqlDriver {
                 )])
             }
         }
+    }
+
+    async fn query_on_connection(
+        &self,
+        sql: &str,
+        conn: &mut sqlx::MySqlConnection,
+    ) -> Result<Vec<QueryResult>> {
+        let statements = split_sql_statements(sql, StatementScanDialect::Mysql);
+        if statements.is_empty() {
+            return Ok(Vec::new());
+        }
+        if statements.len() <= 1 {
+            return self.query_single_on_connection(statements[0], conn).await;
+        }
+
+        let mut results = Vec::with_capacity(statements.len());
+        for statement in statements {
+            results.extend(self.query_single_on_connection(statement, conn).await?);
+        }
+        Ok(results)
     }
 
     async fn track_query_on_connection<'a>(
@@ -340,6 +448,10 @@ impl MysqlDriver {
 
 #[async_trait]
 impl DatabaseDriver for MysqlDriver {
+    fn statement_scan_dialect(&self) -> Option<StatementScanDialect> {
+        Some(StatementScanDialect::Mysql)
+    }
+
     async fn connect(&mut self) -> Result<()> {
         let options = MySqlConnectOptions::from_str(&self.connection_string)?
             .disable_statement_logging()
@@ -435,7 +547,7 @@ impl DatabaseDriver for MysqlDriver {
         let pool = self.get_pool(None).await?;
         let mut query = sqlx::query(sql).persistent(false);
         for param in params {
-            query = bind_mysql_parameter(query, param);
+            query = bind_mysql_parameter(query, param)?;
         }
         let result = query.execute(&pool).await?;
         Ok(result.rows_affected())
@@ -451,15 +563,15 @@ impl DatabaseDriver for MysqlDriver {
             QueryExecutionMode::ReturnsRows => {
                 let mut query = sqlx::query(sql).persistent(false);
                 for param in params {
-                    query = bind_mysql_parameter(query, param);
+                    query = bind_mysql_parameter(query, param)?;
                 }
                 let rows = query.fetch_all(&pool).await?;
-                self.process_rows(rows)
+                self.process_pool_rows(sql, rows, &pool).await
             }
             QueryExecutionMode::AffectsRows => {
                 let mut query = sqlx::query(sql).persistent(false);
                 for param in params {
-                    query = bind_mysql_parameter(query, param);
+                    query = bind_mysql_parameter(query, param)?;
                 }
                 let result = query.execute(&pool).await?;
                 Ok(vec![QueryResult::execution(
@@ -486,7 +598,7 @@ impl DatabaseDriver for MysqlDriver {
         for statement in statements {
             let mut query = sqlx::query(&statement.sql).persistent(false);
             for param in &statement.params {
-                query = bind_mysql_parameter(query, param);
+                query = bind_mysql_parameter(query, param)?;
             }
 
             match query.execute(&mut *conn).await {
@@ -514,6 +626,9 @@ impl DatabaseDriver for MysqlDriver {
 
         let pool = self.get_pool(None).await?;
         let mut conn = pool.acquire().await?;
+        if has_multiple_statements(sql, StatementScanDialect::Mysql) {
+            conn.close_on_drop();
+        }
         let tracked_query = self.track_query_on_connection(query_id, &mut conn).await?;
         let result = self.query_on_connection(sql, &mut conn).await;
         drop(tracked_query);
@@ -540,6 +655,9 @@ impl DatabaseDriver for MysqlDriver {
 
         let pool = self.get_pool(Some(schema)).await?;
         let mut conn = pool.acquire().await?;
+        if has_multiple_statements(sql, StatementScanDialect::Mysql) {
+            conn.close_on_drop();
+        }
         let tracked_query = self.track_query_on_connection(query_id, &mut conn).await?;
         let result = self.query_on_connection(sql, &mut conn).await;
         drop(tracked_query);
@@ -576,7 +694,7 @@ impl DatabaseDriver for MysqlDriver {
         let session = self.get_transaction_session(session_id).await?;
         let mut conn = session.lock().await;
 
-        self.query_on_connection(sql, &mut **conn).await
+        self.query_on_connection(sql, &mut conn).await
     }
 
     async fn query_transaction_tracked(
@@ -592,10 +710,8 @@ impl DatabaseDriver for MysqlDriver {
         let session = self.get_transaction_session(session_id).await?;
         let mut conn = session.lock().await;
 
-        let tracked_query = self
-            .track_query_on_connection(query_id, &mut **conn)
-            .await?;
-        let result = self.query_on_connection(sql, &mut **conn).await;
+        let tracked_query = self.track_query_on_connection(query_id, &mut conn).await?;
+        let result = self.query_on_connection(sql, &mut conn).await;
         drop(tracked_query);
         result
     }
@@ -949,48 +1065,244 @@ impl DatabaseDriver for MysqlDriver {
     }
 }
 
+const JS_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
+
+fn json_i64(value: i64) -> serde_json::Value {
+    if (-JS_SAFE_INTEGER_MAX..=JS_SAFE_INTEGER_MAX).contains(&value) {
+        serde_json::Value::Number(value.into())
+    } else {
+        serde_json::Value::String(value.to_string())
+    }
+}
+
+fn json_u64(value: u64) -> serde_json::Value {
+    if value <= JS_SAFE_INTEGER_MAX as u64 {
+        serde_json::Value::Number(value.into())
+    } else {
+        serde_json::Value::String(value.to_string())
+    }
+}
+
+fn non_finite_float_text(value: f64) -> &'static str {
+    if value.is_nan() {
+        "NaN"
+    } else if value.is_sign_positive() {
+        "Infinity"
+    } else {
+        "-Infinity"
+    }
+}
+
+fn json_f32(value: f32) -> serde_json::Value {
+    if value.is_finite() {
+        value
+            .to_string()
+            .parse::<serde_json::Number>()
+            .map(serde_json::Value::Number)
+            .expect("finite f32 values always have a valid JSON representation")
+    } else {
+        serde_json::Value::String(non_finite_float_text(f64::from(value)).into())
+    }
+}
+
+fn json_f64(value: f64) -> serde_json::Value {
+    serde_json::Number::from_f64(value)
+        .map(serde_json::Value::Number)
+        .unwrap_or_else(|| serde_json::Value::String(non_finite_float_text(value).into()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn hex_decode(value: &str) -> Result<Vec<u8>> {
+    let value = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("\\x"))
+        .unwrap_or(value);
+    if !value.len().is_multiple_of(2) {
+        return Err(anyhow!(
+            "Hex-encoded binary values must contain an even number of digits"
+        ));
+    }
+
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("hex pairs are always UTF-8");
+            u8::from_str_radix(pair, 16)
+                .map_err(|_| anyhow!("Invalid hex byte in binary value: {pair}"))
+        })
+        .collect()
+}
+
+fn binary_json(bytes: &[u8]) -> serde_json::Value {
+    serde_json::Value::String(format!("0x{}", hex_encode(bytes)))
+}
+
+fn mysql_fallback_value(row: &MySqlRow, index: usize, type_name: &str) -> serde_json::Value {
+    if let Ok(value) = row.try_get_unchecked::<String, _>(index) {
+        return serde_json::Value::String(value);
+    }
+    if let Ok(value) = row.try_get_unchecked::<Vec<u8>, _>(index) {
+        return binary_json(&value);
+    }
+
+    serde_json::Value::String(format!("<unreadable MySQL {type_name} value>"))
+}
+
 fn decode_mysql_value(row: &MySqlRow, index: usize) -> serde_json::Value {
     let col = row.column(index);
     let type_name = col.type_info().name();
 
-    match type_name {
-        "BOOLEAN" | "BOOL" | "TINYINT" => {
-            let v: Option<i8> = row.try_get(index).ok();
-            serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
-        }
-        "SMALLINT" | "INT" | "INTEGER" | "MEDIUMINT" | "BIGINT" => {
-            let v: Option<i64> = row.try_get(index).ok();
-            serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
-        }
-        "FLOAT" | "DOUBLE" | "DECIMAL" => {
-            let v: Option<f64> = row.try_get(index).ok();
-            serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
-        }
-        "VARCHAR" | "CHAR" | "TEXT" | "LONGTEXT" | "MEDIUMTEXT" | "TINYTEXT" | "ENUM" => {
-            let v: Option<String> = row.try_get(index).ok();
-            serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
-        }
-        "JSON" => {
-            let v: Option<serde_json::Value> = row.try_get(index).ok();
-            v.unwrap_or(serde_json::Value::Null)
-        }
-        _ => {
-            let v: Option<String> = row.try_get(index).ok();
-            serde_json::to_value(v).unwrap_or(serde_json::Value::String(format!("<{}>", type_name)))
-        }
+    macro_rules! decode {
+        ($ty:ty, $map:expr) => {
+            row.try_get_unchecked::<Option<$ty>, _>(index)
+                .map(|value| value.map($map).unwrap_or(serde_json::Value::Null))
+                .unwrap_or_else(|_| mysql_fallback_value(row, index, type_name))
+        };
     }
+
+    match type_name {
+        "BOOLEAN" | "BOOL" => decode!(bool, serde_json::Value::Bool),
+        "TINYINT" => decode!(i8, |value| json_i64(i64::from(value))),
+        "TINYINT UNSIGNED" => decode!(u8, |value| json_u64(u64::from(value))),
+        "SMALLINT" => decode!(i16, |value| json_i64(i64::from(value))),
+        "SMALLINT UNSIGNED" => decode!(u16, |value| json_u64(u64::from(value))),
+        "INT" | "INTEGER" | "MEDIUMINT" => {
+            decode!(i32, |value| json_i64(i64::from(value)))
+        }
+        "INT UNSIGNED" | "INTEGER UNSIGNED" | "MEDIUMINT UNSIGNED" => {
+            decode!(u32, |value| json_u64(u64::from(value)))
+        }
+        "BIGINT" => decode!(i64, json_i64),
+        "BIGINT UNSIGNED" => decode!(u64, json_u64),
+        "YEAR" => decode!(u16, |value| json_u64(u64::from(value))),
+        "BIT" => decode!(u64, json_u64),
+        "FLOAT" => decode!(f32, json_f32),
+        "DOUBLE" => decode!(f64, json_f64),
+        "DECIMAL" => decode!(BigDecimal, |value| serde_json::Value::String(
+            value.to_string()
+        )),
+        "VARCHAR" | "CHAR" | "TEXT" | "LONGTEXT" | "MEDIUMTEXT" | "TINYTEXT" | "ENUM" | "SET" => {
+            decode!(String, serde_json::Value::String)
+        }
+        "JSON" => decode!(serde_json::Value, |value| value),
+        "DATE" => decode!(NaiveDate, |value| serde_json::Value::String(
+            value.to_string()
+        )),
+        "TIMESTAMP" | "DATETIME" => decode!(NaiveDateTime, |value| {
+            serde_json::Value::String(value.to_string())
+        }),
+        "TIME" => decode!(MySqlTime, |value| serde_json::Value::String(
+            value.to_string()
+        )),
+        "BINARY" | "VARBINARY" | "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB" | "GEOMETRY" => {
+            decode!(Vec<u8>, |value| binary_json(&value))
+        }
+        "NULL" => serde_json::Value::Null,
+        _ => mysql_fallback_value(row, index, type_name),
+    }
+}
+
+fn is_mysql_binary_type(data_type: Option<&str>) -> bool {
+    let Some(data_type) = data_type else {
+        return false;
+    };
+    let normalized = data_type.to_ascii_lowercase();
+    let base_type = normalized
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .split('(')
+        .next()
+        .unwrap_or("")
+        .trim();
+    matches!(
+        base_type,
+        "binary" | "varbinary" | "tinyblob" | "blob" | "mediumblob" | "longblob"
+    )
+}
+
+fn binary_parameter_bytes(value: &serde_json::Value) -> Result<Vec<u8>> {
+    match value {
+        serde_json::Value::String(value) if value.starts_with("0x") || value.starts_with("\\x") => {
+            hex_decode(value)
+        }
+        serde_json::Value::String(value) => Ok(value.as_bytes().to_vec()),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|value| u8::try_from(value).ok())
+                    .ok_or_else(|| anyhow!("Binary byte arrays may only contain integers 0..255"))
+            })
+            .collect(),
+        _ => Err(anyhow!(
+            "Binary parameters must be hex strings, text, or byte arrays"
+        )),
+    }
+}
+
+fn is_mysql_unsigned_type(data_type: Option<&str>) -> bool {
+    data_type.is_some_and(|data_type| {
+        data_type
+            .split_whitespace()
+            .any(|part| part.eq_ignore_ascii_case("unsigned"))
+    })
+}
+
+fn is_mysql_bit_type(data_type: Option<&str>) -> bool {
+    data_type.is_some_and(|data_type| {
+        data_type
+            .trim()
+            .split('(')
+            .next()
+            .unwrap_or("")
+            .eq_ignore_ascii_case("bit")
+    })
 }
 
 fn bind_mysql_parameter<'q>(
     query: Query<'q, MySql, MySqlArguments>,
     param: &QueryParameter,
-) -> Query<'q, MySql, MySqlArguments> {
-    match &param.value {
-        serde_json::Value::Null => query.bind(Option::<String>::None),
+) -> Result<Query<'q, MySql, MySqlArguments>> {
+    if param.value.is_null() {
+        return Ok(query.bind(Option::<String>::None));
+    }
+    if is_mysql_binary_type(param.data_type.as_deref()) {
+        return Ok(query.bind(binary_parameter_bytes(&param.value)?));
+    }
+    if is_mysql_bit_type(param.data_type.as_deref()) {
+        let value = match &param.value {
+            serde_json::Value::Number(value) => value.as_u64(),
+            serde_json::Value::String(value) => value.parse::<u64>().ok(),
+            _ => None,
+        }
+        .ok_or_else(|| anyhow!("MySQL BIT parameters must be unsigned integers"))?;
+        return Ok(query.bind(value));
+    }
+
+    Ok(match &param.value {
+        serde_json::Value::Null => unreachable!("NULL parameters return above"),
         serde_json::Value::Bool(value) => query.bind(*value),
         serde_json::Value::Number(value) => {
             if is_integral_type(param.data_type.as_deref()) {
-                if let Some(value) = value.as_i64() {
+                if is_mysql_unsigned_type(param.data_type.as_deref()) {
+                    if let Some(value) = value.as_u64() {
+                        query.bind(value)
+                    } else {
+                        query.bind(value.to_string())
+                    }
+                } else if let Some(value) = value.as_i64() {
                     query.bind(value)
                 } else if let Some(value) =
                     value.as_u64().and_then(|value| i64::try_from(value).ok())
@@ -1005,11 +1317,27 @@ fn bind_mysql_parameter<'q>(
                 query.bind(value.to_string())
             }
         }
-        serde_json::Value::String(value) => query.bind(value.clone()),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            query.bind(serde_json::to_string(&param.value).unwrap_or_default())
+        serde_json::Value::String(value) => {
+            if is_integral_type(param.data_type.as_deref()) {
+                if is_mysql_unsigned_type(param.data_type.as_deref()) {
+                    if let Ok(value) = value.parse::<u64>() {
+                        query.bind(value)
+                    } else {
+                        query.bind(value.clone())
+                    }
+                } else if let Ok(value) = value.parse::<i64>() {
+                    query.bind(value)
+                } else {
+                    query.bind(value.clone())
+                }
+            } else {
+                query.bind(value.clone())
+            }
         }
-    }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            query.bind(serde_json::to_string(&param.value)?)
+        }
+    })
 }
 
 fn is_integral_type(data_type: Option<&str>) -> bool {
@@ -1036,6 +1364,81 @@ mod tests {
     use super::*;
     use dotenvy::dotenv;
     use std::env;
+
+    #[test]
+    fn empty_mysql_rows_preserve_described_columns() {
+        let driver = MysqlDriver::new("mysql://user:pass@localhost/db");
+        let results = driver
+            .process_rows(
+                Vec::new(),
+                vec![
+                    ColumnDef {
+                        name: "id".to_string(),
+                        data_type: "BIGINT".to_string(),
+                    },
+                    ColumnDef {
+                        name: "email".to_string(),
+                        data_type: "VARCHAR".to_string(),
+                    },
+                ],
+            )
+            .expect("empty rows should produce a query result");
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].rows.is_empty());
+        assert_eq!(results[0].columns.len(), 2);
+        assert_eq!(results[0].columns[0].name, "id");
+        assert_eq!(results[0].columns[0].data_type, "BIGINT");
+        assert_eq!(results[0].columns[1].name, "email");
+        assert_eq!(results[0].columns[1].data_type, "VARCHAR");
+    }
+
+    #[test]
+    fn mysql_json_integers_only_use_numbers_inside_javascript_safe_range() {
+        assert_eq!(
+            json_i64(JS_SAFE_INTEGER_MAX),
+            serde_json::json!(9_007_199_254_740_991_i64)
+        );
+        assert_eq!(
+            json_i64(JS_SAFE_INTEGER_MAX + 1),
+            serde_json::json!("9007199254740992")
+        );
+        assert_eq!(
+            json_i64(i64::MIN),
+            serde_json::json!("-9223372036854775808")
+        );
+        assert_eq!(
+            json_u64(u64::MAX),
+            serde_json::json!("18446744073709551615")
+        );
+    }
+
+    #[test]
+    fn mysql_binary_hex_representation_is_reversible() {
+        let bytes = vec![0x00, 0x7f, 0x80, 0xff];
+        assert_eq!(binary_json(&bytes), serde_json::json!("0x007f80ff"));
+        assert_eq!(hex_decode("0x007f80ff").unwrap(), bytes);
+        assert!(hex_decode("0x0").is_err());
+        assert!(hex_decode("0xzz").is_err());
+    }
+
+    #[test]
+    fn mysql_float_representation_keeps_f32_shape_and_special_values() {
+        assert_eq!(json_f32(0.1), serde_json::json!(0.1));
+        assert_eq!(json_f32(f32::NAN), serde_json::json!("NaN"));
+        assert_eq!(json_f64(f64::INFINITY), serde_json::json!("Infinity"));
+        assert_eq!(json_f64(f64::NEG_INFINITY), serde_json::json!("-Infinity"));
+    }
+
+    #[test]
+    fn mysql_type_detection_preserves_unsigned_and_binary_bindings() {
+        assert!(is_mysql_unsigned_type(Some("bigint unsigned")));
+        assert!(!is_mysql_unsigned_type(Some("bigint")));
+        assert!(is_mysql_binary_type(Some("varbinary(255)")));
+        assert!(is_mysql_binary_type(Some("longblob")));
+        assert!(!is_mysql_binary_type(Some("varchar(255)")));
+        assert!(is_mysql_bit_type(Some("bit(64)")));
+    }
 
     #[test]
     fn tracked_query_guard_removes_active_query_on_drop() {
@@ -1151,6 +1554,12 @@ mod tests {
         assert!(mysql_requires_unprepared("show tables"));
         assert!(mysql_requires_unprepared("DESCRIBE users"));
         assert!(mysql_requires_unprepared("BEGIN"));
+        assert!(mysql_requires_unprepared(
+            "# generated dump\nCREATE TABLE users(id INT)"
+        ));
+        assert!(mysql_requires_unprepared(
+            "/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */"
+        ));
         assert!(mysql_requires_unprepared(
             "SELECT 1; CREATE TABLE users(id INT)"
         ));

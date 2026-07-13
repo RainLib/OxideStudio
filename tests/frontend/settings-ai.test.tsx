@@ -95,8 +95,14 @@ describe("AI settings", () => {
 
     const testButton = buttonWithText(document, "Test Provider");
     expect(testButton).toBeTruthy();
-    expect(document.body.textContent).toContain("LangGraph planner plugin");
-    expect(document.body.textContent).toContain("@langchain/langgraph");
+    expect(document.body.textContent).toContain("Choose O2, Plan, Agent, or Chat");
+    expect(document.body.textContent).toContain(
+      "Planning and tool orchestration are selected automatically"
+    );
+    expect(document.body.textContent).toContain("Inline Completion");
+    expect(document.body.textContent).toContain("Enable inline completion");
+    expect(document.body.textContent).toContain("Include project context");
+    expect(document.body.textContent).toContain("Chat completions");
     expect(testButton?.getAttribute("type")).toBe("button");
     expect(
       Array.from(document.querySelectorAll("a")).some((anchor) =>

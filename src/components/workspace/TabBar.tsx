@@ -1,4 +1,8 @@
-import { useTabStore, TabType } from "@/store/useTabStore";
+import {
+  hasUnsavedTabChanges,
+  useTabStore,
+  TabType,
+} from "@/store/useTabStore";
 import { cn } from "@/lib/utils";
 import {
   X,
@@ -7,7 +11,12 @@ import {
   Table as TableIcon,
   ChevronDown,
   Database,
+  FileCode2,
   Pin,
+  PanelLeft,
+  PanelRight,
+  PanelTop,
+  PanelBottom,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,17 +26,39 @@ import {
   DropdownMenuTrigger,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useEffect, useRef, useState } from "react";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
+import {
+  useEditorGroupStore,
+  type EditorSplitDirection,
+} from "@/store/useEditorGroupStore";
 
-const TabIcon = ({ type }: { type: TabType }) => {
+const TabIcon = ({ type, isFile }: { type: TabType; isFile?: boolean }) => {
   if (type === "table") return <TableIcon size={12} className="wb-muted" />;
+  if (isFile) return <FileCode2 size={12} className="text-sky-400" />;
   return <Terminal size={12} className="text-sky-400" />;
 };
 
-export function TabBar() {
+interface TabBarProps {
+  activeTabIdOverride?: string | null;
+  queryOnly?: boolean;
+  allowSplit?: boolean;
+  onSelectTab?: (tabId: string) => void;
+  onCloseGroup?: () => void;
+}
+
+export function TabBar({
+  activeTabIdOverride,
+  queryOnly = false,
+  allowSplit = true,
+  onSelectTab,
+  onCloseGroup,
+}: TabBarProps = {}) {
   const {
     tabs,
     activeTabId,
@@ -50,8 +81,22 @@ export function TabBar() {
   const activeConnection = connections.find(
     (connection) => connection.id === activeConnectionId
   );
+  const displayedActiveTabId =
+    activeTabIdOverride === undefined ? activeTabId : activeTabIdOverride;
+  const visibleTabs = queryOnly
+    ? tabs.filter((tab) => tab.type === "query")
+    : tabs;
+  const activateTab = (tabId: string) => {
+    onSelectTab?.(tabId);
+    setActiveTab(tabId);
+  };
+  const splitTab = (direction: EditorSplitDirection, tabId: string) => {
+    useEditorGroupStore.getState().split(direction, tabId);
+    setActiveTab(tabId);
+  };
 
   const createQueryConsole = () => {
+    useEditorGroupStore.getState().reset();
     const queryNumber = tabs.filter((tab) => tab.type === "query").length + 1;
     createTab(
       "query",
@@ -78,12 +123,12 @@ export function TabBar() {
     checkOverflow();
     window.addEventListener("resize", checkOverflow);
     return () => window.removeEventListener("resize", checkOverflow);
-  }, [tabs]);
+  }, [visibleTabs]);
 
   // Auto-scroll to active tab
   useEffect(() => {
-    if (activeTabId && tabRefs.current.has(activeTabId)) {
-      const activeTabElement = tabRefs.current.get(activeTabId);
+    if (displayedActiveTabId && tabRefs.current.has(displayedActiveTabId)) {
+      const activeTabElement = tabRefs.current.get(displayedActiveTabId);
       if (activeTabElement && scrollContainerRef.current) {
         // Scroll the active tab into view with smooth behavior
         activeTabElement.scrollIntoView({
@@ -93,7 +138,7 @@ export function TabBar() {
         });
       }
     }
-  }, [activeTabId]);
+  }, [displayedActiveTabId]);
 
   return (
     <div className="flex items-center h-8 w-full overflow-visible border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] shadow-[inset_0_-1px_0_hsl(var(--wb-accent)/0.08)]">
@@ -106,13 +151,13 @@ export function TabBar() {
           msOverflowStyle: "none",
         }}
       >
-        {tabs.map((tab) => {
-          const tabIndex = tabs.findIndex((t) => t.id === tab.id);
+        {visibleTabs.map((tab) => {
+          const tabIndex = visibleTabs.findIndex((t) => t.id === tab.id);
           const canCloseLeft =
-            tabIndex > 0 && tabs.slice(0, tabIndex).some((t) => !t.isPinned);
+            tabIndex > 0 && visibleTabs.slice(0, tabIndex).some((t) => !t.isPinned);
           const canCloseRight =
-            tabIndex < tabs.length - 1 &&
-            tabs.slice(tabIndex + 1).some((t) => !t.isPinned);
+            tabIndex < visibleTabs.length - 1 &&
+            visibleTabs.slice(tabIndex + 1).some((t) => !t.isPinned);
           const isContextMenuOpen = contextMenuTabId === tab.id;
 
           return (
@@ -134,19 +179,30 @@ export function TabBar() {
                   }}
                   className={cn(
                     "flex items-center gap-1.5 px-3 h-full min-w-[118px] max-w-[220px] text-[11px] cursor-pointer select-none group transition-colors shrink-0 border-r border-[hsl(var(--wb-border-subtle))]",
-                    activeTabId === tab.id
+                    displayedActiveTabId === tab.id
                       ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))] font-semibold shadow-[inset_0_1px_0_hsl(var(--wb-accent)/0.34)]"
                       : "bg-transparent text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
                   )}
-                  onClick={() => setActiveTab(tab.id)}
+                  onClick={() => activateTab(tab.id)}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setContextMenuTabId(tab.id);
                   }}
                 >
                   {tab.isPinned && <Pin size={10} className="text-primary" />}
-                  <TabIcon type={tab.type} />
-                  <span className="truncate flex-1">{tab.title}</span>
+                  <TabIcon type={tab.type} isFile={Boolean(tab.fileRelativePath)} />
+                  <span
+                    className="truncate flex-1"
+                    title={tab.fileRelativePath || tab.title}
+                  >
+                    {tab.title}
+                  </span>
+                  {hasUnsavedTabChanges(tab) && (
+                    <span
+                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-[hsl(var(--wb-accent))]"
+                      title="Unsaved changes"
+                    />
+                  )}
                   {!tab.isPinned && (
                     <div
                       className="opacity-0 group-hover:opacity-100 hover:bg-[hsl(var(--wb-hover))] rounded-[3px] p-0.5 transition-opacity"
@@ -161,6 +217,30 @@ export function TabBar() {
                 </div>
               </DropdownMenuTrigger>
               <DropdownMenuContent className="w-48 bg-background-elevated border-border text-foreground">
+                {allowSplit && tab.type === "query" && <DropdownMenuSub>
+                  <DropdownMenuSubTrigger className="text-[11px] cursor-pointer focus:bg-background-tertiary">
+                    <PanelRight size={12} className="mr-2" />
+                    Split Editor
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="w-40 bg-background-elevated border-border text-foreground">
+                    {([
+                      ["left", "Split Left", PanelLeft],
+                      ["right", "Split Right", PanelRight],
+                      ["up", "Split Up", PanelTop],
+                      ["down", "Split Down", PanelBottom],
+                    ] as const).map(([direction, label, Icon]) => (
+                      <DropdownMenuItem
+                        key={direction}
+                        className="text-[11px] cursor-pointer focus:bg-background-tertiary"
+                        onClick={() => splitTab(direction, tab.id)}
+                      >
+                        <Icon size={12} className="mr-2" />
+                        {label}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>}
+                {allowSplit && tab.type === "query" && <DropdownMenuSeparator className="bg-border" />}
                 <DropdownMenuItem
                   onClick={() => {
                     togglePinTab(tab.id);
@@ -263,8 +343,8 @@ export function TabBar() {
               className="w-56 bg-background-elevated border-border text-foreground max-h-[400px] overflow-y-auto"
             >
               {(() => {
-                const queryTabs = tabs.filter((t) => t.type === "query");
-                const tableTabs = tabs.filter((t) => t.type === "table");
+                const queryTabs = visibleTabs.filter((t) => t.type === "query");
+                const tableTabs = visibleTabs.filter((t) => t.type === "table");
 
                 const tablesBySchema = tableTabs.reduce((acc, tab) => {
                   const schema = tab.schemaName || "Unknown";
@@ -287,14 +367,23 @@ export function TabBar() {
                             key={tab.id}
                             className={cn(
                               "flex items-center gap-2 text-[11px] cursor-pointer",
-                              activeTabId === tab.id
+                              displayedActiveTabId === tab.id
                                 ? "bg-background-tertiary text-foreground"
                                 : "text-muted-foreground hover:text-foreground focus:bg-background-tertiary"
                             )}
-                            onClick={() => setActiveTab(tab.id)}
+                            onClick={() => activateTab(tab.id)}
                           >
-                            <TabIcon type={tab.type} />
+                            <TabIcon
+                              type={tab.type}
+                              isFile={Boolean(tab.fileRelativePath)}
+                            />
                             <span className="truncate flex-1">{tab.title}</span>
+                            {hasUnsavedTabChanges(tab) && (
+                              <span
+                                className="h-1.5 w-1.5 shrink-0 rounded-full bg-[hsl(var(--wb-accent))]"
+                                title="Unsaved changes"
+                              />
+                            )}
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
@@ -329,16 +418,25 @@ export function TabBar() {
                               key={tab.id}
                               className={cn(
                                 "flex items-center gap-2 text-[11px] cursor-pointer pl-4",
-                                activeTabId === tab.id
+                                displayedActiveTabId === tab.id
                                   ? "bg-background-tertiary text-foreground"
                                   : "text-muted-foreground hover:text-foreground focus:bg-background-tertiary"
                               )}
-                              onClick={() => setActiveTab(tab.id)}
+                              onClick={() => activateTab(tab.id)}
                             >
-                              <TabIcon type={tab.type} />
+                              <TabIcon
+                                type={tab.type}
+                                isFile={Boolean(tab.fileRelativePath)}
+                              />
                               <span className="truncate flex-1">
                                 {tab.title}
                               </span>
+                              {hasUnsavedTabChanges(tab) && (
+                                <span
+                                  className="h-1.5 w-1.5 shrink-0 rounded-full bg-[hsl(var(--wb-accent))]"
+                                  title="Unsaved changes"
+                                />
+                              )}
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -372,6 +470,18 @@ export function TabBar() {
           <Plus size={14} />
         </Button>
       </div>
+      {onCloseGroup && (
+        <div className="h-full flex items-center border-l border-border-subtle px-1">
+          <button
+            type="button"
+            className="wb-icon-button h-6 w-6"
+            onClick={onCloseGroup}
+            title="Close Editor Group"
+          >
+            <X size={12} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

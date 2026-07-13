@@ -3,8 +3,12 @@ import { DataGrid } from "@/components/workspace/DataGrid";
 import { LeftPanel } from "@/components/workspace/LeftPanel";
 import { QueryEditor } from "@/components/workspace/QueryEditor";
 import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
-import { AssistantSidebar } from "@/components/workspace/AssistantSidebar";
+import {
+  SecondaryPanel,
+  type SecondaryPanelView,
+} from "@/components/workspace/SecondaryPanel";
 import { TabBar } from "@/components/workspace/TabBar";
+import { SplitEditor } from "@/components/workspace/SplitEditor";
 import { TableDataView } from "@/components/workspace/TableDataView";
 import { CreateTableTab } from "@/components/workspace/CreateTableTab";
 import { SideToolWindow } from "@/components/workspace/SideToolWindow";
@@ -18,7 +22,10 @@ import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
+import { useEditorGroupStore } from "@/store/useEditorGroupStore";
 import { CommandPalette } from "@/components/workspace/CommandPalette";
+import { useUnsavedChangesGuard } from "@/hooks/useUnsavedChangesGuard";
+import { APP_EVENT_OPEN_PROJECT_FILES } from "@/lib/projectFilesNavigation";
 import { cn } from "@/lib/utils";
 import type { WorkbenchSide } from "@/lib/appSettings";
 import {
@@ -32,13 +39,20 @@ import {
 } from "lucide-react";
 import {
   useEffect,
+  useState,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 
 export function WorkspacePage() {
+  useUnsavedChangesGuard();
+  const [secondaryPanelView, setSecondaryPanelView] =
+    useState<SecondaryPanelView>("assistant");
   const { tabs, activeTabId, setActiveResultIndex, closeResultAt } = useTabStore();
-  const { connections, activeConnectionId } = useConnectionStore();
+  const connections = useConnectionStore((state) => state.connections);
+  const activeConnectionId = useConnectionStore(
+    (state) => state.activeConnectionId
+  );
   const appSettings = useSettingsStore((state) => state.settings);
   const workbenchSettings = appSettings.workbench;
   const layout = workbenchSettings.layout;
@@ -50,13 +64,17 @@ export function WorkspacePage() {
     setBottomHeight,
     setActiveToolWindow,
   } = useWorkbenchLayoutStore();
-  const {
-    currentSchema,
-    isLoading: isSchemaLoading,
-    isCollectionsLoading,
-    isFunctionsLoading,
-  } = useSchemaStore();
+  const currentSchema = useSchemaStore((state) => state.currentSchema);
+  const isSchemaLoading = useSchemaStore((state) => state.isLoading);
+  const isCollectionsLoading = useSchemaStore(
+    (state) => state.isCollectionsLoading
+  );
+  const isFunctionsLoading = useSchemaStore(
+    (state) => state.isFunctionsLoading
+  );
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
+  const splitDirection = useEditorGroupStore((state) => state.splitDirection);
+  const resetEditorGroups = useEditorGroupStore((state) => state.reset);
   const activeConnection = connections.find(
     (connection) => connection.id === activeConnectionId
   );
@@ -75,7 +93,7 @@ export function WorkspacePage() {
     isSchemaLoading || isCollectionsLoading || isFunctionsLoading;
   const isDatabaseExplorerOpen =
     toolWindows.databaseExplorer.enabled && layout.visibility.databaseExplorer;
-  const isAssistantOpen =
+  const isSecondaryPanelOpen =
     toolWindows.assistant.enabled && layout.visibility.assistant;
   const showQueryResultPanel =
     toolWindows.results.enabled &&
@@ -90,10 +108,37 @@ export function WorkspacePage() {
   const activePanelClass = "wb-panel-active";
 
   useEffect(() => {
+    if (!tabs.some((tab) => tab.type === "query") && splitDirection) {
+      resetEditorGroups();
+    }
+  }, [resetEditorGroups, splitDirection, tabs]);
+
+  useEffect(() => {
     if (hasQueryResultSurface && toolWindows.results.enabled) {
       setToolWindowVisible("results", true);
     }
   }, [hasQueryResultSurface, setToolWindowVisible, toolWindows.results.enabled]);
+
+  useEffect(() => {
+    const openProjectFiles = () => {
+      setSecondaryPanelView("files");
+      setToolWindowVisible("assistant", true);
+      setActiveToolWindow("assistant");
+    };
+    window.addEventListener(APP_EVENT_OPEN_PROJECT_FILES, openProjectFiles);
+    return () =>
+      window.removeEventListener(APP_EVENT_OPEN_PROJECT_FILES, openProjectFiles);
+  }, [setActiveToolWindow, setToolWindowVisible]);
+
+  const toggleSecondaryPanelView = (nextView: SecondaryPanelView) => {
+    if (isSecondaryPanelOpen && secondaryPanelView === nextView) {
+      setToolWindowVisible("assistant", false);
+      return;
+    }
+    setSecondaryPanelView(nextView);
+    setToolWindowVisible("assistant", true);
+    setActiveToolWindow("assistant");
+  };
 
   const handleSideDragStart = (
     event: ReactMouseEvent,
@@ -157,7 +202,7 @@ export function WorkspacePage() {
     const isOpen =
       id === "databaseExplorer"
         ? isDatabaseExplorerOpen
-        : isAssistantOpen;
+        : isSecondaryPanelOpen;
     const isActive = layout.activeToolWindow === id;
     const handleDragStart = (event: ReactMouseEvent) =>
       handleSideDragStart(event, side, id);
@@ -186,7 +231,7 @@ export function WorkspacePage() {
         onFocus={() => setActiveToolWindow(id)}
         onDragStart={handleDragStart}
       >
-        <AssistantSidebar />
+        <SecondaryPanel view={secondaryPanelView} />
       </SideToolWindow>
     );
   };
@@ -205,7 +250,8 @@ export function WorkspacePage() {
           <WorkbenchTitleTools
             databaseExplorerOpen={isDatabaseExplorerOpen}
             databaseExplorerSide={toolWindows.databaseExplorer.side}
-            assistantOpen={isAssistantOpen}
+            secondaryPanelOpen={isSecondaryPanelOpen}
+            secondaryPanelView={secondaryPanelView}
             assistantSide={toolWindows.assistant.side}
             onToggleDatabaseExplorer={() =>
               setToolWindowVisible(
@@ -213,9 +259,8 @@ export function WorkspacePage() {
                 !isDatabaseExplorerOpen
               )
             }
-            onToggleAssistant={() =>
-              setToolWindowVisible("assistant", !isAssistantOpen)
-            }
+            onToggleAssistant={() => toggleSecondaryPanelView("assistant")}
+            onToggleFiles={() => toggleSecondaryPanelView("files")}
           />
         }
         right={
@@ -233,9 +278,9 @@ export function WorkspacePage() {
                 <QueryShortcuts />
               ) : (
                 <div className="z-10 flex h-full min-w-0 flex-col gap-1 bg-[hsl(var(--wb-editor))]">
-                  <div className="z-20">
-                    <TabBar />
-                  </div>
+                  {!(activeTab?.type === "query" && splitDirection) && (
+                    <div className="z-20"><TabBar /></div>
+                  )}
 
                   {activeTab?.type === "table" ? (
                     <TableDataView />
@@ -254,7 +299,7 @@ export function WorkspacePage() {
                         )}
                         onFocus={() => setActiveToolWindow("editor")}
                       >
-                        <QueryEditor />
+                        {splitDirection ? <SplitEditor /> : <QueryEditor />}
                       </div>
 
                       {showQueryResultPanel && (
@@ -433,9 +478,9 @@ export function WorkspacePage() {
         currentSchema={currentSchema}
         activeTabTitle={activeTab?.title}
         isIntrospecting={isIntrospecting}
-        assistantOpen={isAssistantOpen}
-        onToggleAssistant={() =>
-          setToolWindowVisible("assistant", !isAssistantOpen)
+        secondaryPanelOpen={isSecondaryPanelOpen}
+        onToggleSecondaryPanel={() =>
+          setToolWindowVisible("assistant", !isSecondaryPanelOpen)
         }
       />
 

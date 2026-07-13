@@ -4,9 +4,9 @@
     "version": "0.1.0",
     "identifier": "com.houshuai.oxide-studio",
     "build": {
-        "beforeDevCommand": "OXIDE_SKIP_SQL_LSP_PREPARE=1 bash src-tauri/build_prepare.sh && npm run dev",
+        "beforeDevCommand": "node scripts/prepare-sql-lsp.mjs && npm run dev",
         "devUrl": "http://localhost:1420",
-        "beforeBuildCommand": "npm run build && bash src-tauri/build_prepare.sh",
+        "beforeBuildCommand": "npm run build && node scripts/prepare-sql-lsp.mjs",
         "frontendDist": "../dist"
     },
     "app": {

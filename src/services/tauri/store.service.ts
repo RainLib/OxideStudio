@@ -15,6 +15,7 @@ export interface Resource {
 export interface Project {
   id: string;
   name: string;
+  root_path?: string | null;
   created_at: number;
   updated_at: number;
 }

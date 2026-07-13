@@ -1,5 +1,5 @@
 import { invokeWithInterceptors } from "./client";
-import type { SavedConnection } from "./types";
+import type { SavedConnection, SshTunnelConfig } from "./types";
 
 /**
  * 数据库连接服务
@@ -27,12 +27,14 @@ function activeProjectId() {
 export async function connect(
   connectionId: string,
   driver: string,
-  url: string
+  url: string,
+  sshTunnel?: SshTunnelConfig
 ): Promise<string> {
   return invokeWithInterceptors<string>("connect_db", {
     connectionId,
     driver,
     url,
+    sshTunnel,
   });
 }
 
@@ -41,11 +43,13 @@ export async function connect(
  */
 export async function testConnection(
   driver: string,
-  url: string
+  url: string,
+  sshTunnel?: SshTunnelConfig
 ): Promise<string> {
   return invokeWithInterceptors<string>("test_db_connection", {
     driver,
     url,
+    sshTunnel,
   });
 }
 

@@ -8,6 +8,7 @@ import {
 } from "@/lib/connectionUrlParser";
 import {
   DEFAULT_DATABASE_DRIVER,
+  defaultConnectionIcon,
   defaultDatabaseName,
   defaultDatabasePort,
 } from "@/lib/databaseDialect";
@@ -21,8 +22,6 @@ export interface ConnectionConfig extends SavedConnection {
   user?: string;
   password?: string;
   database?: string;
-  connectionUrl?: string;
-  sslMode?: string;
   tags?: string[];
 }
 
@@ -63,7 +62,18 @@ function connectionUrlForConfig(config: ConnectionConfig) {
   });
 }
 
+function enabledSshTunnel(config: ConnectionConfig) {
+  return config.sshTunnel?.enabled ? config.sshTunnel : undefined;
+}
+
 let latestConnectAttempt = 0;
+
+interface PendingConnect {
+  attemptId: number;
+  promise: Promise<string | null>;
+}
+
+const pendingConnects = new Map<string, PendingConnect>();
 
 function activeProjectId() {
   try {
@@ -80,6 +90,21 @@ function scopeConnectionToActiveProject<T extends ConnectionConfig>(config: T): 
   };
 }
 
+function connectionProjectId(config: ConnectionConfig) {
+  return config.projectId || activeProjectId();
+}
+
+function connectionScopeKey(config: ConnectionConfig) {
+  return JSON.stringify([connectionProjectId(config), config.id]);
+}
+
+export async function readProjectConnections(projectId: string) {
+  return (await connectionService.loadConnections(projectId)).map((connection) => ({
+    ...connection,
+    projectId: connection.projectId || projectId,
+  }));
+}
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connections: [],
   activeConnectionId: null,
@@ -91,12 +116,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   loadConnections: async () => {
     try {
       const projectId = activeProjectId();
-      const connections = (await connectionService.loadConnections(projectId)).map(
-        (connection) => ({
-          ...connection,
-          projectId: connection.projectId || projectId,
-        })
-      );
+      const connections = await readProjectConnections(projectId);
       const activeConnectionId = get().activeConnectionId;
       const activeConnectionExists = connections.some(
         (connection) => connection.id === activeConnectionId
@@ -126,7 +146,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     const conn = get().connections.find((c) => c.id === id);
     if (conn) {
-      set({ selectedConnection: { ...conn } }); // Clone to avoid direct mutation
+      set({
+        selectedConnection: {
+          ...conn,
+          icon: conn.icon || defaultConnectionIcon(conn.driver),
+          sshTunnel: conn.sshTunnel ? { ...conn.sshTunnel } : undefined,
+        },
+      }); // Clone nested editable configuration to avoid direct mutation
     }
   },
 
@@ -142,7 +168,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       user: "",
       password: "",
       database: defaultDatabaseName(DEFAULT_DATABASE_DRIVER),
+      icon: defaultConnectionIcon(DEFAULT_DATABASE_DRIVER),
       tags: [],
+      sshTunnel: {
+        enabled: false,
+        host: "",
+        port: 22,
+        username: "",
+        authMethod: "password",
+        password: "",
+        privateKeyPath: "",
+        privateKeyPassphrase: "",
+        strictHostKeyChecking: true,
+      },
     };
 
     set({
@@ -188,7 +226,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     try {
       await connectionService.testConnection(
         config.driver,
-        connectionUrlForConfig(config)
+        connectionUrlForConfig(config),
+        enabledSshTunnel(config)
       );
       return null;
     } catch (e: any) {
@@ -196,55 +235,90 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  connect: async (config) => {
-    const attemptId = latestConnectAttempt + 1;
-    latestConnectAttempt = attemptId;
-    try {
-      await connectionService.connect(
-        config.id,
-        config.driver,
-        connectionUrlForConfig(config)
-      );
-
-      if (attemptId !== latestConnectAttempt) {
-        if (get().activeConnectionId !== config.id) {
-          try {
-            await connectionService.disconnect(config.id);
-          } catch (disconnectError) {
-            console.warn(
-              "Failed to disconnect superseded backend connection:",
-              disconnectError
-            );
-          }
-        }
-        return null;
+  connect: (config) => {
+    const projectId = connectionProjectId(config);
+    const scopedConfig = { ...config, projectId };
+    const scopeKey = connectionScopeKey(scopedConfig);
+    const pending = pendingConnects.get(scopeKey);
+    if (pending) {
+      // A user can switch A -> B -> A while A is still connecting. Reusing
+      // A's backend request keeps the operation single-flight, while
+      // promoting it preserves the latest-selection-wins behavior.
+      if (pending.attemptId !== latestConnectAttempt) {
+        latestConnectAttempt += 1;
+        pending.attemptId = latestConnectAttempt;
       }
-
-      // Clear only the active metadata after the backend connection is ready.
-      // Per-connection snapshots are preserved so switching back to an already
-      // opened source does not blank the explorer before cache hydration.
-      const schemaStore = useSchemaStore.getState();
-      schemaStore.snapshotActiveMetadata();
-      schemaStore.clearActiveMetadata();
-      set({
-        activeConnectionId: config.id,
-        connectedConnectionIds: Array.from(
-          new Set([...get().connectedConnectionIds, config.id])
-        ),
-        isConnected: true,
-      });
-
-      return null; // No error
-    } catch (e: any) {
-      if (attemptId !== latestConnectAttempt) {
-        return null;
-      }
-      const message = e.message || String(e);
-      return message;
+      return pending.promise;
     }
+
+    latestConnectAttempt += 1;
+    const flight: PendingConnect = {
+      attemptId: latestConnectAttempt,
+      promise: Promise.resolve(null),
+    };
+
+    flight.promise = (async () => {
+      try {
+        await connectionService.connect(
+          scopedConfig.id,
+          scopedConfig.driver,
+          connectionUrlForConfig(scopedConfig),
+          enabledSshTunnel(scopedConfig)
+        );
+
+        if (
+          flight.attemptId !== latestConnectAttempt ||
+          activeProjectId() !== projectId
+        ) {
+          if (get().activeConnectionId !== scopedConfig.id) {
+            try {
+              await connectionService.disconnect(scopedConfig.id);
+            } catch (disconnectError) {
+              console.warn(
+                "Failed to disconnect superseded backend connection:",
+                disconnectError
+              );
+            }
+          }
+          return null;
+        }
+
+        const schemaStore = useSchemaStore.getState();
+        if (get().activeConnectionId !== scopedConfig.id) {
+          schemaStore.snapshotActiveMetadata();
+        }
+        if (!schemaStore.restoreConnectionSnapshot(scopedConfig.id)) {
+          schemaStore.clearActiveMetadata();
+        }
+        set({
+          activeConnectionId: scopedConfig.id,
+          connectedConnectionIds: Array.from(
+            new Set([...get().connectedConnectionIds, scopedConfig.id])
+          ),
+          isConnected: true,
+        });
+
+        return null;
+      } catch (e: any) {
+        if (
+          flight.attemptId !== latestConnectAttempt ||
+          activeProjectId() !== projectId
+        ) {
+          return null;
+        }
+        return e.message || String(e);
+      } finally {
+        if (pendingConnects.get(scopeKey) === flight) {
+          pendingConnects.delete(scopeKey);
+        }
+      }
+    })();
+
+    pendingConnects.set(scopeKey, flight);
+    return flight.promise;
   },
 
-  setActiveConnection: async (id: string) => {
+  setActiveConnection: (id: string) => {
     const {
       activeConnectionId,
       connectedConnectionIds,
@@ -252,14 +326,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       connections,
     } = get();
     if (activeConnectionId === id && isConnected) {
-      return null;
+      return Promise.resolve(null);
     }
 
     const connection = connections.find((conn) => conn.id === id);
     if (!connection) {
       const message = `Connection not found: ${id}`;
       console.warn(message);
-      return message;
+      return Promise.resolve(message);
+    }
+
+    if (
+      activeConnectionId === id &&
+      pendingConnects.has(connectionScopeKey(connection))
+    ) {
+      return get().connect(connection);
     }
 
     if (connectedConnectionIds.includes(id)) {
@@ -267,8 +348,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       schemaStore.snapshotActiveMetadata();
       schemaStore.restoreConnectionSnapshot(id);
       set({ activeConnectionId: id, isConnected: true });
-      return null;
+      return Promise.resolve(null);
     }
+
+    // Select the source and restore its local SQLite-backed snapshot before
+    // awaiting the network connection. Query execution remains disabled until
+    // connect() marks this source as connected.
+    const schemaStore = useSchemaStore.getState();
+    schemaStore.snapshotActiveMetadata();
+    if (!schemaStore.restoreConnectionSnapshot(id)) {
+      schemaStore.clearActiveMetadata();
+    }
+    set({ activeConnectionId: id, isConnected: false });
 
     return get().connect(connection);
   },

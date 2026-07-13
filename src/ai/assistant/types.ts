@@ -3,6 +3,7 @@ import type {
   AiToolExecutionPolicy,
   AiToolSummary,
 } from "@/ai/tools/types";
+import type { AssistantMode } from "./modes";
 
 export type AssistantIntent =
   | "metadata"
@@ -13,6 +14,7 @@ export type AssistantIntent =
 
 export type AssistantTurnInput = {
   message: string;
+  mode?: AssistantMode;
   selectedText?: string | null;
   history?: AssistantConversationMessage[];
 };

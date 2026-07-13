@@ -8,6 +8,7 @@ export function useShortcuts() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
       const target = event.target as HTMLElement | null;
       const isTextInput =
         target?.tagName === "INPUT" ||
@@ -26,6 +27,11 @@ export function useShortcuts() {
             "query.run",
             "query.runCurrentStatement",
             "query.format",
+            "file.save",
+            "editor.inlineCompletion.trigger",
+            "editor.inlineCompletion.accept",
+            "editor.inlineCompletion.acceptNextWord",
+            "editor.inlineCompletion.hide",
           ].includes(actionId)
         ) {
           return;

@@ -1,4 +1,4 @@
-import { useContext, useMemo, useState, type ReactNode } from "react";
+import { useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Dialog,
   DialogContent,
@@ -8,10 +8,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { aiService } from "@/services/tauri/ai.service";
-import {
-  type AiPlannerKind,
-  useAiSettingsStore,
-} from "@/store/useAiSettingsStore";
+import { useAiSettingsStore } from "@/store/useAiSettingsStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { ThemeContext } from "@/theme/ThemeProvider";
 import { cn } from "@/lib/utils";
@@ -23,6 +20,7 @@ import {
 } from "@/lib/actions";
 import type { AppSettings, WorkbenchSide } from "@/lib/appSettings";
 import { moveSideToolWindow } from "@/lib/workbenchLayout";
+import { parseVimMappings, serializeVimMappings } from "@/lib/vimMappings";
 import {
   Bot,
   Braces,
@@ -121,7 +119,12 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const aiModel = useAiSettingsStore((state) => state.model);
   const aiApiKey = useAiSettingsStore((state) => state.apiKey);
   const aiTimeoutMs = useAiSettingsStore((state) => state.timeoutMs);
-  const aiPlannerKind = useAiSettingsStore((state) => state.plannerKind);
+  const aiInlineCompletionProtocol = useAiSettingsStore(
+    (state) => state.inlineCompletionProtocol
+  );
+  const aiInlineCompletionModel = useAiSettingsStore(
+    (state) => state.inlineCompletionModel
+  );
   const setAiEnabled = useAiSettingsStore((state) => state.setEnabled);
   const updateAiSettings = useAiSettingsStore((state) => state.updateSettings);
   const [activeSection, setActiveSection] =
@@ -167,11 +170,6 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     void updateSettings(updates);
   };
 
-  const handlePlannerChange = (plannerKind: AiPlannerKind) => {
-    updateAiSettings({ plannerKind });
-    updateAppSettings({ ai: { ...appSettings.ai, plannerKind } });
-  };
-
   const handleTestAiProvider = async () => {
     setAiTestState(null);
     setIsTestingAi(true);
@@ -198,7 +196,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="h-[720px] max-h-[calc(100vh-28px)] w-[980px] max-w-[calc(100vw-28px)] gap-0 overflow-hidden rounded-[8px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] p-0 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_24px_70px_rgba(0,0,0,0.46)]">
+      <DialogContent className="top-[14px] flex h-[calc(100vh-28px)] max-h-none w-[1040px] max-w-[calc(100vw-28px)] translate-y-0 flex-col gap-0 overflow-hidden rounded-[8px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] p-0 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_12px_36px_rgba(0,0,0,0.4)] data-[state=closed]:slide-out-to-top-0 data-[state=open]:slide-in-from-top-0">
         <DialogHeader className="relative flex h-10 shrink-0 items-center justify-center border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-frame))] px-4 py-0">
           <DialogTitle className="text-[12px] font-semibold tracking-normal text-[hsl(var(--wb-text-muted))]">
             Settings
@@ -271,7 +269,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
               </div>
             )}
 
-            <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-4">
+            <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-4">
               {activeSection === "appearance" && (
                 <AppearanceSettings
                   mode={mode}
@@ -311,10 +309,12 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   aiModel={aiModel}
                   aiApiKey={aiApiKey}
                   aiTimeoutMs={aiTimeoutMs}
-                  aiPlannerKind={aiPlannerKind}
+                  aiInlineCompletionProtocol={aiInlineCompletionProtocol}
+                  aiInlineCompletionModel={aiInlineCompletionModel}
+                  settings={appSettings}
+                  onUpdate={updateAppSettings}
                   setAiEnabled={setAiEnabled}
                   updateAiSettings={updateAiSettings}
-                  onPlannerChange={handlePlannerChange}
                   canTestAi={canTestAi}
                   isTestingAi={isTestingAi}
                   aiTestState={aiTestState}
@@ -525,7 +525,7 @@ function WorkbenchSettings({
           <option value="right">Right</option>
         </select>
       </SettingRow>
-      <SettingRow label="AI Assistant:">
+      <SettingRow label="Secondary Panel:">
         <CheckboxLabel
           label="Enabled"
           checked={toolWindows.assistant.enabled}
@@ -586,7 +586,7 @@ function WorkbenchSettings({
           max={640}
           onChange={(rightWidth) => updateLayout({ rightWidth })}
         />
-        <span className="settings-hint">AI Assistant</span>
+        <span className="settings-hint">Assistant and Files</span>
       </SettingRow>
       <SettingRow label="Bottom height:">
         <NumberInput
@@ -673,6 +673,19 @@ function EditorSettings({
   const editor = settings.editor;
   const updateEditor = (patch: Partial<AppSettings["editor"]>) =>
     onUpdate({ editor: { ...editor, ...patch } });
+  const serializedMappings = useMemo(
+    () => serializeVimMappings(editor.vim.mappings),
+    [editor.vim.mappings]
+  );
+  const [vimMappingDraft, setVimMappingDraft] = useState(serializedMappings);
+  const [vimMappingErrors, setVimMappingErrors] = useState<string[]>([]);
+
+  useEffect(() => {
+    setVimMappingDraft(serializedMappings);
+  }, [serializedMappings]);
+
+  const updateVim = (patch: Partial<AppSettings["editor"]["vim"]>) =>
+    updateEditor({ vim: { ...editor.vim, ...patch } });
 
   return (
     <SettingsPanel>
@@ -721,6 +734,78 @@ function EditorSettings({
           updateEditor({ confirmDestructiveSql: !editor.confirmDestructiveSql })
         }
       />
+      <SettingsDivider title="Vim" />
+      <CheckboxLabel
+        label="Enable Vim keybindings"
+        detail="Normal, Insert, Visual, command, search, and macro workflows"
+        checked={editor.keybindingMode === "vim"}
+        onChange={() =>
+          updateEditor({
+            keybindingMode:
+              editor.keybindingMode === "vim" ? "standard" : "vim",
+          })
+        }
+      />
+      {editor.keybindingMode === "vim" && (
+        <>
+          <SettingRow label="Leader key:">
+            <SettingsInput
+              value={editor.vim.leader}
+              onChange={(leader) => {
+                const normalized = leader.trim();
+                if (normalized && normalized.length <= 16) {
+                  updateVim({ leader: normalized });
+                }
+              }}
+              placeholder="\\ or <Space>"
+            />
+          </SettingRow>
+          <CheckboxLabel
+            label="Use relative line numbers"
+            checked={editor.vim.relativeLineNumbers}
+            onChange={() =>
+              updateVim({
+                relativeLineNumbers: !editor.vim.relativeLineNumbers,
+              })
+            }
+          />
+          <SettingRow label="Custom mappings:">
+            <div className="min-w-0">
+              <textarea
+                value={vimMappingDraft}
+                onChange={(event) => {
+                  const source = event.target.value;
+                  const parsed = parseVimMappings(source);
+                  setVimMappingDraft(source);
+                  setVimMappingErrors(parsed.errors);
+                  if (parsed.errors.length === 0) {
+                    updateVim({ mappings: parsed.mappings });
+                  }
+                }}
+                placeholder={
+                  "nnoremap <leader>f /FROM<Enter>\nimap jj <Esc>"
+                }
+                spellCheck={false}
+                className={cn(
+                  "custom-scrollbar min-h-28 w-[420px] resize-y rounded-[4px] border bg-[hsl(var(--wb-panel-raised))] px-2 py-1.5 font-mono text-[11px] leading-5 text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]",
+                  vimMappingErrors.length > 0
+                    ? "border-[hsl(var(--destructive))]"
+                    : "border-[hsl(var(--wb-border))]"
+                )}
+              />
+              <p className="mt-1 max-w-[58ch] text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
+                Supports map, nmap, imap, vmap and their non-recursive forms.
+                Use &lt;leader&gt; in either side of a mapping.
+              </p>
+              {vimMappingErrors.length > 0 && (
+                <div className="mt-1 text-[10px] leading-4 text-[hsl(var(--destructive))]">
+                  {vimMappingErrors.join(" ")}
+                </div>
+              )}
+            </div>
+          </SettingRow>
+        </>
+      )}
     </SettingsPanel>
   );
 }
@@ -854,10 +939,12 @@ function AiSettings({
   aiModel,
   aiApiKey,
   aiTimeoutMs,
-  aiPlannerKind,
+  aiInlineCompletionProtocol,
+  aiInlineCompletionModel,
+  settings,
+  onUpdate,
   setAiEnabled,
   updateAiSettings,
-  onPlannerChange,
   canTestAi,
   isTestingAi,
   aiTestState,
@@ -868,21 +955,35 @@ function AiSettings({
   aiModel: string;
   aiApiKey: string;
   aiTimeoutMs: number;
-  aiPlannerKind: AiPlannerKind;
+  aiInlineCompletionProtocol: "chat-completions" | "text-completions-fim";
+  aiInlineCompletionModel: string;
+  settings: AppSettings;
+  onUpdate: (updates: Partial<AppSettings>) => void;
   setAiEnabled: (enabled: boolean) => void;
   updateAiSettings: (settings: Partial<{
-    plannerKind: AiPlannerKind;
     baseUrl: string;
     model: string;
     apiKey: string;
     timeoutMs: number;
+    inlineCompletionProtocol: "chat-completions" | "text-completions-fim";
+    inlineCompletionModel: string;
   }>) => void;
-  onPlannerChange: (plannerKind: AiPlannerKind) => void;
   canTestAi: boolean;
   isTestingAi: boolean;
   aiTestState: { status: "success" | "error"; message: string } | null;
   onTest: () => void;
 }) {
+  const inlineCompletion = settings.editor.inlineCompletion;
+  const updateInlineCompletion = (
+    patch: Partial<AppSettings["editor"]["inlineCompletion"]>
+  ) =>
+    onUpdate({
+      editor: {
+        ...settings.editor,
+        inlineCompletion: { ...inlineCompletion, ...patch },
+      },
+    });
+
   return (
     <SettingsPanel>
       <SettingsDivider title="Provider" first />
@@ -892,22 +993,9 @@ function AiSettings({
         onChange={() => setAiEnabled(!aiEnabled)}
         detail="Disabled mode keeps deterministic local planning."
       />
-      <SettingRow label="Planner:">
-        <select
-          className={cn(selectClass, "w-[260px]")}
-          value={aiPlannerKind}
-          onChange={(event) =>
-            onPlannerChange(event.target.value as AiPlannerKind)
-          }
-        >
-          <option value="model">Model planner</option>
-          <option value="langgraph">LangGraph planner plugin</option>
-          <option value="local">Local deterministic planner</option>
-        </select>
-      </SettingRow>
-      <p className="mb-3 ml-[162px] max-w-[68ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
-        LangGraph planner uses @langchain/langgraph and falls back to local planning
-        when the model provider is unavailable.
+      <p className="mb-3 max-w-[68ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
+        Choose O2, Plan, Agent, or Chat from the assistant composer. Planning and
+        tool orchestration are selected automatically for the active mode.
       </p>
       <SettingRow label="Base URL:">
         <SettingsInput
@@ -958,12 +1046,79 @@ function AiSettings({
           </span>
         )}
       </div>
+
+      <SettingsDivider title="Inline Completion" />
+      <CheckboxLabel
+        label="Enable inline completion"
+        detail="Show database-aware ghost text without executing generated SQL"
+        checked={inlineCompletion.enabled}
+        onChange={() =>
+          updateInlineCompletion({ enabled: !inlineCompletion.enabled })
+        }
+      />
+      <CheckboxLabel
+        label="Automatic suggestions"
+        checked={inlineCompletion.automaticSuggestions}
+        onChange={() =>
+          updateInlineCompletion({
+            automaticSuggestions: !inlineCompletion.automaticSuggestions,
+          })
+        }
+      />
+      <CheckboxLabel
+        label="Include schema metadata"
+        checked={inlineCompletion.includeSchemaMetadata}
+        onChange={() =>
+          updateInlineCompletion({
+            includeSchemaMetadata: !inlineCompletion.includeSchemaMetadata,
+          })
+        }
+      />
+      <CheckboxLabel
+        label="Include project context"
+        detail="Opt in to sending relevant database-file snippets from the associated project"
+        checked={inlineCompletion.includeProjectContext}
+        onChange={() =>
+          updateInlineCompletion({
+            includeProjectContext: !inlineCompletion.includeProjectContext,
+          })
+        }
+      />
+      <SettingRow label="Protocol:">
+        <select
+          className={selectClass}
+          value={aiInlineCompletionProtocol}
+          onChange={(event) =>
+            updateAiSettings({
+              inlineCompletionProtocol: event.target.value as
+                | "chat-completions"
+                | "text-completions-fim",
+            })
+          }
+        >
+          <option value="chat-completions">Chat completions</option>
+          <option value="text-completions-fim">Text completions (FIM)</option>
+        </select>
+      </SettingRow>
+      <SettingRow label="Completion model:">
+        <SettingsInput
+          value={aiInlineCompletionModel}
+          onChange={(inlineCompletionModel) =>
+            updateAiSettings({ inlineCompletionModel })
+          }
+          placeholder={`Use assistant model (${aiModel || "not configured"})`}
+        />
+      </SettingRow>
+      <p className="mt-2 max-w-[68ch] text-[11px] leading-5 text-[hsl(var(--wb-text-muted))]">
+        Automatic requests use a 4 second timeout and never include connection
+        strings, API keys, query results, or database row data.
+      </p>
     </SettingsPanel>
   );
 }
 
 function SettingsPanel({ children }: { children: ReactNode }) {
-  return <div className="max-w-[780px] pb-10">{children}</div>;
+  return <div className="w-full max-w-[820px] pb-8">{children}</div>;
 }
 
 function SettingsDivider({

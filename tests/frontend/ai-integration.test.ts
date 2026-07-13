@@ -986,10 +986,69 @@ describe("LangGraph planner bridge", () => {
   });
 });
 
+describe("assistant runtime plan normalization", () => {
+  it("recomputes approval policy and assigns unique step ids", async () => {
+    const runtime = createAssistantRuntime({
+      registry: createTestRegistry(),
+      createContext,
+      policy: DEFAULT_AI_TOOL_POLICY,
+      planner: {
+        id: "untrusted-test-planner",
+        mode: "model",
+        description: "Returns deliberately unsafe plan metadata.",
+        plan: () => ({
+          intent: "query",
+          steps: [
+            {
+              id: "duplicate",
+              title: "Read",
+              toolName: "demo.read",
+              input: { value: "one" },
+              requiresApproval: true,
+            },
+            {
+              id: "duplicate",
+              title: "Write",
+              toolName: "demo.write",
+              input: { value: "two" },
+              requiresApproval: false,
+            },
+            {
+              id: "unknown",
+              title: "Unknown",
+              toolName: "demo.missing",
+              requiresApproval: false,
+            },
+          ],
+        }),
+      },
+    });
+
+    const turn = await runtime.prepareTurnAsync({ message: "change demo" });
+
+    expect(turn.suggestedPlan).toEqual([
+      expect.objectContaining({
+        id: "duplicate",
+        toolName: "demo.read",
+        requiresApproval: false,
+      }),
+      expect.objectContaining({
+        id: "duplicate-2",
+        toolName: "demo.write",
+        requiresApproval: true,
+      }),
+    ]);
+    expect(turn.warnings).toContain(
+      "Assistant planner requested unknown tool: demo.missing"
+    );
+  });
+});
+
 describe("model assistant planner", () => {
   it("bounds large model planner text context before invoking providers", async () => {
     const largeSql = `SELECT * FROM logs WHERE message = '${"x".repeat(9_000)}'`;
     const largeSelection = "y".repeat(9_000);
+    const largePrompt = "z".repeat(20_000);
     const richContext = createRichContext();
     let captured: AssistantModelPlannerRequest | null = null;
     const runtime = createAssistantRuntime({
@@ -1016,17 +1075,25 @@ describe("model assistant planner", () => {
     });
 
     await runtime.prepareTurnAsync({
-      message: "inspect selected query",
+      message: largePrompt,
       selectedText: largeSelection,
       history: Array.from({ length: 14 }, (_, index) => ({
         role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
-        content: index === 13 ? largeSelection : `message ${index}`,
+        content: index >= 5 ? largeSelection : `message ${index}`,
       })),
     });
 
+    expect(captured?.turn.message).toContain("[truncated]");
+    expect(captured?.turn.message.length).toBeLessThan(largePrompt.length);
     expect(captured?.turn.selectedText).toContain("[truncated]");
     expect(captured?.turn.selectedText?.length).toBeLessThan(largeSelection.length);
-    expect(captured?.turn.history).toHaveLength(12);
+    expect(captured?.turn.history?.length).toBeLessThanOrEqual(12);
+    expect(
+      captured?.turn.history?.reduce(
+        (total, message) => total + message.content.length,
+        0
+      )
+    ).toBeLessThanOrEqual(24_000);
     expect(captured?.turn.history?.at(-1)?.content).toContain("[truncated]");
     expect(captured?.context.activeTab?.sql).toContain("[truncated]");
     expect(captured?.context.activeTab?.sql?.length).toBeLessThan(largeSql.length);
@@ -1155,5 +1222,85 @@ describe("model assistant planner", () => {
         tableName: "users",
       },
     });
+  });
+
+  it("falls back to a local result summary when the model summary fails", async () => {
+    const runtime = createAssistantRuntime({
+      registry: createTestRegistry(),
+      createContext,
+      summarizeToolResults: async () => {
+        throw new Error("provider offline");
+      },
+    });
+
+    const summary = await runtime.summarizeToolResults(
+      { message: "summarize this" },
+      [
+        {
+          id: "read",
+          toolName: "demo.read",
+          status: "success",
+          output: { ok: true },
+        },
+      ]
+    );
+
+    expect(summary.message).toBe(
+      "1 tool call succeeded. Detailed model summary unavailable."
+    );
+    expect(summary.warnings).toContain(
+      "Model result summary failed; used the local summary."
+    );
+  });
+
+  it("normalizes model-suggested follow-up calls through the runtime policy", () => {
+    const runtime = createAssistantRuntime({
+      registry: createTestRegistry(),
+      createContext,
+    });
+
+    const followUps = runtime.normalizeSuggestedCalls(
+      [
+        {
+          id: "read",
+          toolName: "demo.read",
+          input: { value: "next" },
+          reason: "Inspect the next value",
+          approved: true,
+        },
+        {
+          id: "write",
+          toolName: "demo.write",
+          input: { value: "change" },
+          approved: true,
+        },
+        {
+          id: "unknown",
+          toolName: "demo.missing",
+          input: "invalid",
+        },
+      ],
+      ["read"]
+    );
+
+    expect(followUps.steps).toEqual([
+      expect.objectContaining({
+        id: "read-2",
+        title: "Inspect the next value",
+        toolName: "demo.read",
+        requiresApproval: false,
+      }),
+      expect.objectContaining({
+        id: "write",
+        toolName: "demo.write",
+        requiresApproval: true,
+      }),
+    ]);
+    expect(followUps.warnings).toContain(
+      "Assistant planner requested unknown tool: demo.missing"
+    );
+    expect(followUps.warnings).toContain(
+      "Assistant follow-up demo.missing had a non-object input and was normalized."
+    );
   });
 });

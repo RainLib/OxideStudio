@@ -8,25 +8,27 @@ import type {
 } from "@/ai/assistant/types";
 import type { AiToolPermission, AiToolSummary } from "@/ai/tools/types";
 import {
-  Bot,
-  FileSearch,
+  Check,
+  CircleAlert,
+  Loader2,
   Play,
   RotateCcw,
   ShieldAlert,
   ShieldCheck,
-  TerminalSquare,
 } from "lucide-react";
-import type { ReactNode } from "react";
 
 interface AssistantPlanViewProps {
   preparedTurn: AssistantPreparedTurn | null;
+  executionEnabled: boolean;
   runnableStepCount: number;
+  safeStepCount: number;
   activeStepId: string | null;
   isRunning: boolean;
-  turnSummary: AssistantToolResultSummary | null;
   toolResults: Record<string, AssistantToolCallResult>;
   toolSummaries: Record<string, AssistantToolResultSummary>;
   approvedStepIds: Set<string>;
+  canRunSafe: boolean;
+  onRunSafe: () => void;
   onApproveStep: (step: AssistantPlanStep) => void;
   onRevokeStepApproval: (step: AssistantPlanStep) => void;
   onRunStep: (step: AssistantPlanStep, approved?: boolean) => void;
@@ -34,118 +36,87 @@ interface AssistantPlanViewProps {
 
 export function AssistantPlanView({
   preparedTurn,
+  executionEnabled,
   runnableStepCount,
+  safeStepCount,
   activeStepId,
   isRunning,
-  turnSummary,
   toolResults,
   toolSummaries,
   approvedStepIds,
+  canRunSafe,
+  onRunSafe,
   onApproveStep,
   onRevokeStepApproval,
   onRunStep,
 }: AssistantPlanViewProps) {
-  if (!preparedTurn) {
-    return (
-      <div className="flex h-full flex-col justify-center px-4 text-[11px] text-[hsl(var(--wb-text-muted))]">
-        <div className="mx-auto w-full max-w-[280px] space-y-3">
-          <div className="flex items-center gap-2 text-[hsl(var(--wb-text))]">
-            <Bot size={15} className="text-[hsl(var(--wb-accent))]" />
-            <span className="font-semibold">Plan database work</span>
-          </div>
-          <div className="space-y-1.5">
-            <EmptyHint icon={<FileSearch size={12} />} text="Inspect the active table or selection" />
-            <EmptyHint icon={<TerminalSquare size={12} />} text="Explain SQL before running it" />
-            <EmptyHint icon={<ShieldCheck size={12} />} text="Prepare mutations behind approval gates" />
-          </div>
-        </div>
-      </div>
-    );
-  }
+  if (!preparedTurn) return null;
 
   return (
-    <div className="space-y-2 p-2">
-      <AssistantPlanHeader
-        preparedTurn={preparedTurn}
-        runnableStepCount={runnableStepCount}
-      />
-
-      {turnSummary && <AssistantSummary summary={turnSummary} />}
-
-      {preparedTurn.suggestedPlan.map((step) => (
-        <AssistantPlanStepCard
-          key={step.id}
-          step={step}
-          result={toolResults[step.id]}
-          summary={toolSummaries[step.id]}
-          tool={preparedTurn.availableTools.find(
-            (candidate) => candidate.name === step.toolName
-          )}
-          isApproved={approvedStepIds.has(step.id)}
-          isActive={activeStepId === step.id}
-          isRunning={isRunning}
-          onApproveStep={onApproveStep}
-          onRevokeStepApproval={onRevokeStepApproval}
-          onRunStep={onRunStep}
-        />
-      ))}
-    </div>
-  );
-}
-
-function AssistantPlanHeader({
-  preparedTurn,
-  runnableStepCount,
-}: {
-  preparedTurn: AssistantPreparedTurn;
-  runnableStepCount: number;
-}) {
-  return (
-    <div className="border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-2 py-1.5">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] font-medium text-[hsl(var(--wb-text-muted))]">
-          {preparedTurn.intent}
+    <section
+      className="mx-3 mb-3 border-y border-[hsl(var(--wb-border-subtle))]"
+      aria-label="Assistant plan"
+    >
+      <div className="flex min-h-8 items-center gap-2 px-1.5 py-1">
+        <span className="text-[10px] font-semibold text-[hsl(var(--wb-text))]">
+          Plan
         </span>
-        <span className="text-[10px] text-[hsl(var(--wb-text-muted))]">
-          {preparedTurn.availableTools.length} tools / {preparedTurn.planner.mode}
+        <span className="min-w-0 flex-1 truncate text-[10px] text-[hsl(var(--wb-text-muted))]">
+          {runnableStepCount > 0
+            ? `${runnableStepCount} tool ${runnableStepCount === 1 ? "step" : "steps"}`
+            : preparedTurn.intent}
         </span>
+        {!executionEnabled && (
+          <span className="text-[9px] text-[hsl(var(--wb-text-muted))]">
+            Review only
+          </span>
+        )}
+        {canRunSafe && (
+          <button
+            type="button"
+            className="wb-text-button h-6 px-1.5 text-[10px]"
+            onClick={onRunSafe}
+            title="Run all read-only steps"
+          >
+            <Play size={10} />
+            Run read-only{safeStepCount > 1 ? ` (${safeStepCount})` : ""}
+          </button>
+        )}
       </div>
+
       {preparedTurn.warnings.length > 0 && (
-        <div className="mt-1 space-y-1">
-          {preparedTurn.warnings.map((warning) => (
-            <div key={warning} className="text-[10px] text-amber-500">
-              {warning}
-            </div>
-          ))}
+        <div className="border-t border-[hsl(var(--wb-border-subtle))] px-2 py-1.5 text-[10px] leading-4 text-amber-500">
+          {preparedTurn.warnings.join(" ")}
         </div>
       )}
-      {runnableStepCount === 0 && (
-        <div className="mt-1 text-[10px] text-[hsl(var(--wb-text-muted))]">
-          No executable tool step was planned.
-        </div>
-      )}
-    </div>
+
+      <ol className="border-t border-[hsl(var(--wb-border-subtle))]">
+        {preparedTurn.suggestedPlan.map((step, index) => (
+          <AssistantPlanStepRow
+            key={step.id}
+            index={index}
+            step={step}
+            result={toolResults[step.id]}
+            summary={toolSummaries[step.id]}
+            tool={preparedTurn.availableTools.find(
+              (candidate) => candidate.name === step.toolName
+            )}
+            isApproved={approvedStepIds.has(step.id)}
+            isActive={activeStepId === step.id}
+            isRunning={isRunning}
+            executionEnabled={executionEnabled}
+            onApproveStep={onApproveStep}
+            onRevokeStepApproval={onRevokeStepApproval}
+            onRunStep={onRunStep}
+          />
+        ))}
+      </ol>
+    </section>
   );
 }
 
-function AssistantSummary({
-  summary,
-}: {
-  summary: AssistantToolResultSummary;
-}) {
-  return (
-    <div className="border border-[hsl(var(--wb-accent)/0.35)] bg-[hsl(var(--wb-accent)/0.08)] px-2 py-1.5 text-[11px] text-[hsl(var(--wb-text))]">
-      {summary.message}
-      {summary.warnings?.map((warning) => (
-        <div key={warning} className="mt-1 text-[10px] text-amber-500">
-          {warning}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function AssistantPlanStepCard({
+function AssistantPlanStepRow({
+  index,
   step,
   result,
   summary,
@@ -153,10 +124,12 @@ function AssistantPlanStepCard({
   isApproved,
   isActive,
   isRunning,
+  executionEnabled,
   onApproveStep,
   onRevokeStepApproval,
   onRunStep,
 }: {
+  index: number;
   step: AssistantPlanStep;
   result?: AssistantToolCallResult;
   summary?: AssistantToolResultSummary;
@@ -164,141 +137,174 @@ function AssistantPlanStepCard({
   isApproved: boolean;
   isActive: boolean;
   isRunning: boolean;
+  executionEnabled: boolean;
   onApproveStep: (step: AssistantPlanStep) => void;
   onRevokeStepApproval: (step: AssistantPlanStep) => void;
   onRunStep: (step: AssistantPlanStep, approved?: boolean) => void;
 }) {
-  const permissions = tool?.permissions ?? [];
   const canRun = Boolean(step.toolName) && (!step.requiresApproval || isApproved);
 
   return (
-    <div className="border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2">
+    <li className="border-b border-[hsl(var(--wb-border-subtle))] px-1.5 py-2 last:border-b-0">
       <div className="flex items-start gap-2">
+        <StepStatus index={index} isActive={isActive} result={result} />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[11px] text-[hsl(var(--wb-text))]">
+          <div className="text-[11px] leading-4 text-[hsl(var(--wb-text))]">
             {step.title}
           </div>
-          {step.toolName && (
-            <div className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
-              {step.toolName}
-            </div>
-          )}
-          {permissions.length > 0 && (
-            <div className="mt-1 flex flex-wrap gap-1">
-              {permissions.map((permission) => (
-                <PermissionBadge key={permission} permission={permission} />
-              ))}
-            </div>
-          )}
-        </div>
-        {step.toolName && !step.requiresApproval && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn(
-              "h-6 w-6 rounded-sm text-muted-foreground hover:text-primary",
-              isActive && "animate-pulse"
+          <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            {step.toolName && (
+              <span className="truncate font-mono text-[9px] text-[hsl(var(--wb-text-muted))]">
+                {step.toolName}
+              </span>
             )}
+            {tool?.permissions.map((permission) => (
+              <PermissionLabel key={permission} permission={permission} />
+            ))}
+          </div>
+        </div>
+
+        {executionEnabled && step.toolName && !step.requiresApproval && !result && (
+          <button
+            type="button"
+            className="wb-icon-button h-6 w-6"
             onClick={() => onRunStep(step, false)}
             disabled={isRunning}
-            title="Run"
+            title="Run step"
+            aria-label={`Run ${step.title}`}
           >
-            <Play size={12} />
-          </Button>
+            <Play size={11} />
+          </button>
         )}
       </div>
 
-      {step.requiresApproval && (
-        <div className="mt-2 border border-amber-500/35 bg-amber-500/10 p-2">
-          <div className="flex items-start gap-2">
-            <ShieldAlert size={13} className="mt-0.5 shrink-0 text-amber-400" />
-            <div className="min-w-0 flex-1">
-              <div className="text-[10px] font-medium text-amber-300">
-                Approval required
-              </div>
-              <div className="mt-0.5 text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
-                This step can change data, delete data, or call an external capability.
-                Approve it only after reviewing the tool and input.
-              </div>
+      {step.input && Object.keys(step.input).length > 0 && (
+        <details className="mt-1.5 ml-6 text-[9px] text-[hsl(var(--wb-text-muted))]">
+          <summary className="cursor-pointer select-none hover:text-[hsl(var(--wb-text))]">
+            Review planned input
+          </summary>
+          <pre className="custom-scrollbar mt-1 max-h-40 overflow-auto bg-[hsl(var(--wb-panel))] p-2 leading-4 text-[hsl(var(--wb-text))]">
+            {JSON.stringify(step.input, null, 2)}
+          </pre>
+        </details>
+      )}
+
+      {executionEnabled && step.requiresApproval && (
+        <div className="mt-2 ml-6 flex items-start gap-2 bg-amber-500/8 px-2 py-1.5">
+          <ShieldAlert size={12} className="mt-0.5 shrink-0 text-amber-500" />
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
+              This action can change data or affect an external system and needs explicit approval.
             </div>
-          </div>
-          <div className="mt-2 flex flex-wrap justify-end gap-1">
-            {isApproved ? (
-              <>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 rounded-sm px-2 text-[10px] text-[hsl(var(--wb-text-muted))]"
-                  disabled={isRunning}
-                  onClick={() => onRevokeStepApproval(step)}
-                >
-                  <RotateCcw size={11} className="mr-1" />
-                  Revoke
-                </Button>
+            <div className="mt-1.5 flex flex-wrap justify-end gap-1">
+              {isApproved ? (
+                <>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 rounded-[4px] px-2 text-[10px]"
+                    disabled={isRunning}
+                    onClick={() => onRevokeStepApproval(step)}
+                  >
+                    <RotateCcw size={10} className="mr-1" />
+                    Revoke
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 rounded-[4px] px-2 text-[10px]"
+                    disabled={isRunning || !canRun}
+                    onClick={() => onRunStep(step, true)}
+                  >
+                    <Play size={10} className="mr-1" />
+                    Run approved
+                  </Button>
+                </>
+              ) : (
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-6 rounded-sm px-2 text-[10px]"
-                  disabled={isRunning || !canRun}
-                  onClick={() => onRunStep(step, true)}
+                  className="h-6 rounded-[4px] px-2 text-[10px] text-amber-500"
+                  disabled={isRunning}
+                  onClick={() => onApproveStep(step)}
                 >
-                  <Play size={11} className="mr-1" />
-                  Run approved
+                  <ShieldCheck size={10} className="mr-1" />
+                  Approve
                 </Button>
-              </>
-            ) : (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-6 rounded-sm px-2 text-[10px] text-amber-300"
-                disabled={isRunning}
-                onClick={() => onApproveStep(step)}
-              >
-                <ShieldCheck size={11} className="mr-1" />
-                Approve
-              </Button>
-            )}
+              )}
+            </div>
           </div>
+        </div>
+      )}
+
+      {summary && (
+        <div className="mt-1.5 ml-6 text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
+          {summary.message}
         </div>
       )}
 
       {result !== undefined && (
-        <div className="mt-2 space-y-1.5">
-          {summary && <AssistantSummary summary={summary} />}
-          <pre className="custom-scrollbar max-h-44 overflow-auto border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] p-2 text-[10px] text-[hsl(var(--wb-text-muted))]">
+        <details className="mt-1.5 ml-6 text-[9px] text-[hsl(var(--wb-text-muted))]">
+          <summary className="cursor-pointer select-none hover:text-[hsl(var(--wb-text))]">
+            Result details
+          </summary>
+          <pre className="custom-scrollbar mt-1 max-h-40 overflow-auto bg-[hsl(var(--wb-panel))] p-2 leading-4">
             {JSON.stringify(result, null, 2)}
           </pre>
-        </div>
+        </details>
       )}
-    </div>
+    </li>
   );
 }
 
-function PermissionBadge({ permission }: { permission: AiToolPermission }) {
+function StepStatus({
+  index,
+  isActive,
+  result,
+}: {
+  index: number;
+  isActive: boolean;
+  result?: AssistantToolCallResult;
+}) {
+  const className = "mt-0.5 h-4 w-4 shrink-0";
+  if (isActive) {
+    return (
+      <Loader2
+        size={13}
+        className={cn(className, "animate-spin text-[hsl(var(--wb-accent))]")}
+      />
+    );
+  }
+  if (result?.status === "success") {
+    return <Check size={13} className={cn(className, "text-emerald-500")} />;
+  }
+  if (result) {
+    return (
+      <CircleAlert
+        size={13}
+        className={cn(className, "text-[hsl(var(--destructive))]")}
+      />
+    );
+  }
   return (
-    <span
-      className={cn(
-        "rounded-[3px] border px-1 py-0.5 text-[9px] uppercase leading-none",
-        permission === "read" &&
-          "border-emerald-500/25 bg-emerald-500/10 text-emerald-300",
-        permission === "write" &&
-          "border-amber-500/30 bg-amber-500/10 text-amber-300",
-        permission === "destructive" &&
-          "border-red-500/35 bg-red-500/10 text-red-300",
-        permission === "external" &&
-          "border-sky-500/35 bg-sky-500/10 text-sky-300"
-      )}
-    >
-      {permission}
+    <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[hsl(var(--wb-active))] text-[9px] tabular-nums text-[hsl(var(--wb-text-muted))]">
+      {index + 1}
     </span>
   );
 }
 
-function EmptyHint({ icon, text }: { icon: ReactNode; text: string }) {
+function PermissionLabel({ permission }: { permission: AiToolPermission }) {
   return (
-    <div className="flex items-center gap-2 border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-2 py-1.5">
-      <span className="text-[hsl(var(--wb-text-muted))]">{icon}</span>
-      <span>{text}</span>
-    </div>
+    <span
+      className={cn(
+        "text-[9px]",
+        permission === "read" && "text-emerald-500",
+        permission === "write" && "text-amber-500",
+        permission === "destructive" && "text-red-500",
+        permission === "external" && "text-sky-500"
+      )}
+    >
+      {permission}
+    </span>
   );
 }

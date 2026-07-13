@@ -5,6 +5,7 @@ import {
   queryEditorLanguageId,
   supportsLspLanguageId,
 } from "@/lib/databaseDialect";
+import { DEFAULT_LSP_METADATA_BATCHING } from "./schemaBatching";
 
 export type LspActivationPolicy = "auto" | "off";
 
@@ -16,15 +17,10 @@ export type BuiltInLspProfile = {
   documentLanguageId: string;
   activationPolicy: LspActivationPolicy;
   binaryKind: "bundled";
-  metadataLimits: {
-    maxTablesPerSchema: number;
-    maxCollectionsPerSchema: number;
+  metadataBatching: {
+    batchSize: number;
+    concurrency: number;
   };
-};
-
-const DEFAULT_METADATA_LIMITS = {
-  maxTablesPerSchema: 200,
-  maxCollectionsPerSchema: 500,
 };
 
 export function builtInLspProfileForDriver(
@@ -41,7 +37,7 @@ export function builtInLspProfileForDriver(
     documentLanguageId: queryEditorLanguageId(driver),
     activationPolicy: "auto",
     binaryKind: "bundled",
-    metadataLimits: DEFAULT_METADATA_LIMITS,
+    metadataBatching: DEFAULT_LSP_METADATA_BATCHING,
   };
 }
 

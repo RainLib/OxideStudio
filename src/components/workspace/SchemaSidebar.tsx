@@ -2,7 +2,7 @@ import { cn } from "@/lib/utils";
 import {
   Database,
   Table,
-  Braces,
+  KeyRound,
   ChevronDown,
   ChevronRight,
   RefreshCw,
@@ -26,6 +26,8 @@ import {
   getConnectionMetadataSnapshotKey,
   getSchemaMetadataNodeKey,
   getSchemaObjectMetadataSnapshotKey,
+  MAX_REDIS_KEYS_IN_MEMORY,
+  REDIS_KEY_PAGE_SIZE,
   useSchemaStore,
   type MetadataNodeState,
 } from "@/store/useSchemaStore";
@@ -40,7 +42,7 @@ import { DdlViewerDialog } from "./DdlViewerDialog";
 import { EditColumnsDialog } from "./EditColumnsDialog";
 import { CreateViewDialog } from "./CreateViewDialog";
 import { useTableOperations } from "@/hooks/useTableOperations";
-import { databaseService } from "@/services/tauri";
+import { databaseService, queryService, schemaService } from "@/services/tauri";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
 import type {
   CollectionInfo,
@@ -68,7 +70,14 @@ import {
   collectionPreviewQueryTemplateForCapabilities,
   collectionPreviewTabTitleForCapabilities,
 } from "@/lib/databaseObjectPreview";
-import { type CSSProperties, useEffect, useMemo, useState } from "react";
+import {
+  type CSSProperties,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -91,6 +100,26 @@ import {
   DatabaseExplorerToolbar,
 } from "./DatabaseExplorerChrome";
 import { DataSourceDialog } from "./DataSourceDialog";
+import { DatabaseBrandIcon } from "@/components/icons/DatabaseBrandIcon";
+import { ConnectionGlyph } from "@/components/icons/ConnectionGlyph";
+import { RedisKeyDialog } from "./RedisKeyDialog";
+import {
+  PostgresDatabaseTree,
+  postgresConnectionDatabaseName,
+} from "./PostgresDatabaseTree";
+import { PostgresRemoteDatabaseContents } from "./PostgresRemoteDatabaseContents";
+import { PostgresDatabaseVisibilitySection } from "./PostgresDatabaseVisibilitySection";
+import { usePostgresDatabaseDiscovery } from "@/hooks/usePostgresDatabaseDiscovery";
+import {
+  buildRedisKeyTree,
+  type RedisKeyTreeNode,
+} from "@/lib/redisKey";
+
+interface PostgresRemoteDatabaseState {
+  connectionId: string | null;
+  schemas: Record<string, string[]>;
+  tables: Record<string, Record<string, TableInfo[]>>;
+}
 
 function routineMatchesFilter(routine: FunctionInfo, filter: string) {
   const normalizedFilter = filter.trim().toLowerCase();
@@ -122,18 +151,36 @@ function connectionTreeColor(driver: string | null | undefined, color?: string) 
   return color || DRIVER_TREE_COLORS[driver || ""] || "#75a7ff";
 }
 
-function connectionRegionStyle(color: string, _active: boolean): CSSProperties {
+function connectionRegionStyle(
+  color: string | undefined,
+  active: boolean
+): CSSProperties | undefined {
+  if (!color) return undefined;
   return {
     "--connection-color": color,
-    backgroundColor: "transparent",
-    borderColor: "transparent",
+    backgroundColor: `${color}${active ? "18" : "0b"}`,
+    borderColor: active ? `${color}35` : "transparent",
   } as CSSProperties;
 }
 
+function schemaTreeKey(
+  connectionId: string,
+  driver: string | null | undefined,
+  schema: string
+) {
+  return `${connectionId}:${driver || "unknown"}:${schema}`;
+}
+
+function objectGroupKey(
+  connectionId: string,
+  driver: string | null | undefined,
+  schema: string,
+  group: string
+) {
+  return `${connectionId}:${driver || "unknown"}:${schema}:${group}`;
+}
+
 function MetadataNodeBadge({ state }: { state?: MetadataNodeState }) {
-  const showCacheBadges = useSettingsStore(
-    (store) => store.settings.databaseExplorer.showCacheBadges
-  );
   if (!state || state.status === "idle") return null;
 
   if (state.status === "loading") {
@@ -168,29 +215,29 @@ function MetadataNodeBadge({ state }: { state?: MetadataNodeState }) {
     );
   }
 
-  if (state.source === "cache" && showCacheBadges) {
-    return (
-      <span
-        className="shrink-0 rounded-[3px] px-1 text-[9px] leading-4 wb-muted"
-        title={state.message || "Loaded from local metadata cache"}
-      >
-        cache
-      </span>
-    );
-  }
-
   return null;
 }
 
 export function SchemaSidebar() {
-  const {
-    activeConnectionId,
-    connections,
-    setActiveConnection,
-    createNewConnection,
-    updateConnectionConfig,
-    selectConnection,
-  } = useConnectionStore();
+  const activeConnectionId = useConnectionStore(
+    (state) => state.activeConnectionId
+  );
+  const connections = useConnectionStore((state) => state.connections);
+  const connectedConnectionIds = useConnectionStore(
+    (state) => state.connectedConnectionIds
+  );
+  const setActiveConnection = useConnectionStore(
+    (state) => state.setActiveConnection
+  );
+  const createNewConnection = useConnectionStore(
+    (state) => state.createNewConnection
+  );
+  const updateConnectionConfig = useConnectionStore(
+    (state) => state.updateConnectionConfig
+  );
+  const selectConnection = useConnectionStore(
+    (state) => state.selectConnection
+  );
   const setToolWindowVisible = useWorkbenchLayoutStore(
     (store) => store.setToolWindowVisible
   );
@@ -203,6 +250,7 @@ export function SchemaSidebar() {
     loadSchemas,
     loadTables,
     loadCollections,
+    loadMoreCollections,
     loadFunctions,
     tables,
     collections,
@@ -220,6 +268,8 @@ export function SchemaSidebar() {
     selectedTable,
     bumpMetadataVersion,
     isCollectionsLoading,
+    collectionNextCursor,
+    collectionTotal,
     isFunctionsLoading,
     metadataNodeStates,
   } = useSchemaStore();
@@ -229,6 +279,10 @@ export function SchemaSidebar() {
   const [isDataSourceDialogOpen, setIsDataSourceDialogOpen] = useState(false);
   const [isCreateDbDialogOpen, setIsCreateDbDialogOpen] = useState(false);
   const [isCreateViewDialogOpen, setIsCreateViewDialogOpen] = useState(false);
+  const [isCreateRedisKeyOpen, setIsCreateRedisKeyOpen] = useState(false);
+  const [connectingConnectionIds, setConnectingConnectionIds] = useState<
+    string[]
+  >([]);
   const [viewDialogMode, setViewDialogMode] = useState<"create" | "edit">(
     "create"
   );
@@ -251,6 +305,24 @@ export function SchemaSidebar() {
   const [expandedObjectGroupKeys, setExpandedObjectGroupKeys] = useState<
     string[]
   >([]);
+  const [postgresDatabaseRefreshVersion, setPostgresDatabaseRefreshVersion] =
+    useState(0);
+  const [postgresVisibilityKey, setPostgresVisibilityKey] = useState<
+    string | null
+  >(null);
+  const [showAllPostgresDatabases, setShowAllPostgresDatabases] =
+    useState(true);
+  const [visiblePostgresDatabaseNames, setVisiblePostgresDatabaseNames] =
+    useState<string[]>([]);
+  const [postgresRemoteDatabases, setPostgresRemoteDatabases] =
+    useState<PostgresRemoteDatabaseState>({
+      connectionId: null,
+      schemas: {},
+      tables: {},
+    });
+  const postgresRemoteRequestIds = useRef<Record<string, number>>({});
+  const postgresRemoteRequestCounter = useRef(0);
+  const postgresRemoteContextVersion = useRef(0);
 
   // Context Menu State
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -282,7 +354,17 @@ export function SchemaSidebar() {
   } = useTableOperations();
 
   const activeConnection = connections.find((c) => c.id === activeConnectionId);
+  const isActiveConnectionReady = Boolean(
+    activeConnectionId && connectedConnectionIds.includes(activeConnectionId)
+  );
   const activeDriver = activeConnection?.driver || DEFAULT_DATABASE_DRIVER;
+  const postgresDatabaseDiscovery = usePostgresDatabaseDiscovery({
+    projectId: activeProjectId,
+    connectionId: activeConnectionId,
+    driver: activeConnection?.driver,
+    isConnectionReady: isActiveConnectionReady,
+    refreshVersion: postgresDatabaseRefreshVersion,
+  });
   const activeCapabilities =
     capabilities.driver === activeDriver
       ? capabilities
@@ -291,6 +373,22 @@ export function SchemaSidebar() {
   const canBrowseCollections =
     activeCapabilities.supportsCollectionBrowsing ||
     activeCapabilities.supportsKeyValueBrowsing;
+  const isActiveNamespaceExpanded = Boolean(
+    activeConnectionId &&
+      currentSchema &&
+      (activeCapabilities.dataModel === "keyValue"
+        ? expandedObjectGroupKeys.includes(
+            objectGroupKey(
+              activeConnectionId,
+              activeDriver,
+              currentSchema,
+              "objects"
+            )
+          )
+        : expandedSchemaKeys.includes(
+            schemaTreeKey(activeConnectionId, activeDriver, currentSchema)
+          ))
+  );
   const collectionNamespace = currentSchema || "";
   const collectionNamespaceForTemplate = collectionNamespace || null;
   const collectionPreviewProvider =
@@ -310,6 +408,55 @@ export function SchemaSidebar() {
   const schemaVisibilityStorageKey = activeConnectionId
     ? `oxide-studio-visible-schemas:${activeProjectId}:${activeConnectionId}:${activeDriver}`
     : null;
+  const activePostgresDatabase =
+    activeConnection?.driver === "postgres"
+      ? postgresConnectionDatabaseName(activeConnection)
+      : null;
+  const postgresDatabaseRows = useMemo(() => {
+    if (!activePostgresDatabase) return [];
+    const discoveredDatabases =
+      postgresDatabaseDiscovery.connectionId === activeConnectionId
+        ? postgresDatabaseDiscovery.databases
+        : [];
+    return [
+      activePostgresDatabase,
+      ...discoveredDatabases.filter(
+        (database) => database !== activePostgresDatabase
+      ),
+    ].filter(
+      (database, index, rows) =>
+        Boolean(database) && rows.indexOf(database) === index
+    );
+  }, [
+    activeConnectionId,
+    activePostgresDatabase,
+    postgresDatabaseDiscovery.connectionId,
+    postgresDatabaseDiscovery.databases,
+  ]);
+  const postgresDatabaseVisibilityStorageKey =
+    activeConnectionId && activeDriver === "postgres"
+      ? `oxide-studio-visible-databases:${activeProjectId}:${activeConnectionId}`
+      : null;
+  const visiblePostgresDatabaseSet = useMemo(
+    () => new Set(visiblePostgresDatabaseNames),
+    [visiblePostgresDatabaseNames]
+  );
+  const visiblePostgresDatabases = useMemo(
+    () =>
+      showAllPostgresDatabases
+        ? postgresDatabaseRows
+        : postgresDatabaseRows.filter((database) =>
+            visiblePostgresDatabaseSet.has(database)
+          ),
+    [
+      postgresDatabaseRows,
+      showAllPostgresDatabases,
+      visiblePostgresDatabaseSet,
+    ]
+  );
+  const postgresDatabaseCountLabel = showAllPostgresDatabases
+    ? `${postgresDatabaseRows.length} db`
+    : `${visiblePostgresDatabases.length} of ${postgresDatabaseRows.length} db`;
   const preferredVisibleSchema =
     [currentSchema, defaultSchema, activeConnection?.database, schemas[0]].find(
       (schema): schema is string =>
@@ -323,6 +470,10 @@ export function SchemaSidebar() {
     if (schemas.length === 0) {
       return currentSchema ? [currentSchema] : [];
     }
+
+    // PostgreSQL schema visibility belongs beneath each database node. Do not
+    // apply the legacy connection-wide schema picker to the current database.
+    if (activeDriver === "postgres") return schemas;
 
     if (showAllSchemas || !shouldLimitVisibleSchemas) return schemas;
 
@@ -341,6 +492,7 @@ export function SchemaSidebar() {
 
     return rows;
   }, [
+    activeDriver,
     currentSchema,
     preferredVisibleSchema,
     schemas,
@@ -348,9 +500,10 @@ export function SchemaSidebar() {
     showAllSchemas,
     visibleSchemaSet,
   ]);
-  const schemaCountLabel = showAllSchemas || !shouldLimitVisibleSchemas
-    ? String(schemas.length)
-    : `${schemaRows.length} of ${schemas.length}`;
+  const schemaCountLabel =
+    activeDriver === "postgres" || showAllSchemas || !shouldLimitVisibleSchemas
+      ? String(schemas.length)
+      : `${schemaRows.length} of ${schemas.length}`;
   const metadataForConnection = (connectionId: string, driver?: string | null) => {
     const isActiveConnection = connectionId === activeConnectionId;
     const snapshot =
@@ -382,18 +535,6 @@ export function SchemaSidebar() {
   const menuSeparatorClass = "bg-[hsl(var(--wb-border-subtle))]";
   const checkboxClass =
     "h-3.5 w-3.5 rounded-[3px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] data-[state=checked]:border-[hsl(var(--wb-accent))] data-[state=checked]:bg-[hsl(var(--wb-accent))] data-[state=checked]:text-[hsl(var(--wb-accent-foreground))]";
-  const schemaTreeKey = (
-    connectionId: string,
-    driver: string | null | undefined,
-    schema: string
-  ) => `${connectionId}:${driver || "unknown"}:${schema}`;
-  const objectGroupKey = (
-    connectionId: string,
-    driver: string | null | undefined,
-    schema: string,
-    group: string
-  ) => `${connectionId}:${driver || "unknown"}:${schema}:${group}`;
-
   const updateVisibleSchemas = (showAll: boolean, names: string[]) => {
     const normalizedNames = Array.from(new Set(names)).filter(
       (schema) => schemas.length === 0 || schemas.includes(schema)
@@ -439,6 +580,58 @@ export function SchemaSidebar() {
       ? [...visibleSchemaNames, schema]
       : visibleSchemaNames.filter((item) => item !== schema);
     updateVisibleSchemas(false, nextNames);
+  };
+
+  const updateVisiblePostgresDatabases = (
+    showAll: boolean,
+    names: string[]
+  ) => {
+    const normalizedNames = Array.from(new Set(names)).filter(
+      (database) =>
+        postgresDatabaseRows.length === 0 ||
+        postgresDatabaseRows.includes(database)
+    );
+    setShowAllPostgresDatabases(showAll);
+    setVisiblePostgresDatabaseNames(normalizedNames);
+
+    if (!postgresDatabaseVisibilityStorageKey) return;
+    try {
+      localStorage.setItem(
+        postgresDatabaseVisibilityStorageKey,
+        JSON.stringify({ all: showAll, databases: normalizedNames })
+      );
+    } catch (error) {
+      console.warn("Failed to persist visible PostgreSQL databases", error);
+    }
+  };
+
+  const handleToggleAllPostgresDatabases = (
+    checked: boolean | "indeterminate"
+  ) => {
+    const nextChecked = checked === true;
+    updateVisiblePostgresDatabases(
+      nextChecked,
+      nextChecked ? postgresDatabaseRows : []
+    );
+  };
+
+  const handleTogglePostgresDatabaseVisibility = (
+    database: string,
+    checked: boolean | "indeterminate"
+  ) => {
+    const nextChecked = checked === true;
+    if (showAllPostgresDatabases && !nextChecked) {
+      updateVisiblePostgresDatabases(
+        false,
+        postgresDatabaseRows.filter((item) => item !== database)
+      );
+      return;
+    }
+
+    const nextNames = nextChecked
+      ? [...visiblePostgresDatabaseNames, database]
+      : visiblePostgresDatabaseNames.filter((item) => item !== database);
+    updateVisiblePostgresDatabases(false, nextNames);
   };
 
   const copyText = async (value: string) => {
@@ -520,46 +713,82 @@ export function SchemaSidebar() {
 
   useEffect(() => {
     if (activeConnectionId) {
-      if (shouldAutoIntrospect) {
-        loadSchemas(activeConnectionId);
+      if (
+        isActiveConnectionReady &&
+        (shouldAutoIntrospect || activeDriver === "redis")
+      ) {
+        // Show any hydrated metadata immediately, then refresh only the
+        // namespace list. Object metadata stays lazy until its node expands.
+        loadSchemas(activeConnectionId, true);
       } else {
         void hydrateConnectionMetadataFromCache(activeConnectionId);
       }
     }
   }, [
     activeConnectionId,
+    activeDriver,
     hydrateConnectionMetadataFromCache,
+    isActiveConnectionReady,
     loadSchemas,
     shouldAutoIntrospect,
   ]);
 
   useEffect(() => {
-    if (!activeConnectionId) return;
+    if (!postgresDatabaseVisibilityStorageKey) {
+      if (postgresVisibilityKey !== null) {
+        setPostgresVisibilityKey(null);
+        setShowAllPostgresDatabases(true);
+        setVisiblePostgresDatabaseNames([]);
+      }
+      return;
+    }
+    if (postgresVisibilityKey === postgresDatabaseVisibilityStorageKey) return;
 
-    setExpandedConnectionIds((current) =>
-      current.includes(activeConnectionId)
-        ? current
-        : [...current, activeConnectionId]
-    );
-  }, [activeConnectionId]);
+    let showAll = true;
+    let databases: string[] = [];
+    try {
+      const saved = localStorage.getItem(
+        postgresDatabaseVisibilityStorageKey
+      );
+      if (saved) {
+        const parsed = JSON.parse(saved) as {
+          all?: unknown;
+          databases?: unknown;
+        };
+        showAll = parsed.all !== false;
+        databases = Array.isArray(parsed.databases)
+          ? parsed.databases.filter(
+              (database): database is string => typeof database === "string"
+            )
+          : [];
+      }
+    } catch (error) {
+      console.warn("Failed to restore visible PostgreSQL databases", error);
+    }
+
+    setShowAllPostgresDatabases(showAll);
+    setVisiblePostgresDatabaseNames(databases);
+    setPostgresVisibilityKey(postgresDatabaseVisibilityStorageKey);
+  }, [postgresDatabaseVisibilityStorageKey, postgresVisibilityKey]);
 
   useEffect(() => {
-    if (!activeConnectionId || !currentSchema) return;
+    postgresRemoteContextVersion.current += 1;
+    setPostgresRemoteDatabases({
+      connectionId:
+        activeDriver === "postgres" ? activeConnectionId : null,
+      schemas: {},
+      tables: {},
+    });
+  }, [activeConnectionId, activeDriver, postgresDatabaseRefreshVersion]);
 
-    const key = schemaTreeKey(activeConnectionId, activeDriver, currentSchema);
-    const tablesKey = objectGroupKey(
-      activeConnectionId,
-      activeDriver,
-      currentSchema,
-      "objects"
-    );
-    setExpandedSchemaKeys((current) =>
-      current.includes(key) ? current : [...current, key]
-    );
-    setExpandedObjectGroupKeys((current) =>
-      current.includes(tablesKey) ? current : [...current, tablesKey]
-    );
-  }, [activeConnectionId, currentSchema]);
+  useEffect(() => {
+    // Project switches select and hydrate the first cached data source. Reveal
+    // it immediately so users do not need a click before cached metadata is
+    // visible. A manual collapse remains respected until the scope changes.
+    setExpandedConnectionIds(activeConnectionId ? [activeConnectionId] : []);
+    setExpandedSchemaKeys([]);
+    setExpandedObjectGroupKeys([]);
+  }, [activeConnectionId, activeProjectId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -658,8 +887,11 @@ export function SchemaSidebar() {
   useEffect(() => {
     if (
       shouldAutoIntrospect &&
+      isActiveConnectionReady &&
+      !isLoading &&
       activeConnectionId &&
       currentSchema &&
+      isActiveNamespaceExpanded &&
       canBrowseTables
     ) {
       loadTables(activeConnectionId, currentSchema);
@@ -668,36 +900,94 @@ export function SchemaSidebar() {
     activeConnectionId,
     canBrowseTables,
     currentSchema,
+    isActiveNamespaceExpanded,
+    isActiveConnectionReady,
+    isLoading,
     loadTables,
     shouldAutoIntrospect,
   ]);
 
   useEffect(() => {
-    if (shouldAutoIntrospect || !activeConnectionId || !currentSchema) return;
+    if (
+      (shouldAutoIntrospect && isActiveConnectionReady) ||
+      activeCapabilities.dataModel === "keyValue" ||
+      !activeConnectionId ||
+      !currentSchema ||
+      !isActiveNamespaceExpanded
+    )
+      return;
     void hydrateSchemaObjectsFromCache(activeConnectionId, currentSchema);
   }, [
     activeConnectionId,
+    activeCapabilities.dataModel,
     currentSchema,
     hydrateSchemaObjectsFromCache,
+    isActiveConnectionReady,
+    isActiveNamespaceExpanded,
     shouldAutoIntrospect,
   ]);
 
   useEffect(() => {
-    if (shouldAutoIntrospect && activeConnectionId && canBrowseCollections) {
+    if (
+      shouldAutoIntrospect &&
+      isActiveConnectionReady &&
+      !isLoading &&
+      activeConnectionId &&
+      isActiveNamespaceExpanded &&
+      canBrowseCollections &&
+      activeCapabilities.dataModel !== "keyValue"
+    ) {
       loadCollections(activeConnectionId, collectionNamespace);
     }
   }, [
     activeConnectionId,
+    activeCapabilities.dataModel,
     canBrowseCollections,
     collectionNamespace,
+    isActiveConnectionReady,
+    isActiveNamespaceExpanded,
+    isLoading,
     loadCollections,
     shouldAutoIntrospect,
   ]);
 
   useEffect(() => {
     if (
+      activeCapabilities.dataModel !== "keyValue" ||
+      !isActiveConnectionReady ||
+      isLoading ||
+      !activeConnectionId ||
+      !isActiveNamespaceExpanded
+    ) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      void loadCollections(
+        activeConnectionId,
+        collectionNamespace,
+        true,
+        filterText
+      );
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [
+    activeCapabilities.dataModel,
+    activeConnectionId,
+    collectionNamespace,
+    filterText,
+    isActiveConnectionReady,
+    isActiveNamespaceExpanded,
+    isLoading,
+    loadCollections,
+  ]);
+
+  useEffect(() => {
+    if (
       activeConnectionId &&
+      isActiveConnectionReady &&
       currentSchema &&
+      isActiveNamespaceExpanded &&
       canBrowseTables &&
       activeCapabilities.supportsFunctions
     ) {
@@ -707,6 +997,8 @@ export function SchemaSidebar() {
     activeConnectionId,
     canBrowseTables,
     currentSchema,
+    isActiveConnectionReady,
+    isActiveNamespaceExpanded,
     activeCapabilities.supportsFunctions,
     loadFunctions,
   ]);
@@ -760,15 +1052,66 @@ export function SchemaSidebar() {
     };
   };
 
-  const {
-    findOrCreateTableTab,
-    findOrCreateObjectQueryTab,
-    loadTablePage,
-    createTableTab,
-    createTab,
-    runTabQuery,
-    setTableMetadata,
-  } = useTabStore();
+  const postgresDatabaseMatchesFilter = (
+    connectionId: string,
+    database: string,
+    currentDatabase: string,
+    normalizedFilter: string
+  ) => {
+    if (!normalizedFilter) return true;
+    if (database === currentDatabase) {
+      return schemas.some((schema) => {
+        if (schema.toLocaleLowerCase().includes(normalizedFilter)) return true;
+        const isActiveSchema = schema === currentSchema;
+        const snapshot = isActiveSchema
+          ? null
+          : objectSnapshots[
+              getSchemaObjectMetadataSnapshotKey(
+                connectionId,
+                "postgres",
+                schema
+              )
+            ];
+        const schemaTables = isActiveSchema ? tables : snapshot?.tables || [];
+        const schemaFunctions = isActiveSchema
+          ? functions
+          : snapshot?.functions || [];
+        return (
+          schemaTables.some((table) =>
+            table.name.toLocaleLowerCase().includes(normalizedFilter)
+          ) ||
+          schemaFunctions.some((routine) =>
+            routineMatchesFilter(routine, normalizedFilter)
+          )
+        );
+      });
+    }
+
+    if (postgresRemoteDatabases.connectionId !== connectionId) return false;
+    return (
+      (postgresRemoteDatabases.schemas[database] || []).some((schema) =>
+        schema.toLocaleLowerCase().includes(normalizedFilter)
+      ) ||
+      Object.values(postgresRemoteDatabases.tables[database] || {}).some(
+        (databaseTables) =>
+          databaseTables.some((table) =>
+            table.name.toLocaleLowerCase().includes(normalizedFilter)
+          )
+      )
+    );
+  };
+
+  const findOrCreateTableTab = useTabStore(
+    (state) => state.findOrCreateTableTab
+  );
+  const findOrCreateObjectQueryTab = useTabStore(
+    (state) => state.findOrCreateObjectQueryTab
+  );
+  const loadTablePage = useTabStore((state) => state.loadTablePage);
+  const createTableTab = useTabStore((state) => state.createTableTab);
+  const createTab = useTabStore((state) => state.createTab);
+  const runTabQuery = useTabStore((state) => state.runTabQuery);
+  const setTableMetadata = useTabStore((state) => state.setTableMetadata);
 
   const handleNewQueryConsole = () => {
     const queryNumber = useTabStore
@@ -850,6 +1193,28 @@ export function SchemaSidebar() {
       schemaName,
       table.name,
       table.type
+    );
+
+    await loadTablePage(tabId, 0);
+  };
+
+  const handlePostgresRemoteTableOpen = async (
+    connectionId: string,
+    databaseName: string,
+    schemaName: string,
+    table: TableInfo
+  ) => {
+    if (!connectionId || !databaseName || !schemaName) return;
+
+    // A PostgreSQL database is a separate connection target, not another
+    // schema. Keep the active connection/schema untouched and bind the target
+    // database to the table tab itself.
+    const tabId = findOrCreateTableTab(
+      connectionId,
+      schemaName,
+      table.name,
+      table.type,
+      databaseName
     );
 
     await loadTablePage(tabId, 0);
@@ -951,6 +1316,11 @@ export function SchemaSidebar() {
   const handleCreateCollectionClick = () => {
     if (!activeConnectionId) return;
 
+    if (activeCapabilities.dataModel === "keyValue") {
+      setIsCreateRedisKeyOpen(true);
+      return;
+    }
+
     const rawName = window.prompt(`New ${collectionLabel.toLowerCase()} name:`);
     if (rawName === null) return;
 
@@ -972,6 +1342,26 @@ export function SchemaSidebar() {
       objectType: collectionLabel.toLowerCase(),
     });
     void runCollectionMutation(tabId, sql);
+  };
+
+  const handleCreateRedisKey = async (name: string, command: string) => {
+    if (!activeConnectionId) throw new Error("No active Redis connection.");
+    const normalizedName = name.trim();
+    const existing = await queryService.executeQuery(
+      activeConnectionId,
+      `EXISTS ${JSON.stringify(normalizedName)}`,
+      collectionNamespace || undefined
+    );
+    if (Number(existing[0]?.rows?.[0]?.[1] ?? 0) > 0) {
+      throw new Error(`Key "${normalizedName}" already exists.`);
+    }
+    await queryService.executeQuery(
+      activeConnectionId,
+      command,
+      collectionNamespace || undefined
+    );
+    await refreshCollectionObjects();
+    selectTable(normalizedName);
   };
 
   // Highlight matching text
@@ -1113,6 +1503,9 @@ export function SchemaSidebar() {
 
   const handleRefresh = async () => {
     if (activeConnectionId) {
+      if (activeConnection?.driver === "postgres") {
+        setPostgresDatabaseRefreshVersion((version) => version + 1);
+      }
       // Force refresh schemas
       await loadSchemas(activeConnectionId, true);
       // If currentSchema is selected, force refresh tables too
@@ -1123,14 +1516,24 @@ export function SchemaSidebar() {
         }
       }
       if (canBrowseCollections) {
-        await loadCollections(activeConnectionId, collectionNamespace, true);
+        await loadCollections(
+          activeConnectionId,
+          collectionNamespace,
+          true,
+          activeCapabilities.dataModel === "keyValue" ? filterText : undefined
+        );
       }
     }
   };
 
   const handleRefreshConnection = async (connectionId: string) => {
+    const wasActiveConnection = connectionId === activeConnectionId;
+    const connection = connections.find((item) => item.id === connectionId);
     if (connectionId !== activeConnectionId) {
       await setActiveConnection(connectionId);
+    }
+    if (wasActiveConnection && connection?.driver === "postgres") {
+      setPostgresDatabaseRefreshVersion((version) => version + 1);
     }
     await loadSchemas(connectionId, true);
   };
@@ -1147,7 +1550,12 @@ export function SchemaSidebar() {
       }
     }
     if (canBrowseCollections) {
-      await loadCollections(connectionId, schema, true);
+      await loadCollections(
+        connectionId,
+        schema,
+        true,
+        activeCapabilities.dataModel === "keyValue" ? filterText : undefined
+      );
     }
   };
 
@@ -1203,19 +1611,94 @@ export function SchemaSidebar() {
 
   const handleConnectionRowClick = async (connectionId: string) => {
     const isExpanded = expandedConnectionIds.includes(connectionId);
+    const isConnected = connectedConnectionIds.includes(connectionId);
 
-    if (isExpanded) {
+    if (isExpanded && isConnected) {
       setExpandedConnectionIds((current) =>
         current.filter((id) => id !== connectionId)
       );
       return;
     }
 
-    await hydrateConnectionMetadataFromCache(connectionId);
-    await setActiveConnection(connectionId);
-    setExpandedConnectionIds((current) =>
-      current.includes(connectionId) ? current : [...current, connectionId]
+    // Expand immediately so SQLite metadata can paint while the remote
+    // connection is still being established. Keep only the selected source
+    // expanded because object capabilities are scoped to the active driver.
+    setExpandedConnectionIds([connectionId]);
+    if (!isConnected) {
+      setConnectingConnectionIds((current) =>
+        current.includes(connectionId) ? current : [...current, connectionId]
+      );
+    }
+    try {
+      await setActiveConnection(connectionId);
+    } finally {
+      setConnectingConnectionIds((current) =>
+        current.filter((id) => id !== connectionId)
+      );
+    }
+  };
+
+  const loadPostgresRemoteDatabase = async (
+    connectionId: string,
+    database: string
+  ) => {
+    const requestKey = `${connectionId}:${database}`;
+    const requestId = postgresRemoteRequestCounter.current + 1;
+    postgresRemoteRequestCounter.current = requestId;
+    const contextVersion = postgresRemoteContextVersion.current;
+    postgresRemoteRequestIds.current[requestKey] = requestId;
+    const databaseSchemas = await schemaService.getDatabaseSchemas(
+      connectionId,
+      database
     );
+
+    const connectionState = useConnectionStore.getState();
+    const connection = connectionState.connections.find(
+      (item) => item.id === connectionId
+    );
+    if (
+      postgresRemoteRequestIds.current[requestKey] !== requestId ||
+      postgresRemoteContextVersion.current !== contextVersion ||
+      connectionState.activeConnectionId !== connectionId ||
+      !connectionState.connectedConnectionIds.includes(connectionId) ||
+      connection?.driver !== "postgres"
+    ) {
+      return;
+    }
+
+    setPostgresRemoteDatabases((current) => ({
+      connectionId,
+      schemas: {
+        ...(current.connectionId === connectionId ? current.schemas : {}),
+        [database]: Array.from(new Set(databaseSchemas)),
+      },
+      tables:
+        current.connectionId === connectionId ? current.tables : {},
+    }));
+  };
+
+  const handlePostgresRemoteTablesLoaded = (
+    connectionId: string,
+    database: string,
+    schema: string,
+    databaseTables: TableInfo[]
+  ) => {
+    if (useConnectionStore.getState().activeConnectionId !== connectionId) {
+      return;
+    }
+    setPostgresRemoteDatabases((current) => {
+      if (current.connectionId !== connectionId) return current;
+      return {
+        ...current,
+        tables: {
+          ...current.tables,
+          [database]: {
+            ...(current.tables[database] || {}),
+            [schema]: databaseTables,
+          },
+        },
+      };
+    });
   };
 
   const handleSchemaRowClick = async (
@@ -1248,10 +1731,21 @@ export function SchemaSidebar() {
     setExpandedSchemaKeys((current) =>
       current.includes(key) ? current : [...current, key]
     );
+    const objectsKey = objectGroupKey(connectionId, driver, schema, "objects");
+    setExpandedObjectGroupKeys((current) =>
+      current.includes(objectsKey) ? current : [...current, objectsKey]
+    );
   };
 
   const renderSchemaVisibilityPicker = () => {
-    if (!activeConnectionId || schemas.length === 0) return null;
+    const isPostgresPicker = activeDriver === "postgres";
+    if (
+      !activeConnectionId ||
+      (schemas.length === 0 &&
+        (!isPostgresPicker || postgresDatabaseRows.length === 0))
+    ) {
+      return null;
+    }
 
     const defaultSchemaName = preferredVisibleSchema;
     const pickerSchemas = defaultSchemaName
@@ -1266,10 +1760,14 @@ export function SchemaSidebar() {
           <button
             type="button"
             className="shrink-0 rounded-[3px] bg-[hsl(var(--wb-panel-raised))] px-1 text-[10px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
-            title={`Select visible ${namespaceLabelPlural}`}
+            title={
+              isPostgresPicker
+                ? "Select visible databases"
+                : `Select visible ${namespaceLabelPlural}`
+            }
             onClick={(event) => event.stopPropagation()}
           >
-            {schemaCountLabel}
+            {isPostgresPicker ? postgresDatabaseCountLabel : schemaCountLabel}
           </button>
         </PopoverTrigger>
         <PopoverContent
@@ -1281,7 +1779,9 @@ export function SchemaSidebar() {
         >
           <div className="flex h-8 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] px-2">
             <span className="text-[11px] font-semibold">
-              Select {namespaceLabelPlural}
+              {isPostgresPicker
+                ? "Select databases"
+                : `Select ${namespaceLabelPlural}`}
             </span>
             <div className="flex items-center gap-0.5">
               <button
@@ -1299,52 +1799,72 @@ export function SchemaSidebar() {
             </div>
           </div>
           <div className="max-h-[430px] overflow-auto py-1 custom-scrollbar">
-            <label className="flex h-6 cursor-default select-none items-center gap-2 px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))]">
-              <Checkbox
-                className={checkboxClass}
-                checked={showAllSchemas}
-                onCheckedChange={handleToggleAllSchemas}
+            {isPostgresPicker && (
+              <PostgresDatabaseVisibilitySection
+                databases={postgresDatabaseRows}
+                currentDatabase={activePostgresDatabase}
+                showAll={showAllPostgresDatabases}
+                visibleDatabases={visiblePostgresDatabaseSet}
+                checkboxClassName={checkboxClass}
+                connectionColor={connectionTreeColor(activeDriver)}
+                onToggleAll={handleToggleAllPostgresDatabases}
+                onToggleDatabase={
+                  handleTogglePostgresDatabaseVisibility
+                }
               />
-              <span className="font-medium">All schemas</span>
-              <span className="ml-auto text-[10px] wb-muted">add pattern</span>
-            </label>
-
-            {defaultSchemaName && (
+            )}
+            {!isPostgresPicker && (
+              <>
               <label className="flex h-6 cursor-default select-none items-center gap-2 px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))]">
                 <Checkbox
                   className={checkboxClass}
-                  checked={schemaIsChecked(defaultSchemaName)}
-                  onCheckedChange={(checked) =>
-                    handleToggleSchemaVisibility(defaultSchemaName, checked)
-                  }
+                  checked={showAllSchemas}
+                  onCheckedChange={handleToggleAllSchemas}
                 />
-                <span className="min-w-0 flex-1 truncate">
-                  Default schema{" "}
-                  <span className="wb-muted">({defaultSchemaName})</span>
+                <span className="font-medium">All schemas</span>
+                <span className="ml-auto text-[10px] wb-muted">
+                  add pattern
                 </span>
               </label>
-            )}
 
-            {pickerSchemas.map((schema) => (
-              <label
-                key={schema}
-                className="flex h-6 cursor-default select-none items-center gap-2 px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))]"
-              >
-                <Checkbox
-                  className={checkboxClass}
-                  checked={schemaIsChecked(schema)}
-                  onCheckedChange={(checked) =>
-                    handleToggleSchemaVisibility(schema, checked)
-                  }
-                />
-                <Database
-                  size={12}
-                  className="shrink-0"
-                  style={{ color: connectionTreeColor(activeDriver) }}
-                />
-                <span className="min-w-0 flex-1 truncate">{schema}</span>
-              </label>
-            ))}
+                {defaultSchemaName && (
+                  <label className="flex h-6 cursor-default select-none items-center gap-2 px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))]">
+                    <Checkbox
+                      className={checkboxClass}
+                      checked={schemaIsChecked(defaultSchemaName)}
+                      onCheckedChange={(checked) =>
+                        handleToggleSchemaVisibility(defaultSchemaName, checked)
+                      }
+                    />
+                    <span className="min-w-0 flex-1 truncate">
+                      Default schema{" "}
+                      <span className="wb-muted">({defaultSchemaName})</span>
+                    </span>
+                  </label>
+                )}
+
+                {pickerSchemas.map((schema) => (
+                  <label
+                    key={schema}
+                    className="flex h-6 cursor-default select-none items-center gap-2 px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))]"
+                  >
+                    <Checkbox
+                      className={checkboxClass}
+                      checked={schemaIsChecked(schema)}
+                      onCheckedChange={(checked) =>
+                        handleToggleSchemaVisibility(schema, checked)
+                      }
+                    />
+                    <Database
+                      size={12}
+                      className="shrink-0"
+                      style={{ color: connectionTreeColor(activeDriver) }}
+                    />
+                    <span className="min-w-0 flex-1 truncate">{schema}</span>
+                  </label>
+                ))}
+              </>
+            )}
           </div>
           <div className="border-t border-[hsl(var(--wb-border-subtle))] px-2 py-1 text-[10px] wb-muted">
             Press Enter or click outside the list to apply
@@ -1457,6 +1977,12 @@ export function SchemaSidebar() {
       : canBrowseCollections
         ? schemaObjects.collections.length
         : 0;
+    const schemaObjectCountLabel =
+      activeCapabilities.dataModel === "keyValue" &&
+      isCurrentSchema &&
+      collectionTotal !== null
+        ? `${schemaObjectCount}/${collectionTotal}`
+        : schemaObjectCount;
     const hasSchemaObjectContext = canBrowseTables
       ? Boolean(schema)
       : canBrowseCollections;
@@ -1488,6 +2014,22 @@ export function SchemaSidebar() {
           : [...current, key]
       );
     };
+
+    const renderLoadMoreKeys = () =>
+      isCurrentSchema &&
+      activeCapabilities.dataModel === "keyValue" &&
+      collectionNextCursor ? (
+        <button
+          type="button"
+          className="wb-text-button ml-1 mt-1 h-6 px-2 text-[10px] text-[hsl(var(--wb-accent))]"
+          disabled={isCollectionsLoading}
+          onClick={() => void loadMoreCollections(connectionId, schema)}
+        >
+          {isCollectionsLoading
+            ? "Loading…"
+            : `Load next ${REDIS_KEY_PAGE_SIZE} keys`}
+        </button>
+      ) : null;
 
     const renderServerObjects = () => {
       if (!activeCapabilities.supportsFunctions) return null;
@@ -1630,6 +2172,143 @@ export function SchemaSidebar() {
       );
     };
 
+    const renderCollectionItem = (
+      collection: CollectionInfo,
+      label = collection.name,
+      depth = 0
+    ) => {
+      const canDeleteCollection = Boolean(collectionDeleteSql(collection));
+      const isSelectedCollection =
+        isCurrentSchema && selectedTable === collection.name;
+
+      return (
+        <ContextMenu key={`${schema}:${collection.name}`}>
+          <ContextMenuTrigger>
+            <div
+              className={cn(
+                "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] py-1 pr-2 text-[11px] transition-colors",
+                isSelectedCollection
+                  ? "wb-tree-row-selected"
+                  : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]"
+              )}
+              style={{ paddingLeft: `${8 + depth * 14}px` }}
+              onClick={() =>
+                void runForSchema(schema, () =>
+                  handleCollectionSelect(collection.name)
+                )
+              }
+              onDoubleClick={() =>
+                void runForSchema(schema, () =>
+                  handleCollectionDoubleClick(collection)
+                )
+              }
+              title={collection.name}
+            >
+              <KeyRound
+                size={12}
+                className={cn(
+                  "shrink-0 text-red-400/80",
+                  isSelectedCollection && "opacity-100"
+                )}
+              />
+              <span className="min-w-0 flex-1 truncate">
+                {highlightMatch(label || "(empty)", filterText)}
+              </span>
+              {collection.type && (
+                <span className="shrink-0 text-[9px] uppercase opacity-50">
+                  {collection.type}
+                </span>
+              )}
+            </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent className="w-48">
+            <ContextMenuItem
+              onClick={() =>
+                void runForSchema(schema, () =>
+                  handleCollectionDoubleClick(collection)
+                )
+              }
+            >
+              <Code2 className="mr-2 h-3.5 w-3.5" />
+              Open Preview
+            </ContextMenuItem>
+            <ContextMenuItem
+              onClick={() =>
+                void runForSchema(schema, () =>
+                  handleCopyCollectionPreview(collection)
+                )
+              }
+            >
+              <Clipboard className="mr-2 h-3.5 w-3.5" />
+              Copy Preview Query
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              onClick={() =>
+                void runForSchema(schema, () =>
+                  handleDeleteCollectionClick(collection)
+                )
+              }
+              disabled={!canDeleteCollection}
+              className="text-destructive focus:text-destructive"
+            >
+              <Trash2 className="mr-2 h-3.5 w-3.5" />
+              Delete {collectionLabel}
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
+      );
+    };
+
+    const renderRedisKeyNodes = (
+      nodes: RedisKeyTreeNode<CollectionInfo>[],
+      depth = 0
+    ): ReactNode =>
+      nodes.map((node) => {
+        if (node.children.length === 0 && node.key) {
+          return renderCollectionItem(node.key, node.segment, depth);
+        }
+
+        const key = objectGroupKey(
+          connectionId,
+          driver,
+          schema,
+          `redis:${node.path}`
+        );
+        const isExpanded = expandedObjectGroupKeys.includes(key);
+        return (
+          <div key={`redis-group:${node.path}`}>
+            <button
+              type="button"
+              className="flex h-6 w-full items-center gap-1.5 rounded-[3px] pr-2 text-left text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+              style={{ paddingLeft: `${6 + depth * 14}px` }}
+              onClick={() => toggleObjectGroup(key)}
+              title={node.path}
+            >
+              {isExpanded ? (
+                <ChevronDown size={12} className="shrink-0 wb-muted" />
+              ) : (
+                <ChevronRight size={12} className="shrink-0 wb-muted" />
+              )}
+              <Folder size={12} className="shrink-0 text-amber-400/80" />
+              <span className="min-w-0 flex-1 truncate">
+                {node.segment || "(empty)"}
+              </span>
+              <span className="shrink-0 text-[9px] tabular-nums wb-muted">
+                {node.keyCount}
+              </span>
+            </button>
+            {isExpanded && (
+              <div>
+                {node.key &&
+                  renderCollectionItem(node.key, "(key)", depth + 1)}
+                {renderRedisKeyNodes(node.children, depth + 1)}
+              </div>
+            )}
+          </div>
+        );
+      });
+
     return (
       <div
         className="ml-4 pb-1 pl-2"
@@ -1653,13 +2332,24 @@ export function SchemaSidebar() {
             ) : (
               <ChevronRight size={12} className="shrink-0 wb-muted" />
             )}
-            <Folder size={12} className="shrink-0 text-blue-400/85" />
+            {activeCapabilities.dataModel === "keyValue" ? (
+              <KeyRound size={12} className="shrink-0 text-red-400/85" />
+            ) : (
+              <Folder size={12} className="shrink-0 text-blue-400/85" />
+            )}
             <span className="truncate text-[11px] font-medium text-[hsl(var(--wb-text))]">
               {objectSectionLabel}
             </span>
             {hasSchemaObjectContext && (
-              <span className="rounded-[3px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised))] px-1 text-[9px] wb-muted">
-                {schemaObjectCount}
+              <span
+                className="rounded-[3px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised))] px-1 text-[9px] wb-muted"
+                title={
+                  activeCapabilities.dataModel === "keyValue"
+                    ? `Loads ${REDIS_KEY_PAGE_SIZE} keys per page and keeps up to ${MAX_REDIS_KEYS_IN_MEMORY} keys in memory`
+                    : undefined
+                }
+              >
+                {schemaObjectCountLabel}
               </span>
             )}
             <MetadataNodeBadge state={schemaNodeState} />
@@ -1669,6 +2359,33 @@ export function SchemaSidebar() {
 
         {isObjectGroupExpanded && (
           <>
+            {activeCapabilities.dataModel === "keyValue" &&
+              isCurrentSchema && (
+                <div className="relative mx-1 mb-1 mt-0.5">
+                  <Search
+                    size={12}
+                    className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 wb-muted"
+                  />
+                  <input
+                    value={filterText}
+                    onChange={(event) => setFilterText(event.target.value)}
+                    placeholder="Filter Redis keys"
+                    aria-label="Filter Redis keys"
+                    spellCheck={false}
+                    className="h-7 w-full rounded-[3px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-surface))] pl-7 pr-7 text-[11px] text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
+                  />
+                  {filterText && (
+                    <button
+                      type="button"
+                      onClick={() => setFilterText("")}
+                      aria-label="Clear Redis key filter"
+                      className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 wb-muted hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]"
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
+                </div>
+              )}
             {!hasSchemaObjectContext ? (
               <div className="px-2 py-1.5 text-[11px] italic wb-muted">
                 Select a {namespaceLabel} to view objects
@@ -1677,116 +2394,33 @@ export function SchemaSidebar() {
               isCurrentSchema &&
               isCollectionsLoading &&
               schemaObjects.collections.length === 0 ? (
-                <div className="px-2 py-1.5 text-[11px] italic wb-muted">
+                <div className="flex items-center gap-1.5 px-2 py-1.5 text-[11px] italic wb-muted">
+                  <RefreshCw size={11} className="animate-spin" />
                   Loading {collectionLabelPlural.toLowerCase()}...
                 </div>
               ) : schemaObjects.collections.length === 0 ? (
-                <div className="px-2 py-1.5 text-[11px] italic wb-muted">
-                  {filterText
-                    ? `No ${collectionLabelPlural.toLowerCase()} match "${filterText}"`
-                    : `No ${collectionLabelPlural.toLowerCase()} found`}
+                <div className="px-2 py-1.5 text-[11px] wb-muted">
+                  <div className="italic">
+                    {collectionNextCursor
+                      ? filterText
+                        ? "No matching keys in this scan page"
+                        : "No keys in this scan page"
+                      : filterText
+                        ? `No ${collectionLabelPlural.toLowerCase()} match "${filterText}"`
+                        : `No ${collectionLabelPlural.toLowerCase()} found`}
+                  </div>
+                  {renderLoadMoreKeys()}
                 </div>
               ) : (
                 <div className="space-y-0.5">
-                  {schemaObjects.collections.map((collection) => {
-                    const canDeleteCollection = Boolean(
-                      collectionDeleteSql(collection)
-                    );
-                    const isSelectedCollection =
-                      isCurrentSchema && selectedTable === collection.name;
-
-                    return (
-                      <ContextMenu
-                        key={`${schema}:${collection.name}`}
-                        onOpenChange={(open) => {
-                          if (open) {
-                            void runForSchema(schema, () =>
-                              handleCollectionSelect(collection.name)
-                            );
-                          }
-                        }}
-                      >
-                        <ContextMenuTrigger>
-                          <div
-                            className={cn(
-                              "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] px-2 py-1 text-[11px] transition-colors",
-                              isSelectedCollection
-                                ? "wb-tree-row-selected"
-                                : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]"
-                            )}
-                            onClick={() =>
-                              void runForSchema(schema, () =>
-                                handleCollectionSelect(collection.name)
-                              )
-                            }
-                            onDoubleClick={() =>
-                              void runForSchema(schema, () =>
-                                handleCollectionDoubleClick(collection)
-                              )
-                            }
-                            title={collection.name}
-                          >
-                            <Braces
-                              size={12}
-                              className={cn(
-                                "shrink-0 opacity-70",
-                                isSelectedCollection && "opacity-100"
-                              )}
-                            />
-                            <span className="min-w-0 flex-1 truncate">
-                              {highlightMatch(collection.name, filterText)}
-                            </span>
-                            {collection.type && (
-                              <span className="shrink-0 text-[9px] uppercase opacity-50">
-                                {collection.type}
-                              </span>
-                            )}
-                            {collection.documentCount !== null &&
-                              collection.documentCount !== undefined && (
-                                <span className="shrink-0 text-[9px] tabular-nums opacity-50">
-                                  {collection.documentCount}
-                                </span>
-                              )}
-                          </div>
-                        </ContextMenuTrigger>
-                        <ContextMenuContent className="w-48">
-                          <ContextMenuItem
-                            onClick={() =>
-                              void runForSchema(schema, () =>
-                                handleCollectionDoubleClick(collection)
-                              )
-                            }
-                          >
-                            <Code2 className="mr-2 h-3.5 w-3.5" />
-                            Open Preview
-                          </ContextMenuItem>
-                          <ContextMenuItem
-                            onClick={() =>
-                              void runForSchema(schema, () =>
-                                handleCopyCollectionPreview(collection)
-                              )
-                            }
-                          >
-                            <Clipboard className="mr-2 h-3.5 w-3.5" />
-                            Copy Preview Query
-                          </ContextMenuItem>
-                          <ContextMenuSeparator />
-                          <ContextMenuItem
-                            onClick={() =>
-                              void runForSchema(schema, () =>
-                                handleDeleteCollectionClick(collection)
-                              )
-                            }
-                            disabled={!canDeleteCollection}
-                            className="text-destructive focus:text-destructive"
-                          >
-                            <Trash2 className="mr-2 h-3.5 w-3.5" />
-                            Delete {collectionLabel}
-                          </ContextMenuItem>
-                        </ContextMenuContent>
-                      </ContextMenu>
-                    );
-                  })}
+                  {activeCapabilities.dataModel === "keyValue"
+                    ? renderRedisKeyNodes(
+                        buildRedisKeyTree(schemaObjects.collections)
+                      )
+                    : schemaObjects.collections.map((collection) =>
+                        renderCollectionItem(collection)
+                      )}
+                  {renderLoadMoreKeys()}
                 </div>
               )
             ) : !canBrowseTables ? (
@@ -2201,34 +2835,36 @@ export function SchemaSidebar() {
     );
   };
 
-    return (
+  return (
     <div className="flex h-full min-w-0 flex-col">
-      <DatabaseExplorerHeader
-        isLoading={isLoading}
-        onRevealActive={handleRevealActiveConnection}
-        onExpandActive={handleExpandActiveConnection}
-        onCollapseAll={handleCollapseAll}
-        onRefresh={() => void handleRefresh()}
-        onHide={() => setToolWindowVisible("databaseExplorer", false)}
-      />
+      <div className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.72)]">
+        <DatabaseExplorerHeader
+          isLoading={isLoading}
+          onRevealActive={handleRevealActiveConnection}
+          onExpandActive={handleExpandActiveConnection}
+          onCollapseAll={handleCollapseAll}
+          onRefresh={() => void handleRefresh()}
+          onHide={() => setToolWindowVisible("databaseExplorer", false)}
+        />
 
-      <DatabaseExplorerToolbar
-        isLoading={isLoading}
-        namespaceLabel={namespaceLabel}
-        canCreateNamespace={activeCapabilities.supportsCreateDatabase}
-        canCreateTable={Boolean(currentSchema && canBrowseTables)}
-        canCreateView={Boolean(
-          currentSchema && activeCapabilities.supportsViews
-        )}
-        isFilterVisible={isFilterVisible}
-        onNewQueryConsole={handleNewQueryConsole}
-        onNewDataSource={handleNewDataSource}
-        onCreateNamespace={handleCreateDatabase}
-        onCreateTable={handleCreateTable}
-        onCreateView={handleCreateView}
-        onRefresh={() => void handleRefresh()}
-        onToggleFilter={() => setIsFilterVisible((visible) => !visible)}
-      />
+        <DatabaseExplorerToolbar
+          isLoading={isLoading}
+          namespaceLabel={namespaceLabel}
+          canCreateNamespace={activeCapabilities.supportsCreateDatabase}
+          canCreateTable={Boolean(currentSchema && canBrowseTables)}
+          canCreateView={Boolean(
+            currentSchema && activeCapabilities.supportsViews
+          )}
+          isFilterVisible={isFilterVisible}
+          onNewQueryConsole={handleNewQueryConsole}
+          onNewDataSource={handleNewDataSource}
+          onCreateNamespace={handleCreateDatabase}
+          onCreateTable={handleCreateTable}
+          onCreateView={handleCreateView}
+          onRefresh={() => void handleRefresh()}
+          onToggleFilter={() => setIsFilterVisible((visible) => !visible)}
+        />
+      </div>
 
       {isFilterVisible && (
         <div className="relative flex h-7 shrink-0 items-center border-b border-[hsl(var(--wb-border-subtle))] px-1.5">
@@ -2240,7 +2876,11 @@ export function SchemaSidebar() {
             autoFocus
             value={filterText}
             onChange={(event) => setFilterText(event.target.value)}
-            placeholder="Filter database objects"
+            placeholder={
+              activeCapabilities.dataModel === "keyValue"
+                ? "Filter keys on server"
+                : "Filter database objects"
+            }
             className="h-6 w-full rounded-[3px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] pl-6 pr-6 text-[11px] text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
           />
           <button
@@ -2260,8 +2900,26 @@ export function SchemaSidebar() {
       <div className="min-h-0 flex-1 overflow-auto px-1 py-1 custom-scrollbar">
         <div className="space-y-0">
           {connections.length === 0 ? (
-            <div className="px-2 py-1.5 text-[11px] italic wb-muted">
-              No data sources configured
+            <div className="flex flex-col items-center px-4 py-8 text-center">
+              <DatabaseBrandIcon
+                driver={DEFAULT_DATABASE_DRIVER}
+                size={24}
+                className="mb-2 opacity-80"
+              />
+              <span className="text-[11px] font-medium text-[hsl(var(--wb-text))]">
+                No data sources
+              </span>
+              <span className="mt-1 text-[10px] leading-4 wb-muted">
+                Add a connection to browse schemas and objects.
+              </span>
+              <button
+                type="button"
+                className="wb-text-button mt-2 text-[hsl(var(--wb-accent))]"
+                onClick={() => handleNewDataSource(DEFAULT_DATABASE_DRIVER)}
+              >
+                <Plus size={12} />
+                Add data source
+              </button>
             </div>
           ) : (
             connections.map((connection) => {
@@ -2270,6 +2928,9 @@ export function SchemaSidebar() {
                 connection.color
               );
               const isActive = connection.id === activeConnectionId;
+              const isConnecting = connectingConnectionIds.includes(
+                connection.id
+              );
               const connectionMetadata = metadataForConnection(
                 connection.id,
                 connection.driver
@@ -2279,13 +2940,50 @@ export function SchemaSidebar() {
                 : connectionMetadata.schemas;
               const isConnectionExpanded =
                 expandedConnectionIds.includes(connection.id);
+              const isFlatKeyValueTree =
+                defaultDatabaseCapabilities(connection.driver).dataModel ===
+                "keyValue";
+              const connectedPostgresDatabase =
+                connection.driver === "postgres"
+                  ? postgresConnectionDatabaseName(connection)
+                  : "";
+              const normalizedObjectFilter = filterText
+                .trim()
+                .toLocaleLowerCase();
+              const renderedConnectionSchemas =
+                isActive &&
+                connection.driver === "postgres" &&
+                normalizedObjectFilter &&
+                !connectedPostgresDatabase
+                  .toLocaleLowerCase()
+                  .includes(normalizedObjectFilter)
+                  ? connectionSchemas.filter((schema) => {
+                      if (
+                        schema
+                          .toLocaleLowerCase()
+                          .includes(normalizedObjectFilter)
+                      ) {
+                        return true;
+                      }
+                      const schemaObjects = schemaObjectsFor(
+                        connection.id,
+                        connection.driver,
+                        schema
+                      );
+                      return (
+                        schemaObjects.tables.length > 0 ||
+                        schemaObjects.collections.length > 0 ||
+                        schemaObjects.functions.length > 0
+                      );
+                    })
+                  : connectionSchemas;
 
               return (
                   <div
                     id={`database-connection-${connection.id}`}
                     key={connection.id}
                     className="rounded-[3px] border border-transparent transition-colors"
-                    style={connectionRegionStyle(connectionColor, isActive)}
+                    style={connectionRegionStyle(connection.color, isActive)}
                   >
                   <ContextMenu>
                     <ContextMenuTrigger asChild>
@@ -2313,19 +3011,47 @@ export function SchemaSidebar() {
                     ) : (
                       <ChevronRight size={13} className="shrink-0 wb-muted" />
                     )}
-                    <Database
-                      size={13}
+                    <ConnectionGlyph
+                      driver={connection.driver}
+                      icon={connection.icon}
+                      size={14}
                       className="shrink-0"
                       style={{ color: connectionColor }}
+                      title={`${databaseDriverProfile(connection.driver).capabilities.displayName} data source`}
                     />
                     <span className="truncate font-medium">
                       {connection.name}
                     </span>
                     <MetadataNodeBadge state={connectionMetadata.nodeState} />
-                    <span className="ml-auto shrink-0 text-[9px] uppercase wb-muted">
-                      {connection.driver}
-                    </span>
-                    {isActive && renderSchemaVisibilityPicker()}
+                    {(isConnecting ||
+                      (isActive &&
+                        isFlatKeyValueTree &&
+                        (isLoading || isCollectionsLoading))) && (
+                      <RefreshCw
+                        size={11}
+                        className="ml-auto shrink-0 animate-spin wb-muted"
+                        aria-label={
+                          isConnecting
+                            ? "Connecting to Redis"
+                            : "Loading Redis keys"
+                        }
+                      />
+                    )}
+                    {isActive && activeCapabilities.dataModel === "keyValue" ? (
+                      <span
+                        className={cn(
+                          "rounded-[3px] bg-[hsl(var(--wb-panel-raised))] px-1 text-[9px] wb-muted",
+                          !isConnecting &&
+                            !isLoading &&
+                            !isCollectionsLoading &&
+                            "ml-auto"
+                        )}
+                      >
+                        db {currentSchema || connection.database || "0"}
+                      </span>
+                    ) : isActive ? (
+                      renderSchemaVisibilityPicker()
+                    ) : null}
                   </div>
                     </ContextMenuTrigger>
                     <ContextMenuContent className={menuContentClass}>
@@ -2349,6 +3075,24 @@ export function SchemaSidebar() {
                           >
                             Table
                           </ContextMenuItem>
+                          {isFlatKeyValueTree && (
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() => {
+                                if (!isActive) {
+                                  void setActiveConnection(connection.id).then(
+                                    (error) => {
+                                      if (!error) setIsCreateRedisKeyOpen(true);
+                                    }
+                                  );
+                                  return;
+                                }
+                                setIsCreateRedisKeyOpen(true);
+                              }}
+                            >
+                              Key
+                            </ContextMenuItem>
+                          )}
                         </ContextMenuSubContent>
                       </ContextMenuSub>
                       <ContextMenuItem
@@ -2393,20 +3137,161 @@ export function SchemaSidebar() {
                     </ContextMenuContent>
                   </ContextMenu>
 
-                  {isConnectionExpanded && (
-                    <div className="pb-1 pl-5 pr-1">
+                  {isConnectionExpanded && isFlatKeyValueTree ? (
+                    <div className="ml-[11px] border-l border-[hsl(var(--wb-border-subtle))] pb-1 pl-2 pr-1">
+                      {isActive && currentSchema ? (
+                        renderSchemaObjects(
+                          connection.id,
+                          connection.driver,
+                          currentSchema,
+                          connectionColor
+                        )
+                      ) : (
+                        <div className="flex items-center gap-1.5 px-1.5 py-1 text-[11px] italic wb-muted">
+                          <RefreshCw size={11} className="animate-spin" />
+                          Connecting and loading Redis metadata...
+                        </div>
+                      )}
+                    </div>
+                  ) : isConnectionExpanded ? (
+                    <div className="ml-[11px] border-l border-[hsl(var(--wb-border-subtle))] pb-1 pl-2 pr-1">
+                      <PostgresDatabaseTree
+                        key={`${connection.id}:${
+                          connection.driver === "postgres"
+                            ? postgresDatabaseRefreshVersion
+                            : 0
+                        }:${isActive ? "active" : "inactive"}`}
+                        enabled={
+                          isActive &&
+                          connection.driver === "postgres"
+                        }
+                        databases={
+                          postgresDatabaseDiscovery.connectionId ===
+                          connection.id
+                            ? postgresDatabaseDiscovery.databases
+                            : []
+                        }
+                        currentDatabase={
+                          connectedPostgresDatabase
+                        }
+                        status={
+                          postgresDatabaseDiscovery.connectionId ===
+                          connection.id
+                            ? postgresDatabaseDiscovery.status
+                            : "idle"
+                        }
+                        error={
+                          postgresDatabaseDiscovery.connectionId ===
+                          connection.id
+                            ? postgresDatabaseDiscovery.error
+                            : null
+                        }
+                        schemaCount={
+                          isActive
+                            ? schemaCountLabel
+                            : String(connectionSchemas.length)
+                        }
+                        connectionColor={connectionColor}
+                        visibleDatabases={
+                          isActive && connection.driver === "postgres"
+                            ? visiblePostgresDatabases
+                            : undefined
+                        }
+                        filterText={
+                          connection.driver === "postgres" ? filterText : ""
+                        }
+                        databaseMatchesFilter={(database, normalizedFilter) =>
+                          postgresDatabaseMatchesFilter(
+                            connection.id,
+                            database,
+                            connectedPostgresDatabase,
+                            normalizedFilter
+                          )
+                        }
+                        onLoadDatabase={
+                          isActive && connection.driver === "postgres"
+                            ? async (database) => {
+                                if (
+                                  !useConnectionStore
+                                    .getState()
+                                    .connectedConnectionIds.includes(
+                                      connection.id
+                                    )
+                                ) {
+                                  const connectionError = await setActiveConnection(
+                                    connection.id
+                                  );
+                                  if (connectionError) {
+                                    throw new Error(connectionError);
+                                  }
+                                }
+                                await loadPostgresRemoteDatabase(
+                                  connection.id,
+                                  database
+                                );
+                              }
+                            : undefined
+                        }
+                        renderDatabaseChildren={(database) =>
+                          database === connectedPostgresDatabase ? null : (
+                            <PostgresRemoteDatabaseContents
+                              connectionId={connection.id}
+                              database={database}
+                              schemas={
+                                postgresRemoteDatabases.connectionId ===
+                                connection.id
+                                  ? postgresRemoteDatabases.schemas[database] ||
+                                    []
+                                  : []
+                              }
+                              connectionColor={connectionColor}
+                              filterText={
+                                database
+                                  .toLocaleLowerCase()
+                                  .includes(
+                                    filterText.trim().toLocaleLowerCase()
+                                  )
+                                  ? ""
+                                  : filterText
+                              }
+                              onTablesLoaded={(schema, databaseTables) =>
+                                handlePostgresRemoteTablesLoaded(
+                                  connection.id,
+                                  database,
+                                  schema,
+                                  databaseTables
+                                )
+                              }
+                              onOpenTable={(
+                                databaseName,
+                                schema,
+                                table
+                              ) =>
+                                handlePostgresRemoteTableOpen(
+                                  connection.id,
+                                  databaseName,
+                                  schema,
+                                  table
+                                )
+                              }
+                            />
+                          )
+                        }
+                      >
                       {(connectionMetadata.isLoading ||
                         connectionMetadata.nodeState?.status === "loading") &&
                       connectionSchemas.length === 0 ? (
                         <div className="px-1.5 py-1 text-[11px] italic wb-muted">
                           Loading {namespaceLabelPlural}...
                         </div>
-                      ) : connectionSchemas.length === 0 ? (
+                      ) : renderedConnectionSchemas.length === 0 ? (
                         <div className="px-1.5 py-1 text-[11px] italic wb-muted">
-                          No {namespaceLabelPlural} found
+                          {normalizedObjectFilter
+                            ? `No ${namespaceLabelPlural} match “${filterText.trim()}”`
+                            : `No ${namespaceLabelPlural} found`}
                         </div>
                       ) : (
-                        connectionSchemas.map((schema) => {
+                        renderedConnectionSchemas.map((schema) => {
                           const isCurrentSchema =
                             isActive && schema === currentSchema;
                           const schemaKey = schemaTreeKey(
@@ -2617,8 +3502,9 @@ export function SchemaSidebar() {
                           );
                         })
                       )}
+                      </PostgresDatabaseTree>
                     </div>
-                  )}
+                  ) : null}
                 </div>
               );
             })
@@ -2639,6 +3525,32 @@ export function SchemaSidebar() {
         isOpen={isCreateDbDialogOpen}
         onClose={() => setIsCreateDbDialogOpen(false)}
         activeConnectionId={activeConnectionId || ""}
+        onCreated={(schema) => {
+          if (!activeConnectionId) return;
+          if (activeDriver === "postgres") return;
+          const schemaKey = schemaTreeKey(
+            activeConnectionId,
+            activeDriver,
+            schema
+          );
+          const objectsKey = objectGroupKey(
+            activeConnectionId,
+            activeDriver,
+            schema,
+            "objects"
+          );
+          setExpandedConnectionIds((current) =>
+            current.includes(activeConnectionId)
+              ? current
+              : [...current, activeConnectionId]
+          );
+          setExpandedSchemaKeys((current) =>
+            current.includes(schemaKey) ? current : [...current, schemaKey]
+          );
+          setExpandedObjectGroupKeys((current) =>
+            current.includes(objectsKey) ? current : [...current, objectsKey]
+          );
+        }}
       />
       <RenameTableDialog
         isOpen={renameDialogOpen}
@@ -2673,6 +3585,14 @@ export function SchemaSidebar() {
         viewKind={viewDialogKind}
         initialViewName={viewDialogInitialName}
         initialSelectSql={viewDialogInitialSql}
+      />
+      <RedisKeyDialog
+        open={isCreateRedisKeyOpen}
+        database={collectionNamespace || "0"}
+        onOpenChange={setIsCreateRedisKeyOpen}
+        onCreate={(draft, command) =>
+          handleCreateRedisKey(draft.name, command)
+        }
       />
     </div>
   );

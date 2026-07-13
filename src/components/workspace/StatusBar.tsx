@@ -4,7 +4,7 @@ import { Database, Settings, Download } from "lucide-react";
 
 export function StatusBar() {
   const { activeConnectionId, connections } = useConnectionStore();
-  const { currentSchema } = useSchemaStore();
+  const currentSchema = useSchemaStore((state) => state.currentSchema);
 
   const activeConnection = connections.find((c) => c.id === activeConnectionId);
 

@@ -6,6 +6,11 @@ import {
   evaluateAiToolPolicy,
 } from "@/ai/tools/policy";
 import type { AiToolExecutionContext } from "@/ai/tools/types";
+import {
+  boundedAssistantText,
+  boundedConversationHistory,
+  CHAT_CONTEXT_LIMITS,
+} from "./chatContext";
 import { classifyAssistantIntent, createDefaultAssistantPlanner } from "./planner";
 import type {
   AssistantIntent,
@@ -24,6 +29,7 @@ export type AssistantModelPlannerRequest = {
   context: AssistantModelPlannerContext;
   manifest: AiToolManifest;
   instructions: string[];
+  abortSignal?: AbortSignal;
 };
 
 export type AssistantModelPlannerContext = Pick<
@@ -51,6 +57,7 @@ export type AssistantModelResultSummaryRequest = {
   manifest: AiToolManifest;
   results: AssistantToolCallResult[];
   instructions: string[];
+  abortSignal?: AbortSignal;
 };
 
 export type AssistantModelResultSummaryResponse = AssistantToolResultSummary;
@@ -100,6 +107,7 @@ export class ModelAssistantPlanner implements AssistantPlanner {
         context: modelPlannerContext(input.context),
         manifest: createAiToolManifest(input.availableTools, input.policy),
         instructions: MODEL_PLANNER_INSTRUCTIONS,
+        abortSignal: input.context.abortSignal,
       });
     } catch (error: any) {
       if (!this.fallback) {
@@ -195,8 +203,9 @@ export function createModelToolResultSummarizer(
       turn: modelPlannerTurn(input.turn),
       context: modelPlannerContext(input.context),
       manifest: createAiToolManifest(input.availableTools, input.policy),
-      results: input.results,
+      results: boundedModelToolResults(input.results),
       instructions: MODEL_RESULT_SUMMARY_INSTRUCTIONS,
+      abortSignal: input.context.abortSignal,
     });
 }
 
@@ -226,18 +235,19 @@ function modelPlannerContext(
 function modelPlannerTurn(turn: AssistantTurnInput): AssistantTurnInput {
   return {
     ...turn,
+    message:
+      boundedAssistantText(turn.message, CHAT_CONTEXT_LIMITS.promptCharacters) ||
+      "",
     selectedText: boundedNullableModelText(turn.selectedText),
-    history: turn.history
-      ?.slice(-12)
-      .map((message) => ({
-        ...message,
-        content: boundedRequiredModelText(message.content),
-      })),
+    history: boundedConversationHistory(turn.history),
   };
 }
 
 const MODEL_CONTEXT_TEXT_LIMIT = 8_000;
 const MODEL_CONTEXT_TRUNCATION_SUFFIX = "\n...[truncated]";
+const MODEL_RESULT_TOTAL_LIMIT = 32_000;
+const MODEL_RESULT_ITEM_LIMIT = 8_000;
+const MODEL_RESULT_COUNT_LIMIT = 24;
 
 function boundedRequiredModelText(text: string) {
   if (text.length <= MODEL_CONTEXT_TEXT_LIMIT) return text;
@@ -252,6 +262,39 @@ function boundedOptionalModelText(text: string | undefined) {
 function boundedNullableModelText(text: string | null | undefined) {
   if (text === null || text === undefined) return text;
   return boundedRequiredModelText(text);
+}
+
+export function boundedModelToolResults(
+  results: AssistantToolCallResult[]
+): AssistantToolCallResult[] {
+  let remaining = MODEL_RESULT_TOTAL_LIMIT;
+  return results.slice(0, MODEL_RESULT_COUNT_LIMIT).map((result) => {
+    const error: string | undefined = result.error
+      ? boundedAssistantText(
+          result.error,
+          Math.min(MODEL_RESULT_ITEM_LIMIT, remaining)
+        ) || undefined
+      : undefined;
+    remaining = Math.max(0, remaining - (error?.length || 0));
+    if (result.output === undefined) return { ...result, error };
+
+    const serialized = serializeModelToolOutput(result.output);
+    const output = boundedAssistantText(
+      serialized,
+      Math.min(MODEL_RESULT_ITEM_LIMIT, remaining)
+    );
+    remaining = Math.max(0, remaining - (output?.length || 0));
+    return { ...result, error, output };
+  });
+}
+
+function serializeModelToolOutput(output: unknown) {
+  if (typeof output === "string") return output;
+  try {
+    return JSON.stringify(output);
+  } catch {
+    return String(output);
+  }
 }
 
 const MODEL_PLANNER_INSTRUCTIONS = [

@@ -446,6 +446,40 @@ pub async fn lsp_references(
         .map_err(|e| format!("LSP error: {}", e))
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InlineCompletionValidationRequest {
+    #[serde(default)]
+    pub session_key: Option<String>,
+    pub uri: String,
+    pub text: String,
+}
+
+#[tauri::command]
+pub async fn lsp_inline_completion_context(
+    request: TextDocumentPositionRequest,
+    state: State<'_, LspState>,
+) -> Result<Value, String> {
+    send_position_request("oxide/inlineCompletionContext", request, state).await
+}
+
+#[tauri::command]
+pub async fn lsp_validate_inline_completion(
+    request: InlineCompletionValidationRequest,
+    state: State<'_, LspState>,
+) -> Result<Value, String> {
+    let manager = current_manager(&state, request.session_key.as_deref()).await?;
+    manager
+        .send_request(
+            "oxide/validateInlineCompletion".to_string(),
+            serde_json::json!({
+                "textDocument": { "uri": request.uri },
+                "text": request.text,
+            }),
+        )
+        .await
+        .map_err(|error| format!("LSP error: {error}"))
+}
+
 #[tauri::command]
 pub async fn lsp_formatting(
     request: FormatDocumentRequest,

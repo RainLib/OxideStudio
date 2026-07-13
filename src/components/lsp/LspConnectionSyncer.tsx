@@ -28,6 +28,10 @@ import {
   createLspSyncPlan,
 } from "@/services/lsp/syncPlan";
 import {
+  DEFAULT_LSP_METADATA_BATCHING,
+  loadLspMetadataInBatches,
+} from "@/services/lsp/schemaBatching";
+import {
   cancelScheduledLspSync,
   scheduleDebouncedLspSync,
   type LspSyncTimer,
@@ -40,10 +44,9 @@ import {
 } from "@/lib/databaseDialect";
 import { v4 as uuidv4 } from "uuid";
 
-const MAX_LSP_TABLES_PER_SCHEMA = 200;
-const MAX_LSP_COLLECTIONS_PER_SCHEMA = 500;
-const LSP_METADATA_CONCURRENCY = 8;
 const LSP_METADATA_CACHE_TTL_MS = 60_000;
+const LSP_PROGRESS_PUBLISH_INTERVAL_MS = 1_000;
+const LSP_PROGRESS_PUBLISH_BATCHES = 8;
 
 type CachedLspTableDefinition = CachedLspMetadata<LspTableDefinition>;
 
@@ -84,34 +87,27 @@ async function collectionToLspTableDefinitionWithMetadata(
   }
 }
 
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  mapper: (item: T) => Promise<R>
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let nextIndex = 0;
-
-  const workers = Array.from(
-    { length: Math.min(limit, items.length) },
-    async () => {
-      while (nextIndex < items.length) {
-        const currentIndex = nextIndex;
-        nextIndex += 1;
-        results[currentIndex] = await mapper(items[currentIndex]!);
-      }
-    }
-  );
-
-  await Promise.all(workers);
-  return results;
-}
-
 export function LspConnectionSyncer() {
-  const { activeConnectionId, connections } = useConnectionStore();
-  const { schemas, tables, currentSchema, metadataVersion } = useSchemaStore();
-  const { tabs } = useTabStore();
+  const activeConnectionId = useConnectionStore(
+    (state) => state.activeConnectionId
+  );
+  const connections = useConnectionStore((state) => state.connections);
+  const schemas = useSchemaStore((state) => state.schemas);
+  const tables = useSchemaStore((state) => state.tables);
+  const currentSchema = useSchemaStore((state) => state.currentSchema);
+  const metadataVersion = useSchemaStore((state) => state.metadataVersion);
+  const tabs = useTabStore((state) => state.tabs);
   const activeConnection = connections.find((c) => c.id === activeConnectionId);
+  const supportsMetadataSync = Boolean(
+    activeConnection &&
+      defaultDatabaseCapabilities(activeConnection.driver).dataModel !==
+        "keyValue"
+  );
+  const hasConnectionQueryTab = tabs.some(
+    (tab) =>
+      tab.type === "query" &&
+      (tab.connectionId || activeConnectionId) === activeConnectionId
+  );
   const {
     isReady,
     client: lspClient,
@@ -121,6 +117,8 @@ export function LspConnectionSyncer() {
     enabled: Boolean(
       activeConnectionId &&
         activeConnection &&
+        supportsMetadataSync &&
+        hasConnectionQueryTab &&
         supportsLspLanguageId(activeConnection.driver)
     ),
   });
@@ -145,6 +143,11 @@ export function LspConnectionSyncer() {
 
     const connection = activeConnection;
     if (!connection) return;
+
+    if (!supportsMetadataSync) {
+      lastConfigRef.current = null;
+      return;
+    }
 
     if (!supportsLspLanguageId(connection.driver)) {
       lastConfigRef.current = null;
@@ -174,6 +177,14 @@ export function LspConnectionSyncer() {
       targetSchemas,
       preferredTablesBySchema,
     } = syncPlan;
+
+    // Do not introspect a newly selected data source solely for LSP setup.
+    // Once a query tab actually targets it, the dependency change schedules a
+    // bounded sync. This keeps connection selection itself lightweight.
+    if (queryTabs.length === 0) {
+      lastConfigRef.current = null;
+      return;
+    }
 
     const syncGeneration = syncGenerationRef.current + 1;
     syncGenerationRef.current = syncGeneration;
@@ -242,6 +253,8 @@ export function LspConnectionSyncer() {
             primary_key: !!col.is_primary_key,
             unique: !!col.is_unique,
             indexed: !!col.is_indexed,
+            default_value: col.default_value ?? null,
+            auto_increment: !!col.is_auto_increment,
             comment: col.comment || null,
             source_location: null,
           })),
@@ -286,11 +299,12 @@ export function LspConnectionSyncer() {
         // tables is an ARRAY: TableInfo[]
         const buildTableDefinitions = async () => {
           const capabilities = await capabilitiesPromise;
+          const isStale = () =>
+            isCancelled() || syncGenerationRef.current !== syncGeneration;
           const canSyncTableMetadata = supportsTableWorkspace(capabilities);
           const canSyncCollectionMetadata =
             !canSyncTableMetadata &&
-            (capabilities.supportsCollectionBrowsing ||
-              capabilities.supportsKeyValueBrowsing);
+            capabilities.supportsCollectionBrowsing;
           const lspDialect = normalizeLspDialect(
             capabilities.lspLanguageId || connection.driver
           );
@@ -302,12 +316,20 @@ export function LspConnectionSyncer() {
             lspDialect,
             getSchemaId,
           });
-          const schemaDefinitions: LspSchemaDefinition[] = await Promise.all(
+          const catalogs = await Promise.all(
             targetSchemas.map(async (schemaName) => {
               const [schemaTables, schemaCollections, schemaFunctions] =
                 await Promise.all([
                   canSyncTableMetadata
-                    ? schemaService.getTables(activeConnectionId, schemaName)
+                    ? schemaService
+                        .getTables(activeConnectionId, schemaName)
+                        .catch((error) => {
+                          console.error(
+                            `[LSP] Failed to fetch tables for ${schemaName}:`,
+                            error
+                          );
+                          return [];
+                        })
                     : Promise.resolve([]),
                   canSyncCollectionMetadata
                     ? schemaService
@@ -332,34 +354,6 @@ export function LspConnectionSyncer() {
                         })
                     : Promise.resolve([]),
                 ]);
-              const boundedTables = selectLspTablesForSchema(
-                schemaTables,
-                preferredTablesBySchema.get(schemaName),
-                MAX_LSP_TABLES_PER_SCHEMA
-              );
-              const lspTables = await mapWithConcurrency(
-                boundedTables,
-                LSP_METADATA_CONCURRENCY,
-                async (table) => getCachedTableDefinition(schemaName, table)
-              );
-              const boundedCollections = schemaCollections.slice(
-                0,
-                MAX_LSP_COLLECTIONS_PER_SCHEMA
-              );
-              const lspCollections = await mapWithConcurrency(
-                boundedCollections,
-                LSP_METADATA_CONCURRENCY,
-                async (collection) =>
-                  collectionToLspTableDefinitionWithMetadata(
-                    activeConnectionId,
-                    schemaName,
-                    capabilities,
-                    collection
-                  )
-              );
-              const lspObjects = canSyncTableMetadata
-                ? lspTables
-                : lspCollections;
               const lspFunctions: LspFunctionDefinition[] = schemaFunctions.map(
                 (func) => ({
                   name: func.name,
@@ -373,21 +367,171 @@ export function LspConnectionSyncer() {
                   description: func.description || null,
                 })
               );
-              console.log(
-                canSyncTableMetadata
-                  ? `[LSP] Built ${lspTables.length}/${schemaTables.length} tables and ${lspFunctions.length} functions for ${schemaName}`
-                  : `[LSP] Built ${lspCollections.length}/${schemaCollections.length} objects for ${schemaName}`
-              );
 
               return {
-                id: getSchemaId(schemaName),
-                database: schemaName,
-                source_uri: null,
-                tables: lspObjects,
+                schemaName,
+                tables: selectLspTablesForSchema(
+                  schemaTables,
+                  preferredTablesBySchema.get(schemaName)
+                ),
+                collections: selectLspTablesForSchema(
+                  schemaCollections,
+                  preferredTablesBySchema.get(schemaName)
+                ),
                 functions: lspFunctions,
               };
             })
           );
+
+          if (isStale()) {
+            console.log("[LSP] Cancelled stale metadata sync");
+            return;
+          }
+
+          const schemaDefinitions: LspSchemaDefinition[] = catalogs.map(
+            (catalog) => ({
+              id: getSchemaId(catalog.schemaName),
+              database: catalog.schemaName,
+              source_uri: null,
+              tables: canSyncTableMetadata
+                ? catalog.tables.map((table) => ({
+                    name: table.name,
+                    object_type: table.type || null,
+                    comment: table.comment || null,
+                    ...emptyLspTableDetails(),
+                    columns: [],
+                  }))
+                : catalog.collections.map((collection) =>
+                    collectionToLspTableDefinition(capabilities, collection)
+                  ),
+              functions: catalog.functions,
+            })
+          );
+          const metadataWork: Array<{
+            schemaIndex: number;
+            objectIndex: number;
+            load: () => Promise<LspTableDefinition>;
+          }> = [];
+
+          catalogs.forEach((catalog, schemaIndex) => {
+            if (canSyncTableMetadata) {
+              catalog.tables.forEach((table, objectIndex) => {
+                metadataWork.push({
+                  schemaIndex,
+                  objectIndex,
+                  load: () =>
+                    getCachedTableDefinition(catalog.schemaName, table),
+                });
+              });
+              return;
+            }
+
+            if (
+              capabilities.dataModel !== "document" &&
+              capabilities.dataModel !== "search"
+            ) {
+              return;
+            }
+
+            catalog.collections.forEach((collection, objectIndex) => {
+              metadataWork.push({
+                schemaIndex,
+                objectIndex,
+                load: () =>
+                  collectionToLspTableDefinitionWithMetadata(
+                    activeConnectionId,
+                    catalog.schemaName,
+                    capabilities,
+                    collection
+                  ),
+              });
+            });
+          });
+
+          console.log(
+            `[LSP] Loading complete metadata for ${metadataWork.length} objects in batches of ${DEFAULT_LSP_METADATA_BATCHING.batchSize}`
+          );
+          const publishConfiguration = async () => {
+            try {
+              const dispatchResult = await dispatchLspConfiguration({
+                connectionId: activeConnectionId,
+                driver: connection.driver,
+                lspDialect,
+                config: {
+                  defaultDialect: lspDialect,
+                  schemas: schemaDefinitions.map((schema) => ({
+                    ...schema,
+                    tables: [...schema.tables],
+                    functions: [...schema.functions],
+                  })),
+                  fileSchemas,
+                  fileDialects,
+                },
+                lastConfigKey: lastConfigRef.current,
+                syncGeneration,
+                getCurrentGeneration: () => syncGenerationRef.current,
+                isCancelled: isStale,
+                updateConfiguration: (nextConfig) =>
+                  lspClient.updateConfiguration(nextConfig),
+              });
+
+              if (dispatchResult.status === "sent") {
+                lastConfigRef.current = dispatchResult.lastConfigKey;
+              }
+              return (
+                dispatchResult.status !== "stale" &&
+                dispatchResult.status !== "sent-stale"
+              );
+            } catch (error) {
+              console.error("[LSP] Failed to sync schema:", error);
+              return !isStale();
+            }
+          };
+
+          // Publish every object and routine name before slower per-object
+          // enrichment starts. No catalog entry is omitted from this payload.
+          if (
+            metadataWork.length > DEFAULT_LSP_METADATA_BATCHING.batchSize &&
+            !(await publishConfiguration())
+          ) {
+            return;
+          }
+
+          let lastPublishedAt = Date.now();
+          let batchesSincePublish = 0;
+          const batchResult = await loadLspMetadataInBatches({
+            items: metadataWork,
+            batchSize: DEFAULT_LSP_METADATA_BATCHING.batchSize,
+            concurrency: DEFAULT_LSP_METADATA_BATCHING.concurrency,
+            isCancelled: isStale,
+            load: (work) => work.load(),
+            onBatch: async (definitions, startIndex) => {
+              definitions.forEach((definition, resultIndex) => {
+                const work = metadataWork[startIndex + resultIndex]!;
+                schemaDefinitions[work.schemaIndex]!.tables[
+                  work.objectIndex
+                ] = definition;
+              });
+
+              batchesSincePublish += 1;
+              const now = Date.now();
+              if (
+                now - lastPublishedAt >= LSP_PROGRESS_PUBLISH_INTERVAL_MS ||
+                batchesSincePublish >= LSP_PROGRESS_PUBLISH_BATCHES
+              ) {
+                await publishConfiguration();
+                lastPublishedAt = Date.now();
+                batchesSincePublish = 0;
+              }
+            },
+          });
+
+          if (batchResult.status === "cancelled" || isStale()) {
+            console.log(
+              `[LSP] Cancelled stale metadata sync after ${batchResult.processed}/${batchResult.total} objects`
+            );
+            return;
+          }
 
           // Build configuration matching Python script format
           const config = {
@@ -411,7 +555,7 @@ export function LspConnectionSyncer() {
               lastConfigKey: lastConfigRef.current,
               syncGeneration,
               getCurrentGeneration: () => syncGenerationRef.current,
-              isCancelled,
+              isCancelled: isStale,
               updateConfiguration: (nextConfig) =>
                 lspClient.updateConfiguration(nextConfig),
             });
@@ -456,6 +600,7 @@ export function LspConnectionSyncer() {
     tables,
     currentSchema,
     metadataVersion,
+    supportsMetadataSync,
   ]);
 
   return null;

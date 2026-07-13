@@ -25,6 +25,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .manage(manager)
         .manage(lsp_state)
@@ -32,8 +33,8 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 let mut updater = tauri_plugin_updater::Builder::new();
-                if let Some(public_key) = option_env!("OXIDE_UPDATER_PUBLIC_KEY")
-                    .filter(|value| !value.trim().is_empty())
+                if let Some(public_key) =
+                    option_env!("OXIDE_UPDATER_PUBLIC_KEY").filter(|value| !value.trim().is_empty())
                 {
                     updater = updater.pubkey(public_key);
                 }
@@ -57,6 +58,7 @@ pub fn run() {
             // Initialize SQL Parser state
             app.manage(ParserState(Mutex::new(SqlParser::new())));
             app.manage(QueryCancellationState::default());
+            app.manage(commands::ai::AiCancellationState::default());
 
             // Platform-specific window configuration
             if let Some(window) = app.get_webview_window("main") {
@@ -83,9 +85,12 @@ pub fn run() {
             commands::connection::load_connections,
             // AI commands
             commands::ai::ai_chat_completion,
+            commands::ai::ai_inline_completion,
+            commands::ai::cancel_ai_request,
             commands::ai::ai_test_provider,
             // Query commands
             commands::query::execute_query,
+            commands::query::execute_read_only_query,
             commands::query::cancel_query,
             commands::query::get_sql_completion,
             // Schema commands
@@ -94,13 +99,21 @@ pub fn run() {
             commands::database::create_database,
             commands::database::drop_database,
             commands::database::rename_database,
+            commands::schema::get_databases,
             commands::schema::get_schemas,
+            commands::schema::get_database_schemas,
             commands::schema::get_tables,
+            commands::schema::get_database_tables,
             commands::schema::get_collections,
+            commands::schema::get_collections_page,
             commands::schema::get_columns,
+            commands::schema::get_database_columns,
             commands::schema::get_indexes,
+            commands::schema::get_database_indexes,
             commands::schema::get_constraints,
+            commands::schema::get_database_constraints,
             commands::schema::get_functions,
+            commands::schema::get_database_functions,
             commands::schema::set_current_schema,
             // Table commands
             commands::table::preview_table_page,
@@ -139,6 +152,7 @@ pub fn run() {
             // Store commands (SQLite MetaStore)
             commands::store::save_project,
             commands::store::get_projects,
+            commands::store::get_project,
             commands::store::save_connection,
             commands::store::get_connections,
             commands::store::delete_connection,
@@ -147,6 +161,16 @@ pub fn run() {
             commands::store::delete_resources,
             commands::store::get_resources,
             commands::store::search_resources,
+            // Project file commands
+            commands::project_files::set_project_root,
+            commands::project_files::list_project_entries,
+            commands::project_files::get_project_completion_context,
+            commands::project_files::read_project_file,
+            commands::project_files::create_project_file,
+            commands::project_files::create_project_directory,
+            commands::project_files::write_project_file,
+            commands::project_files::rename_project_entry,
+            commands::project_files::delete_project_entry,
             // App settings commands
             commands::settings::get_app_settings,
             commands::settings::get_app_settings_path,
@@ -160,6 +184,8 @@ pub fn run() {
             commands::lsp::lsp_hover,
             commands::lsp::lsp_goto_definition,
             commands::lsp::lsp_references,
+            commands::lsp::lsp_inline_completion_context,
+            commands::lsp::lsp_validate_inline_completion,
             commands::lsp::lsp_formatting,
             commands::lsp::lsp_did_change_configuration,
             commands::lsp::lsp_did_open,
@@ -169,6 +195,7 @@ pub fn run() {
             lsp::check_lsp_binary,
             // Window commands
             commands::window::create_new_window,
+            commands::window::close_current_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

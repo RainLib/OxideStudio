@@ -10,6 +10,7 @@ import {
   collectionToLspTableDefinition,
   lspSchemaSignature,
   selectLspTablesForSchema,
+  type LspSchemaDefinition,
 } from "@/services/lsp/schemaConfig";
 import type { ColumnInfo, IndexInfo } from "@/services/tauri/types";
 
@@ -32,6 +33,103 @@ function index(name: string, columns: string[]): IndexInfo {
     is_unique: false,
     is_primary: false,
   };
+}
+
+function signatureSchema(): LspSchemaDefinition {
+  return {
+    id: "schema-1",
+    database: "app",
+    source_uri: null,
+    tables: [
+      {
+        name: "users",
+        object_type: "BASE TABLE",
+        comment: "Application users",
+        source_location: null,
+        columns: [
+          {
+            name: "id",
+            data_type: "integer",
+            nullable: false,
+            primary_key: true,
+            unique: true,
+            indexed: true,
+            default_value: "nextval('users_id_seq')",
+            auto_increment: true,
+            comment: "Primary identifier",
+            source_location: null,
+          },
+          {
+            name: "email",
+            data_type: "text",
+            nullable: false,
+            primary_key: false,
+            unique: true,
+            indexed: true,
+            default_value: null,
+            auto_increment: false,
+            comment: null,
+            source_location: null,
+          },
+        ],
+        indexes: [
+          {
+            name: "users_pkey",
+            columns: ["id"],
+            is_unique: true,
+            is_primary: true,
+            index_type: "btree",
+            definition: "CREATE UNIQUE INDEX users_pkey ON users (id)",
+          },
+          {
+            name: "users_email_key",
+            columns: ["email"],
+            is_unique: true,
+            is_primary: false,
+            index_type: "btree",
+            definition: "CREATE UNIQUE INDEX users_email_key ON users (email)",
+          },
+        ],
+        constraints: [
+          {
+            name: "users_team_fk",
+            constraint_type: "FOREIGN KEY",
+            columns: ["team_id"],
+            referenced_schema: "app",
+            referenced_table: "teams",
+            referenced_columns: ["id"],
+            definition:
+              "FOREIGN KEY (team_id) REFERENCES app.teams(id) ON DELETE CASCADE",
+          },
+          {
+            name: "users_email_check",
+            constraint_type: "CHECK",
+            columns: ["email"],
+            referenced_schema: null,
+            referenced_table: null,
+            referenced_columns: [],
+            definition: "CHECK (email <> '')",
+          },
+        ],
+      },
+    ],
+    functions: [
+      {
+        name: "find_user",
+        routine_type: "function",
+        parameters: [
+          { name: "user_id", data_type: "integer", optional: false, mode: "IN" },
+          { name: "include_deleted", data_type: "boolean", optional: true, mode: "IN" },
+        ],
+        return_type: "app.users",
+        description: "Find a user",
+      },
+    ],
+  };
+}
+
+function cloneSchema(schema: LspSchemaDefinition): LspSchemaDefinition {
+  return JSON.parse(JSON.stringify(schema)) as LspSchemaDefinition;
 }
 
 describe("LSP schema config", () => {
@@ -116,6 +214,22 @@ describe("LSP schema config", () => {
     expect(selected.map((item) => item.name)).toEqual(["events", "users"]);
   });
 
+  it("keeps every schema object when no explicit compatibility limit is given", () => {
+    const tables = Array.from({ length: 620 }, (_, index) => ({
+      name: `table_${index}`,
+    }));
+    const selected = selectLspTablesForSchema(
+      tables,
+      new Set(["TABLE_619"])
+    );
+
+    expect(selected).toHaveLength(620);
+    expect(selected[0]?.name).toBe("table_619");
+    expect(new Set(selected.map((table) => table.name))).toEqual(
+      new Set(tables.map((table) => table.name))
+    );
+  });
+
   it("uses LSP document URIs that the bundled server can infer when mappings lag", () => {
     expect(lspLanguageId("redis")).toBe("redis");
     expect(lspLanguageId("mongodb")).toBe("mongodb");
@@ -143,27 +257,69 @@ describe("LSP schema config", () => {
     expect(normalizeLspDialect("sql", "mysql")).toBe("mysql");
   });
 
-  it("captures schema signature changes from NoSQL fields and indexes", () => {
-    const signature = lspSchemaSignature([
-      {
-        id: "schema-1",
-        database: "app",
-        source_uri: null,
-        tables: [
-          collectionToLspTableDefinition(
-            defaultDatabaseCapabilities("mongodb"),
-            { name: "users", type: "collection" },
-            [column("email", "string")],
-            [index("email_1", ["email"])]
-          ),
-        ],
-        functions: [],
-      },
-    ]);
+  it("captures the complete semantic schema metadata in its signature", () => {
+    const baseline = signatureSchema();
+    const baselineSignature = lspSchemaSignature([baseline]);
+    const mutations: Array<(schema: LspSchemaDefinition) => void> = [
+      (schema) => (schema.database = "audit"),
+      (schema) => (schema.tables[0]!.comment = "Changed"),
+      (schema) => (schema.tables[0]!.columns[0]!.data_type = "bigint"),
+      (schema) => (schema.tables[0]!.columns[0]!.nullable = true),
+      (schema) => (schema.tables[0]!.columns[0]!.unique = false),
+      (schema) => (schema.tables[0]!.columns[0]!.comment = "Changed"),
+      (schema) => (schema.tables[0]!.columns[0]!.default_value = "1"),
+      (schema) => (schema.tables[0]!.columns[0]!.auto_increment = false),
+      (schema) => (schema.tables[0]!.indexes[0]!.name = "renamed_idx"),
+      (schema) => (schema.tables[0]!.indexes[0]!.columns = ["email", "id"]),
+      (schema) => (schema.tables[0]!.indexes[0]!.is_unique = false),
+      (schema) => (schema.tables[0]!.indexes[0]!.index_type = "hash"),
+      (schema) => (schema.tables[0]!.indexes[0]!.definition = "changed"),
+      (schema) => (schema.tables[0]!.constraints[0]!.name = "renamed_fk"),
+      (schema) => (schema.tables[0]!.constraints[0]!.constraint_type = "UNIQUE"),
+      (schema) => (schema.tables[0]!.constraints[0]!.columns = ["team_id", "id"]),
+      (schema) => (schema.tables[0]!.constraints[0]!.referenced_schema = "core"),
+      (schema) => (schema.tables[0]!.constraints[0]!.referenced_table = "groups"),
+      (schema) => (schema.tables[0]!.constraints[0]!.referenced_columns = ["group_id"]),
+      (schema) => (schema.tables[0]!.constraints[0]!.definition = "ON DELETE RESTRICT"),
+      (schema) => (schema.functions[0]!.return_type = "jsonb"),
+      (schema) => (schema.functions[0]!.description = "Changed"),
+      (schema) => (schema.functions[0]!.parameters[0]!.name = "id"),
+      (schema) => (schema.functions[0]!.parameters[0]!.data_type = "bigint"),
+      (schema) => (schema.functions[0]!.parameters[0]!.optional = true),
+      (schema) => (schema.functions[0]!.parameters[0]!.mode = "INOUT"),
+      (schema) => schema.functions[0]!.parameters.reverse(),
+    ];
 
-    expect(signature).toContain("schema-1:app");
-    expect(signature).toContain("users:collection");
-    expect(signature).toContain("email:string:1:0:1");
-    expect(signature).toContain(":1:0");
+    for (const mutate of mutations) {
+      const changed = cloneSchema(baseline);
+      mutate(changed);
+      expect(lspSchemaSignature([changed])).not.toBe(baselineSignature);
+    }
+  });
+
+  it("ignores metadata collection ordering while retaining ordered semantics", () => {
+    const original = signatureSchema();
+    const secondTable = cloneSchema(original).tables[0]!;
+    secondTable.name = "teams";
+    original.tables.push(secondTable);
+    const secondFunction = cloneSchema(original).functions[0]!;
+    secondFunction.name = "list_users";
+    original.functions.push(secondFunction);
+    const secondSchema = cloneSchema(original);
+    secondSchema.id = "schema-2";
+    secondSchema.database = "audit";
+
+    const reordered = cloneSchema(original);
+    reordered.tables.reverse();
+    for (const table of reordered.tables) {
+      table.columns.reverse();
+      table.indexes.reverse();
+      table.constraints.reverse();
+    }
+    reordered.functions.reverse();
+
+    expect(lspSchemaSignature([secondSchema, reordered])).toBe(
+      lspSchemaSignature([original, secondSchema])
+    );
   });
 });

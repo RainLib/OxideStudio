@@ -18,11 +18,12 @@ export function createOpenAiCompatibleAssistantPlanner(
       parseModelJson<AssistantModelPlannerResponse>(
         (
           await aiService.chatCompletion({
+            requestId: `${request.context.requestId}:plan`,
             config,
             messages: plannerMessages(request),
             temperature: 0,
             maxTokens: 1200,
-          })
+          }, request.abortSignal)
         ).content
       ),
   });
@@ -35,17 +36,19 @@ export function createOpenAiCompatibleResultSummarizer(
     parseModelJson<AssistantModelResultSummaryResponse>(
       (
         await aiService.chatCompletion({
+          requestId: `${request.context.requestId}:summary`,
           config,
           messages: summaryMessages(request),
           temperature: 0,
           maxTokens: 800,
-        })
+        }, request.abortSignal)
       ).content
     )
   );
 }
 
 function plannerMessages(request: AssistantModelPlannerRequest) {
+  const { abortSignal: _abortSignal, ...modelRequest } = request;
   return [
     {
       role: "system" as const,
@@ -58,12 +61,13 @@ function plannerMessages(request: AssistantModelPlannerRequest) {
     },
     {
       role: "user" as const,
-      content: JSON.stringify(request, null, 2),
+      content: JSON.stringify(modelRequest, null, 2),
     },
   ];
 }
 
 function summaryMessages(request: AssistantModelResultSummaryRequest) {
+  const { abortSignal: _abortSignal, ...modelRequest } = request;
   return [
     {
       role: "system" as const,
@@ -75,7 +79,7 @@ function summaryMessages(request: AssistantModelResultSummaryRequest) {
     },
     {
       role: "user" as const,
-      content: JSON.stringify(request, null, 2),
+      content: JSON.stringify(modelRequest, null, 2),
     },
   ];
 }

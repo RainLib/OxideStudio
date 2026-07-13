@@ -14,7 +14,8 @@ import {
 
 export function useTableOperations() {
   const { activeConnectionId, connections } = useConnectionStore();
-  const { currentSchema, loadTables } = useSchemaStore();
+  const currentSchema = useSchemaStore((state) => state.currentSchema);
+  const loadTables = useSchemaStore((state) => state.loadTables);
 
   const getDriver = () => {
     const conn = connections.find((c) => c.id === activeConnectionId);

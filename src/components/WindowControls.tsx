@@ -1,27 +1,37 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
 import { Minus, Square, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function WindowControls() {
   const handleMinimize = () => {
-    getCurrentWindow().minimize();
+    void getCurrentWindow().minimize();
   };
 
   const handleMaximize = () => {
-    getCurrentWindow().toggleMaximize();
+    void getCurrentWindow().toggleMaximize();
   };
 
-  const handleClose = () => {
-    getCurrentWindow().close();
+  const handleClose = async () => {
+    try {
+      await invoke("close_current_window");
+    } catch (error) {
+      console.warn("Native close command failed; falling back to window API", error);
+      await getCurrentWindow().close();
+    }
   };
 
   const baseButtonClass =
     "h-full flex items-center justify-center px-4 transition-colors duration-200";
 
   return (
-    <div className="flex items-center h-full">
+    <div
+      className="flex items-center h-full"
+      onPointerDown={(event) => event.stopPropagation()}
+    >
       {/* Minimize Button */}
       <button
+        type="button"
         onClick={handleMinimize}
         className={cn(
           baseButtonClass,
@@ -35,6 +45,7 @@ export function WindowControls() {
 
       {/* Maximize Button */}
       <button
+        type="button"
         onClick={handleMaximize}
         className={cn(
           baseButtonClass,
@@ -48,7 +59,8 @@ export function WindowControls() {
 
       {/* Close Button - Red hover */}
       <button
-        onClick={handleClose}
+        type="button"
+        onClick={() => void handleClose()}
         className={cn(
           baseButtonClass,
           "text-muted-foreground hover:text-white",

@@ -4,19 +4,35 @@ import { settingsService } from "@/services/tauri/settings.service";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
+import { saveProjectFileTab } from "@/lib/projectFileTabs";
+import { requestProjectFilesPanel } from "@/lib/projectFilesNavigation";
+import {
+  useEditorGroupStore,
+  type EditorSplitDirection,
+} from "@/store/useEditorGroupStore";
 
 export type WorkbenchActionId =
   | "commandPalette.open"
   | "settings.open"
   | "settings.openJson"
   | "window.new"
+  | "editor.splitLeft"
+  | "editor.splitRight"
+  | "editor.splitUp"
+  | "editor.splitDown"
   | "query.newConsole"
   | "query.reopenClosed"
   | "query.closeTab"
   | "query.run"
   | "query.runCurrentStatement"
   | "query.format"
+  | "editor.inlineCompletion.trigger"
+  | "editor.inlineCompletion.accept"
+  | "editor.inlineCompletion.acceptNextWord"
+  | "editor.inlineCompletion.hide"
+  | "file.save"
   | "workbench.toggleDatabaseExplorer"
+  | "workbench.openProjectFiles"
   | "workbench.toggleAssistant"
   | "workbench.toggleResults"
   | "workbench.focusEditor"
@@ -33,15 +49,30 @@ export type WorkbenchActionId =
 export type WorkbenchAction = {
   id: WorkbenchActionId;
   title: string;
-  group: "Workbench" | "Query" | "Window" | "Settings";
+  group: "Workbench" | "Editor" | "Query" | "File" | "Window" | "Settings";
   run: () => void | Promise<void>;
 };
+
+function splitActiveEditor(direction: EditorSplitDirection) {
+  const { activeTabId, tabs } = useTabStore.getState();
+  const activeTab = tabs.find((tab) => tab.id === activeTabId);
+  if (!activeTabId || activeTab?.type !== "query") return;
+  useEditorGroupStore.getState().split(direction, activeTabId);
+}
 
 export const APP_EVENT_RUN_QUERY = "oxide:run-query";
 export const APP_EVENT_RUN_CURRENT = "oxide:run-current";
 export const APP_EVENT_FORMAT_SQL = "oxide:format-sql";
+export const APP_EVENT_SAVE_FILE = "oxide:save-file";
 export const APP_EVENT_OPEN_COMMAND_PALETTE = "oxide:open-command-palette";
 export const APP_EVENT_OPEN_SETTINGS = "oxide:open-settings";
+export const APP_EVENT_INLINE_COMPLETION_TRIGGER =
+  "oxide:inline-completion-trigger";
+export const APP_EVENT_INLINE_COMPLETION_ACCEPT =
+  "oxide:inline-completion-accept";
+export const APP_EVENT_INLINE_COMPLETION_ACCEPT_NEXT_WORD =
+  "oxide:inline-completion-accept-next-word";
+export const APP_EVENT_INLINE_COMPLETION_HIDE = "oxide:inline-completion-hide";
 
 export function workbenchActions(): WorkbenchAction[] {
   return [
@@ -84,6 +115,7 @@ export function workbenchActions(): WorkbenchAction[] {
       title: "New Query Console",
       group: "Query",
       run: () => {
+        useEditorGroupStore.getState().reset();
         useTabStore.getState().createTab("query", "New Query", "");
       },
     },
@@ -119,6 +151,25 @@ export function workbenchActions(): WorkbenchAction[] {
       },
     },
     {
+      id: "file.save",
+      title: "Save Project File",
+      group: "File",
+      run: async () => {
+        await saveProjectFileTab();
+      },
+    },
+    ...([
+      ["editor.splitLeft", "Split Editor Left", "left"],
+      ["editor.splitRight", "Split Editor Right", "right"],
+      ["editor.splitUp", "Split Editor Up", "up"],
+      ["editor.splitDown", "Split Editor Down", "down"],
+    ] as const).map(([id, title, direction]) => ({
+      id,
+      title,
+      group: "Editor" as const,
+      run: () => splitActiveEditor(direction),
+    })),
+    {
       id: "query.format",
       title: "Format Query",
       group: "Query",
@@ -133,8 +184,50 @@ export function workbenchActions(): WorkbenchAction[] {
       run: () => useWorkbenchLayoutStore.getState().toggleToolWindow("databaseExplorer"),
     },
     {
+      id: "workbench.openProjectFiles",
+      title: "Open Project Files",
+      group: "File",
+      run: () => {
+        requestProjectFilesPanel();
+      },
+    },
+    {
+      id: "editor.inlineCompletion.trigger",
+      title: "Trigger Inline Completion",
+      group: "Editor",
+      run: () => {
+        window.dispatchEvent(new CustomEvent(APP_EVENT_INLINE_COMPLETION_TRIGGER));
+      },
+    },
+    {
+      id: "editor.inlineCompletion.accept",
+      title: "Accept Inline Completion",
+      group: "Editor",
+      run: () => {
+        window.dispatchEvent(new CustomEvent(APP_EVENT_INLINE_COMPLETION_ACCEPT));
+      },
+    },
+    {
+      id: "editor.inlineCompletion.acceptNextWord",
+      title: "Accept Next Inline Completion Word",
+      group: "Editor",
+      run: () => {
+        window.dispatchEvent(
+          new CustomEvent(APP_EVENT_INLINE_COMPLETION_ACCEPT_NEXT_WORD)
+        );
+      },
+    },
+    {
+      id: "editor.inlineCompletion.hide",
+      title: "Hide Inline Completion",
+      group: "Editor",
+      run: () => {
+        window.dispatchEvent(new CustomEvent(APP_EVENT_INLINE_COMPLETION_HIDE));
+      },
+    },
+    {
       id: "workbench.toggleAssistant",
-      title: "Toggle AI Assistant",
+      title: "Toggle Secondary Panel",
       group: "Workbench",
       run: () => useWorkbenchLayoutStore.getState().toggleToolWindow("assistant"),
     },
@@ -158,7 +251,7 @@ export function workbenchActions(): WorkbenchAction[] {
     },
     {
       id: "workbench.focusAssistant",
-      title: "Focus AI Assistant",
+      title: "Focus Secondary Panel",
       group: "Workbench",
       run: () => useWorkbenchLayoutStore.getState().setActiveToolWindow("assistant"),
     },

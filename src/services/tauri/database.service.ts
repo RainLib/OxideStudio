@@ -57,7 +57,8 @@ export async function createDatabase(
   driver: DatabaseDriver,
   database: string,
   charset?: string,
-  collation?: string
+  collation?: string,
+  owner?: string
 ): Promise<string> {
   return invokeWithInterceptors<string>("create_database", {
     connectionId,
@@ -65,6 +66,7 @@ export async function createDatabase(
     database,
     charset,
     collation,
+    owner,
   });
 }
 

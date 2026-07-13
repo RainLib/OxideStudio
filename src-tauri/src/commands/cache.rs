@@ -40,13 +40,6 @@ pub async fn refresh_schemas(
     cache.save(&key, &schemas);
 
     // 同时缓存每个 schema 的表
-    for schema in &schemas {
-        if let Ok(tables) = manager.get_tables(&connection_id, schema).await {
-            let table_key = format!("tables_{}_{}", connection_id, schema);
-            cache.save(&table_key, &tables);
-        }
-    }
-
     Ok(Response::ok(schemas))
 }
 

@@ -1,5 +1,10 @@
 /// Window management commands
-use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tauri::{
+    AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
+
+static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 
 #[tauri::command]
 pub async fn create_new_window(app: AppHandle) -> Result<String, String> {
@@ -12,7 +17,8 @@ pub async fn create_new_window(app: AppHandle) -> Result<String, String> {
         .map_err(|e| e.to_string())?
         .as_millis();
 
-    let window_label = format!("window_{}", timestamp);
+    let window_id = NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed);
+    let window_label = format!("window_{timestamp}_{window_id}");
     println!("[create_new_window] Window label: {}", window_label);
 
     // Calculate position offset based on current focused window
@@ -68,7 +74,7 @@ pub async fn create_new_window(app: AppHandle) -> Result<String, String> {
     }
 
     println!("[create_new_window] Building window...");
-    let window = builder.build().map_err(|e| {
+    let _window = builder.build().map_err(|e| {
         println!("[create_new_window] Failed to build window: {}", e);
         e.to_string()
     })?;
@@ -76,8 +82,13 @@ pub async fn create_new_window(app: AppHandle) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
         use tauri::TitleBarStyle;
-        let _ = window.set_title_bar_style(TitleBarStyle::Overlay);
+        let _ = _window.set_title_bar_style(TitleBarStyle::Overlay);
     }
 
     Ok(window_label)
+}
+
+#[tauri::command]
+pub fn close_current_window(window: WebviewWindow) -> Result<(), String> {
+    window.close().map_err(|error| error.to_string())
 }

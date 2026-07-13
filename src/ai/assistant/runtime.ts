@@ -2,11 +2,13 @@ import type { AiToolRegistry } from "@/ai/tools/registry";
 import {
   DEFAULT_AI_TOOL_POLICY,
   approveAiToolForPolicy,
+  evaluateAiToolPolicy,
 } from "@/ai/tools/policy";
 import { createAiToolManifest } from "@/ai/tools/manifest";
 import type {
   AiToolExecutionContext,
   AiToolExecutionPolicy,
+  AiToolSummary,
 } from "@/ai/tools/types";
 import { createDefaultAssistantPlanner } from "./planner";
 import type {
@@ -14,6 +16,7 @@ import type {
   AssistantPlannerInfo,
   AssistantPlannerInput,
   AssistantPlannerResult,
+  AssistantPlanStep,
   AssistantPreparedTurn,
   AssistantToolCall,
   AssistantToolCallResult,
@@ -56,8 +59,11 @@ export class AssistantRuntime {
     return this.createPreparedTurn(plannerInput, result);
   }
 
-  async prepareTurnAsync(input: AssistantTurnInput): Promise<AssistantPreparedTurn> {
-    const plannerInput = this.createPlannerInput(input);
+  async prepareTurnAsync(
+    input: AssistantTurnInput,
+    contextOverrides?: Partial<AiToolExecutionContext>
+  ): Promise<AssistantPreparedTurn> {
+    const plannerInput = this.createPlannerInput(input, contextOverrides);
     const result = await this.planner.plan(plannerInput);
     return this.createPreparedTurn(plannerInput, result);
   }
@@ -127,22 +133,72 @@ export class AssistantRuntime {
     context = this.createContext()
   ): Promise<AssistantToolResultSummary> {
     if (this.summarizeResults) {
-      return this.summarizeResults({
-        turn,
-        context,
-        availableTools: this.registry.list(),
-        policy: this.policy,
-        results,
-      });
+      try {
+        return await this.summarizeResults({
+          turn,
+          context,
+          availableTools: this.registry.list(),
+          policy: this.policy,
+          results,
+        });
+      } catch {
+        const fallback = summarizeResultsLocally(results);
+        return {
+          ...fallback,
+          message: `${fallback.message}. Detailed model summary unavailable.`,
+          warnings: uniqueStrings([
+            ...(fallback.warnings ?? []),
+            "Model result summary failed; used the local summary.",
+          ]),
+        };
+      }
     }
 
     return summarizeResultsLocally(results);
   }
 
-  private createPlannerInput(input: AssistantTurnInput): AssistantPlannerInput {
+  normalizeSuggestedCalls(
+    calls: AssistantToolCall[],
+    existingIds: Iterable<string> = []
+  ) {
+    const warnings: string[] = [];
+    const steps = calls.slice(0, 12).map((call) => {
+      const input = isRecord(call.input) ? call.input : {};
+      if (call.input !== undefined && !isRecord(call.input)) {
+        warnings.push(
+          `Assistant follow-up ${call.toolName} had a non-object input and was normalized.`
+        );
+      }
+      return {
+        id: call.id,
+        title: call.reason?.trim() || `Run ${call.toolName}`,
+        toolName: call.toolName,
+        input,
+        requiresApproval: false,
+      };
+    });
+    if (calls.length > steps.length) {
+      warnings.push("Assistant follow-up calls were capped at 12.");
+    }
+    const normalized = normalizeSuggestedPlan(
+      steps,
+      this.registry.list(),
+      this.policy,
+      existingIds
+    );
+    return {
+      steps: normalized.steps,
+      warnings: uniqueStrings([...warnings, ...normalized.warnings]),
+    };
+  }
+
+  private createPlannerInput(
+    input: AssistantTurnInput,
+    contextOverrides?: Partial<AiToolExecutionContext>
+  ): AssistantPlannerInput {
     return {
       turn: input,
-      context: this.createContext(),
+      context: { ...this.createContext(), ...contextOverrides },
       availableTools: this.registry.list(),
       policy: this.policy,
     };
@@ -152,16 +208,22 @@ export class AssistantRuntime {
     input: AssistantPlannerInput,
     result: AssistantPlannerResult
   ): AssistantPreparedTurn {
+    const normalizedPlan = normalizeSuggestedPlan(
+      result.steps,
+      input.availableTools,
+      input.policy
+    );
     return {
       requestId: input.context.requestId,
       intent: result.intent,
       planner: toPlannerInfo(this.planner),
       context: input.context,
       availableTools: input.availableTools,
-      suggestedPlan: result.steps,
+      suggestedPlan: normalizedPlan.steps,
       warnings: uniqueStrings([
         ...baseWarnings(input),
         ...(result.warnings ?? []),
+        ...normalizedPlan.warnings,
       ]),
       notes: uniqueStrings(result.notes ?? []),
     };
@@ -194,6 +256,62 @@ function toPlannerInfo(planner: AssistantPlanner): AssistantPlannerInfo {
 
 function uniqueStrings(values: string[]) {
   return Array.from(new Set(values.filter(Boolean)));
+}
+
+function normalizeSuggestedPlan(
+  steps: AssistantPlanStep[],
+  tools: AiToolSummary[],
+  policy: AiToolExecutionPolicy,
+  existingIds: Iterable<string> = []
+) {
+  const toolsByName = new Map(tools.map((tool) => [tool.name, tool]));
+  const usedIds = new Set(existingIds);
+  const warnings: string[] = [];
+  const normalizedSteps: AssistantPlanStep[] = [];
+
+  for (const [index, step] of steps.entries()) {
+    const tool = step.toolName ? toolsByName.get(step.toolName) : null;
+    if (step.toolName && !tool) {
+      warnings.push(`Assistant planner requested unknown tool: ${step.toolName}`);
+      continue;
+    }
+
+    let requiresApproval = false;
+    if (tool) {
+      const decision = evaluateAiToolPolicy(tool, policy);
+      if (!decision.allowed && !decision.requiresApproval) {
+        warnings.push(
+          `Assistant planner requested blocked tool ${tool.name}: ${
+            decision.reason || "tool is denied by policy"
+          }`
+        );
+        continue;
+      }
+      requiresApproval = decision.requiresApproval;
+    }
+
+    const fallbackId = step.toolName || `plan-step-${index + 1}`;
+    const baseId = step.id?.trim().slice(0, 120) || fallbackId;
+    let id = baseId;
+    let duplicateIndex = 2;
+    while (usedIds.has(id)) {
+      id = `${baseId}-${duplicateIndex}`;
+      duplicateIndex += 1;
+    }
+    usedIds.add(id);
+
+    normalizedSteps.push({
+      ...step,
+      id,
+      requiresApproval,
+    });
+  }
+
+  return { steps: normalizedSteps, warnings };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {

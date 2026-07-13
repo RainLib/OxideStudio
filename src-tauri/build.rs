@@ -1,19 +1,19 @@
 fn main() {
-    let script_path = std::path::Path::new("build_prepare.sh");
+    let script_path = std::path::Path::new("../scripts/prepare-sql-lsp.mjs");
     if script_path.exists() {
         println!("cargo:rerun-if-changed=build_prepare.sh");
         println!("cargo:rerun-if-env-changed=OXIDE_SQL_LSP_BINARY");
         println!("cargo:rerun-if-env-changed=OXIDE_PREPARE_SQL_LSP");
 
         if should_prepare_sql_lsp_binary() {
-            let status = std::process::Command::new("bash")
-                .arg("build_prepare.sh")
+            let status = std::process::Command::new("node")
+                .arg(script_path)
                 .current_dir(env!("CARGO_MANIFEST_DIR"))
                 .status()
-                .expect("Failed to execute build_prepare.sh");
+                .expect("Failed to execute prepare-sql-lsp.mjs");
 
             if !status.success() {
-                panic!("build_prepare.sh failed");
+                panic!("prepare-sql-lsp.mjs failed");
             }
         }
     }

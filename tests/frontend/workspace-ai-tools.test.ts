@@ -16,6 +16,7 @@ import type { DatabaseDriver } from "@/services/tauri/types";
 
 const mocks = vi.hoisted(() => ({
   executeQuery: vi.fn(async () => []),
+  executeReadOnlyQuery: vi.fn(async () => []),
   cancelQuery: vi.fn(async () => "cancelled"),
   getDatabaseCapabilities: vi.fn(),
   createDatabase: vi.fn(async () => undefined),
@@ -49,6 +50,7 @@ vi.mock("@/services/tauri", () => ({
   },
   queryService: {
     executeQuery: mocks.executeQuery,
+    executeReadOnlyQuery: mocks.executeReadOnlyQuery,
     cancelQuery: mocks.cancelQuery,
   },
   schemaService: {
@@ -144,6 +146,7 @@ describe("workspace AI tools", () => {
       async (driver: DatabaseDriver) => defaultDatabaseCapabilities(driver)
     );
     mocks.executeQuery.mockResolvedValue([]);
+    mocks.executeReadOnlyQuery.mockResolvedValue([]);
     mocks.cancelQuery.mockResolvedValue("cancelled");
     mocks.getCollections.mockResolvedValue([]);
     mocks.getColumns.mockResolvedValue([]);
@@ -228,7 +231,7 @@ describe("workspace AI tools", () => {
       namespace: "public",
     });
     let resolveQuery: (value: any[]) => void = () => undefined;
-    mocks.executeQuery.mockImplementationOnce(
+    mocks.executeReadOnlyQuery.mockImplementationOnce(
       () =>
         new Promise<any[]>((resolve) => {
           resolveQuery = resolve;
@@ -253,12 +256,11 @@ describe("workspace AI tools", () => {
     );
     await waitForNextTask();
 
-    const queryId = mocks.executeQuery.mock.calls[0]?.[4];
-    expect(mocks.executeQuery).toHaveBeenCalledWith(
+    const queryId = mocks.executeReadOnlyQuery.mock.calls[0]?.[3];
+    expect(mocks.executeReadOnlyQuery).toHaveBeenCalledWith(
       "postgres-1",
       "SELECT pg_sleep(30)",
       "public",
-      undefined,
       expect.stringMatching(/^workspace-ai-abort:query.runReadOnly:/)
     );
 
@@ -297,6 +299,34 @@ describe("workspace AI tools", () => {
     ).rejects.toThrow("AI tool execution aborted");
     expect(mocks.executeQuery).not.toHaveBeenCalled();
     expect(mocks.cancelQuery).not.toHaveBeenCalled();
+  });
+
+  it("routes relational driver aliases through backend-enforced read-only execution", async () => {
+    setWorkspaceConnection({
+      id: "mariadb-1",
+      driver: "mariadb",
+      namespace: "app",
+    });
+    const registry = createWorkspaceAiToolRegistry();
+
+    await registry.executeWithPolicy(
+      "query.runReadOnly",
+      { connectionId: "mariadb-1", query: "SELECT 1" },
+      {
+        requestId: "workspace-ai-alias",
+        activeConnectionId: "mariadb-1",
+        activeDriver: "mariadb",
+      },
+      DEFAULT_AI_TOOL_POLICY
+    );
+
+    expect(mocks.executeReadOnlyQuery).toHaveBeenCalledWith(
+      "mariadb-1",
+      "SELECT 1",
+      "app",
+      undefined
+    );
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
   });
 
   it("exposes active namespace and object context to assistant planners", () => {
@@ -540,7 +570,7 @@ describe("workspace AI tools", () => {
       rows: [[1]],
       statementType: "SELECT",
     };
-    mocks.executeQuery.mockResolvedValueOnce([queryResult]);
+    mocks.executeReadOnlyQuery.mockResolvedValueOnce([queryResult]);
     const runtime = createAssistantRuntime({
       registry: createWorkspaceAiToolRegistry(),
       createContext: () => createWorkspaceAiToolContext("workspace-ai-test"),
@@ -576,10 +606,11 @@ describe("workspace AI tools", () => {
         output: [queryResult],
       }),
     ]);
-    expect(mocks.executeQuery).toHaveBeenCalledWith(
+    expect(mocks.executeReadOnlyQuery).toHaveBeenCalledWith(
       "postgres-1",
       "SELECT * FROM users",
-      "public"
+      "public",
+      undefined
     );
   });
 

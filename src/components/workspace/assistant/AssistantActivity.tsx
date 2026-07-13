@@ -19,16 +19,16 @@ export function AssistantActivity({
   entries,
   onClear,
 }: AssistantActivityProps) {
-  const [isExpanded, setIsExpanded] = useState(true);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   if (entries.length === 0) return null;
 
   return (
     <section
-      className="border-t border-[hsl(var(--wb-border-subtle))]"
+      className="mx-3 mb-3 border-y border-[hsl(var(--wb-border-subtle))]"
       aria-label="AI tool activity"
     >
-      <div className="flex h-7 items-center bg-[hsl(var(--wb-toolbar))] px-1">
+      <div className="flex h-7 items-center px-1">
         <button
           type="button"
           className="flex min-w-0 flex-1 items-center gap-1.5 px-1 text-left text-[10px] font-medium text-[hsl(var(--wb-text-muted))] hover:text-[hsl(var(--wb-text))]"

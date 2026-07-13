@@ -11,6 +11,7 @@ import {
   RefreshCw,
   RotateCw,
   Settings,
+  AppWindow,
   type LucideIcon,
 } from "lucide-react";
 import { SettingsDialog } from "@/components/settings/SettingsDialog";
@@ -163,7 +164,7 @@ export function AppBar({ center, right }: AppBarProps) {
   };
 
   return (
-    <div data-tauri-drag-region className="wb-titlebar flex items-center relative">
+    <div className="wb-titlebar flex items-center relative">
       <SettingsDialog open={showSettings} onOpenChange={setShowSettings} />
       <UpdateDialog open={updateDialogOpen} onOpenChange={setUpdateDialogOpen} />
       <div
@@ -213,8 +214,9 @@ export function AppBar({ center, right }: AppBarProps) {
                       : "hover:bg-[hsl(var(--wb-hover))]"
                   }`}
                   onClick={() => {
-                    setActiveProject(project.id);
-                    setProjectMenuOpen(false);
+                    if (setActiveProject(project.id)) {
+                      setProjectMenuOpen(false);
+                    }
                   }}
                 >
                   <span className="truncate">{project.name}</span>
@@ -250,7 +252,7 @@ export function AppBar({ center, right }: AppBarProps) {
 
       <div className="h-full flex items-center gap-1 shrink-0 ml-auto pr-1">
         {right && (
-          <div data-tauri-drag-region className="flex items-center gap-1 pr-1">
+          <div className="flex items-center gap-1 pr-1">
             {right}
           </div>
         )}
@@ -277,6 +279,16 @@ export function AppBar({ center, right }: AppBarProps) {
               sideOffset={6}
               className="w-[238px] rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[13px] text-[hsl(var(--wb-text))] shadow-[0_18px_44px_rgba(0,0,0,0.46)]"
             >
+              <SettingsMenuItem
+                icon={AppWindow}
+                label="New Window"
+                shortcut={isMacOS ? "⌘⇧N" : "Ctrl+Shift+N"}
+                onClick={() => {
+                  setSettingsMenuOpen(false);
+                  void findWorkbenchAction("window.new")?.run();
+                }}
+              />
+              <div className="my-1 h-px bg-[hsl(var(--wb-border-subtle))]" />
               <SettingsMenuItem
                 icon={UpdateMenuIcon}
                 iconSpinning={

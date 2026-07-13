@@ -4,18 +4,26 @@ export type KeybindingEventLike = Pick<
 >;
 
 export function normalizeKeybinding(binding: string) {
-  return binding
+  const compact = binding
     .trim()
     .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/cmd|ctrl|control/g, "mod")
-    .replace(/option/g, "alt")
-    .replace(/return/g, "enter")
-    .replace(/esc/g, "escape")
-    .replace(/left/g, "arrowleft")
-    .replace(/right/g, "arrowright")
-    .replace(/up/g, "arrowup")
-    .replace(/down/g, "arrowdown");
+    .replace(/\s+/g, "");
+  const aliases: Record<string, string> = {
+    cmd: "mod",
+    ctrl: "mod",
+    control: "mod",
+    option: "alt",
+    return: "enter",
+    esc: "escape",
+    left: "arrowleft",
+    right: "arrowright",
+    up: "arrowup",
+    down: "arrowdown",
+  };
+  return compact
+    .split("+")
+    .map((part) => aliases[part] || part)
+    .join("+");
 }
 
 export function keybindingMatchesEvent(

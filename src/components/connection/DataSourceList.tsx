@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import type { DatabaseDriver } from "@/services/tauri";
 import type { ConnectionConfig } from "@/store/useConnectionStore";
 import { Database, Plus } from "lucide-react";
+import { ConnectionGlyph } from "@/components/icons/ConnectionGlyph";
 
 interface DataSourceListProps {
   dataSources: ConnectionConfig[];
@@ -78,9 +79,15 @@ export function DataSourceList({
               )}
               onClick={() => onSelect(connection.id)}
             >
-              <Database
+              <ConnectionGlyph
+                driver={connection.driver}
+                icon={connection.icon}
                 size={13}
-                className={cn("shrink-0", profile?.iconClassName)}
+                className={cn(
+                  "shrink-0",
+                  !connection.color && profile?.iconClassName
+                )}
+                style={{ color: connection.color || undefined }}
               />
               <span className="min-w-0 flex-1 truncate">{connection.name}</span>
             </button>

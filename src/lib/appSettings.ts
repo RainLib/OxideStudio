@@ -1,5 +1,21 @@
 import type { AiPlannerKind } from "@/store/useAiSettingsStore";
 
+export type VimMappingMode = "all" | "normal" | "insert" | "visual";
+
+export type VimCustomMapping = {
+  mode: VimMappingMode;
+  lhs: string;
+  rhs: string;
+  recursive: boolean;
+};
+
+export type InlineCompletionSettings = {
+  enabled: boolean;
+  automaticSuggestions: boolean;
+  includeSchemaMetadata: boolean;
+  includeProjectContext: boolean;
+};
+
 export type WorkbenchToolWindowId =
   | "databaseExplorer"
   | "assistant"
@@ -43,6 +59,13 @@ export type AppSettings = {
     wordWrap: "off" | "on" | "wordWrapColumn" | "bounded";
     minimap: boolean;
     confirmDestructiveSql: boolean;
+    inlineCompletion: InlineCompletionSettings;
+    keybindingMode: "standard" | "vim";
+    vim: {
+      leader: string;
+      relativeLineNumbers: boolean;
+      mappings: VimCustomMapping[];
+    };
   };
   dataGrid: {
     fontSize: number;
@@ -98,12 +121,19 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     "commandPalette.open": ["mod+p"],
     "settings.open": ["mod+,"],
     "window.new": ["mod+shift+n"],
+    "editor.splitRight": ["mod+\\"],
+    "editor.splitDown": ["mod+shift+\\"],
     "query.newConsole": ["mod+t"],
     "query.reopenClosed": ["mod+shift+t"],
     "query.closeTab": ["mod+w"],
     "query.run": ["mod+enter"],
     "query.runCurrentStatement": ["mod+shift+enter"],
     "query.format": ["mod+l"],
+    "editor.inlineCompletion.trigger": ["alt+\\"],
+    "editor.inlineCompletion.accept": ["tab"],
+    "editor.inlineCompletion.acceptNextWord": ["mod+arrowright"],
+    "editor.inlineCompletion.hide": ["escape"],
+    "file.save": ["mod+s"],
     "workbench.toggleDatabaseExplorer": ["mod+1"],
     "workbench.toggleAssistant": ["mod+2"],
     "workbench.toggleResults": ["mod+3"],
@@ -119,6 +149,18 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     wordWrap: "off",
     minimap: false,
     confirmDestructiveSql: true,
+    inlineCompletion: {
+      enabled: false,
+      automaticSuggestions: true,
+      includeSchemaMetadata: true,
+      includeProjectContext: false,
+    },
+    keybindingMode: "standard",
+    vim: {
+      leader: "\\",
+      relativeLineNumbers: true,
+      mappings: [],
+    },
   },
   dataGrid: {
     fontSize: 12,
@@ -199,6 +241,48 @@ export function normalizeAppSettings(value: unknown): AppSettings {
       wordWrap: enumAt(raw, ["editor", "wordWrap"], ["off", "on", "wordWrapColumn", "bounded"], defaults.editor.wordWrap),
       minimap: boolAt(raw, ["editor", "minimap"], defaults.editor.minimap),
       confirmDestructiveSql: boolAt(raw, ["editor", "confirmDestructiveSql"], defaults.editor.confirmDestructiveSql),
+      inlineCompletion: {
+        enabled: boolAt(
+          raw,
+          ["editor", "inlineCompletion", "enabled"],
+          defaults.editor.inlineCompletion.enabled
+        ),
+        automaticSuggestions: boolAt(
+          raw,
+          ["editor", "inlineCompletion", "automaticSuggestions"],
+          defaults.editor.inlineCompletion.automaticSuggestions
+        ),
+        includeSchemaMetadata: boolAt(
+          raw,
+          ["editor", "inlineCompletion", "includeSchemaMetadata"],
+          defaults.editor.inlineCompletion.includeSchemaMetadata
+        ),
+        includeProjectContext: boolAt(
+          raw,
+          ["editor", "inlineCompletion", "includeProjectContext"],
+          defaults.editor.inlineCompletion.includeProjectContext
+        ),
+      },
+      keybindingMode: enumAt(
+        raw,
+        ["editor", "keybindingMode"],
+        ["standard", "vim"],
+        defaults.editor.keybindingMode
+      ),
+      vim: {
+        leader: stringAt(
+          raw,
+          ["editor", "vim", "leader"],
+          defaults.editor.vim.leader,
+          16
+        ),
+        relativeLineNumbers: boolAt(
+          raw,
+          ["editor", "vim", "relativeLineNumbers"],
+          defaults.editor.vim.relativeLineNumbers
+        ),
+        mappings: vimMappingsAt(raw, ["editor", "vim", "mappings"]),
+      },
     },
     dataGrid: {
       fontSize: numberAt(raw, ["dataGrid", "fontSize"], defaults.dataGrid.fontSize, 10, 20),
@@ -319,6 +403,53 @@ function numberAt(
   const item = getAt(value, path);
   if (typeof item !== "number" || !Number.isFinite(item)) return fallback;
   return Math.min(max, Math.max(min, Math.round(item)));
+}
+
+function stringAt(
+  value: Record<string, unknown>,
+  path: string[],
+  fallback: string,
+  maxLength: number
+) {
+  const item = getAt(value, path);
+  if (typeof item !== "string") return fallback;
+  const normalized = item.trim();
+  return normalized && normalized.length <= maxLength ? normalized : fallback;
+}
+
+function vimMappingsAt(
+  value: Record<string, unknown>,
+  path: string[]
+): VimCustomMapping[] {
+  const mappings = getAt(value, path);
+  if (!Array.isArray(mappings)) return [];
+
+  return mappings.flatMap((item): VimCustomMapping[] => {
+    if (!isRecord(item)) return [];
+    const mode = item.mode;
+    const lhs = item.lhs;
+    const rhs = item.rhs;
+    if (
+      !["all", "normal", "insert", "visual"].includes(String(mode)) ||
+      typeof lhs !== "string" ||
+      !lhs.trim() ||
+      lhs.length > 128 ||
+      typeof rhs !== "string" ||
+      !rhs.trim() ||
+      rhs.length > 512
+    ) {
+      return [];
+    }
+
+    return [
+      {
+        mode: mode as VimMappingMode,
+        lhs: lhs.trim(),
+        rhs: rhs.trim(),
+        recursive: item.recursive !== false,
+      },
+    ];
+  });
 }
 
 function enumAt<T extends string>(

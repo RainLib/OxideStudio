@@ -56,6 +56,18 @@ vi.mock("@/components/workspace/AssistantSidebar", () => ({
   AssistantSidebar: () => <aside data-testid="assistant-sidebar">Assistant Panel</aside>,
 }));
 
+vi.mock("@/services/tauri/settings.service", () => ({
+  settingsService: {
+    getAppSettings: vi.fn(),
+    saveAppSettings: vi.fn().mockResolvedValue(undefined),
+    resetAppSettings: vi.fn(),
+  },
+}));
+
+vi.mock("@/components/workspace/ProjectFilesSidebar", () => ({
+  ProjectFilesSidebar: () => <aside data-testid="project-files-sidebar">Project Files</aside>,
+}));
+
 const initialTabState = useTabStore.getState();
 const initialSettingsState = useSettingsStore.getState();
 
@@ -116,8 +128,28 @@ describe("database workspace entry", () => {
     expect(container.querySelector("[data-testid='assistant-sidebar']")).toBeTruthy();
     expect(
       Array.from(container.querySelectorAll("button")).some(
-        (button) => button.getAttribute("title") === "Toggle AI Assistant"
+        (button) => button.getAttribute("title") === "Toggle AI Assistant (right)"
       )
+    ).toBe(true);
+    expect(
+      Array.from(container.querySelectorAll("button")).some(
+        (button) => button.getAttribute("title") === "Toggle Project Files (right)"
+      )
+    ).toBe(true);
+
+    const filesButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.getAttribute("title") === "Toggle Project Files (right)"
+    );
+    await act(async () => filesButton?.click());
+    expect(
+      container
+        .querySelector("#secondary-panel-files")
+        ?.classList.contains("hidden")
+    ).toBe(false);
+    expect(
+      container
+        .querySelector("#secondary-panel-assistant")
+        ?.classList.contains("hidden")
     ).toBe(true);
   });
 

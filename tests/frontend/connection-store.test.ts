@@ -85,7 +85,8 @@ describe("connection store", () => {
     expect(error).toBeNull();
     expect(mocks.testConnection).toHaveBeenCalledWith(
       "postgres",
-      expect.stringContaining("localhost")
+      expect.stringContaining("localhost"),
+      undefined
     );
     expect(mocks.connect).not.toHaveBeenCalled();
     expect(mocks.saveConnections).not.toHaveBeenCalled();
@@ -115,7 +116,8 @@ describe("connection store", () => {
     expect(mocks.connect).toHaveBeenCalledWith(
       "postgres-1",
       "postgres",
-      expect.stringContaining("localhost")
+      expect.stringContaining("localhost"),
+      undefined
     );
     expect(useConnectionStore.getState().activeConnectionId).toBe("postgres-1");
     expect(useConnectionStore.getState().connectedConnectionIds).toEqual([
@@ -153,7 +155,8 @@ describe("connection store", () => {
     expect(mocks.connect).toHaveBeenCalledWith(
       "mysql-1",
       "mysql",
-      expect.stringContaining("localhost")
+      expect.stringContaining("localhost"),
+      undefined
     );
     expect(mocks.disconnect).not.toHaveBeenCalled();
     expect(useConnectionStore.getState().activeConnectionId).toBe("mysql-1");
@@ -162,6 +165,43 @@ describe("connection store", () => {
       "mysql-1",
     ]);
     expect(useConnectionStore.getState().isConnected).toBe(true);
+  });
+
+  it("supplies driver default icons when creating or editing legacy connections", () => {
+    useConnectionStore.setState({
+      connections: [connection({ id: "redis-1", driver: "redis", icon: undefined })],
+    });
+
+    useConnectionStore.getState().selectConnection("redis-1");
+    expect(useConnectionStore.getState().selectedConnection?.icon).toBe("KeyRound");
+
+    const created = useConnectionStore.getState().createNewConnection();
+    expect(created.icon).toBe("Database");
+  });
+
+  it("passes enabled SSH tunnel settings without rewriting the saved database URL", async () => {
+    const config = connection({
+      connectionUrl: "postgres://postgres:secret@db.internal:5432/app",
+      sshTunnel: {
+        enabled: true,
+        host: "bastion.example.com",
+        port: 22,
+        username: "deploy",
+        authMethod: "privateKey",
+        privateKeyPath: "C:/Users/test/.ssh/id_ed25519",
+        strictHostKeyChecking: true,
+      },
+    });
+
+    await expect(useConnectionStore.getState().testConnection(config)).resolves.toBeNull();
+
+    expect(mocks.testConnection).toHaveBeenCalledWith(
+      "postgres",
+      "postgres://postgres:secret@db.internal:5432/app",
+      config.sshTunnel
+    );
+    expect(config.connectionUrl).toContain("db.internal");
+    expect(config.connectionUrl).not.toContain("127.0.0.1");
   });
 
   it("keeps the previous active connection when a switch fails", async () => {
@@ -229,6 +269,124 @@ describe("connection store", () => {
     expect(mocks.connect).not.toHaveBeenCalled();
     expect(mocks.disconnect).not.toHaveBeenCalled();
     expect(useConnectionStore.getState().activeConnectionId).toBe("mysql-1");
+  });
+
+  it("selects an uncached source immediately while its connection is pending", async () => {
+    const pending = deferred();
+    mocks.connect.mockReturnValueOnce(pending.promise);
+    useConnectionStore.setState({
+      connections: [
+        connection({ id: "postgres-1" }),
+        connection({ id: "redis-1", driver: "redis", database: "0" }),
+      ],
+      activeConnectionId: "postgres-1",
+      connectedConnectionIds: ["postgres-1"],
+      isConnected: true,
+    });
+
+    const switching = useConnectionStore.getState().setActiveConnection("redis-1");
+    expect(useConnectionStore.getState()).toMatchObject({
+      activeConnectionId: "redis-1",
+      isConnected: false,
+    });
+
+    pending.resolve();
+    await expect(switching).resolves.toBeNull();
+    expect(useConnectionStore.getState()).toMatchObject({
+      activeConnectionId: "redis-1",
+      isConnected: true,
+    });
+  });
+
+  it("shares one pending connect within the same project and connection scope", async () => {
+    const pending = deferred();
+    localStorage.setItem("oxide-studio-active-project", "project-a");
+    mocks.connect.mockReturnValueOnce(pending.promise);
+    useConnectionStore.setState({
+      connections: [connection({ projectId: "project-a" })],
+      activeConnectionId: null,
+      connectedConnectionIds: [],
+      isConnected: false,
+    });
+
+    const first = useConnectionStore
+      .getState()
+      .setActiveConnection("postgres-1");
+    const second = useConnectionStore
+      .getState()
+      .setActiveConnection("postgres-1");
+
+    expect(second).toBe(first);
+    expect(mocks.connect).toHaveBeenCalledTimes(1);
+    expect(useConnectionStore.getState()).toMatchObject({
+      activeConnectionId: "postgres-1",
+      isConnected: false,
+    });
+
+    let secondSettled = false;
+    void second.then(() => {
+      secondSettled = true;
+    });
+    await Promise.resolve();
+    expect(secondSettled).toBe(false);
+
+    pending.resolve();
+    await expect(first).resolves.toBeNull();
+    await expect(second).resolves.toBeNull();
+    expect(useConnectionStore.getState()).toMatchObject({
+      activeConnectionId: "postgres-1",
+      connectedConnectionIds: ["postgres-1"],
+      isConnected: true,
+    });
+  });
+
+  it("does not share a pending connect across projects with the same connection id", async () => {
+    const projectAConnect = deferred();
+    const projectBConnect = deferred();
+    mocks.connect
+      .mockReturnValueOnce(projectAConnect.promise)
+      .mockReturnValueOnce(projectBConnect.promise);
+
+    localStorage.setItem("oxide-studio-active-project", "project-a");
+    useConnectionStore.setState({
+      connections: [connection({ projectId: "project-a" })],
+      activeConnectionId: null,
+      connectedConnectionIds: [],
+      isConnected: false,
+    });
+    const projectA = useConnectionStore
+      .getState()
+      .setActiveConnection("postgres-1");
+
+    localStorage.setItem("oxide-studio-active-project", "project-b");
+    useConnectionStore.setState({
+      connections: [connection({ projectId: "project-b" })],
+      activeConnectionId: null,
+      connectedConnectionIds: [],
+      isConnected: false,
+    });
+    const projectB = useConnectionStore
+      .getState()
+      .setActiveConnection("postgres-1");
+
+    expect(projectB).not.toBe(projectA);
+    expect(mocks.connect).toHaveBeenCalledTimes(2);
+
+    projectBConnect.resolve();
+    await expect(projectB).resolves.toBeNull();
+    expect(useConnectionStore.getState()).toMatchObject({
+      activeConnectionId: "postgres-1",
+      connectedConnectionIds: ["postgres-1"],
+      isConnected: true,
+    });
+
+    projectAConnect.resolve();
+    await expect(projectA).resolves.toBeNull();
+    expect(useConnectionStore.getState()).toMatchObject({
+      activeConnectionId: "postgres-1",
+      connectedConnectionIds: ["postgres-1"],
+      isConnected: true,
+    });
   });
 
   it("loads and saves connections inside the active project scope", async () => {

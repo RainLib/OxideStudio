@@ -29,6 +29,66 @@ describe("app settings workbench layout", () => {
     expect(settings.dataGrid.zoomPercent).toBe(160);
   });
 
+  it("normalizes Vim editor settings and drops invalid mappings", () => {
+    const settings = normalizeAppSettings({
+      editor: {
+        keybindingMode: "vim",
+        vim: {
+          leader: "<Space>",
+          relativeLineNumbers: false,
+          mappings: [
+            {
+              mode: "normal",
+              lhs: "<leader>f",
+              rhs: "/FROM<Enter>",
+              recursive: false,
+            },
+            { mode: "invalid", lhs: "x", rhs: "dd" },
+          ],
+        },
+      },
+    });
+
+    expect(settings.editor.keybindingMode).toBe("vim");
+    expect(settings.editor.vim).toEqual({
+      leader: "<Space>",
+      relativeLineNumbers: false,
+      mappings: [
+        {
+          mode: "normal",
+          lhs: "<leader>f",
+          rhs: "/FROM<Enter>",
+          recursive: false,
+        },
+      ],
+    });
+  });
+
+  it("keeps inline completion opt-in while preserving safe context defaults", () => {
+    expect(DEFAULT_APP_SETTINGS.editor.inlineCompletion).toEqual({
+      enabled: false,
+      automaticSuggestions: true,
+      includeSchemaMetadata: true,
+      includeProjectContext: false,
+    });
+    const settings = normalizeAppSettings({
+      editor: {
+        inlineCompletion: {
+          enabled: true,
+          automaticSuggestions: false,
+          includeSchemaMetadata: false,
+          includeProjectContext: true,
+        },
+      },
+    });
+    expect(settings.editor.inlineCompletion).toEqual({
+      enabled: true,
+      automaticSuggestions: false,
+      includeSchemaMetadata: false,
+      includeProjectContext: true,
+    });
+  });
+
   it("migrates legacy side visibility into tool window visibility", () => {
     const settings = normalizeAppSettings({
       workbench: {

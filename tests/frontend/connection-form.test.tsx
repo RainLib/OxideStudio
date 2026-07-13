@@ -182,4 +182,116 @@ describe("ConnectionForm", () => {
       connectionUrl: "",
     });
   });
+
+  it("renders and updates SSH tunnel settings without invalidating the database URL", async () => {
+    const updateConnectionConfig = vi.fn();
+    const connection = selectedConnection();
+    connection.connectionUrl = "postgres://postgres:postgres@db.internal/app";
+    connection.sshTunnel = {
+      enabled: true,
+      host: "bastion.example.com",
+      port: 22,
+      username: "deploy",
+      authMethod: "password",
+      password: "ssh-secret",
+      strictHostKeyChecking: true,
+    };
+    useConnectionStore.setState({
+      selectedConnection: connection,
+      updateConnectionConfig,
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root?.render(<ConnectionForm />);
+      await flushAsyncWork();
+    });
+
+    await act(async () => {
+      buttonWithText(container, "SSH/SSL")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true })
+      );
+    });
+
+    const sshHost = container.querySelector<HTMLInputElement>("#ssh-host");
+    const sshPassword = container.querySelector<HTMLInputElement>("#ssh-password");
+    expect(sshHost?.value).toBe("bastion.example.com");
+    expect(sshPassword?.type).toBe("password");
+
+    await act(async () => {
+      if (!sshHost) return;
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value"
+      )?.set;
+      valueSetter?.call(sshHost, "jump.internal");
+      sshHost.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    expect(updateConnectionConfig).toHaveBeenCalledWith({
+      sshTunnel: expect.objectContaining({
+        enabled: true,
+        host: "jump.internal",
+        username: "deploy",
+      }),
+    });
+    expect(updateConnectionConfig).not.toHaveBeenCalledWith(
+      expect.objectContaining({ connectionUrl: "" })
+    );
+  });
+
+  it("shows the driver default icon and allows icon and color editing", async () => {
+    const updateConnectionConfig = vi.fn();
+    useConnectionStore.setState({ updateConnectionConfig });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<ConnectionForm />);
+      await flushAsyncWork();
+    });
+
+    await act(async () => {
+      buttonWithText(container, "Advanced")?.click();
+    });
+
+    expect(
+      container.querySelector('button[title="Database"]')?.getAttribute("aria-checked")
+    ).toBe("true");
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('button[title="KeyRound"]')?.click();
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Connection color #d95b5b"]'
+        )
+        ?.click();
+    });
+
+    expect(updateConnectionConfig).toHaveBeenCalledWith({ icon: "KeyRound" });
+    expect(updateConnectionConfig).toHaveBeenCalledWith({ color: "#d95b5b" });
+  });
+
+  it("keeps connection backgrounds unset by default and can clear a chosen color", async () => {
+    const updateConnectionConfig = vi.fn();
+    useConnectionStore.setState({ updateConnectionConfig });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<ConnectionForm />);
+      await flushAsyncWork();
+    });
+
+    await act(async () => {
+      buttonWithText(container, "Advanced")?.click();
+      await flushAsyncWork();
+    });
+
+    const noColor = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="No connection background color"]'
+    );
+    expect(noColor?.getAttribute("aria-checked")).toBe("true");
+
+    await act(async () => noColor?.click());
+    expect(updateConnectionConfig).toHaveBeenCalledWith({ color: undefined });
+  });
 });

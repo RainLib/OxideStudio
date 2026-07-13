@@ -13,6 +13,7 @@ export interface AiChatMessage {
 }
 
 export interface AiChatCompletionRequest {
+  requestId?: string;
   config: AiProviderConfig;
   messages: AiChatMessage[];
   temperature?: number;
@@ -24,17 +25,107 @@ export interface AiChatCompletionResult {
   model?: string;
 }
 
+export type InlineCompletionProtocol =
+  | "chat-completions"
+  | "text-completions-fim";
+
+export interface InlineLspContext {
+  dialect?: string;
+  clause?: string;
+  statementRange?: unknown;
+  ctes?: string[];
+  referencedObjects?: string[];
+  aliases?: Record<string, string>;
+  expectedKinds?: string[];
+  candidates?: Array<{ label: string; insertText?: string; kind?: number }>;
+  diagnostics?: Array<{ severity?: number; message: string }>;
+  errorCount?: number;
+}
+
+export interface ProjectSnippet {
+  relativePath: string;
+  content: string;
+}
+
+export interface AiInlineCompletionRequest {
+  requestId: string;
+  protocol: InlineCompletionProtocol;
+  config: AiProviderConfig;
+  prefix: string;
+  suffix: string;
+  languageId: string;
+  dialect: string;
+  filePath?: string;
+  lspContext: InlineLspContext;
+  relatedSnippets?: ProjectSnippet[];
+}
+
+export interface AiInlineCompletionResult {
+  text: string;
+  model?: string;
+}
+
 export interface AiProviderTestResult {
   message: string;
   model: string;
 }
 
 export async function chatCompletion(
-  request: AiChatCompletionRequest
+  request: AiChatCompletionRequest,
+  abortSignal?: AbortSignal
 ): Promise<AiChatCompletionResult> {
-  return invokeWithInterceptors<AiChatCompletionResult>("ai_chat_completion", {
-    request,
-  });
+  if (abortSignal?.aborted) throw abortError();
+  const requestId = request.requestId || createAiRequestId();
+  const cancel = () => {
+    void cancelRequest(requestId).catch(() => undefined);
+  };
+  abortSignal?.addEventListener("abort", cancel, { once: true });
+  try {
+    return await invokeWithInterceptors<AiChatCompletionResult>(
+      "ai_chat_completion",
+      {
+        request: { ...request, requestId },
+      }
+    );
+  } finally {
+    abortSignal?.removeEventListener("abort", cancel);
+  }
+}
+
+export async function cancelRequest(requestId: string): Promise<boolean> {
+  return invokeWithInterceptors<boolean>("cancel_ai_request", { requestId });
+}
+
+export async function inlineCompletion(
+  request: AiInlineCompletionRequest,
+  abortSignal?: AbortSignal
+): Promise<AiInlineCompletionResult> {
+  if (abortSignal?.aborted) throw abortError();
+  const cancel = () => {
+    void cancelRequest(request.requestId).catch(() => undefined);
+  };
+  abortSignal?.addEventListener("abort", cancel, { once: true });
+  try {
+    return await invokeWithInterceptors<AiInlineCompletionResult>(
+      "ai_inline_completion",
+      { request }
+    );
+  } finally {
+    abortSignal?.removeEventListener("abort", cancel);
+  }
+}
+
+function createAiRequestId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `ai-${crypto.randomUUID()}`;
+  }
+  return `ai-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function abortError() {
+  const error = new Error("AI request cancelled");
+  error.name = "AbortError";
+  return error;
 }
 
 export async function testProvider(
@@ -47,5 +138,7 @@ export async function testProvider(
 
 export const aiService = {
   chatCompletion,
+  inlineCompletion,
+  cancelRequest,
   testProvider,
 };

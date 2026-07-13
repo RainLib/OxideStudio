@@ -12,6 +12,7 @@ import {
   SquareTerminal,
   Table2,
 } from "lucide-react";
+import { DatabaseBrandIcon } from "@/components/icons/DatabaseBrandIcon";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -151,7 +152,7 @@ export function DatabaseExplorerToolbar({
   const driverProfiles = supportedDatabaseDriverProfiles();
 
   return (
-    <div className="wb-explorer-toolbar gap-0.5">
+    <div className="wb-explorer-toolbar gap-0.5 border-0 bg-transparent px-1.5">
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button
@@ -181,7 +182,11 @@ export function DatabaseExplorerToolbar({
                   className={menuItemClass}
                   onClick={() => onNewDataSource(profile.driver)}
                 >
-                  <Database size={13} className={cn("mr-2", profile.iconClassName)} />
+                  <DatabaseBrandIcon
+                    driver={profile.driver}
+                    size={14}
+                    className="mr-2 shrink-0"
+                  />
                   {profile.menuLabel}
                 </DropdownMenuItem>
               ))}
@@ -220,7 +225,6 @@ export function DatabaseExplorerToolbar({
       >
         <RefreshCw size={13} className={cn(isLoading && "animate-spin")} />
       </button>
-      <span className="mx-1 h-4 w-px bg-[hsl(var(--wb-border-subtle))]" />
       <button
         type="button"
         className="wb-icon-button"

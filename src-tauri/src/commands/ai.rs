@@ -2,7 +2,57 @@ use crate::core::protocol::Response;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
+use tauri::State;
+use tokio::sync::{watch, Mutex};
+
+const MAX_EARLY_CANCELLATIONS: usize = 256;
+
+#[derive(Default)]
+struct AiCancellationInner {
+    active: HashMap<String, watch::Sender<bool>>,
+    cancelled_before_start: HashSet<String>,
+}
+
+#[derive(Default)]
+pub struct AiCancellationState {
+    inner: Mutex<AiCancellationInner>,
+}
+
+impl AiCancellationState {
+    async fn register(&self, request_id: &str) -> Result<watch::Receiver<bool>, String> {
+        let mut inner = self.inner.lock().await;
+        if inner.cancelled_before_start.remove(request_id) {
+            return Err("AI request cancelled".to_string());
+        }
+        if inner.active.contains_key(request_id) {
+            return Err(format!("AI request id is already active: {request_id}"));
+        }
+
+        let (sender, receiver) = watch::channel(false);
+        inner.active.insert(request_id.to_string(), sender);
+        Ok(receiver)
+    }
+
+    async fn finish(&self, request_id: &str) {
+        self.inner.lock().await.active.remove(request_id);
+    }
+
+    async fn cancel(&self, request_id: &str) -> bool {
+        let mut inner = self.inner.lock().await;
+        if let Some(sender) = inner.active.remove(request_id) {
+            let _ = sender.send(true);
+            return true;
+        }
+
+        if inner.cancelled_before_start.len() >= MAX_EARLY_CANCELLATIONS {
+            inner.cancelled_before_start.clear();
+        }
+        inner.cancelled_before_start.insert(request_id.to_string());
+        true
+    }
+}
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +73,7 @@ pub struct AiChatMessage {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiChatCompletionRequest {
+    pub request_id: Option<String>,
     pub config: AiProviderConfig,
     pub messages: Vec<AiChatMessage>,
     pub temperature: Option<f32>,
@@ -36,6 +87,44 @@ pub struct AiChatCompletionResult {
     pub model: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum InlineCompletionProtocol {
+    ChatCompletions,
+    TextCompletionsFim,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSnippet {
+    pub relative_path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiInlineCompletionRequest {
+    pub request_id: String,
+    pub protocol: InlineCompletionProtocol,
+    pub config: AiProviderConfig,
+    pub prefix: String,
+    pub suffix: String,
+    pub language_id: String,
+    pub dialect: String,
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub lsp_context: Value,
+    #[serde(default)]
+    pub related_snippets: Vec<ProjectSnippet>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiInlineCompletionResult {
+    pub text: String,
+    pub model: Option<String>,
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AiProviderTestResult {
@@ -46,10 +135,89 @@ pub struct AiProviderTestResult {
 #[tauri::command]
 pub async fn ai_chat_completion(
     request: AiChatCompletionRequest,
+    cancellation: State<'_, AiCancellationState>,
 ) -> Result<Response<AiChatCompletionResult>, String> {
-    match send_chat_completion(request).await {
+    let request_id = request
+        .request_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let mut cancel_rx = if let Some(request_id) = request_id.as_deref() {
+        match cancellation.register(request_id).await {
+            Ok(receiver) => Some(receiver),
+            Err(error) => return Ok(Response::err("AI_REQUEST_CANCELLED", &error)),
+        }
+    } else {
+        None
+    };
+
+    let result = if let Some(cancel_rx) = cancel_rx.as_mut() {
+        tokio::select! {
+            result = send_chat_completion(request) => result,
+            _ = cancel_rx.changed() => Err("AI request cancelled".to_string()),
+        }
+    } else {
+        send_chat_completion(request).await
+    };
+
+    if let Some(request_id) = request_id.as_deref() {
+        cancellation.finish(request_id).await;
+    }
+
+    match result {
         Ok(result) => Ok(Response::ok(result)),
+        Err(error) if error == "AI request cancelled" => {
+            Ok(Response::err("AI_REQUEST_CANCELLED", &error))
+        }
         Err(error) => Ok(Response::err("AI_CHAT_COMPLETION_ERROR", &error)),
+    }
+}
+
+#[tauri::command]
+pub async fn cancel_ai_request(
+    request_id: String,
+    cancellation: State<'_, AiCancellationState>,
+) -> Result<Response<bool>, String> {
+    let request_id = request_id.trim();
+    if request_id.is_empty() {
+        return Ok(Response::err(
+            "AI_CANCEL_INVALID_REQUEST",
+            "AI request id is required",
+        ));
+    }
+    Ok(Response::ok(cancellation.cancel(request_id).await))
+}
+
+#[tauri::command]
+pub async fn ai_inline_completion(
+    request: AiInlineCompletionRequest,
+    cancellation: State<'_, AiCancellationState>,
+) -> Result<Response<AiInlineCompletionResult>, String> {
+    let request_id = request.request_id.trim().to_string();
+    if request_id.is_empty() {
+        return Ok(Response::err(
+            "AI_INLINE_COMPLETION_INVALID_REQUEST",
+            "Inline completion request id is required",
+        ));
+    }
+    let mut cancel_rx = match cancellation.register(&request_id).await {
+        Ok(receiver) => receiver,
+        Err(error) => return Ok(Response::err("AI_REQUEST_CANCELLED", &error)),
+    };
+
+    let result = tokio::select! {
+        result = send_inline_completion(request) => result,
+        _ = cancel_rx.changed() => Err("AI request cancelled".to_string()),
+    };
+    cancellation.finish(&request_id).await;
+
+    match result {
+        Ok(result) => Ok(Response::ok(result)),
+        Err(error) if error == "AI request cancelled" => {
+            Ok(Response::err("AI_REQUEST_CANCELLED", &error))
+        }
+        Err(error) => Ok(Response::err("AI_INLINE_COMPLETION_ERROR", &error)),
     }
 }
 
@@ -59,6 +227,7 @@ pub async fn ai_test_provider(
 ) -> Result<Response<AiProviderTestResult>, String> {
     let model = config.model.trim().to_string();
     let request = AiChatCompletionRequest {
+        request_id: None,
         config,
         messages: vec![
             AiChatMessage {
@@ -140,6 +309,156 @@ async fn send_chat_completion(
     Ok(AiChatCompletionResult { content, model })
 }
 
+async fn send_inline_completion(
+    request: AiInlineCompletionRequest,
+) -> Result<AiInlineCompletionResult, String> {
+    validate_config(&request.config)?;
+    let timeout = Duration::from_millis(
+        request
+            .config
+            .timeout_ms
+            .unwrap_or(4_000)
+            .clamp(1_000, 4_000),
+    );
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let prefix = truncate_utf8_tail(&request.prefix, 8_192);
+    let suffix = truncate_utf8_head(&request.suffix, 4_096);
+    let related_snippets = request
+        .related_snippets
+        .into_iter()
+        .take(3)
+        .map(|mut snippet| {
+            snippet.content = truncate_utf8_head(&snippet.content, 8_192);
+            snippet
+        })
+        .collect::<Vec<_>>();
+    let context = json!({
+        "languageId": request.language_id,
+        "dialect": request.dialect,
+        "filePath": request.file_path,
+        "lsp": request.lsp_context,
+        "relatedSnippets": related_snippets,
+    });
+    let (url, payload) = match request.protocol {
+        InlineCompletionProtocol::ChatCompletions => {
+            let user_payload = json!({
+                "context": context,
+                "prefix": prefix,
+                "suffix": suffix,
+            });
+            (
+                provider_endpoint_url(&request.config.base_url, "chat/completions")?,
+                json!({
+                    "model": request.config.model.trim(),
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "Complete the database-language text at the cursor. Return only the exact text to insert, with no Markdown fence or explanation. Respect the supplied dialect, schema/LSP context, suffix, and project snippets. Do not repeat the prefix or suffix."
+                        },
+                        { "role": "user", "content": user_payload.to_string() }
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 192,
+                    "stream": false
+                }),
+            )
+        }
+        InlineCompletionProtocol::TextCompletionsFim => (
+            provider_endpoint_url(&request.config.base_url, "completions")?,
+            json!({
+                "model": request.config.model.trim(),
+                "prompt": format!("<oxide_context>{context}</oxide_context>\n{prefix}"),
+                "suffix": suffix,
+                "temperature": 0.0,
+                "max_tokens": 192,
+                "stream": false
+            }),
+        ),
+    };
+
+    let mut builder = client
+        .post(url)
+        .header(CONTENT_TYPE, "application/json")
+        .json(&payload);
+    if let Some(api_key) = request.config.api_key.as_deref().map(str::trim) {
+        if !api_key.is_empty() {
+            builder = builder.header(AUTHORIZATION, format!("Bearer {api_key}"));
+        }
+    }
+    let response = builder.send().await.map_err(|error| error.to_string())?;
+    let status = response.status();
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("AI provider returned invalid JSON: {error}"))?;
+    if !status.is_success() {
+        return Err(provider_error_message(status.as_u16(), &value));
+    }
+
+    let text = match request.protocol {
+        InlineCompletionProtocol::ChatCompletions => value
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str),
+        InlineCompletionProtocol::TextCompletionsFim => {
+            value.pointer("/choices/0/text").and_then(Value::as_str)
+        }
+    }
+    .ok_or_else(|| "AI provider response did not include completion text".to_string())?;
+    let model = value
+        .get("model")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+
+    Ok(AiInlineCompletionResult {
+        text: clean_inline_completion(text),
+        model,
+    })
+}
+
+fn clean_inline_completion(value: &str) -> String {
+    let trimmed = value.trim_matches(['\r', '\n']);
+    let without_fence = if let Some(fenced) = trimmed.strip_prefix("```") {
+        let body = fenced.split_once('\n').map_or(fenced, |(_, body)| body);
+        body.rsplit_once("```").map_or(body, |(body, _)| body)
+    } else {
+        trimmed
+    };
+    without_fence
+        .trim_matches(['\r', '\n'])
+        .lines()
+        .take(12)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .chars()
+        .take(2_048)
+        .collect()
+}
+
+fn truncate_utf8_head(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
+fn truncate_utf8_tail(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut start = value.len() - max_bytes;
+    while start < value.len() && !value.is_char_boundary(start) {
+        start += 1;
+    }
+    value[start..].to_string()
+}
+
 fn validate_config(config: &AiProviderConfig) -> Result<(), String> {
     if config.base_url.trim().is_empty() {
         return Err("AI provider base URL is required".to_string());
@@ -151,15 +470,21 @@ fn validate_config(config: &AiProviderConfig) -> Result<(), String> {
 }
 
 fn chat_completions_url(base_url: &str) -> Result<String, String> {
-    let trimmed = base_url.trim().trim_end_matches('/');
+    provider_endpoint_url(base_url, "chat/completions")
+}
+
+fn provider_endpoint_url(base_url: &str, endpoint: &str) -> Result<String, String> {
+    let mut trimmed = base_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err("AI provider base URL is required".to_string());
     }
-    if trimmed.ends_with("/chat/completions") {
-        Ok(trimmed.to_string())
-    } else {
-        Ok(format!("{trimmed}/chat/completions"))
+    for suffix in ["/chat/completions", "/completions"] {
+        if let Some(base) = trimmed.strip_suffix(suffix) {
+            trimmed = base.trim_end_matches('/');
+            break;
+        }
     }
+    Ok(format!("{trimmed}/{endpoint}"))
 }
 
 fn provider_error_message(status: u16, value: &Value) -> String {
@@ -198,6 +523,52 @@ mod tests {
         assert_eq!(
             provider_error_message(401, &value),
             "AI provider returned HTTP 401: invalid api key"
+        );
+    }
+
+    #[test]
+    fn provider_endpoint_switches_between_chat_and_fim() {
+        assert_eq!(
+            provider_endpoint_url("http://localhost:11434/v1/chat/completions", "completions")
+                .unwrap(),
+            "http://localhost:11434/v1/completions"
+        );
+        assert_eq!(
+            provider_endpoint_url("http://localhost:11434/v1/completions", "chat/completions")
+                .unwrap(),
+            "http://localhost:11434/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn inline_completion_cleanup_removes_fences_and_bounds_lines() {
+        assert_eq!(
+            clean_inline_completion("```sql\nSELECT 1\nFROM dual\n```"),
+            "SELECT 1\nFROM dual"
+        );
+        let many_lines = (0..20)
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(clean_inline_completion(&many_lines).lines().count(), 12);
+        let unicode = format!("{}end", "数".repeat(3_000));
+        let tail = truncate_utf8_tail(&unicode, 8_192);
+        assert!(tail.len() <= 8_192);
+        assert!(tail.ends_with("end"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_reaches_active_and_not_yet_registered_requests() {
+        let state = AiCancellationState::default();
+        let mut active = state.register("active").await.unwrap();
+        assert!(state.cancel("active").await);
+        active.changed().await.unwrap();
+        assert!(*active.borrow());
+
+        assert!(state.cancel("early").await);
+        assert_eq!(
+            state.register("early").await.unwrap_err(),
+            "AI request cancelled"
         );
     }
 }

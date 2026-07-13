@@ -17,7 +17,9 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { format } from "date-fns";
 import {
+  Braces,
   ChevronDown,
+  BookmarkPlus,
   FileCode2,
   History,
   Play,
@@ -35,8 +37,14 @@ type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
 
 interface EditorActionBarProps {
+  connectionId?: string | null;
   currentSchema: string | null;
   onSchemaChange: (schema: string) => void;
+  databases?: string[];
+  currentDatabase?: string | null;
+  onDatabaseChange?: (database: string) => void;
+  isDatabaseRefreshing?: boolean;
+  databaseSelectionDisabled?: boolean;
   transactionMode: TransactionMode;
   transactionState: TransactionState;
   onTransactionModeChange: (mode: TransactionMode) => void;
@@ -55,6 +63,11 @@ interface EditorActionBarProps {
   onSaveQuery: (name: string, sql: string) => void;
   onDeleteQuery: (id: string) => void;
   supportsTransactions: boolean;
+  isProjectFile: boolean;
+  isFileDirty: boolean;
+  onSaveFile: () => void;
+  parameterCount: number;
+  onConfigureParameters: () => void;
 }
 
 const dialogClass =
@@ -65,8 +78,14 @@ const menuItemClass =
   "h-7 cursor-default rounded-[3px] px-2 text-[12px] focus:bg-[hsl(var(--wb-active-strong))] focus:text-[hsl(var(--wb-text))]";
 
 export function EditorActionBar({
+  connectionId,
   currentSchema,
   onSchemaChange,
+  databases,
+  currentDatabase,
+  onDatabaseChange,
+  isDatabaseRefreshing,
+  databaseSelectionDisabled,
   transactionMode,
   transactionState,
   onTransactionModeChange,
@@ -85,6 +104,11 @@ export function EditorActionBar({
   onSaveQuery,
   onDeleteQuery,
   supportsTransactions,
+  isProjectFile,
+  isFileDirty,
+  onSaveFile,
+  parameterCount,
+  onConfigureParameters,
 }: EditorActionBarProps) {
   const [isSaveOpen, setIsSaveOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
@@ -108,7 +132,13 @@ export function EditorActionBar({
           )}
           onClick={isExecuting ? onCancelRun : onRunCurrent}
           disabled={!isConnected}
-          title={isExecuting ? "Stop Query" : "Run Current Statement (⌘⇧Enter)"}
+          title={
+            isExecuting
+              ? "Stop Query"
+              : parameterCount > 0
+                ? `Set ${parameterCount} SQL ${parameterCount === 1 ? "parameter" : "parameters"} and run`
+                : "Run Current Statement (⌘⇧Enter)"
+          }
         >
           {isExecuting ? (
             <Square size={12} className="fill-current" />
@@ -140,6 +170,22 @@ export function EditorActionBar({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+
+        {parameterCount > 0 && (
+          <button
+            type="button"
+            className="wb-icon-button gap-1 px-1.5 text-[hsl(var(--wb-accent))]"
+            aria-label={`Configure ${parameterCount} SQL ${parameterCount === 1 ? "parameter" : "parameters"}`}
+            title="Configure SQL parameters"
+            onClick={onConfigureParameters}
+            disabled={isExecuting}
+          >
+            <Braces size={13} />
+            <span className="text-[9px] font-semibold tabular-nums">
+              {parameterCount}
+            </span>
+          </button>
+        )}
 
         <Dialog>
           <DialogTrigger asChild>
@@ -202,6 +248,20 @@ export function EditorActionBar({
       </div>
 
       <div className="wb-editor-secondary-actions flex min-w-0 shrink-0 items-center gap-0.5">
+        {isProjectFile && (
+          <button
+            type="button"
+            className={cn(
+              "wb-editor-library-action wb-icon-button",
+              isFileDirty && "text-[hsl(var(--wb-accent))]"
+            )}
+            title={isFileDirty ? "Save Project File (Ctrl+S)" : "Project File Saved"}
+            onClick={onSaveFile}
+            disabled={!isFileDirty}
+          >
+            <Save size={13} />
+          </button>
+        )}
         <Dialog>
           <DialogTrigger asChild>
             <button
@@ -255,14 +315,14 @@ export function EditorActionBar({
             <button
               type="button"
               className="wb-editor-library-action wb-icon-button"
-              title="Save Query"
+              title="Add to Saved Queries"
             >
-              <Save size={13} />
+              <BookmarkPlus size={13} />
             </button>
           </DialogTrigger>
           <DialogContent className="w-[420px] max-w-[calc(100vw-32px)] gap-0 rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
             <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
-              <DialogTitle className="text-[13px]">Save Query</DialogTitle>
+              <DialogTitle className="text-[13px]">Add to Saved Queries</DialogTitle>
             </DialogHeader>
             <div className="px-4 py-4">
               <Input
@@ -278,14 +338,23 @@ export function EditorActionBar({
             </div>
             <DialogFooter className="border-t border-[hsl(var(--wb-border-subtle))] px-4 py-3">
               <Button className="wb-primary-button" onClick={handleSave}>
-                Save
+                Add
               </Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
 
         <span className="wb-editor-library-action mx-1 h-4 w-px bg-[hsl(var(--wb-border-subtle))]" />
-        <SchemaSelector currentSchema={currentSchema} onSchemaChange={onSchemaChange} />
+        <SchemaSelector
+          connectionId={connectionId}
+          currentSchema={currentSchema}
+          onSchemaChange={onSchemaChange}
+          databases={databases}
+          currentDatabase={currentDatabase}
+          onDatabaseChange={onDatabaseChange}
+          isDatabaseRefreshing={isDatabaseRefreshing}
+          databaseSelectionDisabled={databaseSelectionDisabled}
+        />
       </div>
     </div>
   );

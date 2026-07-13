@@ -1,8 +1,17 @@
 import { create } from "zustand";
 import { storeService, type Project } from "@/services/tauri/store.service";
-import { useConnectionStore } from "@/store/useConnectionStore";
+import { connectionService } from "@/services/tauri";
+import {
+  readProjectConnections,
+  useConnectionStore,
+} from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
-import { useTabStore } from "@/store/useTabStore";
+import {
+  confirmDiscardAllTabChanges,
+  useTabStore,
+} from "@/store/useTabStore";
+import { unstable_batchedUpdates } from "react-dom";
+import { useEditorGroupStore } from "@/store/useEditorGroupStore";
 
 const DEFAULT_PROJECT: Project = {
   id: "sqls",
@@ -19,7 +28,7 @@ interface ProjectState {
   activeProjectName: string;
   isLoading: boolean;
   loadProjects: () => Promise<void>;
-  setActiveProject: (projectId: string) => void;
+  setActiveProject: (projectId: string) => boolean;
   createProject: (name: string) => Promise<Project>;
 }
 
@@ -39,19 +48,48 @@ function writeActiveProjectId(projectId: string) {
   }
 }
 
-function reloadActiveConnectionMetadata() {
-  const schemaStore = useSchemaStore.getState();
-  schemaStore.reset();
-  useTabStore.setState({ tabs: [], activeTabId: null, closedTabsStack: [] });
-  useConnectionStore.setState({
-    connections: [],
-    activeConnectionId: null,
-    connectedConnectionIds: [],
-    isConnected: false,
-    selectedConnection: null,
-    isLoading: true,
+let latestProjectSwitch = 0;
+
+function disconnectPreviousProjectConnections(connectionIds: string[]) {
+  for (const connectionId of connectionIds) {
+    void connectionService.disconnect(connectionId).catch((error) => {
+      console.warn("Failed to disconnect previous project connection", error);
+    });
+  }
+}
+
+function replaceProjectWorkspace(
+  project: Project,
+  connections: Awaited<ReturnType<typeof readProjectConnections>>,
+  updateProject: () => void
+) {
+  const previousConnectionIds = [
+    ...useConnectionStore.getState().connectedConnectionIds,
+  ];
+  const initialConnectionId = connections[0]?.id ?? null;
+  writeActiveProjectId(project.id);
+  unstable_batchedUpdates(() => {
+    useSchemaStore.getState().reset();
+    useEditorGroupStore.getState().reset();
+    useTabStore.setState({ tabs: [], activeTabId: null, closedTabsStack: [] });
+    useConnectionStore.setState({
+      connections,
+      activeConnectionId: initialConnectionId,
+      connectedConnectionIds: [],
+      isConnected: false,
+      selectedConnection: null,
+      isLoading: false,
+    });
+    updateProject();
   });
-  void useConnectionStore.getState().loadConnections();
+  if (initialConnectionId) {
+    // Paint the first data source from the target project's SQLite metadata
+    // immediately. Establishing a live connection remains an explicit action.
+    void useSchemaStore
+      .getState()
+      .hydrateConnectionMetadataFromCache(initialConnectionId);
+  }
+  disconnectPreviousProjectConnections(previousConnectionIds);
 }
 
 function projectIdFromName(name: string) {
@@ -107,18 +145,40 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   setActiveProject: (projectId: string) => {
     const project =
       get().projects.find((item) => item.id === projectId) || DEFAULT_PROJECT;
-    writeActiveProjectId(project.id);
-    set({
-      activeProjectId: project.id,
-      activeProjectName: project.name,
-    });
-    reloadActiveConnectionMetadata();
+    if (project.id === get().activeProjectId) return true;
+    if (!confirmDiscardAllTabChanges("switch projects")) return false;
+
+    const switchId = ++latestProjectSwitch;
+    void readProjectConnections(project.id)
+      .then((connections) => {
+        if (switchId !== latestProjectSwitch) return;
+        replaceProjectWorkspace(project, connections, () => {
+          set({
+            activeProjectId: project.id,
+            activeProjectName: project.name,
+          });
+        });
+      })
+      .catch((error) => {
+        if (switchId !== latestProjectSwitch) return;
+        console.warn("Failed to load project connections", error);
+        replaceProjectWorkspace(project, [], () => {
+          set({
+            activeProjectId: project.id,
+            activeProjectName: project.name,
+          });
+        });
+      });
+    return true;
   },
 
   createProject: async (name: string) => {
     const trimmedName = name.trim();
     if (!trimmedName) {
       throw new Error("Project name is required");
+    }
+    if (!confirmDiscardAllTabChanges("switch to the new project")) {
+      throw new Error("Project creation was cancelled to keep unsaved files open.");
     }
 
     const now = Date.now();
@@ -130,17 +190,18 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     };
 
     await storeService.saveProject(project);
-    set((state) => ({
-      projects: [
-        ...state.projects.filter((item) => item.id !== project.id),
-        project,
-      ].sort((a, b) => a.name.localeCompare(b.name)),
-      activeProjectId: project.id,
-      activeProjectName: project.name,
-      isLoading: false,
-    }));
-    writeActiveProjectId(project.id);
-    reloadActiveConnectionMetadata();
+    latestProjectSwitch += 1;
+    replaceProjectWorkspace(project, [], () => {
+      set((state) => ({
+        projects: [
+          ...state.projects.filter((item) => item.id !== project.id),
+          project,
+        ].sort((a, b) => a.name.localeCompare(b.name)),
+        activeProjectId: project.id,
+        activeProjectName: project.name,
+        isLoading: false,
+      }));
+    });
     return project;
   },
 }));

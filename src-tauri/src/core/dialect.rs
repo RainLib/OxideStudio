@@ -790,6 +790,7 @@ impl DatabaseKind {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_foreign_key_constraint_query(
         self,
         schema: Option<&str>,
@@ -1128,10 +1129,38 @@ fn mysql_default_needs_quotes(data_type: &str) -> bool {
     )
 }
 
-fn postgres_cast_type(data_type: &str) -> Option<&'static str> {
+fn postgres_cast_type(data_type: &str) -> Option<String> {
+    let data_type = data_type.trim();
+    if data_type.is_empty() {
+        return None;
+    }
+    if let Some(element_type) = data_type.strip_suffix("[]") {
+        return postgres_cast_type(element_type).map(|element_type| format!("{element_type}[]"));
+    }
+
     let normalized = data_type.to_ascii_lowercase();
+    if normalized.starts_with("timestamp(") {
+        return Some(
+            if normalized.ends_with("with time zone") {
+                "timestamptz"
+            } else {
+                "timestamp"
+            }
+            .to_string(),
+        );
+    }
+    if normalized.starts_with("time(") {
+        return Some(
+            if normalized.ends_with("with time zone") {
+                "timetz"
+            } else {
+                "time"
+            }
+            .to_string(),
+        );
+    }
     let base_type = normalized.split('(').next().unwrap_or("").trim();
-    match base_type {
+    let canonical = match base_type {
         "smallint" | "int2" => Some("smallint"),
         "integer" | "int" | "int4" | "serial" => Some("integer"),
         "bigint" | "int8" | "bigserial" => Some("bigint"),
@@ -1151,7 +1180,46 @@ fn postgres_cast_type(data_type: &str) -> Option<&'static str> {
         "jsonb" => Some("jsonb"),
         "uuid" => Some("uuid"),
         _ => None,
+    };
+
+    canonical
+        .map(str::to_string)
+        .or_else(|| postgres_type_expression_is_safe(data_type).then(|| data_type.to_string()))
+}
+
+fn postgres_type_expression_is_safe(data_type: &str) -> bool {
+    let mut chars = data_type.chars().peekable();
+    let mut quoted = false;
+    let mut parentheses = 0_u32;
+
+    while let Some(ch) = chars.next() {
+        if quoted {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                } else {
+                    quoted = false;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => quoted = true,
+            '(' => parentheses = parentheses.saturating_add(1),
+            ')' if parentheses > 0 => parentheses -= 1,
+            ')' => return false,
+            '[' if chars.next() == Some(']') => {}
+            '[' => return false,
+            ',' if parentheses > 0 => {}
+            ',' => return false,
+            ch if ch.is_whitespace() && parentheses > 0 => {}
+            ch if ch.is_alphanumeric() || matches!(ch, '_' | '$' | '.') => {}
+            _ => return false,
+        }
     }
+
+    !quoted && parentheses == 0
 }
 
 fn sql_string_literal(value: &str) -> String {
@@ -1234,7 +1302,27 @@ mod tests {
         );
         assert_eq!(
             DatabaseKind::Postgres.parameter_placeholder(1, "geometry"),
-            "$1"
+            "$1::geometry"
+        );
+        assert_eq!(
+            DatabaseKind::Postgres.parameter_placeholder(3, "numeric(20, 8)[]"),
+            "$3::numeric[]"
+        );
+        assert_eq!(
+            DatabaseKind::Postgres.parameter_placeholder(4, r#""audit"."odd;type"[]"#),
+            r#"$4::"audit"."odd;type"[]"#
+        );
+        assert_eq!(
+            DatabaseKind::Postgres.parameter_placeholder(5, "timestamp(6) with time zone[]"),
+            "$5::timestamptz[]"
+        );
+        assert_eq!(
+            DatabaseKind::Postgres.parameter_placeholder(6, "text; DROP TABLE users"),
+            "$6"
+        );
+        assert_eq!(
+            DatabaseKind::Postgres.parameter_placeholder(7, "text, current_user"),
+            "$7"
         );
         assert_eq!(DatabaseKind::Mysql.parameter_placeholder(3, "integer"), "?");
         assert_eq!(

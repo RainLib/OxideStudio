@@ -2,12 +2,15 @@ import {
   AlertCircle,
   Check,
   CheckCircle2,
-  Database,
   Eye,
   EyeOff,
   Loader2,
   RotateCcw,
 } from "lucide-react";
+import {
+  CONNECTION_ICON_OPTIONS,
+  ConnectionGlyph,
+} from "@/components/icons/ConnectionGlyph";
 import { useEffect, useMemo, useState } from "react";
 import { DataSourceList } from "./DataSourceList";
 import {
@@ -17,6 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import {
   buildConnectionUrl,
   parseConnectionUrl,
@@ -102,6 +106,8 @@ export function ConnectionForm({
   } = useConnectionStore();
   const [section, setSection] = useState<FormSection>("general");
   const [showPassword, setShowPassword] = useState(false);
+  const [showSshPassword, setShowSshPassword] = useState(false);
+  const [showSshPassphrase, setShowSshPassphrase] = useState(false);
   const [status, setStatus] = useState<ConnectionStatus>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [driverCapabilities, setDriverCapabilities] =
@@ -170,6 +176,18 @@ export function ConnectionForm({
     sslMode: selectedConnection.sslMode || "disable",
   });
   const displayedUrl = selectedConnection.connectionUrl?.trim() || generatedUrl;
+  const sshTunnel = {
+    enabled: false,
+    host: "",
+    port: 22,
+    username: "",
+    authMethod: "password" as const,
+    password: "",
+    privateKeyPath: "",
+    privateKeyPassphrase: "",
+    strictHostKeyChecking: true,
+    ...selectedConnection.sshTunnel,
+  };
 
   const updateField = (
     field: keyof ConnectionConfig,
@@ -179,6 +197,18 @@ export function ConnectionForm({
     updateConnectionConfig({
       [field]: value,
       ...(invalidateUrl ? { connectionUrl: "" } : {}),
+    });
+    setStatus(null);
+  };
+
+  const updateSshTunnel = (
+    updates: Partial<NonNullable<ConnectionConfig["sshTunnel"]>>
+  ) => {
+    updateConnectionConfig({
+      sshTunnel: {
+        ...sshTunnel,
+        ...updates,
+      },
     });
     setStatus(null);
   };
@@ -306,7 +336,24 @@ export function ConnectionForm({
 
       <section className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-11 shrink-0 items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-3">
-          <Database size={15} className={profile.iconClassName} />
+          <span
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[4px]"
+            style={{
+              color: selectedConnection.color || undefined,
+              backgroundColor: selectedConnection.color
+                ? `${selectedConnection.color}18`
+                : undefined,
+            }}
+          >
+            <ConnectionGlyph
+              driver={selectedConnection.driver}
+              icon={selectedConnection.icon}
+              size={15}
+              className={
+                !selectedConnection.color ? profile.iconClassName : undefined
+              }
+            />
+          </span>
           <input
             value={selectedConnection.name}
             onChange={(event) => updateField("name", event.target.value)}
@@ -461,6 +508,166 @@ export function ConnectionForm({
                   <SelectItem value="verify-full">Verify full</SelectItem>
                 </SelectContent>
               </Select>
+
+              <div className="col-span-2 my-2 border-t border-[hsl(var(--wb-border-subtle))]" />
+
+              <span className={labelClass}>SSH tunnel</span>
+              <div className="flex h-7 items-center gap-2">
+                <Switch
+                  checked={sshTunnel.enabled}
+                  onCheckedChange={(enabled) => updateSshTunnel({ enabled })}
+                  className="h-5 w-9 data-[state=checked]:bg-[hsl(var(--wb-accent))] data-[state=unchecked]:bg-[hsl(var(--wb-border))] [&>span]:h-4 [&>span]:w-4 [&>span]:data-[state=checked]:translate-x-4"
+                  aria-label="Enable SSH tunnel"
+                />
+                <span className="text-[11px] wb-muted">
+                  Forward the database connection through an SSH server
+                </span>
+              </div>
+
+              {sshTunnel.enabled && (
+                <>
+                  <label className={labelClass} htmlFor="ssh-host">SSH host</label>
+                  <div className="grid grid-cols-[minmax(0,1fr)_116px] gap-2">
+                    <input
+                      id="ssh-host"
+                      value={sshTunnel.host}
+                      onChange={(event) => updateSshTunnel({ host: event.target.value })}
+                      className={fieldClass}
+                      placeholder="bastion.example.com"
+                      autoComplete="off"
+                    />
+                    <div className="grid grid-cols-[30px_minmax(0,1fr)] items-center gap-2">
+                      <span className="text-right text-[11px] wb-muted">Port</span>
+                      <input
+                        type="number"
+                        value={sshTunnel.port || ""}
+                        onChange={(event) =>
+                          updateSshTunnel({
+                            port: event.target.value ? Number(event.target.value) : 22,
+                          })
+                        }
+                        className={fieldClass}
+                        min={1}
+                        max={65535}
+                        aria-label="SSH port"
+                      />
+                    </div>
+                  </div>
+
+                  <label className={labelClass} htmlFor="ssh-username">Username</label>
+                  <input
+                    id="ssh-username"
+                    value={sshTunnel.username}
+                    onChange={(event) => updateSshTunnel({ username: event.target.value })}
+                    className={fieldClass}
+                    autoComplete="off"
+                  />
+
+                  <span className={labelClass}>Authentication</span>
+                  <Select
+                    value={sshTunnel.authMethod}
+                    onValueChange={(value) =>
+                      updateSshTunnel({
+                        authMethod: value as "password" | "privateKey",
+                      })
+                    }
+                  >
+                    <SelectTrigger className={fieldClass} aria-label="SSH authentication method">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                      <SelectItem value="password">Password</SelectItem>
+                      <SelectItem value="privateKey">Private key</SelectItem>
+                    </SelectContent>
+                  </Select>
+
+                  {sshTunnel.authMethod === "password" ? (
+                    <>
+                      <label className={labelClass} htmlFor="ssh-password">Password</label>
+                      <div className="relative">
+                        <input
+                          id="ssh-password"
+                          type={showSshPassword ? "text" : "password"}
+                          value={sshTunnel.password || ""}
+                          onChange={(event) =>
+                            updateSshTunnel({ password: event.target.value })
+                          }
+                          className={cn(fieldClass, "pr-8")}
+                          autoComplete="off"
+                        />
+                        <button
+                          type="button"
+                          className="wb-icon-button absolute right-0.5 top-0.5"
+                          onClick={() => setShowSshPassword((visible) => !visible)}
+                          title={showSshPassword ? "Hide SSH password" : "Show SSH password"}
+                        >
+                          {showSshPassword ? <EyeOff size={12} /> : <Eye size={12} />}
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <label className={labelClass} htmlFor="ssh-private-key">Private key</label>
+                      <input
+                        id="ssh-private-key"
+                        value={sshTunnel.privateKeyPath || ""}
+                        onChange={(event) =>
+                          updateSshTunnel({ privateKeyPath: event.target.value })
+                        }
+                        className={cn(fieldClass, "font-mono text-[11px]")}
+                        placeholder="~/.ssh/id_ed25519"
+                        autoComplete="off"
+                      />
+
+                      <label className={labelClass} htmlFor="ssh-passphrase">Passphrase</label>
+                      <div className="relative">
+                        <input
+                          id="ssh-passphrase"
+                          type={showSshPassphrase ? "text" : "password"}
+                          value={sshTunnel.privateKeyPassphrase || ""}
+                          onChange={(event) =>
+                            updateSshTunnel({ privateKeyPassphrase: event.target.value })
+                          }
+                          className={cn(fieldClass, "pr-8")}
+                          autoComplete="off"
+                        />
+                        <button
+                          type="button"
+                          className="wb-icon-button absolute right-0.5 top-0.5"
+                          onClick={() => setShowSshPassphrase((visible) => !visible)}
+                          title={showSshPassphrase ? "Hide key passphrase" : "Show key passphrase"}
+                        >
+                          {showSshPassphrase ? <EyeOff size={12} /> : <Eye size={12} />}
+                        </button>
+                      </div>
+                    </>
+                  )}
+
+                  <span className={labelClass}>Host key</span>
+                  <div className="flex min-h-7 items-center gap-2">
+                    <Switch
+                      checked={sshTunnel.strictHostKeyChecking}
+                      onCheckedChange={(strictHostKeyChecking) =>
+                        updateSshTunnel({ strictHostKeyChecking })
+                      }
+                      className="h-5 w-9 data-[state=checked]:bg-[hsl(var(--wb-accent))] data-[state=unchecked]:bg-[hsl(var(--wb-border))] [&>span]:h-4 [&>span]:w-4 [&>span]:data-[state=checked]:translate-x-4"
+                      aria-label="Verify SSH host key"
+                    />
+                    <span
+                      className={cn(
+                        "text-[11px]",
+                        sshTunnel.strictHostKeyChecking
+                          ? "wb-muted"
+                          : "text-amber-400"
+                      )}
+                    >
+                      {sshTunnel.strictHostKeyChecking
+                        ? "Verify against ~/.ssh/known_hosts"
+                        : "Warning: SSH host identity will not be verified"}
+                    </span>
+                  </div>
+                </>
+              )}
             </div>
           )}
 
@@ -484,10 +691,31 @@ export function ConnectionForm({
               </Select>
 
               <span className={labelClass}>Color</span>
-              <div className="flex h-7 items-center gap-2">
+              <div
+                className="flex h-7 items-center gap-2"
+                role="radiogroup"
+                aria-label="Connection background color"
+              >
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={!selectedConnection.color}
+                  className={cn(
+                    "relative h-4 w-4 rounded-full border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))]",
+                    !selectedConnection.color &&
+                      "ring-2 ring-[hsl(var(--wb-accent))] ring-offset-2 ring-offset-[hsl(var(--wb-editor))]"
+                  )}
+                  onClick={() => updateField("color", undefined)}
+                  aria-label="No connection background color"
+                  title="No background color"
+                >
+                  <span className="absolute left-[2px] top-[7px] h-px w-[10px] -rotate-45 bg-[hsl(var(--wb-text-muted))]" />
+                </button>
                 {CONNECTION_COLORS.map((color) => (
                   <button
                     type="button"
+                    role="radio"
+                    aria-checked={selectedConnection.color === color}
                     key={color}
                     className={cn(
                       "h-4 w-4 rounded-full border border-white/10 transition-transform hover:scale-110",
@@ -499,6 +727,39 @@ export function ConnectionForm({
                     aria-label={`Connection color ${color}`}
                   />
                 ))}
+              </div>
+
+              <span className={labelClass}>Icon</span>
+              <div
+                className="flex min-h-7 flex-wrap items-center gap-1"
+                role="radiogroup"
+                aria-label="Connection icon"
+              >
+                {CONNECTION_ICON_OPTIONS.map((icon) => {
+                  const isSelected =
+                    (selectedConnection.icon || profile.defaultIcon) === icon;
+                  return (
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={isSelected}
+                      key={icon}
+                      className={cn(
+                        "flex h-7 w-7 items-center justify-center rounded-[4px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]",
+                        isSelected &&
+                          "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+                      )}
+                      onClick={() => updateField("icon", icon)}
+                      title={icon}
+                    >
+                      <ConnectionGlyph
+                        driver={selectedConnection.driver}
+                        icon={icon}
+                        size={14}
+                      />
+                    </button>
+                  );
+                })}
               </div>
 
               <label className={labelClass} htmlFor="connection-tags">Tags</label>
