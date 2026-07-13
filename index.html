@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="icon" type="image/png" href="/oxide-logo.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OxideStudio</title>
     <style>
@@ -59,44 +59,20 @@
                 position: relative;
             }
 
-            /* Premium Hexagon Logo Animation */
             .logo-container {
                 position: relative;
-                width: 64px;
-                height: 64px;
+                width: 72px;
+                height: 72px;
                 display: flex;
                 align-items: center;
                 justify-content: center;
-            }
-
-            .logo-hex {
-                position: absolute;
-                width: 100%;
-                height: 100%;
-                border-radius: 16px;
-                border: 2px solid rgba(255, 255, 255, 0.1);
-                transform: rotate(45deg);
                 animation: breath 3s infinite ease-in-out;
             }
 
-            .logo-hex::after {
-                content: '';
-                position: absolute;
-                inset: 4px;
-                border-radius: 12px;
-                border: 2px solid #ea580c;
-                /* Orange-600 */
-                opacity: 0.8;
-            }
-
-            .logo-inner {
-                width: 24px;
-                height: 24px;
-                background-color: #ea580c;
-                border-radius: 6px;
-                transform: rotate(45deg);
-                box-shadow: 0 0 20px rgba(234, 88, 12, 0.4);
-                animation: inner-pulse 2s infinite ease-in-out;
+            .logo-image {
+                width: 100%;
+                height: 100%;
+                object-fit: contain;
             }
 
             .loader-text {
@@ -179,8 +155,7 @@
         <div id="app-loader">
             <div class="loader-content">
                 <div class="logo-container">
-                    <div class="logo-hex"></div>
-                    <div class="logo-inner"></div>
+                    <img class="logo-image" src="/oxide-logo.png" alt="" />
                 </div>
                 <div class="loader-text">OXIDE STUDIO</div>
                 <div class="loader-bar-bg">

@@ -180,9 +180,6 @@ export function AppBar({ center, right }: AppBarProps) {
           data-tauri-drag-region
           className="flex h-full min-w-0 items-center gap-1.5 px-1.5 text-[12px] font-medium"
         >
-          <span className="inline-flex h-5 w-5 items-center justify-center rounded-[4px] bg-[hsl(var(--wb-brand))] text-white text-[11px] font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)]">
-            S
-          </span>
           <Popover open={projectMenuOpen} onOpenChange={setProjectMenuOpen}>
             <PopoverTrigger asChild>
               <button

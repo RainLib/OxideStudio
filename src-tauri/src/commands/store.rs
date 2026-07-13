@@ -1,4 +1,7 @@
-use crate::core::store::{MetaStore, Project, Resource, SavedConnection};
+use crate::core::{
+    config::ConfigManager,
+    store::{MetaStore, Project, Resource, SavedConnection},
+};
 use anyhow::Result;
 use tauri::State;
 
@@ -55,6 +58,7 @@ pub async fn get_connections(
 #[tauri::command]
 pub async fn delete_connection(
     meta_store: State<'_, MetaStore>,
+    config_manager: State<'_, ConfigManager>,
     project_id: Option<String>,
     id: String,
 ) -> Result<(), String> {
@@ -62,7 +66,17 @@ pub async fn delete_connection(
     meta_store
         .delete_connection(&project_id, &id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Keep the legacy migration source in sync so a removed connection cannot
+    // be imported again when this was the project's final stored connection.
+    let mut legacy_config = config_manager.load();
+    legacy_config
+        .connections
+        .retain(|connection| connection.project_id != project_id || connection.id != id);
+    config_manager.save(&legacy_config);
+
+    Ok(())
 }
 
 #[tauri::command]

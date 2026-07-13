@@ -790,6 +790,8 @@ impl DatabaseKind {
         )
     }
 
+    // Foreign keys have several independent SQL clauses; keeping them
+    // explicit makes call sites type checked and avoids a loosely typed bag.
     #[allow(clippy::too_many_arguments)]
     pub fn add_foreign_key_constraint_query(
         self,

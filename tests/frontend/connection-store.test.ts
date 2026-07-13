@@ -7,6 +7,7 @@ import {
 const mocks = vi.hoisted(() => ({
   connect: vi.fn(async () => undefined),
   disconnect: vi.fn(async () => undefined),
+  deleteConnection: vi.fn(async () => undefined),
   loadConnections: vi.fn(async () => []),
   saveConnections: vi.fn(async () => undefined),
   testConnection: vi.fn(async () => undefined),
@@ -16,6 +17,7 @@ vi.mock("@/services/tauri", () => ({
   connectionService: {
     connect: mocks.connect,
     disconnect: mocks.disconnect,
+    deleteConnection: mocks.deleteConnection,
     loadConnections: mocks.loadConnections,
     saveConnections: mocks.saveConnections,
     testConnection: mocks.testConnection,
@@ -413,6 +415,105 @@ describe("connection store", () => {
       ]),
       "project-a"
     );
+  });
+
+  it("removes a saved data source and disconnects it when active", async () => {
+    localStorage.setItem("oxide-studio-active-project", "project-a");
+    const postgres = connection({ projectId: "project-a" });
+    const mysql = connection({
+      id: "mysql-1",
+      name: "MySQL",
+      driver: "mysql",
+      port: 3306,
+      projectId: "project-a",
+    });
+    useConnectionStore.setState({
+      connections: [postgres, mysql],
+      activeConnectionId: postgres.id,
+      connectedConnectionIds: [postgres.id, mysql.id],
+      isConnected: true,
+      selectedConnection: postgres,
+    });
+
+    await useConnectionStore.getState().removeConnection(postgres.id);
+
+    expect(mocks.disconnect).toHaveBeenCalledWith(postgres.id);
+    expect(mocks.deleteConnection).toHaveBeenCalledWith(
+      postgres.id,
+      "project-a"
+    );
+    expect(useConnectionStore.getState()).toEqual(
+      expect.objectContaining({
+        connections: [mysql],
+        activeConnectionId: mysql.id,
+        connectedConnectionIds: [mysql.id],
+        isConnected: true,
+        selectedConnection: null,
+      })
+    );
+  });
+
+  it("still removes a data source when disconnect cleanup fails", async () => {
+    const postgres = connection();
+    mocks.disconnect.mockRejectedValueOnce(new Error("already disconnected"));
+    useConnectionStore.setState({
+      connections: [postgres],
+      activeConnectionId: postgres.id,
+      connectedConnectionIds: [postgres.id],
+      isConnected: true,
+      selectedConnection: postgres,
+    });
+
+    await expect(
+      useConnectionStore.getState().removeConnection(postgres.id)
+    ).resolves.toBeUndefined();
+
+    expect(mocks.deleteConnection).toHaveBeenCalledWith(postgres.id, "sqls");
+    expect(useConnectionStore.getState()).toEqual(
+      expect.objectContaining({
+        connections: [],
+        activeConnectionId: null,
+        connectedConnectionIds: [],
+        isConnected: false,
+        selectedConnection: null,
+      })
+    );
+  });
+
+  it("removes the data source from the visible state before persistence finishes", async () => {
+    const postgres = connection();
+    const deletion = deferred();
+    mocks.deleteConnection.mockReturnValueOnce(deletion.promise);
+    useConnectionStore.setState({
+      connections: [postgres],
+      activeConnectionId: postgres.id,
+      connectedConnectionIds: [postgres.id],
+      isConnected: true,
+      selectedConnection: postgres,
+    });
+
+    const removal = useConnectionStore.getState().removeConnection(postgres.id);
+    expect(useConnectionStore.getState().connections).toEqual([]);
+
+    deletion.resolve();
+    await removal;
+  });
+
+  it("restores the data source when persistent deletion fails", async () => {
+    const postgres = connection();
+    mocks.deleteConnection.mockRejectedValueOnce(new Error("delete failed"));
+    useConnectionStore.setState({
+      connections: [postgres],
+      activeConnectionId: postgres.id,
+      connectedConnectionIds: [postgres.id],
+      isConnected: true,
+      selectedConnection: postgres,
+    });
+
+    await expect(
+      useConnectionStore.getState().removeConnection(postgres.id)
+    ).rejects.toThrow("delete failed");
+    expect(useConnectionStore.getState().connections).toEqual([postgres]);
   });
 
   it("ignores older connection attempts that finish after a newer switch", async () => {

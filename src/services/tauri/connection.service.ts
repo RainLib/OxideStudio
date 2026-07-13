@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { invokeWithInterceptors } from "./client";
 import type { SavedConnection, SshTunnelConfig } from "./types";
 
@@ -95,6 +96,16 @@ export async function saveConnections(
 }
 
 /**
+ * Permanently remove one saved data source configuration.
+ */
+export async function deleteConnection(
+  id: string,
+  projectId = activeProjectId()
+): Promise<void> {
+  return invoke("delete_connection", { id, projectId });
+}
+
+/**
  * 连接服务对象
  * 提供更面向对象的 API 接口
  */
@@ -104,4 +115,5 @@ export const connectionService = {
   disconnect,
   loadConnections,
   saveConnections,
+  deleteConnection,
 };

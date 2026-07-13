@@ -39,6 +39,7 @@ interface ConnectionState {
   createNewConnection: () => ConnectionConfig;
   updateConnectionConfig: (updates: Partial<ConnectionConfig>) => void;
   saveConnection: (config: ConnectionConfig) => Promise<void>;
+  removeConnection: (id: string) => Promise<void>;
   addConnection: (config: Omit<ConnectionConfig, "id">) => Promise<void>;
   testConnection: (config: ConnectionConfig) => Promise<string | null>;
   connect: (config: ConnectionConfig) => Promise<string | null>;
@@ -214,6 +215,63 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     // Save to backend
     await connectionService.saveConnections(updatedConnections, activeProjectId());
+  },
+
+  removeConnection: async (id) => {
+    const state = get();
+    const remainingConnections = state.connections.filter(
+      (connection) => connection.id !== id
+    );
+
+    if (remainingConnections.length === state.connections.length) return;
+
+    const connectedConnectionIds = state.connectedConnectionIds.filter(
+      (connectionId) => connectionId !== id
+    );
+    const activeConnectionId =
+      state.activeConnectionId === id
+        ? connectedConnectionIds[0] ?? null
+        : state.activeConnectionId;
+    set({
+      connections: remainingConnections,
+      activeConnectionId,
+      connectedConnectionIds,
+      isConnected: Boolean(
+        activeConnectionId && connectedConnectionIds.includes(activeConnectionId)
+      ),
+      selectedConnection:
+        state.selectedConnection?.id === id ? null : state.selectedConnection,
+    });
+
+    try {
+      await connectionService.deleteConnection(id, activeProjectId());
+
+      if (state.connectedConnectionIds.includes(id)) {
+        try {
+          await connectionService.disconnect(id);
+        } catch (error) {
+          console.warn("Failed to disconnect removed data source:", error);
+        }
+      }
+
+      if (state.activeConnectionId === id) {
+        const schemaStore = useSchemaStore.getState();
+        if (activeConnectionId) {
+          schemaStore.restoreConnectionSnapshot(activeConnectionId);
+        } else {
+          schemaStore.clearActiveMetadata();
+        }
+      }
+    } catch (error) {
+      set({
+        connections: state.connections,
+        activeConnectionId: state.activeConnectionId,
+        connectedConnectionIds: state.connectedConnectionIds,
+        isConnected: state.isConnected,
+        selectedConnection: state.selectedConnection,
+      });
+      throw error;
+    }
   },
 
   // Deprecated simplified add

@@ -52,6 +52,8 @@ impl QueryCancellationState {
 
 /// 执行 SQL 查询
 #[tauri::command]
+// The command parameters are the stable frontend IPC contract.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_query(
     manager: State<'_, ConnectionManager>,
     cancellation: State<'_, QueryCancellationState>,
@@ -144,6 +146,9 @@ fn strip_read_only_transaction_results(mut results: Vec<QueryResult>) -> Vec<Que
     results
 }
 
+// Keep the execution inputs aligned with `execute_query` so the read-only
+// wrapper can reuse the exact same cancellation and database routing path.
+#[allow(clippy::too_many_arguments)]
 async fn execute_query_with_cancellation(
     manager: &ConnectionManager,
     cancellation: &QueryCancellationState,

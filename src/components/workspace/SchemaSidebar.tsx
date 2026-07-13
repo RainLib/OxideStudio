@@ -114,6 +114,14 @@ import {
   buildRedisKeyTree,
   type RedisKeyTreeNode,
 } from "@/lib/redisKey";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 interface PostgresRemoteDatabaseState {
   connectionId: string | null;
@@ -238,6 +246,9 @@ export function SchemaSidebar() {
   const selectConnection = useConnectionStore(
     (state) => state.selectConnection
   );
+  const removeConnection = useConnectionStore(
+    (state) => state.removeConnection
+  );
   const setToolWindowVisible = useWorkbenchLayoutStore(
     (store) => store.setToolWindowVisible
   );
@@ -332,6 +343,14 @@ export function SchemaSidebar() {
   const [activeTableType, setActiveTableType] = useState<string | null>(null);
   const [ddlContent, setDdlContent] = useState("");
   const [namespaceError, setNamespaceError] = useState<string | null>(null);
+  const [pendingDataSourceRemoval, setPendingDataSourceRemoval] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  const [isRemovingDataSource, setIsRemovingDataSource] = useState(false);
+  const [dataSourceRemovalError, setDataSourceRemovalError] = useState<
+    string | null
+  >(null);
   const [capabilities, setCapabilities] = useState(() =>
     defaultDatabaseCapabilities(DEFAULT_DATABASE_DRIVER)
   );
@@ -1146,6 +1165,38 @@ export function SchemaSidebar() {
   const handleOpenConnectionProperties = (connectionId: string) => {
     selectConnection(connectionId);
     setIsDataSourceDialogOpen(true);
+  };
+
+  const handleRemoveDataSource = async () => {
+    if (!pendingDataSourceRemoval || isRemovingDataSource) return;
+    const { id: connectionId } = pendingDataSourceRemoval;
+    setNamespaceError(null);
+    setDataSourceRemovalError(null);
+    setIsRemovingDataSource(true);
+    try {
+      await removeConnection(connectionId);
+      try {
+        await forgetConnectionMetadata(connectionId);
+      } catch (error) {
+        console.warn("Failed to clear removed data source metadata:", error);
+      }
+      setExpandedConnectionIds((ids) =>
+        ids.filter((id) => id !== connectionId)
+      );
+      setExpandedSchemaKeys((keys) =>
+        keys.filter((key) => !key.startsWith(`${connectionId}:`))
+      );
+      setExpandedObjectGroupKeys((keys) =>
+        keys.filter((key) => !key.startsWith(`${connectionId}:`))
+      );
+      setPendingDataSourceRemoval(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setNamespaceError(message);
+      setDataSourceRemovalError(message);
+    } finally {
+      setIsRemovingDataSource(false);
+    }
   };
 
   const handleCollapseAll = () => {
@@ -3134,6 +3185,20 @@ export function SchemaSidebar() {
                       >
                         Properties...
                       </ContextMenuItem>
+                      <ContextMenuSeparator className={menuSeparatorClass} />
+                      <ContextMenuItem
+                        className={cn(menuItemClass, "text-destructive")}
+                        onSelect={() => {
+                          setDataSourceRemovalError(null);
+                          setPendingDataSourceRemoval({
+                            id: connection.id,
+                            name: connection.name,
+                          });
+                        }}
+                      >
+                        <Trash2 className="mr-2 h-3.5 w-3.5" />
+                        Remove Data Source...
+                      </ContextMenuItem>
                     </ContextMenuContent>
                   </ContextMenu>
 
@@ -3521,6 +3586,49 @@ export function SchemaSidebar() {
         open={isDataSourceDialogOpen}
         onOpenChange={setIsDataSourceDialogOpen}
       />
+      <Dialog
+        open={Boolean(pendingDataSourceRemoval)}
+        onOpenChange={(open) => {
+          if (!open && !isRemovingDataSource) {
+            setPendingDataSourceRemoval(null);
+            setDataSourceRemovalError(null);
+          }
+        }}
+      >
+        <DialogContent className="w-[420px] max-w-[calc(100vw-32px)] gap-4 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-5 text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.35)]">
+          <DialogHeader>
+            <DialogTitle className="text-[15px]">Remove data source?</DialogTitle>
+            <DialogDescription className="text-[12px] leading-5 wb-muted">
+              Remove <strong>{pendingDataSourceRemoval?.name}</strong> from
+              OxideStudio. This deletes the saved connection configuration and
+              cached metadata, but does not delete the remote database.
+            </DialogDescription>
+          </DialogHeader>
+          {dataSourceRemovalError && (
+            <div className="rounded-[4px] bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+              {dataSourceRemovalError}
+            </div>
+          )}
+          <DialogFooter className="gap-2 sm:space-x-0">
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={isRemovingDataSource}
+              onClick={() => setPendingDataSourceRemoval(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={isRemovingDataSource}
+              onClick={() => void handleRemoveDataSource()}
+            >
+              {isRemovingDataSource ? "Removing..." : "Remove Data Source"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <CreateDatabaseDialog
         isOpen={isCreateDbDialogOpen}
         onClose={() => setIsCreateDbDialogOpen(false)}

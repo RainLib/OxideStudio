@@ -2387,6 +2387,8 @@ async fn completion_items_at(
     Ok(result)
 }
 
+// Keep the completion position and expected edit range visible at each test
+// call site; grouping them would make failure inputs harder to scan.
 #[allow(clippy::too_many_arguments)]
 async fn assert_completion_text_edit(
     lsp: &mut LspProcess,

@@ -190,6 +190,7 @@ pub async fn disconnect_db(
 #[tauri::command]
 pub async fn save_connections(
     meta_store: State<'_, MetaStore>,
+    config_manager: State<'_, ConfigManager>,
     project_id: Option<String>,
     connections: Vec<ConfigSavedConnection>,
 ) -> Result<Response<String>, String> {
@@ -202,6 +203,22 @@ pub async fn save_connections(
         .replace_connections(&project_id, &store_connections)
         .await
         .map_err(|error| error.to_string())?;
+
+    // Keep the legacy config in sync until its one-time migration fallback can
+    // be removed. Otherwise deleting the final connection leaves the legacy
+    // entry behind and load_connections imports it again on the next launch.
+    let mut legacy_config = config_manager.load();
+    legacy_config
+        .connections
+        .retain(|connection| connection.project_id != project_id);
+    legacy_config
+        .connections
+        .extend(connections.into_iter().map(|mut connection| {
+            connection.project_id = project_id.clone();
+            connection
+        }));
+    config_manager.save(&legacy_config);
+
     Ok(Response::ok("Connections saved successfully".to_string()))
 }
 
