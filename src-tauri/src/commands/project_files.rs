@@ -1,4 +1,7 @@
-use crate::core::store::{MetaStore, Project};
+use crate::core::{
+    protocol::CommandError,
+    store::{MetaStore, Project},
+};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -23,6 +26,28 @@ const COMPLETION_FILE_SIZE_LIMIT: u64 = 256 * 1024;
 const COMPLETION_INDEX_SIZE_LIMIT: usize = 20 * 1024 * 1024;
 const COMPLETION_CONTEXT_SIZE_LIMIT: usize = 8 * 1024;
 const PROJECT_FILE_PREVIEW_SIZE_LIMIT: u64 = 25 * 1024 * 1024;
+
+fn project_command_error(
+    fallback_code: &str,
+    error: impl std::fmt::Display,
+    retryable: bool,
+    context: serde_json::Value,
+) -> CommandError {
+    let raw_message = error.to_string();
+    let (code, message, retryable) =
+        if let Some(message) = raw_message.strip_prefix(REVISION_CONFLICT_PREFIX) {
+            ("REVISION_CONFLICT", message.trim(), false)
+        } else if let Some(message) = raw_message.strip_prefix(PROJECT_ROOT_CHANGED_PREFIX) {
+            ("PROJECT_ROOT_CHANGED", message.trim(), false)
+        } else if raw_message.starts_with("project not found:") {
+            ("PROJECT_NOT_FOUND", raw_message.as_str(), false)
+        } else if raw_message.starts_with("project root is not configured:") {
+            ("PROJECT_ROOT_NOT_CONFIGURED", raw_message.as_str(), false)
+        } else {
+            (fallback_code, raw_message.as_str(), retryable)
+        };
+    CommandError::new(code, message, retryable, Some(context))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -876,17 +901,32 @@ pub async fn set_project_root(
     meta_store: State<'_, MetaStore>,
     project_id: String,
     root_path: Option<String>,
-) -> Result<Project, String> {
+) -> Result<Project, CommandError> {
+    let error_context = serde_json::json!({ "projectId": project_id });
     let canonical_root = match root_path {
         Some(root_path) => {
             if root_path.is_empty() {
-                return Err("project root cannot be an empty string".to_string());
+                return Err(project_command_error(
+                    "PROJECT_ROOT_INVALID",
+                    "project root cannot be an empty string",
+                    false,
+                    error_context,
+                ));
             }
-            let root = ProjectRoot::new(root_path).map_err(|error| error.to_string())?;
+            let root = ProjectRoot::new(root_path).map_err(|error| {
+                project_command_error("PROJECT_ROOT_INVALID", error, false, error_context.clone())
+            })?;
             Some(
                 root.path
                     .to_str()
-                    .ok_or_else(|| "project root is not valid UTF-8".to_string())?
+                    .ok_or_else(|| {
+                        project_command_error(
+                            "PROJECT_ROOT_INVALID",
+                            "project root is not valid UTF-8",
+                            false,
+                            error_context.clone(),
+                        )
+                    })?
                     .to_string(),
             )
         }
@@ -896,7 +936,9 @@ pub async fn set_project_root(
     let project = meta_store
         .set_project_root(&project_id, canonical_root.as_deref())
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            project_command_error("PROJECT_ROOT_SAVE_FAILED", error, true, error_context)
+        })?;
     if let Ok(mut indexes) = completion_indexes().lock() {
         indexes.clear();
     }
@@ -907,14 +949,33 @@ pub async fn set_project_root(
 pub async fn get_project_completion_context(
     meta_store: State<'_, MetaStore>,
     request: ProjectCompletionContextRequest,
-) -> Result<Vec<ProjectCompletionSnippet>, String> {
+) -> Result<Vec<ProjectCompletionSnippet>, CommandError> {
+    let error_context = serde_json::json!({
+        "projectId": request.project_id,
+        "relativePath": request.active_file,
+    });
     let root = project_root(
         &meta_store,
         &request.project_id,
         request.expected_root.as_deref(),
     )
-    .await?;
-    let index = completion_index(&root).map_err(|error| error.to_string())?;
+    .await
+    .map_err(|error| {
+        project_command_error(
+            "PROJECT_ROOT_RESOLUTION_FAILED",
+            error,
+            true,
+            error_context.clone(),
+        )
+    })?;
+    let index = completion_index(&root).map_err(|error| {
+        project_command_error(
+            "PROJECT_COMPLETION_INDEX_FAILED",
+            error,
+            true,
+            error_context,
+        )
+    })?;
     Ok(ranked_project_snippets(&index, &request))
 }
 
@@ -924,11 +985,25 @@ pub async fn list_project_entries(
     project_id: String,
     relative_path: Option<String>,
     expected_root: Option<String>,
-) -> Result<Vec<ProjectEntry>, String> {
+) -> Result<Vec<ProjectEntry>, CommandError> {
+    let error_context = serde_json::json!({
+        "projectId": project_id,
+        "relativePath": relative_path,
+    });
     project_root(&meta_store, &project_id, expected_root.as_deref())
-        .await?
+        .await
+        .map_err(|error| {
+            project_command_error(
+                "PROJECT_ROOT_RESOLUTION_FAILED",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?
         .list_entries(relative_path.as_deref())
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            project_command_error("PROJECT_ENTRY_LIST_FAILED", error, true, error_context)
+        })
 }
 
 #[tauri::command]
@@ -937,11 +1012,25 @@ pub async fn read_project_file(
     project_id: String,
     relative_path: String,
     expected_root: Option<String>,
-) -> Result<ProjectFileRead, String> {
+) -> Result<ProjectFileRead, CommandError> {
+    let error_context = serde_json::json!({
+        "projectId": project_id,
+        "relativePath": relative_path,
+    });
     project_root(&meta_store, &project_id, expected_root.as_deref())
-        .await?
+        .await
+        .map_err(|error| {
+            project_command_error(
+                "PROJECT_ROOT_RESOLUTION_FAILED",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?
         .read_file(&relative_path)
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            project_command_error("PROJECT_FILE_READ_FAILED", error, true, error_context)
+        })
 }
 
 #[tauri::command]
@@ -950,11 +1039,25 @@ pub async fn read_project_file_preview(
     project_id: String,
     relative_path: String,
     expected_root: Option<String>,
-) -> Result<ProjectFilePreview, String> {
+) -> Result<ProjectFilePreview, CommandError> {
+    let error_context = serde_json::json!({
+        "projectId": project_id,
+        "relativePath": relative_path,
+    });
     project_root(&meta_store, &project_id, expected_root.as_deref())
-        .await?
+        .await
+        .map_err(|error| {
+            project_command_error(
+                "PROJECT_ROOT_RESOLUTION_FAILED",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?
         .read_file_preview(&relative_path)
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            project_command_error("PROJECT_FILE_PREVIEW_FAILED", error, true, error_context)
+        })
 }
 
 #[tauri::command]
@@ -964,11 +1067,26 @@ pub async fn create_project_file(
     relative_path: String,
     content: Option<String>,
     expected_root: Option<String>,
-) -> Result<ProjectFileWrite, String> {
-    let root = project_root(&meta_store, &project_id, expected_root.as_deref()).await?;
+) -> Result<ProjectFileWrite, CommandError> {
+    let error_context = serde_json::json!({
+        "projectId": project_id,
+        "relativePath": relative_path,
+    });
+    let root = project_root(&meta_store, &project_id, expected_root.as_deref())
+        .await
+        .map_err(|error| {
+            project_command_error(
+                "PROJECT_ROOT_RESOLUTION_FAILED",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?;
     let result = root
         .create_file(&relative_path, content.as_deref().unwrap_or_default())
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            project_command_error("PROJECT_FILE_CREATE_FAILED", error, false, error_context)
+        })?;
     invalidate_completion_index(&root);
     Ok(result)
 }
@@ -979,11 +1097,30 @@ pub async fn create_project_directory(
     project_id: String,
     relative_path: String,
     expected_root: Option<String>,
-) -> Result<ProjectEntry, String> {
+) -> Result<ProjectEntry, CommandError> {
+    let error_context = serde_json::json!({
+        "projectId": project_id,
+        "relativePath": relative_path,
+    });
     project_root(&meta_store, &project_id, expected_root.as_deref())
-        .await?
+        .await
+        .map_err(|error| {
+            project_command_error(
+                "PROJECT_ROOT_RESOLUTION_FAILED",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?
         .create_directory(&relative_path)
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            project_command_error(
+                "PROJECT_DIRECTORY_CREATE_FAILED",
+                error,
+                false,
+                error_context,
+            )
+        })
 }
 
 #[tauri::command]
@@ -994,11 +1131,26 @@ pub async fn write_project_file(
     content: String,
     expected_revision: String,
     expected_root: Option<String>,
-) -> Result<ProjectFileWrite, String> {
-    let root = project_root(&meta_store, &project_id, expected_root.as_deref()).await?;
+) -> Result<ProjectFileWrite, CommandError> {
+    let error_context = serde_json::json!({
+        "projectId": project_id,
+        "relativePath": relative_path,
+    });
+    let root = project_root(&meta_store, &project_id, expected_root.as_deref())
+        .await
+        .map_err(|error| {
+            project_command_error(
+                "PROJECT_ROOT_RESOLUTION_FAILED",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?;
     let result = root
         .write_file(&relative_path, &content, &expected_revision)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            project_command_error("PROJECT_FILE_WRITE_FAILED", error, false, error_context)
+        })?;
     invalidate_completion_index(&root);
     Ok(result)
 }
@@ -1010,11 +1162,27 @@ pub async fn rename_project_entry(
     relative_path: String,
     new_relative_path: String,
     expected_root: Option<String>,
-) -> Result<ProjectEntry, String> {
-    let root = project_root(&meta_store, &project_id, expected_root.as_deref()).await?;
+) -> Result<ProjectEntry, CommandError> {
+    let error_context = serde_json::json!({
+        "projectId": project_id,
+        "relativePath": relative_path,
+        "newRelativePath": new_relative_path,
+    });
+    let root = project_root(&meta_store, &project_id, expected_root.as_deref())
+        .await
+        .map_err(|error| {
+            project_command_error(
+                "PROJECT_ROOT_RESOLUTION_FAILED",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?;
     let result = root
         .rename_entry(&relative_path, &new_relative_path)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            project_command_error("PROJECT_ENTRY_RENAME_FAILED", error, false, error_context)
+        })?;
     invalidate_completion_index(&root);
     Ok(result)
 }
@@ -1026,10 +1194,26 @@ pub async fn delete_project_entry(
     relative_path: String,
     recursive: Option<bool>,
     expected_root: Option<String>,
-) -> Result<(), String> {
-    let root = project_root(&meta_store, &project_id, expected_root.as_deref()).await?;
+) -> Result<(), CommandError> {
+    let error_context = serde_json::json!({
+        "projectId": project_id,
+        "relativePath": relative_path,
+        "recursive": recursive,
+    });
+    let root = project_root(&meta_store, &project_id, expected_root.as_deref())
+        .await
+        .map_err(|error| {
+            project_command_error(
+                "PROJECT_ROOT_RESOLUTION_FAILED",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?;
     root.delete_entry(&relative_path, recursive.unwrap_or(false))
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            project_command_error("PROJECT_ENTRY_DELETE_FAILED", error, false, error_context)
+        })?;
     invalidate_completion_index(&root);
     Ok(())
 }

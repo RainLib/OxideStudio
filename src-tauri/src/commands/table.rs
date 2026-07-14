@@ -1823,6 +1823,15 @@ pub async fn preview_table_page(
     filters: Option<Vec<TableFilter>>,
     sort: Option<TableSort>,
 ) -> Result<Response<TablePageResult>, String> {
+    let error_context = serde_json::json!({
+        "connectionId": connection_id,
+        "driver": driver,
+        "database": database,
+        "schema": schema,
+        "table": table,
+        "page": page,
+        "pageSize": page_size,
+    });
     let result: Result<TablePageResult, String> = async {
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         let database = database.as_deref();
@@ -1939,7 +1948,12 @@ pub async fn preview_table_page(
 
     match result {
         Ok(page) => Ok(Response::ok(page)),
-        Err(error) => Ok(Response::err("PREVIEW_TABLE_PAGE_ERROR", &error)),
+        Err(error) => Ok(Response::err_with_details(
+            "PREVIEW_TABLE_PAGE_ERROR",
+            &error,
+            true,
+            Some(error_context),
+        )),
     }
 }
 
@@ -3064,6 +3078,12 @@ pub async fn get_view_definition(
     view: String,
     object_type: Option<String>,
 ) -> Result<Response<String>, String> {
+    let error_context = serde_json::json!({
+        "connectionId": connection_id,
+        "driver": driver,
+        "schema": schema,
+        "view": view,
+    });
     let result: Result<String, String> = async {
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         let view_name = view.trim();
@@ -3099,7 +3119,12 @@ pub async fn get_view_definition(
 
     match result {
         Ok(definition) => Ok(Response::ok(definition)),
-        Err(error) => Ok(Response::err("GET_VIEW_DEFINITION_ERROR", &error)),
+        Err(error) => Ok(Response::err_with_details(
+            "GET_VIEW_DEFINITION_ERROR",
+            &error,
+            true,
+            Some(error_context),
+        )),
     }
 }
 
@@ -3157,6 +3182,13 @@ pub async fn get_table_ddl(
     object_type: Option<String>,
     database: Option<String>,
 ) -> Result<Response<String>, String> {
+    let error_context = serde_json::json!({
+        "connectionId": connection_id,
+        "driver": driver,
+        "database": database,
+        "schema": schema,
+        "table": table,
+    });
     let result: Result<String, String> = async {
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         let table_name = table.trim();
@@ -3276,7 +3308,12 @@ pub async fn get_table_ddl(
 
     match result {
         Ok(ddl) => Ok(Response::ok(ddl)),
-        Err(error) => Ok(Response::err("GET_TABLE_DDL_ERROR", &error)),
+        Err(error) => Ok(Response::err_with_details(
+            "GET_TABLE_DDL_ERROR",
+            &error,
+            true,
+            Some(error_context),
+        )),
     }
 }
 

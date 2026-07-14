@@ -282,6 +282,15 @@ type UiAction = {
 - Database Explorer 能定位当前 database 及远程 PostgreSQL database 下的 schema/object；Monaco range 统一为 one-based，LSP 的 zero-based range 在 attachment boundary 转换。
 - `editor.previewPatch`、`plan.revealNode`、`task.reveal` 已占据 typed contract，但在 diff viewer、Explain Plan 和 durable task surface 完成前稳定返回 unsupported，不伪造成功。
 
+### 5.5 结构化错误基线（2026-07-15）
+
+- Rust envelope error 与直接 Tauri command rejection 统一提供 `code + message + category + retryable + context`；前端无论调用哪类 command 都只消费 `ApiError`。
+- `connection/query/schema/table/projectFile` 是稳定错误分类；未知 legacy rejection 由 command family 生成 fallback code，不再把 message 文本当协议。
+- `context` 只允许 project、connection、driver、database、schema、table、view、queryId、relative path 等目标身份；SQL、connection URL、密码、文件内容和 revision 内容不得进入错误遥测。
+- 写入型查询、DDL、文件 mutation 默认不可重试；只有幂等读取、连接建立/元数据刷新等明确安全路径可标记 `retryable=true`，最终是否重试仍由调用方结合幂等性决定。
+- project file revision conflict 使用稳定 `REVISION_CONFLICT` code；UI 不再解析 `REVISION_CONFLICT:` 字符串前缀。
+- 当前 envelope 尚未统一驱动 vendor code、SQLSTATE、position 与 object identity；这些字段应在 SQL error adapter 中作为后续可选 details 增加，不能退回字符串解析。
+
 ## 6. 安全与批准模型
 
 | 风险 | 示例 | 默认行为 |

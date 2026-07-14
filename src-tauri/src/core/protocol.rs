@@ -179,7 +179,51 @@ pub struct Response<T> {
 pub struct ErrorResponse {
     pub code: String,
     pub message: String,
+    #[serde(default)]
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CommandError {
+    pub code: String,
+    pub message: String,
+    #[serde(default)]
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
+}
+
+impl CommandError {
+    pub fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        retryable: bool,
+        context: Option<serde_json::Value>,
+    ) -> Self {
+        let code = code.into();
+        Self {
+            category: Some(error_category(&code).to_string()),
+            code,
+            message: message.into(),
+            retryable,
+            context,
+        }
+    }
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.message)
+    }
+}
+
+impl std::error::Error for CommandError {}
 
 impl<T> Response<T> {
     pub fn ok(data: T) -> Self {
@@ -191,20 +235,58 @@ impl<T> Response<T> {
     }
 
     pub fn err(code: &str, message: &str) -> Self {
+        Self::err_with_details(code, message, false, None)
+    }
+
+    pub fn err_with_details(
+        code: &str,
+        message: &str,
+        retryable: bool,
+        context: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             success: false,
             data: None,
             error: Some(ErrorResponse {
                 code: code.to_string(),
                 message: message.to_string(),
+                retryable,
+                category: Some(error_category(code).to_string()),
+                context,
             }),
         }
     }
 }
 
+fn error_category(code: &str) -> &'static str {
+    if code.contains("CONNECTION") || code == "DISCONNECT_ERROR" {
+        "connection"
+    } else if code.contains("QUERY") || code.contains("SQL_COMPLETION") {
+        "query"
+    } else if code.ends_with("_LIST_FAILED")
+        || code == "COLLECTION_PAGE_FAILED"
+        || code == "SET_CURRENT_SCHEMA_FAILED"
+        || code.contains("METADATA")
+    {
+        "schema"
+    } else if code.contains("TABLE") || code.contains("VIEW") || code.contains("CONSTRAINT") {
+        "table"
+    } else if code == "REVISION_CONFLICT"
+        || code.contains("PROJECT")
+        || code.contains("FILE")
+        || code.contains("PATH")
+    {
+        "projectFile"
+    } else if code.contains("UNSUPPORTED") {
+        "capability"
+    } else {
+        "application"
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::QueryResult;
+    use super::{CommandError, QueryResult, Response};
 
     #[test]
     fn execution_result_carries_affected_rows() {
@@ -215,5 +297,52 @@ mod tests {
         assert_eq!(result.rows_affected, Some(3));
         assert_eq!(result.statement_type.as_deref(), Some("UPDATE"));
         assert!(result.message.unwrap().contains("3 rows affected"));
+    }
+
+    #[test]
+    fn response_errors_include_stable_operational_details() {
+        let response = Response::<()>::err_with_details(
+            "QUERY_EXECUTION_FAILED",
+            "connection reset",
+            true,
+            Some(serde_json::json!({ "connectionId": "connection-1" })),
+        );
+        let error = response.error.expect("error response");
+
+        assert_eq!(error.code, "QUERY_EXECUTION_FAILED");
+        assert_eq!(error.category.as_deref(), Some("query"));
+        assert!(error.retryable);
+        assert_eq!(
+            error.context,
+            Some(serde_json::json!({ "connectionId": "connection-1" }))
+        );
+    }
+
+    #[test]
+    fn command_errors_classify_revision_conflicts_as_project_files() {
+        let error = CommandError::new(
+            "REVISION_CONFLICT",
+            "file changed on disk",
+            false,
+            Some(serde_json::json!({ "relativePath": "query.sql" })),
+        );
+
+        assert_eq!(error.category.as_deref(), Some("projectFile"));
+        assert!(!error.retryable);
+    }
+
+    #[test]
+    fn metadata_list_errors_are_classified_as_schema_errors() {
+        for code in [
+            "DATABASE_LIST_FAILED",
+            "TABLE_LIST_FAILED",
+            "COLUMN_LIST_FAILED",
+            "DATABASE_FUNCTION_LIST_FAILED",
+        ] {
+            let error = Response::<()>::err(code, "metadata lookup failed")
+                .error
+                .expect("error response");
+            assert_eq!(error.category.as_deref(), Some("schema"), "{code}");
+        }
     }
 }

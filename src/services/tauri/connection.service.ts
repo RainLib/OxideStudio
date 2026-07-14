@@ -1,5 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
-import { invokeWithInterceptors } from "./client";
+import { invokeRawCommand, invokeWithInterceptors } from "./client";
 import type { SavedConnection, SshTunnelConfig } from "./types";
 
 /**
@@ -29,7 +28,7 @@ export async function connect(
   connectionId: string,
   driver: string,
   url: string,
-  sshTunnel?: SshTunnelConfig
+  sshTunnel?: SshTunnelConfig,
 ): Promise<string> {
   return invokeWithInterceptors<string>("connect_db", {
     connectionId,
@@ -45,7 +44,7 @@ export async function connect(
 export async function testConnection(
   driver: string,
   url: string,
-  sshTunnel?: SshTunnelConfig
+  sshTunnel?: SshTunnelConfig,
 ): Promise<string> {
   return invokeWithInterceptors<string>("test_db_connection", {
     driver,
@@ -70,7 +69,7 @@ export async function disconnect(connectionId: string): Promise<string> {
  * @returns Promise<SavedConnection[]> - 连接列表
  */
 export async function loadConnections(
-  projectId = activeProjectId()
+  projectId = activeProjectId(),
 ): Promise<SavedConnection[]> {
   return invokeWithInterceptors<SavedConnection[]>("load_connections", {
     projectId,
@@ -84,7 +83,7 @@ export async function loadConnections(
  */
 export async function saveConnections(
   connections: SavedConnection[],
-  projectId = activeProjectId()
+  projectId = activeProjectId(),
 ): Promise<string> {
   return invokeWithInterceptors<string>("save_connections", {
     projectId,
@@ -100,9 +99,9 @@ export async function saveConnections(
  */
 export async function deleteConnection(
   id: string,
-  projectId = activeProjectId()
+  projectId = activeProjectId(),
 ): Promise<void> {
-  return invoke("delete_connection", { id, projectId });
+  return invokeRawCommand("delete_connection", { id, projectId });
 }
 
 /**

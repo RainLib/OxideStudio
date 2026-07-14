@@ -8,17 +8,29 @@ use crate::core::{
 };
 use tauri::State;
 
+fn schema_result<T>(
+    result: Result<T, impl std::fmt::Display>,
+    code: &str,
+    context: serde_json::Value,
+) -> Response<T> {
+    match result {
+        Ok(data) => Response::ok(data),
+        Err(error) => Response::err_with_details(code, &error.to_string(), true, Some(context)),
+    }
+}
+
 /// Get databases visible from the connected server.
 #[tauri::command]
 pub async fn get_databases(
     manager: State<'_, ConnectionManager>,
     connection_id: String,
 ) -> Result<Response<Vec<String>>, String> {
-    manager
-        .get_databases(&connection_id)
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+    let result = manager.get_databases(&connection_id).await;
+    Ok(schema_result(
+        result,
+        "DATABASE_LIST_FAILED",
+        serde_json::json!({ "connectionId": connection_id }),
+    ))
 }
 
 /// 获取所有 schemas
@@ -29,11 +41,12 @@ pub async fn get_schemas(
 ) -> Result<Response<Vec<String>>, String> {
     println!("Getting schemas for connection: {}", connection_id);
 
-    manager
-        .get_schemas(&connection_id)
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+    let result = manager.get_schemas(&connection_id).await;
+    Ok(schema_result(
+        result,
+        "SCHEMA_LIST_FAILED",
+        serde_json::json!({ "connectionId": connection_id }),
+    ))
 }
 
 /// Get schemas from one explicitly selected database without changing the
@@ -44,11 +57,17 @@ pub async fn get_database_schemas(
     connection_id: String,
     database: String,
 ) -> Result<Response<Vec<String>>, String> {
-    manager
+    let result = manager
         .get_database_schemas(&connection_id, &database)
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+        .await;
+    Ok(schema_result(
+        result,
+        "DATABASE_SCHEMA_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "database": database,
+        }),
+    ))
 }
 
 /// 获取指定 schema 下的所有表
@@ -60,11 +79,15 @@ pub async fn get_tables(
 ) -> Result<Response<Vec<TableInfo>>, String> {
     println!("Getting tables for schema: {}", schema);
 
-    manager
-        .get_tables(&connection_id, &schema)
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+    let result = manager.get_tables(&connection_id, &schema).await;
+    Ok(schema_result(
+        result,
+        "TABLE_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "schema": schema,
+        }),
+    ))
 }
 
 /// 获取指定 namespace 下的 collections/indexes
@@ -74,11 +97,15 @@ pub async fn get_collections(
     connection_id: String,
     namespace: String,
 ) -> Result<Response<Vec<CollectionInfo>>, String> {
-    manager
-        .get_collections(&connection_id, &namespace)
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+    let result = manager.get_collections(&connection_id, &namespace).await;
+    Ok(schema_result(
+        result,
+        "COLLECTION_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "namespace": namespace,
+        }),
+    ))
 }
 
 #[tauri::command]
@@ -90,7 +117,7 @@ pub async fn get_collections_page(
     limit: usize,
     filter: Option<String>,
 ) -> Result<Response<CollectionPage>, String> {
-    manager
+    let result = manager
         .get_collections_page(
             &connection_id,
             &namespace,
@@ -98,9 +125,17 @@ pub async fn get_collections_page(
             limit.clamp(1, 1_000),
             filter.as_deref(),
         )
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+        .await;
+    Ok(schema_result(
+        result,
+        "COLLECTION_PAGE_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "namespace": namespace,
+            "cursor": cursor,
+            "limit": limit.clamp(1, 1_000),
+        }),
+    ))
 }
 
 /// Get tables from a schema in one explicitly selected database.
@@ -111,11 +146,18 @@ pub async fn get_database_tables(
     database: String,
     schema: String,
 ) -> Result<Response<Vec<TableInfo>>, String> {
-    manager
+    let result = manager
         .get_database_tables(&connection_id, &database, &schema)
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+        .await;
+    Ok(schema_result(
+        result,
+        "DATABASE_TABLE_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "database": database,
+            "schema": schema,
+        }),
+    ))
 }
 
 /// 获取表的列信息
@@ -126,11 +168,16 @@ pub async fn get_columns(
     schema: String,
     table: String,
 ) -> Result<Response<Vec<ColumnInfo>>, String> {
-    manager
-        .get_columns(&connection_id, &schema, &table)
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+    let result = manager.get_columns(&connection_id, &schema, &table).await;
+    Ok(schema_result(
+        result,
+        "COLUMN_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "schema": schema,
+            "table": table,
+        }),
+    ))
 }
 
 /// Get table columns from one explicitly selected database.
@@ -142,11 +189,19 @@ pub async fn get_database_columns(
     schema: String,
     table: String,
 ) -> Result<Response<Vec<ColumnInfo>>, String> {
-    manager
+    let result = manager
         .get_database_columns(&connection_id, &database, &schema, &table)
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+        .await;
+    Ok(schema_result(
+        result,
+        "DATABASE_COLUMN_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "database": database,
+            "schema": schema,
+            "table": table,
+        }),
+    ))
 }
 
 /// 获取表的索引信息
@@ -157,11 +212,16 @@ pub async fn get_indexes(
     schema: String,
     table: String,
 ) -> Result<Response<Vec<IndexInfo>>, String> {
-    manager
-        .get_indexes(&connection_id, &schema, &table)
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+    let result = manager.get_indexes(&connection_id, &schema, &table).await;
+    Ok(schema_result(
+        result,
+        "INDEX_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "schema": schema,
+            "table": table,
+        }),
+    ))
 }
 
 /// Get table indexes from one explicitly selected database.
@@ -173,11 +233,19 @@ pub async fn get_database_indexes(
     schema: String,
     table: String,
 ) -> Result<Response<Vec<IndexInfo>>, String> {
-    manager
+    let result = manager
         .get_database_indexes(&connection_id, &database, &schema, &table)
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+        .await;
+    Ok(schema_result(
+        result,
+        "DATABASE_INDEX_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "database": database,
+            "schema": schema,
+            "table": table,
+        }),
+    ))
 }
 
 /// 获取表的约束和外键信息
@@ -188,11 +256,18 @@ pub async fn get_constraints(
     schema: String,
     table: String,
 ) -> Result<Response<Vec<ConstraintInfo>>, String> {
-    manager
+    let result = manager
         .get_constraints(&connection_id, &schema, &table)
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+        .await;
+    Ok(schema_result(
+        result,
+        "CONSTRAINT_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "schema": schema,
+            "table": table,
+        }),
+    ))
 }
 
 /// Get table constraints from one explicitly selected database.
@@ -204,11 +279,19 @@ pub async fn get_database_constraints(
     schema: String,
     table: String,
 ) -> Result<Response<Vec<ConstraintInfo>>, String> {
-    manager
+    let result = manager
         .get_database_constraints(&connection_id, &database, &schema, &table)
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+        .await;
+    Ok(schema_result(
+        result,
+        "DATABASE_CONSTRAINT_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "database": database,
+            "schema": schema,
+            "table": table,
+        }),
+    ))
 }
 
 /// 获取 schema 下的函数和存储过程信息
@@ -218,11 +301,15 @@ pub async fn get_functions(
     connection_id: String,
     schema: String,
 ) -> Result<Response<Vec<FunctionInfo>>, String> {
-    manager
-        .get_functions(&connection_id, &schema)
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+    let result = manager.get_functions(&connection_id, &schema).await;
+    Ok(schema_result(
+        result,
+        "FUNCTION_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "schema": schema,
+        }),
+    ))
 }
 
 /// Get routines from a schema in one explicitly selected database.
@@ -233,11 +320,18 @@ pub async fn get_database_functions(
     database: String,
     schema: String,
 ) -> Result<Response<Vec<FunctionInfo>>, String> {
-    manager
+    let result = manager
         .get_database_functions(&connection_id, &database, &schema)
-        .await
-        .map(Response::ok)
-        .map_err(|e| e.to_string())
+        .await;
+    Ok(schema_result(
+        result,
+        "DATABASE_FUNCTION_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "database": database,
+            "schema": schema,
+        }),
+    ))
 }
 
 /// 设置当前活动 schema
@@ -247,9 +341,16 @@ pub async fn set_current_schema(
     connection_id: String,
     schema: String,
 ) -> Result<Response<String>, String> {
-    manager
+    let result = manager
         .set_current_schema(&connection_id, &schema)
         .await
-        .map(|_| Response::ok(format!("Schema set to: {}", schema)))
-        .map_err(|e| e.to_string())
+        .map(|_| format!("Schema set to: {schema}"));
+    Ok(schema_result(
+        result,
+        "SET_CURRENT_SCHEMA_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "schema": schema,
+        }),
+    ))
 }

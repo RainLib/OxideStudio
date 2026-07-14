@@ -126,7 +126,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | --- | --- | --- | --- |
 | 查询取消、事务 | 已具备/部分 | PostgreSQL/MySQL 有 tracked cancellation 和命名事务；session 可视化、锁与 idle transaction 提示不足 | P0 |
 | 后台任务与进度 | 部分具备 | 有 TaskStatusCenter；缺少可回看日志、任务详情和 retry | P1 |
-| 结构化错误 | 部分具备 | 部分前端错误有类型，很多 Rust command 仍返回字符串 | P0 |
+| 结构化错误 | 已具备/部分 | connection/query/schema/table/project-file 已统一稳定 code、category、safe context、retryable；vendor SQLSTATE/position/object 仍待驱动层补齐 | P0 |
 | destructive safety | 已具备/部分 | SQL 分类、确认、参数化 mutation、AI policy 和 read-only backend gate 已有；权限模型与审计导出不足 | P0/P1 |
 | AI 辅助 | 部分具备/有差异化基础 | 共享工具 registry、MCP/CLI、审批与审计是优势；但 DataGrip 已有 schema-aware chat、对象/选区/UI 附件、SQL 错误修复、查询优化和 plan explanation，Oxide 尚未形成对应用户闭环 | P0/P1 |
 
@@ -156,7 +156,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | DG-P0-03 | Value Editor | text/JSON/date/binary 类型有只读/可编辑大视图；明确 NULL、空串和未加载状态；提交沿用 mutation gate | 待开始 |
 | DG-P0-04 | Explain Plan MVP | PostgreSQL/MySQL 支持文本/JSON plan；只读执行；显示 cost/rows/time，失败可定位到 driver 能力 | 待开始 |
 | DG-P0-05 | Driver 与文档一致性 | 增加 SQLite driver，或从发布文档移除未实现支持；能力列表由 runtime registry 生成 | 待开始 |
-| DG-P0-06 | 结构化错误协议 | connection/query/schema/table/file command 返回稳定 code、message、context、retryable；UI 不再解析字符串前缀 | 待开始 |
+| DG-P0-06 | 结构化错误协议 | connection/query/schema/table/file command 返回稳定 code、message、context、retryable；UI 不再解析字符串前缀 | 已完成 |
 | DG-P0-07 | CSV Import Mapping | 导入前预览、编码/delimiter/header、列映射、类型错误摘要和事务性提交 | 待开始 |
 | DG-P0-08 | LSP catalog scope 与候选排序 | `(connection, database, schema)` 严格隔离；显式 qualifier/当前 statement/DML target/active table 排序；同名列以 alias/table 区分；同 source 去重；覆盖跨 PostgreSQL database 回归 | 已完成 |
 | DG-P0-09 | AI attachment 与页面动作 | 对象、错误、结果、执行计划引用可点击并准确跳转；stable target、stale context 和同名对象有测试；导航不与数据库 mutation 混为一个动作 | 进行中：对象/文件/结果/LSP error 已完成，plan 待 DG-P0-04 |
@@ -195,5 +195,5 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 
 1. **DG-P0-08 LSP catalog scope 与候选排序** 已完成；证据覆盖跨 PostgreSQL database 配置、database-scoped metadata、同名列、alias 插入、模糊匹配、CTE/DML 作用域、全量 LSP tests 与 Clippy。
 2. **DG-P0-09 AI attachment 与页面动作** 的通用 registry、stable target、stale context、对象/文件/结果/LSP error 跳转已完成；Explain Plan attachment 随 DG-P0-04 补齐。
-3. 当前推进 **DG-P0-06 结构化错误协议**，作为 error fix、重试和 Agent verification 的公共基础。
-4. 再完成 **DG-P0-03 Value Editor** 与 **DG-P0-04 Explain Plan MVP**；Explain Plan 完成后才启用 AI query optimization/plan explanation。
+3. **DG-P0-06 结构化错误协议** 已完成：envelope 与直接 Tauri rejection 统一为 `ApiError`，project revision conflict 不再依赖字符串前缀，错误 context 使用白名单且不包含 SQL、URL、密码或文件内容。
+4. 当前推进 **DG-P0-03 Value Editor**，随后完成 **DG-P0-04 Explain Plan MVP**；Explain Plan 完成后才启用 AI query optimization/plan explanation。

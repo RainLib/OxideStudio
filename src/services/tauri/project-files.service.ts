@@ -1,5 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeRawCommand } from "./client";
 import type { Project } from "./store.service";
+import { ApiError } from "./types";
 
 export type ProjectEntryKind = "file" | "directory";
 
@@ -36,26 +37,13 @@ export interface ProjectCompletionSnippet {
   content: string;
 }
 
-export const PROJECT_FILE_REVISION_CONFLICT_PREFIX = "REVISION_CONFLICT:";
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return String(error);
-  }
-}
-
 export class ProjectFileRevisionConflictError extends Error {
   readonly code = "REVISION_CONFLICT";
 
   constructor(
     readonly relativePath: string,
     message: string,
-    readonly originalError?: unknown
+    readonly originalError?: unknown,
   ) {
     super(message);
     this.name = "ProjectFileRevisionConflictError";
@@ -63,11 +51,11 @@ export class ProjectFileRevisionConflictError extends Error {
 }
 
 export function isProjectFileRevisionConflict(
-  error: unknown
+  error: unknown,
 ): error is ProjectFileRevisionConflictError {
   return (
     error instanceof ProjectFileRevisionConflictError ||
-    errorMessage(error).startsWith(PROJECT_FILE_REVISION_CONFLICT_PREFIX)
+    (error instanceof ApiError && error.code === "REVISION_CONFLICT")
   );
 }
 
@@ -78,7 +66,7 @@ export function isProjectFileRevisionConflict(
  */
 export function normalizeProjectRelativePath(
   value: string,
-  options: { allowEmpty?: boolean } = {}
+  options: { allowEmpty?: boolean } = {},
 ): string {
   if (value.includes("\0")) {
     throw new Error("Project paths cannot contain a null byte");
@@ -161,7 +149,9 @@ export function supportsProjectFilePreview(relativePath: string): boolean {
   );
 }
 
-function normalizeWrite(result: ProjectFileWriteResult): ProjectFileWriteResult {
+function normalizeWrite(
+  result: ProjectFileWriteResult,
+): ProjectFileWriteResult {
   return {
     ...result,
     relativePath: normalizeProjectRelativePath(result.relativePath),
@@ -176,7 +166,7 @@ export const projectFilesService = {
     query: string;
     referencedObjects?: string[];
   }): Promise<ProjectCompletionSnippet[]> => {
-    return await invoke<ProjectCompletionSnippet[]>(
+    return await invokeRawCommand<ProjectCompletionSnippet[]>(
       "get_project_completion_context",
       {
         request: {
@@ -188,15 +178,15 @@ export const projectFilesService = {
           query: options.query.slice(-8_192),
           referencedObjects: options.referencedObjects || [],
         },
-      }
+      },
     );
   },
 
   setProjectRoot: async (
     projectId: string,
-    rootPath: string | null
+    rootPath: string | null,
   ): Promise<Project> => {
-    return await invoke("set_project_root", {
+    return await invokeRawCommand("set_project_root", {
       projectId: requireProjectId(projectId),
       rootPath: rootPath && rootPath.length > 0 ? rootPath : null,
     });
@@ -205,44 +195,50 @@ export const projectFilesService = {
   listProjectEntries: async (
     projectId: string,
     relativePath = "",
-    expectedRoot?: string | null
+    expectedRoot?: string | null,
   ): Promise<ProjectFileEntry[]> => {
     const normalizedPath = normalizeProjectRelativePath(relativePath, {
       allowEmpty: true,
     });
-    const entries = await invoke<ProjectFileEntry[]>("list_project_entries", {
-      projectId: requireProjectId(projectId),
-      relativePath: normalizedPath || null,
-      ...expectedRootArgument(expectedRoot),
-    });
+    const entries = await invokeRawCommand<ProjectFileEntry[]>(
+      "list_project_entries",
+      {
+        projectId: requireProjectId(projectId),
+        relativePath: normalizedPath || null,
+        ...expectedRootArgument(expectedRoot),
+      },
+    );
     return entries.map(normalizeEntry);
   },
 
   readProjectFile: async (
     projectId: string,
     relativePath: string,
-    expectedRoot?: string | null
+    expectedRoot?: string | null,
   ): Promise<ProjectFileRead> => {
-    const result = await invoke<ProjectFileRead>("read_project_file", {
-      projectId: requireProjectId(projectId),
-      relativePath: normalizeProjectRelativePath(relativePath),
-      ...expectedRootArgument(expectedRoot),
-    });
+    const result = await invokeRawCommand<ProjectFileRead>(
+      "read_project_file",
+      {
+        projectId: requireProjectId(projectId),
+        relativePath: normalizeProjectRelativePath(relativePath),
+        ...expectedRootArgument(expectedRoot),
+      },
+    );
     return normalizeRead(result);
   },
 
   readProjectFilePreview: async (
     projectId: string,
     relativePath: string,
-    expectedRoot?: string | null
+    expectedRoot?: string | null,
   ): Promise<ProjectFilePreview> => {
-    const result = await invoke<ProjectFilePreview>(
+    const result = await invokeRawCommand<ProjectFilePreview>(
       "read_project_file_preview",
       {
         projectId: requireProjectId(projectId),
         relativePath: normalizeProjectRelativePath(relativePath),
         ...expectedRootArgument(expectedRoot),
-      }
+      },
     );
     return normalizePreview(result);
   },
@@ -251,27 +247,33 @@ export const projectFilesService = {
     projectId: string,
     relativePath: string,
     content = "",
-    expectedRoot?: string | null
+    expectedRoot?: string | null,
   ): Promise<ProjectFileWriteResult> => {
-    const result = await invoke<ProjectFileWriteResult>("create_project_file", {
-      projectId: requireProjectId(projectId),
-      relativePath: normalizeProjectRelativePath(relativePath),
-      content,
-      ...expectedRootArgument(expectedRoot),
-    });
+    const result = await invokeRawCommand<ProjectFileWriteResult>(
+      "create_project_file",
+      {
+        projectId: requireProjectId(projectId),
+        relativePath: normalizeProjectRelativePath(relativePath),
+        content,
+        ...expectedRootArgument(expectedRoot),
+      },
+    );
     return normalizeWrite(result);
   },
 
   createProjectDirectory: async (
     projectId: string,
     relativePath: string,
-    expectedRoot?: string | null
+    expectedRoot?: string | null,
   ): Promise<ProjectFileEntry> => {
-    const result = await invoke<ProjectFileEntry>("create_project_directory", {
-      projectId: requireProjectId(projectId),
-      relativePath: normalizeProjectRelativePath(relativePath),
-      ...expectedRootArgument(expectedRoot),
-    });
+    const result = await invokeRawCommand<ProjectFileEntry>(
+      "create_project_directory",
+      {
+        projectId: requireProjectId(projectId),
+        relativePath: normalizeProjectRelativePath(relativePath),
+        ...expectedRootArgument(expectedRoot),
+      },
+    );
     return normalizeEntry(result);
   },
 
@@ -280,25 +282,27 @@ export const projectFilesService = {
     relativePath: string,
     content: string,
     expectedRevision: string,
-    expectedRoot?: string | null
+    expectedRoot?: string | null,
   ): Promise<ProjectFileWriteResult> => {
     const normalizedPath = normalizeProjectRelativePath(relativePath);
     try {
-      const result = await invoke<ProjectFileWriteResult>("write_project_file", {
-        projectId: requireProjectId(projectId),
-        relativePath: normalizedPath,
-        content,
-        expectedRevision,
-        ...expectedRootArgument(expectedRoot),
-      });
+      const result = await invokeRawCommand<ProjectFileWriteResult>(
+        "write_project_file",
+        {
+          projectId: requireProjectId(projectId),
+          relativePath: normalizedPath,
+          content,
+          expectedRevision,
+          ...expectedRootArgument(expectedRoot),
+        },
+      );
       return normalizeWrite(result);
     } catch (error) {
-      const message = errorMessage(error);
-      if (message.startsWith(PROJECT_FILE_REVISION_CONFLICT_PREFIX)) {
+      if (error instanceof ApiError && error.code === "REVISION_CONFLICT") {
         throw new ProjectFileRevisionConflictError(
           normalizedPath,
-          message,
-          error
+          error.message,
+          error,
         );
       }
       throw error;
@@ -309,14 +313,17 @@ export const projectFilesService = {
     projectId: string,
     relativePath: string,
     newRelativePath: string,
-    expectedRoot?: string | null
+    expectedRoot?: string | null,
   ): Promise<ProjectFileEntry> => {
-    const result = await invoke<ProjectFileEntry>("rename_project_entry", {
-      projectId: requireProjectId(projectId),
-      relativePath: normalizeProjectRelativePath(relativePath),
-      newRelativePath: normalizeProjectRelativePath(newRelativePath),
-      ...expectedRootArgument(expectedRoot),
-    });
+    const result = await invokeRawCommand<ProjectFileEntry>(
+      "rename_project_entry",
+      {
+        projectId: requireProjectId(projectId),
+        relativePath: normalizeProjectRelativePath(relativePath),
+        newRelativePath: normalizeProjectRelativePath(newRelativePath),
+        ...expectedRootArgument(expectedRoot),
+      },
+    );
     return normalizeEntry(result);
   },
 
@@ -324,9 +331,9 @@ export const projectFilesService = {
     projectId: string,
     relativePath: string,
     recursive = false,
-    expectedRoot?: string | null
+    expectedRoot?: string | null,
   ): Promise<void> => {
-    await invoke("delete_project_entry", {
+    await invokeRawCommand("delete_project_entry", {
       projectId: requireProjectId(projectId),
       relativePath: normalizeProjectRelativePath(relativePath),
       recursive,

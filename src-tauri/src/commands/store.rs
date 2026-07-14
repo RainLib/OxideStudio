@@ -1,5 +1,6 @@
 use crate::core::{
     config::ConfigManager,
+    protocol::CommandError,
     store::{MetaStore, Project, QueryHistoryItem, Resource, SavedConnection},
 };
 use anyhow::Result;
@@ -83,12 +84,23 @@ pub async fn delete_connection(
     config_manager: State<'_, ConfigManager>,
     project_id: Option<String>,
     id: String,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let project_id = project_id.unwrap_or_else(|| "sqls".to_string());
+    let error_context = serde_json::json!({
+        "projectId": project_id,
+        "connectionId": id,
+    });
     meta_store
         .delete_connection(&project_id, &id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| {
+            CommandError::new(
+                "CONNECTION_DELETE_FAILED",
+                error.to_string(),
+                true,
+                Some(error_context),
+            )
+        })?;
 
     // Keep the legacy migration source in sync so a removed connection cannot
     // be imported again when this was the project's final stored connection.

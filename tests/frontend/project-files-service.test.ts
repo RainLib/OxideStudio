@@ -79,21 +79,21 @@ describe("project files service", () => {
     await projectFilesService.setProjectRoot("project-1", "C:\\workspace");
     const entries = await projectFilesService.listProjectEntries(
       "project-1",
-      "queries\\."
+      "queries\\.",
     );
     const read = await projectFilesService.readProjectFile(
       "project-1",
-      "queries\\daily.sql"
+      "queries\\daily.sql",
     );
     const preview = await projectFilesService.readProjectFilePreview(
       "project-1",
       "images\\diagram.png",
-      "C:\\workspace"
+      "C:\\workspace",
     );
     await projectFilesService.createProjectFile(
       "project-1",
       "queries\\new.sql",
-      "select 2"
+      "select 2",
     );
     await projectFilesService.createProjectDirectory("project-1", "archive");
     await projectFilesService.writeProjectFile(
@@ -101,18 +101,14 @@ describe("project files service", () => {
       "queries/daily.sql",
       "select 3",
       "revision-1",
-      "C:\\workspace"
+      "C:\\workspace",
     );
     await projectFilesService.renameProjectEntry(
       "project-1",
       "queries/daily.sql",
-      "archive/daily.sql"
+      "archive/daily.sql",
     );
-    await projectFilesService.deleteProjectEntry(
-      "project-1",
-      "archive",
-      true
-    );
+    await projectFilesService.deleteProjectEntry("project-1", "archive", true);
 
     expect(entries[0]?.relativePath).toBe("queries/daily.sql");
     expect(read.relativePath).toBe("queries/daily.sql");
@@ -189,13 +185,13 @@ describe("project files service", () => {
       relativePath: null,
     });
     expect(() => normalizeProjectRelativePath("../outside.sql")).toThrow(
-      "cannot leave the project root"
+      "cannot leave the project root",
     );
     expect(() => normalizeProjectRelativePath("C:\\outside.sql")).toThrow(
-      "must be relative"
+      "must be relative",
     );
     expect(() => normalizeProjectRelativePath("/outside.sql")).toThrow(
-      "must be relative"
+      "must be relative",
     );
     expect(mocks.invoke).toHaveBeenCalledTimes(1);
   });
@@ -229,28 +225,33 @@ describe("project files service", () => {
           query: "select users.email",
           referencedObjects: ["users"],
         },
-      }
+      },
     );
   });
 
   it("turns revision conflict rejections into a typed error", async () => {
-    mocks.invoke.mockRejectedValueOnce(
-      "REVISION_CONFLICT: the file changed on disk"
-    );
+    mocks.invoke.mockRejectedValueOnce({
+      code: "REVISION_CONFLICT",
+      message: "the file changed on disk",
+      retryable: false,
+      category: "projectFile",
+      context: { relativePath: "query.sql" },
+    });
 
     const write = projectFilesService.writeProjectFile(
-        "project-1",
-        "query.sql",
-        "select 2",
-        "revision-1"
-      );
+      "project-1",
+      "query.sql",
+      "select 2",
+      "revision-1",
+    );
 
     await expect(write).rejects.toBeInstanceOf(
-      ProjectFileRevisionConflictError
+      ProjectFileRevisionConflictError,
     );
     await expect(write).rejects.toMatchObject({
       code: "REVISION_CONFLICT",
       relativePath: "query.sql",
+      message: "the file changed on disk",
     });
   });
 });

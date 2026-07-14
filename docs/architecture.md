@@ -220,7 +220,7 @@ Table Tab 使用服务端分页。前端保存 cell edits、新增行、删除�
 ## 7. 当前架构债务
 
 1. `SchemaSidebar.tsx` 和 `QueryEditor.tsx` 仍是高复杂度组件，领域操作需要继续拆到 hooks/lib。
-2. 部分 Rust command 仍返回字符串错误，前端只能解析 message；需要统一结构化错误码。
+2. 核心 connection/query/schema/table/project-file 已统一为结构化错误；低频 legacy command 仍有字符串 rejection，但前端 raw-command adapter 会规范化为稳定 `ApiError`，后续应随模块修改逐步迁移后端来源码。
 3. `tauri::generate_handler!` 是手工总表，新增命令容易漏注册，应增加命令契约测试或代码生成。
 4. Search Everywhere 目前只索引内存中已知范围，还没有覆盖 MetaStore 的全项目对象索引。
 5. provider capability 同时存在前端默认值和后端运行时值，需要持续用契约测试防止漂移。

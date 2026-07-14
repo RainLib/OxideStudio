@@ -13,18 +13,16 @@ const mocks = vi.hoisted(() => ({
   deleteProjectEntry: vi.fn(),
 }));
 
-vi.mock(
-  "@/services/tauri/project-files.service",
-  async (importOriginal) => {
-    const actual = await importOriginal<
+vi.mock("@/services/tauri/project-files.service", async (importOriginal) => {
+  const actual =
+    await importOriginal<
       typeof import("@/services/tauri/project-files.service")
     >();
-    return {
-      ...actual,
-      projectFilesService: mocks,
-    };
-  }
-);
+  return {
+    ...actual,
+    projectFilesService: mocks,
+  };
+});
 
 import { ProjectFileRevisionConflictError } from "@/services/tauri/project-files.service";
 import {
@@ -34,7 +32,7 @@ import {
 
 function entry(
   relativePath: string,
-  kind: ProjectFileEntry["kind"]
+  kind: ProjectFileEntry["kind"],
 ): ProjectFileEntry {
   return {
     relativePath,
@@ -46,7 +44,10 @@ function entry(
   };
 }
 
-function activateProject(id = "project-1", rootPath: string | null = "C:\\work") {
+function activateProject(
+  id = "project-1",
+  rootPath: string | null = "C:\\work",
+) {
   useProjectStore.setState(
     {
       ...useProjectStore.getInitialState(),
@@ -63,7 +64,7 @@ function activateProject(id = "project-1", rootPath: string | null = "C:\\work")
       activeProjectName: "Project",
       isLoading: false,
     },
-    true
+    true,
   );
   useProjectFilesStore.getState().reset();
 }
@@ -81,7 +82,7 @@ describe("project files store", () => {
         () =>
           new Promise<ProjectFileEntry[]>((resolve) => {
             resolveRoot = resolve;
-          })
+          }),
       )
       .mockResolvedValueOnce([entry("queries/daily.sql", "file")]);
 
@@ -93,10 +94,7 @@ describe("project files store", () => {
       loadingDirectories: [""],
     });
 
-    resolveRoot?.([
-      entry("readme.sql", "file"),
-      entry("queries", "directory"),
-    ]);
+    resolveRoot?.([entry("readme.sql", "file"), entry("queries", "directory")]);
     await load;
     await useProjectFilesStore.getState().expandDirectory("queries");
 
@@ -118,7 +116,9 @@ describe("project files store", () => {
   });
 
   it("stores load failures and clears loading state", async () => {
-    mocks.listProjectEntries.mockRejectedValueOnce(new Error("permission denied"));
+    mocks.listProjectEntries.mockRejectedValueOnce(
+      new Error("permission denied"),
+    );
 
     await useProjectFilesStore.getState().loadTree();
 
@@ -150,7 +150,7 @@ describe("project files store", () => {
       "queries/daily.sql",
       "select 2",
       "revision-1",
-      "C:\\work"
+      "C:\\work",
     );
     expect(document).toEqual({
       relativePath: "queries/daily.sql",
@@ -158,7 +158,7 @@ describe("project files store", () => {
       revision: "revision-2",
     });
     expect(
-      useProjectFilesStore.getState().documents["queries/daily.sql"]
+      useProjectFilesStore.getState().documents["queries/daily.sql"],
     ).toEqual(document);
   });
 
@@ -175,12 +175,12 @@ describe("project files store", () => {
     mocks.writeProjectFile.mockRejectedValueOnce(
       new ProjectFileRevisionConflictError(
         "query.sql",
-        "REVISION_CONFLICT: the file changed on disk"
-      )
+        "the file changed on disk",
+      ),
     );
 
     await expect(
-      useProjectFilesStore.getState().writeFile("query.sql", "select 2")
+      useProjectFilesStore.getState().writeFile("query.sql", "select 2"),
     ).rejects.toBeInstanceOf(ProjectFileRevisionConflictError);
 
     expect(useProjectFilesStore.getState()).toMatchObject({
@@ -194,7 +194,7 @@ describe("project files store", () => {
         relativePath: "query.sql",
         expectedRevision: "revision-1",
         attemptedContent: "select 2",
-        message: "REVISION_CONFLICT: the file changed on disk",
+        message: "the file changed on disk",
       },
       isLoading: false,
     });
@@ -215,17 +215,21 @@ describe("project files store", () => {
         },
       },
     });
-    mocks.renameProjectEntry.mockResolvedValueOnce(entry("archive", "directory"));
+    mocks.renameProjectEntry.mockResolvedValueOnce(
+      entry("archive", "directory"),
+    );
     mocks.deleteProjectEntry.mockResolvedValueOnce(undefined);
 
     await useProjectFilesStore.getState().renameEntry("queries", "archive");
 
-    expect(selectProjectFileTree(useProjectFilesStore.getState())[0]).toMatchObject({
+    expect(
+      selectProjectFileTree(useProjectFilesStore.getState())[0],
+    ).toMatchObject({
       relativePath: "archive",
       children: [{ relativePath: "archive/daily.sql" }],
     });
     expect(
-      useProjectFilesStore.getState().documents["archive/daily.sql"]
+      useProjectFilesStore.getState().documents["archive/daily.sql"],
     ).toMatchObject({ relativePath: "archive/daily.sql" });
 
     await useProjectFilesStore.getState().deleteEntry("archive", true);
@@ -235,7 +239,7 @@ describe("project files store", () => {
       "project-1",
       "archive",
       true,
-      "C:\\work"
+      "C:\\work",
     );
   });
 

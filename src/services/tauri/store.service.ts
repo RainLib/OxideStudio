@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeRawCommand } from "./client";
 import type { SavedConnection } from "./types";
 
 export interface Resource {
@@ -39,36 +39,36 @@ function scopeResources(resources: Resource[], projectId: string) {
 
 export const storeService = {
   saveProject: async (project: Project): Promise<void> => {
-    return await invoke("save_project", { project });
+    return await invokeRawCommand("save_project", { project });
   },
 
   getProjects: async (): Promise<Project[]> => {
-    return await invoke("get_projects");
+    return await invokeRawCommand("get_projects");
   },
 
   deleteProject: async (projectId: string): Promise<void> => {
-    return await invoke("delete_project", { projectId });
+    return await invokeRawCommand("delete_project", { projectId });
   },
 
   // Connection operations
   saveConnection: async (connection: SavedConnection): Promise<void> => {
-    return await invoke("save_connection", { connection });
+    return await invokeRawCommand("save_connection", { connection });
   },
 
   getConnections: async (): Promise<SavedConnection[]> => {
-    return await invoke("get_connections");
+    return await invokeRawCommand("get_connections");
   },
 
   deleteConnection: async (id: string): Promise<void> => {
-    return await invoke("delete_connection", { id });
+    return await invokeRawCommand("delete_connection", { id });
   },
 
   // Resource operations
   saveResources: async (
     resources: Resource[],
-    projectId = activeProjectId()
+    projectId = activeProjectId(),
   ): Promise<void> => {
-    return await invoke("save_resources", {
+    return await invokeRawCommand("save_resources", {
       projectId,
       resources: scopeResources(resources, projectId),
     });
@@ -79,9 +79,9 @@ export const storeService = {
     parentId: string | undefined,
     kind: string,
     resources: Resource[],
-    projectId = activeProjectId()
+    projectId = activeProjectId(),
   ): Promise<void> => {
-    return await invoke("replace_resources", {
+    return await invokeRawCommand("replace_resources", {
       projectId,
       connectionId,
       parentId,
@@ -94,9 +94,9 @@ export const storeService = {
     connectionId: string,
     parentId?: string,
     kind?: string,
-    projectId = activeProjectId()
+    projectId = activeProjectId(),
   ): Promise<void> => {
-    return await invoke("delete_resources", {
+    return await invokeRawCommand("delete_resources", {
       projectId,
       connectionId,
       parentId,
@@ -107,9 +107,13 @@ export const storeService = {
   getResources: async (
     connectionId: string,
     parentId?: string,
-    projectId = activeProjectId()
+    projectId = activeProjectId(),
   ): Promise<Resource[]> => {
-    return await invoke("get_resources", { projectId, connectionId, parentId });
+    return await invokeRawCommand("get_resources", {
+      projectId,
+      connectionId,
+      parentId,
+    });
   },
 
   searchResources: async (
@@ -118,9 +122,9 @@ export const storeService = {
     kind?: string,
     parentId?: string,
     limit?: number,
-    projectId = activeProjectId()
+    projectId = activeProjectId(),
   ): Promise<Resource[]> => {
-    return await invoke("search_resources", {
+    return await invokeRawCommand("search_resources", {
       projectId,
       connectionId,
       query,

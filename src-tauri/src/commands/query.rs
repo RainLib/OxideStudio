@@ -90,17 +90,41 @@ pub async fn execute_read_only_query(
     schema: Option<String>,
     query_id: Option<String>,
 ) -> Result<Response<Vec<QueryResult>>, String> {
-    let dialect = manager
-        .statement_scan_dialect(&connection_id)
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "Read-only SQL execution is unsupported for this driver".to_string())?;
+    let query_context = serde_json::json!({
+        "connectionId": connection_id,
+        "schema": schema,
+        "queryId": query_id,
+    });
+    let dialect = match manager.statement_scan_dialect(&connection_id).await {
+        Ok(Some(dialect)) => dialect,
+        Ok(None) => {
+            return Ok(Response::err_with_details(
+                "READ_ONLY_QUERY_UNSUPPORTED",
+                "Read-only SQL execution is unsupported for this driver",
+                false,
+                Some(query_context),
+            ));
+        }
+        Err(error) => {
+            return Ok(Response::err_with_details(
+                "QUERY_TARGET_RESOLUTION_FAILED",
+                &error.to_string(),
+                true,
+                Some(query_context),
+            ));
+        }
+    };
     let kind = match dialect {
         StatementScanDialect::Postgres => DatabaseKind::Postgres,
         StatementScanDialect::Mysql => DatabaseKind::Mysql,
     };
     if let Err(reason) = validate_read_only_sql(&sql, dialect) {
-        return Ok(Response::err("READ_ONLY_QUERY_REJECTED", reason));
+        return Ok(Response::err_with_details(
+            "READ_ONLY_QUERY_REJECTED",
+            reason,
+            false,
+            Some(query_context),
+        ));
     }
 
     let script = read_only_transaction_script(kind, &sql);
@@ -160,14 +184,22 @@ async fn execute_query_with_cancellation(
     database: Option<String>,
 ) -> Result<Response<Vec<QueryResult>>, String> {
     let database = database.filter(|value| !value.trim().is_empty());
+    let query_context = serde_json::json!({
+        "connectionId": connection_id,
+        "database": database,
+        "schema": schema,
+        "queryId": query_id,
+    });
     if database.is_some()
         && transaction_id
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
     {
-        return Ok(Response::err(
+        return Ok(Response::err_with_details(
             "CROSS_DATABASE_TRANSACTION_UNSUPPORTED",
             "Manual transactions are unavailable for a PostgreSQL database selected through the editor.",
+            false,
+            Some(query_context),
         ));
     }
     let query_id = query_id.filter(|value| !value.trim().is_empty());
@@ -175,7 +207,12 @@ async fn execute_query_with_cancellation(
         match cancellation.register(query_id, &connection_id).await {
             Ok(cancel_rx) => Some(cancel_rx),
             Err(error) => {
-                return Ok(Response::err("DUPLICATE_QUERY_ID", &error));
+                return Ok(Response::err_with_details(
+                    "DUPLICATE_QUERY_ID",
+                    &error,
+                    false,
+                    Some(query_context),
+                ));
             }
         }
     } else {
@@ -212,7 +249,12 @@ async fn execute_query_with_cancellation(
                 result.map(Response::ok)
             }
             _ = cancel_rx.changed() => {
-                Ok(Response::err("QUERY_CANCELLED", "Query cancelled"))
+                Ok(Response::err_with_details(
+                    "QUERY_CANCELLED",
+                    "Query cancelled",
+                    false,
+                    Some(query_context.clone()),
+                ))
             }
         }
     } else {
@@ -223,7 +265,15 @@ async fn execute_query_with_cancellation(
         cancellation.take(&query_id).await;
     }
 
-    result.map_err(|e| e.to_string())
+    match result {
+        Ok(response) => Ok(response),
+        Err(error) => Ok(Response::err_with_details(
+            "QUERY_EXECUTION_FAILED",
+            &error.to_string(),
+            false,
+            Some(query_context),
+        )),
+    }
 }
 
 #[tauri::command]
@@ -254,9 +304,11 @@ pub async fn cancel_query(
         };
         Ok(Response::ok(message.to_string()))
     } else {
-        Ok(Response::err(
+        Ok(Response::err_with_details(
             "QUERY_NOT_FOUND",
             &format!("Query not found or already finished: {query_id}"),
+            false,
+            Some(serde_json::json!({ "queryId": query_id })),
         ))
     }
 }
@@ -274,11 +326,19 @@ pub async fn get_sql_completion(
         "get_sql_completion command called"
     );
 
-    let mut parser = parser_state.0.lock().map_err(|e| {
-        let err_msg = format!("Failed to lock parser: {}", e);
-        tracing::error!("{}", err_msg);
-        err_msg
-    })?;
+    let mut parser = match parser_state.0.lock() {
+        Ok(parser) => parser,
+        Err(error) => {
+            let message = format!("Failed to lock parser: {error}");
+            tracing::error!("{message}");
+            return Ok(Response::err_with_details(
+                "SQL_COMPLETION_UNAVAILABLE",
+                &message,
+                true,
+                Some(serde_json::json!({ "cursor": cursor })),
+            ));
+        }
+    };
 
     tracing::debug!("SQL parser locked successfully");
 

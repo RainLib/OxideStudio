@@ -9,23 +9,25 @@
 export interface ApiResponse<T> {
   success: boolean;
   data?: T;
-  error?: {
-    code: string;
-    message: string;
-  };
+  error?: ApiErrorPayload;
+}
+
+export interface ApiErrorPayload {
+  code: string;
+  message: string;
+  retryable?: boolean;
+  category?: string;
+  context?: Record<string, unknown>;
 }
 
 /**
  * 数据库驱动类型
  */
 export type KnownDatabaseDriver =
-  | "postgres"
-  | "mysql"
-  | "redis"
-  | "elasticsearch"
-  | "mongodb";
+  "postgres" | "mysql" | "redis" | "elasticsearch" | "mongodb";
 export type DatabaseDriver = KnownDatabaseDriver | (string & {});
-export type DatabaseDataModel = "relational" | "document" | "keyValue" | "search";
+export type DatabaseDataModel =
+  "relational" | "document" | "keyValue" | "search";
 
 export interface DatabaseCapabilities {
   driver: DatabaseDriver;
@@ -87,14 +89,7 @@ export interface TablePageResult {
 }
 
 export type TableFilterOperator =
-  | "equals"
-  | "contains"
-  | "startsWith"
-  | "endsWith"
-  | ">"
-  | "<"
-  | ">="
-  | "<=";
+  "equals" | "contains" | "startsWith" | "endsWith" | ">" | "<" | ">=" | "<=";
 
 export interface TableFilter {
   column: string;
@@ -373,12 +368,29 @@ export interface CompletionRequest {
  * API 错误类
  */
 export class ApiError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly category?: string;
+  readonly context: Record<string, unknown>;
+  readonly command?: string;
+
   constructor(
     message: string,
-    public code?: string,
-    public originalError?: unknown
+    code = "API_ERROR",
+    public originalError?: unknown,
+    details: {
+      retryable?: boolean;
+      category?: string;
+      context?: Record<string, unknown>;
+      command?: string;
+    } = {},
   ) {
     super(message);
     this.name = "ApiError";
+    this.code = code;
+    this.retryable = details.retryable ?? false;
+    this.category = details.category;
+    this.context = details.context || {};
+    this.command = details.command;
   }
 }

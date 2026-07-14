@@ -93,6 +93,10 @@ pub async fn connect_db(
     url: String,
     ssh_tunnel: Option<SshTunnelConfig>,
 ) -> Result<Response<String>, String> {
+    let error_context = serde_json::json!({
+        "connectionId": connection_id,
+        "driver": driver,
+    });
     let result: Result<String, String> = async {
         tracing::info!(
             "Connecting to database: driver={}, url={}",
@@ -128,7 +132,12 @@ pub async fn connect_db(
 
     match result {
         Ok(msg) => Ok(Response::ok(msg)),
-        Err(e) => Ok(Response::err("CONNECTION_ERROR", &e)),
+        Err(e) => Ok(Response::err_with_details(
+            "CONNECTION_ERROR",
+            &e,
+            true,
+            Some(error_context),
+        )),
     }
 }
 
@@ -139,6 +148,7 @@ pub async fn test_db_connection(
     url: String,
     ssh_tunnel: Option<SshTunnelConfig>,
 ) -> Result<Response<String>, String> {
+    let error_context = serde_json::json!({ "driver": driver });
     let result: Result<String, String> = async {
         tracing::info!(
             "Testing database connection: driver={}, url={}",
@@ -170,7 +180,12 @@ pub async fn test_db_connection(
 
     match result {
         Ok(msg) => Ok(Response::ok(msg)),
-        Err(e) => Ok(Response::err("CONNECTION_TEST_ERROR", &e)),
+        Err(e) => Ok(Response::err_with_details(
+            "CONNECTION_TEST_ERROR",
+            &e,
+            true,
+            Some(error_context),
+        )),
     }
 }
 
@@ -182,7 +197,12 @@ pub async fn disconnect_db(
 ) -> Result<Response<String>, String> {
     match manager.disconnect_connection(&connection_id).await {
         Ok(_) => Ok(Response::ok("Connection disconnected".to_string())),
-        Err(e) => Ok(Response::err("DISCONNECT_ERROR", &e.to_string())),
+        Err(e) => Ok(Response::err_with_details(
+            "DISCONNECT_ERROR",
+            &e.to_string(),
+            true,
+            Some(serde_json::json!({ "connectionId": connection_id })),
+        )),
     }
 }
 
@@ -195,31 +215,47 @@ pub async fn save_connections(
     connections: Vec<ConfigSavedConnection>,
 ) -> Result<Response<String>, String> {
     let project_id = project_id.unwrap_or_else(|| "sqls".to_string());
-    let store_connections = connections
-        .iter()
-        .map(|connection| store_connection_from_config(&project_id, connection))
-        .collect::<Result<Vec<_>, _>>()?;
-    meta_store
-        .replace_connections(&project_id, &store_connections)
-        .await
-        .map_err(|error| error.to_string())?;
+    let connection_count = connections.len();
+    let result: Result<String, String> = async {
+        let store_connections = connections
+            .iter()
+            .map(|connection| store_connection_from_config(&project_id, connection))
+            .collect::<Result<Vec<_>, _>>()?;
+        meta_store
+            .replace_connections(&project_id, &store_connections)
+            .await
+            .map_err(|error| error.to_string())?;
 
-    // Keep the legacy config in sync until its one-time migration fallback can
-    // be removed. Otherwise deleting the final connection leaves the legacy
-    // entry behind and load_connections imports it again on the next launch.
-    let mut legacy_config = config_manager.load();
-    legacy_config
-        .connections
-        .retain(|connection| connection.project_id != project_id);
-    legacy_config
-        .connections
-        .extend(connections.into_iter().map(|mut connection| {
-            connection.project_id = project_id.clone();
-            connection
-        }));
-    config_manager.save(&legacy_config);
+        // Keep the legacy config in sync until its one-time migration fallback can
+        // be removed. Otherwise deleting the final connection leaves the legacy
+        // entry behind and load_connections imports it again on the next launch.
+        let mut legacy_config = config_manager.load();
+        legacy_config
+            .connections
+            .retain(|connection| connection.project_id != project_id);
+        legacy_config
+            .connections
+            .extend(connections.into_iter().map(|mut connection| {
+                connection.project_id = project_id.clone();
+                connection
+            }));
+        config_manager.save(&legacy_config);
+        Ok("Connections saved successfully".to_string())
+    }
+    .await;
 
-    Ok(Response::ok("Connections saved successfully".to_string()))
+    Ok(match result {
+        Ok(message) => Response::ok(message),
+        Err(error) => Response::err_with_details(
+            "CONNECTION_SAVE_FAILED",
+            &error,
+            true,
+            Some(serde_json::json!({
+                "projectId": project_id,
+                "connectionCount": connection_count,
+            })),
+        ),
+    })
 }
 
 /// 加载连接配置
@@ -230,36 +266,48 @@ pub async fn load_connections(
     project_id: Option<String>,
 ) -> Result<Response<Vec<ConfigSavedConnection>>, String> {
     let project_id = project_id.unwrap_or_else(|| "sqls".to_string());
-    let mut store_connections = meta_store
-        .get_connections(&project_id)
-        .await
-        .map_err(|error| error.to_string())?;
+    let result: Result<Vec<ConfigSavedConnection>, String> = async {
+        let mut store_connections = meta_store
+            .get_connections(&project_id)
+            .await
+            .map_err(|error| error.to_string())?;
 
-    if store_connections.is_empty() {
-        let legacy_connections = config_manager
-            .load()
-            .connections
-            .into_iter()
-            .filter(|connection| connection.project_id == project_id)
-            .collect::<Vec<_>>();
+        if store_connections.is_empty() {
+            let legacy_connections = config_manager
+                .load()
+                .connections
+                .into_iter()
+                .filter(|connection| connection.project_id == project_id)
+                .collect::<Vec<_>>();
 
-        if !legacy_connections.is_empty() {
-            store_connections = legacy_connections
-                .iter()
-                .map(|connection| store_connection_from_config(&project_id, connection))
-                .collect::<Result<Vec<_>, _>>()?;
-            meta_store
-                .replace_connections(&project_id, &store_connections)
-                .await
-                .map_err(|error| error.to_string())?;
+            if !legacy_connections.is_empty() {
+                store_connections = legacy_connections
+                    .iter()
+                    .map(|connection| store_connection_from_config(&project_id, connection))
+                    .collect::<Result<Vec<_>, _>>()?;
+                meta_store
+                    .replace_connections(&project_id, &store_connections)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
         }
-    }
 
-    let connections = store_connections
-        .into_iter()
-        .map(|connection| config_connection_from_store(&project_id, connection))
-        .collect();
-    Ok(Response::ok(connections))
+        Ok(store_connections
+            .into_iter()
+            .map(|connection| config_connection_from_store(&project_id, connection))
+            .collect())
+    }
+    .await;
+
+    Ok(match result {
+        Ok(connections) => Response::ok(connections),
+        Err(error) => Response::err_with_details(
+            "CONNECTION_LOAD_FAILED",
+            &error,
+            true,
+            Some(serde_json::json!({ "projectId": project_id })),
+        ),
+    })
 }
 
 #[cfg(test)]
