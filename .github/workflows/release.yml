@@ -176,20 +176,19 @@ jobs:
           args: ${{ matrix.args }} --config src-tauri/tauri.release.conf.json
 
       - name: Upload bundles for OSS publication
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tauri-bundle-${{ matrix.id }}
           if-no-files-found: error
           retention-days: 3
           path: |
-            src-tauri/target/**/release/bundle/**/*.AppImage
-            src-tauri/target/**/release/bundle/**/*.deb
-            src-tauri/target/**/release/bundle/**/*.dmg
-            src-tauri/target/**/release/bundle/**/*.exe
-            src-tauri/target/**/release/bundle/**/*.msi
-            src-tauri/target/**/release/bundle/**/*.rpm
-            src-tauri/target/**/release/bundle/**/*.tar.gz
-            src-tauri/target/**/release/bundle/**/*.sig
+            src-tauri/target/**/release/bundle/appimage/*.AppImage*
+            src-tauri/target/**/release/bundle/deb/*.deb
+            src-tauri/target/**/release/bundle/dmg/*.dmg
+            src-tauri/target/**/release/bundle/macos/*.app.tar.gz*
+            src-tauri/target/**/release/bundle/msi/*.msi*
+            src-tauri/target/**/release/bundle/nsis/*-setup.exe*
+            src-tauri/target/**/release/bundle/rpm/*.rpm
 
   publish:
     name: Publish and verify Aliyun OSS release
@@ -211,7 +210,7 @@ jobs:
           node-version: "22"
 
       - name: Download signed Tauri bundles
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: tauri-bundle-*
           path: release-input
@@ -294,7 +293,7 @@ jobs:
         run: node scripts/verify-oss-release.mjs
 
       - name: Preserve release index
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: oxide-studio-${{ needs.validate.outputs.tag }}-release-index
           retention-days: 30

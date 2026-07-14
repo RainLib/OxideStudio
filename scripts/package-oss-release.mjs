@@ -18,7 +18,7 @@ const ASSET_PATTERNS = [
   /\.appimage(?:\.sig)?$/i,
   /\.deb$/i,
   /\.rpm$/i,
-  /\.exe(?:\.sig)?$/i,
+  /(?:-|_)setup\.exe(?:\.sig)?$/i,
   /\.msi(?:\.sig)?$/i,
 ];
 

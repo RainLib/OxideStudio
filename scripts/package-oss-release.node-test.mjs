@@ -34,6 +34,12 @@ async function fixture() {
     }
   }
 
+  for (const directory of ["appimage/resources", "deb/data/usr/lib/oxide-studio"]) {
+    const resources = join(input, "tauri-bundle-linux", directory);
+    await mkdir(resources, { recursive: true });
+    await writeFile(join(resources, "sql-lsp.exe"), "bundled resource", "utf8");
+  }
+
   return { root, input, output };
 }
 
@@ -64,6 +70,10 @@ test("builds signed updater metadata for every desktop target", async () => {
       /v0\.1\.1\/windows\/OxideStudio_0\.1\.1_x64-setup\.exe$/
     );
     assert.equal(result.release.files.length, 9);
+    assert.equal(
+      result.release.files.some((file) => file.name === "sql-lsp.exe"),
+      false
+    );
 
     const manifest = JSON.parse(
       await readFile(join(files.output, "latest.json"), "utf8")
