@@ -22,8 +22,10 @@ import {
   BookmarkPlus,
   FileCode2,
   History,
+  LineChart,
   Play,
   Save,
+  ScanSearch,
   Square,
   Star,
   Trash2,
@@ -55,9 +57,11 @@ interface EditorActionBarProps {
   onFormat: () => void;
   onRun: () => void;
   onRunCurrent: () => void;
+  onExplain: (mode: "estimate" | "analyze") => void;
   onCancelRun: () => void;
   isExecuting: boolean;
   isConnected: boolean;
+  supportsExplainPlan: boolean;
   savedQueries: Array<{ id: string; name: string; sql: string }>;
   onOpenHistory: (item: QueryHistoryItem) => void;
   onRerunHistory: (item: QueryHistoryItem) => Promise<boolean>;
@@ -99,9 +103,11 @@ export function EditorActionBar({
   onFormat,
   onRun,
   onRunCurrent,
+  onExplain,
   onCancelRun,
   isExecuting,
   isConnected,
+  supportsExplainPlan,
   savedQueries,
   onOpenHistory,
   onRerunHistory,
@@ -134,7 +140,7 @@ export function EditorActionBar({
           type="button"
           className={cn(
             "wb-icon-button",
-            isExecuting ? "text-red-400" : "text-emerald-400"
+            isExecuting ? "text-red-400" : "text-emerald-400",
           )}
           onClick={isExecuting ? onCancelRun : onRunCurrent}
           disabled={!isConnected}
@@ -174,6 +180,32 @@ export function EditorActionBar({
               Run Console
               <span className="ml-auto text-[10px] wb-muted">⌘↵</span>
             </DropdownMenuItem>
+            {supportsExplainPlan && (
+              <>
+                <div className="my-1 h-px bg-[hsl(var(--wb-border-subtle))]" />
+                <DropdownMenuItem
+                  className={menuItemClass}
+                  onClick={() => onExplain("estimate")}
+                  disabled={parameterCount > 0}
+                >
+                  <LineChart
+                    size={13}
+                    className="mr-2 text-[hsl(var(--wb-accent))]"
+                  />
+                  Explain Plan
+                  <span className="ml-auto text-[9px] wb-muted">estimates</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className={menuItemClass}
+                  onClick={() => onExplain("analyze")}
+                  disabled={parameterCount > 0}
+                >
+                  <ScanSearch size={13} className="mr-2" />
+                  Explain Analyze
+                  <span className="ml-auto text-[9px] wb-muted">executes</span>
+                </DropdownMenuItem>
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
 
@@ -249,9 +281,11 @@ export function EditorActionBar({
             type="button"
             className={cn(
               "wb-editor-library-action wb-icon-button",
-              isFileDirty && "text-[hsl(var(--wb-accent))]"
+              isFileDirty && "text-[hsl(var(--wb-accent))]",
             )}
-            title={isFileDirty ? "Save Project File (Ctrl+S)" : "Project File Saved"}
+            title={
+              isFileDirty ? "Save Project File (Ctrl+S)" : "Project File Saved"
+            }
             onClick={onSaveFile}
             disabled={!isFileDirty}
           >
@@ -274,7 +308,9 @@ export function EditorActionBar({
             </DialogHeader>
             <div className="min-h-0 flex-1 overflow-y-auto p-2 custom-scrollbar">
               {savedQueries.length === 0 ? (
-                <div className="p-6 text-center text-[12px] wb-muted">No saved queries</div>
+                <div className="p-6 text-center text-[12px] wb-muted">
+                  No saved queries
+                </div>
               ) : (
                 savedQueries.map((item) => (
                   <div
@@ -286,7 +322,9 @@ export function EditorActionBar({
                       className="min-w-0 flex-1 text-left"
                       onClick={() => onLoadQuery(item.sql)}
                     >
-                      <div className="truncate text-[12px] font-medium">{item.name}</div>
+                      <div className="truncate text-[12px] font-medium">
+                        {item.name}
+                      </div>
                       <div className="max-h-12 overflow-hidden whitespace-pre-wrap font-mono text-[10px] wb-muted">
                         {item.sql}
                       </div>
@@ -318,7 +356,9 @@ export function EditorActionBar({
           </DialogTrigger>
           <DialogContent className="w-[420px] max-w-[calc(100vw-32px)] gap-0 rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
             <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
-              <DialogTitle className="text-[13px]">Add to Saved Queries</DialogTitle>
+              <DialogTitle className="text-[13px]">
+                Add to Saved Queries
+              </DialogTitle>
             </DialogHeader>
             <div className="px-4 py-4">
               <Input

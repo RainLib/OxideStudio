@@ -117,9 +117,7 @@ function createInlineCompletionRequestId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return `inline-${crypto.randomUUID()}`;
   }
-  return `inline-${Date.now().toString(36)}-${Math.random()
-    .toString(36)
-    .slice(2)}`;
+  return `inline-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 function toMonacoKeybinding(monaco: any, binding: string) {
@@ -154,7 +152,7 @@ function toMonacoKeybinding(monaco: any, binding: string) {
 }
 
 function isPublishDiagnosticsParams(
-  value: unknown
+  value: unknown,
 ): value is PublishDiagnosticsParams {
   if (!value || typeof value !== "object") return false;
   const params = value as PublishDiagnosticsParams;
@@ -166,7 +164,7 @@ function toMonacoRange(monaco: any, range: LspRange) {
     range.start.line + 1,
     range.start.character + 1,
     range.end.line + 1,
-    range.end.character + 1
+    range.end.character + 1,
   );
 }
 
@@ -211,7 +209,7 @@ type LspDocumentSyncClient = {
     uri: string,
     text: string,
     version: number,
-    languageId: string
+    languageId: string,
   ) => Promise<void>;
   didChange: (uri: string, text: string, version: number) => Promise<void>;
 };
@@ -255,6 +253,7 @@ export function QueryEditor({
     activeTabId,
     updateTabSql,
     runTabQuery,
+    runExplainPlan,
     cancelTabQuery,
     setTargetSchema,
     setTargetDatabase,
@@ -262,11 +261,11 @@ export function QueryEditor({
     setLspDiagnostics,
   } = useTabStore(); // line 15...
   const activeConnectionId = useConnectionStore(
-    (state) => state.activeConnectionId
+    (state) => state.activeConnectionId,
   );
   const connections = useConnectionStore((state) => state.connections);
   const connectedConnectionIds = useConnectionStore(
-    (state) => state.connectedConnectionIds
+    (state) => state.connectedConnectionIds,
   );
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const currentSchema = useSchemaStore((state) => state.currentSchema);
@@ -274,7 +273,7 @@ export function QueryEditor({
   const loadSchemas = useSchemaStore((state) => state.loadSchemas);
   const loadTables = useSchemaStore((state) => state.loadTables);
   const bumpMetadataVersion = useSchemaStore(
-    (state) => state.bumpMetadataVersion
+    (state) => state.bumpMetadataVersion,
   );
   const { savedQueries, saveQuery, deleteQuery } = useSavedQueryStore();
   const editorSettings = useSettingsStore((state) => state.settings.editor);
@@ -282,10 +281,10 @@ export function QueryEditor({
   const aiEnabled = useAiSettingsStore((state) => state.enabled);
   const aiProviderConfig = useAiSettingsStore((state) => state.providerConfig);
   const inlineCompletionProtocol = useAiSettingsStore(
-    (state) => state.inlineCompletionProtocol
+    (state) => state.inlineCompletionProtocol,
   );
   const inlineCompletionModel = useAiSettingsStore(
-    (state) => state.inlineCompletionModel
+    (state) => state.inlineCompletionModel,
   );
   const projectId = useProjectFilesStore((state) => state.projectId);
   const projectRootPath = useProjectFilesStore((state) => state.rootPath);
@@ -312,7 +311,7 @@ export function QueryEditor({
   const vimControllerRef = useRef<VimModeController | null>(null);
   const vimModeRef = useRef("NORMAL");
   const inlineKeysContextRef = useRef<{ set: (value: boolean) => void } | null>(
-    null
+    null,
   );
   const vimStatusNodeRef = useRef<HTMLSpanElement | null>(null);
   const openedDocumentsRef = useRef<Set<string>>(new Set());
@@ -321,12 +320,14 @@ export function QueryEditor({
   const inlineCompletionAbortRef = useRef<AbortController | null>(null);
   const inlineCompletionListenersRef = useRef(new Set<() => void>());
   const activeTransactionsRef = useRef<Map<string, QueryTransactionSession>>(
-    new Map()
+    new Map(),
   );
 
   const activeTab = tabs.find((t) => t.id === effectiveTabId);
   const effectiveConnectionId = activeTab?.connectionId || activeConnectionId;
-  const activeConnection = connections.find((c) => c.id === effectiveConnectionId);
+  const activeConnection = connections.find(
+    (c) => c.id === effectiveConnectionId,
+  );
   const driver = activeConnection?.driver || DEFAULT_DATABASE_DRIVER;
   const configuredPostgresDatabase =
     activeConnection?.driver === "postgres"
@@ -337,7 +338,8 @@ export function QueryEditor({
     connectionId: effectiveConnectionId || null,
     driver: activeConnection?.driver,
     isConnectionReady: Boolean(
-      effectiveConnectionId && connectedConnectionIds.includes(effectiveConnectionId)
+      effectiveConnectionId &&
+      connectedConnectionIds.includes(effectiveConnectionId),
     ),
     refreshVersion: metadataVersion,
   });
@@ -350,13 +352,13 @@ export function QueryEditor({
     return [configuredPostgresDatabase, ...discovered]
       .filter(
         (database, index, rows) =>
-          Boolean(database) && rows.indexOf(database) === index
+          Boolean(database) && rows.indexOf(database) === index,
       )
       .sort((left, right) =>
         left.localeCompare(right, undefined, {
           sensitivity: "base",
           numeric: true,
-        })
+        }),
       );
   }, [
     configuredPostgresDatabase,
@@ -377,7 +379,8 @@ export function QueryEditor({
       : getLspDocumentUri(activeTab.id, driver, documentLanguageId)
     : "";
   const editorLanguageId =
-    activeProjectFileLanguage?.editorLanguageId || queryEditorLanguageId(driver);
+    activeProjectFileLanguage?.editorLanguageId ||
+    queryEditorLanguageId(driver);
   const canUseLsp =
     !isProjectFilePreview &&
     supportsLspLanguageId(driver) &&
@@ -406,7 +409,7 @@ export function QueryEditor({
     activeTab?.editorSelection?.text?.trim() || activeTab?.sql || "";
   const parameterCount = useMemo(
     () => extractSqlParameters(parameterTargetSql, driver).length,
-    [driver, parameterTargetSql]
+    [driver, parameterTargetSql],
   );
 
   useEffect(() => {
@@ -460,8 +463,7 @@ export function QueryEditor({
         vimModeRef.current = mode;
         inlineKeysContextRef.current?.set(mode === "INSERT");
       },
-      onWrite: () =>
-        saveProjectFileTab(activeTabIdRef.current || undefined),
+      onWrite: () => saveProjectFileTab(activeTabIdRef.current || undefined),
       onQuit: () => {
         const activeId = activeTabIdRef.current;
         if (activeId) useTabStore.getState().closeTab(activeId);
@@ -477,12 +479,13 @@ export function QueryEditor({
         } catch (error) {
           const tabId = activeTabIdRef.current;
           if (!tabId) return;
-          const message = error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
           useTabStore.setState((state) => ({
             tabs: state.tabs.map((tab) =>
               tab.id === tabId
                 ? { ...tab, fileError: `Failed to open file: ${message}` }
-                : tab
+                : tab,
             ),
           }));
         }
@@ -524,7 +527,8 @@ export function QueryEditor({
 
   useEffect(() => {
     inlineKeysContextRef.current?.set(
-      editorSettings.keybindingMode !== "vim" || vimModeRef.current === "INSERT"
+      editorSettings.keybindingMode !== "vim" ||
+        vimModeRef.current === "INSERT",
     );
   }, [editorSettings.keybindingMode, mountedEditor]);
 
@@ -540,18 +544,29 @@ export function QueryEditor({
       mountedEditor.trigger("oxide-inline-completion", command, null);
     };
     const handlers: Array<[string, () => void]> = [
-      [APP_EVENT_INLINE_COMPLETION_TRIGGER, () => run("editor.action.inlineSuggest.trigger")],
-      [APP_EVENT_INLINE_COMPLETION_ACCEPT, () => run("editor.action.inlineSuggest.commit")],
+      [
+        APP_EVENT_INLINE_COMPLETION_TRIGGER,
+        () => run("editor.action.inlineSuggest.trigger"),
+      ],
+      [
+        APP_EVENT_INLINE_COMPLETION_ACCEPT,
+        () => run("editor.action.inlineSuggest.commit"),
+      ],
       [
         APP_EVENT_INLINE_COMPLETION_ACCEPT_NEXT_WORD,
         () => run("editor.action.inlineSuggest.acceptNextWord"),
       ],
-      [APP_EVENT_INLINE_COMPLETION_HIDE, () => run("editor.action.inlineSuggest.hide")],
+      [
+        APP_EVENT_INLINE_COMPLETION_HIDE,
+        () => run("editor.action.inlineSuggest.hide"),
+      ],
     ];
-    handlers.forEach(([event, handler]) => window.addEventListener(event, handler));
+    handlers.forEach(([event, handler]) =>
+      window.addEventListener(event, handler),
+    );
     return () => {
       handlers.forEach(([event, handler]) =>
-        window.removeEventListener(event, handler)
+        window.removeEventListener(event, handler),
       );
     };
   }, [editorSettings.keybindingMode, isActivePane, mountedEditor]);
@@ -574,35 +589,39 @@ export function QueryEditor({
     addRules(
       "editor.inlineCompletion.trigger",
       "editor.action.inlineSuggest.trigger",
-      "oxideInlineCompletionKeysEnabled && editorTextFocus"
+      "oxideInlineCompletionKeysEnabled && editorTextFocus",
     );
     addRules(
       "editor.inlineCompletion.accept",
       "editor.action.inlineSuggest.commit",
-      visibleWhen
+      visibleWhen,
     );
     addRules(
       "editor.inlineCompletion.acceptNextWord",
       "editor.action.inlineSuggest.acceptNextWord",
-      visibleWhen
+      visibleWhen,
     );
     addRules(
       "editor.inlineCompletion.hide",
       "editor.action.inlineSuggest.hide",
-      visibleWhen
+      visibleWhen,
     );
 
-    const normalizedAccept = (keymap["editor.inlineCompletion.accept"] || []).map(
-      normalizeKeybinding
-    );
+    const normalizedAccept = (
+      keymap["editor.inlineCompletion.accept"] || []
+    ).map(normalizeKeybinding);
     const normalizedWord = (
       keymap["editor.inlineCompletion.acceptNextWord"] || []
     ).map(normalizeKeybinding);
     const normalizedHide = (keymap["editor.inlineCompletion.hide"] || []).map(
-      normalizeKeybinding
+      normalizeKeybinding,
     );
     if (!normalizedAccept.includes("tab")) {
-      rules.push({ keybinding: monaco.KeyCode.Tab, command: null, when: visibleWhen });
+      rules.push({
+        keybinding: monaco.KeyCode.Tab,
+        command: null,
+        when: visibleWhen,
+      });
     }
     if (!normalizedWord.includes("mod+arrowright")) {
       rules.push({
@@ -642,7 +661,7 @@ export function QueryEditor({
         documentUri,
         activeDocumentSql,
         version,
-        documentLanguageId
+        documentLanguageId,
       );
     }
   }, [
@@ -664,11 +683,11 @@ export function QueryEditor({
         .map((tab) => {
           const tabConnectionId = tab.connectionId || activeConnectionId;
           const tabConnection = connections.find(
-            (connection) => connection.id === tabConnectionId
+            (connection) => connection.id === tabConnectionId,
           );
           const tabDriver = tabConnection?.driver || DEFAULT_DATABASE_DRIVER;
           return getLspDocumentUri(tab.id, tabDriver, lspLanguageId(tabDriver));
-        })
+        }),
     );
 
     for (const uri of Array.from(openedDocumentsRef.current)) {
@@ -712,7 +731,7 @@ export function QueryEditor({
     const contexts: QueryTransactionTabContext[] = tabs.map((tab) => {
       const tabConnectionId = tab.connectionId || activeConnectionId || null;
       const tabConnection = connections.find(
-        (connection) => connection.id === tabConnectionId
+        (connection) => connection.id === tabConnectionId,
       );
       const tabDriver = tabConnection?.driver || DEFAULT_DATABASE_DRIVER;
 
@@ -726,7 +745,7 @@ export function QueryEditor({
 
     const staleTabIds = collectStaleTransactionTabIds(
       activeTransactionsRef.current,
-      contexts
+      contexts,
     );
 
     if (staleTabIds.length > 0) {
@@ -736,13 +755,13 @@ export function QueryEditor({
 
         void transactionService.rollbackTransaction(
           session.connectionId,
-          session.transactionId
+          session.transactionId,
         );
         activeTransactionsRef.current.delete(tabId);
       }
 
       setTransactionStates((state) =>
-        removeTransactionStates(state, staleTabIds)
+        removeTransactionStates(state, staleTabIds),
       );
     }
   }, [activeConnectionId, connections, tabs]);
@@ -752,7 +771,7 @@ export function QueryEditor({
       for (const session of activeTransactionsRef.current.values()) {
         void transactionService.rollbackTransaction(
           session.connectionId,
-          session.transactionId
+          session.transactionId,
         );
       }
       activeTransactionsRef.current.clear();
@@ -771,7 +790,7 @@ export function QueryEditor({
         provideCompletionItems: async (
           model: any,
           position: any,
-          context: any
+          context: any,
         ) => {
           try {
             const uri = model.uri.toString();
@@ -795,7 +814,7 @@ export function QueryEditor({
               uri,
               position.lineNumber - 1, // LSP uses 0-indexed lines
               position.column - 1, // LSP uses 0-indexed columns
-              toLspCompletionContext(context)
+              toLspCompletionContext(context),
             );
 
             console.log(`[LSP] Got ${items.length} completion items`);
@@ -806,13 +825,13 @@ export function QueryEditor({
               position.lineNumber,
               word.startColumn,
               position.lineNumber,
-              word.endColumn
+              word.endColumn,
             );
             const typedWord = model.getValueInRange(range);
             const completedContextKeyword =
               isCompletedSqlContextKeyword(typedWord);
             const textBeforeCursor = model.getValueInRange(
-              new monaco.Range(1, 1, position.lineNumber, position.column)
+              new monaco.Range(1, 1, position.lineNumber, position.column),
             );
             const sqlContextKeyword =
               sqlContextKeywordBeforeCursor(textBeforeCursor);
@@ -821,12 +840,12 @@ export function QueryEditor({
                   position.lineNumber,
                   position.column,
                   position.lineNumber,
-                  position.column
+                  position.column,
                 )
               : range;
             const filteredItems = filterCompletionsForSqlContext(
               items,
-              sqlContextKeyword
+              sqlContextKeyword,
             );
 
             // Convert LSP completion items to Monaco format
@@ -840,12 +859,13 @@ export function QueryEditor({
               filterText: completionFilterText(
                 item,
                 typedWord,
-                completedContextKeyword
+                completedContextKeyword,
               ),
               preselect: item.preselect,
               insertTextRules:
                 item.insertTextFormat === 2
-                  ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+                  ? monaco.languages.CompletionItemInsertTextRule
+                      .InsertAsSnippet
                   : undefined,
               range: item.textEdit
                 ? toMonacoRange(monaco, item.textEdit.range)
@@ -858,7 +878,7 @@ export function QueryEditor({
             return { suggestions: [] };
           }
         },
-      })
+      }),
     );
 
     const hoverDisposables = LSP_PROVIDER_LANGUAGES.map((language) =>
@@ -870,7 +890,7 @@ export function QueryEditor({
           const hover = await lspClient.getHover(
             uri,
             position.lineNumber - 1,
-            position.column - 1
+            position.column - 1,
           );
 
           if (!hover) return null;
@@ -880,7 +900,7 @@ export function QueryEditor({
             range: hover.range ? toMonacoRange(monaco, hover.range) : undefined,
           };
         },
-      })
+      }),
     );
 
     const definitionDisposables = LSP_PROVIDER_LANGUAGES.map((language) =>
@@ -892,7 +912,7 @@ export function QueryEditor({
           const locations = await lspClient.getDefinitions(
             uri,
             position.lineNumber - 1,
-            position.column - 1
+            position.column - 1,
           );
 
           return locations.map((location) => ({
@@ -900,7 +920,7 @@ export function QueryEditor({
             range: toMonacoRange(monaco, location.range),
           }));
         },
-      })
+      }),
     );
 
     const referencesDisposables = LSP_PROVIDER_LANGUAGES.map((language) =>
@@ -912,7 +932,7 @@ export function QueryEditor({
           const locations = await lspClient.getReferences(
             uri,
             position.lineNumber - 1,
-            position.column - 1
+            position.column - 1,
           );
 
           return locations.map((location) => ({
@@ -920,7 +940,7 @@ export function QueryEditor({
             range: toMonacoRange(monaco, location.range),
           }));
         },
-      })
+      }),
     );
 
     const formattingDisposables = LSP_PROVIDER_LANGUAGES.map((language) =>
@@ -932,7 +952,7 @@ export function QueryEditor({
           const edits = await lspClient.formatDocument(
             uri,
             options.tabSize || 2,
-            options.insertSpaces !== false
+            options.insertSpaces !== false,
           );
 
           return edits.map((edit) => ({
@@ -940,7 +960,7 @@ export function QueryEditor({
             text: edit.newText,
           }));
         },
-      })
+      }),
     );
 
     return () => {
@@ -980,14 +1000,15 @@ export function QueryEditor({
         onDidChangeInlineCompletions: (listener: () => void) => {
           inlineCompletionListenersRef.current.add(listener);
           return {
-            dispose: () => inlineCompletionListenersRef.current.delete(listener),
+            dispose: () =>
+              inlineCompletionListenersRef.current.delete(listener),
           };
         },
         provideInlineCompletions: async (
           model: any,
           position: any,
           context: any,
-          token: any
+          token: any,
         ) => {
           const uri = model.uri.toString();
           if (
@@ -1026,13 +1047,16 @@ export function QueryEditor({
             openedDocuments: openedDocumentsRef.current,
             documentVersions: documentVersionsRef.current,
           });
-          if (token.isCancellationRequested || model.getVersionId() !== modelVersion) {
+          if (
+            token.isCancellationRequested ||
+            model.getVersionId() !== modelVersion
+          ) {
             return { items: [] };
           }
           const lspContext = await lspClient.getInlineCompletionContext(
             uri,
             position.lineNumber - 1,
-            position.column - 1
+            position.column - 1,
           );
           const localText = localInlineSuggestion(bounded.prefix, lspContext);
           const inlineResult = (text: string) => {
@@ -1051,7 +1075,7 @@ export function QueryEditor({
                         position.lineNumber,
                         position.column,
                         position.lineNumber,
-                        position.column
+                        position.column,
                       ),
                       completeBracketPairs: true,
                     },
@@ -1130,11 +1154,12 @@ export function QueryEditor({
                 })),
               };
               const cacheKey = inlineCompletionCacheKey(request);
-              const cachedWithProject = inlineCompletionCacheRef.current.get(cacheKey);
+              const cachedWithProject =
+                inlineCompletionCacheRef.current.get(cacheKey);
               if (cachedWithProject !== undefined) return cachedWithProject;
               const result = await aiService.inlineCompletion(
                 request,
-                abortController.signal
+                abortController.signal,
               );
               if (
                 abortController.signal.aborted ||
@@ -1145,21 +1170,21 @@ export function QueryEditor({
               const completion = cleanInlineSuggestion(
                 result.text,
                 bounded.prefix,
-                bounded.suffix
+                bounded.suffix,
               );
               if (!completion) return "";
               const nextText = `${value.slice(0, offset)}${completion}${value.slice(offset)}`;
               const nextDiagnostics = await lspClient.validateInlineCompletion(
                 uri,
-                nextText
+                nextText,
               );
               const baselineErrors =
                 lspContext.errorCount ??
                 (lspContext.diagnostics || []).filter(
-                  (diagnostic) => diagnostic.severity === 1
+                  (diagnostic) => diagnostic.severity === 1,
                 ).length;
               const nextErrors = nextDiagnostics.filter(
-                (diagnostic) => diagnostic.severity === 1
+                (diagnostic) => diagnostic.severity === 1,
               ).length;
               if (nextErrors > baselineErrors) return "";
               inlineCompletionCacheRef.current.set(cacheKey, completion);
@@ -1174,7 +1199,10 @@ export function QueryEditor({
             } catch (error) {
               if (!abortController.signal.aborted && !disposed) {
                 setInlineCompletionStatus(localText ? "local" : "offline");
-                console.debug("[InlineCompletion] AI provider unavailable", error);
+                console.debug(
+                  "[InlineCompletion] AI provider unavailable",
+                  error,
+                );
               }
               return "";
             } finally {
@@ -1190,7 +1218,7 @@ export function QueryEditor({
           const fastAiText = await Promise.race([
             aiPromise,
             new Promise<string>((resolve) =>
-              window.setTimeout(() => resolve(""), 120)
+              window.setTimeout(() => resolve(""), 120),
             ),
           ]);
           if (fastAiText) return inlineResult(fastAiText);
@@ -1199,7 +1227,7 @@ export function QueryEditor({
           return inlineResult(localText);
         },
         disposeInlineCompletions: () => undefined,
-      })
+      }),
     );
 
     return () => {
@@ -1257,7 +1285,7 @@ export function QueryEditor({
       monaco.editor.setModelMarkers(
         model,
         "sql-lsp",
-        diagnostics.map((diagnostic) => toMarker(monaco, diagnostic))
+        diagnostics.map((diagnostic) => toMarker(monaco, diagnostic)),
       );
     }).then((cleanup) => {
       if (disposed) {
@@ -1283,10 +1311,7 @@ export function QueryEditor({
   // Close dropdown on click outside - COMMENTED OUT UNUSED
   // useEffect(() => { ... }, []);
 
-  const confirmEditorExecution = (
-    sql: string,
-    executionDriver = driver
-  ) => {
+  const confirmEditorExecution = (sql: string, executionDriver = driver) => {
     if (!editorSettings.confirmDestructiveSql) return true;
     const confirmation = editorExecutionConfirmation(sql, executionDriver);
     if (!confirmation.required) return true;
@@ -1302,7 +1327,7 @@ export function QueryEditor({
 
   const requestParameterizedExecution = (
     sql: string,
-    transactionId?: string
+    transactionId?: string,
   ) => {
     if (
       !activeTab ||
@@ -1340,7 +1365,12 @@ export function QueryEditor({
       if (requestParameterizedExecution(sql, transactionId)) return;
       if (!confirmEditorExecution(sql)) return;
       updateTabSql(activeTab.id, sql);
-      runTabQuery(activeTab.id, effectiveConnectionId, undefined, transactionId);
+      runTabQuery(
+        activeTab.id,
+        effectiveConnectionId,
+        undefined,
+        transactionId,
+      );
     }
   };
 
@@ -1371,22 +1401,54 @@ export function QueryEditor({
     if (selectedText && selectedText.trim()) {
       if (requestParameterizedExecution(selectedText, transactionId)) return;
       if (!confirmEditorExecution(selectedText)) return;
-      runTabQuery(activeTab.id, effectiveConnectionId, selectedText, transactionId);
+      runTabQuery(
+        activeTab.id,
+        effectiveConnectionId,
+        selectedText,
+        transactionId,
+      );
     } else {
       // Otherwise run the full tab query
       const sql = model.getValue();
       if (requestParameterizedExecution(sql, transactionId)) return;
       if (!confirmEditorExecution(sql)) return;
       updateTabSql(activeTab.id, sql);
-      runTabQuery(activeTab.id, effectiveConnectionId, undefined, transactionId);
+      runTabQuery(
+        activeTab.id,
+        effectiveConnectionId,
+        undefined,
+        transactionId,
+      );
     }
   };
 
   const handleConfigureParameters = () => {
     requestParameterizedExecution(
       currentEditorExecutionSql(),
-      transactionIdForExecution()
+      transactionIdForExecution(),
     );
+  };
+
+  const handleExplain = (mode: "estimate" | "analyze") => {
+    if (
+      !canExecuteDocument ||
+      !capabilities.supportsExplainPlan ||
+      !effectiveConnectionId ||
+      !activeTab
+    ) {
+      return;
+    }
+    const sql = currentEditorExecutionSql();
+    if (!sql.trim() || extractSqlParameters(sql, driver).length > 0) return;
+    if (
+      mode === "analyze" &&
+      !window.confirm(
+        "Explain Analyze executes this query to collect actual timing and row counts. It runs in a backend-enforced read-only transaction, but it can still be expensive. Continue?",
+      )
+    ) {
+      return;
+    }
+    void runExplainPlan(activeTab.id, effectiveConnectionId, sql, mode);
   };
 
   const openHistoryInEditor = (item: QueryHistoryItem) => {
@@ -1394,7 +1456,7 @@ export function QueryEditor({
       ? connections.find((connection) => connection.id === item.connectionId)
       : undefined;
     const fallbackConnection = connections.find(
-      (connection) => connection.id === effectiveConnectionId
+      (connection) => connection.id === effectiveConnectionId,
     );
     const targetConnectionId = item.connectionId
       ? savedConnection?.id || item.connectionId
@@ -1420,16 +1482,19 @@ export function QueryEditor({
       : undefined;
     if (item.connectionId && !savedConnection) {
       throw new Error(
-        "The saved data source is no longer available in this project. Open the query and choose another data source."
+        "The saved data source is no longer available in this project. Open the query and choose another data source.",
       );
     }
     const targetConnection =
       savedConnection ||
       connections.find((connection) => connection.id === effectiveConnectionId);
     if (!targetConnection) {
-      throw new Error("Choose a data source before running this history entry.");
+      throw new Error(
+        "Choose a data source before running this history entry.",
+      );
     }
-    if (!confirmEditorExecution(item.sql, targetConnection.driver)) return false;
+    if (!confirmEditorExecution(item.sql, targetConnection.driver))
+      return false;
 
     if (!connectedConnectionIds.includes(targetConnection.id)) {
       const connectionError = await useConnectionStore
@@ -1446,7 +1511,7 @@ export function QueryEditor({
       {
         connectionId: targetConnection.id,
         databaseName: item.databaseName || undefined,
-      }
+      },
     );
     tabStore.setTargetSchema(tabId, item.schemaName);
     await tabStore.runTabQuery(tabId, targetConnection.id);
@@ -1465,7 +1530,7 @@ export function QueryEditor({
       parameterExecution.tabId,
       parameterExecution.connectionId,
       compiledSql,
-      parameterExecution.transactionId
+      parameterExecution.transactionId,
     );
     setParameterExecution(null);
   };
@@ -1536,7 +1601,7 @@ export function QueryEditor({
     if (!activeTab || !configuredPostgresDatabase) return;
     setTargetDatabase(
       activeTab.id,
-      database === configuredPostgresDatabase ? null : database
+      database === configuredPostgresDatabase ? null : database,
     );
   };
 
@@ -1563,7 +1628,7 @@ export function QueryEditor({
       await transactionService.beginTransaction(
         effectiveConnectionId,
         transactionId,
-        activeTab.targetSchema ?? currentSchema
+        activeTab.targetSchema ?? currentSchema,
       );
       activeTransactionsRef.current.set(activeTab.id, {
         connectionId: effectiveConnectionId,
@@ -1587,7 +1652,7 @@ export function QueryEditor({
     try {
       await transactionService.commitTransaction(
         session.connectionId,
-        session.transactionId
+        session.transactionId,
       );
       activeTransactionsRef.current.delete(activeTab.id);
       setTransactionStates((state) => ({
@@ -1595,7 +1660,8 @@ export function QueryEditor({
         [activeTab.id]: "idle",
       }));
       await loadSchemas(session.connectionId, true);
-      const schemaToRefresh = useSchemaStore.getState().currentSchema ||
+      const schemaToRefresh =
+        useSchemaStore.getState().currentSchema ||
         activeTab.targetSchema ||
         currentSchema;
       if (schemaToRefresh) {
@@ -1616,7 +1682,7 @@ export function QueryEditor({
     try {
       await transactionService.rollbackTransaction(
         session.connectionId,
-        session.transactionId
+        session.transactionId,
       );
       activeTransactionsRef.current.delete(activeTab.id);
       setTransactionStates((state) => ({
@@ -1651,7 +1717,7 @@ export function QueryEditor({
       editorSettings.tabSize,
       editorSettings.vim.relativeLineNumbers,
       editorSettings.wordWrap,
-    ]
+    ],
   );
 
   // Update Monaco theme when app theme changes
@@ -1683,7 +1749,10 @@ export function QueryEditor({
         </div>
       ) : activeProjectFileLanguage && !canExecuteDocument ? (
         <div className="wb-editor-commandbar justify-between gap-2">
-          <div className="min-w-0 truncate text-[10px] wb-muted" title={activeTab.fileRelativePath}>
+          <div
+            className="min-w-0 truncate text-[10px] wb-muted"
+            title={activeTab.fileRelativePath}
+          >
             {activeTab.fileRelativePath}
             <span className="ml-2 uppercase opacity-70">
               {activeProjectFileLanguage.editorLanguageId}
@@ -1693,11 +1762,15 @@ export function QueryEditor({
             type="button"
             className={cn(
               "wb-text-button h-6 shrink-0 gap-1.5 px-2 text-[10px]",
-              activeTab.isDirty && "text-[hsl(var(--wb-accent))]"
+              activeTab.isDirty && "text-[hsl(var(--wb-accent))]",
             )}
             onClick={() => void saveProjectFileTab(activeTab.id)}
             disabled={!activeTab.isDirty}
-            title={activeTab.isDirty ? "Save Project File (Ctrl+S)" : "Project File Saved"}
+            title={
+              activeTab.isDirty
+                ? "Save Project File (Ctrl+S)"
+                : "Project File Saved"
+            }
           >
             <Save size={12} />
             Save
@@ -1728,9 +1801,13 @@ export function QueryEditor({
           onFormat={handleFormat}
           onRun={handleRun}
           onRunCurrent={handleRunCurrent}
+          onExplain={handleExplain}
           onCancelRun={handleCancelRun}
           isExecuting={activeTab.isExecuting}
           isConnected={Boolean(effectiveConnectionId && canExecuteDocument)}
+          supportsExplainPlan={
+            capabilities.supportsExplainPlan && canExecuteDocument
+          }
           savedQueries={savedQueries}
           onOpenHistory={openHistoryInEditor}
           onRerunHistory={rerunHistory}
@@ -1788,7 +1865,7 @@ export function QueryEditor({
               setMountedEditor(editor);
               inlineKeysContextRef.current = editor.createContextKey(
                 "oxideInlineCompletionKeysEnabled",
-                editorSettings.keybindingMode !== "vim"
+                editorSettings.keybindingMode !== "vim",
               );
               selectionDisposableRef.current?.dispose();
               selectionDisposableRef.current =
@@ -1813,7 +1890,7 @@ export function QueryEditor({
                           endLineNumber: event.selection.endLineNumber,
                           endColumn: event.selection.endColumn,
                         }
-                      : null
+                      : null,
                   );
                 });
               const initialPosition = editor.getPosition();
@@ -1894,7 +1971,7 @@ export function QueryEditor({
                 <span
                   className={cn(
                     "h-1.5 w-1.5 rounded-full",
-                    lspReady ? "bg-emerald-400" : "bg-amber-400"
+                    lspReady ? "bg-emerald-400" : "bg-amber-400",
                   )}
                 />
                 SQL

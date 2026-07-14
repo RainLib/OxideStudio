@@ -24,7 +24,7 @@ const toolContext: AiToolExecutionContext = {
 function success(
   toolName: string,
   output: unknown,
-  id = "tool-1"
+  id = "tool-1",
 ): AssistantToolCallResult {
   return { id, toolName, status: "success", output };
 }
@@ -69,7 +69,7 @@ describe("assistant UI attachments", () => {
           kind: "relation",
         }),
       ],
-      toolContext
+      toolContext,
     );
 
     expect(attachment).toMatchObject({
@@ -86,10 +86,9 @@ describe("assistant UI attachments", () => {
         },
       },
     });
-    expect(attachment?.secondaryActions?.map((action) => action.action)).toEqual([
-      "database.openObjectData",
-      "database.openObjectDdl",
-    ]);
+    expect(
+      attachment?.secondaryActions?.map((action) => action.action),
+    ).toEqual(["database.openObjectData", "database.openObjectDdl"]);
   });
 
   it("does not collapse same-named objects from different schemas", () => {
@@ -100,7 +99,7 @@ describe("assistant UI attachments", () => {
           { name: "users", namespace: "audit", kind: "relation" },
         ]),
       ],
-      toolContext
+      toolContext,
     );
 
     expect(attachments).toHaveLength(2);
@@ -127,7 +126,7 @@ describe("assistant UI attachments", () => {
           ],
         }),
       ],
-      toolContext
+      toolContext,
     );
 
     expect(attachment).toMatchObject({
@@ -146,6 +145,39 @@ describe("assistant UI attachments", () => {
         issuedAgainst: {
           projectId: "project-1",
           documentRevision: expect.any(String),
+        },
+      },
+    });
+  });
+
+  it("creates an exact execution-plan attachment that reveals the normalized node", () => {
+    const [attachment] = createAssistantAttachments(
+      [
+        success("query.explain", {
+          id: "plan-1",
+          driver: "postgres",
+          mode: "estimate",
+          root: {
+            id: "plan-1/root",
+            nodeType: "Index Scan",
+            children: [],
+          },
+        }),
+      ],
+      toolContext,
+    );
+
+    expect(attachment).toMatchObject({
+      kind: "plan",
+      label: "Explain Plan · Index Scan",
+      detail: "postgres · estimate",
+      action: {
+        action: "plan.revealNode",
+        target: {
+          projectId: "project-1",
+          tabId: "tab-1",
+          planId: "plan-1",
+          nodeId: "plan-1/root",
         },
       },
     });

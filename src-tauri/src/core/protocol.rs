@@ -48,6 +48,60 @@ impl QueryResult {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ExplainPlanMode {
+    Estimate,
+    Analyze,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ExplainPlanFormat {
+    Json,
+    Text,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainPlanNode {
+    pub id: String,
+    pub node_type: String,
+    pub relation: Option<String>,
+    pub alias: Option<String>,
+    pub access_type: Option<String>,
+    pub join_type: Option<String>,
+    pub index: Option<String>,
+    pub condition: Option<String>,
+    pub startup_cost: Option<f64>,
+    pub total_cost: Option<f64>,
+    pub estimated_rows: Option<f64>,
+    pub actual_startup_time_ms: Option<f64>,
+    pub actual_total_time_ms: Option<f64>,
+    pub actual_rows: Option<f64>,
+    pub loops: Option<f64>,
+    #[serde(default)]
+    pub children: Vec<ExplainPlanNode>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainPlan {
+    pub id: String,
+    pub driver: String,
+    pub mode: ExplainPlanMode,
+    pub format: ExplainPlanFormat,
+    pub generated_in_ms: f64,
+    pub planning_time_ms: Option<f64>,
+    pub execution_time_ms: Option<f64>,
+    pub total_cost: Option<f64>,
+    pub estimated_rows: Option<f64>,
+    pub root: ExplainPlanNode,
+    pub raw_plan: serde_json::Value,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ColumnDef {
     pub name: String,
@@ -261,7 +315,8 @@ impl<T> Response<T> {
 fn error_category(code: &str) -> &'static str {
     if code.contains("CONNECTION") || code == "DISCONNECT_ERROR" {
         "connection"
-    } else if code.contains("QUERY") || code.contains("SQL_COMPLETION") {
+    } else if code.contains("QUERY") || code.contains("EXPLAIN") || code.contains("SQL_COMPLETION")
+    {
         "query"
     } else if code.ends_with("_LIST_FAILED")
         || code == "COLLECTION_PAGE_FAILED"

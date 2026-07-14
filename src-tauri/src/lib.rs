@@ -91,6 +91,7 @@ pub fn run() {
             // Query commands
             commands::query::execute_query,
             commands::query::execute_read_only_query,
+            commands::query::explain_query,
             commands::query::cancel_query,
             commands::query::get_sql_completion,
             // Schema commands

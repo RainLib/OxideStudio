@@ -7,6 +7,18 @@ import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
 
 const mocks = vi.hoisted(() => ({
   executeQuery: vi.fn(async () => []),
+  explainQuery: vi.fn(async (request: { queryId: string }) => ({
+    id: request.queryId,
+    driver: "postgres",
+    mode: "estimate",
+    format: "json",
+    generatedInMs: 2.5,
+    totalCost: 1,
+    estimatedRows: 1,
+    root: { id: "node-0", nodeType: "Result", children: [] },
+    rawPlan: {},
+    warnings: [],
+  })),
   cancelQuery: vi.fn(async () => "Query cancellation requested"),
   getDatabaseCapabilities: vi.fn(async () => {
     throw new Error("use fallback capabilities");
@@ -26,6 +38,7 @@ vi.mock("@/services/tauri", () => ({
   },
   queryService: {
     executeQuery: mocks.executeQuery,
+    explainQuery: mocks.explainQuery,
     cancelQuery: mocks.cancelQuery,
   },
   schemaService: {
@@ -96,6 +109,7 @@ function resetWorkspaceState() {
 describe("query run cancellation store", () => {
   beforeEach(() => {
     mocks.executeQuery.mockClear();
+    mocks.explainQuery.mockClear();
     mocks.cancelQuery.mockClear();
     mocks.getDatabaseCapabilities.mockClear();
     mocks.saveHistoryEntries.mockClear();
@@ -117,7 +131,7 @@ describe("query run cancellation store", () => {
       "public",
       undefined,
       expect.stringMatching(/^tab-1:/),
-      undefined
+      undefined,
     );
 
     const tab = useTabStore.getState().tabs[0]!;
@@ -141,7 +155,9 @@ describe("query run cancellation store", () => {
   });
 
   it("records failed statement executions with their error and context", async () => {
-    mocks.executeQuery.mockRejectedValueOnce(new Error("syntax error near FROM"));
+    mocks.executeQuery.mockRejectedValueOnce(
+      new Error("syntax error near FROM"),
+    );
 
     await useTabStore
       .getState()
@@ -190,8 +206,43 @@ describe("query run cancellation store", () => {
       undefined,
       undefined,
       expect.stringMatching(/^tab-1:/),
-      "analytics"
+      "analytics",
     );
+  });
+
+  it("stores a database-scoped Explain Plan without replacing query results", async () => {
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          databaseName: "analytics",
+          results: [
+            {
+              columns: [{ name: "value", data_type: "int4" }],
+              rows: [[1]],
+            },
+          ],
+        },
+      ],
+    });
+
+    await useTabStore
+      .getState()
+      .runExplainPlan("tab-1", "postgres-1", "SELECT * FROM users");
+
+    expect(mocks.explainQuery).toHaveBeenCalledWith({
+      connectionId: "postgres-1",
+      sql: "SELECT * FROM users",
+      schema: undefined,
+      database: "analytics",
+      queryId: expect.stringMatching(/^tab-1:plan:/),
+      mode: "estimate",
+    });
+    const tab = useTabStore.getState().tabs[0]!;
+    expect(tab.isExecuting).toBe(false);
+    expect(tab.queryOutputView).toBe("plan");
+    expect(tab.explainPlan?.root.nodeType).toBe("Result");
+    expect(tab.results?.[0]?.rows).toEqual([[1]]);
   });
 
   it("refreshes Redis keys and follows SELECT database changes after writes", async () => {
@@ -200,7 +251,7 @@ describe("query run cancellation store", () => {
     const setCurrentSchema = vi.fn(async () => undefined);
     const bumpMetadataVersion = vi.fn();
     mocks.getDatabaseCapabilities.mockResolvedValueOnce(
-      defaultDatabaseCapabilities("redis")
+      defaultDatabaseCapabilities("redis"),
     );
     useConnectionStore.setState({
       connections: [
@@ -246,7 +297,7 @@ describe("query run cancellation store", () => {
       "0",
       undefined,
       expect.stringMatching(/^redis-tab:/),
-      undefined
+      undefined,
     );
     expect(setCurrentSchema).toHaveBeenCalledWith("2");
     expect(loadCollections).toHaveBeenCalledWith("redis-1", "2", true);

@@ -3,6 +3,7 @@ pub mod config;
 pub mod dialect;
 pub mod driver;
 pub mod error;
+pub mod explain;
 pub mod manager;
 pub mod parser;
 pub mod protocol;

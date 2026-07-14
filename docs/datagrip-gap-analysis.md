@@ -1,6 +1,6 @@
 # OxideStudio 与 DataGrip 能力差距
 
-> 评估日期：2026-07-14。DataGrip 基线采用 JetBrains DataGrip 2026.1 官方文档；OxideStudio 基线采用当前仓库代码与测试，而不是 README 宣称能力。AI Agent 的完整逻辑要求见 [AI_AGENT_PRODUCT_SPEC.md](AI_AGENT_PRODUCT_SPEC.md)。
+> 评估日期：2026-07-15。DataGrip 基线采用 JetBrains DataGrip 2026.1 官方文档；OxideStudio 基线采用当前仓库代码与测试，而不是 README 宣称能力。AI Agent 的完整逻辑要求见 [AI_AGENT_PRODUCT_SPEC.md](AI_AGENT_PRODUCT_SPEC.md)。
 
 ## 1. 评估方法
 
@@ -35,9 +35,9 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 
 1. **发现闭环**：Search Everywhere、对象导航、find usages、数据库全文搜索仍不完整。
 2. **变更闭环**：schema diff、migration preview、data compare、VCS/DDL data source 缺失。
-3. **数据工作闭环**：Value Editor、外键导航、聚合视图、多视图模式和导入映射不足。
-4. **诊断闭环**：Explain Plan、结构化错误、会话/锁/运行监控和可筛选查询历史不足。
-5. **智能协作闭环**：AI 有工具和审批基础，但缺少对象附件、页面跳转、patch preview、持久任务、plan-grounded 优化；LSP 也缺少 catalog 隔离和同名列的上下文排序。
+3. **数据工作闭环**：Value Editor 已有类型感知主路径，但外键导航、聚合视图、多视图模式和导入映射不足。
+4. **诊断闭环**：Explain Plan 与结构化错误已有主路径，但 vendor error、会话/锁/运行监控仍不足。
+5. **智能协作闭环**：AI 已有工具、审批、对象/结果/错误/plan attachment 和稳定页面跳转，但 patch preview、持久任务和 plan-grounded 自动优化仍待完成；LSP 的 catalog 隔离与同名列 P0 排序已经关闭，高级派生表/临时对象语义仍不足。
 
 按日常数据库开发主路径估算，当前完成度约为 **55%–65%**；按 DataGrip 全功能面估算约为 **35%–45%**。这是工程规划区间，不是营销评分。
 
@@ -96,7 +96,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | Schema diff | 缺失 | 无结构快照比较、差异树和迁移 SQL | P1 |
 | Migration preview / apply | 缺失 | UI 生成单对象 DDL，但没有多对象 dependency plan、dry run 和 apply journal | P1 |
 | Database diagram | 缺失 | 已有 constraints 数据，尚未形成 ER graph、布局和导出 | P1 |
-| Explain Plan | 缺失 | 没有文本或图形计划、节点成本和热点展示 | P0 |
+| Explain Plan | 已具备/部分 | PostgreSQL/MySQL 支持 estimate/analyze、规范化节点树、raw plan、cost/rows/time 和取消；尚缺图形 plan、节点到表/索引的双向联动与多次计划对比 | P1 |
 | Object dependency / usages | 缺失 | 无依赖图和影响面分析 | P1 |
 
 ### 3.6 项目、文件与 VCS
@@ -134,11 +134,11 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 
 | DataGrip / 专业 Agent 基线 | OxideStudio 状态 | 当前证据与差距 | 优先级 |
 | --- | --- | --- | --- |
-| Schema/object/selection/UI attachment | 已具备/部分 | tool result 已生成带 provenance 的对象、文件、结果、tab、selection 与 diagnostic attachment；Explain Plan attachment 等待 plan surface | P0/P1 |
+| Schema/object/selection/UI attachment | 已具备/部分 | tool result 已生成带 provenance 的对象、文件、结果、tab、selection、diagnostic 与 Explain Plan attachment；patch/task artifact 尚未完成 | P0/P1 |
 | Text-to-SQL 与 dialect grounding | 部分具备 | 有模型 planner、inline completion 和 dialect context；缺少 metadata citation、patch preview 与执行前验证闭环 | P0 |
 | Explain/Fix SQL error | 部分具备 | LSP diagnostic 已可点击 Jump 到精确 range；vendor error 尚未统一为 code/position/object，Preview Fix → Validate 仍缺失 | P0 |
-| Query optimization / plan explanation | 缺失 | Explain Plan 本身尚未实现，AI 无法基于真实计划做可靠优化 | P0/P1 |
-| IDE 页面跳转和联动 | 已具备/部分 | typed `UiActionRegistry` 已覆盖 project/file/tab/panel/connection/object/editor/result/settings，含 stable target 与 stale-context；patch/plan/task surface 待补 | P0/P1 |
+| Query optimization / plan explanation | 部分具备 | `query.explain` 只生成 estimate plan，模型可读取真实规范化计划；尚缺热点规则、索引/schema citation、优化前后 plan 对比与验证闭环 | P1 |
+| IDE 页面跳转和联动 | 已具备/部分 | typed `UiActionRegistry` 已覆盖 project/file/tab/panel/connection/object/editor/result/plan/settings，含 stable target 与 stale-context；patch/task surface 待补 | P0/P1 |
 | 多轮 durable agent | 部分具备 | Sidebar 有有界多轮工具循环，LangGraph 当前主要为 `plan -> policy`；缺 checkpoint/resume、runtime-owned loop、持久 thread 和 subagent | P1 |
 | 工具安全与多数据模型 | 已具备/优势 | registry、capability、approval、MCP/CLI 以及 Mongo/Redis/ES 结构化 mutation 已形成独立方向 | — |
 | AI 数据治理 | 部分具备 | credential 隔离、上下文截断和有界结果已有；缺发送内容预览、项目级 retention 和 attachment 敏感级别 | P0/P1 |
@@ -154,12 +154,12 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | DG-P0-01 | Search Everywhere 第一阶段 | 搜索 action、tab、数据源、当前 schema/table 和已加载 project files；选择数据源会真正激活连接；键盘可完成全部操作 | 已完成 |
 | DG-P0-02 | Query History 2.0 | 记录 connection/schema/database、duration、success/error、row count；支持筛选、单条删除、复制到 editor 和 rerun | 已完成 |
 | DG-P0-03 | Value Editor | text/JSON/date/binary 类型有只读/可编辑大视图；明确 NULL、空串和未加载状态；提交沿用 mutation gate | 已完成 |
-| DG-P0-04 | Explain Plan MVP | PostgreSQL/MySQL 支持文本/JSON plan；只读执行；显示 cost/rows/time，失败可定位到 driver 能力 | 待开始 |
+| DG-P0-04 | Explain Plan MVP | PostgreSQL/MySQL 支持文本/JSON plan；只读执行；显示 cost/rows/time，失败可定位到 driver 能力 | 已完成 |
 | DG-P0-05 | Driver 与文档一致性 | 增加 SQLite driver，或从发布文档移除未实现支持；能力列表由 runtime registry 生成 | 待开始 |
 | DG-P0-06 | 结构化错误协议 | connection/query/schema/table/file command 返回稳定 code、message、context、retryable；UI 不再解析字符串前缀 | 已完成 |
 | DG-P0-07 | CSV Import Mapping | 导入前预览、编码/delimiter/header、列映射、类型错误摘要和事务性提交 | 待开始 |
 | DG-P0-08 | LSP catalog scope 与候选排序 | `(connection, database, schema)` 严格隔离；显式 qualifier/当前 statement/DML target/active table 排序；同名列以 alias/table 区分；同 source 去重；覆盖跨 PostgreSQL database 回归 | 已完成 |
-| DG-P0-09 | AI attachment 与页面动作 | 对象、错误、结果、执行计划引用可点击并准确跳转；stable target、stale context 和同名对象有测试；导航不与数据库 mutation 混为一个动作 | 进行中：对象/文件/结果/LSP error 已完成，plan 待 DG-P0-04 |
+| DG-P0-09 | AI attachment 与页面动作 | 对象、错误、结果、执行计划引用可点击并准确跳转；stable target、stale context 和同名对象有测试；导航不与数据库 mutation 混为一个动作 | 已完成：对象/文件/结果/LSP error/plan 均有精确跳转与 stale target 测试 |
 
 ### P1：形成 schema 工程能力
 
@@ -194,7 +194,8 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 近期顺序调整为：
 
 1. **DG-P0-08 LSP catalog scope 与候选排序** 已完成；证据覆盖跨 PostgreSQL database 配置、database-scoped metadata、同名列、alias 插入、模糊匹配、CTE/DML 作用域、全量 LSP tests 与 Clippy。
-2. **DG-P0-09 AI attachment 与页面动作** 的通用 registry、stable target、stale context、对象/文件/结果/LSP error 跳转已完成；Explain Plan attachment 随 DG-P0-04 补齐。
+2. **DG-P0-09 AI attachment 与页面动作** 已完成：通用 registry、stable target、stale context、对象/文件/结果/LSP error/plan attachment 与精确节点跳转均有回归测试。
 3. **DG-P0-06 结构化错误协议** 已完成：envelope 与直接 Tauri rejection 统一为 `ApiError`，project revision conflict 不再依赖字符串前缀，错误 context 使用白名单且不包含 SQL、URL、密码或文件内容。
 4. **DG-P0-03 Value Editor** 已完成：类型感知大视图、四态值语义、JSON/binary/date 校验和既有 mutation gate 已有组件与模型测试。
-5. 当前推进 **DG-P0-04 Explain Plan MVP**；Explain Plan 完成后才启用 AI query optimization/plan explanation。
+5. **DG-P0-04 Explain Plan MVP** 已完成：后端生成 driver-specific SQL 并强制单条只读源查询，PostgreSQL/MySQL 结果规范化为稳定 plan tree，UI 支持 tree/raw、estimate/analyze、取消和节点指标；AI 只允许无审批 estimate，并通过 `plan.revealNode` 回到精确节点。安全边界见 [ADR-0003](decisions/0003-explain-plan-safety.md)。
+6. 下一项为 **DG-P0-05 Driver 与文档一致性**，随后推进 **DG-P0-07 CSV Import Mapping**；完整 AI plan explanation/优化前后验证转入 P1。

@@ -4,6 +4,7 @@ import type {
   CollectionInfo,
   ColumnInfo,
   ConstraintInfo,
+  ExplainPlan,
   IndexInfo,
   QueryResult,
   TableInfo,
@@ -16,12 +17,7 @@ import type { CompletionItem, Diagnostic } from "@/services/lsp/types";
 export type AiToolPermission = "read" | "write" | "destructive" | "external";
 
 export type AiToolCapability =
-  | "connection"
-  | "metadata"
-  | "provider"
-  | "query"
-  | "workspace"
-  | "lsp";
+  "connection" | "metadata" | "provider" | "query" | "workspace" | "lsp";
 
 export type JsonSchema = {
   type?: string;
@@ -63,9 +59,7 @@ export type AiToolAuditEntry = {
   reason?: string;
 };
 
-export type AiToolAuditSink = (
-  entry: AiToolAuditEntry
-) => Promise<void> | void;
+export type AiToolAuditSink = (entry: AiToolAuditEntry) => Promise<void> | void;
 
 export type AiToolExecutionContext = {
   requestId: string;
@@ -87,7 +81,7 @@ export type AiToolDefinition<TInput = unknown, TOutput = unknown> = {
   resultLimit?: AiToolResultLimit;
   execute: (
     input: TInput,
-    context: AiToolExecutionContext
+    context: AiToolExecutionContext,
   ) => Promise<TOutput> | TOutput;
 };
 
@@ -135,6 +129,12 @@ export type AiReadOnlyQueryInput = {
   namespace?: string | null;
   query: string;
   limit?: number;
+};
+
+export type AiExplainQueryInput = {
+  connectionId?: string | null;
+  namespace?: string | null;
+  query: string;
 };
 
 export type AiMutationQueryInput = {
@@ -235,7 +235,8 @@ export type AiListObjectsInput = {
   namespace?: string | null;
 };
 
-export type AiObjectKind = "relation" | "collection" | "key" | "index" | "object";
+export type AiObjectKind =
+  "relation" | "collection" | "key" | "index" | "object";
 
 export type AiObjectSummary = {
   name: string;
@@ -265,59 +266,62 @@ export type AiObjectDescription = {
 export type AiToolAdapters = {
   listConnections: () => Promise<AiConnectionSummary[]> | AiConnectionSummary[];
   getConnectionCapabilities: (
-    driver: DatabaseDriver
+    driver: DatabaseDriver,
   ) => Promise<DatabaseCapabilities> | DatabaseCapabilities;
-  getActiveTab?: () => Promise<AiWorkspaceTabSummary | null> | AiWorkspaceTabSummary | null;
+  getActiveTab?: () =>
+    Promise<AiWorkspaceTabSummary | null> | AiWorkspaceTabSummary | null;
   getWorkspaceSelection?: () =>
-    | Promise<AiWorkspaceSelection | null>
-    | AiWorkspaceSelection
-    | null;
+    Promise<AiWorkspaceSelection | null> | AiWorkspaceSelection | null;
   listCollections?: (
     input: { connectionId?: string | null; namespace?: string | null },
-    context: AiToolExecutionContext
+    context: AiToolExecutionContext,
   ) => Promise<CollectionInfo[]> | CollectionInfo[];
   listObjects?: (
     input: AiListObjectsInput,
-    context: AiToolExecutionContext
+    context: AiToolExecutionContext,
   ) => Promise<AiObjectSummary[]> | AiObjectSummary[];
   describeObject?: (
     input: AiDescribeObjectInput,
-    context: AiToolExecutionContext
+    context: AiToolExecutionContext,
   ) => Promise<AiObjectDescription> | AiObjectDescription;
   runReadOnlyQuery?: (
     input: AiReadOnlyQueryInput,
-    context: AiToolExecutionContext
+    context: AiToolExecutionContext,
   ) => Promise<QueryResult[]> | QueryResult[];
+  explainQuery?: (
+    input: AiExplainQueryInput,
+    context: AiToolExecutionContext,
+  ) => Promise<ExplainPlan> | ExplainPlan;
   runMutationQuery?: (
     input: AiMutationQueryInput,
-    context: AiToolExecutionContext
+    context: AiToolExecutionContext,
   ) => Promise<QueryResult[]> | QueryResult[];
   mutateTableRows?: (
     input: AiTableMutationInput,
-    context: AiToolExecutionContext
+    context: AiToolExecutionContext,
   ) => Promise<TableMutationResult> | TableMutationResult;
   mutateDocuments?: (
     input: AiDocumentMutationInput,
-    context: AiToolExecutionContext
+    context: AiToolExecutionContext,
   ) => Promise<QueryResult[]> | QueryResult[];
   mutateKeyValues?: (
     input: AiKeyValueMutationInput,
-    context: AiToolExecutionContext
+    context: AiToolExecutionContext,
   ) => Promise<QueryResult[]> | QueryResult[];
   mutateSearchDocuments?: (
     input: AiSearchDocumentMutationInput,
-    context: AiToolExecutionContext
+    context: AiToolExecutionContext,
   ) => Promise<QueryResult[]> | QueryResult[];
   getLspCompletions?: (
     input: AiLspCompletionInput,
-    context: AiToolExecutionContext
+    context: AiToolExecutionContext,
   ) => Promise<CompletionItem[]> | CompletionItem[];
   explainLspDiagnostics?: (
     input: AiLspDiagnosticsInput,
-    context: AiToolExecutionContext
+    context: AiToolExecutionContext,
   ) => Promise<AiLspDiagnosticsExplanation> | AiLspDiagnosticsExplanation;
   mutateNamespace?: (
     input: AiNamespaceMutationInput,
-    context: AiToolExecutionContext
+    context: AiToolExecutionContext,
   ) => Promise<string> | string;
 };

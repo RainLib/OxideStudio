@@ -63,25 +63,27 @@ export type WorkspaceAiToolRegistryOptions = {
 };
 
 export function createWorkspaceAiToolRegistry(
-  options: WorkspaceAiToolRegistryOptions = {}
+  options: WorkspaceAiToolRegistryOptions = {},
 ) {
   return registerCoreAiTools(
     createAiToolRegistry(),
     createWorkspaceAiToolAdapters(),
-    options.families
+    options.families,
   );
 }
 
 export function createWorkspaceAiToolContext(
-  requestId = createRequestId()
+  requestId = createRequestId(),
 ): AiToolExecutionContext {
   const connectionState = useConnectionStore.getState();
   const schemaState = useSchemaStore.getState();
   const tabState = useTabStore.getState();
   const activeConnection = connectionState.connections.find(
-    (connection) => connection.id === connectionState.activeConnectionId
+    (connection) => connection.id === connectionState.activeConnectionId,
   );
-  const activeTab = tabState.tabs.find((tab) => tab.id === tabState.activeTabId);
+  const activeTab = tabState.tabs.find(
+    (tab) => tab.id === tabState.activeTabId,
+  );
 
   return {
     requestId,
@@ -106,20 +108,26 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
 
     getActiveTab: () => {
       const tabState = useTabStore.getState();
-      const activeTab = tabState.tabs.find((tab) => tab.id === tabState.activeTabId);
+      const activeTab = tabState.tabs.find(
+        (tab) => tab.id === tabState.activeTabId,
+      );
       return activeTab ? workspaceTabSummaryFromTab(activeTab) : null;
     },
 
     getWorkspaceSelection: () => {
       const tabState = useTabStore.getState();
-      const activeTab = tabState.tabs.find((tab) => tab.id === tabState.activeTabId);
+      const activeTab = tabState.tabs.find(
+        (tab) => tab.id === tabState.activeTabId,
+      );
       return activeTab ? workspaceSelectionFromTab(activeTab) : null;
     },
 
     listCollections: async (input, context) => {
       const connectionId = input.connectionId || context.activeConnectionId;
       if (!connectionId) {
-        throw new Error("No active connection is available for metadata.listCollections");
+        throw new Error(
+          "No active connection is available for metadata.listCollections",
+        );
       }
       const namespace =
         input.namespace || useSchemaStore.getState().currentSchema || "";
@@ -135,7 +143,7 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
         input.connectionId,
         input.namespace,
         context,
-        "query.runReadOnly"
+        "query.runReadOnly",
       );
 
       const results = await executeReadOnlyWorkspaceQuery(
@@ -148,12 +156,15 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
       return limitQueryResults(results, input.limit ?? 200);
     },
 
+    explainQuery: async (input, context) =>
+      executeWorkspaceExplainPlan(input, context),
+
     runMutationQuery: async (input, context) => {
       const { connectionId, namespace } = resolveQueryExecutionTarget(
         input.connectionId,
         input.namespace,
         context,
-        "mutation query"
+        "mutation query",
       );
 
       return executeWorkspaceQuery(
@@ -161,7 +172,7 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
         input.query,
         namespace,
         context,
-        "query.runMutation"
+        "query.runMutation",
       );
     },
 
@@ -255,17 +266,19 @@ function workspaceTabSummaryFromTab(tab: {
 
 async function mutateTableRows(
   input: AiTableMutationInput,
-  context: AiToolExecutionContext
+  context: AiToolExecutionContext,
 ) {
   const { connectionId, namespace, driver, capabilities } =
     await resolveMetadataTarget(
       input.connectionId,
       input.namespace,
       context,
-      "table.mutateRows"
+      "table.mutateRows",
     );
   if (!capabilities.supportsTableBrowsing) {
-    throw new Error(`${capabilities.displayName} does not support table row mutation`);
+    throw new Error(
+      `${capabilities.displayName} does not support table row mutation`,
+    );
   }
 
   return tableService.mutateTableRows(
@@ -275,22 +288,24 @@ async function mutateTableRows(
     input.table,
     input.inserts ?? [],
     input.updates ?? [],
-    input.deletes ?? []
+    input.deletes ?? [],
   );
 }
 
 async function mutateDocuments(
   input: AiDocumentMutationInput,
-  context: AiToolExecutionContext
+  context: AiToolExecutionContext,
 ) {
   const { connectionId, namespace, capabilities } = await resolveMetadataTarget(
     input.connectionId,
     input.namespace,
     context,
-    "document.mutate"
+    "document.mutate",
   );
   if (capabilities.dataModel !== "document") {
-    throw new Error(`${capabilities.displayName} does not support document mutation`);
+    throw new Error(
+      `${capabilities.displayName} does not support document mutation`,
+    );
   }
 
   return executeWorkspaceQuery(
@@ -299,22 +314,24 @@ async function mutateDocuments(
     undefined,
     context,
     "document.mutate",
-    false
+    false,
   );
 }
 
 async function mutateKeyValues(
   input: AiKeyValueMutationInput,
-  context: AiToolExecutionContext
+  context: AiToolExecutionContext,
 ) {
   const { connectionId, namespace, capabilities } = await resolveMetadataTarget(
     input.connectionId,
     input.namespace,
     context,
-    "key.mutate"
+    "key.mutate",
   );
   if (capabilities.dataModel !== "keyValue") {
-    throw new Error(`${capabilities.displayName} does not support key-value mutation`);
+    throw new Error(
+      `${capabilities.displayName} does not support key-value mutation`,
+    );
   }
 
   return executeWorkspaceQuery(
@@ -322,22 +339,24 @@ async function mutateKeyValues(
     buildRedisMutationCommand(input),
     namespace || undefined,
     context,
-    "key.mutate"
+    "key.mutate",
   );
 }
 
 async function mutateSearchDocuments(
   input: AiSearchDocumentMutationInput,
-  context: AiToolExecutionContext
+  context: AiToolExecutionContext,
 ) {
   const { connectionId, capabilities } = await resolveMetadataTarget(
     input.connectionId,
     null,
     context,
-    "search.mutate"
+    "search.mutate",
   );
   if (capabilities.dataModel !== "search") {
-    throw new Error(`${capabilities.displayName} does not support search document mutation`);
+    throw new Error(
+      `${capabilities.displayName} does not support search document mutation`,
+    );
   }
 
   return executeWorkspaceQuery(
@@ -346,13 +365,13 @@ async function mutateSearchDocuments(
     undefined,
     context,
     "search.mutate",
-    false
+    false,
   );
 }
 
 async function getLspCompletions(
   input: AiLspCompletionInput,
-  context: AiToolExecutionContext
+  context: AiToolExecutionContext,
 ) {
   const connectionId = input.connectionId || context.activeConnectionId;
   if (!connectionId) {
@@ -371,7 +390,9 @@ async function getLspCompletions(
   }
 
   const tabState = useTabStore.getState();
-  const activeTab = tabState.tabs.find((tab) => tab.id === tabState.activeTabId);
+  const activeTab = tabState.tabs.find(
+    (tab) => tab.id === tabState.activeTabId,
+  );
   const languageId = input.languageId || lspLanguageId(driver);
   const uri =
     input.uri ||
@@ -390,7 +411,7 @@ async function getLspCompletions(
 
 async function explainLspDiagnostics(
   input: AiLspDiagnosticsInput,
-  _context: AiToolExecutionContext
+  _context: AiToolExecutionContext,
 ): Promise<AiLspDiagnosticsExplanation> {
   const tabState = useTabStore.getState();
   const tabId =
@@ -402,19 +423,19 @@ async function explainLspDiagnostics(
     throw new Error("No active tab is available for lsp.explainDiagnostics");
   }
 
-  const selection = input.onlySelection ? tab.editorSelection ?? null : null;
+  const selection = input.onlySelection ? (tab.editorSelection ?? null) : null;
   const diagnostics = (tab.lspDiagnostics ?? [])
     .filter((diagnostic) =>
       input.severity
         ? diagnosticSeverityLabel(diagnostic.severity) === input.severity
-        : true
+        : true,
     )
     .filter((diagnostic) =>
-      selection ? diagnosticOverlapsSelection(diagnostic, selection) : true
+      selection ? diagnosticOverlapsSelection(diagnostic, selection) : true,
     );
   const lines = tab.sql.split(/\r?\n/);
   const explained = diagnostics.map((diagnostic) =>
-    explainDiagnostic(diagnostic, lines)
+    explainDiagnostic(diagnostic, lines),
   );
 
   return {
@@ -425,7 +446,7 @@ async function explainLspDiagnostics(
     summary: diagnosticsSummary(
       explained,
       Boolean(selection),
-      input.severity ?? null
+      input.severity ?? null,
     ),
     diagnostics: explained,
   };
@@ -433,7 +454,7 @@ async function explainLspDiagnostics(
 
 function explainDiagnostic(
   diagnostic: Diagnostic,
-  lines: string[]
+  lines: string[],
 ): AiExplainedDiagnostic {
   const severityLabel = diagnosticSeverityLabel(diagnostic.severity);
   const lineNumber = diagnostic.range.start.line + 1;
@@ -455,7 +476,7 @@ function explainDiagnostic(
 }
 
 function diagnosticSeverityLabel(
-  severity: number | undefined
+  severity: number | undefined,
 ): AiExplainedDiagnostic["severityLabel"] {
   if (severity === 1) return "error";
   if (severity === 2) return "warning";
@@ -466,7 +487,7 @@ function diagnosticSeverityLabel(
 
 function diagnosticExplanation(
   message: string,
-  severity: ReturnType<typeof diagnosticSeverityLabel>
+  severity: ReturnType<typeof diagnosticSeverityLabel>,
 ) {
   if (severity === "error") {
     return `The LSP reported a blocking syntax or semantic problem: ${message}`;
@@ -486,7 +507,7 @@ function diagnosticExplanation(
 function diagnosticsSummary(
   diagnostics: AiExplainedDiagnostic[],
   onlySelection: boolean,
-  severity: string | null
+  severity: string | null,
 ) {
   const scope = onlySelection ? "selection" : "active tab";
   const filter = severity ? ` ${severity}` : "";
@@ -499,7 +520,7 @@ function diagnosticsSummary(
       acc[diagnostic.severityLabel] = (acc[diagnostic.severityLabel] ?? 0) + 1;
       return acc;
     },
-    {}
+    {},
   );
   const countText = Object.entries(counts)
     .map(([label, count]) => `${count} ${label}`)
@@ -509,7 +530,7 @@ function diagnosticsSummary(
 
 function diagnosticOverlapsSelection(
   diagnostic: Diagnostic,
-  selection: EditorSelectionState
+  selection: EditorSelectionState,
 ) {
   const diagnosticStart = {
     line: diagnostic.range.start.line + 1,
@@ -536,7 +557,7 @@ function diagnosticOverlapsSelection(
 
 function comparePosition(
   left: { line: number; column: number },
-  right: { line: number; column: number }
+  right: { line: number; column: number },
 ) {
   if (left.line !== right.line) return left.line - right.line;
   return left.column - right.column;
@@ -544,19 +565,19 @@ function comparePosition(
 
 async function mutateNamespace(
   input: AiNamespaceMutationInput,
-  context: AiToolExecutionContext
+  context: AiToolExecutionContext,
 ) {
   const { connectionId, driver, capabilities } = await resolveMetadataTarget(
     input.connectionId,
     null,
     context,
-    "database.mutateNamespace"
+    "database.mutateNamespace",
   );
 
   if (input.operation === "create") {
     if (!capabilities.supportsCreateDatabase) {
       throw new Error(
-        `${capabilities.displayName} does not support namespace creation`
+        `${capabilities.displayName} does not support namespace creation`,
       );
     }
     return databaseService.createDatabase(
@@ -564,32 +585,32 @@ async function mutateNamespace(
       driver,
       input.namespace,
       input.charset ?? undefined,
-      input.collation ?? undefined
+      input.collation ?? undefined,
     );
   }
 
   if (!capabilities.supportsCreateDatabase) {
     throw new Error(
-      `${capabilities.displayName} does not support namespace deletion`
+      `${capabilities.displayName} does not support namespace deletion`,
     );
   }
   return databaseService.dropDatabase(
     connectionId,
     driver,
     input.namespace,
-    input.cascade ?? false
+    input.cascade ?? false,
   );
 }
 
 async function listObjects(
   input: AiListObjectsInput,
-  context: AiToolExecutionContext
+  context: AiToolExecutionContext,
 ): Promise<AiObjectSummary[]> {
   const { connectionId, namespace, capabilities } = await resolveMetadataTarget(
     input.connectionId,
     input.namespace,
     context,
-    "metadata.listObjects"
+    "metadata.listObjects",
   );
 
   if (capabilities.supportsTableBrowsing) {
@@ -608,7 +629,10 @@ async function listObjects(
     capabilities.supportsCollectionBrowsing ||
     capabilities.supportsKeyValueBrowsing
   ) {
-    const collections = await schemaService.getCollections(connectionId, namespace);
+    const collections = await schemaService.getCollections(
+      connectionId,
+      namespace,
+    );
     const kind = collectionKind(capabilities.dataModel);
     return collections.map((collection) => ({
       name: collection.name,
@@ -625,14 +649,14 @@ async function listObjects(
 
 async function describeObject(
   input: AiDescribeObjectInput,
-  context: AiToolExecutionContext
+  context: AiToolExecutionContext,
 ): Promise<AiObjectDescription> {
   const { connectionId, namespace, driver, capabilities } =
     await resolveMetadataTarget(
       input.connectionId,
       input.namespace,
       context,
-      "metadata.describeObject"
+      "metadata.describeObject",
     );
   if (capabilities.supportsTableBrowsing) {
     const metadata = await loadTableMetadata({
@@ -661,10 +685,16 @@ async function describeObject(
     capabilities.supportsCollectionBrowsing ||
     capabilities.supportsKeyValueBrowsing
   ) {
-    const collections = await schemaService.getCollections(connectionId, namespace);
-    const collection = collections.find((candidate) => candidate.name === input.name);
+    const collections = await schemaService.getCollections(
+      connectionId,
+      namespace,
+    );
+    const collection = collections.find(
+      (candidate) => candidate.name === input.name,
+    );
     const metadata =
-      capabilities.dataModel === "document" || capabilities.dataModel === "search"
+      capabilities.dataModel === "document" ||
+      capabilities.dataModel === "search"
         ? await loadTableMetadata({
             connectionId,
             driver,
@@ -692,12 +722,12 @@ async function describeObject(
       previewQuery: collectionPreviewQueryTemplateForCapabilities(
         capabilities,
         namespace,
-        previewCollection
+        previewCollection,
       ),
       deleteQuery: collectionDeleteQueryTemplateForCapabilities(
         capabilities,
         namespace,
-        previewCollection
+        previewCollection,
       ),
     };
   }
@@ -712,7 +742,7 @@ async function describeObject(
 }
 
 function collectionKind(
-  dataModel: "relational" | "document" | "keyValue" | "search"
+  dataModel: "relational" | "document" | "keyValue" | "search",
 ): AiObjectKind {
   if (dataModel === "keyValue") return "key";
   if (dataModel === "search") return "index";
@@ -724,7 +754,7 @@ async function resolveMetadataTarget(
   requestedConnectionId: string | null | undefined,
   requestedNamespace: string | null | undefined,
   context: AiToolExecutionContext,
-  toolName: string
+  toolName: string,
 ) {
   const connectionId = requestedConnectionId || context.activeConnectionId;
   if (!connectionId) {
@@ -740,7 +770,10 @@ async function resolveMetadataTarget(
   }
 
   const namespace =
-    requestedNamespace || context.activeNamespace || useSchemaStore.getState().currentSchema || "";
+    requestedNamespace ||
+    context.activeNamespace ||
+    useSchemaStore.getState().currentSchema ||
+    "";
   const capabilities = await databaseService.getDatabaseCapabilities(driver);
   return { connectionId, namespace, driver, capabilities };
 }
@@ -749,7 +782,7 @@ function resolveQueryExecutionTarget(
   requestedConnectionId: string | null | undefined,
   requestedNamespace: string | null | undefined,
   context: AiToolExecutionContext,
-  toolName: string
+  toolName: string,
 ) {
   const connectionId = requestedConnectionId || context.activeConnectionId;
   if (!connectionId) {
@@ -772,12 +805,13 @@ function resolveQueryExecutionTarget(
 function inferActiveQueryNamespace(
   connectionId: string,
   driver: DatabaseDriver,
-  context: AiToolExecutionContext
+  context: AiToolExecutionContext,
 ) {
   const schemaState = useSchemaStore.getState();
   if (
     context.activeTab &&
-    (!context.activeTab.connectionId || context.activeTab.connectionId === connectionId)
+    (!context.activeTab.connectionId ||
+      context.activeTab.connectionId === connectionId)
   ) {
     return querySchemaContextForTab(
       {
@@ -787,18 +821,24 @@ function inferActiveQueryNamespace(
         objectType: context.activeTab.objectType ?? undefined,
       },
       context.activeNamespace || schemaState.currentSchema,
-      driver
+      driver,
     );
   }
 
   const tabState = useTabStore.getState();
-  const activeTab = tabState.tabs.find((tab) => tab.id === tabState.activeTabId);
+  const activeTab = tabState.tabs.find(
+    (tab) => tab.id === tabState.activeTabId,
+  );
 
   if (
     activeTab &&
     (!activeTab.connectionId || activeTab.connectionId === connectionId)
   ) {
-    return querySchemaContextForTab(activeTab, schemaState.currentSchema, driver);
+    return querySchemaContextForTab(
+      activeTab,
+      schemaState.currentSchema,
+      driver,
+    );
   }
 
   return schemaState.currentSchema || undefined;
@@ -810,7 +850,7 @@ async function executeWorkspaceQuery(
   namespace: string | undefined,
   context: AiToolExecutionContext,
   operation: string,
-  includeNamespaceArgument = true
+  includeNamespaceArgument = true,
 ) {
   const queryId = createCancellableAiQueryId(context, operation);
   if (!queryId) {
@@ -838,7 +878,7 @@ async function executeWorkspaceQuery(
       query,
       queryNamespace,
       undefined,
-      queryId
+      queryId,
     );
   } finally {
     isSettled = true;
@@ -851,7 +891,7 @@ async function executeReadOnlyWorkspaceQuery(
   query: string,
   namespace: string | undefined,
   driver: DatabaseDriver,
-  context: AiToolExecutionContext
+  context: AiToolExecutionContext,
 ) {
   const normalizedDriver =
     normalizeDatabaseDriverName(String(driver)) ||
@@ -862,7 +902,7 @@ async function executeReadOnlyWorkspaceQuery(
       query,
       namespace,
       context,
-      "query.runReadOnly"
+      "query.runReadOnly",
     );
   }
 
@@ -883,8 +923,84 @@ async function executeReadOnlyWorkspaceQuery(
       connectionId,
       query,
       namespace,
-      queryId
+      queryId,
     );
+  } finally {
+    isSettled = true;
+    context.abortSignal?.removeEventListener("abort", abortHandler);
+  }
+}
+
+async function executeWorkspaceExplainPlan(
+  input: {
+    connectionId?: string | null;
+    namespace?: string | null;
+    query: string;
+  },
+  context: AiToolExecutionContext,
+) {
+  const { connectionId, namespace, driver } = resolveQueryExecutionTarget(
+    input.connectionId,
+    input.namespace,
+    context,
+    "query.explain",
+  );
+  const capabilities = await databaseService.getDatabaseCapabilities(driver);
+  if (!capabilities.supportsExplainPlan) {
+    throw new Error(
+      `${capabilities.displayName} does not support Explain Plan`,
+    );
+  }
+
+  const queryId = [
+    sanitizeQueryIdSegment(context.requestId),
+    "query.explain",
+    createRequestId(),
+  ].join(":");
+  if (context.abortSignal?.aborted) {
+    throw new Error("AI tool execution aborted");
+  }
+  const tabState = useTabStore.getState();
+  const activeTab = tabState.tabs.find(
+    (tab) => tab.id === tabState.activeTabId,
+  );
+  const targetTab =
+    activeTab &&
+    (!activeTab.connectionId || activeTab.connectionId === connectionId)
+      ? activeTab
+      : null;
+  const database = targetTab?.databaseName || undefined;
+  let isSettled = false;
+  const abortHandler = () => {
+    if (isSettled) return;
+    void queryService.cancelQuery(queryId).catch(() => undefined);
+  };
+  context.abortSignal?.addEventListener("abort", abortHandler, { once: true });
+
+  try {
+    const plan = await queryService.explainQuery({
+      connectionId,
+      queryId,
+      sql: input.query,
+      schema: database ? undefined : namespace,
+      database,
+      mode: "estimate",
+    });
+    if (targetTab) {
+      useTabStore.setState((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === targetTab.id
+            ? {
+                ...tab,
+                explainPlan: plan,
+                queryOutputView: "plan",
+                error: null,
+              }
+            : tab,
+        ),
+      }));
+    }
+    return plan;
   } finally {
     isSettled = true;
     context.abortSignal?.removeEventListener("abort", abortHandler);
@@ -893,7 +1009,7 @@ async function executeReadOnlyWorkspaceQuery(
 
 function createCancellableAiQueryId(
   context: AiToolExecutionContext,
-  operation: string
+  operation: string,
 ) {
   if (!context.abortSignal) return undefined;
   return [

@@ -10,6 +10,8 @@ import type {
   ColumnDef,
   ColumnInfo,
   ConstraintInfo,
+  ExplainPlan,
+  ExplainPlanMode,
   IndexInfo,
   TableFilter,
   TableSort,
@@ -50,7 +52,7 @@ async function refreshMetadataAfterQuery(
   connectionId: string,
   schemaContext: string | undefined,
   sql: string,
-  results: QueryResult[] | null | undefined
+  results: QueryResult[] | null | undefined,
 ) {
   const schemaStore = useSchemaStore.getState();
   const connection = useConnectionStore
@@ -106,7 +108,7 @@ async function refreshMetadataAfterQuery(
   const namespacesToRefresh = metadataRefreshNamespaces(
     sql,
     fallbackSchema,
-    driver
+    driver,
   );
   await Promise.all(namespacesToRefresh.map(refreshNamespaceObjects));
   schemaStore.bumpMetadataVersion();
@@ -147,6 +149,8 @@ export interface TabData {
   objectType?: string | null;
   filters?: any[];
   results: QueryResult[] | null;
+  explainPlan?: ExplainPlan | null;
+  queryOutputView?: "results" | "plan";
   isExecuting: boolean;
   runningQueryId?: string | null;
   error: string | null;
@@ -202,7 +206,7 @@ function fileNameFromPath(relativePath: string) {
 }
 
 export function hasPendingTableChanges(
-  tab: Pick<TabData, "type" | "pendingEdits" | "newRowsCount">
+  tab: Pick<TabData, "type" | "pendingEdits" | "newRowsCount">,
 ) {
   return (
     tab.type === "table" &&
@@ -213,14 +217,12 @@ export function hasPendingTableChanges(
 export function hasUnsavedTabChanges(
   tab: Pick<
     TabData,
-    | "type"
-    | "fileRelativePath"
-    | "isDirty"
-    | "pendingEdits"
-    | "newRowsCount"
-  >
+    "type" | "fileRelativePath" | "isDirty" | "pendingEdits" | "newRowsCount"
+  >,
 ) {
-  return Boolean(tab.fileRelativePath && tab.isDirty) || hasPendingTableChanges(tab);
+  return (
+    Boolean(tab.fileRelativePath && tab.isDirty) || hasPendingTableChanges(tab)
+  );
 }
 
 function confirmDiscardTabChanges(tabs: TabData[], action: string) {
@@ -241,29 +243,29 @@ function confirmDiscardTabChanges(tabs: TabData[], action: string) {
     details.push(
       `${dirtyFiles.length} project file${dirtyFiles.length === 1 ? "" : "s"}: ${names}${
         remaining > 0 ? ` and ${remaining} more` : ""
-      }`
+      }`,
     );
   }
   if (dirtyTables.length > 0) {
     const editedCells = dirtyTables.reduce(
       (total, tab) => total + (tab.pendingEdits?.size || 0),
-      0
+      0,
     );
     const newRows = dirtyTables.reduce(
       (total, tab) => total + (tab.newRowsCount || 0),
-      0
+      0,
     );
     details.push(
       `${dirtyTables.length} table tab${dirtyTables.length === 1 ? "" : "s"} (${editedCells} edited cell${
         editedCells === 1 ? "" : "s"
-      }, ${newRows} new row${newRows === 1 ? "" : "s"})`
+      }, ${newRows} new row${newRows === 1 ? "" : "s"})`,
     );
   }
 
   return window.confirm(
     `Unsaved changes will be discarded when you ${action}.\n\n${details.join(
-      "\n"
-    )}\n\nUse Submit Changes or save the file first to keep them. Select OK to discard, or Cancel to stay.`
+      "\n",
+    )}\n\nUse Submit Changes or save the file first to keep them. Select OK to discard, or Cancel to stay.`,
   );
 }
 
@@ -279,14 +281,12 @@ export function confirmDiscardTableChanges(tabId: string, action: string) {
 }
 
 function normalizedDatabaseName(databaseName: string | null | undefined) {
-  return databaseName === "" || databaseName == null
-    ? undefined
-    : databaseName;
+  return databaseName === "" || databaseName == null ? undefined : databaseName;
 }
 
 function tabMatchesDatabase(
   tab: Pick<TabData, "databaseName">,
-  databaseName: string | null | undefined
+  databaseName: string | null | undefined,
 ) {
   return (
     normalizedDatabaseName(tab.databaseName) ===
@@ -300,14 +300,16 @@ export function querySchemaContextForTab(
     "targetSchema" | "schemaName" | "tableName" | "objectType"
   >,
   currentSchema: string | null | undefined,
-  driver: string = DEFAULT_DATABASE_DRIVER
+  driver: string = DEFAULT_DATABASE_DRIVER,
 ) {
   const capabilities = defaultDatabaseCapabilities(driver);
   if (
     capabilities.dataModel === "search" &&
     tab.tableName &&
     !tab.targetSchema &&
-    (tab.objectType === "index" || !tab.schemaName || tab.schemaName === "default")
+    (tab.objectType === "index" ||
+      !tab.schemaName ||
+      tab.schemaName === "default")
   ) {
     return tab.tableName;
   }
@@ -318,13 +320,13 @@ export function querySchemaContextForTab(
 function mutationKeyColumns(
   columns: ColumnInfo[] | undefined,
   indexes: IndexInfo[] | undefined,
-  resultColumns: ColumnDef[]
+  resultColumns: ColumnDef[],
 ) {
   const tableColumns = columns || [];
   const resultColumnNames = new Set(resultColumns.map((column) => column.name));
   const byName = new Map(tableColumns.map((column) => [column.name, column]));
   const primaryKeyColumns = tableColumns.filter(
-    (column) => column.is_primary_key && resultColumnNames.has(column.name)
+    (column) => column.is_primary_key && resultColumnNames.has(column.name),
   );
 
   if (primaryKeyColumns.length > 0) {
@@ -342,7 +344,7 @@ function mutationKeyColumns(
     .filter(
       ({ index, columns }) =>
         columns.length === index.columns.length &&
-        columns.every((column) => resultColumnNames.has(column.name))
+        columns.every((column) => resultColumnNames.has(column.name)),
     )
     .map(({ columns }) => columns)
     .sort((left, right) => left.length - right.length);
@@ -355,7 +357,7 @@ function mutationKeyColumns(
     (column) =>
       !column.is_primary_key &&
       column.is_unique &&
-      resultColumnNames.has(column.name)
+      resultColumnNames.has(column.name),
   );
 
   // Column-level uniqueness is ambiguous for composite unique constraints.
@@ -365,13 +367,13 @@ function mutationKeyColumns(
 function rowMutationKey(
   row: unknown[],
   resultColumns: ColumnDef[],
-  keyColumns: ColumnInfo[]
+  keyColumns: ColumnInfo[],
 ) {
   const key: Record<string, unknown> = {};
 
   for (const keyColumn of keyColumns) {
     const keyIndex = resultColumns.findIndex(
-      (column) => column.name === keyColumn.name
+      (column) => column.name === keyColumn.name,
     );
     if (keyIndex === -1) return null;
 
@@ -392,20 +394,25 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function mutationRefreshError(operation: "save" | "delete", details?: string | null) {
-  const completedAction = operation === "save" ? "Changes were saved" : "Rows were deleted";
+function mutationRefreshError(
+  operation: "save" | "delete",
+  details?: string | null,
+) {
+  const completedAction =
+    operation === "save" ? "Changes were saved" : "Rows were deleted";
   const detailSuffix = details ? ` Details: ${details}` : "";
   return `${completedAction}, but the table could not be refreshed. Click Refresh to load the latest data.${detailSuffix}`;
 }
 
 function mutationPreservedDraftsMessage(operation: "save" | "delete") {
-  const completedAction = operation === "save" ? "Changes were saved" : "Rows were deleted";
+  const completedAction =
+    operation === "save" ? "Changes were saved" : "Rows were deleted";
   return `${completedAction}. Other unsaved table changes were preserved; submit or revert them before refreshing.`;
 }
 
 function resultsAfterSubmittedEdits(
   results: QueryResult[] | null,
-  submittedEdits: Map<string, any>
+  submittedEdits: Map<string, any>,
 ) {
   if (!results?.[0] || submittedEdits.size === 0) return results;
 
@@ -427,13 +434,13 @@ function resultsAfterSubmittedEdits(
   }
 
   return results.map((result, index) =>
-    index === 0 ? { ...result, rows } : result
+    index === 0 ? { ...result, rows } : result,
   );
 }
 
 function pendingEditsAfterRowDeletion(
   pendingEdits: Map<string, any> | undefined,
-  deletedRowIndexes: number[]
+  deletedRowIndexes: number[],
 ) {
   const nextEdits = new Map<string, any>();
   const deletedRows = new Set(deletedRowIndexes);
@@ -450,7 +457,7 @@ function pendingEditsAfterRowDeletion(
     if (deletedRows.has(rowIndex)) continue;
 
     const precedingDeletedRows = deletedRowIndexes.filter(
-      (deletedRowIndex) => deletedRowIndex < rowIndex
+      (deletedRowIndex) => deletedRowIndex < rowIndex,
     ).length;
     nextEdits.set(`${rowIndex - precedingDeletedRows}:${columnIndex}`, value);
   }
@@ -462,7 +469,7 @@ function tableDraftsAfterSuccessfulSave(
   pendingEdits: Map<string, any> | undefined,
   newRowsCount: number | undefined,
   submittedEdits: Map<string, any>,
-  insertedRowIndexes: Set<number>
+  insertedRowIndexes: Set<number>,
 ) {
   const insertedOffsets = Array.from(insertedRowIndexes)
     .map((rowIndex) => -rowIndex - 1)
@@ -482,7 +489,10 @@ function tableDraftsAfterSuccessfulSave(
     }
 
     if (rowIndex >= 0) {
-      if (submittedEdits.has(key) && Object.is(submittedEdits.get(key), value)) {
+      if (
+        submittedEdits.has(key) &&
+        Object.is(submittedEdits.get(key), value)
+      ) {
         continue;
       }
       nextEdits.set(key, value);
@@ -493,9 +503,12 @@ function tableDraftsAfterSuccessfulSave(
     if (insertedOffsetSet.has(rowOffset)) continue;
 
     const precedingInsertedRows = insertedOffsets.filter(
-      (insertedOffset) => insertedOffset < rowOffset
+      (insertedOffset) => insertedOffset < rowOffset,
     ).length;
-    nextEdits.set(`${-1 - (rowOffset - precedingInsertedRows)}:${columnIndex}`, value);
+    nextEdits.set(
+      `${-1 - (rowOffset - precedingInsertedRows)}:${columnIndex}`,
+      value,
+    );
   }
 
   return {
@@ -535,14 +548,14 @@ interface TabState {
         | "filePreview"
         | "isDirty"
       >
-    >
+    >,
   ) => string;
   findOrCreateTableTab: (
     connectionId: string,
     schemaName: string,
     tableName: string,
     objectType?: string | null,
-    databaseName?: string
+    databaseName?: string,
   ) => string;
   findOrCreateObjectQueryTab: (
     connectionId: string,
@@ -550,7 +563,7 @@ interface TabState {
     objectName: string,
     objectType: string | null | undefined,
     initialSql: string,
-    title?: string
+    title?: string,
   ) => string;
   createTableTab: (connectionId: string, schemaName: string) => string;
   retargetTableTabs: (
@@ -559,7 +572,7 @@ interface TabState {
     oldTableName: string,
     newTableName: string,
     objectType?: string | null,
-    databaseName?: string
+    databaseName?: string,
   ) => void;
   updateTabTitle: (id: string, title: string) => void;
   openProjectFileTab: (
@@ -567,7 +580,7 @@ interface TabState {
     relativePath: string,
     content: string,
     revision: string,
-    rootPath?: string | null
+    rootPath?: string | null,
   ) => string;
   openProjectFilePreviewTab: (
     projectId: string,
@@ -576,22 +589,19 @@ interface TabState {
     dataBase64: string,
     revision: string,
     size: number,
-    rootPath?: string | null
+    rootPath?: string | null,
   ) => string;
   markProjectFileSaved: (
     id: string,
     revision: string,
-    savedContent?: string
+    savedContent?: string,
   ) => void;
   renameProjectFileTabs: (
     projectId: string,
     oldRelativePath: string,
-    newRelativePath: string
+    newRelativePath: string,
   ) => void;
-  discardProjectFileTabs: (
-    projectId: string,
-    relativePath: string
-  ) => void;
+  discardProjectFileTabs: (projectId: string, relativePath: string) => void;
   closeTab: (id: string) => void;
   forceCloseTab: (id: string) => void;
   closeOtherTabs: (id: string) => void;
@@ -604,37 +614,44 @@ interface TabState {
   updateTabSql: (id: string, sql: string) => void;
   setEditorSelection: (
     id: string,
-    selection: EditorSelectionState | null
+    selection: EditorSelectionState | null,
   ) => void;
   setLspDiagnostics: (id: string, diagnostics: Diagnostic[]) => void;
   setActiveResultIndex: (id: string, index: number) => void;
+  setQueryOutputView: (id: string, view: "results" | "plan") => void;
   closeResultAt: (id: string, index: number) => void;
   runTabQuery: (
     id: string,
     connectionId: string,
     sqlOverride?: string,
-    transactionId?: string
+    transactionId?: string,
+  ) => Promise<void>;
+  runExplainPlan: (
+    id: string,
+    connectionId: string,
+    sql: string,
+    mode?: ExplainPlanMode,
   ) => Promise<void>;
   cancelTabQuery: (id: string) => Promise<void>;
   setGridFilter: (
     tabId: string,
     column: string,
-    filter: { operator: string; value: string } | undefined
+    filter: { operator: string; value: string } | undefined,
   ) => void;
   setGridSort: (
     tabId: string,
     column: string | null,
-    direction: "asc" | "desc" | null
+    direction: "asc" | "desc" | null,
   ) => Promise<boolean>;
   setCellEdit: (
     tabId: string,
     rowIndex: number,
     colIndex: number,
-    value: any
+    value: any,
   ) => void;
   setBulkCellEdit: (
     tabId: string,
-    edits: Array<{ rowIndex: number; colIndex: number; value: any }>
+    edits: Array<{ rowIndex: number; colIndex: number; value: any }>,
   ) => void;
   commitEdits: (tabId: string) => Promise<void>;
   deleteRows: (tabId: string, rowIndexes: number[]) => Promise<void>;
@@ -649,7 +666,7 @@ interface TabState {
       operator: FilterOperator;
       value: string;
       logic?: "AND" | "OR";
-    }>
+    }>,
   ) => void;
   setSqlFilter: (tabId: string, sqlFilter: string) => void;
   // Column layout methods
@@ -661,24 +678,21 @@ interface TabState {
   // Schema selection method
   setTargetSchema: (tabId: string, schema: string | null) => void;
   setTargetDatabase: (tabId: string, database: string | null) => void;
-  setTableMetadata: (
-    tabId: string,
-    metadata: TableMetadataSnapshot
-  ) => void;
+  setTableMetadata: (tabId: string, metadata: TableMetadataSnapshot) => void;
   fetchTableColumns: (tabId: string, force?: boolean) => Promise<void>;
   refreshTableTabs: (
     connectionId: string,
     schemaName: string,
     tableName: string,
     refreshMetadata?: boolean,
-    databaseName?: string
+    databaseName?: string,
   ) => Promise<void>;
   loadTablePage: (
     tabId: string,
     page?: number,
     filterSql?: string | null,
     filters?: TableFilter[] | null,
-    options?: TablePageLoadOptions
+    options?: TablePageLoadOptions,
   ) => Promise<boolean>;
 }
 
@@ -691,7 +705,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     type = "query",
     title = "New Query",
     initialSql = "",
-    metadata = {}
+    metadata = {},
   ) => {
     const newTab: TabData = {
       id: uuidv4(),
@@ -699,6 +713,8 @@ export const useTabStore = create<TabState>((set, get) => ({
       type,
       sql: initialSql,
       results: null,
+      explainPlan: null,
+      queryOutputView: "results",
       activeResultIndex: 0,
       isExecuting: false,
       error: null,
@@ -719,7 +735,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     schemaName: string,
     tableName: string,
     objectType?: string | null,
-    databaseName?: string
+    databaseName?: string,
   ) => {
     const { tabs } = get();
     const normalizedDatabase = normalizedDatabaseName(databaseName);
@@ -731,7 +747,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         tab.connectionId === connectionId &&
         tab.tableName === tableName &&
         tab.schemaName === schemaName &&
-        tabMatchesDatabase(tab, normalizedDatabase)
+        tabMatchesDatabase(tab, normalizedDatabase),
     );
 
     if (existingTab) {
@@ -741,7 +757,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         tabs: state.tabs.map((tab) =>
           tab.id === existingTab.id && objectType
             ? { ...tab, objectType }
-            : tab
+            : tab,
         ),
       }));
       return existingTab.id;
@@ -769,7 +785,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     objectName: string,
     objectType: string | null | undefined,
     initialSql: string,
-    title = objectName
+    title = objectName,
   ) => {
     const normalizedSchema = schemaName || "";
     const normalizedObjectType = objectType || null;
@@ -778,7 +794,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         tab.type === "query" &&
         tab.connectionId === connectionId &&
         (tab.schemaName || "") === normalizedSchema &&
-        tab.tableName === objectName
+        tab.tableName === objectName,
     );
 
     if (existingTab) {
@@ -793,7 +809,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                 schemaName: normalizedSchema,
                 objectType: normalizedObjectType,
               }
-            : tab
+            : tab,
         ),
       }));
       return existingTab.id;
@@ -838,7 +854,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     oldTableName: string,
     newTableName: string,
     objectType?: string | null,
-    databaseName?: string
+    databaseName?: string,
   ) => {
     set((state) => ({
       tabs: state.tabs.map((tab) =>
@@ -860,7 +876,7 @@ export const useTabStore = create<TabState>((set, get) => ({
               tablePage: 0,
               tableTotalRows: null,
             }
-          : tab
+          : tab,
       ),
     }));
   },
@@ -876,13 +892,13 @@ export const useTabStore = create<TabState>((set, get) => ({
     relativePath,
     content,
     revision,
-    rootPath
+    rootPath,
   ) => {
     const existing = get().tabs.find(
       (tab) =>
         tab.fileProjectId === projectId &&
         tab.fileRelativePath === relativePath &&
-        (!rootPath || !tab.fileRootPath || tab.fileRootPath === rootPath)
+        (!rootPath || !tab.fileRootPath || tab.fileRootPath === rootPath),
     );
     if (existing) {
       set({ activeTabId: existing.id });
@@ -905,13 +921,13 @@ export const useTabStore = create<TabState>((set, get) => ({
     dataBase64,
     revision,
     size,
-    rootPath
+    rootPath,
   ) => {
     const existing = get().tabs.find(
       (tab) =>
         tab.fileProjectId === projectId &&
         tab.fileRelativePath === relativePath &&
-        (!rootPath || !tab.fileRootPath || tab.fileRootPath === rootPath)
+        (!rootPath || !tab.fileRootPath || tab.fileRootPath === rootPath),
     );
     const filePreview: ProjectFileImagePreview = {
       kind: "image",
@@ -933,7 +949,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                 isDirty: false,
                 fileError: null,
               }
-            : tab
+            : tab,
         ),
       }));
       return existing.id;
@@ -960,16 +976,12 @@ export const useTabStore = create<TabState>((set, get) => ({
                 savedContent === undefined ? false : tab.sql !== savedContent,
               fileError: null,
             }
-          : tab
+          : tab,
       ),
     }));
   },
 
-  renameProjectFileTabs: (
-    projectId,
-    oldRelativePath,
-    newRelativePath
-  ) => {
+  renameProjectFileTabs: (projectId, oldRelativePath, newRelativePath) => {
     set((state) => ({
       tabs: state.tabs.map((tab) => {
         if (
@@ -999,7 +1011,7 @@ export const useTabStore = create<TabState>((set, get) => ({
           tab.fileRelativePath === relativePath ||
           tab.fileRelativePath!.startsWith(`${relativePath}/`));
       const discardedIds = new Set(
-        state.tabs.filter(shouldDiscard).map((tab) => tab.id)
+        state.tabs.filter(shouldDiscard).map((tab) => tab.id),
       );
       if (discardedIds.size === 0) return state;
 
@@ -1012,7 +1024,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         tabs,
         activeTabId,
         closedTabsStack: state.closedTabsStack.filter(
-          (tab) => !shouldDiscard(tab)
+          (tab) => !shouldDiscard(tab),
         ),
       };
     });
@@ -1076,7 +1088,9 @@ export const useTabStore = create<TabState>((set, get) => ({
 
   closeOtherTabs: (id: string) => {
     set((state) => {
-      const closing = state.tabs.filter((tab) => tab.id !== id && !tab.isPinned);
+      const closing = state.tabs.filter(
+        (tab) => tab.id !== id && !tab.isPinned,
+      );
       if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
       return {
         tabs: state.tabs.filter((tab) => tab.id === id || tab.isPinned),
@@ -1134,7 +1148,7 @@ export const useTabStore = create<TabState>((set, get) => ({
   togglePinTab: (id: string) => {
     set((state) => {
       const tabs = state.tabs.map((t) =>
-        t.id === id ? { ...t, isPinned: !t.isPinned } : t
+        t.id === id ? { ...t, isPinned: !t.isPinned } : t,
       );
 
       // Sort tabs: pinned first, then unpinned
@@ -1175,12 +1189,17 @@ export const useTabStore = create<TabState>((set, get) => ({
           ? {
               ...tab,
               sql,
+              explainPlan: tab.sql === sql ? tab.explainPlan : null,
+              queryOutputView:
+                tab.sql === sql || !tab.explainPlan
+                  ? tab.queryOutputView
+                  : "results",
               isDirty: tab.fileRelativePath
                 ? tab.isDirty || tab.sql !== sql
                 : tab.isDirty,
               fileError: tab.fileRelativePath ? null : tab.fileError,
             }
-          : tab
+          : tab,
       ),
     }));
   },
@@ -1188,7 +1207,7 @@ export const useTabStore = create<TabState>((set, get) => ({
   setEditorSelection: (id: string, selection: EditorSelectionState | null) => {
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.id === id ? { ...t, editorSelection: selection } : t
+        t.id === id ? { ...t, editorSelection: selection } : t,
       ),
     }));
   },
@@ -1196,7 +1215,7 @@ export const useTabStore = create<TabState>((set, get) => ({
   setLspDiagnostics: (id: string, diagnostics: Diagnostic[]) => {
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.id === id ? { ...t, lspDiagnostics: diagnostics } : t
+        t.id === id ? { ...t, lspDiagnostics: diagnostics } : t,
       ),
     }));
   },
@@ -1214,11 +1233,21 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
   },
 
+  setQueryOutputView: (id, queryOutputView) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === id ? { ...tab, queryOutputView } : tab,
+      ),
+    }));
+  },
+
   closeResultAt: (id: string, index: number) => {
     set((state) => ({
       tabs: state.tabs.map((t) => {
         if (t.id !== id || !t.results) return t;
-        const nextResults = t.results.filter((_, resultIndex) => resultIndex !== index);
+        const nextResults = t.results.filter(
+          (_, resultIndex) => resultIndex !== index,
+        );
         const currentIndex = t.activeResultIndex ?? 0;
         const nextActiveIndex =
           nextResults.length === 0
@@ -1242,7 +1271,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     id: string,
     connectionId: string,
     sqlOverride?: string,
-    transactionId?: string
+    transactionId?: string,
   ) => {
     const tab = get().tabs.find((t) => t.id === id);
     if (!tab) return;
@@ -1257,7 +1286,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     const schemaContext = querySchemaContextForTab(
       tab,
       currentSchema,
-      connection?.driver || DEFAULT_DATABASE_DRIVER
+      connection?.driver || DEFAULT_DATABASE_DRIVER,
     );
     const historyContext = {
       projectId: connection?.projectId || "sqls",
@@ -1291,16 +1320,18 @@ export const useTabStore = create<TabState>((set, get) => ({
               runningQueryId: queryId,
               error: null,
               results: null,
+              explainPlan: null,
+              queryOutputView: "results",
               activeResultIndex: 0,
             }
-          : t
+          : t,
       ),
     }));
 
     try {
       console.log(
         "TabStore: Running query with schema context:",
-        schemaContext
+        schemaContext,
       );
 
       const results = await queryService.executeQuery(
@@ -1309,7 +1340,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         tab.databaseName ? undefined : schemaContext || undefined,
         transactionId,
         queryId,
-        tab.databaseName
+        tab.databaseName,
       );
 
       console.log("[TabStore] Query successfully finished", results);
@@ -1325,7 +1356,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       });
       taskStore.finishTask(
         taskId,
-        `${rowCount.toLocaleString()} row${rowCount === 1 ? "" : "s"}`
+        `${rowCount.toLocaleString()} row${rowCount === 1 ? "" : "s"}`,
       );
 
       set((state) => ({
@@ -1338,7 +1369,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                 results: results || null,
                 activeResultIndex: 0,
               }
-            : t
+            : t,
         ),
       }));
 
@@ -1347,7 +1378,7 @@ export const useTabStore = create<TabState>((set, get) => ({
           connectionId,
           schemaContext || undefined,
           sqlToRun,
-          results
+          results,
         ).catch((error) => {
           console.warn("[TabStore] Metadata refresh after query failed", error);
         });
@@ -1373,7 +1404,91 @@ export const useTabStore = create<TabState>((set, get) => ({
                 runningQueryId: null,
                 error: message,
               }
-            : t
+            : t,
+        ),
+      }));
+    }
+  },
+
+  runExplainPlan: async (id, connectionId, sql, mode = "estimate") => {
+    const tab = get().tabs.find((candidate) => candidate.id === id);
+    if (!tab || !sql.trim()) return;
+
+    const { currentSchema } = useSchemaStore.getState();
+    const connection = useConnectionStore
+      .getState()
+      .connections.find((item) => item.id === connectionId);
+    const schemaContext = querySchemaContextForTab(
+      tab,
+      currentSchema,
+      connection?.driver || DEFAULT_DATABASE_DRIVER,
+    );
+    const queryId = `${id}:plan:${uuidv4()}`;
+    const taskStore = useTaskStore.getState();
+    const taskId = taskStore.startTask({
+      kind: "query",
+      title: `${mode === "analyze" ? "Analyze" : "Explain"} ${tab.title}`,
+      detail:
+        mode === "analyze"
+          ? "Executing a read-only analyzed plan"
+          : "Generating an estimated plan",
+    });
+
+    set((state) => ({
+      tabs: state.tabs.map((candidate) =>
+        candidate.id === id
+          ? {
+              ...candidate,
+              isExecuting: true,
+              runningQueryId: queryId,
+              error: null,
+              explainPlan: null,
+              queryOutputView: "plan",
+            }
+          : candidate,
+      ),
+    }));
+
+    try {
+      const plan = await queryService.explainQuery({
+        connectionId,
+        sql,
+        schema: tab.databaseName ? undefined : schemaContext || undefined,
+        database: tab.databaseName || undefined,
+        queryId,
+        mode,
+      });
+      taskStore.finishTask(
+        taskId,
+        `${plan.mode === "analyze" ? "Analyzed" : "Estimated"} in ${plan.generatedInMs.toFixed(1)} ms`,
+      );
+      set((state) => ({
+        tabs: state.tabs.map((candidate) =>
+          candidate.id === id && candidate.runningQueryId === queryId
+            ? {
+                ...candidate,
+                isExecuting: false,
+                runningQueryId: null,
+                explainPlan: plan,
+                queryOutputView: "plan",
+              }
+            : candidate,
+        ),
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      taskStore.failTask(taskId, message);
+      set((state) => ({
+        tabs: state.tabs.map((candidate) =>
+          candidate.id === id && candidate.runningQueryId === queryId
+            ? {
+                ...candidate,
+                isExecuting: false,
+                runningQueryId: null,
+                error: message,
+                queryOutputView: "plan",
+              }
+            : candidate,
         ),
       }));
     }
@@ -1396,7 +1511,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                 ...t,
                 error: `Failed to cancel query: ${message}`,
               }
-            : t
+            : t,
         ),
       }));
     }
@@ -1429,8 +1544,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     if (tab.type === "table") {
       return get().loadTablePage(tabId, 0, undefined, undefined, {
         discardAction: "sort the table",
-        sortOverride:
-          column && direction ? { column, direction } : null,
+        sortOverride: column && direction ? { column, direction } : null,
       });
     }
 
@@ -1521,7 +1635,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                   error:
                     "Cannot save edits because column metadata is unavailable.",
                 }
-              : t
+              : t,
           ),
         }));
         // Clear edits to avoid stuck state? No, let user retry.
@@ -1543,7 +1657,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     const keyColumns = mutationKeyColumns(
       currentTab.tableColumns,
       currentTab.tableIndexes,
-      resultColumns
+      resultColumns,
     );
 
     const editsByRow = new Map<number, Record<number, any>>();
@@ -1560,14 +1674,14 @@ export const useTabStore = create<TabState>((set, get) => ({
     }
 
     const hasExistingRowEdits = Array.from(editsByRow.keys()).some(
-      (rowIndex) => rowIndex >= 0
+      (rowIndex) => rowIndex >= 0,
     );
     if (hasExistingRowEdits && keyColumns.length === 0) {
       const message = missingMutationKeyMessage("update", table);
       console.warn(message);
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === tabId ? { ...t, error: message } : t
+          t.id === tabId ? { ...t, error: message } : t,
         ),
       }));
       return;
@@ -1608,9 +1722,7 @@ export const useTabStore = create<TabState>((set, get) => ({
 
         inserts.push(values);
         insertedRowIndexes.add(rowIndex);
-        saveableEdits.forEach(([key, value]) =>
-          submittedEdits.set(key, value)
-        );
+        saveableEdits.forEach(([key, value]) => submittedEdits.set(key, value));
       } else {
         if (colDefs.length === 0) continue;
         if (keyColumns.length === 0) {
@@ -1636,7 +1748,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         if (Object.keys(values).length > 0 && key) {
           updates.push({ key, values });
           saveableEdits.forEach(([editKey, value]) =>
-            submittedEdits.set(editKey, value)
+            submittedEdits.set(editKey, value),
           );
         }
       }
@@ -1648,7 +1760,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       console.log(message);
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === tabId ? { ...t, error: message } : t
+          t.id === tabId ? { ...t, error: message } : t,
         ),
       }));
       return;
@@ -1659,7 +1771,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       console.error(message);
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === tabId ? { ...t, error: message } : t
+          t.id === tabId ? { ...t, error: message } : t,
         ),
       }));
       return;
@@ -1667,7 +1779,7 @@ export const useTabStore = create<TabState>((set, get) => ({
 
     set((state) => ({
       tabs: state.tabs.map((item) =>
-        item.id === tabId ? { ...item, isExecuting: true, error: null } : item
+        item.id === tabId ? { ...item, isExecuting: true, error: null } : item,
       ),
     }));
 
@@ -1680,7 +1792,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         inserts,
         updates,
         [],
-        ...(currentTab.databaseName ? [currentTab.databaseName] : [])
+        ...(currentTab.databaseName ? [currentTab.databaseName] : []),
       );
     } catch (e) {
       console.error("Save failed:", e);
@@ -1689,7 +1801,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         tabs: state.tabs.map((t) =>
           t.id === tabId
             ? { ...t, isExecuting: false, error: `Save failed: ${message}` }
-            : t
+            : t,
         ),
       }));
       return;
@@ -1704,7 +1816,7 @@ export const useTabStore = create<TabState>((set, get) => ({
           t.pendingEdits,
           t.newRowsCount,
           submittedEdits,
-          insertedRowIndexes
+          insertedRowIndexes,
         );
         return {
           ...t,
@@ -1725,7 +1837,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       const message = mutationPreservedDraftsMessage("save");
       set((state) => ({
         tabs: state.tabs.map((item) =>
-          item.id === tabId ? { ...item, error: message } : item
+          item.id === tabId ? { ...item, error: message } : item,
         ),
       }));
       return;
@@ -1740,7 +1852,7 @@ export const useTabStore = create<TabState>((set, get) => ({
           tab.tablePage ?? 0,
           tab.tableFilterSql ?? null,
           tab.tableFilters ?? null,
-          { discardDraftsConfirmed: true }
+          { discardDraftsConfirmed: true },
         );
       } else {
         await state.runTabQuery(tabId, connId);
@@ -1755,11 +1867,11 @@ export const useTabStore = create<TabState>((set, get) => ({
       const refreshedTab = get().tabs.find((item) => item.id === tabId);
       const message = mutationRefreshError(
         "save",
-        refreshFailure || refreshedTab?.error
+        refreshFailure || refreshedTab?.error,
       );
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === tabId ? { ...t, error: message } : t
+          t.id === tabId ? { ...t, error: message } : t,
         ),
       }));
     }
@@ -1792,21 +1904,22 @@ export const useTabStore = create<TabState>((set, get) => ({
     const keyColumns = mutationKeyColumns(
       currentTab.tableColumns,
       currentTab.tableIndexes,
-      result.columns
+      result.columns,
     );
     if (keyColumns.length === 0) {
       const message = missingMutationKeyMessage("delete", table);
       console.warn(message);
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === tabId ? { ...t, error: message } : t
+          t.id === tabId ? { ...t, error: message } : t,
         ),
       }));
       return;
     }
 
     const connId =
-      currentTab.connectionId || useConnectionStore.getState().activeConnectionId;
+      currentTab.connectionId ||
+      useConnectionStore.getState().activeConnectionId;
     if (!connId) {
       console.error("No connection ID found");
       return;
@@ -1816,7 +1929,9 @@ export const useTabStore = create<TabState>((set, get) => ({
       .getState()
       .connections.find((c) => c.id === connId);
     const driver = connection?.driver || DEFAULT_DATABASE_DRIVER;
-    const uniqueRowIndexes = Array.from(new Set(rowIndexes)).sort((a, b) => a - b);
+    const uniqueRowIndexes = Array.from(new Set(rowIndexes)).sort(
+      (a, b) => a - b,
+    );
     const deletes: Array<{ key: Record<string, unknown> }> = [];
     const deletedRowIndexes: number[] = [];
 
@@ -1836,7 +1951,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       const message = "No deleteable rows were generated from the selection.";
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === tabId ? { ...t, error: message } : t
+          t.id === tabId ? { ...t, error: message } : t,
         ),
       }));
       return;
@@ -1844,7 +1959,7 @@ export const useTabStore = create<TabState>((set, get) => ({
 
     set((state) => ({
       tabs: state.tabs.map((item) =>
-        item.id === tabId ? { ...item, isExecuting: true, error: null } : item
+        item.id === tabId ? { ...item, isExecuting: true, error: null } : item,
       ),
     }));
 
@@ -1857,7 +1972,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         [],
         [],
         deletes,
-        ...(currentTab.databaseName ? [currentTab.databaseName] : [])
+        ...(currentTab.databaseName ? [currentTab.databaseName] : []),
       );
     } catch (e) {
       console.error("Delete rows failed:", e);
@@ -1870,7 +1985,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                 isExecuting: false,
                 error: `Delete rows failed: ${message}`,
               }
-            : t
+            : t,
         ),
       }));
       return;
@@ -1887,17 +2002,17 @@ export const useTabStore = create<TabState>((set, get) => ({
             ? {
                 ...queryResult,
                 rows: queryResult.rows.filter(
-                  (_row, rowIndex) => !deletedRowIndexes.includes(rowIndex)
+                  (_row, rowIndex) => !deletedRowIndexes.includes(rowIndex),
                 ),
               }
-            : queryResult
+            : queryResult,
         );
         return {
           ...t,
           results: nextResults ?? t.results,
           pendingEdits: pendingEditsAfterRowDeletion(
             t.pendingEdits,
-            deletedRowIndexes
+            deletedRowIndexes,
           ),
           tableTotalRows:
             typeof t.tableTotalRows === "number"
@@ -1914,7 +2029,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       const message = mutationPreservedDraftsMessage("delete");
       set((state) => ({
         tabs: state.tabs.map((item) =>
-          item.id === tabId ? { ...item, error: message } : item
+          item.id === tabId ? { ...item, error: message } : item,
         ),
       }));
       return;
@@ -1928,7 +2043,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         currentTab.tablePage ?? 0,
         currentTab.tableFilterSql ?? null,
         currentTab.tableFilters ?? null,
-        { discardDraftsConfirmed: true }
+        { discardDraftsConfirmed: true },
       );
     } catch (e) {
       refreshFailure = errorMessage(e);
@@ -1938,11 +2053,11 @@ export const useTabStore = create<TabState>((set, get) => ({
       const refreshedTab = get().tabs.find((item) => item.id === tabId);
       const message = mutationRefreshError(
         "delete",
-        refreshFailure || refreshedTab?.error
+        refreshFailure || refreshedTab?.error,
       );
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === tabId ? { ...t, error: message } : t
+          t.id === tabId ? { ...t, error: message } : t,
         ),
       }));
     }
@@ -1961,7 +2076,7 @@ export const useTabStore = create<TabState>((set, get) => ({
               tableMetadataUpdatedAt: metadata.updatedAt,
               isFetchingColumns: false,
             }
-          : tab
+          : tab,
       ),
     }));
   },
@@ -1989,7 +2104,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     // Set fetching flag immediately
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.id === tabId ? { ...t, isFetchingColumns: true } : t
+        t.id === tabId ? { ...t, isFetchingColumns: true } : t,
       ),
     }));
 
@@ -2010,7 +2125,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       console.log(
         `[fetchTableColumns] Loaded metadata from ${metadata.source}:`,
         metadata.columns,
-        metadata.indexes
+        metadata.indexes,
       );
 
       set((state) => ({
@@ -2025,14 +2140,14 @@ export const useTabStore = create<TabState>((set, get) => ({
                 tableMetadataUpdatedAt: metadata.updatedAt,
                 isFetchingColumns: false,
               }
-            : t
+            : t,
         ),
       }));
     } catch (e) {
       console.error("Failed to fetch columns:", e);
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === tabId ? { ...t, isFetchingColumns: false } : t
+          t.id === tabId ? { ...t, isFetchingColumns: false } : t,
         ),
       }));
     }
@@ -2043,29 +2158,28 @@ export const useTabStore = create<TabState>((set, get) => ({
     schemaName,
     tableName,
     refreshMetadata = true,
-    databaseName
+    databaseName,
   ) => {
     const matchingTableTabs = get().tabs.filter(
-        (tab) =>
-          tab.type === "table" &&
-          tab.connectionId === connectionId &&
-          tab.schemaName === schemaName &&
-          tab.tableName === tableName &&
-          tabMatchesDatabase(tab, databaseName)
-      );
-    const matchingTabs = matchingTableTabs
-      .map((tab) => ({
-        id: tab.id,
-        page: tab.tablePage ?? 0,
-        filterSql: tab.tableFilterSql ?? null,
-        filters: tab.tableFilters ?? null,
-      }));
+      (tab) =>
+        tab.type === "table" &&
+        tab.connectionId === connectionId &&
+        tab.schemaName === schemaName &&
+        tab.tableName === tableName &&
+        tabMatchesDatabase(tab, databaseName),
+    );
+    const matchingTabs = matchingTableTabs.map((tab) => ({
+      id: tab.id,
+      page: tab.tablePage ?? 0,
+      filterSql: tab.tableFilterSql ?? null,
+      filters: tab.tableFilters ?? null,
+    }));
 
     if (matchingTabs.length === 0) return;
     if (
       !confirmDiscardTabChanges(
         matchingTableTabs,
-        `refresh ${schemaName}.${tableName}`
+        `refresh ${schemaName}.${tableName}`,
       )
     ) {
       return;
@@ -2084,12 +2198,12 @@ export const useTabStore = create<TabState>((set, get) => ({
                     tableMetadataSource: undefined,
                     tableMetadataUpdatedAt: undefined,
                   }
-              : {}),
+                : {}),
               isFetchingColumns: false,
               isExecuting: true,
               error: null,
             }
-          : tab
+          : tab,
       ),
     }));
 
@@ -2103,15 +2217,23 @@ export const useTabStore = create<TabState>((set, get) => ({
           tab.page,
           tab.filterSql,
           tab.filters,
-          { discardDraftsConfirmed: true }
+          {
+            discardDraftsConfirmed: true,
+          },
         );
-      })
+      }),
     );
   },
 
   loadTablePage: async (tabId, page, filterSql, filters, options) => {
     const tab = get().tabs.find((t) => t.id === tabId);
-    if (!tab || tab.type !== "table" || !tab.connectionId || !tab.schemaName || !tab.tableName) {
+    if (
+      !tab ||
+      tab.type !== "table" ||
+      !tab.connectionId ||
+      !tab.schemaName ||
+      !tab.tableName
+    ) {
       return false;
     }
 
@@ -2119,7 +2241,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       !options?.discardDraftsConfirmed &&
       !confirmDiscardTabChanges(
         [tab],
-        options?.discardAction || "reload the table data"
+        options?.discardAction || "reload the table data",
       )
     ) {
       return false;
@@ -2133,7 +2255,8 @@ export const useTabStore = create<TabState>((set, get) => ({
       title: `Load ${tab.tableName}`,
       detail: `Page ${nextPage + 1}`,
     });
-    const nextFilterSql = filterSql === undefined ? tab.tableFilterSql : filterSql;
+    const nextFilterSql =
+      filterSql === undefined ? tab.tableFilterSql : filterSql;
     const nextFilters = filters === undefined ? tab.tableFilters : filters;
     const hasSortOverride = options?.sortOverride !== undefined;
     const requestedTableSort: TableSort | undefined = hasSortOverride
@@ -2145,7 +2268,7 @@ export const useTabStore = create<TabState>((set, get) => ({
           }
         : undefined;
     const primaryKeySort = tab.tableColumns?.find(
-      (column) => column.is_primary_key
+      (column) => column.is_primary_key,
     );
     const tableSort: TableSort | undefined =
       requestedTableSort ||
@@ -2155,7 +2278,7 @@ export const useTabStore = create<TabState>((set, get) => ({
 
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.id === tabId ? { ...t, isExecuting: true, error: null } : t
+        t.id === tabId ? { ...t, isExecuting: true, error: null } : t,
       ),
     }));
 
@@ -2164,10 +2287,10 @@ export const useTabStore = create<TabState>((set, get) => ({
       const currentTab = get().tabs.find((candidate) => candidate.id === tabId);
       const tabContextIsCurrent = Boolean(
         currentTab?.type === "table" &&
-          currentTab.connectionId === tab.connectionId &&
-          currentTab.databaseName === tab.databaseName &&
-          currentTab.schemaName === tab.schemaName &&
-          currentTab.tableName === tab.tableName
+        currentTab.connectionId === tab.connectionId &&
+        currentTab.databaseName === tab.databaseName &&
+        currentTab.schemaName === tab.schemaName &&
+        currentTab.tableName === tab.tableName,
       );
 
       if (!tabContextIsCurrent || readiness.status === "cancelled") {
@@ -2176,7 +2299,7 @@ export const useTabStore = create<TabState>((set, get) => ({
           tabs: state.tabs.map((candidate) =>
             candidate.id === tabId
               ? { ...candidate, isExecuting: false }
-              : candidate
+              : candidate,
           ),
         }));
         return false;
@@ -2198,7 +2321,7 @@ export const useTabStore = create<TabState>((set, get) => ({
             nextFilterSql || undefined,
             nextFilters || undefined,
             tableSort,
-            tab.databaseName
+            tab.databaseName,
           )
         : await tableService.previewTablePage(
             tab.connectionId,
@@ -2209,7 +2332,7 @@ export const useTabStore = create<TabState>((set, get) => ({
             pageSize,
             nextFilterSql || undefined,
             nextFilters || undefined,
-            tableSort
+            tableSort,
           );
 
       set((state) => ({
@@ -2240,14 +2363,14 @@ export const useTabStore = create<TabState>((set, get) => ({
                     }
                   : {}),
               }
-            : t
+            : t,
         ),
       }));
       taskStore.finishTask(
         taskId,
         `${pageResult.result.rows.length.toLocaleString()} row${
           pageResult.result.rows.length === 1 ? "" : "s"
-        }`
+        }`,
       );
       return true;
     } catch (e: any) {
@@ -2256,7 +2379,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         tabs: state.tabs.map((t) =>
           t.id === tabId
             ? { ...t, isExecuting: false, error: e.message || String(e) }
-            : t
+            : t,
         ),
       }));
       return false;
@@ -2266,7 +2389,7 @@ export const useTabStore = create<TabState>((set, get) => ({
   cancelEdits: (tabId) => {
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.id === tabId ? { ...t, pendingEdits: new Map(), newRowsCount: 0 } : t
+        t.id === tabId ? { ...t, pendingEdits: new Map(), newRowsCount: 0 } : t,
       ),
     }));
   },
@@ -2276,7 +2399,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       tabs: state.tabs.map((t) =>
         t.id === tabId && !t.isExecuting
           ? { ...t, newRowsCount: (t.newRowsCount || 0) + 1 }
-          : t
+          : t,
       ),
     }));
   },
@@ -2284,7 +2407,7 @@ export const useTabStore = create<TabState>((set, get) => ({
   setFilterMode: (tabId, mode) => {
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.id === tabId ? { ...t, filterMode: mode } : t
+        t.id === tabId ? { ...t, filterMode: mode } : t,
       ),
     }));
   },
@@ -2292,7 +2415,7 @@ export const useTabStore = create<TabState>((set, get) => ({
   setVisualFilters: (tabId, filters) => {
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.id === tabId ? { ...t, visualFilters: filters } : t
+        t.id === tabId ? { ...t, visualFilters: filters } : t,
       ),
     }));
   },
@@ -2340,7 +2463,7 @@ export const useTabStore = create<TabState>((set, get) => ({
   showAllColumns: (tabId) => {
     set((state) => ({
       tabs: state.tabs.map((tab) =>
-        tab.id === tabId ? { ...tab, hiddenColumns: [] } : tab
+        tab.id === tabId ? { ...tab, hiddenColumns: [] } : tab,
       ),
     }));
   },
@@ -2350,7 +2473,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       tabs: state.tabs.map((tab) =>
         tab.id === tabId
           ? { ...tab, columnWidths: {}, columnOrder: [], hiddenColumns: [] }
-          : tab
+          : tab,
       ),
     }));
   },
@@ -2358,7 +2481,7 @@ export const useTabStore = create<TabState>((set, get) => ({
   setTargetSchema: (tabId, schema) => {
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.id === tabId ? { ...t, targetSchema: schema } : t
+        t.id === tabId ? { ...t, targetSchema: schema } : t,
       ),
     }));
   },
@@ -2368,7 +2491,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       tabs: state.tabs.map((tab) =>
         tab.id === tabId
           ? { ...tab, databaseName: normalizedDatabaseName(database) }
-          : tab
+          : tab,
       ),
     }));
   },
@@ -2380,12 +2503,12 @@ export function confirmDiscardAllTabChanges(action: string) {
 
 export function confirmDiscardProjectFileChanges(
   projectId: string,
-  action: string
+  action: string,
 ) {
   return confirmDiscardTabChanges(
     useTabStore
       .getState()
       .tabs.filter((tab) => tab.fileProjectId === projectId),
-    action
+    action,
   );
 }

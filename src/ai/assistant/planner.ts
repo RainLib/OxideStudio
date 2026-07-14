@@ -1,10 +1,7 @@
 import { evaluateAiToolPolicy } from "@/ai/tools/policy";
 import { classifyAiQuerySafety } from "@/lib/querySafety";
 import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
-import type {
-  AiToolExecutionPolicy,
-  AiToolSummary,
-} from "@/ai/tools/types";
+import type { AiToolExecutionPolicy, AiToolSummary } from "@/ai/tools/types";
 import type {
   AssistantIntent,
   AssistantPlanner,
@@ -31,7 +28,7 @@ export class DefaultAssistantPlanner implements AssistantPlanner {
         input.context.activeDriver,
         input.context.activeNamespace,
         input.context.activeTab?.tableName,
-        input.context.activeTab?.sql
+        input.context.activeTab?.sql,
       ),
       notes: [
         "Use this planner as the local fallback; a LangGraph or model planner can implement the same AssistantPlanner contract.",
@@ -45,11 +42,14 @@ export function createDefaultAssistantPlanner() {
 }
 
 export function classifyAssistantIntent(
-  input: AssistantTurnInput
+  input: AssistantTurnInput,
 ): AssistantIntent {
   const text = `${input.message} ${input.selectedText || ""}`.toLowerCase();
   if (!text.trim()) return "unknown";
 
+  if (hasExplainIntent(text)) {
+    return "explain";
+  }
   if (hasWriteIntent(text)) {
     return "query";
   }
@@ -61,9 +61,6 @@ export function classifyAssistantIntent(
   }
   if (hasMetadataIntent(text)) {
     return "metadata";
-  }
-  if (hasExplainIntent(text)) {
-    return "explain";
   }
   if (hasWorkspaceIntent(text)) {
     return "workspace";
@@ -80,7 +77,7 @@ function buildSuggestedPlan(
   activeDriver?: string | null,
   activeNamespace?: string | null,
   activeObjectName?: string | null,
-  activeSql?: string | null
+  activeSql?: string | null,
 ): AssistantPlanStep[] {
   const hasTool = (name: string) => tools.some((tool) => tool.name === name);
   const requiresApproval = (name: string) => {
@@ -130,7 +127,11 @@ function buildSuggestedPlan(
     });
   }
 
-  if (intent === "metadata" && activeObjectName && hasTool("metadata.describeObject")) {
+  if (
+    intent === "metadata" &&
+    activeObjectName &&
+    hasTool("metadata.describeObject")
+  ) {
     steps.push({
       id: "metadata-active-object",
       title: "Describe metadata for the active object",
@@ -161,7 +162,24 @@ function buildSuggestedPlan(
     });
   }
 
-  if (intent === "explain" && hasTool("lsp.explainDiagnostics")) {
+  const explainSql = input.selectedText?.trim() || activeSql?.trim() || "";
+  if (
+    intent === "explain" &&
+    explainSql &&
+    hasQueryPlanIntent(input.message) &&
+    hasTool("query.explain")
+  ) {
+    steps.push({
+      id: "query-explain-plan",
+      title: "Generate a read-only estimated execution plan",
+      toolName: "query.explain",
+      input: {
+        query: explainSql,
+        ...(activeNamespace ? { namespace: activeNamespace } : {}),
+      },
+      requiresApproval: requiresApproval("query.explain"),
+    });
+  } else if (intent === "explain" && hasTool("lsp.explainDiagnostics")) {
     steps.push({
       id: "lsp-diagnostics",
       title: "Explain current LSP diagnostics",
@@ -178,16 +196,17 @@ function buildSuggestedPlan(
       activeDriver,
       activeNamespace,
       activeObjectName,
-      hasTool
+      hasTool,
     );
-    const structuredRead = !structuredMutation && !query
-      ? selectedStructuredReadPlan(
-          input,
-          activeDriver,
-          activeNamespace,
-          activeObjectName
-        )
-      : null;
+    const structuredRead =
+      !structuredMutation && !query
+        ? selectedStructuredReadPlan(
+            input,
+            activeDriver,
+            activeNamespace,
+            activeObjectName,
+          )
+        : null;
     const writeTool = selectedMutationTool(query, activeDriver, hasTool);
     const toolName =
       structuredMutation?.toolName ||
@@ -220,7 +239,7 @@ function selectedStructuredMutationPlan(
   activeDriver: string | null | undefined,
   activeNamespace: string | null | undefined,
   activeObjectName: string | null | undefined,
-  hasTool: (name: string) => boolean
+  hasTool: (name: string) => boolean,
 ): { toolName: string; title: string; input: Record<string, unknown> } | null {
   const message = input.message || "";
   const selectedText = input.selectedText?.trim() || "";
@@ -230,11 +249,7 @@ function selectedStructuredMutationPlan(
 
   if (capabilities.dataModel === "keyValue") {
     const key = extractTargetName(message, ["key", "键"]);
-    if (
-      key &&
-      hasTool("key.getValue") &&
-      hasReadIntent(text)
-    ) {
+    if (key && hasTool("key.getValue") && hasReadIntent(text)) {
       return {
         toolName: "key.getValue",
         title: "Read a Redis key value",
@@ -242,11 +257,7 @@ function selectedStructuredMutationPlan(
       };
     }
 
-    if (
-      key &&
-      hasTool("key.deleteKeys") &&
-      hasDeleteIntent(text)
-    ) {
+    if (key && hasTool("key.deleteKeys") && hasDeleteIntent(text)) {
       return {
         toolName: "key.deleteKeys",
         title: "Delete Redis keys with approval",
@@ -255,7 +266,9 @@ function selectedStructuredMutationPlan(
     }
   }
 
-  const selectedRecord = selectedText ? parseSelectedRecord(selectedText) : null;
+  const selectedRecord = selectedText
+    ? parseSelectedRecord(selectedText)
+    : null;
   const records = selectedText ? parseSelectedRecordArray(selectedText) : null;
 
   if (
@@ -285,7 +298,11 @@ function selectedStructuredMutationPlan(
         "到集合",
         "从集合",
       ]) || activeObjectName;
-    if (collection && hasTool("document.updateDocuments") && hasUpdateIntent(text)) {
+    if (
+      collection &&
+      hasTool("document.updateDocuments") &&
+      hasUpdateIntent(text)
+    ) {
       const filter = recordField(selectedRecord, "filter") ?? inlineJson;
       const update =
         recordField(selectedRecord, "update") ??
@@ -300,14 +317,20 @@ function selectedStructuredMutationPlan(
             filter,
             update,
             many: booleanField(selectedRecord, "many") ?? hasManyIntent(text),
-            upsert: booleanField(selectedRecord, "upsert") ?? hasUpsertIntent(text),
+            upsert:
+              booleanField(selectedRecord, "upsert") ?? hasUpsertIntent(text),
           },
         };
       }
     }
 
-    if (collection && hasTool("document.deleteDocuments") && hasDeleteIntent(text)) {
-      const filter = recordField(selectedRecord, "filter") ?? selectedRecord ?? inlineJson;
+    if (
+      collection &&
+      hasTool("document.deleteDocuments") &&
+      hasDeleteIntent(text)
+    ) {
+      const filter =
+        recordField(selectedRecord, "filter") ?? selectedRecord ?? inlineJson;
       if (filter) {
         return {
           toolName: "document.deleteDocuments",
@@ -346,11 +369,7 @@ function selectedStructuredMutationPlan(
 
   if (capabilities.dataModel === "keyValue") {
     const key = extractTargetName(message, ["key", "键"]);
-    if (
-      key &&
-      hasTool("key.setValue") &&
-      hasCreateSetOrWriteIntent(text)
-    ) {
+    if (key && hasTool("key.setValue") && hasCreateSetOrWriteIntent(text)) {
       return {
         toolName: "key.setValue",
         title: "Set a Redis key with approval",
@@ -364,8 +383,15 @@ function selectedStructuredMutationPlan(
 
   if (capabilities.dataModel === "search") {
     const index =
-      extractTargetName(message, ["index", "into", "from", "in", "索引", "到索引", "从索引"]) ||
-      activeObjectName;
+      extractTargetName(message, [
+        "index",
+        "into",
+        "from",
+        "in",
+        "索引",
+        "到索引",
+        "从索引",
+      ]) || activeObjectName;
     const id = extractTargetName(message, ["id", "编号"]);
 
     if (
@@ -382,7 +408,8 @@ function selectedStructuredMutationPlan(
           index,
           id,
           document: recordField(selectedRecord, "document") ?? selectedRecord,
-          upsert: booleanField(selectedRecord, "upsert") ?? hasUpsertIntent(text),
+          upsert:
+            booleanField(selectedRecord, "upsert") ?? hasUpsertIntent(text),
         },
       };
     }
@@ -433,7 +460,7 @@ function selectedStructuredReadPlan(
   input: AssistantTurnInput,
   activeDriver: string | null | undefined,
   activeNamespace: string | null | undefined,
-  activeObjectName: string | null | undefined
+  activeObjectName: string | null | undefined,
 ): { toolName: string; title: string; input: Record<string, unknown> } | null {
   const message = input.message || "";
   const text = message.toLowerCase();
@@ -445,7 +472,13 @@ function selectedStructuredReadPlan(
     const inlineCollection =
       typeof inlineJson?.collection === "string" ? inlineJson.collection : null;
     const collection =
-      extractTargetName(message, ["collection", "from", "in", "集合", "从集合"]) ||
+      extractTargetName(message, [
+        "collection",
+        "from",
+        "in",
+        "集合",
+        "从集合",
+      ]) ||
       inlineCollection ||
       activeObjectName;
     if (!collection) return null;
@@ -515,7 +548,7 @@ function queryPreparationTitle(activeDriver: string | null | undefined) {
 }
 
 function parseSelectedRecordArray(
-  text: string
+  text: string,
 ): Array<Record<string, unknown>> | null {
   const value = parseSelectedJsonValue(text);
   if (Array.isArray(value) && value.every(isPlainRecord)) {
@@ -546,7 +579,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 function recordField(
   value: Record<string, unknown> | null,
-  field: string
+  field: string,
 ): Record<string, unknown> | null {
   const fieldValue = value?.[field];
   return isPlainRecord(fieldValue) ? fieldValue : null;
@@ -554,14 +587,14 @@ function recordField(
 
 function booleanField(
   value: Record<string, unknown> | null,
-  field: string
+  field: string,
 ): boolean | null {
   const fieldValue = value?.[field];
   return typeof fieldValue === "boolean" ? fieldValue : null;
 }
 
 function inferMongoUpdateDocument(
-  value: Record<string, unknown> | null
+  value: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
   if (!value) return null;
   const updateKeys = Object.keys(value).filter((key) => key.startsWith("$"));
@@ -571,7 +604,7 @@ function inferMongoUpdateDocument(
 
   const ignoredFields = new Set(["filter", "many", "upsert"]);
   const setFields = Object.fromEntries(
-    Object.entries(value).filter(([key]) => !ignoredFields.has(key))
+    Object.entries(value).filter(([key]) => !ignoredFields.has(key)),
   );
   return Object.keys(setFields).length > 0 ? { $set: setFields } : null;
 }
@@ -585,8 +618,8 @@ function extractTargetName(message: string, labels: string[]) {
         isAsciiLabel
           ? `\\b${escaped}\\b\\s+(?:named\\s+)?["'\`]?([\\w.:-]+)`
           : `${escaped}\\s*(?:名为|叫|named\\s+)?["'\`]?([\\w.:-]+)`,
-        "i"
-      )
+        "i",
+      ),
     );
     const candidate = match?.[1]?.replace(/[,.，。;；:：]+$/, "");
     if (candidate && !TARGET_NAME_STOP_WORDS.has(candidate.toLowerCase())) {
@@ -618,7 +651,9 @@ function extractLimit(message: string, fallback = 50) {
   return Math.max(1, Math.min(value, 200));
 }
 
-function extractInlineJsonObject(message: string): Record<string, unknown> | null {
+function extractInlineJsonObject(
+  message: string,
+): Record<string, unknown> | null {
   const start = message.indexOf("{");
   const end = message.lastIndexOf("}");
   if (start < 0 || end <= start) return null;
@@ -634,14 +669,14 @@ function extractInlineJsonObject(message: string): Record<string, unknown> | nul
 function elasticsearchReadBody(
   inlineJson: Record<string, unknown> | null,
   text: string,
-  limit: number
+  limit: number,
 ) {
   if (inlineJson) {
     if (
       Object.keys(inlineJson).some((key) =>
         ["query", "aggs", "aggregations", "size", "sort"].includes(
-          key.toLowerCase()
-        )
+          key.toLowerCase(),
+        ),
       )
     ) {
       return {
@@ -679,7 +714,7 @@ function elasticsearchReadBody(
 function isMongoReadCommand(value: Record<string, unknown>) {
   const keys = Object.keys(value);
   const operations = keys.filter((key) =>
-    MONGO_READ_OPERATION_KEYS.has(key.toLowerCase())
+    MONGO_READ_OPERATION_KEYS.has(key.toLowerCase()),
   );
 
   if (operations.length > 1) return false;
@@ -700,7 +735,7 @@ function isMongoReadCommand(value: Record<string, unknown>) {
 function boundedMongoReadCommand(
   command: Record<string, unknown>,
   collection: string,
-  limit: number
+  limit: number,
 ) {
   const hasRawCommand = isPlainRecord(command.command);
   const keys = Object.keys(command).map((key) => key.toLowerCase());
@@ -764,27 +799,28 @@ const MONGO_READ_OPERATION_KEYS = new Set([
 function hasWriteIntent(text: string) {
   return (
     /\b(create|delete|drop|insert|remove|replace|set|truncate|update|upsert|write)\b/.test(
-      text
-    ) || /创建|删除|移除|插入|新增|替换|设置|写入|更新|清空|截断|保存/.test(text)
+      text,
+    ) ||
+    /创建|删除|移除|插入|新增|替换|设置|写入|更新|清空|截断|保存/.test(text)
   );
 }
 
 function hasReadIntent(text: string) {
-  return /\b(get|read|show|fetch|inspect)\b/.test(text) ||
-    /读取|查看|获取|查询|显示/.test(text);
+  return (
+    /\b(get|read|show|fetch|inspect)\b/.test(text) ||
+    /读取|查看|获取|查询|显示/.test(text)
+  );
 }
 
 function hasKeyReadIntent(text: string) {
-  return (
-    (/\bkey\b/.test(text) || /键/.test(text)) &&
-    hasReadIntent(text)
-  );
+  return (/\bkey\b/.test(text) || /键/.test(text)) && hasReadIntent(text);
 }
 
 function hasMetadataIntent(text: string) {
   return (
-    /\b(schema|table|collection|index|key|metadata|database|list)\b/.test(text) ||
-    /架构|模式|表|集合|索引|键|元数据|数据库|列出|列表/.test(text)
+    /\b(schema|table|collection|index|key|metadata|database|list)\b/.test(
+      text,
+    ) || /架构|模式|表|集合|索引|键|元数据|数据库|列出|列表/.test(text)
   );
 }
 
@@ -800,13 +836,42 @@ function hasCountIntent(text: string) {
 }
 
 function hasExplainIntent(text: string) {
-  return /\b(explain|diagnostic|error|fix|why|optimi[sz]e)\b/.test(text) ||
-    /解释|诊断|错误|修复|为什么|优化/.test(text);
+  return (
+    /\b(explain|diagnostic|error|fix|why|optimi[sz]e)\b/.test(text) ||
+    /解释|诊断|错误|修复|为什么|优化|执行计划|查询计划/.test(text) ||
+    hasQueryPlanIntent(text)
+  );
+}
+
+function hasQueryPlanIntent(message: string) {
+  const text = message.toLowerCase();
+  if (
+    /\b(execution plan|query plan|optimi[sz]e|slow query|query performance)\b/.test(
+      text,
+    ) ||
+    /执行计划|查询计划|慢查询|查询性能|优化/i.test(text)
+  ) {
+    return true;
+  }
+  if (/\b(diagnostic|error|fix)\b/.test(text) || /诊断|错误|修复/.test(text)) {
+    return false;
+  }
+  return (
+    /\b(explain|analy[sz]e)\b.*\b(query|sql|statement|plan|performance)\b/.test(
+      text,
+    ) ||
+    /\b(query|sql|statement|plan|performance)\b.*\b(explain|analy[sz]e)\b/.test(
+      text,
+    ) ||
+    /分析.*(?:查询|sql|语句)/i.test(text)
+  );
 }
 
 function hasWorkspaceIntent(text: string) {
-  return /\b(tab|selection|editor|workspace|current)\b/.test(text) ||
-    /标签|选区|编辑器|工作区|当前/.test(text);
+  return (
+    /\b(tab|selection|editor|workspace|current)\b/.test(text) ||
+    /标签|选区|编辑器|工作区|当前/.test(text)
+  );
 }
 
 function hasDeleteIntent(text: string) {
@@ -814,39 +879,50 @@ function hasDeleteIntent(text: string) {
 }
 
 function hasUpdateIntent(text: string) {
-  return /\b(update|modify|patch|change)\b/.test(text) ||
-    /更新|修改|变更/.test(text);
+  return (
+    /\b(update|modify|patch|change)\b/.test(text) || /更新|修改|变更/.test(text)
+  );
 }
 
 function hasManyIntent(text: string) {
-  return /\b(all|many|multiple|bulk)\b/.test(text) ||
-    /全部|所有|多条|批量/.test(text);
+  return (
+    /\b(all|many|multiple|bulk)\b/.test(text) ||
+    /全部|所有|多条|批量/.test(text)
+  );
 }
 
 function hasUpsertIntent(text: string) {
-  return /\b(upsert|insert if missing|create if missing)\b/.test(text) ||
-    /不存在则创建|不存在就创建|插入或更新/.test(text);
+  return (
+    /\b(upsert|insert if missing|create if missing)\b/.test(text) ||
+    /不存在则创建|不存在就创建|插入或更新/.test(text)
+  );
 }
 
 function hasCreateOrWriteIntent(text: string) {
-  return /\b(add|create|insert|new|write)\b/.test(text) ||
-    /新增|创建|插入|写入|添加/.test(text);
+  return (
+    /\b(add|create|insert|new|write)\b/.test(text) ||
+    /新增|创建|插入|写入|添加/.test(text)
+  );
 }
 
 function hasCreateSetOrWriteIntent(text: string) {
-  return /\b(add|create|set|write)\b/.test(text) ||
-    /新增|创建|设置|写入|添加/.test(text);
+  return (
+    /\b(add|create|set|write)\b/.test(text) ||
+    /新增|创建|设置|写入|添加/.test(text)
+  );
 }
 
 function hasIndexWriteIntent(text: string) {
-  return /\b(add|create|index|replace|upsert|write)\b/.test(text) ||
-    /新增|创建|索引|替换|写入|添加/.test(text);
+  return (
+    /\b(add|create|index|replace|upsert|write)\b/.test(text) ||
+    /新增|创建|索引|替换|写入|添加/.test(text)
+  );
 }
 
 function selectedMutationTool(
   query: string,
   activeDriver: string | null | undefined,
-  hasTool: (name: string) => boolean
+  hasTool: (name: string) => boolean,
 ) {
   if (!query) return null;
   const safety = classifyAiQuerySafety(query, activeDriver);

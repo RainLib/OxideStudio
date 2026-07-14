@@ -14,7 +14,7 @@ import type {
   AiToolExecutionContext,
 } from "@/ai/tools/types";
 import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
-import type { DatabaseDriver } from "@/services/tauri/types";
+import type { DatabaseDriver, ExplainPlan } from "@/services/tauri/types";
 
 type AdapterCall = {
   name: string;
@@ -24,13 +24,37 @@ type AdapterCall = {
 const CONNECTIONS: AiConnectionSummary[] = [
   { id: "redis-1", name: "Redis local", driver: "redis" },
   { id: "mongodb-1", name: "Mongo local", driver: "mongodb" },
-  { id: "elasticsearch-1", name: "Elasticsearch local", driver: "elasticsearch" },
+  {
+    id: "elasticsearch-1",
+    name: "Elasticsearch local",
+    driver: "elasticsearch",
+  },
   { id: "postgres-1", name: "Postgres local", driver: "postgres" },
 ];
 
+const EXPLAIN_PLAN: ExplainPlan = {
+  id: "plan-1",
+  driver: "postgres",
+  mode: "estimate",
+  format: "json",
+  generatedInMs: 4,
+  totalCost: 8.25,
+  estimatedRows: 12,
+  root: {
+    id: "plan-1/root",
+    nodeType: "Seq Scan",
+    relation: "users",
+    totalCost: 8.25,
+    estimatedRows: 12,
+    children: [],
+  },
+  rawPlan: {},
+  warnings: [],
+};
+
 function createContext(
   driver: DatabaseDriver,
-  connectionId = `${driver}-1`
+  connectionId = `${driver}-1`,
 ): AiToolExecutionContext {
   return {
     requestId: `core-tools-${driver}`,
@@ -46,6 +70,10 @@ function createAdapters(calls: AdapterCall[] = []): AiToolAdapters {
     runReadOnlyQuery: async (input) => {
       calls.push({ name: "read", input });
       return [];
+    },
+    explainQuery: async (input) => {
+      calls.push({ name: "explain", input });
+      return EXPLAIN_PLAN;
     },
     runMutationQuery: async (input) => {
       calls.push({ name: "mutation", input });
@@ -96,16 +124,17 @@ describe("core AI tools", () => {
   it("describes unavailable core tool families for headless agent adapters", () => {
     const headlessAdapters: AiToolAdapters = {
       listConnections: () => [],
-      getConnectionCapabilities: (driver) => defaultDatabaseCapabilities(driver),
+      getConnectionCapabilities: (driver) =>
+        defaultDatabaseCapabilities(driver),
     };
 
     const environment = describeCoreAiToolEnvironment(
       headlessAdapters,
-      "headless-cli"
+      "headless-cli",
     );
 
     expect(environment.enabledToolFamilies).toEqual(
-      expect.arrayContaining(["connection", "provider.registry"])
+      expect.arrayContaining(["connection", "provider.registry"]),
     );
     expect(environment.disabledToolFamilies).toEqual(
       expect.arrayContaining([
@@ -121,7 +150,7 @@ describe("core AI tools", () => {
           name: "lsp.completion",
           missingAdapters: ["getLspCompletions"],
         }),
-      ])
+      ]),
     );
   });
 
@@ -140,16 +169,20 @@ describe("core AI tools", () => {
       }>;
     }>("provider.list", {}, createContext("postgres"));
 
-    const redis = result.driverProfiles.find((profile) => profile.driver === "redis");
-    const postgres = result.driverProfiles.find(
-      (profile) => profile.driver === "postgres"
+    const redis = result.driverProfiles.find(
+      (profile) => profile.driver === "redis",
     );
-    const mysql = result.driverProfiles.find((profile) => profile.driver === "mysql");
+    const postgres = result.driverProfiles.find(
+      (profile) => profile.driver === "postgres",
+    );
+    const mysql = result.driverProfiles.find(
+      (profile) => profile.driver === "mysql",
+    );
     const mongodb = result.driverProfiles.find(
-      (profile) => profile.driver === "mongodb"
+      (profile) => profile.driver === "mongodb",
     );
     const elasticsearch = result.driverProfiles.find(
-      (profile) => profile.driver === "elasticsearch"
+      (profile) => profile.driver === "elasticsearch",
     );
 
     expect(redis?.aiToolHints).toMatchObject({
@@ -165,10 +198,12 @@ describe("core AI tools", () => {
       ]),
     });
     expect(postgres?.aiToolHints).toMatchObject({
+      read: expect.arrayContaining(["query.explain"]),
       write: expect.arrayContaining(["database.createNamespace"]),
       destructive: expect.arrayContaining(["database.dropNamespace"]),
     });
     expect(mysql?.aiToolHints).toMatchObject({
+      read: expect.arrayContaining(["query.explain"]),
       write: expect.arrayContaining(["database.createNamespace"]),
       destructive: expect.arrayContaining(["database.dropNamespace"]),
     });
@@ -204,6 +239,46 @@ describe("core AI tools", () => {
     });
   });
 
+  it("generates estimated plans without approval and rejects unsupported drivers", async () => {
+    const calls: AdapterCall[] = [];
+    const registry = createRegistry(createAdapters(calls));
+
+    const result = await registry.executeWithPolicy(
+      "query.explain",
+      {
+        connectionId: "postgres-1",
+        namespace: "public",
+        query: "SELECT * FROM users",
+      },
+      createContext("postgres"),
+      DEFAULT_AI_TOOL_POLICY,
+    );
+
+    expect(result).toEqual(EXPLAIN_PLAN);
+    expect(calls).toContainEqual({
+      name: "explain",
+      input: {
+        connectionId: "postgres-1",
+        namespace: "public",
+        query: "SELECT * FROM users",
+      },
+    });
+    expect(
+      registry.list().find((tool) => tool.name === "query.explain"),
+    ).toMatchObject({
+      permissions: ["read"],
+    });
+
+    await expect(
+      registry.executeWithPolicy(
+        "query.explain",
+        { connectionId: "redis-1", query: "GET session:1" },
+        createContext("redis"),
+        DEFAULT_AI_TOOL_POLICY,
+      ),
+    ).rejects.toThrow("does not support Explain Plan");
+  });
+
   it("routes read, write, and destructive query tools through safety gates", async () => {
     const calls: AdapterCall[] = [];
     const registry = createRegistry(createAdapters(calls));
@@ -218,7 +293,7 @@ describe("core AI tools", () => {
         limit: 500,
       },
       context,
-      DEFAULT_AI_TOOL_POLICY
+      DEFAULT_AI_TOOL_POLICY,
     );
     await expect(
       registry.executeWithPolicy(
@@ -228,8 +303,8 @@ describe("core AI tools", () => {
           query: 'POST /_bulk\n{"delete":{"_index":"users","_id":"1"}}',
         },
         context,
-        DEFAULT_AI_TOOL_POLICY
-      )
+        DEFAULT_AI_TOOL_POLICY,
+      ),
     ).rejects.toThrow("potentially mutating");
     await expect(
       registry.executeWithPolicy(
@@ -239,8 +314,8 @@ describe("core AI tools", () => {
           query: 'POST /_bulk\n{"delete":{"_index":"users","_id":"1"}}',
         },
         context,
-        approvedPolicy("query.runMutation")
-      )
+        approvedPolicy("query.runMutation"),
+      ),
     ).rejects.toThrow("destructive request");
     await registry.executeWithPolicy(
       "query.runDestructive",
@@ -249,7 +324,7 @@ describe("core AI tools", () => {
         query: 'POST /_bulk\n{"delete":{"_index":"users","_id":"1"}}',
       },
       context,
-      approvedPolicy("query.runDestructive")
+      approvedPolicy("query.runDestructive"),
     );
 
     expect(calls).toEqual([
@@ -273,7 +348,7 @@ describe("core AI tools", () => {
 
     expect(
       registry.list().find((tool) => tool.name === "query.runReadOnly")
-        ?.inputSchema.properties?.namespace
+        ?.inputSchema.properties?.namespace,
     ).toMatchObject({
       type: "string",
     });
@@ -284,7 +359,7 @@ describe("core AI tools", () => {
 
     expect(
       registry.list().find((tool) => tool.name === "key.setValue")?.inputSchema
-        .properties?.namespace
+        .properties?.namespace,
     ).toMatchObject({ type: "string" });
 
     await expect(
@@ -292,8 +367,8 @@ describe("core AI tools", () => {
         "key.setValue",
         { key: "session:1", value: "active" },
         createContext("redis"),
-        DEFAULT_AI_TOOL_POLICY
-      )
+        DEFAULT_AI_TOOL_POLICY,
+      ),
     ).rejects.toThrow("requires explicit approval");
   });
 
@@ -306,8 +381,8 @@ describe("core AI tools", () => {
         "database.createNamespace",
         { namespace: "app" },
         createContext("postgres"),
-        DEFAULT_AI_TOOL_POLICY
-      )
+        DEFAULT_AI_TOOL_POLICY,
+      ),
     ).rejects.toThrow("requires explicit approval");
 
     await registry.executeWithPolicy(
@@ -319,7 +394,7 @@ describe("core AI tools", () => {
         collation: "",
       },
       createContext("postgres"),
-      approvedPolicy("database.createNamespace")
+      approvedPolicy("database.createNamespace"),
     );
     await registry.executeWithPolicy(
       "database.dropNamespace",
@@ -329,7 +404,7 @@ describe("core AI tools", () => {
         cascade: true,
       },
       createContext("postgres"),
-      approvedPolicy("database.dropNamespace")
+      approvedPolicy("database.dropNamespace"),
     );
 
     expect(calls).toEqual([
@@ -367,7 +442,7 @@ describe("core AI tools", () => {
         key: "session token",
       },
       createContext("redis"),
-      DEFAULT_AI_TOOL_POLICY
+      DEFAULT_AI_TOOL_POLICY,
     );
 
     expect(calls).toEqual([
@@ -384,7 +459,7 @@ describe("core AI tools", () => {
 
     expect(
       registry.list().find((tool) => tool.name === "key.getValue")?.inputSchema
-        .properties?.namespace
+        .properties?.namespace,
     ).toMatchObject({ type: "string" });
 
     await expect(
@@ -395,8 +470,8 @@ describe("core AI tools", () => {
           key: "session:1",
         },
         createContext("postgres"),
-        DEFAULT_AI_TOOL_POLICY
-      )
+        DEFAULT_AI_TOOL_POLICY,
+      ),
     ).rejects.toThrow("does not support key-value reads");
   });
 
@@ -413,7 +488,7 @@ describe("core AI tools", () => {
         documents: [{ name: "Ada" }],
       },
       createContext("mongodb"),
-      approvedPolicy("document.insertDocuments")
+      approvedPolicy("document.insertDocuments"),
     );
     await registry.executeWithPolicy(
       "key.setValue",
@@ -425,7 +500,7 @@ describe("core AI tools", () => {
         ttlSeconds: 60.8,
       },
       createContext("redis"),
-      approvedPolicy("key.setValue")
+      approvedPolicy("key.setValue"),
     );
     await registry.executeWithPolicy(
       "search.updateDocument",
@@ -437,7 +512,7 @@ describe("core AI tools", () => {
         upsert: true,
       },
       createContext("elasticsearch"),
-      approvedPolicy("search.updateDocument")
+      approvedPolicy("search.updateDocument"),
     );
 
     expect(calls).toEqual([

@@ -41,6 +41,7 @@ pub struct DatabaseCapabilities {
     pub supports_functions: bool,
     pub supports_transactions: bool,
     pub supports_query_cancellation: bool,
+    pub supports_explain_plan: bool,
     pub auto_increment_keyword: Option<String>,
     pub default_primary_key_type: String,
     pub common_data_types: Vec<String>,
@@ -76,6 +77,7 @@ pub struct DatabaseSpec {
     pub supports_functions: bool,
     pub supports_transactions: bool,
     pub supports_query_cancellation: bool,
+    pub supports_explain_plan: bool,
     pub auto_increment_keyword: Option<&'static str>,
     pub default_primary_key_type: &'static str,
     pub common_data_types: &'static [&'static str],
@@ -124,6 +126,7 @@ impl DatabaseSpec {
             supports_functions: self.supports_functions,
             supports_transactions: self.supports_transactions,
             supports_query_cancellation: self.supports_query_cancellation,
+            supports_explain_plan: self.supports_explain_plan,
             auto_increment_keyword: self.auto_increment_keyword.map(ToString::to_string),
             default_primary_key_type: self.default_primary_key_type.to_string(),
             common_data_types: self
@@ -206,6 +209,7 @@ const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
     supports_functions: true,
     supports_transactions: true,
     supports_query_cancellation: true,
+    supports_explain_plan: true,
     auto_increment_keyword: None,
     default_primary_key_type: "SERIAL",
     common_data_types: POSTGRES_COMMON_DATA_TYPES,
@@ -240,6 +244,7 @@ const MYSQL_SPEC: DatabaseSpec = DatabaseSpec {
     supports_functions: true,
     supports_transactions: true,
     supports_query_cancellation: true,
+    supports_explain_plan: true,
     auto_increment_keyword: Some("AUTO_INCREMENT"),
     default_primary_key_type: "INT",
     common_data_types: MYSQL_COMMON_DATA_TYPES,
@@ -274,6 +279,7 @@ const REDIS_SPEC: DatabaseSpec = DatabaseSpec {
     supports_functions: false,
     supports_transactions: false,
     supports_query_cancellation: false,
+    supports_explain_plan: false,
     auto_increment_keyword: None,
     default_primary_key_type: "",
     common_data_types: REDIS_COMMON_DATA_TYPES,
@@ -308,6 +314,7 @@ const ELASTICSEARCH_SPEC: DatabaseSpec = DatabaseSpec {
     supports_functions: false,
     supports_transactions: false,
     supports_query_cancellation: false,
+    supports_explain_plan: false,
     auto_increment_keyword: None,
     default_primary_key_type: "",
     common_data_types: ELASTICSEARCH_COMMON_DATA_TYPES,
@@ -342,6 +349,7 @@ const MONGODB_SPEC: DatabaseSpec = DatabaseSpec {
     supports_functions: false,
     supports_transactions: false,
     supports_query_cancellation: false,
+    supports_explain_plan: false,
     auto_increment_keyword: None,
     default_primary_key_type: "",
     common_data_types: MONGODB_COMMON_DATA_TYPES,
@@ -1670,6 +1678,7 @@ WITH NO DATA;"#
         assert!(postgres.supports_functions);
         assert!(postgres.supports_transactions);
         assert!(postgres.supports_query_cancellation);
+        assert!(postgres.supports_explain_plan);
         assert_eq!(postgres.default_primary_key_type, "SERIAL");
 
         let mysql = DatabaseKind::Mysql.capabilities();
@@ -1703,6 +1712,7 @@ WITH NO DATA;"#
         assert!(mysql.supports_functions);
         assert!(mysql.supports_transactions);
         assert!(mysql.supports_query_cancellation);
+        assert!(mysql.supports_explain_plan);
         assert_eq!(
             mysql.auto_increment_keyword.as_deref(),
             Some("AUTO_INCREMENT")
@@ -1725,6 +1735,7 @@ WITH NO DATA;"#
         assert!(!redis.supports_sql_query);
         assert!(!redis.supports_table_browsing);
         assert!(!redis.supports_collection_browsing);
+        assert!(!redis.supports_explain_plan);
         assert!(!redis.supports_create_database);
         assert!(!redis.supports_transactions);
         assert!(all_database_capabilities()
@@ -1747,6 +1758,7 @@ WITH NO DATA;"#
         assert!(!elasticsearch.supports_sql_query);
         assert!(!elasticsearch.supports_table_browsing);
         assert!(!elasticsearch.supports_key_value_browsing);
+        assert!(!elasticsearch.supports_explain_plan);
         assert!(!elasticsearch.supports_create_database);
         assert!(!elasticsearch.supports_transactions);
         assert!(all_database_capabilities()
@@ -1769,6 +1781,7 @@ WITH NO DATA;"#
         assert!(!mongodb.supports_sql_query);
         assert!(!mongodb.supports_table_browsing);
         assert!(!mongodb.supports_key_value_browsing);
+        assert!(!mongodb.supports_explain_plan);
         assert!(!mongodb.supports_create_database);
         assert!(!mongodb.supports_transactions);
         assert!(all_database_capabilities()

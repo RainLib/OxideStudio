@@ -5,6 +5,20 @@ import type { AiToolSummary } from "@/ai/tools/types";
 
 const QUERY_TOOLS: AiToolSummary[] = [
   {
+    name: "lsp.explainDiagnostics",
+    description: "Explain editor diagnostics.",
+    inputSchema: { type: "object" },
+    permissions: ["read"],
+    capabilities: ["lsp"],
+  },
+  {
+    name: "query.explain",
+    description: "Generate an estimated execution plan.",
+    inputSchema: { type: "object" },
+    permissions: ["read"],
+    capabilities: ["query"],
+  },
+  {
     name: "query.runReadOnly",
     description: "Run read-only query.",
     inputSchema: { type: "object" },
@@ -87,7 +101,7 @@ function planFor(
   message: string,
   activeDriver: "postgres" | "redis" | "mongodb" | "elasticsearch",
   selectedText?: string,
-  activeSql?: string
+  activeSql?: string,
 ) {
   return createDefaultAssistantPlanner().plan({
     turn: { message, selectedText },
@@ -114,7 +128,7 @@ describe("default assistant planner", () => {
       "run current query",
       "postgres",
       undefined,
-      "SELECT * FROM users"
+      "SELECT * FROM users",
     );
 
     expect(result.intent).toBe("query");
@@ -124,7 +138,7 @@ describe("default assistant planner", () => {
         toolName: "query.runReadOnly",
         input: { query: "SELECT * FROM users" },
         requiresApproval: false,
-      })
+      }),
     );
   });
 
@@ -133,14 +147,82 @@ describe("default assistant planner", () => {
       "run current query",
       "postgres",
       "SELECT id FROM selected_users",
-      "SELECT * FROM users"
+      "SELECT * FROM users",
     );
 
     expect(result.steps).toContainEqual(
       expect.objectContaining({
         toolName: "query.runReadOnly",
         input: { query: "SELECT id FROM selected_users" },
-      })
+      }),
+    );
+  });
+
+  it("plans an estimated execution plan from the selected or active SQL", () => {
+    const selected = planFor(
+      "explain this query",
+      "postgres",
+      "SELECT id FROM selected_users",
+      "SELECT * FROM users",
+    );
+    const active = planFor(
+      "分析当前查询的执行计划",
+      "postgres",
+      undefined,
+      "SELECT * FROM users",
+    );
+
+    expect(selected.intent).toBe("explain");
+    expect(selected.steps).toContainEqual(
+      expect.objectContaining({
+        id: "query-explain-plan",
+        toolName: "query.explain",
+        input: { query: "SELECT id FROM selected_users" },
+        requiresApproval: false,
+      }),
+    );
+    expect(active.steps).toContainEqual(
+      expect.objectContaining({
+        toolName: "query.explain",
+        input: { query: "SELECT * FROM users" },
+      }),
+    );
+    expect(active.steps).not.toContainEqual(
+      expect.objectContaining({ toolName: "query.runReadOnly" }),
+    );
+  });
+
+  it("never turns an explain request for mutating SQL into a write action", () => {
+    const result = planFor(
+      "explain why this update is slow",
+      "postgres",
+      "UPDATE users SET active = false",
+    );
+
+    expect(result.intent).toBe("explain");
+    expect(result.steps).toContainEqual(
+      expect.objectContaining({ toolName: "lsp.explainDiagnostics" }),
+    );
+    expect(result.steps).not.toContainEqual(
+      expect.objectContaining({
+        toolName: expect.stringMatching(/runMutation|runDestructive|insertRows/),
+      }),
+    );
+  });
+
+  it("routes error explanation to diagnostics instead of a query plan", () => {
+    const result = planFor(
+      "explain this SQL error",
+      "postgres",
+      undefined,
+      "SELECT missing_column FROM users",
+    );
+
+    expect(result.steps).toContainEqual(
+      expect.objectContaining({ toolName: "lsp.explainDiagnostics" }),
+    );
+    expect(result.steps).not.toContainEqual(
+      expect.objectContaining({ toolName: "query.explain" }),
     );
   });
 
@@ -154,7 +236,7 @@ describe("default assistant planner", () => {
         toolName: "key.getValue",
         input: { key: "session:1" },
         requiresApproval: false,
-      })
+      }),
     );
   });
 
@@ -166,7 +248,7 @@ describe("default assistant planner", () => {
       expect.objectContaining({
         toolName: "key.getValue",
         input: { key: "session:1" },
-      })
+      }),
     );
   });
 
@@ -175,31 +257,31 @@ describe("default assistant planner", () => {
     const documentInsert = planFor(
       "新增到集合 users",
       "mongodb",
-      '{"name":"Ada"}'
+      '{"name":"Ada"}',
     );
     const searchIndex = planFor(
       "写入到索引 users 编号 1",
       "elasticsearch",
-      '{"active":true}'
+      '{"active":true}',
     );
 
     expect(rowInsert.steps).toContainEqual(
       expect.objectContaining({
         toolName: "table.insertRows",
         input: { table: "users", inserts: [{ id: 1 }] },
-      })
+      }),
     );
     expect(documentInsert.steps).toContainEqual(
       expect.objectContaining({
         toolName: "document.insertDocuments",
         input: { collection: "users", documents: [{ name: "Ada" }] },
-      })
+      }),
     );
     expect(searchIndex.steps).toContainEqual(
       expect.objectContaining({
         toolName: "search.indexDocument",
         input: { index: "users", id: "1", document: { active: true } },
-      })
+      }),
     );
   });
 
@@ -207,22 +289,22 @@ describe("default assistant planner", () => {
     const documentUpdate = planFor(
       'update collection users where {"id":1}',
       "mongodb",
-      '{"active":false}'
+      '{"active":false}',
     );
     const documentDelete = planFor(
       "delete many from collection users",
       "mongodb",
-      '{"filter":{"active":false},"many":true}'
+      '{"filter":{"active":false},"many":true}',
     );
     const redisDelete = planFor("delete key session:1", "redis");
     const searchUpdate = planFor(
       "update index users id 42",
       "elasticsearch",
-      '{"active":false}'
+      '{"active":false}',
     );
     const searchDelete = planFor(
       "delete from index users id 42",
-      "elasticsearch"
+      "elasticsearch",
     );
 
     expect(documentUpdate.steps).toContainEqual(
@@ -235,7 +317,7 @@ describe("default assistant planner", () => {
           many: false,
           upsert: false,
         },
-      })
+      }),
     );
     expect(documentDelete.steps).toContainEqual(
       expect.objectContaining({
@@ -245,13 +327,13 @@ describe("default assistant planner", () => {
           filter: { active: false },
           many: true,
         },
-      })
+      }),
     );
     expect(redisDelete.steps).toContainEqual(
       expect.objectContaining({
         toolName: "key.deleteKeys",
         input: { keys: ["session:1"] },
-      })
+      }),
     );
     expect(searchUpdate.steps).toContainEqual(
       expect.objectContaining({
@@ -262,7 +344,7 @@ describe("default assistant planner", () => {
           document: { active: false },
           upsert: false,
         },
-      })
+      }),
     );
     expect(searchDelete.steps).toContainEqual(
       expect.objectContaining({
@@ -271,26 +353,26 @@ describe("default assistant planner", () => {
           index: "users",
           id: "42",
         },
-      })
+      }),
     );
   });
 
   it("plans MongoDB read commands from natural language and active collection context", () => {
     const findResult = planFor(
       'find collection users where {"active":true} limit 10',
-      "mongodb"
+      "mongodb",
     );
     const nativeFindResult = planFor(
       'find {"collection":"users","find":{"active":true}}',
-      "mongodb"
+      "mongodb",
     );
     const nativeLimitedFindResult = planFor(
       'find {"collection":"users","find":{"active":true},"limit":20}',
-      "mongodb"
+      "mongodb",
     );
     const aggregateResult = planFor(
       'aggregate collection events {"aggregate":[{"$match":{"active":true}}]}',
-      "mongodb"
+      "mongodb",
     );
     const countResult = createDefaultAssistantPlanner().plan({
       turn: { message: "count current collection" },
@@ -322,7 +404,7 @@ describe("default assistant planner", () => {
           }),
           limit: 10,
         },
-      })
+      }),
     );
     expect(nativeFindResult.steps).toContainEqual(
       expect.objectContaining({
@@ -335,7 +417,7 @@ describe("default assistant planner", () => {
           }),
           limit: 50,
         },
-      })
+      }),
     );
     expect(nativeLimitedFindResult.steps).toContainEqual(
       expect.objectContaining({
@@ -348,7 +430,7 @@ describe("default assistant planner", () => {
           }),
           limit: 50,
         },
-      })
+      }),
     );
     expect(aggregateResult.steps).toContainEqual(
       expect.objectContaining({
@@ -360,7 +442,7 @@ describe("default assistant planner", () => {
           }),
           limit: 50,
         },
-      })
+      }),
     );
     expect(countResult.steps).toContainEqual(
       expect.objectContaining({
@@ -373,7 +455,7 @@ describe("default assistant planner", () => {
           }),
           limit: 50,
         },
-      })
+      }),
     );
   });
 
@@ -399,7 +481,7 @@ describe("default assistant planner", () => {
     });
     const nativeBodyResult = planFor(
       'search current index {"query":{"match_all":{}},"size":25}',
-      "elasticsearch"
+      "elasticsearch",
     );
 
     expect(result.intent).toBe("query");
@@ -414,7 +496,7 @@ describe("default assistant planner", () => {
           }),
           limit: 50,
         },
-      })
+      }),
     );
     expect(nativeBodyResult.steps).toContainEqual(
       expect.objectContaining({
@@ -426,7 +508,7 @@ describe("default assistant planner", () => {
           }),
           limit: 50,
         },
-      })
+      }),
     );
   });
 });

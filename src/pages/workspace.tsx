@@ -11,6 +11,7 @@ import { TabBar } from "@/components/workspace/TabBar";
 import { SplitEditor } from "@/components/workspace/SplitEditor";
 import { TableDataView } from "@/components/workspace/TableDataView";
 import { CreateTableTab } from "@/components/workspace/CreateTableTab";
+import { ExplainPlanView } from "@/components/workspace/ExplainPlanView";
 import { SideToolWindow } from "@/components/workspace/SideToolWindow";
 import {
   WorkbenchGlobalTools,
@@ -29,15 +30,8 @@ import { useUnsavedChangesGuard } from "@/hooks/useUnsavedChangesGuard";
 import { APP_EVENT_OPEN_PROJECT_FILES } from "@/lib/projectFilesNavigation";
 import { cn } from "@/lib/utils";
 import type { WorkbenchSide } from "@/lib/appSettings";
-import {
-  toolWindowAtSide,
-  type SideToolWindowId,
-} from "@/lib/workbenchLayout";
-import {
-  ChevronDown,
-  ChevronRight,
-  X,
-} from "lucide-react";
+import { toolWindowAtSide, type SideToolWindowId } from "@/lib/workbenchLayout";
+import { ChevronDown, ChevronRight, LineChart, X } from "lucide-react";
 import {
   useEffect,
   useState,
@@ -49,10 +43,16 @@ export function WorkspacePage() {
   useUnsavedChangesGuard();
   const [secondaryPanelView, setSecondaryPanelView] =
     useState<SecondaryPanelView>("assistant");
-  const { tabs, activeTabId, setActiveResultIndex, closeResultAt } = useTabStore();
+  const {
+    tabs,
+    activeTabId,
+    setActiveResultIndex,
+    setQueryOutputView,
+    closeResultAt,
+  } = useTabStore();
   const connections = useConnectionStore((state) => state.connections);
   const activeConnectionId = useConnectionStore(
-    (state) => state.activeConnectionId
+    (state) => state.activeConnectionId,
   );
   const appSettings = useSettingsStore((state) => state.settings);
   const workbenchSettings = appSettings.workbench;
@@ -68,28 +68,34 @@ export function WorkspacePage() {
   const currentSchema = useSchemaStore((state) => state.currentSchema);
   const isSchemaLoading = useSchemaStore((state) => state.isLoading);
   const isCollectionsLoading = useSchemaStore(
-    (state) => state.isCollectionsLoading
+    (state) => state.isCollectionsLoading,
   );
   const isFunctionsLoading = useSchemaStore(
-    (state) => state.isFunctionsLoading
+    (state) => state.isFunctionsLoading,
   );
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
   const splitDirection = useEditorGroupStore((state) => state.splitDirection);
   const resetEditorGroups = useEditorGroupStore((state) => state.reset);
   const activeConnection = connections.find(
-    (connection) => connection.id === activeConnectionId
+    (connection) => connection.id === activeConnectionId,
   );
   const queryResults = activeTab?.results ?? [];
   const activeResultIndex = Math.min(
     activeTab?.activeResultIndex ?? 0,
-    Math.max(0, queryResults.length - 1)
+    Math.max(0, queryResults.length - 1),
   );
   const currentResult = queryResults[activeResultIndex];
+  const isPlanView = activeTab?.queryOutputView === "plan";
   const isQueryTab =
     activeTab?.type !== "table" && activeTab?.type !== "create_table";
   const hasQueryResultSurface =
     Boolean(isQueryTab && activeTab) &&
-    Boolean(currentResult || activeTab?.isExecuting || activeTab?.error);
+    Boolean(
+      currentResult ||
+      activeTab?.explainPlan ||
+      activeTab?.isExecuting ||
+      activeTab?.error,
+    );
   const isIntrospecting =
     isSchemaLoading || isCollectionsLoading || isFunctionsLoading;
   const isDatabaseExplorerOpen =
@@ -118,7 +124,11 @@ export function WorkspacePage() {
     if (hasQueryResultSurface && toolWindows.results.enabled) {
       setToolWindowVisible("results", true);
     }
-  }, [hasQueryResultSurface, setToolWindowVisible, toolWindows.results.enabled]);
+  }, [
+    hasQueryResultSurface,
+    setToolWindowVisible,
+    toolWindows.results.enabled,
+  ]);
 
   useEffect(() => {
     const openProjectFiles = () => {
@@ -128,7 +138,10 @@ export function WorkspacePage() {
     };
     window.addEventListener(APP_EVENT_OPEN_PROJECT_FILES, openProjectFiles);
     return () =>
-      window.removeEventListener(APP_EVENT_OPEN_PROJECT_FILES, openProjectFiles);
+      window.removeEventListener(
+        APP_EVENT_OPEN_PROJECT_FILES,
+        openProjectFiles,
+      );
   }, [setActiveToolWindow, setToolWindowVisible]);
 
   const toggleSecondaryPanelView = (nextView: SecondaryPanelView) => {
@@ -144,7 +157,7 @@ export function WorkspacePage() {
   const handleSideDragStart = (
     event: ReactMouseEvent,
     side: WorkbenchSide,
-    id: SideToolWindowId
+    id: SideToolWindowId,
   ) => {
     event.preventDefault();
     const startX = event.clientX;
@@ -195,15 +208,10 @@ export function WorkspacePage() {
     document.body.style.cursor = "row-resize";
   };
 
-  const renderSideToolWindow = (
-    id: SideToolWindowId,
-    side: WorkbenchSide
-  ) => {
+  const renderSideToolWindow = (id: SideToolWindowId, side: WorkbenchSide) => {
     const width = side === "left" ? layout.leftWidth : layout.rightWidth;
     const isOpen =
-      id === "databaseExplorer"
-        ? isDatabaseExplorerOpen
-        : isSecondaryPanelOpen;
+      id === "databaseExplorer" ? isDatabaseExplorerOpen : isSecondaryPanelOpen;
     const isActive = layout.activeToolWindow === id;
     const handleDragStart = (event: ReactMouseEvent) =>
       handleSideDragStart(event, side, id);
@@ -256,18 +264,13 @@ export function WorkspacePage() {
             secondaryPanelView={secondaryPanelView}
             assistantSide={toolWindows.assistant.side}
             onToggleDatabaseExplorer={() =>
-              setToolWindowVisible(
-                "databaseExplorer",
-                !isDatabaseExplorerOpen
-              )
+              setToolWindowVisible("databaseExplorer", !isDatabaseExplorerOpen)
             }
             onToggleAssistant={() => toggleSecondaryPanelView("assistant")}
             onToggleFiles={() => toggleSecondaryPanelView("files")}
           />
         }
-        right={
-          <WorkbenchGlobalTools />
-        }
+        right={<WorkbenchGlobalTools />}
       />
 
       <main className="wb-workspace-track">
@@ -281,7 +284,9 @@ export function WorkspacePage() {
               ) : (
                 <div className="z-10 flex h-full min-w-0 flex-col gap-1 bg-[hsl(var(--wb-editor))]">
                   {!(activeTab?.type === "query" && splitDirection) && (
-                    <div className="z-20"><TabBar /></div>
+                    <div className="z-20">
+                      <TabBar />
+                    </div>
                   )}
 
                   {activeTab?.type === "table" ? (
@@ -297,7 +302,8 @@ export function WorkspacePage() {
                       <div
                         className={cn(
                           "flex min-h-[160px] flex-1 flex-col overflow-hidden",
-                          layout.activeToolWindow === "editor" && activePanelClass
+                          layout.activeToolWindow === "editor" &&
+                            activePanelClass,
                         )}
                         onFocus={() => setActiveToolWindow("editor")}
                       >
@@ -314,17 +320,52 @@ export function WorkspacePage() {
                             className={cn(
                               "min-h-[140px] shrink-0 overflow-hidden rounded-b-[6px] border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-grid))]",
                               layout.activeToolWindow === "results" &&
-                                activePanelClass
+                                activePanelClass,
                             )}
                             style={{ height: `${layout.bottomHeight}px` }}
                             onFocus={() => setActiveToolWindow("results")}
                           >
                             <div className="flex h-8 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-2 text-[11px] text-[hsl(var(--wb-text-muted))]">
                               <div className="flex min-w-0 items-center gap-1.5">
-                                <span className="mr-1 font-medium text-[hsl(var(--wb-text))]">
-                                  Results
-                                </span>
-                                {queryResults.length > 1 ? (
+                                {(!isPlanView || queryResults.length > 0) && (
+                                  <button
+                                    type="button"
+                                    className={cn(
+                                      "mr-1 flex h-5 items-center rounded-[3px] px-2 font-medium",
+                                      !isPlanView
+                                        ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+                                        : "hover:bg-[hsl(var(--wb-hover))]",
+                                    )}
+                                    onClick={() =>
+                                      activeTab &&
+                                      setQueryOutputView(
+                                        activeTab.id,
+                                        "results",
+                                      )
+                                    }
+                                  >
+                                    Results
+                                  </button>
+                                )}
+                                {(activeTab?.explainPlan || isPlanView) && (
+                                  <button
+                                    type="button"
+                                    className={cn(
+                                      "mr-1 flex h-5 items-center gap-1.5 rounded-[3px] px-2 font-medium",
+                                      isPlanView
+                                        ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+                                        : "hover:bg-[hsl(var(--wb-hover))]",
+                                    )}
+                                    onClick={() =>
+                                      activeTab &&
+                                      setQueryOutputView(activeTab.id, "plan")
+                                    }
+                                  >
+                                    <LineChart size={11} />
+                                    Explain Plan
+                                  </button>
+                                )}
+                                {!isPlanView && queryResults.length > 1 ? (
                                   <div className="flex min-w-0 items-center gap-0.5">
                                     {queryResults.map((result, index) => (
                                       <button
@@ -334,11 +375,14 @@ export function WorkspacePage() {
                                           "group/result flex h-5 max-w-[150px] items-center gap-1 rounded-[3px] pl-2 pr-1 text-[10px] hover:bg-[hsl(var(--wb-hover))]",
                                           index === activeResultIndex
                                             ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
-                                            : "text-[hsl(var(--wb-text-muted))]"
+                                            : "text-[hsl(var(--wb-text-muted))]",
                                         )}
                                         onClick={() =>
                                           activeTab &&
-                                          setActiveResultIndex(activeTab.id, index)
+                                          setActiveResultIndex(
+                                            activeTab.id,
+                                            index,
+                                          )
                                         }
                                         title={`${result.rows.length.toLocaleString()} rows`}
                                       >
@@ -353,7 +397,10 @@ export function WorkspacePage() {
                                           onClick={(event) => {
                                             event.stopPropagation();
                                             if (activeTab) {
-                                              closeResultAt(activeTab.id, index);
+                                              closeResultAt(
+                                                activeTab.id,
+                                                index,
+                                              );
                                             }
                                           }}
                                           onKeyDown={(event) => {
@@ -364,7 +411,10 @@ export function WorkspacePage() {
                                               event.preventDefault();
                                               event.stopPropagation();
                                               if (activeTab) {
-                                                closeResultAt(activeTab.id, index);
+                                                closeResultAt(
+                                                  activeTab.id,
+                                                  index,
+                                                );
                                               }
                                             }
                                           }}
@@ -374,7 +424,7 @@ export function WorkspacePage() {
                                       </button>
                                     ))}
                                   </div>
-                                ) : (
+                                ) : !isPlanView && queryResults.length === 1 ? (
                                   <button
                                     type="button"
                                     className="group/result flex h-5 items-center gap-1 rounded-[3px] bg-[hsl(var(--wb-active-strong))] pl-2 pr-1 text-[10px] text-[hsl(var(--wb-text))]"
@@ -413,14 +463,17 @@ export function WorkspacePage() {
                                       </span>
                                     )}
                                   </button>
-                                )}
-                                {currentResult && (
+                                ) : null}
+                                {!isPlanView && currentResult && (
                                   <span className="whitespace-nowrap text-[10px]">
-                                    {currentResult.rows.length.toLocaleString()} rows
+                                    {currentResult.rows.length.toLocaleString()}{" "}
+                                    rows
                                   </span>
                                 )}
                                 {activeTab?.isExecuting && (
-                                  <span className="whitespace-nowrap">Running...</span>
+                                  <span className="whitespace-nowrap">
+                                    Running...
+                                  </span>
                                 )}
                                 {activeTab?.error && (
                                   <span className="truncate text-[hsl(var(--destructive))]">
@@ -440,7 +493,23 @@ export function WorkspacePage() {
                               </button>
                             </div>
                             <div className="h-[calc(100%-2rem)] min-h-0">
-                              <DataGrid readOnly />
+                              {isPlanView ? (
+                                activeTab?.explainPlan ? (
+                                  <ExplainPlanView
+                                    tabId={activeTab.id}
+                                    plan={activeTab.explainPlan}
+                                  />
+                                ) : (
+                                  <div className="flex h-full items-center justify-center px-6 text-center text-[11px] text-[hsl(var(--wb-text-muted))]">
+                                    {activeTab?.isExecuting
+                                      ? "Generating Explain Plan…"
+                                      : activeTab?.error ||
+                                        "No Explain Plan is available."}
+                                  </div>
+                                )
+                              ) : (
+                                <DataGrid readOnly />
+                              )}
                             </div>
                           </div>
                         </>
@@ -455,9 +524,9 @@ export function WorkspacePage() {
                         >
                           <ChevronRight size={12} />
                           <span className="font-medium text-[hsl(var(--wb-text))]">
-                            Results
+                            {isPlanView ? "Explain Plan" : "Results"}
                           </span>
-                          {currentResult && (
+                          {!isPlanView && currentResult && (
                             <span>
                               {currentResult.rows.length.toLocaleString()} rows
                             </span>

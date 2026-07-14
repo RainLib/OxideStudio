@@ -77,6 +77,7 @@ const DATABASE_DRIVER_PROFILES: Record<
       supportsFunctions: true,
       supportsTransactions: true,
       supportsQueryCancellation: true,
+      supportsExplainPlan: true,
       autoIncrementKeyword: null,
       defaultPrimaryKeyType: "SERIAL",
       commonDataTypes: [
@@ -136,6 +137,7 @@ const DATABASE_DRIVER_PROFILES: Record<
       supportsFunctions: true,
       supportsTransactions: true,
       supportsQueryCancellation: true,
+      supportsExplainPlan: true,
       autoIncrementKeyword: "AUTO_INCREMENT",
       defaultPrimaryKeyType: "INT",
       commonDataTypes: [
@@ -195,6 +197,7 @@ const DATABASE_DRIVER_PROFILES: Record<
       supportsFunctions: false,
       supportsTransactions: false,
       supportsQueryCancellation: false,
+      supportsExplainPlan: false,
       autoIncrementKeyword: null,
       defaultPrimaryKeyType: "",
       commonDataTypes: ["string", "list", "set", "zset", "hash", "stream"],
@@ -239,6 +242,7 @@ const DATABASE_DRIVER_PROFILES: Record<
       supportsFunctions: false,
       supportsTransactions: false,
       supportsQueryCancellation: false,
+      supportsExplainPlan: false,
       autoIncrementKeyword: null,
       defaultPrimaryKeyType: "",
       commonDataTypes: [
@@ -294,6 +298,7 @@ const DATABASE_DRIVER_PROFILES: Record<
       supportsFunctions: false,
       supportsTransactions: false,
       supportsQueryCancellation: false,
+      supportsExplainPlan: false,
       autoIncrementKeyword: null,
       defaultPrimaryKeyType: "",
       commonDataTypes: [
@@ -321,20 +326,24 @@ function capabilitiesKey(driver: DatabaseDriver | string) {
 }
 
 function cloneCapabilities(
-  capabilities: DatabaseCapabilities
+  capabilities: DatabaseCapabilities,
 ): DatabaseCapabilities {
   return {
     ...capabilities,
     dataModel: capabilities.dataModel || "relational",
     supportsSqlQuery: capabilities.supportsSqlQuery ?? true,
     supportsTableBrowsing: capabilities.supportsTableBrowsing ?? true,
-    supportsCollectionBrowsing: capabilities.supportsCollectionBrowsing ?? false,
+    supportsCollectionBrowsing:
+      capabilities.supportsCollectionBrowsing ?? false,
     supportsKeyValueBrowsing: capabilities.supportsKeyValueBrowsing ?? false,
+    supportsExplainPlan: capabilities.supportsExplainPlan ?? false,
     commonDataTypes: [...capabilities.commonDataTypes],
   };
 }
 
-function cloneDriverProfile(profile: DatabaseDriverProfile): DatabaseDriverProfile {
+function cloneDriverProfile(
+  profile: DatabaseDriverProfile,
+): DatabaseDriverProfile {
   return {
     ...profile,
     protocolAliases: [...profile.protocolAliases],
@@ -348,13 +357,14 @@ function cloneDriverProfile(profile: DatabaseDriverProfile): DatabaseDriverProfi
         profile.capabilities.supportsCollectionBrowsing ?? false,
       supportsKeyValueBrowsing:
         profile.capabilities.supportsKeyValueBrowsing ?? false,
+      supportsExplainPlan: profile.capabilities.supportsExplainPlan ?? false,
       commonDataTypes: [...profile.capabilities.commonDataTypes],
     },
   };
 }
 
 function profileCapabilitiesFromRuntime(
-  capabilities: DatabaseCapabilities
+  capabilities: DatabaseCapabilities,
 ): DatabaseDriverCapabilities {
   const { driver: _driver, ...rest } = cloneCapabilities(capabilities);
   return rest;
@@ -362,7 +372,7 @@ function profileCapabilitiesFromRuntime(
 
 function withRuntimeCapabilities(
   profile: DatabaseDriverProfile,
-  capabilities?: DatabaseCapabilities
+  capabilities?: DatabaseCapabilities,
 ): DatabaseDriverProfile {
   if (!capabilities) return profile;
 
@@ -374,16 +384,19 @@ function withRuntimeCapabilities(
 }
 
 export function registerDatabaseCapabilities(
-  capabilities: DatabaseCapabilities | DatabaseCapabilities[]
+  capabilities: DatabaseCapabilities | DatabaseCapabilities[],
 ) {
   const values = Array.isArray(capabilities) ? capabilities : [capabilities];
   for (const value of values) {
-    runtimeCapabilities.set(capabilitiesKey(value.driver), cloneCapabilities(value));
+    runtimeCapabilities.set(
+      capabilitiesKey(value.driver),
+      cloneCapabilities(value),
+    );
   }
 }
 
 export function registerDatabaseDriverProfile(
-  profile: DatabaseDriverProfile | DatabaseDriverProfile[]
+  profile: DatabaseDriverProfile | DatabaseDriverProfile[],
 ) {
   const values = Array.isArray(profile) ? profile : [profile];
   for (const value of values) {
@@ -403,7 +416,7 @@ function formatDriverDisplayName(driver: DatabaseDriver) {
 }
 
 function fallbackDatabaseDriverProfile(
-  driver: DatabaseDriver
+  driver: DatabaseDriver,
 ): DatabaseDriverProfile {
   const displayName = formatDriverDisplayName(driver);
   return {
@@ -445,6 +458,7 @@ function fallbackDatabaseDriverProfile(
       supportsFunctions: false,
       supportsTransactions: true,
       supportsQueryCancellation: false,
+      supportsExplainPlan: false,
       autoIncrementKeyword: null,
       defaultPrimaryKeyType: "INTEGER",
       commonDataTypes: [
@@ -480,7 +494,7 @@ export function supportedDatabaseDriverProfiles() {
   }
 
   return Array.from(profiles.values()).map((profile) =>
-    databaseDriverProfile(profile.driver)
+    databaseDriverProfile(profile.driver),
   );
 }
 
@@ -488,14 +502,18 @@ export function supportedDatabaseDrivers() {
   return supportedDatabaseDriverProfiles().map((profile) => profile.driver);
 }
 
-export function normalizeDatabaseDriverName(value: string): DatabaseDriver | null {
+export function normalizeDatabaseDriverName(
+  value: string,
+): DatabaseDriver | null {
   const normalized = value.trim().toLowerCase();
   if (!normalized) return null;
 
   for (const profile of supportedDatabaseDriverProfiles()) {
     if (
       profile.driver === normalized ||
-      profile.protocolAliases.some((alias) => alias.toLowerCase() === normalized)
+      profile.protocolAliases.some(
+        (alias) => alias.toLowerCase() === normalized,
+      )
     ) {
       return profile.driver;
     }
@@ -532,7 +550,7 @@ export function defaultConnectionAccentClassName(driver: DatabaseDriver) {
 }
 
 export function defaultDatabaseCapabilities(
-  driver: DatabaseDriver
+  driver: DatabaseDriver,
 ): DatabaseCapabilities {
   const capabilities = databaseDriverProfile(driver).capabilities;
   return {
@@ -543,13 +561,13 @@ export function defaultDatabaseCapabilities(
 }
 
 export function isRelationalDataModel(
-  capabilities: Pick<DatabaseCapabilities, "dataModel">
+  capabilities: Pick<DatabaseCapabilities, "dataModel">,
 ) {
   return capabilities.dataModel === "relational";
 }
 
 export function supportsSqlWorkspace(
-  capabilities: Pick<DatabaseCapabilities, "supportsSqlQuery">
+  capabilities: Pick<DatabaseCapabilities, "supportsSqlQuery">,
 ) {
   return capabilities.supportsSqlQuery;
 }
@@ -558,9 +576,11 @@ export function supportsTableWorkspace(
   capabilities: Pick<
     DatabaseCapabilities,
     "dataModel" | "supportsTableBrowsing"
-  >
+  >,
 ) {
-  return isRelationalDataModel(capabilities) && capabilities.supportsTableBrowsing;
+  return (
+    isRelationalDataModel(capabilities) && capabilities.supportsTableBrowsing
+  );
 }
 
 export function pluralizeNamespaceLabel(label: string | null | undefined) {
@@ -574,16 +594,20 @@ export function pluralizeNamespaceLabel(label: string | null | undefined) {
 
 export function isSystemNamespace(
   driver: DatabaseDriver | null | undefined,
-  namespace: string | null | undefined
+  namespace: string | null | undefined,
 ) {
-  const normalizedDriver = normalizeDatabaseDriverName(String(driver || "")) || driver;
+  const normalizedDriver =
+    normalizeDatabaseDriverName(String(driver || "")) || driver;
   const normalized = (namespace || "").trim().toLowerCase();
   if (!normalized) return false;
 
   if (normalizedDriver === "mysql") {
-    return ["information_schema", "mysql", "performance_schema", "sys"].includes(
-      normalized
-    );
+    return [
+      "information_schema",
+      "mysql",
+      "performance_schema",
+      "sys",
+    ].includes(normalized);
   }
 
   if (normalizedDriver === "postgres") {
@@ -602,7 +626,7 @@ export function isSystemNamespace(
 export function selectPreferredNamespace(
   driver: DatabaseDriver | null | undefined,
   namespaces: string[],
-  preferred: Array<string | null | undefined> = []
+  preferred: Array<string | null | undefined> = [],
 ) {
   if (namespaces.length === 0) return null;
 
@@ -612,7 +636,7 @@ export function selectPreferredNamespace(
   }
 
   const publicNamespace = namespaces.find(
-    (namespace) => namespace.toLowerCase() === "public"
+    (namespace) => namespace.toLowerCase() === "public",
   );
   if (publicNamespace) return publicNamespace;
 
@@ -627,15 +651,15 @@ export function defaultStringDataType(
   capabilities: Pick<
     DatabaseCapabilities,
     "commonDataTypes" | "defaultPrimaryKeyType"
-  >
+  >,
 ) {
   const preferred = ["VARCHAR", "TEXT", "STRING"];
   const type =
     preferred
       .map((candidate) =>
         capabilities.commonDataTypes.find(
-          (value) => value.toUpperCase() === candidate
-        )
+          (value) => value.toUpperCase() === candidate,
+        ),
       )
       .find(Boolean) ||
     capabilities.commonDataTypes[0] ||
@@ -666,7 +690,7 @@ export function supportsAutoIncrementForDataType(
     DatabaseCapabilities,
     "autoIncrementKeyword" | "commonDataTypes" | "lspLanguageId"
   >,
-  dataType: string
+  dataType: string,
 ) {
   const baseType = normalizedDataTypeBase(dataType);
   if (!baseType) return false;
@@ -689,7 +713,9 @@ export function supportsAutoIncrementForDataType(
   }
 
   if ((capabilities.lspLanguageId || "").toLowerCase() === "postgres") {
-    return integerTypes.has(baseType) || ["INT2", "INT4", "INT8"].includes(baseType);
+    return (
+      integerTypes.has(baseType) || ["INT2", "INT4", "INT8"].includes(baseType)
+    );
   }
 
   return false;
@@ -702,7 +728,7 @@ export function quoteIdentifier(driver: DatabaseDriver, identifier: string) {
 
 export function quoteIdentifierWithCapabilities(
   capabilities: Pick<DatabaseCapabilities, "identifierQuote">,
-  identifier: string
+  identifier: string,
 ) {
   const quote = capabilities.identifierQuote || '"';
   return `${quote}${identifier.split(quote).join(quote + quote)}${quote}`;
@@ -711,7 +737,7 @@ export function quoteIdentifierWithCapabilities(
 export function qualifiedTableName(
   driver: DatabaseDriver,
   schema: string | null | undefined,
-  table: string
+  table: string,
 ) {
   if (!schema) return quoteIdentifier(driver, table);
   return `${quoteIdentifier(driver, schema)}.${quoteIdentifier(driver, table)}`;
@@ -721,7 +747,7 @@ export function previewTableQuery(
   driver: DatabaseDriver,
   schema: string | null | undefined,
   table: string,
-  limit = 500
+  limit = 500,
 ) {
   return `SELECT * FROM ${qualifiedTableName(driver, schema, table)} LIMIT ${limit};`;
 }
@@ -735,7 +761,9 @@ export function lspLanguageId(driver: DatabaseDriver) {
 }
 
 export function configuredLspLanguageId(driver: DatabaseDriver) {
-  return databaseDriverProfile(driver).capabilities.lspLanguageId.trim().toLowerCase();
+  return databaseDriverProfile(driver)
+    .capabilities.lspLanguageId.trim()
+    .toLowerCase();
 }
 
 export function supportsLspLanguageId(driver: DatabaseDriver) {
@@ -745,7 +773,10 @@ export function supportsLspLanguageId(driver: DatabaseDriver) {
 
 export function queryEditorLanguageId(driver: DatabaseDriver) {
   const capabilities = databaseDriverProfile(driver).capabilities;
-  if (capabilities.dataModel === "document" || capabilities.dataModel === "search") {
+  if (
+    capabilities.dataModel === "document" ||
+    capabilities.dataModel === "search"
+  ) {
     return "json";
   }
   if (capabilities.dataModel === "keyValue") {
@@ -756,7 +787,7 @@ export function queryEditorLanguageId(driver: DatabaseDriver) {
 
 export function normalizeLspDialect(
   dialect: string | null | undefined,
-  fallback = DEFAULT_LSP_DIALECT
+  fallback = DEFAULT_LSP_DIALECT,
 ) {
   const normalized = (dialect || "").trim().toLowerCase();
   if (SUPPORTED_LSP_DIALECTS.has(normalized)) return normalized;
@@ -804,7 +835,8 @@ export function relationObjectLabel(objectType?: string | null) {
 
 export function formatSqlValue(value: unknown): string {
   if (value === null || value === undefined) return "NULL";
-  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "NULL";
+  if (typeof value === "number")
+    return Number.isFinite(value) ? String(value) : "NULL";
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
   return `'${String(value).replace(/'/g, "''")}'`;
 }

@@ -1,5 +1,10 @@
 import { invokeWithInterceptors } from "./client";
-import type { QueryResult, CompletionContext } from "./types";
+import type {
+  QueryResult,
+  CompletionContext,
+  ExplainPlan,
+  ExplainQueryRequest,
+} from "./types";
 
 /**
  * 查询执行服务
@@ -19,7 +24,7 @@ export async function executeQuery(
   schema?: string,
   transactionId?: string,
   queryId?: string,
-  database?: string
+  database?: string,
 ): Promise<QueryResult[]> {
   return invokeWithInterceptors<QueryResult[]>("execute_query", {
     connectionId,
@@ -41,7 +46,7 @@ export async function executeReadOnlyQuery(
   connectionId: string,
   sql: string,
   schema?: string,
-  queryId?: string
+  queryId?: string,
 ): Promise<QueryResult[]> {
   return invokeWithInterceptors<QueryResult[]>("execute_read_only_query", {
     connectionId,
@@ -49,6 +54,12 @@ export async function executeReadOnlyQuery(
     schema,
     queryId,
   });
+}
+
+export async function explainQuery(
+  request: ExplainQueryRequest,
+): Promise<ExplainPlan> {
+  return invokeWithInterceptors<ExplainPlan>("explain_query", { request });
 }
 
 /**
@@ -59,7 +70,7 @@ export async function executeReadOnlyQuery(
  */
 export async function getSqlCompletion(
   sql: string,
-  cursor: number
+  cursor: number,
 ): Promise<CompletionContext> {
   return invokeWithInterceptors<CompletionContext>("get_sql_completion", {
     sql,
@@ -73,6 +84,7 @@ export async function getSqlCompletion(
 export const queryService = {
   executeQuery,
   executeReadOnlyQuery,
+  explainQuery,
   cancelQuery,
   getSqlCompletion,
 };

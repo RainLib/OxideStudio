@@ -22,7 +22,7 @@ describe("query service database scope", () => {
       "public",
       undefined,
       "query-1",
-      "analytics"
+      "analytics",
     );
 
     expect(mocks.invoke).toHaveBeenCalledWith("execute_query", {
@@ -33,5 +33,20 @@ describe("query service database scope", () => {
       queryId: "query-1",
       database: "analytics",
     });
+  });
+
+  it("sends Explain Plan as one structured request", async () => {
+    const request = {
+      connectionId: "postgres-1",
+      sql: "SELECT * FROM users",
+      schema: "public",
+      database: "analytics",
+      queryId: "plan-1",
+      mode: "estimate" as const,
+    };
+
+    await queryService.explainQuery(request);
+
+    expect(mocks.invoke).toHaveBeenCalledWith("explain_query", { request });
   });
 });

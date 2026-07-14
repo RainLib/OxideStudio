@@ -1,8 +1,9 @@
-import type {
-  AssistantToolCallResult,
-} from "@/ai/assistant/types";
+import type { AssistantToolCallResult } from "@/ai/assistant/types";
 import type { AiToolExecutionContext } from "@/ai/tools/types";
-import { captureWorkspaceUiActionContext, documentRevisionForTab } from "./context";
+import {
+  captureWorkspaceUiActionContext,
+  documentRevisionForTab,
+} from "./context";
 import type {
   AssistantAttachment,
   UiActionName,
@@ -15,7 +16,7 @@ const MAX_ATTACHMENTS_PER_MESSAGE = 8;
 
 export function createAssistantAttachments(
   results: AssistantToolCallResult[],
-  toolContext: AiToolExecutionContext
+  toolContext: AiToolExecutionContext,
 ) {
   const context = captureWorkspaceUiActionContext();
   const attachments: AssistantAttachment[] = [];
@@ -37,9 +38,9 @@ export function createAssistantAttachments(
               "workspace.openTab",
               { projectId: context.projectId, tabId },
               "Open tab",
-              context
+              context,
             ),
-          })
+          }),
         );
         const fileRelativePath = stringValue(tab?.fileRelativePath);
         if (fileRelativePath) {
@@ -52,11 +53,14 @@ export function createAssistantAttachments(
               action: actionRequest(
                 `${result.id}-reveal-file`,
                 "project.revealFile",
-                { projectId: context.projectId, relativePath: fileRelativePath },
+                {
+                  projectId: context.projectId,
+                  relativePath: fileRelativePath,
+                },
                 "Open project file",
-                context
+                context,
               ),
-            })
+            }),
           );
         }
         const resultSetCount = numberValue(tab?.resultSetCount);
@@ -78,9 +82,9 @@ export function createAssistantAttachments(
                   resultIndex: activeResultIndex,
                 },
                 "Reveal results",
-                context
+                context,
               ),
-            })
+            }),
           );
         }
       }
@@ -93,7 +97,7 @@ export function createAssistantAttachments(
           objectName: stringValue(tab?.tableName),
           objectType: stringValue(tab?.objectType),
         },
-        context
+        context,
       );
       if (objectAttachment) attachments.push(objectAttachment);
     }
@@ -110,8 +114,8 @@ export function createAssistantAttachments(
             range,
             stringValue(selection?.tabTitle) || "Editor selection",
             "Selected SQL",
-            context
-          )
+            context,
+          ),
         );
       }
     }
@@ -134,7 +138,7 @@ export function createAssistantAttachments(
           objectType:
             stringValue(description?.type) || stringValue(description?.kind),
         },
-        context
+        context,
       );
       if (objectAttachment) attachments.push(objectAttachment);
     }
@@ -156,10 +160,9 @@ export function createAssistantAttachments(
               toolContext.activeNamespace ||
               undefined,
             objectName: stringValue(object?.name),
-            objectType:
-              stringValue(object?.type) || stringValue(object?.kind),
+            objectType: stringValue(object?.type) || stringValue(object?.kind),
           },
-          context
+          context,
         );
         if (objectAttachment) attachments.push(objectAttachment);
       }
@@ -183,15 +186,51 @@ export function createAssistantAttachments(
               range,
               stringValue(diagnostic?.message) || `Diagnostic ${index + 1}`,
               stringValue(diagnostic?.location) || "SQL diagnostic",
-              context
-            )
+              context,
+            ),
           );
         }
       }
     }
+
+    if (result.toolName === "query.explain") {
+      const plan = record(result.output);
+      const root = record(plan?.root);
+      const tabId = toolContext.activeTab?.id;
+      const planId = stringValue(plan?.id);
+      const nodeId = stringValue(root?.id);
+      if (tabId && planId && nodeId) {
+        const nodeType = stringValue(root?.nodeType) || "Plan root";
+        attachments.push(
+          attachment({
+            id: `${result.id}-plan`,
+            kind: "plan",
+            label: `Explain Plan · ${nodeType}`,
+            detail: [stringValue(plan?.driver), stringValue(plan?.mode)]
+              .filter(Boolean)
+              .join(" · "),
+            action: actionRequest(
+              `${result.id}-reveal-plan`,
+              "plan.revealNode",
+              {
+                projectId: context.projectId,
+                tabId,
+                planId,
+                nodeId,
+              },
+              "Reveal Explain Plan",
+              context,
+            ),
+          }),
+        );
+      }
+    }
   }
 
-  return deduplicateAttachments(attachments).slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
+  return deduplicateAttachments(attachments).slice(
+    0,
+    MAX_ATTACHMENTS_PER_MESSAGE,
+  );
 }
 
 function databaseObjectAttachment(
@@ -203,9 +242,10 @@ function databaseObjectAttachment(
     objectName?: string;
     objectType?: string;
   },
-  context: ReturnType<typeof captureWorkspaceUiActionContext>
+  context: ReturnType<typeof captureWorkspaceUiActionContext>,
 ): AssistantAttachment | null {
-  if (!target.connectionId || !target.schemaName || !target.objectName) return null;
+  if (!target.connectionId || !target.schemaName || !target.objectName)
+    return null;
   const uiTarget: UiActionTarget = {
     projectId: context.projectId,
     connectionId: target.connectionId,
@@ -232,7 +272,7 @@ function databaseObjectAttachment(
       "database.revealObject",
       uiTarget,
       `Reveal ${qualifiedName}`,
-      context
+      context,
     ),
     secondaryActions: [
       actionRequest(
@@ -240,14 +280,14 @@ function databaseObjectAttachment(
         "database.openObjectData",
         uiTarget,
         "Open data",
-        context
+        context,
       ),
       actionRequest(
         `${id}-ddl`,
         "database.openObjectDdl",
         uiTarget,
         "Open DDL",
-        context
+        context,
       ),
     ],
   });
@@ -259,7 +299,7 @@ function editorRangeAttachment(
   range: UiActionRange,
   label: string,
   detail: string,
-  context: ReturnType<typeof captureWorkspaceUiActionContext>
+  context: ReturnType<typeof captureWorkspaceUiActionContext>,
 ): AssistantAttachment {
   return attachment({
     id,
@@ -272,7 +312,7 @@ function editorRangeAttachment(
       { projectId: context.projectId, tabId, range },
       "Reveal in editor",
       context,
-      documentRevisionForTab(tabId)
+      documentRevisionForTab(tabId),
     ),
   });
 }
@@ -283,7 +323,7 @@ function actionRequest(
   target: UiActionTarget,
   label: string,
   context: ReturnType<typeof captureWorkspaceUiActionContext>,
-  documentRevision?: string | null
+  documentRevision?: string | null,
 ): UiActionRequest {
   return {
     id,
@@ -333,7 +373,9 @@ function stringValue(value: unknown) {
 }
 
 function numberValue(value: unknown) {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 function editorSelectionRange(value: Record<string, unknown> | null) {
@@ -351,12 +393,15 @@ function lspRange(value: unknown) {
   const start = record(range?.start);
   const end = record(range?.end);
   if (!start || !end) return null;
-  const zeroBased = numericRange({
-    startLine: start.line,
-    startColumn: start.character,
-    endLine: end.line,
-    endColumn: end.character,
-  }, true);
+  const zeroBased = numericRange(
+    {
+      startLine: start.line,
+      startColumn: start.character,
+      endLine: end.line,
+      endColumn: end.character,
+    },
+    true,
+  );
   if (!zeroBased) return null;
   return {
     startLine: zeroBased.startLine + 1,
@@ -368,13 +413,13 @@ function lspRange(value: unknown) {
 
 function numericRange(
   values: Record<keyof UiActionRange, unknown>,
-  allowZero = false
+  allowZero = false,
 ): UiActionRange | null {
   const range = values as Record<keyof UiActionRange, number>;
   const minimum = allowZero ? 0 : 1;
   if (
     Object.values(range).some(
-      (value) => !Number.isInteger(value) || value < minimum
+      (value) => !Number.isInteger(value) || value < minimum,
     )
   ) {
     return null;

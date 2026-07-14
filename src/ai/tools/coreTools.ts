@@ -66,6 +66,11 @@ export const CORE_AI_TOOL_FAMILIES: AiToolFamily[] = [
     tools: [readOnlyQueryTool],
   },
   {
+    name: "query.explain",
+    requiredAdapters: ["explainQuery"],
+    tools: [explainQueryTool],
+  },
+  {
     name: "query.write",
     requiredAdapters: ["runMutationQuery"],
     tools: [mutationQueryTool, destructiveQueryTool],
@@ -119,7 +124,7 @@ export const CORE_AI_TOOL_FAMILIES: AiToolFamily[] = [
 export function registerCoreAiTools(
   registry: AiToolRegistry,
   adapters: AiToolAdapters,
-  families: AiToolFamily[] = mergeAiToolFamilies(CORE_AI_TOOL_FAMILIES)
+  families: AiToolFamily[] = mergeAiToolFamilies(CORE_AI_TOOL_FAMILIES),
 ) {
   return registerAiToolFamilies(registry, adapters, families);
 }
@@ -127,7 +132,7 @@ export function registerCoreAiTools(
 export function describeCoreAiToolEnvironment(
   adapters: AiToolAdapters,
   host: string,
-  families: AiToolFamily[] = mergeAiToolFamilies(CORE_AI_TOOL_FAMILIES)
+  families: AiToolFamily[] = mergeAiToolFamilies(CORE_AI_TOOL_FAMILIES),
 ) {
   const availability = describeAiToolFamilyAvailability(families, adapters);
 
@@ -150,7 +155,8 @@ export function describeCoreAiToolEnvironment(
 function connectionListTool(adapters: AiToolAdapters): AiToolDefinition {
   return {
     name: "connection.list",
-    description: "List saved database connections visible to the current workspace.",
+    description:
+      "List saved database connections visible to the current workspace.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -162,7 +168,9 @@ function connectionListTool(adapters: AiToolAdapters): AiToolDefinition {
   };
 }
 
-function connectionCapabilitiesTool(adapters: AiToolAdapters): AiToolDefinition {
+function connectionCapabilitiesTool(
+  adapters: AiToolAdapters,
+): AiToolDefinition {
   return {
     name: "connection.capabilities",
     description: "Return driver capabilities for a database connection type.",
@@ -171,7 +179,8 @@ function connectionCapabilitiesTool(adapters: AiToolAdapters): AiToolDefinition 
       properties: {
         driver: {
           type: "string",
-          description: "Database driver id, for example postgres, mysql, redis, mongodb.",
+          description:
+            "Database driver id, for example postgres, mysql, redis, mongodb.",
         },
       },
       required: ["driver"],
@@ -209,13 +218,13 @@ function providerListTool(): AiToolDefinition {
         priority: provider.priority ?? 0,
         activated: provider.activated,
         driverProfiles: (provider.driverProfiles ?? []).map(
-          (profile) => profile.driver
+          (profile) => profile.driver,
         ),
         objectPreviewProviders: (provider.objectPreviewProviders ?? []).map(
-          (previewProvider) => previewProvider.id
+          (previewProvider) => previewProvider.id,
         ),
         aiToolFamilies: (provider.aiToolFamilies ?? []).map(
-          (family) => family.name
+          (family) => family.name,
         ),
       })),
       driverProfiles: supportedDatabaseDriverProfiles().map((profile) => {
@@ -286,6 +295,10 @@ function aiToolHintsForCapabilities(capabilities: DatabaseCapabilities) {
     read.push(...lsp);
   }
 
+  if (capabilities.supportsExplainPlan) {
+    read.push("query.explain");
+  }
+
   return {
     read: uniqueToolNames(read),
     metadata: uniqueToolNames(metadata),
@@ -302,7 +315,8 @@ function uniqueToolNames(names: string[]) {
 function activeTabTool(adapters: AiToolAdapters): AiToolDefinition {
   return {
     name: "workspace.getActiveTab",
-    description: "Return the active editor tab metadata and current query text.",
+    description:
+      "Return the active editor tab metadata and current query text.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -317,7 +331,8 @@ function activeTabTool(adapters: AiToolAdapters): AiToolDefinition {
 function workspaceSelectionTool(adapters: AiToolAdapters): AiToolDefinition {
   return {
     name: "workspace.getSelection",
-    description: "Return the current editor selection for the active workspace tab.",
+    description:
+      "Return the current editor selection for the active workspace tab.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -332,7 +347,8 @@ function workspaceSelectionTool(adapters: AiToolAdapters): AiToolDefinition {
 function listCollectionsTool(adapters: AiToolAdapters): AiToolDefinition {
   return {
     name: "metadata.listCollections",
-    description: "List document collections, search indexes, or analogous objects.",
+    description:
+      "List document collections, search indexes, or analogous objects.",
     inputSchema: {
       type: "object",
       properties: {
@@ -342,7 +358,8 @@ function listCollectionsTool(adapters: AiToolAdapters): AiToolDefinition {
         },
         namespace: {
           type: "string",
-          description: "Database, schema, or namespace. Defaults to the active namespace.",
+          description:
+            "Database, schema, or namespace. Defaults to the active namespace.",
         },
       },
       additionalProperties: false,
@@ -355,10 +372,13 @@ function listCollectionsTool(adapters: AiToolAdapters): AiToolDefinition {
       return adapters.listCollections?.(
         {
           connectionId:
-            typeof payload.connectionId === "string" ? payload.connectionId : null,
-          namespace: typeof payload.namespace === "string" ? payload.namespace : null,
+            typeof payload.connectionId === "string"
+              ? payload.connectionId
+              : null,
+          namespace:
+            typeof payload.namespace === "string" ? payload.namespace : null,
         },
-        context
+        context,
       );
     },
   };
@@ -367,7 +387,8 @@ function listCollectionsTool(adapters: AiToolAdapters): AiToolDefinition {
 function listObjectsTool(adapters: AiToolAdapters): AiToolDefinition {
   return {
     name: "metadata.listObjects",
-    description: "List tables, collections, indexes, keys, or analogous objects.",
+    description:
+      "List tables, collections, indexes, keys, or analogous objects.",
     inputSchema: {
       type: "object",
       properties: {
@@ -377,7 +398,8 @@ function listObjectsTool(adapters: AiToolAdapters): AiToolDefinition {
         },
         namespace: {
           type: "string",
-          description: "Database, schema, or namespace. Defaults to the active namespace.",
+          description:
+            "Database, schema, or namespace. Defaults to the active namespace.",
         },
       },
       additionalProperties: false,
@@ -390,10 +412,13 @@ function listObjectsTool(adapters: AiToolAdapters): AiToolDefinition {
       return adapters.listObjects?.(
         {
           connectionId:
-            typeof payload.connectionId === "string" ? payload.connectionId : null,
-          namespace: typeof payload.namespace === "string" ? payload.namespace : null,
+            typeof payload.connectionId === "string"
+              ? payload.connectionId
+              : null,
+          namespace:
+            typeof payload.namespace === "string" ? payload.namespace : null,
         },
-        context
+        context,
       );
     },
   };
@@ -402,7 +427,8 @@ function listObjectsTool(adapters: AiToolAdapters): AiToolDefinition {
 function describeObjectTool(adapters: AiToolAdapters): AiToolDefinition {
   return {
     name: "metadata.describeObject",
-    description: "Describe a table, collection, index, or key in the current workspace.",
+    description:
+      "Describe a table, collection, index, or key in the current workspace.",
     inputSchema: {
       type: "object",
       properties: {
@@ -412,11 +438,13 @@ function describeObjectTool(adapters: AiToolAdapters): AiToolDefinition {
         },
         namespace: {
           type: "string",
-          description: "Database, schema, or namespace. Defaults to the active namespace.",
+          description:
+            "Database, schema, or namespace. Defaults to the active namespace.",
         },
         name: {
           type: "string",
-          description: "Object name, for example a table, collection, index, or key.",
+          description:
+            "Object name, for example a table, collection, index, or key.",
         },
       },
       required: ["name"],
@@ -435,11 +463,14 @@ function describeObjectTool(adapters: AiToolAdapters): AiToolDefinition {
       return adapters.describeObject?.(
         {
           connectionId:
-            typeof payload.connectionId === "string" ? payload.connectionId : null,
-          namespace: typeof payload.namespace === "string" ? payload.namespace : null,
+            typeof payload.connectionId === "string"
+              ? payload.connectionId
+              : null,
+          namespace:
+            typeof payload.namespace === "string" ? payload.namespace : null,
           name,
         },
-        context
+        context,
       );
     },
   };
@@ -489,8 +520,12 @@ function readOnlyQueryTool(adapters: AiToolAdapters): AiToolDefinition {
       const connectionId =
         typeof payload.connectionId === "string"
           ? payload.connectionId
-          : context.activeConnectionId ?? null;
-      const driver = await resolveQueryDriver(adapters, connectionId, context.activeDriver);
+          : (context.activeConnectionId ?? null);
+      const driver = await resolveQueryDriver(
+        adapters,
+        connectionId,
+        context.activeDriver,
+      );
 
       const gate = evaluateSqlExecutionIntent({
         sql: query,
@@ -513,7 +548,65 @@ function readOnlyQueryTool(adapters: AiToolAdapters): AiToolDefinition {
               ? Math.min(payload.limit, DEFAULT_QUERY_LIMIT)
               : DEFAULT_QUERY_LIMIT,
         },
-        context
+        context,
+      );
+    },
+  };
+}
+
+function explainQueryTool(adapters: AiToolAdapters): AiToolDefinition {
+  return {
+    name: "query.explain",
+    description:
+      "Generate an estimated, read-only execution plan for one PostgreSQL or MySQL query. This never runs EXPLAIN ANALYZE.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        connectionId: {
+          type: "string",
+          description: "Connection id. Defaults to the active connection.",
+        },
+        query: {
+          type: "string",
+          description: "One SELECT, TABLE, or VALUES query to explain.",
+        },
+        namespace: {
+          type: "string",
+          description: "Optional schema context.",
+        },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    permissions: ["read"],
+    capabilities: ["query"],
+    timeoutMs: 30_000,
+    execute: async (input, context) => {
+      const payload = assertObject(input);
+      const query = requireString(payload, "query");
+      const connectionId =
+        optionalString(payload, "connectionId") ??
+        context.activeConnectionId ??
+        null;
+      const driver = await resolveQueryDriver(
+        adapters,
+        connectionId,
+        context.activeDriver,
+      );
+      if (!driver) throw new Error("A connection driver is required");
+      const capabilities = await adapters.getConnectionCapabilities(driver);
+      if (!capabilities.supportsExplainPlan) {
+        throw new Error(
+          `${capabilities.displayName} does not support Explain Plan`,
+        );
+      }
+      return adapters.explainQuery?.(
+        {
+          connectionId,
+          namespace: optionalString(payload, "namespace"),
+          query,
+        },
+        context,
       );
     },
   };
@@ -522,7 +615,8 @@ function readOnlyQueryTool(adapters: AiToolAdapters): AiToolDefinition {
 function mutationQueryTool(adapters: AiToolAdapters): AiToolDefinition {
   return {
     name: "query.runMutation",
-    description: "Run a non-destructive database mutation after explicit approval.",
+    description:
+      "Run a non-destructive database mutation after explicit approval.",
     inputSchema: {
       type: "object",
       properties: {
@@ -554,7 +648,8 @@ function mutationQueryTool(adapters: AiToolAdapters): AiToolDefinition {
 function destructiveQueryTool(adapters: AiToolAdapters): AiToolDefinition {
   return {
     name: "query.runDestructive",
-    description: "Run a destructive database operation after explicit approval.",
+    description:
+      "Run a destructive database operation after explicit approval.",
     inputSchema: {
       type: "object",
       properties: {
@@ -601,7 +696,7 @@ function createNamespaceTool(adapters: AiToolAdapters): AiToolDefinition {
           charset: optionalString(payload, "charset"),
           collation: optionalString(payload, "collation"),
         },
-        context
+        context,
       );
     },
   };
@@ -624,7 +719,7 @@ function dropNamespaceTool(adapters: AiToolAdapters): AiToolDefinition {
           namespace: requireString(payload, "namespace"),
           cascade: optionalBoolean(payload, "cascade") ?? false,
         },
-        context
+        context,
       );
     },
   };
@@ -648,7 +743,7 @@ function insertTableRowsTool(adapters: AiToolAdapters): AiToolDefinition {
           table: payload.table,
           inserts,
         },
-        context
+        context,
       );
     },
   };
@@ -672,7 +767,7 @@ function updateTableRowsTool(adapters: AiToolAdapters): AiToolDefinition {
           table: payload.table,
           updates,
         },
-        context
+        context,
       );
     },
   };
@@ -696,7 +791,7 @@ function deleteTableRowsTool(adapters: AiToolAdapters): AiToolDefinition {
           table: payload.table,
           deletes,
         },
-        context
+        context,
       );
     },
   };
@@ -705,7 +800,8 @@ function deleteTableRowsTool(adapters: AiToolAdapters): AiToolDefinition {
 function insertDocumentsTool(adapters: AiToolAdapters): AiToolDefinition {
   return {
     name: "document.insertDocuments",
-    description: "Insert documents into a document collection after explicit approval.",
+    description:
+      "Insert documents into a document collection after explicit approval.",
     inputSchema: documentInsertSchema(),
     permissions: ["write"],
     capabilities: ["query"],
@@ -720,7 +816,7 @@ function insertDocumentsTool(adapters: AiToolAdapters): AiToolDefinition {
           collection: payload.collection,
           documents: requireRecordArray(assertObject(input), "documents"),
         },
-        context
+        context,
       );
     },
   };
@@ -748,7 +844,7 @@ function updateDocumentsTool(adapters: AiToolAdapters): AiToolDefinition {
           many: optionalBoolean(raw, "many") ?? false,
           upsert: optionalBoolean(raw, "upsert") ?? false,
         },
-        context
+        context,
       );
     },
   };
@@ -774,7 +870,7 @@ function deleteDocumentsTool(adapters: AiToolAdapters): AiToolDefinition {
           filter: requireRecordField(raw, "filter"),
           many: optionalBoolean(raw, "many") ?? false,
         },
-        context
+        context,
       );
     },
   };
@@ -795,11 +891,13 @@ function getKeyValueTool(adapters: AiToolAdapters): AiToolDefinition {
     execute: async (input, context) => {
       const raw = assertObject(input);
       const connectionId =
-        optionalString(raw, "connectionId") ?? context.activeConnectionId ?? null;
+        optionalString(raw, "connectionId") ??
+        context.activeConnectionId ??
+        null;
       const driver = await resolveQueryDriver(
         adapters,
         connectionId,
-        context.activeDriver
+        context.activeDriver,
       );
       if (!driver) {
         throw new Error("Connection driver is required for key.getValue");
@@ -807,7 +905,7 @@ function getKeyValueTool(adapters: AiToolAdapters): AiToolDefinition {
       const capabilities = await adapters.getConnectionCapabilities(driver);
       if (capabilities.dataModel !== "keyValue") {
         throw new Error(
-          `${capabilities.displayName} does not support key-value reads`
+          `${capabilities.displayName} does not support key-value reads`,
         );
       }
       const namespace = optionalString(raw, "namespace");
@@ -818,7 +916,7 @@ function getKeyValueTool(adapters: AiToolAdapters): AiToolDefinition {
           query: buildRedisGetCommand(requireString(raw, "key")),
           limit: 1,
         },
-        context
+        context,
       );
     },
   };
@@ -843,7 +941,7 @@ function setKeyValueTool(adapters: AiToolAdapters): AiToolDefinition {
           value: requirePresent(raw, "value"),
           ttlSeconds: optionalPositiveInteger(raw, "ttlSeconds"),
         },
-        context
+        context,
       );
     },
   };
@@ -866,7 +964,7 @@ function deleteKeysTool(adapters: AiToolAdapters): AiToolDefinition {
           namespace: optionalString(raw, "namespace"),
           keys: requireStringArray(raw, "keys"),
         },
-        context
+        context,
       );
     },
   };
@@ -875,7 +973,8 @@ function deleteKeysTool(adapters: AiToolAdapters): AiToolDefinition {
 function indexSearchDocumentTool(adapters: AiToolAdapters): AiToolDefinition {
   return {
     name: "search.indexDocument",
-    description: "Index or replace an Elasticsearch document after explicit approval.",
+    description:
+      "Index or replace an Elasticsearch document after explicit approval.",
     inputSchema: searchIndexSchema(),
     permissions: ["write"],
     capabilities: ["query"],
@@ -890,7 +989,7 @@ function indexSearchDocumentTool(adapters: AiToolAdapters): AiToolDefinition {
           id: optionalString(raw, "id"),
           document: requireRecordField(raw, "document"),
         },
-        context
+        context,
       );
     },
   };
@@ -899,7 +998,8 @@ function indexSearchDocumentTool(adapters: AiToolAdapters): AiToolDefinition {
 function updateSearchDocumentTool(adapters: AiToolAdapters): AiToolDefinition {
   return {
     name: "search.updateDocument",
-    description: "Partially update an Elasticsearch document after explicit approval.",
+    description:
+      "Partially update an Elasticsearch document after explicit approval.",
     inputSchema: searchUpdateSchema(),
     permissions: ["write"],
     capabilities: ["query"],
@@ -915,7 +1015,7 @@ function updateSearchDocumentTool(adapters: AiToolAdapters): AiToolDefinition {
           document: requireRecordField(raw, "document"),
           upsert: optionalBoolean(raw, "upsert") ?? false,
         },
-        context
+        context,
       );
     },
   };
@@ -938,7 +1038,7 @@ function deleteSearchDocumentTool(adapters: AiToolAdapters): AiToolDefinition {
           index: requireString(raw, "index"),
           id: requireString(raw, "id"),
         },
-        context
+        context,
       );
     },
   };
@@ -957,11 +1057,13 @@ function lspCompletionsTool(adapters: AiToolAdapters): AiToolDefinition {
         },
         uri: {
           type: "string",
-          description: "Optional document URI. Defaults to the active query tab URI.",
+          description:
+            "Optional document URI. Defaults to the active query tab URI.",
         },
         text: {
           type: "string",
-          description: "Optional document text. Defaults to the active query text.",
+          description:
+            "Optional document text. Defaults to the active query text.",
         },
         line: {
           type: "number",
@@ -973,7 +1075,8 @@ function lspCompletionsTool(adapters: AiToolAdapters): AiToolDefinition {
         },
         languageId: {
           type: "string",
-          description: "Optional LSP language id. Defaults to the active driver dialect.",
+          description:
+            "Optional LSP language id. Defaults to the active driver dialect.",
         },
       },
       required: ["line", "character"],
@@ -997,7 +1100,7 @@ function lspCompletionsTool(adapters: AiToolAdapters): AiToolDefinition {
           character: requireNonNegativeInteger(payload, "character"),
           languageId: optionalString(payload, "languageId"),
         },
-        context
+        context,
       );
     },
   };
@@ -1020,7 +1123,8 @@ function lspExplainDiagnosticsTool(adapters: AiToolAdapters): AiToolDefinition {
         },
         onlySelection: {
           type: "boolean",
-          description: "When true, only include diagnostics overlapping the current selection.",
+          description:
+            "When true, only include diagnostics overlapping the current selection.",
         },
         severity: {
           type: "string",
@@ -1044,7 +1148,9 @@ function lspExplainDiagnosticsTool(adapters: AiToolAdapters): AiToolDefinition {
         severity &&
         !["error", "warning", "information", "hint"].includes(severity)
       ) {
-        throw new Error("severity must be error, warning, information, or hint");
+        throw new Error(
+          "severity must be error, warning, information, or hint",
+        );
       }
 
       return adapters.explainLspDiagnostics?.(
@@ -1053,13 +1159,9 @@ function lspExplainDiagnosticsTool(adapters: AiToolAdapters): AiToolDefinition {
           uri: optionalString(payload, "uri"),
           onlySelection: optionalBoolean(payload, "onlySelection") ?? false,
           severity: severity as
-            | "error"
-            | "warning"
-            | "information"
-            | "hint"
-            | null,
+            "error" | "warning" | "information" | "hint" | null,
         },
-        context
+        context,
       );
     },
   };
@@ -1094,11 +1196,13 @@ function namespaceMutationSchema(includeCascade: boolean) {
         : {
             charset: {
               type: "string",
-              description: "Optional charset for database engines that support it.",
+              description:
+                "Optional charset for database engines that support it.",
             },
             collation: {
               type: "string",
-              description: "Optional collation for database engines that support it.",
+              description:
+                "Optional collation for database engines that support it.",
             },
           }),
     },
@@ -1147,7 +1251,8 @@ function tableUpdateRowsSchema() {
       ...tableMutationBaseProperties(),
       updates: {
         type: "array",
-        description: "Rows to update. Each item must include primary-key values and changed column values.",
+        description:
+          "Rows to update. Each item must include primary-key values and changed column values.",
         items: {
           type: "object",
           properties: {
@@ -1179,7 +1284,8 @@ function tableDeleteRowsSchema() {
       ...tableMutationBaseProperties(),
       deletes: {
         type: "array",
-        description: "Rows to delete. Each item must include primary-key values.",
+        description:
+          "Rows to delete. Each item must include primary-key values.",
         items: {
           type: "object",
           properties: {
@@ -1335,7 +1441,8 @@ function keySetSchema() {
         description: "Redis key.",
       },
       value: {
-        description: "Value to store. Objects and arrays are serialized as JSON.",
+        description:
+          "Value to store. Objects and arrays are serialized as JSON.",
       },
       ttlSeconds: {
         type: "number",
@@ -1390,7 +1497,8 @@ function searchIndexSchema() {
       ...searchBaseProperties(),
       id: {
         type: "string",
-        description: "Optional document id. Omit to let Elasticsearch generate one.",
+        description:
+          "Optional document id. Omit to let Elasticsearch generate one.",
       },
       document: {
         type: "object",
@@ -1453,7 +1561,7 @@ function documentMutationPayload(input: unknown) {
 
 function requireRecordArray(
   payload: Record<string, unknown>,
-  field: string
+  field: string,
 ): Array<Record<string, unknown>> {
   const value = payload[field];
   if (!Array.isArray(value) || value.length === 0) {
@@ -1465,7 +1573,9 @@ function requireRecordArray(
   return value;
 }
 
-function requireTableUpdates(payload: Record<string, unknown>): TableRowUpdate[] {
+function requireTableUpdates(
+  payload: Record<string, unknown>,
+): TableRowUpdate[] {
   const updates = requireRecordArray(payload, "updates");
   return updates.map((update, index) => {
     if (!isRecord(update.key) || Object.keys(update.key).length === 0) {
@@ -1478,7 +1588,9 @@ function requireTableUpdates(payload: Record<string, unknown>): TableRowUpdate[]
   });
 }
 
-function requireTableDeletes(payload: Record<string, unknown>): TableRowDelete[] {
+function requireTableDeletes(
+  payload: Record<string, unknown>,
+): TableRowDelete[] {
   const deletes = requireRecordArray(payload, "deletes");
   return deletes.map((row, index) => {
     if (!isRecord(row.key) || Object.keys(row.key).length === 0) {
@@ -1494,7 +1606,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function requireRecordField(
   payload: Record<string, unknown>,
-  field: string
+  field: string,
 ): Record<string, unknown> {
   const value = payload[field];
   if (!isRecord(value)) {
@@ -1542,7 +1654,7 @@ function optionalBoolean(payload: Record<string, unknown>, field: string) {
 
 function optionalPositiveInteger(
   payload: Record<string, unknown>,
-  field: string
+  field: string,
 ) {
   const value = payload[field];
   if (value === undefined || value === null) return null;
@@ -1554,7 +1666,7 @@ function optionalPositiveInteger(
 
 function requireNonNegativeInteger(
   payload: Record<string, unknown>,
-  field: string
+  field: string,
 ) {
   const value = payload[field];
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
@@ -1567,7 +1679,7 @@ async function runApprovedMutation(
   adapters: AiToolAdapters,
   input: unknown,
   context: AiToolExecutionContext,
-  mode: "write" | "destructive"
+  mode: "write" | "destructive",
 ) {
   const payload = assertObject(input);
   const query = payload.query;
@@ -1578,8 +1690,12 @@ async function runApprovedMutation(
   const connectionId =
     typeof payload.connectionId === "string"
       ? payload.connectionId
-      : context.activeConnectionId ?? null;
-  const driver = await resolveQueryDriver(adapters, connectionId, context.activeDriver);
+      : (context.activeConnectionId ?? null);
+  const driver = await resolveQueryDriver(
+    adapters,
+    connectionId,
+    context.activeDriver,
+  );
   const gate = evaluateSqlExecutionIntent({
     sql: query,
     driver,
@@ -1588,7 +1704,7 @@ async function runApprovedMutation(
   });
   if (!gate.allowed) {
     throw new Error(
-      `${mode === "write" ? "query.runMutation" : "query.runDestructive"} rejected request: ${gate.reason}`
+      `${mode === "write" ? "query.runMutation" : "query.runDestructive"} rejected request: ${gate.reason}`,
     );
   }
 
@@ -1599,14 +1715,14 @@ async function runApprovedMutation(
       ...(namespace ? { namespace } : {}),
       query,
     },
-    context
+    context,
   );
 }
 
 async function resolveQueryDriver(
   adapters: AiToolAdapters,
   connectionId: string | null,
-  activeDriver?: DatabaseDriver | null
+  activeDriver?: DatabaseDriver | null,
 ) {
   if (!connectionId) return activeDriver ?? null;
 

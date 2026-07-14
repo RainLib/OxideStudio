@@ -12,11 +12,32 @@ import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
-import type { DatabaseDriver } from "@/services/tauri/types";
+import type { DatabaseDriver, ExplainPlan } from "@/services/tauri/types";
+
+const EXPLAIN_PLAN: ExplainPlan = {
+  id: "plan-1",
+  driver: "postgres",
+  mode: "estimate",
+  format: "json",
+  generatedInMs: 5,
+  totalCost: 10,
+  estimatedRows: 2,
+  root: {
+    id: "plan-1/root",
+    nodeType: "Index Scan",
+    relation: "users",
+    totalCost: 10,
+    estimatedRows: 2,
+    children: [],
+  },
+  rawPlan: {},
+  warnings: [],
+};
 
 const mocks = vi.hoisted(() => ({
   executeQuery: vi.fn(async () => []),
   executeReadOnlyQuery: vi.fn(async () => []),
+  explainQuery: vi.fn(async () => EXPLAIN_PLAN),
   cancelQuery: vi.fn(async () => "cancelled"),
   getDatabaseCapabilities: vi.fn(),
   createDatabase: vi.fn(async () => undefined),
@@ -51,6 +72,7 @@ vi.mock("@/services/tauri", () => ({
   queryService: {
     executeQuery: mocks.executeQuery,
     executeReadOnlyQuery: mocks.executeReadOnlyQuery,
+    explainQuery: mocks.explainQuery,
     cancelQuery: mocks.cancelQuery,
   },
   schemaService: {
@@ -82,6 +104,7 @@ function setWorkspaceConnection(options: {
     id?: string;
     title?: string;
     sql?: string;
+    databaseName?: string | null;
     schemaName?: string | null;
     tableName?: string | null;
     objectType?: string | null;
@@ -118,6 +141,7 @@ function setWorkspaceConnection(options: {
         type: "query",
         sql: options.tab?.sql ?? "",
         connectionId: options.id,
+        databaseName: options.tab?.databaseName ?? null,
         schemaName: options.tab?.schemaName ?? options.namespace,
         tableName: options.tab?.tableName ?? null,
         objectType: options.tab?.objectType ?? null,
@@ -143,10 +167,11 @@ describe("workspace AI tools", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getDatabaseCapabilities.mockImplementation(
-      async (driver: DatabaseDriver) => defaultDatabaseCapabilities(driver)
+      async (driver: DatabaseDriver) => defaultDatabaseCapabilities(driver),
     );
     mocks.executeQuery.mockResolvedValue([]);
     mocks.executeReadOnlyQuery.mockResolvedValue([]);
+    mocks.explainQuery.mockResolvedValue(EXPLAIN_PLAN);
     mocks.cancelQuery.mockResolvedValue("cancelled");
     mocks.getCollections.mockResolvedValue([]);
     mocks.getColumns.mockResolvedValue([]);
@@ -189,13 +214,13 @@ describe("workspace AI tools", () => {
         activeConnectionId: "elasticsearch-1",
         activeDriver: "elasticsearch",
       },
-      DEFAULT_AI_TOOL_POLICY
+      DEFAULT_AI_TOOL_POLICY,
     );
 
     expect(mocks.executeQuery).toHaveBeenCalledWith(
       "elasticsearch-1",
       '{"query":{"match_all":{}}}',
-      "events-2026"
+      "events-2026",
     );
   });
 
@@ -214,13 +239,13 @@ describe("workspace AI tools", () => {
         activeConnectionId: "elasticsearch-1",
         activeDriver: "elasticsearch",
       },
-      DEFAULT_AI_TOOL_POLICY
+      DEFAULT_AI_TOOL_POLICY,
     );
 
     expect(mocks.executeQuery).toHaveBeenCalledWith(
       "elasticsearch-1",
       '{"query":{"match_all":{}}}',
-      "manual-index"
+      "manual-index",
     );
   });
 
@@ -235,7 +260,7 @@ describe("workspace AI tools", () => {
       () =>
         new Promise<any[]>((resolve) => {
           resolveQuery = resolve;
-        })
+        }),
     );
     const controller = new AbortController();
     const registry = createWorkspaceAiToolRegistry();
@@ -252,7 +277,7 @@ describe("workspace AI tools", () => {
         activeDriver: "postgres",
         abortSignal: controller.signal,
       },
-      DEFAULT_AI_TOOL_POLICY
+      DEFAULT_AI_TOOL_POLICY,
     );
     await waitForNextTask();
 
@@ -261,7 +286,7 @@ describe("workspace AI tools", () => {
       "postgres-1",
       "SELECT pg_sleep(30)",
       "public",
-      expect.stringMatching(/^workspace-ai-abort:query.runReadOnly:/)
+      expect.stringMatching(/^workspace-ai-abort:query.runReadOnly:/),
     );
 
     controller.abort();
@@ -269,6 +294,42 @@ describe("workspace AI tools", () => {
     expect(mocks.cancelQuery).toHaveBeenCalledWith(queryId);
     resolveQuery([]);
     await expect(run).resolves.toEqual([]);
+  });
+
+  it("generates an estimated plan in the active database and exposes it in the tab", async () => {
+    setWorkspaceConnection({
+      id: "postgres-1",
+      driver: "postgres",
+      namespace: "public",
+      tab: {
+        sql: "SELECT * FROM users",
+        databaseName: "app_db",
+        schemaName: "public",
+      },
+    });
+    const registry = createWorkspaceAiToolRegistry();
+
+    const result = await registry.executeWithPolicy(
+      "query.explain",
+      { query: "SELECT * FROM users", namespace: "public" },
+      createWorkspaceAiToolContext("workspace-ai-explain"),
+      DEFAULT_AI_TOOL_POLICY,
+    );
+
+    expect(result).toEqual(EXPLAIN_PLAN);
+    expect(mocks.explainQuery).toHaveBeenCalledWith({
+      connectionId: "postgres-1",
+      sql: "SELECT * FROM users",
+      schema: undefined,
+      database: "app_db",
+      queryId: expect.stringMatching(/^workspace-ai-explain:query\.explain:/),
+      mode: "estimate",
+    });
+    expect(useTabStore.getState().tabs[0]).toMatchObject({
+      explainPlan: EXPLAIN_PLAN,
+      queryOutputView: "plan",
+      error: null,
+    });
   });
 
   it("does not start a workspace query when the AI context is already aborted", async () => {
@@ -294,8 +355,8 @@ describe("workspace AI tools", () => {
           activeDriver: "postgres",
           abortSignal: controller.signal,
         },
-        DEFAULT_AI_TOOL_POLICY
-      )
+        DEFAULT_AI_TOOL_POLICY,
+      ),
     ).rejects.toThrow("AI tool execution aborted");
     expect(mocks.executeQuery).not.toHaveBeenCalled();
     expect(mocks.cancelQuery).not.toHaveBeenCalled();
@@ -317,14 +378,14 @@ describe("workspace AI tools", () => {
         activeConnectionId: "mariadb-1",
         activeDriver: "mariadb",
       },
-      DEFAULT_AI_TOOL_POLICY
+      DEFAULT_AI_TOOL_POLICY,
     );
 
     expect(mocks.executeReadOnlyQuery).toHaveBeenCalledWith(
       "mariadb-1",
       "SELECT 1",
       "app",
-      undefined
+      undefined,
     );
     expect(mocks.executeQuery).not.toHaveBeenCalled();
   });
@@ -388,23 +449,23 @@ describe("workspace AI tools", () => {
     const result = await registry.execute<any>(
       "metadata.describeObject",
       { name: "users" },
-      createWorkspaceAiToolContext("workspace-ai-test")
+      createWorkspaceAiToolContext("workspace-ai-test"),
     );
 
     expect(mocks.getColumns).toHaveBeenCalledWith(
       "postgres-1",
       "public",
-      "users"
+      "users",
     );
     expect(mocks.getIndexes).toHaveBeenCalledWith(
       "postgres-1",
       "public",
-      "users"
+      "users",
     );
     expect(mocks.getConstraints).toHaveBeenCalledWith(
       "postgres-1",
       "public",
-      "users"
+      "users",
     );
     expect(result).toMatchObject({
       connectionId: "postgres-1",
@@ -443,7 +504,7 @@ describe("workspace AI tools", () => {
         inserts: [{ name: "Ada" }],
       },
       createWorkspaceAiToolContext("workspace-ai-test"),
-      approvedPolicy("table.insertRows")
+      approvedPolicy("table.insertRows"),
     );
 
     expect(mocks.mutateTableRows).toHaveBeenCalledWith(
@@ -453,7 +514,7 @@ describe("workspace AI tools", () => {
       "users",
       [{ name: "Ada" }],
       [],
-      []
+      [],
     );
   });
 
@@ -472,7 +533,7 @@ describe("workspace AI tools", () => {
         documents: [{ name: "Ada" }],
       },
       createWorkspaceAiToolContext("workspace-ai-mongo"),
-      approvedPolicy("document.insertDocuments")
+      approvedPolicy("document.insertDocuments"),
     );
 
     setWorkspaceConnection({
@@ -488,7 +549,7 @@ describe("workspace AI tools", () => {
         ttlSeconds: 30,
       },
       createWorkspaceAiToolContext("workspace-ai-redis"),
-      approvedPolicy("key.setValue")
+      approvedPolicy("key.setValue"),
     );
 
     setWorkspaceConnection({
@@ -505,7 +566,7 @@ describe("workspace AI tools", () => {
         upsert: true,
       },
       createWorkspaceAiToolContext("workspace-ai-search"),
-      approvedPolicy("search.updateDocument")
+      approvedPolicy("search.updateDocument"),
     );
 
     expect(mocks.executeQuery).toHaveBeenNthCalledWith(
@@ -515,18 +576,18 @@ describe("workspace AI tools", () => {
         database: "app",
         collection: "users",
         insertMany: [{ name: "Ada" }],
-      })
+      }),
     );
     expect(mocks.executeQuery).toHaveBeenNthCalledWith(
       2,
       "redis-1",
       'SET session:1 "{\\"active\\":true}" EX 30',
-      "2"
+      "2",
     );
     expect(mocks.executeQuery).toHaveBeenNthCalledWith(
       3,
       "elasticsearch-1",
-      'POST /events/_update/1\n{"doc":{"active":true},"doc_as_upsert":true}'
+      'POST /events/_update/1\n{"doc":{"active":true},"doc_as_upsert":true}',
     );
   });
 
@@ -550,7 +611,7 @@ describe("workspace AI tools", () => {
             namespace: "default",
           },
         }),
-      ])
+      ]),
     );
   });
 
@@ -580,7 +641,7 @@ describe("workspace AI tools", () => {
       message: "run current query",
     });
     const step = turn.suggestedPlan.find(
-      (candidate) => candidate.id === "query-execution"
+      (candidate) => candidate.id === "query-execution",
     );
 
     expect(step).toMatchObject({
@@ -597,7 +658,7 @@ describe("workspace AI tools", () => {
           input: step?.input,
         },
       ],
-      turn.context
+      turn.context,
     );
 
     expect(results).toEqual([
@@ -610,7 +671,7 @@ describe("workspace AI tools", () => {
       "postgres-1",
       "SELECT * FROM users",
       "public",
-      undefined
+      undefined,
     );
   });
 
@@ -640,7 +701,7 @@ describe("workspace AI tools", () => {
       message: "find current collection limit 5",
     });
     const step = turn.suggestedPlan.find(
-      (candidate) => candidate.id === "query-execution"
+      (candidate) => candidate.id === "query-execution",
     );
     const expectedQuery = JSON.stringify({
       collection: "users",
@@ -666,7 +727,7 @@ describe("workspace AI tools", () => {
           input: step?.input,
         },
       ],
-      turn.context
+      turn.context,
     );
 
     expect(results).toEqual([
@@ -678,7 +739,7 @@ describe("workspace AI tools", () => {
     expect(mocks.executeQuery).toHaveBeenCalledWith(
       "mongodb-1",
       expectedQuery,
-      "app"
+      "app",
     );
   });
 
@@ -708,7 +769,7 @@ describe("workspace AI tools", () => {
       message: "search current index limit 5",
     });
     const step = turn.suggestedPlan.find(
-      (candidate) => candidate.id === "query-execution"
+      (candidate) => candidate.id === "query-execution",
     );
     const expectedQuery = JSON.stringify({
       size: 5,
@@ -735,7 +796,7 @@ describe("workspace AI tools", () => {
           input: step?.input,
         },
       ],
-      turn.context
+      turn.context,
     );
 
     expect(results).toEqual([
@@ -747,7 +808,7 @@ describe("workspace AI tools", () => {
     expect(mocks.executeQuery).toHaveBeenCalledWith(
       "elasticsearch-1",
       expectedQuery,
-      "events"
+      "events",
     );
   });
 });

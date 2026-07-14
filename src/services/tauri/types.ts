@@ -57,6 +57,7 @@ export interface DatabaseCapabilities {
   supportsFunctions: boolean;
   supportsTransactions: boolean;
   supportsQueryCancellation: boolean;
+  supportsExplainPlan: boolean;
   autoIncrementKeyword?: string | null;
   defaultPrimaryKeyType: string;
   commonDataTypes: string[];
@@ -79,6 +80,52 @@ export interface QueryResult {
   rowsAffected?: number;
   statementType?: string;
   message?: string;
+}
+
+export type ExplainPlanMode = "estimate" | "analyze";
+export type ExplainPlanFormat = "json" | "text";
+
+export interface ExplainPlanNode {
+  id: string;
+  nodeType: string;
+  relation?: string | null;
+  alias?: string | null;
+  accessType?: string | null;
+  joinType?: string | null;
+  index?: string | null;
+  condition?: string | null;
+  startupCost?: number | null;
+  totalCost?: number | null;
+  estimatedRows?: number | null;
+  actualStartupTimeMs?: number | null;
+  actualTotalTimeMs?: number | null;
+  actualRows?: number | null;
+  loops?: number | null;
+  children: ExplainPlanNode[];
+}
+
+export interface ExplainPlan {
+  id: string;
+  driver: DatabaseDriver;
+  mode: ExplainPlanMode;
+  format: ExplainPlanFormat;
+  generatedInMs: number;
+  planningTimeMs?: number | null;
+  executionTimeMs?: number | null;
+  totalCost?: number | null;
+  estimatedRows?: number | null;
+  root: ExplainPlanNode;
+  rawPlan: unknown;
+  warnings: string[];
+}
+
+export interface ExplainQueryRequest {
+  connectionId: string;
+  sql: string;
+  schema?: string;
+  database?: string;
+  queryId: string;
+  mode: ExplainPlanMode;
 }
 
 export interface TablePageResult {

@@ -1,14 +1,17 @@
 /// 查询执行相关 commands
 use crate::core::{
     dialect::DatabaseKind,
+    explain::{build_explain_statement, parse_explain_results},
     manager::ConnectionManager,
     parser::{CompletionContext, SqlParser},
-    protocol::{QueryResult, Response},
+    protocol::{ExplainPlan, ExplainPlanMode, QueryResult, Response},
     statement::{validate_read_only_sql, StatementScanDialect},
 };
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Instant;
 use tauri::State;
 use tokio::sync::{watch, Mutex as AsyncMutex};
 
@@ -22,6 +25,17 @@ pub struct QueryCancellationHandle {
 
 #[derive(Default)]
 pub struct QueryCancellationState(pub Arc<AsyncMutex<HashMap<String, QueryCancellationHandle>>>);
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainQueryRequest {
+    pub connection_id: String,
+    pub sql: String,
+    pub schema: Option<String>,
+    pub database: Option<String>,
+    pub query_id: String,
+    pub mode: ExplainPlanMode,
+}
 
 impl QueryCancellationState {
     async fn register(
@@ -143,6 +157,116 @@ pub async fn execute_read_only_query(
         response.data = Some(strip_read_only_transaction_results(results));
     }
     Ok(response)
+}
+
+/// Build and execute a driver-specific Explain Plan behind the same
+/// backend-enforced read-only transaction and cancellation path as AI reads.
+/// The source query is validated before the EXPLAIN prefix is generated, so a
+/// frontend cannot smuggle transaction control or mutations into the plan.
+#[tauri::command]
+pub async fn explain_query(
+    manager: State<'_, ConnectionManager>,
+    cancellation: State<'_, QueryCancellationState>,
+    request: ExplainQueryRequest,
+) -> Result<Response<ExplainPlan>, String> {
+    let query_id = request.query_id.trim().to_string();
+    let database = request.database.filter(|value| !value.trim().is_empty());
+    let schema = request.schema.filter(|value| !value.trim().is_empty());
+    let context = serde_json::json!({
+        "connectionId": request.connection_id,
+        "database": database,
+        "schema": schema,
+        "queryId": query_id,
+        "mode": request.mode,
+    });
+    if query_id.is_empty() {
+        return Ok(Response::err_with_details(
+            "EXPLAIN_QUERY_ID_REQUIRED",
+            "Explain Plan requires a query id for cancellation and stable navigation",
+            false,
+            Some(context),
+        ));
+    }
+
+    let dialect = match manager.statement_scan_dialect(&request.connection_id).await {
+        Ok(Some(dialect)) => dialect,
+        Ok(None) => {
+            return Ok(Response::err_with_details(
+                "EXPLAIN_UNSUPPORTED",
+                "Explain Plan is unsupported for this driver",
+                false,
+                Some(context),
+            ));
+        }
+        Err(error) => {
+            return Ok(Response::err_with_details(
+                "EXPLAIN_TARGET_RESOLUTION_FAILED",
+                &error.to_string(),
+                true,
+                Some(context),
+            ));
+        }
+    };
+    let kind = match dialect {
+        StatementScanDialect::Postgres => DatabaseKind::Postgres,
+        StatementScanDialect::Mysql => DatabaseKind::Mysql,
+    };
+    let (explain_sql, format) = match build_explain_statement(&request.sql, kind, request.mode) {
+        Ok(statement) => statement,
+        Err(error) => {
+            return Ok(Response::err_with_details(
+                "EXPLAIN_QUERY_REJECTED",
+                &error.to_string(),
+                false,
+                Some(context),
+            ));
+        }
+    };
+
+    let started_at = Instant::now();
+    let script = read_only_transaction_script(kind, &explain_sql);
+    let mut response = execute_query_with_cancellation(
+        &manager,
+        &cancellation,
+        request.connection_id,
+        script,
+        schema,
+        None,
+        Some(query_id.clone()),
+        database,
+    )
+    .await?;
+    if let Some(error) = response.error.take() {
+        let code = if error.code == "QUERY_CANCELLED" {
+            "QUERY_CANCELLED"
+        } else {
+            "EXPLAIN_EXECUTION_FAILED"
+        };
+        return Ok(Response::err_with_details(
+            code,
+            &error.message,
+            error.retryable,
+            Some(context),
+        ));
+    }
+
+    let results = strip_read_only_transaction_results(response.data.take().unwrap_or_default());
+    match parse_explain_results(
+        query_id,
+        kind,
+        request.mode,
+        format,
+        started_at.elapsed().as_secs_f64() * 1_000.0,
+        &results,
+    ) {
+        Ok(plan) => Ok(Response::ok(plan)),
+        Err(error) => Ok(Response::err_with_details(
+            "EXPLAIN_PLAN_PARSE_FAILED",
+            &error.to_string(),
+            false,
+            Some(context),
+        )),
+    }
 }
 
 fn read_only_transaction_script(kind: DatabaseKind, sql: &str) -> String {
