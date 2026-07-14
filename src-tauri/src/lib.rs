@@ -162,6 +162,10 @@ pub fn run() {
             commands::store::delete_resources,
             commands::store::get_resources,
             commands::store::search_resources,
+            commands::store::save_query_history_entries,
+            commands::store::get_query_history,
+            commands::store::delete_query_history_entry,
+            commands::store::clear_query_history,
             // Project file commands
             commands::project_files::set_project_root,
             commands::project_files::list_project_entries,

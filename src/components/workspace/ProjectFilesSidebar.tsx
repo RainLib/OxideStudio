@@ -28,6 +28,7 @@ import {
 } from "@/store/useTabStore";
 import { open } from "@tauri-apps/plugin-dialog";
 import { supportsProjectFilePreview } from "@/services/tauri/project-files.service";
+import { openProjectFileInEditor } from "@/lib/projectFileOpen";
 import {
   AlertTriangle,
   ChevronDown,
@@ -260,7 +261,6 @@ export function ProjectFilesSidebar() {
     loadTree,
     toggleDirectory,
     readFile,
-    readPreview,
     createFile,
     createDirectory,
     writeFile,
@@ -372,31 +372,7 @@ export function ProjectFilesSidebar() {
     if (node.isSymlink) return;
 
     try {
-      if (supportsProjectFilePreview(node.relativePath)) {
-        const preview = await readPreview(node.relativePath);
-        useTabStore
-          .getState()
-          .openProjectFilePreviewTab(
-            activeProjectId,
-            preview.relativePath,
-            preview.mediaType,
-            preview.dataBase64,
-            preview.revision,
-            preview.size,
-            rootPath
-          );
-        return;
-      }
-      const document = await readFile(node.relativePath);
-      useTabStore
-        .getState()
-        .openProjectFileTab(
-          activeProjectId,
-          document.relativePath,
-          document.content,
-          document.revision,
-          rootPath
-        );
+      await openProjectFileInEditor(node.relativePath);
     } catch {
       // The store exposes the actionable read error in the explorer.
     }

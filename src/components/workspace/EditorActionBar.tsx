@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { format } from "date-fns";
+import type { QueryHistoryItem } from "@/lib/queryHistory";
 import {
   Braces,
   ChevronDown,
@@ -32,6 +32,7 @@ import {
 import { useState } from "react";
 import { SchemaSelector } from "./SchemaSelector";
 import { TransactionControl } from "./TransactionControl";
+import { QueryHistoryPanel } from "./QueryHistoryPanel";
 
 type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
@@ -57,8 +58,9 @@ interface EditorActionBarProps {
   onCancelRun: () => void;
   isExecuting: boolean;
   isConnected: boolean;
-  history: Array<{ id: string; sql: string; timestamp: number }>;
   savedQueries: Array<{ id: string; name: string; sql: string }>;
+  onOpenHistory: (item: QueryHistoryItem) => void;
+  onRerunHistory: (item: QueryHistoryItem) => Promise<boolean>;
   onLoadQuery: (sql: string) => void;
   onSaveQuery: (name: string, sql: string) => void;
   onDeleteQuery: (id: string) => void;
@@ -72,6 +74,8 @@ interface EditorActionBarProps {
 
 const dialogClass =
   "flex max-h-[76vh] max-w-2xl flex-col gap-0 overflow-hidden rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]";
+const historyDialogClass =
+  "flex h-[min(720px,76vh)] max-w-4xl flex-col gap-0 overflow-hidden rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]";
 const menuClass =
   "min-w-[230px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_16px_40px_rgba(0,0,0,0.42)]";
 const menuItemClass =
@@ -98,8 +102,9 @@ export function EditorActionBar({
   onCancelRun,
   isExecuting,
   isConnected,
-  history,
   savedQueries,
+  onOpenHistory,
+  onRerunHistory,
   onLoadQuery,
   onSaveQuery,
   onDeleteQuery,
@@ -111,6 +116,7 @@ export function EditorActionBar({
   onConfigureParameters,
 }: EditorActionBarProps) {
   const [isSaveOpen, setIsSaveOpen] = useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
 
   const handleSave = () => {
@@ -187,7 +193,7 @@ export function EditorActionBar({
           </button>
         )}
 
-        <Dialog>
+        <Dialog open={isHistoryOpen} onOpenChange={setIsHistoryOpen}>
           <DialogTrigger asChild>
             <button
               type="button"
@@ -197,31 +203,21 @@ export function EditorActionBar({
               <History size={13} />
             </button>
           </DialogTrigger>
-          <DialogContent className={dialogClass}>
+          <DialogContent className={historyDialogClass}>
             <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
               <DialogTitle className="text-[13px]">Query History</DialogTitle>
             </DialogHeader>
-            <div className="min-h-0 flex-1 overflow-y-auto p-2 custom-scrollbar">
-              {history.length === 0 ? (
-                <div className="p-6 text-center text-[12px] wb-muted">No query history</div>
-              ) : (
-                history.map((item) => (
-                  <button
-                    type="button"
-                    key={item.id}
-                    className="mb-1 flex w-full flex-col gap-1 rounded-[3px] px-3 py-2 text-left hover:bg-[hsl(var(--wb-hover))]"
-                    onClick={() => onLoadQuery(item.sql)}
-                  >
-                    <span className="max-h-20 overflow-hidden whitespace-pre-wrap font-mono text-[11px]">
-                      {item.sql}
-                    </span>
-                    <span className="self-end text-[10px] wb-muted">
-                      {format(new Date(item.timestamp), "MMM d, HH:mm:ss")}
-                    </span>
-                  </button>
-                ))
-              )}
-            </div>
+            <QueryHistoryPanel
+              onOpenInEditor={(item) => {
+                onOpenHistory(item);
+                setIsHistoryOpen(false);
+              }}
+              onRerun={async (item) => {
+                const didRun = await onRerunHistory(item);
+                if (didRun) setIsHistoryOpen(false);
+                return didRun;
+              }}
+            />
           </DialogContent>
         </Dialog>
 

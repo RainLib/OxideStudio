@@ -1,5 +1,4 @@
 import { useConnectionStore } from "@/store/useConnectionStore";
-import { useHistoryStore } from "@/store/useHistoryStore";
 import { useSavedQueryStore } from "@/store/useSavedQueryStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
@@ -81,11 +80,10 @@ import {
 import { extractSqlParameters } from "@/lib/sqlParameters";
 import { SqlParametersPanel } from "./SqlParametersPanel";
 import { aiService } from "@/services/tauri/ai.service";
-import {
-  projectFilesService,
-  supportsProjectFilePreview,
-} from "@/services/tauri/project-files.service";
+import { projectFilesService } from "@/services/tauri/project-files.service";
 import { ProjectFileImagePreview } from "./ProjectFileImagePreview";
+import { openProjectFileInEditor } from "@/lib/projectFileOpen";
+import type { QueryHistoryItem } from "@/lib/queryHistory";
 import {
   boundedInlineContext,
   cleanInlineSuggestion,
@@ -274,7 +272,6 @@ export function QueryEditor({
   const bumpMetadataVersion = useSchemaStore(
     (state) => state.bumpMetadataVersion
   );
-  const history = useHistoryStore((s) => s.history);
   const { savedQueries, saveQuery, deleteQuery } = useSavedQueryStore();
   const editorSettings = useSettingsStore((state) => state.settings.editor);
   const keymap = useSettingsStore((state) => state.settings.keymap);
@@ -471,34 +468,8 @@ export function QueryEditor({
         useTabStore.getState().closeTab(tabId);
       },
       onEdit: async (relativePath) => {
-        const files = useProjectFilesStore.getState();
-        files.syncActiveProject();
         try {
-          if (supportsProjectFilePreview(relativePath)) {
-            const preview = await files.readPreview(relativePath);
-            useTabStore
-              .getState()
-              .openProjectFilePreviewTab(
-                files.projectId,
-                preview.relativePath,
-                preview.mediaType,
-                preview.dataBase64,
-                preview.revision,
-                preview.size,
-                files.rootPath
-              );
-            return;
-          }
-          const document = await files.readFile(relativePath);
-          useTabStore
-            .getState()
-            .openProjectFileTab(
-              files.projectId,
-              document.relativePath,
-              document.content,
-              document.revision,
-              files.rootPath
-            );
+          await openProjectFileInEditor(relativePath);
         } catch (error) {
           const tabId = activeTabIdRef.current;
           if (!tabId) return;
@@ -1308,9 +1279,12 @@ export function QueryEditor({
   // Close dropdown on click outside - COMMENTED OUT UNUSED
   // useEffect(() => { ... }, []);
 
-  const confirmEditorExecution = (sql: string) => {
+  const confirmEditorExecution = (
+    sql: string,
+    executionDriver = driver
+  ) => {
     if (!editorSettings.confirmDestructiveSql) return true;
-    const confirmation = editorExecutionConfirmation(sql, driver);
+    const confirmation = editorExecutionConfirmation(sql, executionDriver);
     if (!confirmation.required) return true;
     return window.confirm(confirmation.message || "Execute this query?");
   };
@@ -1409,6 +1383,74 @@ export function QueryEditor({
       currentEditorExecutionSql(),
       transactionIdForExecution()
     );
+  };
+
+  const openHistoryInEditor = (item: QueryHistoryItem) => {
+    const savedConnection = item.connectionId
+      ? connections.find((connection) => connection.id === item.connectionId)
+      : undefined;
+    const fallbackConnection = connections.find(
+      (connection) => connection.id === effectiveConnectionId
+    );
+    const targetConnectionId = item.connectionId
+      ? savedConnection?.id || item.connectionId
+      : fallbackConnection?.id;
+    const firstLine = item.sql
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean);
+    const title = firstLine
+      ? `History · ${firstLine.slice(0, 38)}`
+      : "History Query";
+    const tabStore = useTabStore.getState();
+    const tabId = tabStore.createTab("query", title, item.sql, {
+      connectionId: targetConnectionId,
+      databaseName: item.databaseName || undefined,
+    });
+    tabStore.setTargetSchema(tabId, item.schemaName);
+  };
+
+  const rerunHistory = async (item: QueryHistoryItem) => {
+    const savedConnection = item.connectionId
+      ? connections.find((connection) => connection.id === item.connectionId)
+      : undefined;
+    if (item.connectionId && !savedConnection) {
+      throw new Error(
+        "The saved data source is no longer available in this project. Open the query and choose another data source."
+      );
+    }
+    const targetConnection =
+      savedConnection ||
+      connections.find((connection) => connection.id === effectiveConnectionId);
+    if (!targetConnection) {
+      throw new Error("Choose a data source before running this history entry.");
+    }
+    if (!confirmEditorExecution(item.sql, targetConnection.driver)) return false;
+
+    if (!connectedConnectionIds.includes(targetConnection.id)) {
+      const connectionError = await useConnectionStore
+        .getState()
+        .setActiveConnection(targetConnection.id);
+      if (connectionError) throw new Error(connectionError);
+    }
+
+    const tabStore = useTabStore.getState();
+    const tabId = tabStore.createTab(
+      "query",
+      `History · ${targetConnection.name}`,
+      item.sql,
+      {
+        connectionId: targetConnection.id,
+        databaseName: item.databaseName || undefined,
+      }
+    );
+    tabStore.setTargetSchema(tabId, item.schemaName);
+    await tabStore.runTabQuery(tabId, targetConnection.id);
+    const executionError = useTabStore
+      .getState()
+      .tabs.find((tab) => tab.id === tabId)?.error;
+    if (executionError) throw new Error(executionError);
+    return true;
   };
 
   const handleRunParameterizedSql = (compiledSql: string) => {
@@ -1657,8 +1699,9 @@ export function QueryEditor({
           onCancelRun={handleCancelRun}
           isExecuting={activeTab.isExecuting}
           isConnected={Boolean(effectiveConnectionId && canExecuteDocument)}
-          history={history}
           savedQueries={savedQueries}
+          onOpenHistory={openHistoryInEditor}
+          onRerunHistory={rerunHistory}
           onLoadQuery={(sql: string) => updateTabSql(activeTab.id, sql)}
           onSaveQuery={(_name: string, _sql: string) =>
             saveQuery(_name, activeTab.sql)

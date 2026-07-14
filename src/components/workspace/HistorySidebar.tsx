@@ -54,7 +54,7 @@ export function HistorySidebar() {
                 </div>
                 <div className="flex items-center justify-between mt-1">
                   <span className="text-[10px] text-muted-foreground opacity-70">
-                    {format(item.timestamp, "MMM d, HH:mm")}
+                    {format(item.startedAt, "MMM d, HH:mm")}
                   </span>
                   <Button
                     variant="ghost"

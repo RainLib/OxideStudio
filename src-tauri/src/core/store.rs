@@ -38,6 +38,26 @@ pub struct Project {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryHistoryItem {
+    pub id: String,
+    pub project_id: String,
+    pub connection_id: Option<String>,
+    pub connection_name: Option<String>,
+    pub driver: Option<String>,
+    pub database_name: Option<String>,
+    pub schema_name: Option<String>,
+    pub sql: String,
+    pub status: String,
+    pub duration_ms: i64,
+    pub row_count: Option<i64>,
+    pub error_message: Option<String>,
+    pub execution_mode: String,
+    pub started_at: i64,
+    pub finished_at: i64,
+}
+
 fn default_project_id() -> String {
     "sqls".to_string()
 }
@@ -129,6 +149,46 @@ impl MetaStore {
         )
         .bind(now)
         .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS query_history (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                connection_id TEXT,
+                connection_name TEXT,
+                driver TEXT,
+                database_name TEXT,
+                schema_name TEXT,
+                sql TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('success', 'error', 'cancelled')),
+                duration_ms INTEGER NOT NULL,
+                row_count INTEGER,
+                error_message TEXT,
+                execution_mode TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER NOT NULL,
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_query_history_project_time ON query_history(project_id, started_at DESC, id DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_query_history_project_status ON query_history(project_id, status, started_at DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_query_history_project_connection ON query_history(project_id, connection_id, started_at DESC)",
+        )
         .execute(&self.pool)
         .await?;
 
@@ -343,6 +403,10 @@ impl MetaStore {
         }
 
         let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM query_history WHERE project_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM resources WHERE project_id = ?")
             .bind(id)
             .execute(&mut *tx)
@@ -476,6 +540,177 @@ impl MetaStore {
         sqlx::query("DELETE FROM connections WHERE project_id = ? AND id = ?")
             .bind(project_id)
             .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // --- Query History Operations ---
+
+    pub async fn save_query_history(&self, items: &[QueryHistoryItem]) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        for item in items {
+            if item.id.trim().is_empty() {
+                anyhow::bail!("query history id cannot be empty");
+            }
+            if !matches!(item.status.as_str(), "success" | "error" | "cancelled") {
+                anyhow::bail!("invalid query history status: {}", item.status);
+            }
+            if item.sql.trim().is_empty() {
+                anyhow::bail!("query history SQL cannot be empty");
+            }
+            if !matches!(item.execution_mode.as_str(), "console" | "statement") {
+                anyhow::bail!(
+                    "invalid query history execution mode: {}",
+                    item.execution_mode
+                );
+            }
+            if item.duration_ms < 0 || item.finished_at < item.started_at {
+                anyhow::bail!("query history timing cannot be negative");
+            }
+            if item.row_count.is_some_and(|row_count| row_count < 0) {
+                anyhow::bail!("query history row count cannot be negative");
+            }
+        }
+
+        let affected_projects = items
+            .iter()
+            .map(|item| item.project_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let mut tx = self.pool.begin().await?;
+        for project_id in &affected_projects {
+            let project_exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?)")
+                    .bind(project_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !project_exists {
+                anyhow::bail!("query history project not found: {project_id}");
+            }
+        }
+
+        for item in items {
+            sqlx::query(
+                r#"
+                INSERT INTO query_history (
+                    id, project_id, connection_id, connection_name, driver,
+                    database_name, schema_name, sql, status, duration_ms,
+                    row_count, error_message, execution_mode, started_at, finished_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    project_id = excluded.project_id,
+                    connection_id = excluded.connection_id,
+                    connection_name = excluded.connection_name,
+                    driver = excluded.driver,
+                    database_name = excluded.database_name,
+                    schema_name = excluded.schema_name,
+                    sql = excluded.sql,
+                    status = excluded.status,
+                    duration_ms = excluded.duration_ms,
+                    row_count = excluded.row_count,
+                    error_message = excluded.error_message,
+                    execution_mode = excluded.execution_mode,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at
+                "#,
+            )
+            .bind(&item.id)
+            .bind(&item.project_id)
+            .bind(&item.connection_id)
+            .bind(&item.connection_name)
+            .bind(&item.driver)
+            .bind(&item.database_name)
+            .bind(&item.schema_name)
+            .bind(&item.sql)
+            .bind(&item.status)
+            .bind(item.duration_ms)
+            .bind(item.row_count)
+            .bind(&item.error_message)
+            .bind(&item.execution_mode)
+            .bind(item.started_at)
+            .bind(item.finished_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        for project_id in affected_projects {
+            sqlx::query(
+                r#"
+                DELETE FROM query_history
+                WHERE project_id = ? AND id IN (
+                    SELECT id FROM query_history
+                    WHERE project_id = ?
+                    ORDER BY started_at DESC, id DESC
+                    LIMIT -1 OFFSET 500
+                )
+                "#,
+            )
+            .bind(&project_id)
+            .bind(&project_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn get_query_history(
+        &self,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<Vec<QueryHistoryItem>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM query_history
+            WHERE project_id = ?
+            ORDER BY started_at DESC, id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(project_id)
+        .bind(limit.clamp(1, 500))
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| QueryHistoryItem {
+                id: row.get("id"),
+                project_id: row.get("project_id"),
+                connection_id: row.get("connection_id"),
+                connection_name: row.get("connection_name"),
+                driver: row.get("driver"),
+                database_name: row.get("database_name"),
+                schema_name: row.get("schema_name"),
+                sql: row.get("sql"),
+                status: row.get("status"),
+                duration_ms: row.get("duration_ms"),
+                row_count: row.get("row_count"),
+                error_message: row.get("error_message"),
+                execution_mode: row.get("execution_mode"),
+                started_at: row.get("started_at"),
+                finished_at: row.get("finished_at"),
+            })
+            .collect())
+    }
+
+    pub async fn delete_query_history_item(&self, project_id: &str, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM query_history WHERE project_id = ? AND id = ?")
+            .bind(project_id)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn clear_query_history(&self, project_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM query_history WHERE project_id = ?")
+            .bind(project_id)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -829,5 +1064,116 @@ mod tests {
 
         assert!(store.delete_project("sqls").await.is_err());
         assert!(store.get_project("sqls").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn stores_filters_and_removes_project_query_history() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = MetaStore { pool };
+        store.init().await.unwrap();
+
+        let project = Project {
+            id: "history-project".to_string(),
+            name: "History".to_string(),
+            root_path: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.save_project(&project).await.unwrap();
+
+        let entry = |id: &str, status: &str, started_at: i64| QueryHistoryItem {
+            id: id.to_string(),
+            project_id: project.id.clone(),
+            connection_id: Some("postgres-1".to_string()),
+            connection_name: Some("Local PostgreSQL".to_string()),
+            driver: Some("postgres".to_string()),
+            database_name: Some("app".to_string()),
+            schema_name: Some("public".to_string()),
+            sql: format!("SELECT '{id}'"),
+            status: status.to_string(),
+            duration_ms: 12,
+            row_count: Some(1),
+            error_message: None,
+            execution_mode: "console".to_string(),
+            started_at,
+            finished_at: started_at + 12,
+        };
+
+        store
+            .save_query_history(&[entry("older", "success", 10), entry("newer", "error", 20)])
+            .await
+            .unwrap();
+
+        let history = store.get_query_history(&project.id, 500).await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].id, "newer");
+        assert_eq!(history[1].id, "older");
+
+        store
+            .delete_query_history_item(&project.id, "newer")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_query_history(&project.id, 500)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        store.clear_query_history(&project.id).await.unwrap();
+        assert!(store
+            .get_query_history(&project.id, 500)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn bounds_query_history_to_five_hundred_entries_per_project() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = MetaStore { pool };
+        store.init().await.unwrap();
+
+        let entries = (0..505)
+            .map(|index| QueryHistoryItem {
+                id: format!("entry-{index:03}"),
+                project_id: "sqls".to_string(),
+                connection_id: None,
+                connection_name: None,
+                driver: None,
+                database_name: None,
+                schema_name: None,
+                sql: format!("SELECT {index}"),
+                status: "success".to_string(),
+                duration_ms: 1,
+                row_count: Some(1),
+                error_message: None,
+                execution_mode: "console".to_string(),
+                started_at: index,
+                finished_at: index + 1,
+            })
+            .collect::<Vec<_>>();
+
+        store.save_query_history(&entries).await.unwrap();
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM query_history WHERE project_id = 'sqls'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 500);
+        let retained = store.get_query_history("sqls", 500).await.unwrap();
+        assert_eq!(retained.first().unwrap().id, "entry-504");
+        assert_eq!(retained.last().unwrap().id, "entry-005");
     }
 }

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
+import { useHistoryStore } from "@/store/useHistoryStore";
 import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
 
 const mocks = vi.hoisted(() => ({
@@ -10,6 +11,13 @@ const mocks = vi.hoisted(() => ({
   getDatabaseCapabilities: vi.fn(async () => {
     throw new Error("use fallback capabilities");
   }),
+  saveHistoryEntries: vi.fn(async () => undefined),
+}));
+
+vi.mock("@/services/tauri/query-history.service", () => ({
+  queryHistoryService: {
+    saveEntries: mocks.saveHistoryEntries,
+  },
 }));
 
 vi.mock("@/services/tauri", () => ({
@@ -90,6 +98,13 @@ describe("query run cancellation store", () => {
     mocks.executeQuery.mockClear();
     mocks.cancelQuery.mockClear();
     mocks.getDatabaseCapabilities.mockClear();
+    mocks.saveHistoryEntries.mockClear();
+    useHistoryStore.setState({
+      projectId: "sqls",
+      history: [],
+      isLoading: false,
+      error: null,
+    });
     resetWorkspaceState();
   });
 
@@ -109,6 +124,38 @@ describe("query run cancellation store", () => {
     expect(tab.isExecuting).toBe(false);
     expect(tab.runningQueryId).toBeNull();
     expect(tab.error).toBeNull();
+    expect(useHistoryStore.getState().history[0]).toMatchObject({
+      projectId: "sqls",
+      connectionId: "postgres-1",
+      connectionName: "Postgres",
+      driver: "postgres",
+      schemaName: "public",
+      sql: "SELECT 1",
+      status: "success",
+      rowCount: 0,
+      executionMode: "console",
+    });
+    expect(mocks.saveHistoryEntries).toHaveBeenCalledWith([
+      expect.objectContaining({ status: "success", sql: "SELECT 1" }),
+    ]);
+  });
+
+  it("records failed statement executions with their error and context", async () => {
+    mocks.executeQuery.mockRejectedValueOnce(new Error("syntax error near FROM"));
+
+    await useTabStore
+      .getState()
+      .runTabQuery("tab-1", "postgres-1", "SELECT FROM");
+
+    expect(useHistoryStore.getState().history[0]).toMatchObject({
+      connectionId: "postgres-1",
+      schemaName: "public",
+      sql: "SELECT FROM",
+      status: "error",
+      rowCount: null,
+      errorMessage: "syntax error near FROM",
+      executionMode: "statement",
+    });
   });
 
   it("surfaces cancel invocation errors without clearing the running query id", async () => {

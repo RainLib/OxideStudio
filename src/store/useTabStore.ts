@@ -19,6 +19,10 @@ import {
   type TableMetadataSnapshot,
 } from "@/services/tableMetadataCache";
 import { useHistoryStore } from "./useHistoryStore";
+import {
+  queryHistoryRowCount,
+  queryHistoryStatusFromError,
+} from "@/lib/queryHistory";
 import { useConnectionStore } from "./useConnectionStore";
 import { useSchemaStore } from "./useSchemaStore";
 import { useTaskStore } from "./useTaskStore";
@@ -1242,6 +1246,30 @@ export const useTabStore = create<TabState>((set, get) => ({
 
     const sqlToRun = sqlOverride || tab.sql;
     if (!sqlToRun.trim()) return;
+    const startedAt = Date.now();
+    const { currentSchema } = useSchemaStore.getState();
+    const connection = useConnectionStore
+      .getState()
+      .connections.find((item) => item.id === connectionId);
+    const schemaContext = querySchemaContextForTab(
+      tab,
+      currentSchema,
+      connection?.driver || DEFAULT_DATABASE_DRIVER
+    );
+    const historyContext = {
+      projectId: connection?.projectId || "sqls",
+      connectionId,
+      connectionName: connection?.name || null,
+      driver: connection?.driver || null,
+      databaseName: tab.databaseName || connection?.database || null,
+      schemaName: schemaContext || null,
+      sql: sqlToRun,
+      executionMode:
+        sqlOverride === undefined
+          ? ("console" as const)
+          : ("statement" as const),
+      startedAt,
+    };
     const queryId = `${id}:${uuidv4()}`;
     const taskStore = useTaskStore.getState();
     const taskId = taskStore.startTask({
@@ -1267,16 +1295,6 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
 
     try {
-      const { currentSchema } = useSchemaStore.getState();
-      const connection = useConnectionStore
-        .getState()
-        .connections.find((item) => item.id === connectionId);
-      const schemaContext = querySchemaContextForTab(
-        tab,
-        currentSchema,
-        connection?.driver || DEFAULT_DATABASE_DRIVER
-      );
-
       console.log(
         "TabStore: Running query with schema context:",
         schemaContext
@@ -1291,14 +1309,17 @@ export const useTabStore = create<TabState>((set, get) => ({
         tab.databaseName
       );
 
-      // Add to history if it's the full tab SQL and successful
-      if (!sqlOverride) {
-        useHistoryStore.getState().addToHistory(tab.sql);
-      }
-
       console.log("[TabStore] Query successfully finished", results);
-      const rowCount =
-        results?.reduce((total, result) => total + result.rows.length, 0) ?? 0;
+      const rowCount = queryHistoryRowCount(results);
+      const finishedAt = Date.now();
+      useHistoryStore.getState().recordExecution({
+        ...historyContext,
+        status: "success",
+        durationMs: finishedAt - startedAt,
+        rowCount,
+        errorMessage: null,
+        finishedAt,
+      });
       taskStore.finishTask(
         taskId,
         `${rowCount.toLocaleString()} row${rowCount === 1 ? "" : "s"}`
@@ -1329,7 +1350,17 @@ export const useTabStore = create<TabState>((set, get) => ({
         });
       }
     } catch (e: any) {
-      taskStore.failTask(taskId, e.message || String(e));
+      const message = e.message || String(e);
+      const finishedAt = Date.now();
+      useHistoryStore.getState().recordExecution({
+        ...historyContext,
+        status: queryHistoryStatusFromError(message),
+        durationMs: finishedAt - startedAt,
+        rowCount: null,
+        errorMessage: message,
+        finishedAt,
+      });
+      taskStore.failTask(taskId, message);
       set((state) => ({
         tabs: state.tabs.map((t) =>
           t.id === id && t.runningQueryId === queryId
@@ -1337,7 +1368,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                 ...t,
                 isExecuting: false,
                 runningQueryId: null,
-                error: e.message || String(e),
+                error: message,
               }
             : t
         ),

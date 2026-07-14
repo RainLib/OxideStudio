@@ -24,6 +24,7 @@ import { useSettingsStore } from "@/store/useSettingsStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
 import { useEditorGroupStore } from "@/store/useEditorGroupStore";
 import { CommandPalette } from "@/components/workspace/CommandPalette";
+import { QueryHistorySync } from "@/components/workspace/QueryHistorySync";
 import { useUnsavedChangesGuard } from "@/hooks/useUnsavedChangesGuard";
 import { APP_EVENT_OPEN_PROJECT_FILES } from "@/lib/projectFilesNavigation";
 import { cn } from "@/lib/utils";
@@ -245,6 +246,7 @@ export function WorkspacePage() {
         } as CSSProperties
       }
     >
+      <QueryHistorySync />
       <AppBar
         center={
           <WorkbenchTitleTools

@@ -1,6 +1,6 @@
 use crate::core::{
     config::ConfigManager,
-    store::{MetaStore, Project, Resource, SavedConnection},
+    store::{MetaStore, Project, QueryHistoryItem, Resource, SavedConnection},
 };
 use anyhow::Result;
 use tauri::State;
@@ -192,4 +192,50 @@ pub async fn search_resources(
         )
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn save_query_history_entries(
+    meta_store: State<'_, MetaStore>,
+    entries: Vec<QueryHistoryItem>,
+) -> Result<(), String> {
+    meta_store
+        .save_query_history(&entries)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn get_query_history(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+    limit: Option<i64>,
+) -> Result<Vec<QueryHistoryItem>, String> {
+    meta_store
+        .get_query_history(&project_id, limit.unwrap_or(500))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_query_history_entry(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+    id: String,
+) -> Result<(), String> {
+    meta_store
+        .delete_query_history_item(&project_id, &id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn clear_query_history(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+) -> Result<(), String> {
+    meta_store
+        .clear_query_history(&project_id)
+        .await
+        .map_err(|error| error.to_string())
 }

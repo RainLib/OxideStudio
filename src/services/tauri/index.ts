@@ -21,6 +21,7 @@ export * from "./connection.service";
 export * from "./ai.service";
 export * from "./database.service";
 export * from "./query.service";
+export * from "./query-history.service";
 export * from "./schema.service";
 export * from "./settings.service";
 export * from "./store.service";
