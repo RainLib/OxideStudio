@@ -106,10 +106,15 @@ export type AiWorkspaceTabSummary = {
   title: string;
   sql?: string;
   connectionId?: string | null;
+  databaseName?: string | null;
   targetSchema?: string | null;
   schemaName?: string | null;
   tableName?: string | null;
   objectType?: string | null;
+  fileProjectId?: string | null;
+  fileRelativePath?: string | null;
+  resultSetCount?: number;
+  activeResultIndex?: number;
   selection?: AiWorkspaceSelection | null;
 };
 
@@ -122,6 +127,7 @@ export type AiWorkspaceSelection = {
   endLineNumber: number;
   endColumn: number;
   connectionId?: string | null;
+  databaseName?: string | null;
 };
 
 export type AiReadOnlyQueryInput = {

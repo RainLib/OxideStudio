@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { defaultDatabaseName } from "@/lib/databaseDialect";
 import { parseConnectionUrl } from "@/lib/connectionUrlParser";
+import { useDatabaseNavigationStore } from "@/lib/databaseNavigation";
 
 export type PostgresDatabaseDiscoveryStatus =
   | "idle"
@@ -31,6 +32,7 @@ interface DatabaseLoadState {
 }
 
 export interface PostgresDatabaseTreeProps {
+  connectionId: string;
   enabled?: boolean;
   databases: string[];
   currentDatabase: string;
@@ -105,6 +107,7 @@ function loadErrorMessage(error: unknown, database: string) {
 }
 
 export function PostgresDatabaseTree({
+  connectionId,
   enabled = true,
   databases,
   currentDatabase,
@@ -119,6 +122,9 @@ export function PostgresDatabaseTree({
   onLoadDatabase,
   renderDatabaseChildren,
 }: PostgresDatabaseTreeProps) {
+  const databaseRevealRequest = useDatabaseNavigationStore(
+    (state) => state.revealRequest
+  );
   const treeId = useId();
   const mountedRef = useRef(true);
   const requestVersionsRef = useRef<Record<string, number>>({});
@@ -235,6 +241,26 @@ export function PostgresDatabaseTree({
     },
     [currentDatabase, expandedDatabases, loadDatabase, loadStates]
   );
+
+  useEffect(() => {
+    const target = databaseRevealRequest?.target;
+    if (!target || target.connectionId !== connectionId || !target.databaseName) {
+      return;
+    }
+    const database = target.databaseName;
+    if (!rows.includes(database)) return;
+    setExpandedDatabases((expanded) => {
+      if (expanded.has(database)) return expanded;
+      return new Set([...expanded, database]);
+    });
+    if (
+      database !== currentDatabase &&
+      loadStates[database]?.status !== "success" &&
+      loadStates[database]?.status !== "loading"
+    ) {
+      void loadDatabase(database);
+    }
+  }, [databaseRevealRequest?.id, rows.join("\u0000")]);
 
   if (!enabled) return <>{children}</>;
 

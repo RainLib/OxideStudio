@@ -13,6 +13,10 @@ import { cn } from "@/lib/utils";
 import { isViewObject } from "@/lib/databaseDialect";
 import { schemaService } from "@/services/tauri";
 import type { TableInfo } from "@/services/tauri/types";
+import {
+  databaseObjectNavigationKey,
+  useDatabaseNavigationStore,
+} from "@/lib/databaseNavigation";
 
 type SchemaLoadStatus = "idle" | "loading" | "success" | "error";
 
@@ -50,6 +54,12 @@ export function PostgresRemoteDatabaseContents({
   onTablesLoaded,
   onOpenTable,
 }: PostgresRemoteDatabaseContentsProps) {
+  const databaseRevealRequest = useDatabaseNavigationStore(
+    (state) => state.revealRequest
+  );
+  const clearDatabaseReveal = useDatabaseNavigationStore(
+    (state) => state.clearReveal
+  );
   const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(
     () => new Set()
   );
@@ -153,6 +163,54 @@ export function PostgresRemoteDatabaseContents({
       void loadTables(schema);
     }
   };
+
+  useEffect(() => {
+    const target = databaseRevealRequest?.target;
+    if (
+      !target ||
+      target.connectionId !== connectionId ||
+      target.databaseName !== database ||
+      !schemas.includes(target.schemaName)
+    ) {
+      return;
+    }
+    setExpandedSchemas((current) =>
+      current.has(target.schemaName)
+        ? current
+        : new Set([...current, target.schemaName])
+    );
+    const loadState = schemaLoads[target.schemaName];
+    if (loadState?.status !== "loading" && loadState?.status !== "success") {
+      void loadTables(target.schemaName);
+    }
+  }, [databaseRevealRequest?.id, schemas]);
+
+  useEffect(() => {
+    if (!databaseRevealRequest) return;
+    const { id: requestId, target } = databaseRevealRequest;
+    if (
+      target.connectionId !== connectionId ||
+      target.databaseName !== database ||
+      schemaLoads[target.schemaName]?.status !== "success"
+    ) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      const key = databaseObjectNavigationKey(target);
+      const element = document.querySelector<HTMLElement>(
+        `[data-database-object-key="${key}"]`
+      );
+      element?.scrollIntoView({ block: "nearest" });
+      element?.focus();
+      clearDatabaseReveal(requestId);
+    });
+  }, [
+    clearDatabaseReveal,
+    connectionId,
+    database,
+    databaseRevealRequest,
+    schemaLoads,
+  ]);
 
   const normalizedFilter = filterText.trim().toLocaleLowerCase();
   const visibleSchemas = normalizedFilter
@@ -277,6 +335,12 @@ export function PostgresRemoteDatabaseContents({
                       <button
                         type="button"
                         key={table.name}
+                        data-database-object-key={databaseObjectNavigationKey({
+                          connectionId,
+                          databaseName: database,
+                          schemaName: schema,
+                          objectName: table.name,
+                        })}
                         data-postgres-remote-table={`${database}.${schema}.${table.name}`}
                         onClick={() => void onOpenTable(database, schema, table)}
                         className={cn(

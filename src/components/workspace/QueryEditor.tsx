@@ -83,6 +83,10 @@ import { aiService } from "@/services/tauri/ai.service";
 import { projectFilesService } from "@/services/tauri/project-files.service";
 import { ProjectFileImagePreview } from "./ProjectFileImagePreview";
 import { openProjectFileInEditor } from "@/lib/projectFileOpen";
+import {
+  APP_EVENT_REVEAL_EDITOR_RANGE,
+  type EditorRangeNavigationDetail,
+} from "@/lib/editorNavigation";
 import type { QueryHistoryItem } from "@/lib/queryHistory";
 import {
   boundedInlineContext,
@@ -1493,6 +1497,34 @@ export function QueryEditor({
     supportsTransactions,
     transactionMode,
   ]);
+
+  useEffect(() => {
+    if (!isActivePane) return;
+
+    const revealRange = (event: Event) => {
+      const detail = (event as CustomEvent<EditorRangeNavigationDetail>).detail;
+      const editor = editorRef.current;
+      if (!editor || detail?.tabId !== effectiveTabId) return;
+      const range = detail.range;
+      editor.setSelection({
+        startLineNumber: range.startLine,
+        startColumn: range.startColumn,
+        endLineNumber: range.endLine,
+        endColumn: range.endColumn,
+      });
+      editor.revealRangeInCenter({
+        startLineNumber: range.startLine,
+        startColumn: range.startColumn,
+        endLineNumber: range.endLine,
+        endColumn: range.endColumn,
+      });
+      if (detail.focus !== false) editor.focus();
+    };
+
+    window.addEventListener(APP_EVENT_REVEAL_EDITOR_RANGE, revealRange);
+    return () =>
+      window.removeEventListener(APP_EVENT_REVEAL_EDITOR_RANGE, revealRange);
+  }, [effectiveTabId, isActivePane]);
 
   const handleSchemaChange = (schema: string) => {
     if (activeTab) {

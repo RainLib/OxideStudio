@@ -1,6 +1,12 @@
 import { cn } from "@/lib/utils";
 import { ArrowUpRight, Loader2, Sparkles } from "lucide-react";
 import { AssistantMessageContent } from "./AssistantMessageContent";
+import type {
+  AssistantAttachment,
+  UiActionRequest,
+  UiActionResult,
+} from "@/ai/ui-actions/types";
+import { AssistantAttachmentList } from "./AssistantAttachmentList";
 
 export interface AssistantConversationEntry {
   id: string;
@@ -8,6 +14,7 @@ export interface AssistantConversationEntry {
   role: "user" | "assistant";
   content: string;
   status?: "normal" | "error";
+  attachments?: AssistantAttachment[];
 }
 
 interface AssistantConversationProps {
@@ -15,6 +22,7 @@ interface AssistantConversationProps {
   isResponding: boolean;
   pendingLabel: string;
   onUsePrompt: (prompt: string) => void;
+  onExecuteAttachment: (request: UiActionRequest) => Promise<UiActionResult>;
 }
 
 const STARTER_PROMPTS = [
@@ -28,6 +36,7 @@ export function AssistantConversation({
   isResponding,
   pendingLabel,
   onUsePrompt,
+  onExecuteAttachment,
 }: AssistantConversationProps) {
   if (entries.length === 0 && !isResponding) {
     return <AssistantWelcome onUsePrompt={onUsePrompt} />;
@@ -59,7 +68,13 @@ export function AssistantConversation({
             />
           )}
           {entry.role === "assistant" ? (
-            <AssistantMessageContent content={entry.content} />
+            <div className="min-w-0 flex-1">
+              <AssistantMessageContent content={entry.content} />
+              <AssistantAttachmentList
+                attachments={entry.attachments || []}
+                onExecute={onExecuteAttachment}
+              />
+            </div>
           ) : (
             <div className="min-w-0 whitespace-pre-wrap break-words">
               {entry.content}

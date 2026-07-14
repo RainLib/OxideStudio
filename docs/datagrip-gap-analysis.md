@@ -1,6 +1,6 @@
 # OxideStudio 与 DataGrip 能力差距
 
-> 评估日期：2026-07-13。DataGrip 基线采用 JetBrains DataGrip 2026.1 官方文档；OxideStudio 基线采用当前仓库代码与测试，而不是 README 宣称能力。
+> 评估日期：2026-07-14。DataGrip 基线采用 JetBrains DataGrip 2026.1 官方文档；OxideStudio 基线采用当前仓库代码与测试，而不是 README 宣称能力。AI Agent 的完整逻辑要求见 [AI_AGENT_PRODUCT_SPEC.md](AI_AGENT_PRODUCT_SPEC.md)。
 
 ## 1. 评估方法
 
@@ -14,24 +14,30 @@ DataGrip 的官方能力基线主要来自：
 
 - [Features overview](https://www.jetbrains.com/datagrip/features/)
 - [Database Explorer](https://www.jetbrains.com/help/datagrip/database-explorer.html)
+- [Introspection](https://www.jetbrains.com/help/datagrip/introspection.html)
 - [Query consoles](https://www.jetbrains.com/help/datagrip/query-consoles.html)
 - [Run queries and query history](https://www.jetbrains.com/help/datagrip/run-a-query.html)
+- [Code completion](https://www.jetbrains.com/help/datagrip/auto-completing-code.html)
 - [Data editor and viewer](https://www.jetbrains.com/help/datagrip/data-editor-and-viewer.html)
 - [Search in DataGrip](https://www.jetbrains.com/help/datagrip/search-in-ide.html)
 - [Import](https://www.jetbrains.com/help/datagrip/import-data.html) / [Export](https://www.jetbrains.com/help/datagrip/export-data.html)
-- [Diagrams](https://www.jetbrains.com/help/datagrip/diagrams.html)
+- [Schema comparison and migration](https://www.jetbrains.com/help/datagrip/schema-comparison-and-migration.html)
+- [Diagrams](https://www.jetbrains.com/help/datagrip/creating-diagrams.html)
+- [Refactoring](https://www.jetbrains.com/help/datagrip/refactoring-source-code.html)
 - [Databases in VCS](https://www.jetbrains.com/help/datagrip/databases-in-the-version-control-system.html)
+- [AI for databases](https://www.jetbrains.com/help/ai-assistant/use-ai-with-databases.html)
 
 这不是逐像素复制计划。DataGrip 依托 IntelliJ Platform，OxideStudio 应优先补齐数据库工作流，不复制与数据库价值无关的通用 IDE 复杂度。
 
 ## 2. 结论摘要
 
-OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 → 查看/编辑表数据”的骨架，并在多数据模型、Tauri 安全边界、项目文件和 AI 工具一致性上形成了自己的方向。与 DataGrip 的主要差距不在单个按钮，而在四条专业闭环尚未形成：
+OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 → 查看/编辑表数据”的骨架，并在多数据模型、Tauri 安全边界、项目文件和 AI 工具一致性上形成了自己的方向。与 DataGrip 的主要差距不在单个按钮，而在五条专业闭环尚未形成：
 
 1. **发现闭环**：Search Everywhere、对象导航、find usages、数据库全文搜索仍不完整。
 2. **变更闭环**：schema diff、migration preview、data compare、VCS/DDL data source 缺失。
 3. **数据工作闭环**：Value Editor、外键导航、聚合视图、多视图模式和导入映射不足。
 4. **诊断闭环**：Explain Plan、结构化错误、会话/锁/运行监控和可筛选查询历史不足。
+5. **智能协作闭环**：AI 有工具和审批基础，但缺少对象附件、页面跳转、patch preview、持久任务、plan-grounded 优化；LSP 也缺少 catalog 隔离和同名列的上下文排序。
 
 按日常数据库开发主路径估算，当前完成度约为 **55%–65%**；按 DataGrip 全功能面估算约为 **35%–45%**。这是工程规划区间，不是营销评分。
 
@@ -53,7 +59,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | DataGrip 基线 | OxideStudio 状态 | 当前证据与差距 | 优先级 |
 | --- | --- | --- | --- |
 | 绑定数据源的多个 query console | 部分具备 | 支持多 Tab、连接/schema 上下文、split editor；console 生命周期和 session 模式不够显式 | P0 |
-| schema-aware completion | 部分具备 | Monaco + bundled SQL LSP + 项目上下文；跨 database 解析、临时对象和 routine 语义不足 | P0/P1 |
+| schema-aware completion | 已具备/部分 | query tab 已按 `(connection, database, schema)` 映射独立 metadata/schema id/cache；FROM 前同名列按 table 限定，JOIN 按 alias 限定并插入，当前 statement/DML/active object 有稳定优先级；临时对象、派生表字段和更深 routine 语义仍不足 | P1 |
 | inspections、quick-fix、错误高亮 | 部分具备 | 有 diagnostics 和 formatting；数据库语义 quick-fix、意图操作和 inspection 配置缺失 | P1 |
 | refactor / find usages / navigation | 缺失 | 缺少对象 rename refactor、usage graph、代码与对象双向导航 | P1 |
 | 参数化查询 | 部分具备 | 已有参数面板与后端参数化执行；自定义参数 pattern、历史和值配置不足 | P0 |
@@ -122,7 +128,22 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | 后台任务与进度 | 部分具备 | 有 TaskStatusCenter；缺少可回看日志、任务详情和 retry | P1 |
 | 结构化错误 | 部分具备 | 部分前端错误有类型，很多 Rust command 仍返回字符串 | P0 |
 | destructive safety | 已具备/部分 | SQL 分类、确认、参数化 mutation、AI policy 和 read-only backend gate 已有；权限模型与审计导出不足 | P0/P1 |
-| AI 辅助 | 差异化优势 | 共享工具 registry、MCP/CLI、审批与审计是相对 DataGrip 的产品差异点，应继续坚持安全一致性 | — |
+| AI 辅助 | 部分具备/有差异化基础 | 共享工具 registry、MCP/CLI、审批与审计是优势；但 DataGrip 已有 schema-aware chat、对象/选区/UI 附件、SQL 错误修复、查询优化和 plan explanation，Oxide 尚未形成对应用户闭环 | P0/P1 |
+
+### 3.9 AI Agent 与 IDE 交互
+
+| DataGrip / 专业 Agent 基线 | OxideStudio 状态 | 当前证据与差距 | 优先级 |
+| --- | --- | --- | --- |
+| Schema/object/selection/UI attachment | 已具备/部分 | tool result 已生成带 provenance 的对象、文件、结果、tab、selection 与 diagnostic attachment；Explain Plan attachment 等待 plan surface | P0/P1 |
+| Text-to-SQL 与 dialect grounding | 部分具备 | 有模型 planner、inline completion 和 dialect context；缺少 metadata citation、patch preview 与执行前验证闭环 | P0 |
+| Explain/Fix SQL error | 部分具备 | LSP diagnostic 已可点击 Jump 到精确 range；vendor error 尚未统一为 code/position/object，Preview Fix → Validate 仍缺失 | P0 |
+| Query optimization / plan explanation | 缺失 | Explain Plan 本身尚未实现，AI 无法基于真实计划做可靠优化 | P0/P1 |
+| IDE 页面跳转和联动 | 已具备/部分 | typed `UiActionRegistry` 已覆盖 project/file/tab/panel/connection/object/editor/result/settings，含 stable target 与 stale-context；patch/plan/task surface 待补 | P0/P1 |
+| 多轮 durable agent | 部分具备 | Sidebar 有有界多轮工具循环，LangGraph 当前主要为 `plan -> policy`；缺 checkpoint/resume、runtime-owned loop、持久 thread 和 subagent | P1 |
+| 工具安全与多数据模型 | 已具备/优势 | registry、capability、approval、MCP/CLI 以及 Mongo/Redis/ES 结构化 mutation 已形成独立方向 | — |
+| AI 数据治理 | 部分具备 | credential 隔离、上下文截断和有界结果已有；缺发送内容预览、项目级 retention 和 attachment 敏感级别 | P0/P1 |
+
+完整状态机、工具契约、页面动作、批准绑定、Deep Agents 分层方案和 LSP 排序规则见 [AI Agent 产品与技术规格](AI_AGENT_PRODUCT_SPEC.md)。
 
 ## 4. 优先路线图
 
@@ -137,6 +158,8 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | DG-P0-05 | Driver 与文档一致性 | 增加 SQLite driver，或从发布文档移除未实现支持；能力列表由 runtime registry 生成 | 待开始 |
 | DG-P0-06 | 结构化错误协议 | connection/query/schema/table/file command 返回稳定 code、message、context、retryable；UI 不再解析字符串前缀 | 待开始 |
 | DG-P0-07 | CSV Import Mapping | 导入前预览、编码/delimiter/header、列映射、类型错误摘要和事务性提交 | 待开始 |
+| DG-P0-08 | LSP catalog scope 与候选排序 | `(connection, database, schema)` 严格隔离；显式 qualifier/当前 statement/DML target/active table 排序；同名列以 alias/table 区分；同 source 去重；覆盖跨 PostgreSQL database 回归 | 已完成 |
+| DG-P0-09 | AI attachment 与页面动作 | 对象、错误、结果、执行计划引用可点击并准确跳转；stable target、stale context 和同名对象有测试；导航不与数据库 mutation 混为一个动作 | 进行中：对象/文件/结果/LSP error 已完成，plan 待 DG-P0-04 |
 
 ### P1：形成 schema 工程能力
 
@@ -166,4 +189,11 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 
 ## 6. 下一步
 
-**DG-P0-01 Search Everywhere 第一阶段** 与 **DG-P0-02 Query History 2.0** 已完成。技术边界见 [ADR-0001](decisions/0001-search-everywhere-index.md) 和 [ADR-0002](decisions/0002-query-history-persistence.md)。下一项优先进入 **DG-P0-03 Value Editor**，补齐大文本、JSON、日期和二进制值的专业查看/编辑闭环。
+**DG-P0-01 Search Everywhere 第一阶段** 与 **DG-P0-02 Query History 2.0** 已完成。技术边界见 [ADR-0001](decisions/0001-search-everywhere-index.md) 和 [ADR-0002](decisions/0002-query-history-persistence.md)。
+
+近期顺序调整为：
+
+1. **DG-P0-08 LSP catalog scope 与候选排序** 已完成；证据覆盖跨 PostgreSQL database 配置、database-scoped metadata、同名列、alias 插入、模糊匹配、CTE/DML 作用域、全量 LSP tests 与 Clippy。
+2. **DG-P0-09 AI attachment 与页面动作** 的通用 registry、stable target、stale context、对象/文件/结果/LSP error 跳转已完成；Explain Plan attachment 随 DG-P0-04 补齐。
+3. 当前推进 **DG-P0-06 结构化错误协议**，作为 error fix、重试和 Agent verification 的公共基础。
+4. 再完成 **DG-P0-03 Value Editor** 与 **DG-P0-04 Explain Plan MVP**；Explain Plan 完成后才启用 AI query optimization/plan explanation。

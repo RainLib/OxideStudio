@@ -34,6 +34,14 @@ import {
 } from "./assistant/AssistantConversation";
 import { AssistantPlanView } from "./assistant/AssistantPlanView";
 import { AssistantPromptBox } from "./assistant/AssistantPromptBox";
+import {
+  createAssistantAttachments,
+  createWorkspaceUiActionRegistry,
+} from "@/ai/ui-actions";
+import type {
+  AssistantAttachment,
+  UiActionRequest,
+} from "@/ai/ui-actions/types";
 
 const MAX_AGENT_FOLLOW_UP_ROUNDS = 4;
 const MAX_AGENT_TOOL_CALLS = 12;
@@ -75,6 +83,10 @@ export function AssistantSidebar() {
         summarizeToolResults: plannerSelection.summarizeToolResults,
       }),
     [plannerSelection]
+  );
+  const uiActionRegistry = useMemo(
+    () => createWorkspaceUiActionRegistry(),
+    []
   );
   const { tabs, activeTabId } = useTabStore();
   const auditEntries = useAiAuditStore((state) => state.entries);
@@ -151,7 +163,8 @@ export function AssistantSidebar() {
   const appendAssistantMessage = (
     content: string,
     requestId?: string,
-    status: AssistantConversationEntry["status"] = "normal"
+    status: AssistantConversationEntry["status"] = "normal",
+    attachments: AssistantAttachment[] = []
   ) => {
     if (!content.trim()) return;
     setConversationEntries((current) => [
@@ -162,6 +175,7 @@ export function AssistantSidebar() {
         role: "assistant",
         content: content.trim(),
         status,
+        attachments,
       },
     ]);
   };
@@ -342,7 +356,12 @@ export function AssistantSidebar() {
       );
       if (executionContext.abortSignal?.aborted) return result;
       setToolSummaries((state) => ({ ...state, [step.id]: summary }));
-      appendAssistantMessage(summary.message, turn.requestId);
+      appendAssistantMessage(
+        summary.message,
+        turn.requestId,
+        "normal",
+        createAssistantAttachments([result], executionContext)
+      );
     }
     if (result.status !== "success") {
       setError(result.error || "Tool execution did not complete");
@@ -536,7 +555,12 @@ export function AssistantSidebar() {
             [lastResult.id]: summary,
           }));
         }
-        appendAssistantMessage(summary.message, turn.requestId);
+        appendAssistantMessage(
+          summary.message,
+          turn.requestId,
+          "normal",
+          createAssistantAttachments(roundResults, executionContext)
+        );
 
         const normalized = runtime.normalizeSuggestedCalls(
           summary.suggestedCalls ?? [],
@@ -631,6 +655,16 @@ export function AssistantSidebar() {
     updateAiSettings({ assistantMode: mode });
   };
 
+  const handleExecuteAttachment = async (request: UiActionRequest) => {
+    const result = await uiActionRegistry.execute(request);
+    if (result.status !== "success") {
+      setError(result.message || result.code);
+    } else {
+      setError(null);
+    }
+    return result;
+  };
+
   return (
     <div className="flex h-full flex-col wb-panel">
       <AssistantHeader
@@ -649,6 +683,7 @@ export function AssistantSidebar() {
           isResponding={isPlanning}
           pendingLabel={pendingLabel}
           onUsePrompt={setMessage}
+          onExecuteAttachment={handleExecuteAttachment}
         />
 
         {preparedTurn && (

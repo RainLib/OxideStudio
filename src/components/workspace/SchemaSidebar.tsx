@@ -36,6 +36,10 @@ import { useProjectStore } from "@/store/useProjectStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
+import {
+  databaseObjectNavigationKey,
+  useDatabaseNavigationStore,
+} from "@/lib/databaseNavigation";
 import { CreateDatabaseDialog } from "./CreateDatabaseDialog";
 import { RenameTableDialog } from "./RenameTableDialog";
 import { DdlViewerDialog } from "./DdlViewerDialog";
@@ -316,6 +320,12 @@ export function SchemaSidebar() {
   const [expandedObjectGroupKeys, setExpandedObjectGroupKeys] = useState<
     string[]
   >([]);
+  const databaseRevealRequest = useDatabaseNavigationStore(
+    (state) => state.revealRequest
+  );
+  const clearDatabaseReveal = useDatabaseNavigationStore(
+    (state) => state.clearReveal
+  );
   const [postgresDatabaseRefreshVersion, setPostgresDatabaseRefreshVersion] =
     useState(0);
   const [postgresVisibilityKey, setPostgresVisibilityKey] = useState<
@@ -1788,6 +1798,89 @@ export function SchemaSidebar() {
     );
   };
 
+  useEffect(() => {
+    if (!databaseRevealRequest) return;
+    const { id: requestId, target } = databaseRevealRequest;
+    if (target.projectId !== activeProjectId) return;
+    const connection = connections.find((item) => item.id === target.connectionId);
+    if (!connection) {
+      clearDatabaseReveal(requestId);
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      if (useConnectionStore.getState().activeConnectionId !== connection.id) {
+        const connectionError = await setActiveConnection(connection.id);
+        if (connectionError || cancelled) return;
+      }
+      setExpandedConnectionIds((current) =>
+        current.includes(connection.id) ? current : [...current, connection.id]
+      );
+
+      const currentDatabase =
+        connection.driver === "postgres"
+          ? postgresConnectionDatabaseName(connection)
+          : connection.database || "";
+      if (
+        connection.driver === "postgres" &&
+        target.databaseName &&
+        target.databaseName !== currentDatabase
+      ) {
+        await loadPostgresRemoteDatabase(connection.id, target.databaseName);
+        return;
+      }
+
+      await handleSchemaSelect(target.schemaName);
+      if (!shouldAutoIntrospect) {
+        await hydrateSchemaObjectsFromCache(connection.id, target.schemaName);
+      }
+      if (cancelled) return;
+      const schemaKey = schemaTreeKey(
+        connection.id,
+        connection.driver,
+        target.schemaName
+      );
+      const objectsKey = objectGroupKey(
+        connection.id,
+        connection.driver,
+        target.schemaName,
+        "objects"
+      );
+      setExpandedSchemaKeys((current) =>
+        current.includes(schemaKey) ? current : [...current, schemaKey]
+      );
+      setExpandedObjectGroupKeys((current) =>
+        current.includes(objectsKey) ? current : [...current, objectsKey]
+      );
+      selectTable(target.objectName);
+      setFilterText("");
+      window.requestAnimationFrame(() => {
+        const key = databaseObjectNavigationKey({
+          ...target,
+          databaseName:
+            target.databaseName ||
+            (connection.driver === "postgres" ? currentDatabase : undefined),
+        });
+        const element = document.querySelector<HTMLElement>(
+          `[data-database-object-key="${key}"]`
+        );
+        element?.scrollIntoView({ block: "nearest" });
+        element?.focus();
+        clearDatabaseReveal(requestId);
+      });
+    })().catch((error) => {
+      if (!cancelled) {
+        setNamespaceError(error instanceof Error ? error.message : String(error));
+        clearDatabaseReveal(requestId);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [databaseRevealRequest?.id]);
+
   const renderSchemaVisibilityPicker = () => {
     const isPostgresPicker = activeDriver === "postgres";
     if (
@@ -2016,6 +2109,13 @@ export function SchemaSidebar() {
   ) => {
     const isCurrentSchema =
       connectionId === activeConnectionId && schema === currentSchema;
+    const objectConnection = connections.find(
+      (connection) => connection.id === connectionId
+    );
+    const navigationDatabaseName =
+      objectConnection?.driver === "postgres"
+        ? postgresConnectionDatabaseName(objectConnection)
+        : undefined;
     const schemaObjects = schemaObjectsFor(connectionId, driver, schema);
     const tableRelations = schemaObjects.tables.filter(
       (table) => !isViewObject(table.type)
@@ -2174,6 +2274,13 @@ export function SchemaSidebar() {
                   <ContextMenu key={`${schema}:view:${view.name}`}>
                     <ContextMenuTrigger asChild>
                       <div
+                        data-database-object-key={databaseObjectNavigationKey({
+                          connectionId,
+                          databaseName: navigationDatabaseName,
+                          schemaName: schema,
+                          objectName: view.name,
+                        })}
+                        tabIndex={-1}
                         className={cn(
                           "group ml-4 flex h-6 cursor-pointer items-center gap-2 rounded-[3px] px-2 text-[11px]",
                           isSelectedView
@@ -2236,6 +2343,13 @@ export function SchemaSidebar() {
         <ContextMenu key={`${schema}:${collection.name}`}>
           <ContextMenuTrigger>
             <div
+              data-database-object-key={databaseObjectNavigationKey({
+                connectionId,
+                databaseName: navigationDatabaseName,
+                schemaName: schema,
+                objectName: collection.name,
+              })}
+              tabIndex={-1}
               className={cn(
                 "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] py-1 pr-2 text-[11px] transition-colors",
                 isSelectedCollection
@@ -2517,6 +2631,13 @@ export function SchemaSidebar() {
                     >
                       <ContextMenuTrigger asChild>
                         <div
+                          data-database-object-key={databaseObjectNavigationKey({
+                            connectionId,
+                            databaseName: navigationDatabaseName,
+                            schemaName: schema,
+                            objectName: table.name,
+                          })}
+                          tabIndex={-1}
                           className={cn(
                             "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] px-2 py-1 text-[11px] transition-colors",
                             isSelectedTable
@@ -3221,6 +3342,7 @@ export function SchemaSidebar() {
                   ) : isConnectionExpanded ? (
                     <div className="ml-[11px] border-l border-[hsl(var(--wb-border-subtle))] pb-1 pl-2 pr-1">
                       <PostgresDatabaseTree
+                        connectionId={connection.id}
                         key={`${connection.id}:${
                           connection.driver === "postgres"
                             ? postgresDatabaseRefreshVersion

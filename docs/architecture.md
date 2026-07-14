@@ -208,6 +208,8 @@ Table Tab 使用服务端分页。前端保存 cell edits、新增行、删除�
 
 应用内 Assistant、CLI 与 MCP 共用 `src/ai/tools` 的 registry、policy 和 audit。工具调用必须携带活动项目/连接上下文，并经过权限判定；后端只读执行仍会再次扫描 SQL，避免 AI 绕过 UI 审批。
 
+当前 LangGraph 主要承担 `plan -> policy`，多轮工具循环仍由 Assistant React 组件编排，因此不能把它描述为 durable agent 已完成。页面联动的第一阶段已经由 `src/ai/ui-actions` 提供独立 typed navigation layer：Assistant tool result 会生成带 provenance 的 attachment，registry 负责项目/context/revision 校验，Database Explorer 与 Monaco 只接收稳定语义 target。patch preview、Explain Plan node 和 durable task action 仍须等待对应工作台 surface。目标状态机、Deep Agents 分层与完整页面动作协议见 [AI Agent 产品与技术规格](AI_AGENT_PRODUCT_SPEC.md)。
+
 ## 6. 测试与质量门
 
 - 前端：Vitest，覆盖 stores、服务适配、provider 注册、SQL 安全、工作台与文件生命周期。
@@ -222,5 +224,6 @@ Table Tab 使用服务端分页。前端保存 cell edits、新增行、删除�
 3. `tauri::generate_handler!` 是手工总表，新增命令容易漏注册，应增加命令契约测试或代码生成。
 4. Search Everywhere 目前只索引内存中已知范围，还没有覆盖 MetaStore 的全项目对象索引。
 5. provider capability 同时存在前端默认值和后端运行时值，需要持续用契约测试防止漂移。
+6. Assistant 的多轮执行、调用上限和批准协调仍部分耦合在 UI；页面 action 已有 stale-context 防护，但 agent runtime 仍需要 checkpoint/resume 和批准 token 的 context binding。
 
 DataGrip 对标差距、优先级和验收标准见 [datagrip-gap-analysis.md](datagrip-gap-analysis.md)。

@@ -1,5 +1,10 @@
 # AI Agent Integration Design
 
+> Detailed product capabilities, page interaction protocol, safety state machine,
+> DataGrip comparison, and LSP relevance requirements are defined in
+> [AI_AGENT_PRODUCT_SPEC.md](AI_AGENT_PRODUCT_SPEC.md). This document describes
+> the integration boundary and current implementation.
+
 ## Goal
 
 OxideStudio should expose database, metadata, LSP, and workspace actions to an AI assistant without coupling the assistant to UI components or a single database type. The core design should support the in-app assistant first, then reuse the same capability surface for MCP and CLI adapters.
@@ -26,7 +31,9 @@ Decision summary:
 - Editor assistant: call `AssistantRuntime` directly in TypeScript. This is the best editor integration because it preserves active tab, selection, connection id, schema state, approval UI, and LSP diagnostics without protocol round-trips.
 - External AI clients: expose MCP over the same `AiToolRegistry`. MCP is the best integration for other agents because it provides tool discovery, schemas, and safety annotations.
 - CLI: keep it as a smoke-test, scripting, and local automation adapter. A standalone CLI binary should inject its own registry/context instead of using browser/Tauri defaults.
-- LangGraph: use it as an optional planner implementation, not as the core capability layer. The graph should select and sequence registry tools; it should not call database services directly.
+- LangGraph: keep it as the graph/runtime layer, not as the core capability layer. The graph should select and sequence registry tools; it should not call database services directly.
+- Deep Agents TypeScript: use it only for the long-running Agent mode, loaded lazily in the desktop WebView. It is a LangGraph-based harness rather than a replacement for LangGraph. Chat, O2, and simple Plan requests should stay on the lower-latency planner path.
+- Page interaction: use the separate typed `UiActionRegistry` for navigation, focus, object reveal, editor ranges, files, tabs, and result selection. The shipped first phase resolves stable targets and rejects stale project/document context; patch preview, plan-node navigation, and durable task navigation remain explicit unsupported actions until their underlying surfaces exist. Do not let the model drive DOM selectors, and do not mix UI navigation with database mutation approval.
 
 ## Current Implementation
 
@@ -44,6 +51,9 @@ Decision summary:
 - `tests/frontend/workspace-ai-tools.test.ts` verifies that in-app AI tools route metadata, query, table mutation, and MongoDB/Redis/Elasticsearch structured mutation calls through the workspace Tauri service adapters.
 - `tests/frontend/ai-external-tool-routing.test.ts` verifies that CLI and MCP external-agent entrypoints execute metadata, read query, and approved table mutation tools through an injected database adapter instead of bypassing the shared registry.
 - `src/ai/assistant` exposes an `AssistantPlanner` contract, a deterministic fallback planner, a provider-neutral model planner, and approval-aware execution for AI-proposed tool calls.
+- `src/ai/ui-actions` defines a UI-only action contract, context-version and document-revision checks, stable failure codes, workspace executors, and tool-result attachment generation. Assistant messages render object, file, result, tab, selection, and LSP diagnostic references as typed actions; object reveal, open data, and open DDL remain separate actions.
+- `src/lib/databaseNavigation.ts` and `src/lib/editorNavigation.ts` are semantic host navigation channels. Database targets carry project, connection, database, schema, object type, and object name; editor targets carry tab id and a one-based range. Components never accept model-generated DOM selectors.
+- `tests/frontend/ui-action-registry.test.ts`, `assistant-attachments.test.ts`, and `assistant-conversation-attachments.test.tsx` cover stale project/revision rejection, exact same-name object identity, diagnostic coordinate conversion, and primary/secondary attachment actions.
 - `src/ai/assistant/langGraphPlanner.ts` provides a dependency-light LangGraph bridge plus `createAssistantPlannerGraph` for composing planner nodes over shared context, metadata, warnings, and notes. A real LangGraph graph can still plug in by returning `AssistantPlannerResult` from the shared planner contract.
 - `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
 - `src/ai/mcp/protocol.ts` adds a transport-neutral JSON-RPC handler for `initialize`, `tools/list`, `tools/call`, single-tool inspection, and the Oxide manifest extension; stdio or HTTP servers should wrap this instead of reimplementing tool routing.
@@ -53,6 +63,15 @@ Decision summary:
 ## LangGraph Usage
 
 Use TypeScript LangGraph as an optional implementation of `AssistantPlanner` for the in-app assistant orchestration. The editor should not call itself through MCP because editor state, connection metadata, tabs, and approval UI already live in the frontend. `createLangGraphAssistantPlanner({ invoke })` is the bridge point; the `invoke` function can run a compiled LangGraph graph and return the same `AssistantPlannerResult` used by the default and model planners. For simple in-process orchestration, `createAssistantPlannerGraph({ nodes })` runs ordered planner nodes with shared metadata and merges warnings/notes before returning the final plan.
+
+The current official LangGraph integration is intentionally small: the compiled graph runs `plan -> policy`, while the React assistant panel still owns the multi-round tool loop and its call limits. This is foundation code, not a complete durable agent runtime. The target migration is:
+
+1. Keep `AssistantRuntime`, `AssistantPlanner`, and `AiToolRegistry` as application-owned contracts.
+2. Wrap registry tools for a lazily loaded Deep Agents TypeScript runtime in Agent mode.
+3. Move iteration, cancellation, checkpoints, approval pauses, observation, and verification out of `AssistantSidebar` and into the runtime.
+4. Persist project-scoped thread/checkpoint metadata through a Tauri adapter; do not persist raw result rows by default.
+5. Keep database mutation policy and backend read-only enforcement outside Deep Agents. Its built-in filesystem permissions do not govern custom database or MCP tools.
+6. Disable arbitrary code execution and unrestricted filesystem/network tools initially. Subagents are read-only and budgeted by default.
 
 Recommended graph nodes:
 

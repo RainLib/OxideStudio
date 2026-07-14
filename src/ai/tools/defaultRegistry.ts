@@ -188,6 +188,7 @@ function workspaceSelectionFromTab(tab: {
   id: string;
   title: string;
   connectionId?: string | null;
+  databaseName?: string | null;
   editorSelection?: {
     text: string;
     startLineNumber: number;
@@ -206,6 +207,7 @@ function workspaceSelectionFromTab(tab: {
     endLineNumber: tab.editorSelection.endLineNumber,
     endColumn: tab.editorSelection.endColumn,
     connectionId: tab.connectionId ?? null,
+    databaseName: tab.databaseName ?? null,
   };
 }
 
@@ -215,10 +217,15 @@ function workspaceTabSummaryFromTab(tab: {
   title: string;
   sql?: string;
   connectionId?: string | null;
+  databaseName?: string | null;
   targetSchema?: string | null;
   schemaName?: string | null;
   tableName?: string | null;
   objectType?: string | null;
+  fileProjectId?: string | null;
+  fileRelativePath?: string | null;
+  results?: unknown[] | null;
+  activeResultIndex?: number;
   editorSelection?: {
     text: string;
     startLineNumber: number;
@@ -233,10 +240,15 @@ function workspaceTabSummaryFromTab(tab: {
     title: tab.title,
     sql: tab.sql,
     connectionId: tab.connectionId ?? null,
+    databaseName: tab.databaseName ?? null,
     targetSchema: tab.targetSchema ?? null,
     schemaName: tab.schemaName ?? null,
     tableName: tab.tableName ?? null,
     objectType: tab.objectType ?? null,
+    fileProjectId: tab.fileProjectId ?? null,
+    fileRelativePath: tab.fileRelativePath ?? null,
+    resultSetCount: tab.results?.length ?? 0,
+    activeResultIndex: tab.activeResultIndex ?? 0,
     selection: workspaceSelectionFromTab(tab),
   };
 }
