@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   updateConfiguration: vi.fn(async () => undefined),
   getDatabaseCapabilities: vi.fn(),
   getTables: vi.fn(async () => []),
+  getDatabaseTables: vi.fn(async () => []),
   getCollections: vi.fn(async () => []),
   getCollectionsPage: vi.fn(async () => ({
     items: [],
@@ -21,9 +22,13 @@ const mocks = vi.hoisted(() => ({
     total: 0,
   })),
   getColumns: vi.fn(async () => []),
+  getDatabaseColumns: vi.fn(async () => []),
   getIndexes: vi.fn(async () => []),
+  getDatabaseIndexes: vi.fn(async () => []),
   getConstraints: vi.fn(async () => []),
+  getDatabaseConstraints: vi.fn(async () => []),
   getFunctions: vi.fn(async () => []),
+  getDatabaseFunctions: vi.fn(async () => []),
   getResources: vi.fn(async () => []),
   saveResources: vi.fn(async () => undefined),
 }));
@@ -48,12 +53,17 @@ vi.mock("@/services/tauri", () => ({
   },
   schemaService: {
     getTables: mocks.getTables,
+    getDatabaseTables: mocks.getDatabaseTables,
     getCollections: mocks.getCollections,
     getCollectionsPage: mocks.getCollectionsPage,
     getColumns: mocks.getColumns,
+    getDatabaseColumns: mocks.getDatabaseColumns,
     getIndexes: mocks.getIndexes,
+    getDatabaseIndexes: mocks.getDatabaseIndexes,
     getConstraints: mocks.getConstraints,
+    getDatabaseConstraints: mocks.getDatabaseConstraints,
     getFunctions: mocks.getFunctions,
+    getDatabaseFunctions: mocks.getDatabaseFunctions,
   },
   storeService: {
     getResources: mocks.getResources,
@@ -98,9 +108,31 @@ describe("LspConnectionSyncer render integration", () => {
         comment: null,
       },
     ]);
+    mocks.getDatabaseTables.mockResolvedValue([
+      {
+        name: "events",
+        schema: "public",
+        type: "BASE TABLE",
+        comment: null,
+      },
+    ]);
+    mocks.getDatabaseColumns.mockResolvedValue([
+      {
+        name: "event_id",
+        data_type: "bigint",
+        is_nullable: false,
+        is_primary_key: true,
+        is_unique: true,
+        is_indexed: true,
+        comment: null,
+      },
+    ]);
     mocks.getIndexes.mockResolvedValue([]);
     mocks.getConstraints.mockResolvedValue([]);
     mocks.getFunctions.mockResolvedValue([]);
+    mocks.getDatabaseIndexes.mockResolvedValue([]);
+    mocks.getDatabaseConstraints.mockResolvedValue([]);
+    mocks.getDatabaseFunctions.mockResolvedValue([]);
     mocks.getCollections.mockResolvedValue([]);
     mocks.getCollectionsPage.mockResolvedValue({
       items: [],
@@ -256,6 +288,77 @@ describe("LspConnectionSyncer render integration", () => {
     expect(firstConfig.schemas[0].tables).toHaveLength(205);
     expect(firstConfig.schemas[0].functions).toHaveLength(230);
     expect(firstConfig.schemas[0].tables[204].name).toBe("table_204");
+  });
+
+  it("uses database-scoped metadata and schema ids for a PostgreSQL catalog tab", async () => {
+    useTabStore.setState({
+      activeTabId: "analytics-query",
+      tabs: [
+        {
+          id: "analytics-query",
+          title: "Analytics",
+          type: "query",
+          sql: "SELECT event_id FROM events",
+          connectionId: "postgres-1",
+          databaseName: "analytics",
+          targetSchema: "public",
+          schemaName: "public",
+          tableName: "events",
+          results: null,
+          isExecuting: false,
+          error: null,
+          isPinned: false,
+        },
+      ],
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<LspConnectionSyncer />);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+      await flushAsyncWork();
+    });
+
+    expect(mocks.getDatabaseTables).toHaveBeenCalledWith(
+      "postgres-1",
+      "analytics",
+      "public"
+    );
+    expect(mocks.getDatabaseColumns).toHaveBeenCalledWith(
+      "postgres-1",
+      "analytics",
+      "public",
+      "events"
+    );
+    expect(mocks.getTables).not.toHaveBeenCalled();
+
+    const config = mocks.updateConfiguration.mock.calls.at(-1)?.[0];
+    expect(config.schemas).toEqual([
+      expect.objectContaining({
+        catalog: "analytics",
+        database: "public",
+        tables: [
+          expect.objectContaining({
+            name: "events",
+            columns: [expect.objectContaining({ name: "event_id" })],
+          }),
+        ],
+      }),
+    ]);
+    expect(
+      config.fileSchemas[
+        "oxide://query/analytics-query.postgres.postgres"
+      ]
+    ).toBe(config.schemas[0].id);
+    expect(config.schemas[0].id).toBe(
+      localStorage.getItem(
+        `oxide-lsp-schema-id:v2:${encodeURIComponent(
+          JSON.stringify(["postgres-1", "postgres", "analytics", "public"])
+        )}`
+      )
+    );
   });
 
   it("publishes every collection instead of truncating document catalogs", async () => {

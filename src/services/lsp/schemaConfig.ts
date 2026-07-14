@@ -56,6 +56,7 @@ export type LspFunctionDefinition = {
 
 export type LspSchemaDefinition = {
   id: string;
+  catalog?: string | null;
   database: string;
   source_uri: null;
   tables: LspTableDefinition[];
@@ -112,6 +113,7 @@ export function lspSchemaSignature(schemaDefinitions: LspSchemaDefinition[]) {
   const canonicalSchemas = schemaDefinitions
     .map((schema) => ({
       id: schema.id,
+      catalog: schema.catalog ?? null,
       database: schema.database,
       source_uri: schema.source_uri ?? null,
       tables: sortCanonical(

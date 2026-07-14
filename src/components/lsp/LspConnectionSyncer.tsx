@@ -26,6 +26,8 @@ import { loadTableMetadata } from "@/services/tableMetadataCache";
 import {
   buildLspFileMappings,
   createLspSyncPlan,
+  lspCatalogKey,
+  type LspCatalogTarget,
 } from "@/services/lsp/syncPlan";
 import {
   DEFAULT_LSP_METADATA_BATCHING,
@@ -97,6 +99,7 @@ export function LspConnectionSyncer() {
   const currentSchema = useSchemaStore((state) => state.currentSchema);
   const metadataVersion = useSchemaStore((state) => state.metadataVersion);
   const tabs = useTabStore((state) => state.tabs);
+  const activeTabId = useTabStore((state) => state.activeTabId);
   const activeConnection = connections.find((c) => c.id === activeConnectionId);
   const supportsMetadataSync = Boolean(
     activeConnection &&
@@ -166,16 +169,19 @@ export function LspConnectionSyncer() {
       connection,
       schemas,
       currentSchema,
+      activeTabId,
       tabs,
     });
     if (!syncPlan) return;
 
     const {
       defaultSchema,
+      defaultCatalog,
       queryTabs,
       schemaByTabId,
-      targetSchemas,
-      preferredTablesBySchema,
+      catalogByTabId,
+      targetCatalogs,
+      preferredTablesByCatalog,
     } = syncPlan;
 
     // Do not introspect a newly selected data source solely for LSP setup.
@@ -198,8 +204,18 @@ export function LspConnectionSyncer() {
         return defaultDatabaseCapabilities(connection.driver);
       });
 
-    const getSchemaId = (schemaName: string) => {
-      const schemaKey = `oxide-lsp-schema-id:${activeConnectionId}:${connection.driver}:${schemaName}`;
+    const getSchemaId = (
+      schemaName: string,
+      catalogName: string | null = null
+    ) => {
+      const schemaKey = `oxide-lsp-schema-id:v2:${encodeURIComponent(
+        JSON.stringify([
+          activeConnectionId,
+          connection.driver,
+          catalogName || "",
+          schemaName,
+        ])
+      )}`;
       let schemaId = localStorage.getItem(schemaKey);
       if (!schemaId) {
         schemaId = uuidv4();
@@ -209,7 +225,7 @@ export function LspConnectionSyncer() {
     };
 
     const buildTableDefinition = async (
-      schemaName: string,
+      catalog: LspCatalogTarget,
       table: { name: string; type?: string | null; comment?: string | null }
     ): Promise<LspTableDefinition> => {
       try {
@@ -217,7 +233,8 @@ export function LspConnectionSyncer() {
         const metadata = await loadTableMetadata({
           connectionId: activeConnectionId,
           driver: connection.driver,
-          schema: schemaName,
+          databaseName: catalog.databaseName || undefined,
+          schema: catalog.schemaName,
           table: table.name,
           includeIndexes: capabilities.supportsTableIndexes,
           includeConstraints: capabilities.supportsTableConstraints,
@@ -261,7 +278,13 @@ export function LspConnectionSyncer() {
         };
       } catch (error) {
         console.error(
-          `[LSP] Failed to fetch metadata for ${schemaName}.${table.name}:`,
+          `[LSP] Failed to fetch metadata for ${[
+            catalog.catalogName,
+            catalog.schemaName,
+            table.name,
+          ]
+            .filter(Boolean)
+            .join(".")}:`,
           error
         );
         return {
@@ -275,15 +298,17 @@ export function LspConnectionSyncer() {
     };
 
     const getCachedTableDefinition = (
-      schemaName: string,
+      catalog: LspCatalogTarget,
       table: { name: string; type?: string | null; comment?: string | null }
     ) => {
-      const cacheKey = `${activeConnectionId}:${connection.driver}:${schemaName}:${table.name}`;
+      const cacheKey = `${activeConnectionId}:${connection.driver}:${lspCatalogKey(
+        catalog
+      )}:${table.name}`;
       return getCachedLspMetadata(
         tableMetadataCacheRef.current,
         cacheKey,
         LSP_METADATA_CACHE_TTL_MS,
-        () => buildTableDefinition(schemaName, table)
+        () => buildTableDefinition(catalog, table)
       );
     };
 
@@ -293,7 +318,14 @@ export function LspConnectionSyncer() {
       generation: syncGeneration,
       run: ({ isCancelled }) => {
         console.log("[LSP] Building schema configuration for:", connection.name);
-        console.log("[LSP] Target schemas:", targetSchemas.join(", "));
+        console.log(
+          "[LSP] Target catalogs:",
+          targetCatalogs
+            .map((catalog) =>
+              [catalog.catalogName, catalog.schemaName].filter(Boolean).join(".")
+            )
+            .join(", ")
+        );
 
         // Build tables array with columns
         // tables is an ARRAY: TableInfo[]
@@ -311,18 +343,26 @@ export function LspConnectionSyncer() {
           const { fileSchemas, fileDialects } = buildLspFileMappings({
             queryTabs,
             schemaByTabId,
+            catalogByTabId,
             defaultSchema,
+            defaultCatalog,
             driver: connection.driver,
             lspDialect,
             getSchemaId,
           });
           const catalogs = await Promise.all(
-            targetSchemas.map(async (schemaName) => {
+            targetCatalogs.map(async (catalog) => {
+              const { databaseName, schemaName } = catalog;
               const [schemaTables, schemaCollections, schemaFunctions] =
                 await Promise.all([
                   canSyncTableMetadata
-                    ? schemaService
-                        .getTables(activeConnectionId, schemaName)
+                    ? (databaseName
+                        ? schemaService.getDatabaseTables(
+                            activeConnectionId,
+                            databaseName,
+                            schemaName
+                          )
+                        : schemaService.getTables(activeConnectionId, schemaName))
                         .catch((error) => {
                           console.error(
                             `[LSP] Failed to fetch tables for ${schemaName}:`,
@@ -343,8 +383,13 @@ export function LspConnectionSyncer() {
                         })
                     : Promise.resolve([]),
                   canSyncTableMetadata && capabilities.supportsFunctions
-                    ? schemaService
-                        .getFunctions(activeConnectionId, schemaName)
+                    ? (databaseName
+                        ? schemaService.getDatabaseFunctions(
+                            activeConnectionId,
+                            databaseName,
+                            schemaName
+                          )
+                        : schemaService.getFunctions(activeConnectionId, schemaName))
                         .catch((error) => {
                           console.error(
                             `[LSP] Failed to fetch functions for ${schemaName}:`,
@@ -369,14 +414,14 @@ export function LspConnectionSyncer() {
               );
 
               return {
-                schemaName,
+                ...catalog,
                 tables: selectLspTablesForSchema(
                   schemaTables,
-                  preferredTablesBySchema.get(schemaName)
+                  preferredTablesByCatalog.get(lspCatalogKey(catalog))
                 ),
                 collections: selectLspTablesForSchema(
                   schemaCollections,
-                  preferredTablesBySchema.get(schemaName)
+                  preferredTablesByCatalog.get(lspCatalogKey(catalog))
                 ),
                 functions: lspFunctions,
               };
@@ -390,7 +435,8 @@ export function LspConnectionSyncer() {
 
           const schemaDefinitions: LspSchemaDefinition[] = catalogs.map(
             (catalog) => ({
-              id: getSchemaId(catalog.schemaName),
+              id: getSchemaId(catalog.schemaName, catalog.catalogName),
+              catalog: catalog.catalogName,
               database: catalog.schemaName,
               source_uri: null,
               tables: canSyncTableMetadata
@@ -420,7 +466,7 @@ export function LspConnectionSyncer() {
                   schemaIndex,
                   objectIndex,
                   load: () =>
-                    getCachedTableDefinition(catalog.schemaName, table),
+                    getCachedTableDefinition(catalog, table),
                 });
               });
               return;
@@ -543,7 +589,16 @@ export function LspConnectionSyncer() {
           };
 
           console.log("[LSP] Sending schema configuration:");
-          console.log("[LSP] - Schemas:", targetSchemas.join(", "));
+          console.log(
+            "[LSP] - Catalogs:",
+            targetCatalogs
+              .map((catalog) =>
+                [catalog.catalogName, catalog.schemaName]
+                  .filter(Boolean)
+                  .join(".")
+              )
+              .join(", ")
+          );
           console.log("[LSP] - Files:", Object.keys(fileSchemas).length);
 
           try {
@@ -594,6 +649,7 @@ export function LspConnectionSyncer() {
     activeConnection,
     connections,
     tabs,
+    activeTabId,
     isReady,
     lspClient,
     schemas,

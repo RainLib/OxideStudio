@@ -145,6 +145,126 @@ describe("LSP sync plan", () => {
     });
   });
 
+  it("isolates PostgreSQL tabs by catalog when databases share a schema name", () => {
+    const plan = createLspSyncPlan({
+      activeConnectionId: "postgres-main",
+      connection: {
+        id: "postgres-main",
+        driver: "postgres",
+        database: "primary",
+      },
+      schemas: ["public"],
+      currentSchema: "public",
+      activeTabId: "analytics-query",
+      tabs: [
+        {
+          id: "primary-query",
+          type: "query",
+          connectionId: "postgres-main",
+          targetSchema: "public",
+          sql: "SELECT id FROM users",
+        },
+        {
+          id: "analytics-query",
+          type: "query",
+          connectionId: "postgres-main",
+          databaseName: "analytics",
+          targetSchema: "public",
+          schemaName: "public",
+          tableName: "events",
+          sql: "SELECT id FROM events",
+        },
+      ],
+    });
+
+    expect(plan?.targetCatalogs).toEqual([
+      {
+        catalogName: "primary",
+        databaseName: null,
+        schemaName: "public",
+      },
+      {
+        catalogName: "analytics",
+        databaseName: "analytics",
+        schemaName: "public",
+      },
+    ]);
+    expect(plan?.catalogByTabId["primary-query"]).toMatchObject({
+      catalogName: "primary",
+      schemaName: "public",
+    });
+    expect(plan?.catalogByTabId["analytics-query"]).toMatchObject({
+      catalogName: "analytics",
+      databaseName: "analytics",
+      schemaName: "public",
+    });
+
+    const mappings = buildLspFileMappings({
+      queryTabs: plan?.queryTabs || [],
+      schemaByTabId: plan?.schemaByTabId || {},
+      catalogByTabId: plan?.catalogByTabId,
+      defaultSchema: plan?.defaultSchema || "public",
+      defaultCatalog: plan?.defaultCatalog,
+      driver: "postgres",
+      lspDialect: "postgres",
+      getSchemaId: (schemaName, catalogName) =>
+        `${catalogName || "default"}/${schemaName}`,
+    });
+
+    expect(mappings.fileSchemas).toEqual({
+      "oxide://query/primary-query.postgres.postgres": "primary/public",
+      "oxide://query/analytics-query.postgres.postgres": "analytics/public",
+    });
+  });
+
+  it("prioritizes the active tab object within a catalog", () => {
+    const plan = createLspSyncPlan({
+      activeConnectionId: "postgres-main",
+      connection: {
+        id: "postgres-main",
+        driver: "postgres",
+        database: "primary",
+      },
+      schemas: ["public"],
+      currentSchema: "public",
+      activeTabId: "orders-table",
+      tabs: [
+        {
+          id: "users-table",
+          type: "table",
+          connectionId: "postgres-main",
+          schemaName: "public",
+          tableName: "users",
+        },
+        {
+          id: "orders-table",
+          type: "table",
+          connectionId: "postgres-main",
+          schemaName: "public",
+          tableName: "orders",
+        },
+        {
+          id: "query",
+          type: "query",
+          connectionId: "postgres-main",
+          targetSchema: "public",
+          sql: "SELECT ",
+        },
+      ],
+    });
+    const catalog = plan?.targetCatalogs.find(
+      (item) => item.catalogName === "primary" && item.schemaName === "public"
+    );
+    expect(catalog).toBeDefined();
+    expect(
+      Array.from(
+        plan?.preferredTablesByCatalog.get(
+          JSON.stringify(["primary", "public"])
+        ) || []
+      )
+    ).toEqual(["orders", "users"]);
+  });
+
   it("changes duplicate-send keys when NoSQL schema fields change", () => {
     const base = {
       connectionId: "conn-main",
