@@ -105,6 +105,7 @@ describe("TableDataView CSV import", () => {
         },
       ],
       activeConnectionId: "postgres-1",
+      connectedConnectionIds: ["postgres-1"],
       isConnected: true,
       isLoading: false,
       selectedConnection: null,

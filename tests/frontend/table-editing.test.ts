@@ -7,6 +7,8 @@ import { useTabStore } from "@/store/useTabStore";
 import type { ColumnInfo, IndexInfo } from "@/services/tauri/types";
 
 const mocks = vi.hoisted(() => ({
+  connect: vi.fn(async () => undefined),
+  disconnect: vi.fn(async () => undefined),
   mutateTableRows: vi.fn(async () => ({
     inserted: 0,
     updated: 0,
@@ -24,6 +26,10 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/services/tauri", () => ({
+  connectionService: {
+    connect: mocks.connect,
+    disconnect: mocks.disconnect,
+  },
   databaseService: {
     getDatabaseCapabilities: vi.fn(async () => ({})),
   },
@@ -65,8 +71,18 @@ function column(
   };
 }
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+}
+
 describe("table editing store", () => {
   beforeEach(() => {
+    mocks.connect.mockReset().mockResolvedValue(undefined);
+    mocks.disconnect.mockReset().mockResolvedValue(undefined);
     mocks.mutateTableRows.mockReset().mockResolvedValue({
       inserted: 0,
       updated: 0,
@@ -93,6 +109,7 @@ describe("table editing store", () => {
         },
       ],
       activeConnectionId: "postgres-1",
+      connectedConnectionIds: ["postgres-1"],
       isConnected: true,
       isLoading: false,
       selectedConnection: null,
@@ -283,6 +300,78 @@ describe("table editing store", () => {
       undefined,
       "analytics"
     );
+  });
+
+  it("reconnects a restored project data source before loading table data", async () => {
+    useConnectionStore.setState({
+      connectedConnectionIds: [],
+      isConnected: false,
+    });
+
+    const loaded = await useTabStore.getState().loadTablePage("tab-1", 0);
+
+    expect(loaded).toBe(true);
+    expect(mocks.connect).toHaveBeenCalledWith(
+      "postgres-1",
+      "postgres",
+      expect.stringContaining("postgres://localhost"),
+      undefined
+    );
+    expect(mocks.connect.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.previewTablePage.mock.invocationCallOrder[0]!
+    );
+    expect(useConnectionStore.getState().connectedConnectionIds).toContain(
+      "postgres-1"
+    );
+  });
+
+  it("shows a useful error and skips table loading when reconnecting fails", async () => {
+    mocks.connect.mockRejectedValueOnce(new Error("login failed"));
+    useConnectionStore.setState({
+      connectedConnectionIds: [],
+      isConnected: false,
+    });
+
+    const loaded = await useTabStore.getState().loadTablePage("tab-1", 0);
+
+    expect(loaded).toBe(false);
+    expect(mocks.previewTablePage).not.toHaveBeenCalled();
+    expect(useTabStore.getState().tabs[0]).toMatchObject({
+      isExecuting: false,
+      error: 'Could not connect to "Postgres": login failed',
+    });
+  });
+
+  it("cancels a stale table load when the project changes during reconnect", async () => {
+    const pendingConnection = deferred();
+    mocks.connect.mockImplementationOnce(() => pendingConnection.promise);
+    localStorage.setItem("oxide-studio-active-project", "project-a");
+    useConnectionStore.setState((state) => ({
+      connections: state.connections.map((connection) => ({
+        ...connection,
+        projectId: "project-a",
+      })),
+      connectedConnectionIds: [],
+      isConnected: false,
+    }));
+
+    const load = useTabStore.getState().loadTablePage("tab-1", 0);
+    await vi.waitFor(() => expect(mocks.connect).toHaveBeenCalledOnce());
+
+    localStorage.setItem("oxide-studio-active-project", "project-b");
+    useTabStore.setState({ tabs: [], activeTabId: null });
+    useConnectionStore.setState({
+      connections: [],
+      activeConnectionId: null,
+      connectedConnectionIds: [],
+      isConnected: false,
+    });
+    pendingConnection.resolve();
+
+    await expect(load).resolves.toBe(false);
+    expect(mocks.previewTablePage).not.toHaveBeenCalled();
+    expect(useTabStore.getState().tabs).toEqual([]);
+    expect(useConnectionStore.getState().connectedConnectionIds).toEqual([]);
   });
 
   it("routes save and delete mutations to the selected PostgreSQL database", async () => {

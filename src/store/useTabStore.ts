@@ -23,7 +23,10 @@ import {
   queryHistoryRowCount,
   queryHistoryStatusFromError,
 } from "@/lib/queryHistory";
-import { useConnectionStore } from "./useConnectionStore";
+import {
+  ensureConnectionReady,
+  useConnectionStore,
+} from "./useConnectionStore";
 import { useSchemaStore } from "./useSchemaStore";
 import { useTaskStore } from "./useTaskStore";
 import type { FilterOperator } from "@/components/workspace/GridFilterRow";
@@ -2122,10 +2125,6 @@ export const useTabStore = create<TabState>((set, get) => ({
       return false;
     }
 
-    const connection = useConnectionStore
-      .getState()
-      .connections.find((conn) => conn.id === tab.connectionId);
-    const driver = connection?.driver || DEFAULT_DATABASE_DRIVER;
     const nextPage = Math.max(0, page ?? tab.tablePage ?? 0);
     const pageSize = tab.tablePageSize || 500;
     const taskStore = useTaskStore.getState();
@@ -2161,6 +2160,33 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
 
     try {
+      const readiness = await ensureConnectionReady(tab.connectionId);
+      const currentTab = get().tabs.find((candidate) => candidate.id === tabId);
+      const tabContextIsCurrent = Boolean(
+        currentTab?.type === "table" &&
+          currentTab.connectionId === tab.connectionId &&
+          currentTab.databaseName === tab.databaseName &&
+          currentTab.schemaName === tab.schemaName &&
+          currentTab.tableName === tab.tableName
+      );
+
+      if (!tabContextIsCurrent || readiness.status === "cancelled") {
+        taskStore.cancelTask(taskId, "Workspace changed before loading began");
+        set((state) => ({
+          tabs: state.tabs.map((candidate) =>
+            candidate.id === tabId
+              ? { ...candidate, isExecuting: false }
+              : candidate
+          ),
+        }));
+        return false;
+      }
+
+      if (readiness.status === "error") {
+        throw new Error(readiness.message);
+      }
+
+      const driver = readiness.connection.driver || DEFAULT_DATABASE_DRIVER;
       const pageResult = tab.databaseName
         ? await tableService.previewTablePage(
             tab.connectionId,

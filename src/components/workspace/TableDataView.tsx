@@ -3,7 +3,10 @@ import {
   confirmDiscardTableChanges,
   useTabStore,
 } from "@/store/useTabStore";
-import { useConnectionStore } from "@/store/useConnectionStore";
+import {
+  ensureConnectionReady,
+  useConnectionStore,
+} from "@/store/useConnectionStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTaskStore } from "@/store/useTaskStore";
@@ -181,6 +184,13 @@ export function TableDataView() {
     setTableConstraints([]);
 
     try {
+      const readiness = await ensureConnectionReady(tabConnectionId);
+      if (structureRequestRef.current !== requestId) return;
+      if (readiness.status === "cancelled") return;
+      if (readiness.status === "error") {
+        throw new Error(readiness.message);
+      }
+
       const metadata = await loadTableMetadata({
         projectId: activeProjectId,
         connectionId: tabConnectionId,

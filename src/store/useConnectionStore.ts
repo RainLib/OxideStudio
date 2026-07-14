@@ -130,7 +130,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         connections,
         activeConnectionId: activeConnectionExists ? activeConnectionId : null,
         connectedConnectionIds,
-        isConnected: activeConnectionExists && connectedConnectionIds.length > 0,
+        isConnected: Boolean(
+          activeConnectionExists &&
+            activeConnectionId &&
+            connectedConnectionIds.includes(activeConnectionId)
+        ),
         selectedConnection: null,
         isLoading: false,
       });
@@ -383,7 +387,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       isConnected,
       connections,
     } = get();
-    if (activeConnectionId === id && isConnected) {
+    if (
+      activeConnectionId === id &&
+      isConnected &&
+      connectedConnectionIds.includes(id)
+    ) {
       return Promise.resolve(null);
     }
 
@@ -451,3 +459,61 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
   },
 }));
+
+export type ConnectionReadiness =
+  | { status: "ready"; connection: ConnectionConfig }
+  | { status: "cancelled" }
+  | { status: "error"; message: string };
+
+/**
+ * Ensures a cached data source has a live backend connection before a remote
+ * operation starts. Project switches can replace the connection scope while
+ * the network request is pending, so callers must treat that case as a quiet
+ * cancellation instead of writing a stale error into the new workspace.
+ */
+export async function ensureConnectionReady(
+  connectionId: string
+): Promise<ConnectionReadiness> {
+  const initialState = useConnectionStore.getState();
+  const initialConnection = initialState.connections.find(
+    (connection) => connection.id === connectionId
+  );
+  if (!initialConnection) {
+    return {
+      status: "error",
+      message:
+        "This table's data source is no longer available in the active project. Reopen it from Database Explorer.",
+    };
+  }
+
+  const initialScopeKey = connectionScopeKey(initialConnection);
+  if (initialState.connectedConnectionIds.includes(connectionId)) {
+    return { status: "ready", connection: initialConnection };
+  }
+
+  const connectionError = await initialState.setActiveConnection(connectionId);
+  const currentState = useConnectionStore.getState();
+  const currentConnection = currentState.connections.find(
+    (connection) => connection.id === connectionId
+  );
+
+  if (
+    !currentConnection ||
+    connectionScopeKey(currentConnection) !== initialScopeKey
+  ) {
+    return { status: "cancelled" };
+  }
+
+  if (connectionError) {
+    return {
+      status: "error",
+      message: `Could not connect to "${initialConnection.name}": ${connectionError}`,
+    };
+  }
+
+  if (!currentState.connectedConnectionIds.includes(connectionId)) {
+    return { status: "cancelled" };
+  }
+
+  return { status: "ready", connection: currentConnection };
+}
