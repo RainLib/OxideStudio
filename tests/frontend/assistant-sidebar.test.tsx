@@ -122,6 +122,7 @@ describe("AssistantSidebar", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.saveAssistantTask.mockReset().mockResolvedValue(undefined);
     useAiAuditStore.setState({ entries: [] });
     mocks.cancelQuery.mockResolvedValue("cancelled");
     useProjectStore.setState({
@@ -318,6 +319,16 @@ describe("AssistantSidebar", () => {
     });
 
     expect(mocks.executeQuery).toHaveBeenCalledTimes(1);
+    const receiptCallIndex = mocks.saveAssistantTask.mock.calls.findIndex(
+      ([task]) =>
+        task.checkpoint.executionReceipts?.some(
+          (receipt: { status: string }) => receipt.status === "started",
+        ),
+    );
+    expect(receiptCallIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      mocks.saveAssistantTask.mock.invocationCallOrder[receiptCallIndex],
+    ).toBeLessThan(mocks.executeQuery.mock.invocationCallOrder[0]!);
     expect(mocks.executeQuery).toHaveBeenCalledWith(
       "postgres-1",
       "UPDATE users SET active = false WHERE id = 1",
@@ -330,6 +341,73 @@ describe("AssistantSidebar", () => {
     await vi.waitFor(() =>
       expect(mocks.saveAssistantTask).toHaveBeenCalledWith(
         expect.objectContaining({ status: "completed" }),
+      ),
+    );
+    expect(
+      mocks.saveAssistantTask.mock.calls.at(-1)?.[0].checkpoint
+        .executionReceipts,
+    ).toEqual([
+      expect.objectContaining({ status: "succeeded", finishedAt: expect.any(Number) }),
+    ]);
+  });
+
+  it("does not execute an approved mutation when its safety receipt cannot persist", async () => {
+    useAiSettingsStore.setState({ assistantMode: "agent" });
+    useTabStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === "query-1"
+          ? { ...tab, sql: "UPDATE users SET active = false WHERE id = 1" }
+          : tab,
+      ),
+    }));
+    mocks.saveAssistantTask.mockImplementation(async (task) => {
+      if (
+        task.checkpoint.executionReceipts?.some(
+          (receipt: { status: string }) => receipt.status === "started",
+        )
+      ) {
+        throw new Error("MetaStore unavailable");
+      }
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    const textarea = container.querySelector("textarea");
+    await act(async () => {
+      setTextareaValue(textarea!, "run current query");
+      container.querySelector('button[aria-label="Run agent"]')?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await flushAsyncWork();
+    });
+    await act(async () => {
+      buttonWithText(container, "Approve")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await flushAsyncWork();
+      buttonWithText(container, "Run approved")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await flushAsyncWork();
+    });
+
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain("safety receipt could not be saved"),
+    );
+    await vi.waitFor(() =>
+      expect(mocks.saveAssistantTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: "failed",
+          checkpoint: expect.objectContaining({
+            executionReceipts: [
+              expect.objectContaining({ status: "failed" }),
+            ],
+          }),
+        }),
       ),
     );
   });

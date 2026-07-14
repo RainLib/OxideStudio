@@ -20,7 +20,9 @@ The version 1 checkpoint is deliberately non-executable. Its schema permits only
 - completed step identity, tool name and terminal status;
 - current step identity/title and bounded progress.
 
-It cannot represent prompts, conversation messages, tool inputs, SQL, mutation payloads, approval tokens, tool outputs, result rows, credentials, or arbitrary metadata. Frontend serialization tests assert this exclusion. The Rust boundary independently validates field sizes, at most 100 plan/completed steps, and a maximum serialized checkpoint size of 64 KiB.
+Version 2 adds a bounded execution receipt for approved tools: step id, tool name, `started/succeeded/failed`, and timestamps. It still cannot represent prompts, conversation messages, tool inputs, SQL, mutation payloads, approval tokens, tool outputs, result rows, credentials, or arbitrary metadata. Frontend serialization tests assert this exclusion. The Rust boundary independently validates receipt-to-plan identity, field sizes, at most 100 plan/completed/receipt entries, and a maximum serialized checkpoint size of 64 KiB.
+
+The Runtime awaits a durable `started` receipt before executing an approved tool. If persistence fails, execution is blocked. Normal step completion advances the receipt to `succeeded` or `failed`. A process crash, cancellation, or project switch after an external side effect but before the terminal receipt can leave `started`; any terminal task with that state presents the step as uncertain verification work and never treats it as safe to replay.
 
 Frontend writes for a task are sequenced so an older event cannot overwrite a newer lifecycle state. Task history is hydrated only for the active project; delayed hydration preserves an active same-project task created after the read began. Switching projects aborts the old controller, persists a cancelled summary, and clears conversation and approval state.
 
@@ -30,4 +32,4 @@ Each application process has a random session id. When task history is read, `ru
 
 Task status and bounded plan history survive a restart without placing database content or reusable authorization on disk. The Task Status Center can distinguish waiting, interrupted, completed, failed and cancelled work.
 
-This is a durable summary, not a durable Agent runtime. It cannot replay a tool, resume a graph, reveal the original conversation, or prove whether an external mutation committed. The shipped `task.reveal` surface can display only this safe summary. True checkpoint/resume still requires versioned runtime state, idempotency receipts, non-replayable approval pause tokens, and an explicit thread-retention/encryption policy.
+This is a durable summary with an at-most-once recovery guard, not a durable Agent runtime or a distributed exactly-once transaction. It cannot replay a tool, resume a graph, reveal the original conversation, or prove whether an uncertain external mutation committed. The shipped `task.reveal` surface can display only this safe summary and verification state. True checkpoint/resume still requires versioned runtime state, database-level idempotency where supported, non-replayable approval pause tokens, and an explicit thread-retention/encryption policy.

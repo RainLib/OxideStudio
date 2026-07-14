@@ -57,6 +57,7 @@ import {
   createAssistantTaskRecord,
   finishAssistantTask,
   reduceAssistantTaskEvent,
+  startAssistantTaskExecutionReceipt,
 } from "@/ai/assistant/taskCheckpoint";
 import { assistantTaskToWorkbenchTask } from "@/lib/assistantTaskProjection";
 
@@ -198,7 +199,10 @@ export function AssistantSidebar() {
     ]);
   };
 
-  const saveAssistantTask = (task: AssistantTaskRecord) => {
+  const saveAssistantTask = (
+    task: AssistantTaskRecord,
+    requiredBeforeExecution = false,
+  ) => {
     assistantTaskRef.current = task;
     if (useProjectStore.getState().activeProjectId === task.projectId) {
       useTaskStore.getState().upsertTask(assistantTaskToWorkbenchTask(task));
@@ -209,7 +213,7 @@ export function AssistantSidebar() {
     assistantTaskSaveQueueRef.current = save.catch((error) => {
       console.warn("Failed to persist assistant task", error);
     });
-    return assistantTaskSaveQueueRef.current;
+    return requiredBeforeExecution ? save : assistantTaskSaveQueueRef.current;
   };
 
   const beginAssistantTask = (turn: AssistantPreparedTurn) => {
@@ -598,6 +602,19 @@ export function AssistantSidebar() {
         existingResults: toolResultsRef.current,
         approvedStepIds: initialApprovedStepIds,
         onEvent: handleLoopEvent,
+        beforeApprovedToolExecution: async (execution) => {
+          const current = assistantTaskRef.current;
+          if (
+            !current ||
+            useProjectStore.getState().activeProjectId !== current.projectId
+          ) {
+            throw new Error("Assistant task context is no longer active.");
+          }
+          await saveAssistantTask(
+            startAssistantTaskExecutionReceipt(current, execution),
+            true,
+          );
+        },
       });
       await settleAssistantTask(result);
       if (result.status === "cancelled") {

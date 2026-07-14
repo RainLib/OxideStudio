@@ -240,6 +240,9 @@ export function TaskStatusCenter() {
 }
 
 function TaskDetails({ task }: { task: WorkbenchTask }) {
+  const hasUncertainExecution = task.steps?.some(
+    (step) => step.status === "uncertain",
+  );
   return (
     <div className="px-3 py-3 text-[11px]" data-task-id={task.id}>
       <div className="flex items-start gap-2">
@@ -269,6 +272,14 @@ function TaskDetails({ task }: { task: WorkbenchTask }) {
               style={{ width: `${Math.round(task.progress * 100)}%` }}
             />
           </div>
+        </div>
+      )}
+
+      {hasUncertainExecution && (
+        <div className="mt-3 rounded-[4px] border border-amber-400/30 bg-amber-400/8 px-2 py-1.5 text-[9px] leading-4 text-amber-200">
+          An approved action may have reached the target before this task
+          stopped. Verify the database or external system before creating a new
+          action; this step will not be replayed automatically.
         </div>
       )}
 
@@ -322,7 +333,7 @@ function taskStepIcon(status: NonNullable<WorkbenchTask["steps"]>[number]["statu
   if (status === "success") {
     return <CheckCircle2 size={11} className="text-emerald-400" />;
   }
-  if (status === "requiresApproval") {
+  if (status === "requiresApproval" || status === "uncertain") {
     return <ShieldAlert size={11} className="text-amber-300" />;
   }
   if (status === "error") {
@@ -335,6 +346,7 @@ function stepStatusLabel(
   status: NonNullable<WorkbenchTask["steps"]>[number]["status"],
 ) {
   if (status === "requiresApproval") return "approval";
+  if (status === "uncertain") return "verify";
   return status;
 }
 

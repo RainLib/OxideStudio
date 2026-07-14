@@ -27,10 +27,11 @@ export function createAssistantTaskRecord(input: {
     currentToolName: null,
     progress: taskProgress(0, input.turn.suggestedPlan.length),
     checkpoint: {
-      version: 1,
+      version: 2,
       mode: "agent",
       plan: input.turn.suggestedPlan.slice(0, 100).map(safePlanStep),
       completedSteps: [],
+      executionReceipts: [],
     },
     createdAt: now,
     updatedAt: now,
@@ -77,7 +78,21 @@ export function reduceAssistantTaskEvent(
         completedSteps.filter((step) => step.status === "success").length,
         task.checkpoint.plan.filter((step) => step.toolName).length,
       ),
-      checkpoint: { ...task.checkpoint, completedSteps },
+      checkpoint: {
+        ...task.checkpoint,
+        completedSteps,
+        executionReceipts: (task.checkpoint.executionReceipts ?? []).map(
+          (receipt) =>
+            receipt.stepId === event.result.id && receipt.status === "started"
+              ? {
+                  ...receipt,
+                  status:
+                    event.result.status === "success" ? "succeeded" : "failed",
+                  finishedAt: now,
+                }
+              : receipt,
+        ),
+      },
       updatedAt: now,
     };
   }
@@ -120,10 +135,17 @@ export function finishAssistantTask(
 ): AssistantTaskRecord {
   const status = terminalStatus(result);
   const active = status === "running" || status === "awaiting_approval";
+  const uncertainExecution =
+    !active &&
+    (task.checkpoint.executionReceipts ?? []).some(
+      (receipt) => receipt.status === "started",
+    );
   return {
     ...task,
     status,
-    detail: statusDetail(status),
+    detail: uncertainExecution
+      ? "Stopped with an action requiring verification"
+      : statusDetail(status),
     currentStepId: null,
     currentToolName: null,
     progress: status === "completed" ? 1 : task.progress,
@@ -140,6 +162,60 @@ export function assistantTaskHasPendingApproval(task: AssistantTaskRecord) {
   );
   return task.checkpoint.plan.some(
     (step) => step.toolName && step.requiresApproval && !completed.has(step.id),
+  );
+}
+
+export function startAssistantTaskExecutionReceipt(
+  task: AssistantTaskRecord,
+  execution: { stepId: string; toolName: string },
+  now = Date.now(),
+): AssistantTaskRecord {
+  const step = task.checkpoint.plan.find(
+    (candidate) => candidate.id === execution.stepId,
+  );
+  if (
+    !step ||
+    !step.requiresApproval ||
+    step.toolName !== execution.toolName
+  ) {
+    throw new Error("Approved action does not match the persisted task plan.");
+  }
+  if (
+    (task.checkpoint.executionReceipts ?? []).some(
+      (receipt) => receipt.stepId === execution.stepId,
+    )
+  ) {
+    throw new Error(
+      "Approved action already has an execution receipt and will not be replayed.",
+    );
+  }
+  return {
+    ...task,
+    updatedAt: now,
+    checkpoint: {
+      ...task.checkpoint,
+      version: 2,
+      executionReceipts: [
+        ...(task.checkpoint.executionReceipts ?? []),
+        {
+          stepId: execution.stepId,
+          toolName: execution.toolName,
+          status: "started",
+          startedAt: now,
+          finishedAt: null,
+        },
+      ],
+    },
+  };
+}
+
+export function assistantTaskHasUncertainExecution(task: AssistantTaskRecord) {
+  return (
+    task.status !== "running" &&
+    task.status !== "awaiting_approval" &&
+    (task.checkpoint.executionReceipts ?? []).some(
+      (receipt) => receipt.status === "started",
+    )
   );
 }
 

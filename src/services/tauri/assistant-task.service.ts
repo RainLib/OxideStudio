@@ -21,11 +21,20 @@ export interface AssistantTaskCompletedStepRecord {
   status: "success" | "requiresApproval" | "error";
 }
 
+export interface AssistantTaskExecutionReceiptRecord {
+  stepId: string;
+  toolName: string;
+  status: "started" | "succeeded" | "failed";
+  startedAt: number;
+  finishedAt?: number | null;
+}
+
 export interface AssistantTaskCheckpointRecord {
-  version: 1;
+  version: 1 | 2;
   mode: "agent";
   plan: AssistantTaskPlanStepRecord[];
   completedSteps: AssistantTaskCompletedStepRecord[];
+  executionReceipts?: AssistantTaskExecutionReceiptRecord[];
 }
 
 export interface AssistantTaskRecord {

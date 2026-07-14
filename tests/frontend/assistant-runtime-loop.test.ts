@@ -171,9 +171,84 @@ describe("AssistantRuntime tool loop", () => {
       summaryInput: { message: "Change value" },
       steps: turn.suggestedPlan,
       approvedStepIds: new Set(["write-step"]),
+      beforeApprovedToolExecution: vi.fn(async () => undefined),
     });
     expect(approved.status).toBe("completed");
     expect(write).toHaveBeenCalledOnce();
+  });
+
+  it("blocks an approved write when its durable safety receipt cannot be saved", async () => {
+    const step: AssistantPlanStep = {
+      id: "write-step",
+      title: "Write",
+      toolName: "demo.write",
+      input: { value: "private-change" },
+      requiresApproval: false,
+    };
+    const { runtime, write } = createLoopRuntime(step);
+    const turn = await runtime.prepareTurnAsync({ message: "Change value" });
+    const checkpoint = vi.fn(async (execution) => {
+      expect(execution).not.toHaveProperty("input");
+      expect(write).not.toHaveBeenCalled();
+      throw new Error("MetaStore unavailable");
+    });
+
+    const result = await runtime.runToolLoop({
+      turn,
+      summaryInput: { message: "Change value" },
+      steps: turn.suggestedPlan,
+      approvedStepIds: new Set(["write-step"]),
+      beforeApprovedToolExecution: checkpoint,
+    });
+
+    expect(checkpoint).toHaveBeenCalledWith({
+      stepId: "write-step",
+      title: "Write",
+      toolName: "demo.write",
+      round: 1,
+      totalCalls: 0,
+    });
+    expect(write).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      status: "failed",
+      results: [
+        expect.objectContaining({
+          status: "error",
+          error: expect.stringContaining("safety receipt"),
+        }),
+      ],
+    });
+  });
+
+  it("rechecks cancellation after checkpointing and before an approved write", async () => {
+    const step: AssistantPlanStep = {
+      id: "write-step",
+      title: "Write",
+      toolName: "demo.write",
+      input: { value: "change" },
+      requiresApproval: false,
+    };
+    const { runtime, write } = createLoopRuntime(step);
+    const turn = await runtime.prepareTurnAsync({ message: "Change value" });
+    const controller = new AbortController();
+
+    const result = await runtime.runToolLoop({
+      turn,
+      summaryInput: { message: "Change value" },
+      steps: turn.suggestedPlan,
+      context: { ...turn.context, abortSignal: controller.signal },
+      approvedStepIds: new Set(["write-step"]),
+      beforeApprovedToolExecution: async () => controller.abort(),
+    });
+
+    expect(result.status).toBe("cancelled");
+    expect(write).not.toHaveBeenCalled();
+    expect(result.results).toEqual([
+      expect.objectContaining({
+        status: "error",
+        error: expect.stringContaining("was not executed"),
+      }),
+    ]);
   });
 
   it("returns a bounded limit state when safe follow-ups do not converge", async () => {

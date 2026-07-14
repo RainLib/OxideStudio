@@ -7,6 +7,12 @@ export function assistantTaskToWorkbenchTask(
   const completedById = new Map(
     task.checkpoint.completedSteps.map((step) => [step.id, step.status]),
   );
+  const receiptByStepId = new Map(
+    (task.checkpoint.executionReceipts ?? []).map((receipt) => [
+      receipt.stepId,
+      receipt.status,
+    ]),
+  );
   return {
     id: task.id,
     kind: "agent",
@@ -31,6 +37,13 @@ export function assistantTaskToWorkbenchTask(
       ...step,
       status:
         completedById.get(step.id) ??
+        (receiptByStepId.get(step.id) === "started" &&
+        task.status !== "running" &&
+        task.status !== "awaiting_approval"
+          ? "uncertain"
+          : receiptByStepId.get(step.id) === "started"
+            ? "running"
+            : undefined) ??
         (step.id === task.currentStepId
           ? "running"
           : task.status === "awaiting_approval" && step.requiresApproval

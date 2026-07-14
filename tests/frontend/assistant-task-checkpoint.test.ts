@@ -4,6 +4,8 @@ import {
   createAssistantTaskRecord,
   finishAssistantTask,
   reduceAssistantTaskEvent,
+  assistantTaskHasUncertainExecution,
+  startAssistantTaskExecutionReceipt,
 } from "@/ai/assistant/taskCheckpoint";
 import type {
   AssistantPreparedTurn,
@@ -67,7 +69,7 @@ describe("assistant task checkpoint", () => {
     expect(serialized).not.toContain("UPDATE users");
     expect(serialized).not.toContain("private-result");
     expect(task.checkpoint).toEqual({
-      version: 1,
+      version: 2,
       mode: "agent",
       plan: [
         expect.objectContaining({
@@ -88,6 +90,7 @@ describe("assistant task checkpoint", () => {
           status: "success",
         },
       ],
+      executionReceipts: [],
     });
     expect(assistantTaskHasPendingApproval(task)).toBe(true);
     expect(finishAssistantTask(task, "awaitingApproval", 30)).toMatchObject({
@@ -95,6 +98,69 @@ describe("assistant task checkpoint", () => {
       detail: "Waiting for approval",
       finishedAt: null,
     });
+  });
+
+  it("persists a safe write receipt before execution and never replays its step", () => {
+    const initial = createAssistantTaskRecord({
+      projectId: "project-a",
+      sessionId: "session-a",
+      turn,
+      now: 10,
+    });
+    const started = startAssistantTaskExecutionReceipt(
+      initial,
+      { stepId: "write", toolName: "query.runMutation" },
+      20,
+    );
+
+    expect(started.checkpoint).toMatchObject({
+      version: 2,
+      executionReceipts: [
+        {
+          stepId: "write",
+          toolName: "query.runMutation",
+          status: "started",
+          startedAt: 20,
+          finishedAt: null,
+        },
+      ],
+    });
+    expect(JSON.stringify(started)).not.toContain("UPDATE users");
+    expect(() =>
+      startAssistantTaskExecutionReceipt(
+        started,
+        { stepId: "write", toolName: "query.runMutation" },
+        21,
+      ),
+    ).toThrow("will not be replayed");
+
+    const interrupted = finishAssistantTask(started, "interrupted", 25);
+    expect(assistantTaskHasUncertainExecution(interrupted)).toBe(true);
+
+    const completed = reduceAssistantTaskEvent(
+      started,
+      {
+        type: "stepCompleted",
+        step: turn.suggestedPlan[1]!,
+        result: {
+          id: "write",
+          toolName: "query.runMutation",
+          status: "success",
+          output: { rows: [["private-result"]] },
+        },
+        round: 1,
+        totalCalls: 1,
+      },
+      30,
+    );
+    expect(completed.checkpoint.executionReceipts).toEqual([
+      expect.objectContaining({
+        stepId: "write",
+        status: "succeeded",
+        finishedAt: 30,
+      }),
+    ]);
+    expect(JSON.stringify(completed)).not.toContain("private-result");
   });
 
   it("adds normalized follow-up metadata without persisting follow-up inputs", () => {

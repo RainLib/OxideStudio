@@ -27,8 +27,8 @@ Assistant UI / Inline AI / Error Fix / Explain Plan
                       v
                AssistantRuntime
               /                \
-   Fast path: Chat/Explain    Agent path: Deep Agents
-          direct model       (built on LangGraph)
+   Fast path: Chat/Explain    Agent path: AssistantRuntime
+          direct model       + optional Deep Agents host
               \                /
                Planning + policy
                       |
@@ -46,9 +46,9 @@ Assistant UI / Inline AI / Error Fix / Explain Plan
 
 - **保留 `AssistantRuntime` 作为应用门面**。UI 不绑定某个 agent 框架，切换 planner、模型或执行器时不重写 Sidebar。
 - **保留 `AiToolRegistry` 作为数据库能力与安全策略的唯一边界**。Deep Agents、现有 LangGraph、MCP 和 CLI 都只能包装 registry tool，不能直接调用 driver。
-- **Agent 模式采用 Deep Agents TypeScript，Chat/Plan/O2 走轻量路径**。Deep Agents 适合长任务的 todo、上下文卸载、子代理和持久状态，但短问答不应承担完整 agent bundle、checkpoint 和循环延迟。
+- **Agent 模式以 Deep Agents TypeScript 的 harness 能力为目标，Chat/Plan/O2 走轻量路径**。Deep Agents 适合长任务的 todo、上下文卸载、子代理和持久状态，但短问答不应承担完整 agent bundle、checkpoint 和循环延迟。
 - **Deep Agents 是 LangGraph 之上的 agent harness，不是替换底层图运行时**。现有两节点 `plan -> policy` 图可逐步替换成完整 Agent mode，同时保持 planner contract。
-- **桌面 WebView 使用环境适配入口并延迟加载**。只有用户第一次进入 Agent mode 时加载 Agent 运行时，避免增加首屏启动风险和普通查询路径体积。
+- **禁止把当前 Deep Agents npm 包直接打进桌面 WebView**。2026-07-15 审计的 `deepagents@1.10.2` 单一入口顶层静态导入 `node:fs`、`node:child_process`、`node:os`、`path` 与 `fast-glob`；浏览器 polyfill 无法提供安全的进程能力。落地只能使用独立签名 sidecar/服务协议，或等待官方 browser-safe export，并且必须延迟启动、可缺省降级。见 [ADR-0012](decisions/0012-deep-agents-desktop-runtime-boundary.md)。
 - **模型调用继续经过 Tauri/Rust**。API key、代理和 provider credential 不进入前端状态；前端只拿到流式事件和结构化响应。
 - **持久化使用项目级本地 checkpoint store**。已落地层只保存 task/plan/completed-status 安全摘要，不保存 prompt、tool input/output、SQL、原始结果行或批准 token；后续 resumable checkpoint 仍必须遵守相同最小化原则。
 - **MCP 只用于外部客户端**。应用内页面交互使用直接 TypeScript action bus，避免序列化页面状态、额外网络跳转和外部 host 权限错配。
@@ -64,9 +64,9 @@ Deep Agents 的文件系统权限只约束其内置文件工具，不能替代 O
 | MCP / CLI 复用工具 | 已具备 | `src/ai/mcp`、`src/ai/cli` | 保持外部适配器定位 |
 | 模型 planner 与结果总结 | 已具备/部分 | `src/ai/assistant` | 增加 checkpoint、恢复、验证节点 |
 | LangGraph | 部分具备 | 当前主要为 `plan -> policy` 两节点 | Agent mode 引入完整状态图 |
-| 多轮工具循环 | 已具备/非持久 | `AssistantRuntime.runToolLoop` 已负责 policy、去重、预算、取消和 typed event；Sidebar 只投影状态 | 增加 approval pause token、checkpoint/resume 与 verification node |
+| 多轮工具循环 | 已具备/部分持久 | `AssistantRuntime.runToolLoop` 已负责 policy、去重、预算、取消和 typed event；批准写操作执行前强制保存安全 receipt | 增加 controller host、checkpoint/resume 与 verification node |
 | 页面导航/编辑动作 | 已具备 | `src/ai/ui-actions`、database/editor/plan/task semantic navigation、revision-bound patch preview | 扩展更多 artifact action，不允许 selector 跳转 |
-| 持久 thread / memory | 部分具备 | `assistant_tasks` 已保存项目级安全 task summary，TaskStatusCenter 可恢复 interrupted/waiting/history | 增加 thread retention、idempotency receipt 与真正 checkpoint/resume |
+| 持久 thread / memory | 部分具备 | `assistant_tasks` 已保存安全 task summary；v2 receipt 把崩溃窗口中的写操作标记 uncertain，TaskStatusCenter 要求 verify | 增加 thread retention、数据库级 idempotency 与真正 checkpoint/resume |
 | 子代理 | 缺失 | 无隔离的 subagent executor | 默认只读、受预算约束 |
 | Agent 可观测性与评测 | 部分具备 | 有 audit hook，缺完整 trace/eval | 结构化 trace、回放、黄金任务集 |
 
@@ -285,6 +285,8 @@ type UiAction = {
 - `editor.proposePatch` 是只读 artifact 工具：host 从当前 selection/整篇文档捕获 range、before text 和 revision，模型只能提出 replacement/title/rationale。`editor.previewPatch` 在 revision 与 before text 都匹配时打开 before/after；用户点击 Apply 后 tab store 再校验一次并写入，预览不会自动修改或执行 SQL。单侧内容限制 50,000 字符，binary preview 明确拒绝。
 - 有界多轮执行已从 `AssistantSidebar` 移入 `AssistantRuntime.runToolLoop`。Runtime 对模型 follow-up 重新走 manifest/policy、按 tool+input signature 去重、只接受精确 normalized step id 的批准、默认限制四轮/十二次调用，并发出 typed progress event；Sidebar 不再决定循环语义。当前 AbortController 与任务内存仍属于组件，尚不支持关闭后继续、checkpoint 或 crash resume。
 - Agent task 的安全摘要已进入 project-scoped MetaStore 与 TaskStatusCenter：只保留 plan identity/risk 和 completed status，后端限制 100 steps、64 KiB 与每项目 100 条终态历史；旧 session 的 active task 自动标记 interrupted。项目切换会取消旧运行、清空旧对话/批准。异步 history hydration 会保留同项目刚启动但尚未出现在查询结果中的 active task，避免旧快照覆盖新任务。每个 Agent plan 都提供 `task.reveal` attachment，可按 `projectId + taskId` 从内存或 retained history 打开精确详情；清理后的目标返回 `TARGET_NOT_FOUND`。该摘要不可执行，批准不会落盘，checkpoint resume 仍未完成。
+- checkpoint v2 为批准型工具增加 data-minimized execution receipt，只记录 step/tool/status/timestamp。Runtime 必须先等待 `started` receipt 成功落盘再执行写操作；保存失败则工具不执行。进程退出、项目切换或取消若发生在副作用完成与 `succeeded` 落盘之间，任何终态 task 中遗留的 `started` step 都在 Task Center 标为 `verify/uncertain`，不得自动重放。它是 at-most-once recovery guard，不是跨数据库与 MetaStore 的 exactly-once 事务。
+- `deepagents@1.10.2` 的官方 npm 发布物是 Node-only 单入口，不能直接进入 Tauri WebView；当前继续使用应用自有 Runtime 与 browser-compatible LangGraph planner。未来 Deep Agents 只能通过不持有数据库凭据、不能绕过 registry 的签名 sidecar/服务 host 接入。
 
 ### 5.5 结构化错误基线（2026-07-15）
 
@@ -420,8 +422,8 @@ AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV
 
 ### Phase B：Deep Agents Agent mode（P0/P1）
 
-1. 延迟加载 desktop-compatible Deep Agents runtime，包装现有 registry tools。
-2. 项目级安全 task summary 已完成；继续补 thread retention、可执行 checkpoint、idempotency receipt、cancel/resume 和 trace。
+1. 先实现版本化 Agent host 协议；只有独立签名 sidecar/服务或官方 browser-safe export 通过启动、签名、资源与 fallback 门禁后才启用 Deep Agents，禁止 Node polyfill 进入 WebView。
+2. 项目级安全 task summary 与 mutation pre-execution receipt 已完成；继续补 thread retention、可执行 checkpoint、数据库级 idempotency、cancel/resume 和 trace。
 3. 默认只读 subagent，按 schema research、query review、verification 隔离上下文。
 4. HITL 与现有 approval UI 对接；数据库 policy 仍由 registry/Rust 执行。
 5. 未配置 provider、runtime 加载失败或离线时可靠降级。

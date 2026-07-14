@@ -256,22 +256,46 @@ export class AssistantRuntime {
           totalCalls: toolCalls,
         });
         if (context.abortSignal?.aborted) break;
-        const result =
-          step.requiresApproval && !approvedStepIds.has(step.id)
-            ? approvalRequiredResult(step)
-            : (
-                await this.executeToolCalls(
-                  [
-                    {
-                      id: step.id,
-                      toolName: step.toolName,
-                      input: step.input || {},
-                      approved: approvedStepIds.has(step.id),
-                    },
-                  ],
-                  context,
-                )
-              )[0];
+        let result: AssistantToolCallResult | undefined;
+        if (step.requiresApproval && !approvedStepIds.has(step.id)) {
+          result = approvalRequiredResult(step);
+        } else {
+          if (step.requiresApproval) {
+            if (!options.beforeApprovedToolExecution) {
+              result = executionReceiptRequiredResult(step);
+            } else {
+              try {
+                await options.beforeApprovedToolExecution({
+                  stepId: step.id,
+                  title: step.title,
+                  toolName: step.toolName,
+                  round,
+                  totalCalls: toolCalls,
+                });
+              } catch {
+                result = executionReceiptRequiredResult(step);
+              }
+            }
+          }
+          if (!result && context.abortSignal?.aborted) {
+            result = executionCancelledBeforeCallResult(step);
+          }
+          if (!result) {
+            result = (
+              await this.executeToolCalls(
+                [
+                  {
+                    id: step.id,
+                    toolName: step.toolName,
+                    input: step.input || {},
+                    approved: approvedStepIds.has(step.id),
+                  },
+                ],
+                context,
+              )
+            )[0];
+          }
+        }
         toolCalls += 1;
         if (!result) continue;
 
@@ -539,6 +563,29 @@ function approvalRequiredResult(
     toolName: step.toolName!,
     status: "requiresApproval",
     error: `${step.toolName} requires explicit approval`,
+  };
+}
+
+function executionReceiptRequiredResult(
+  step: AssistantPlanStep,
+): AssistantToolCallResult {
+  return {
+    id: step.id,
+    toolName: step.toolName!,
+    status: "error",
+    error:
+      "Approved action was not executed because its safety receipt could not be saved.",
+  };
+}
+
+function executionCancelledBeforeCallResult(
+  step: AssistantPlanStep,
+): AssistantToolCallResult {
+  return {
+    id: step.id,
+    toolName: step.toolName!,
+    status: "error",
+    error: "Approved action was cancelled after checkpointing and was not executed.",
   };
 }
 

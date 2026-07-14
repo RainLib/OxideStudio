@@ -22,6 +22,7 @@ export type WorkbenchTaskStepStatus =
   | "running"
   | "success"
   | "requiresApproval"
+  | "uncertain"
   | "error";
 
 export interface WorkbenchTaskStep {

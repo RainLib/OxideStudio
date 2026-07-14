@@ -226,7 +226,9 @@ Schema baseline 不读取可变的 Explorer 展示树，而是调用 Rust `captu
 
 当前 LangGraph 主要承担 `plan -> policy`。有界多轮工具循环已由 `AssistantRuntime.runToolLoop` 接管：Runtime 负责工具/输入签名去重、follow-up policy 归一化、精确 step-id 审批、默认四轮/十二次预算、失败停止与 AbortSignal，并通过 typed event 向 React 暴露步骤、结果、summary、plan extension 和 limit。Sidebar 只投影瞬时 UI 状态，但 controller 和生命周期仍在组件内，尚无 checkpoint/resume，因此不能把它描述为 durable agent 已完成。页面联动由 `src/ai/ui-actions` 提供独立 typed navigation layer：Assistant tool result 会生成带 provenance 的 attachment，registry 负责项目/context/revision/plan 校验，Database Explorer、Monaco 与 Explain Plan 只接收稳定语义 target。Runtime 边界见 [ADR-0010](decisions/0010-assistant-runtime-tool-loop.md)。
 
-Agent mode 的任务摘要写入独立 `assistant_tasks` 表，不复用需要数据库连接外键的 metadata resources。落盘 schema 只允许 plan step 的 id/title/tool/approval risk 与 completed status，不包含 prompt、tool input/output、SQL、结果行或批准 token；前端按顺序写入，后端限制 100 steps、64 KiB checkpoint 和每项目 100 条终态记录。TaskStatusCenter 按 project hydration；不同 application session 遗留的 running/awaiting task 会转为 interrupted，项目切换会取消旧 task 并清除旧批准。`task.reveal` 只携带 `projectId + taskId`，可从内存或 retained history 解析后打开精确任务详情；被清理的 target 返回稳定 not-found。该层提供可回看的 durable summary，不提供执行 resume。见 [ADR-0011](decisions/0011-agent-task-summary-persistence.md)。
+Agent mode 的任务摘要写入独立 `assistant_tasks` 表，不复用需要数据库连接外键的 metadata resources。落盘 schema 只允许 plan step 的 id/title/tool/approval risk、completed status，以及 checkpoint v2 的批准工具 receipt（step/tool/status/timestamp），不包含 prompt、tool input/output、SQL、结果行或批准 token；前端按顺序写入，后端限制各类条目 100、64 KiB checkpoint 和每项目 100 条终态记录。批准工具必须先等待 `started` receipt 落盘，失败则不执行；进程退出、取消或项目切换后，终态 task 遗留的 started receipt 在 TaskStatusCenter 标记 `verify/uncertain`，不得自动重放。`task.reveal` 只携带 `projectId + taskId`，可从内存或 retained history 解析后打开精确任务详情。该层提供可回看的 durable summary 与 at-most-once recovery guard，不提供执行 resume 或 exactly-once 保证。见 [ADR-0011](decisions/0011-agent-task-summary-persistence.md)。
+
+Deep Agents 的采用受独立运行边界约束：`deepagents@1.10.2` 的单入口顶层依赖 Node filesystem/child-process/OS 模块，不能直接打入 Tauri WebView。当前进程内继续使用应用自有 Runtime 与 browser-compatible LangGraph planner；未来只能通过官方 browser-safe export 或独立签名、延迟启动且不可绕过 registry 的 sidecar/服务接入。见 [ADR-0012](decisions/0012-deep-agents-desktop-runtime-boundary.md)。
 
 编辑器修改采用两段式边界：只读 `editor.proposePatch` 工具根据当前 tab/selection 生成绑定 document revision 的 patch artifact；`editor.previewPatch` 只打开 before/after surface。只有用户点击 Apply，tab store 才再次核对整篇 revision 与 range 的原始文本并更新 Monaco 内容，预览本身不会写入或执行 SQL。单侧文本限制为 50,000 字符，binary preview 不进入文本 patch 链路。目标状态机、Deep Agents 分层与完整页面动作协议见 [AI Agent 产品与技术规格](AI_AGENT_PRODUCT_SPEC.md)，补丁决策见 [ADR-0009](decisions/0009-revision-bound-editor-patch.md)。
 
@@ -244,6 +246,6 @@ Agent mode 的任务摘要写入独立 `assistant_tasks` 表，不复用需要�
 3. `tauri::generate_handler!` 是手工总表，新增命令容易漏注册，应增加命令契约测试或代码生成。
 4. Search Everywhere 目前只索引内存中已知范围，还没有覆盖 MetaStore 的全项目对象索引。
 5. provider capability 同时存在前端默认值和后端运行时值，需要持续用契约测试防止漂移。
-6. Assistant 的循环语义已移入 Runtime，项目级 task summary 已持久化；剩余债务是把 AbortController/task state 从 Sidebar 生命周期移出，增加 idempotency receipt、真正 checkpoint/resume 和不可重放的 approval pause token。页面 action 已有 stale-context 防护。
+6. Assistant 的循环语义已移入 Runtime，项目级 task summary 与 mutation pre-execution receipt 已持久化；剩余债务是把 AbortController/task state 从 Sidebar 生命周期移出，增加数据库级 idempotency、真正 checkpoint/resume 和不可重放的 approval pause token。Deep Agents 还需独立 host 协议，不能作为 WebView 依赖。页面 action 已有 stale-context 防护。
 
 DataGrip 对标差距、优先级和验收标准见 [datagrip-gap-analysis.md](datagrip-gap-analysis.md)。

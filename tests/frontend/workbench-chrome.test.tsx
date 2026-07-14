@@ -273,5 +273,35 @@ describe("WorkbenchChrome", () => {
     expect(container.textContent).toContain("metadata.listObjects");
     expect(container.textContent).toContain("approval");
     expect(container.textContent).toContain("Safe summary only");
+
+    await act(async () => {
+      useTaskStore.getState().upsertTask({
+        id: "agent:uncertain",
+        kind: "agent",
+        title: "Assistant agent task",
+        detail: "Stopped with an action requiring verification",
+        status: "cancelled",
+        startedAt: 30,
+        finishedAt: 40,
+        projectId: "project-a",
+        persistent: true,
+        steps: [
+          {
+            id: "step-write",
+            title: "Update rows",
+            toolName: "query.runMutation",
+            requiresApproval: true,
+            status: "uncertain",
+          },
+        ],
+      });
+      requestTaskReveal({
+        projectId: "project-a",
+        taskId: "agent:uncertain",
+      });
+    });
+
+    expect(container.textContent).toContain("may have reached the target");
+    expect(container.textContent).toContain("will not be replayed automatically");
   });
 });

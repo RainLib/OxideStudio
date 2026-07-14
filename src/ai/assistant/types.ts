@@ -152,6 +152,13 @@ export type AssistantToolLoopOptions = {
   approvedStepIds?: ReadonlySet<string>;
   limits?: Partial<AssistantToolLoopLimits>;
   onEvent?: (event: AssistantToolLoopEvent) => void;
+  beforeApprovedToolExecution?: (execution: {
+    stepId: string;
+    title: string;
+    toolName: string;
+    round: number;
+    totalCalls: number;
+  }) => Promise<void> | void;
 };
 
 export type AssistantToolLoopResult = {

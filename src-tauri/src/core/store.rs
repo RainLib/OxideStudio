@@ -77,11 +77,23 @@ pub struct AssistantTaskCompletedStep {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct AssistantTaskExecutionReceipt {
+    pub step_id: String,
+    pub tool_name: String,
+    pub status: String,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct AssistantTaskCheckpoint {
     pub version: u32,
     pub mode: String,
     pub plan: Vec<AssistantTaskPlanStep>,
     pub completed_steps: Vec<AssistantTaskCompletedStep>,
+    #[serde(default)]
+    pub execution_receipts: Vec<AssistantTaskExecutionReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1191,10 +1203,16 @@ fn validate_assistant_task(task: &AssistantTaskRecord) -> Result<()> {
     {
         anyhow::bail!("assistant task detail must not exceed 2,000 characters");
     }
-    if task.checkpoint.version != 1 || task.checkpoint.mode != "agent" {
+    if ![1, 2].contains(&task.checkpoint.version) || task.checkpoint.mode != "agent" {
         anyhow::bail!("unsupported assistant task checkpoint");
     }
-    if task.checkpoint.plan.len() > 100 || task.checkpoint.completed_steps.len() > 100 {
+    if task.checkpoint.version == 1 && !task.checkpoint.execution_receipts.is_empty() {
+        anyhow::bail!("assistant task execution receipts require checkpoint version 2");
+    }
+    if task.checkpoint.plan.len() > 100
+        || task.checkpoint.completed_steps.len() > 100
+        || task.checkpoint.execution_receipts.len() > 100
+    {
         anyhow::bail!("assistant task checkpoint exceeds the 100-step limit");
     }
     for step in &task.checkpoint.plan {
@@ -1218,6 +1236,45 @@ fn validate_assistant_task(task: &AssistantTaskRecord) -> Result<()> {
             || !["success", "requiresApproval", "error"].contains(&step.status.as_str())
         {
             anyhow::bail!("assistant task completed step is invalid");
+        }
+    }
+    let mut receipt_step_ids = std::collections::HashSet::new();
+    for receipt in &task.checkpoint.execution_receipts {
+        let plan_step = task
+            .checkpoint
+            .plan
+            .iter()
+            .find(|step| step.id == receipt.step_id);
+        let completed_step = task
+            .checkpoint
+            .completed_steps
+            .iter()
+            .find(|step| step.id == receipt.step_id);
+        let finished_state = matches!(receipt.status.as_str(), "succeeded" | "failed");
+        let completion_matches = match receipt.status.as_str() {
+            "started" => completed_step.is_none(),
+            "succeeded" => completed_step.is_some_and(|step| step.status == "success"),
+            "failed" => completed_step.is_some_and(|step| step.status != "success"),
+            _ => false,
+        };
+        if receipt.step_id.trim().is_empty()
+            || receipt.step_id.chars().count() > 120
+            || receipt.tool_name.trim().is_empty()
+            || receipt.tool_name.chars().count() > 200
+            || !["started", "succeeded", "failed"].contains(&receipt.status.as_str())
+            || receipt.started_at <= 0
+            || finished_state != receipt.finished_at.is_some()
+            || receipt
+                .finished_at
+                .is_some_and(|value| value < receipt.started_at)
+            || !receipt_step_ids.insert(receipt.step_id.as_str())
+            || !completion_matches
+            || !plan_step.is_some_and(|step| {
+                step.requires_approval
+                    && step.tool_name.as_deref() == Some(receipt.tool_name.as_str())
+            })
+        {
+            anyhow::bail!("assistant task execution receipt is invalid");
         }
     }
     if serde_json::to_vec(&task.checkpoint)?.len() > 64 * 1024 {
@@ -1532,6 +1589,7 @@ mod tests {
                         requires_approval: false,
                     }],
                     completed_steps: vec![],
+                    execution_receipts: vec![],
                 },
                 created_at: 10,
                 updated_at: 10,
@@ -1606,7 +1664,7 @@ mod tests {
             .unwrap();
         let store = MetaStore { pool };
         store.init().await.unwrap();
-        let task = AssistantTaskRecord {
+        let mut task = AssistantTaskRecord {
             id: "invalid".to_string(),
             project_id: "sqls".to_string(),
             request_id: "request-invalid".to_string(),
@@ -1622,11 +1680,35 @@ mod tests {
                 mode: "agent".to_string(),
                 plan: vec![],
                 completed_steps: vec![],
+                execution_receipts: vec![],
             },
             created_at: 1,
             updated_at: 1,
             finished_at: None,
         };
+        assert!(store.save_assistant_task(&task).await.is_err());
+
+        task.progress = Some(0.5);
+        task.checkpoint.version = 2;
+        task.checkpoint.plan = vec![AssistantTaskPlanStep {
+            id: "write".to_string(),
+            title: "Update rows".to_string(),
+            tool_name: Some("query.runMutation".to_string()),
+            requires_approval: true,
+        }];
+        task.checkpoint.execution_receipts = vec![AssistantTaskExecutionReceipt {
+            step_id: "write".to_string(),
+            tool_name: "query.runMutation".to_string(),
+            status: "started".to_string(),
+            started_at: 2,
+            finished_at: None,
+        }];
+        store.save_assistant_task(&task).await.unwrap();
+
+        task.checkpoint.version = 1;
+        assert!(store.save_assistant_task(&task).await.is_err());
+        task.checkpoint.version = 2;
+        task.checkpoint.execution_receipts[0].tool_name = "query.other".to_string();
         assert!(store.save_assistant_task(&task).await.is_err());
     }
 }
