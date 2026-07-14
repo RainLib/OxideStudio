@@ -149,17 +149,12 @@ describe("TableDataView CSV import", () => {
     container.remove();
   });
 
-  it("keeps a successful import successful when the follow-up refresh fails", async () => {
-    await act(async () => {
-      root = createRoot(container);
-      root.render(<TableDataView />);
-    });
-
+  const selectFileAndConfirmImport = async (content: string) => {
     const input = container.querySelector<HTMLInputElement>('input[type="file"]');
     expect(input).not.toBeNull();
     const file = {
       name: "users.csv",
-      text: vi.fn(async () => "email\ncreated@example.test\n"),
+      text: vi.fn(async () => content),
     };
     Object.defineProperty(input, "files", {
       configurable: true,
@@ -168,6 +163,29 @@ describe("TableDataView CSV import", () => {
 
     await act(async () => {
       input!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(mocks.mutateTableRows).not.toHaveBeenCalled();
+
+    let importButton: HTMLButtonElement | undefined;
+    await vi.waitFor(() => {
+      importButton = [...document.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent?.trim() === "Import 1 row");
+      expect(importButton).toBeDefined();
+      expect(importButton?.disabled).toBe(false);
+    });
+    await act(async () => {
+      importButton!.click();
+    });
+  };
+
+  it("keeps a successful import successful when the follow-up refresh fails", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<TableDataView />);
+    });
+
+    await selectFileAndConfirmImport("email\ncreated@example.test\n");
+    await act(async () => {
       await vi.waitFor(() => expect(mocks.previewTablePage).toHaveBeenCalledOnce());
     });
 
@@ -199,18 +217,8 @@ describe("TableDataView CSV import", () => {
       root.render(<TableDataView />);
     });
 
-    const input = container.querySelector<HTMLInputElement>('input[type="file"]');
-    const file = {
-      name: "users.csv",
-      text: vi.fn(async () => "EMAIL\ncreated@example.test\n"),
-    };
-    Object.defineProperty(input, "files", {
-      configurable: true,
-      value: [file],
-    });
-
+    await selectFileAndConfirmImport("EMAIL\ncreated@example.test\n");
     await act(async () => {
-      input!.dispatchEvent(new Event("change", { bubbles: true }));
       await vi.waitFor(() => expect(mocks.mutateTableRows).toHaveBeenCalled());
     });
 

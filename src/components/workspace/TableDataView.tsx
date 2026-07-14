@@ -46,6 +46,7 @@ import {
 } from "lucide-react";
 import { CreateConstraintDialog } from "./CreateConstraintDialog";
 import { CreateIndexDialog } from "./CreateIndexDialog";
+import { CsvImportDialog } from "./CsvImportDialog";
 import {
   DEFAULT_DATABASE_DRIVER,
   canAlterRelationStructure,
@@ -119,6 +120,8 @@ export function TableDataView() {
   const [isIndexSubmitting, setIsIndexSubmitting] = useState(false);
   const [isConstraintDialogOpen, setIsConstraintDialogOpen] = useState(false);
   const [isConstraintSubmitting, setIsConstraintSubmitting] = useState(false);
+  const [csvImportFile, setCsvImportFile] = useState<File | null>(null);
+  const [isCsvImportSubmitting, setIsCsvImportSubmitting] = useState(false);
   const [isEditingEnabled, setIsEditingEnabled] = useState(
     !dataGridSettings.readOnlyByDefault
   );
@@ -288,6 +291,7 @@ export function TableDataView() {
 
   useEffect(() => {
     ddlRequestRef.current += 1;
+    setCsvImportFile(null);
     setShowDdl(false);
     setShowStructure(false);
     setTableDdl("");
@@ -325,6 +329,16 @@ export function TableDataView() {
   if (!activeTab || activeTab.type !== "table") return null;
 
   const result = activeTab?.results?.[0];
+  const csvImportColumns: ColumnInfo[] = metadataColumns.length > 0
+    ? metadataColumns
+    : activeTab.tableColumns?.length
+      ? activeTab.tableColumns
+      : (result?.columns || []).map((column) => ({
+          name: column.name,
+          data_type: column.data_type,
+          is_nullable: true,
+          is_primary_key: false,
+        }));
 
   // Get columns from result or fallback
   const columns =
@@ -491,148 +505,29 @@ export function TableDataView() {
     }
   };
 
-  const parseCsv = (content: string) => {
-    const rows: string[][] = [];
-    let row: string[] = [];
-    let cell = "";
-    let inQuotes = false;
-
-    for (let index = 0; index < content.length; index += 1) {
-      const char = content[index];
-      const nextChar = content[index + 1];
-
-      if (char === '"' && inQuotes && nextChar === '"') {
-        cell += '"';
-        index += 1;
-        continue;
-      }
-
-      if (char === '"') {
-        inQuotes = !inQuotes;
-        continue;
-      }
-
-      if (char === "," && !inQuotes) {
-        row.push(cell);
-        cell = "";
-        continue;
-      }
-
-      if ((char === "\n" || char === "\r") && !inQuotes) {
-        if (char === "\r" && nextChar === "\n") {
-          index += 1;
-        }
-        row.push(cell);
-        if (row.some((value) => value.length > 0)) {
-          rows.push(row);
-        }
-        row = [];
-        cell = "";
-        continue;
-      }
-
-      cell += char;
-    }
-
-    row.push(cell);
-    if (row.some((value) => value.length > 0)) {
-      rows.push(row);
-    }
-
-    return rows;
-  };
-
-  const handleImportCsv = async (file: File) => {
+  const handleImportCsvRows = async (
+    rows: Array<Record<string, unknown>>
+  ) => {
     if (
       !tabConnectionId ||
       !activeTab.tableName ||
       !activeTab.schemaName ||
       activeTab.isExecuting ||
-      isTableReadOnly
+      isTableReadOnly ||
+      isCsvImportSubmitting ||
+      !csvImportFile
     ) {
       return;
     }
     const taskId = startTask({
       kind: "import",
-      title: `Import ${file.name}`,
+      title: `Import ${csvImportFile.name}`,
       detail: activeTab.tableName,
     });
-
-    const content = await file.text();
-    const rows = parseCsv(content);
-    const [headers, ...dataRows] = rows;
-    const normalizedHeaders = (headers || []).map((header) => header.trim());
-    if (normalizedHeaders.length === 0 || dataRows.length === 0) {
-      failTask(taskId, "CSV file has no importable rows");
-      return;
-    }
-
+    setIsCsvImportSubmitting(true);
     updateTask(taskId, {
-      detail: `${dataRows.length.toLocaleString()} rows parsed`,
+      detail: `${rows.length.toLocaleString()} rows validated; committing transaction`,
     });
-
-    const canonicalColumns =
-      metadataColumns.length > 0
-        ? metadataColumns.map((column) => column.name)
-        : activeTab.tableColumns?.length
-          ? activeTab.tableColumns.map((column) => column.name)
-          : activeTab.results?.[0]?.columns.length
-            ? activeTab.results[0].columns.map((column) => column.name)
-            : normalizedHeaders;
-    const canonicalByLower = new Map<string, string | null>();
-    for (const column of canonicalColumns) {
-      const key = column.toLowerCase();
-      const existing = canonicalByLower.get(key);
-      canonicalByLower.set(
-        key,
-        existing === undefined || existing === column ? column : null
-      );
-    }
-
-    const resolvedHeaders: Array<string | null> = [];
-    const seenColumns = new Set<string>();
-    for (const header of normalizedHeaders) {
-      if (!header) {
-        resolvedHeaders.push(null);
-        continue;
-      }
-
-      const canonical = canonicalByLower.get(header.toLowerCase());
-      if (canonical === null) {
-        failTask(
-          taskId,
-          `CSV header "${header}" matches multiple case-sensitive table columns`
-        );
-        return;
-      }
-      if (!canonical) {
-        resolvedHeaders.push(null);
-        continue;
-      }
-      if (seenColumns.has(canonical)) {
-        failTask(taskId, `CSV contains duplicate column header: ${canonical}`);
-        return;
-      }
-
-      seenColumns.add(canonical);
-      resolvedHeaders.push(canonical);
-    }
-
-    const insertRows = dataRows.map((values) =>
-      resolvedHeaders.reduce<Record<string, unknown>>((record, column, index) => {
-        if (!column) return record;
-        const value = values[index] ?? "";
-        record[column] = value === "" ? null : value;
-        return record;
-      }, {})
-    );
-
-    const usableRows = insertRows.filter((row) => Object.keys(row).length > 0);
-    if (usableRows.length === 0) {
-      failTask(taskId, "CSV headers do not match table columns");
-      return;
-    }
-
     try {
       if (activeTab.databaseName) {
         await tableService.mutateTableRows(
@@ -640,7 +535,7 @@ export function TableDataView() {
           driver,
           activeTab.schemaName,
           activeTab.tableName,
-          usableRows,
+          rows,
           [],
           [],
           activeTab.databaseName
@@ -651,16 +546,19 @@ export function TableDataView() {
           driver,
           activeTab.schemaName,
           activeTab.tableName,
-          usableRows
+          rows
         );
       }
     } catch (error) {
       failTask(taskId, error instanceof Error ? error.message : String(error));
       console.error("CSV import failed:", error);
+      setIsCsvImportSubmitting(false);
       return;
     }
-    const importedRowCount = usableRows.length.toLocaleString();
+    const importedRowCount = rows.length.toLocaleString();
     finishTask(taskId, `${importedRowCount} rows imported`);
+    setCsvImportFile(null);
+    setIsCsvImportSubmitting(false);
     if (
       !confirmDiscardTableChanges(
         activeTab.id,
@@ -1031,9 +929,19 @@ export function TableDataView() {
           const file = event.currentTarget.files?.[0];
           event.currentTarget.value = "";
           if (file) {
-            void handleImportCsv(file);
+            setCsvImportFile(file);
           }
         }}
+      />
+
+      <CsvImportDialog
+        open={csvImportFile !== null}
+        file={csvImportFile}
+        tableName={activeTab.tableName || "table"}
+        columns={csvImportColumns}
+        isSubmitting={isCsvImportSubmitting}
+        onClose={() => setCsvImportFile(null)}
+        onImport={handleImportCsvRows}
       />
 
       <TableDataToolbar

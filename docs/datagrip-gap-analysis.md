@@ -157,7 +157,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | DG-P0-04 | Explain Plan MVP | PostgreSQL/MySQL 支持文本/JSON plan；只读执行；显示 cost/rows/time，失败可定位到 driver 能力 | 已完成 |
 | DG-P0-05 | Driver 与文档一致性 | 增加 SQLite driver，或从发布文档移除未实现支持；能力列表由 runtime registry 生成 | 已完成：SQLite/SQL Server 明确为规划项；后端 capability list 驱动连接 UI、Explorer 与 AI，失败仅降级不阻塞启动 |
 | DG-P0-06 | 结构化错误协议 | connection/query/schema/table/file command 返回稳定 code、message、context、retryable；UI 不再解析字符串前缀 | 已完成 |
-| DG-P0-07 | CSV Import Mapping | 导入前预览、编码/delimiter/header、列映射、类型错误摘要和事务性提交 | 待开始 |
+| DG-P0-07 | CSV Import Mapping | 导入前预览、编码/delimiter/header、列映射、类型错误摘要和事务性提交 | 已完成：支持 BOM/UTF-8/UTF-16/GB18030、delimiter 自动识别、表头/位置映射、类型预检和 PostgreSQL/MySQL 原子 batch；32 MiB/10 万行以上明确转入 native streaming P1 |
 | DG-P0-08 | LSP catalog scope 与候选排序 | `(connection, database, schema)` 严格隔离；显式 qualifier/当前 statement/DML target/active table 排序；同名列以 alias/table 区分；同 source 去重；覆盖跨 PostgreSQL database 回归 | 已完成 |
 | DG-P0-09 | AI attachment 与页面动作 | 对象、错误、结果、执行计划引用可点击并准确跳转；stable target、stale context 和同名对象有测试；导航不与数据库 mutation 混为一个动作 | 已完成：对象/文件/结果/LSP error/plan 均有精确跳转与 stale target 测试 |
 
@@ -170,6 +170,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 5. DDL data source、真实数据源 mapping 和 run configurations。
 6. 编辑器 inspections、quick-fix、find usages 和 local history。
 7. 批量 DDL/data export 与 native dump/restore。
+8. Native streaming CSV import：Rust 侧增量 decode/parse、分批 prepared insert、单事务与可取消进度；替代 P0 的 32 MiB/10 万行安全上限。
 
 ### P2：平台化与长尾能力
 
@@ -199,4 +200,5 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 4. **DG-P0-03 Value Editor** 已完成：类型感知大视图、四态值语义、JSON/binary/date 校验和既有 mutation gate 已有组件与模型测试。
 5. **DG-P0-04 Explain Plan MVP** 已完成：后端生成 driver-specific SQL 并强制单条只读源查询，PostgreSQL/MySQL 结果规范化为稳定 plan tree，UI 支持 tree/raw、estimate/analyze、取消和节点指标；AI 只允许无审批 estimate，并通过 `plan.revealNode` 回到精确节点。安全边界见 [ADR-0003](decisions/0003-explain-plan-safety.md)。
 6. **DG-P0-05 Driver 与文档一致性** 已完成：README 不声明 SQLite/SQL Server 已支持，`sqlx/sqlite` 明确仅用于 MetaStore；后端完整 capability list 成为连接 UI、Explorer 新建菜单和 AI `provider.list` 的权威目录，能力发现失败会保留内置目录且不阻塞应用壳。
-7. 下一项推进 **DG-P0-07 CSV Import Mapping**；完整 AI plan explanation/优化前后验证转入 P1。
+7. **DG-P0-07 CSV Import Mapping** 已完成：文件选择与写库解耦，用户先配置编码、delimiter、header、空值策略和逐列映射；提交前按目标列类型汇总错误，确认后复用后端原子 batch，任一数据库错误会回滚全部行。内存路径限制为 32 MiB/10 万行，超限文件不会尝试全量载入；后续以 native streaming importer 扩展。
+8. P0 日常闭环已全部完成；下一阶段优先推进 schema snapshot/diff/migration preview，以及完整 AI plan explanation/优化前后验证。

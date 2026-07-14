@@ -21,8 +21,11 @@ const BINARY_TYPE =
   /\b(bytea|binary|varbinary|tinyblob|blob|mediumblob|longblob|raw)\b/i;
 const DATE_TYPE = /\b(date|time|timestamp|datetime|timestamptz|timetz)\b/i;
 const NUMBER_TYPE =
-  /\b(int|serial|decimal|numeric|real|double|float|money|number)\b/i;
+  /\b(tinyint|smallint|mediumint|bigint|integer|int[248]?|smallserial|bigserial|serial|decimal|numeric|real|double(?:\s+precision)?|float|money|number)\b/i;
 const BOOLEAN_TYPE = /\b(bool|boolean)\b/i;
+const INTEGER_TYPE =
+  /\b(tinyint|smallint|mediumint|bigint|integer|int[248]?|smallserial|bigserial|serial)\b/i;
+const UUID_TYPE = /\buuid\b/i;
 
 export function inferValueEditorKind(
   columnType: string | null | undefined,
@@ -152,6 +155,13 @@ export function parseValueEditorDraft(options: {
     if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(normalized)) {
       return { ok: false, error: "Enter a valid numeric value." };
     }
+    if (INTEGER_TYPE.test(columnType || "")) {
+      if (!/^[+-]?\d+$/.test(normalized)) {
+        return { ok: false, error: "Enter a whole integer value." };
+      }
+      const rangeError = integerRangeError(normalized, columnType || "");
+      if (rangeError) return { ok: false, error: rangeError };
+    }
     // Preserve the exact decimal text. The table mutation layer applies the
     // database column cast without routing large numerics through JS Number.
     return { ok: true, value: normalized };
@@ -166,6 +176,13 @@ export function parseValueEditorDraft(options: {
       };
     }
     return { ok: true, value: normalized };
+  }
+
+  if (
+    UUID_TYPE.test(columnType || "") &&
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(draft.trim())
+  ) {
+    return { ok: false, error: "Enter a canonical UUID value." };
   }
 
   return { ok: true, value: draft };
@@ -271,4 +288,27 @@ function temporalFormatHint(columnType?: string | null) {
     return "Use HH:mm:ss, with an optional fractional second and timezone.";
   }
   return "Use YYYY-MM-DD.";
+}
+
+function integerRangeError(value: string, columnType: string) {
+  const type = columnType.toLowerCase();
+  const bitWidth = /\btinyint\b/.test(type)
+    ? 8n
+    : /\b(?:smallint|int2|smallserial)\b/.test(type)
+      ? 16n
+      : /\bmediumint\b/.test(type)
+        ? 24n
+        : /\b(?:bigint|int8|bigserial)\b/.test(type)
+          ? 64n
+          : 32n;
+  const unsigned = /\bunsigned\b/.test(type);
+  const parsed = BigInt(value);
+  const minimum = unsigned ? 0n : -(2n ** (bitWidth - 1n));
+  const maximum = unsigned
+    ? 2n ** bitWidth - 1n
+    : 2n ** (bitWidth - 1n) - 1n;
+  if (parsed < minimum || parsed > maximum) {
+    return `Integer is outside the ${unsigned ? "unsigned " : ""}${bitWidth}-bit range.`;
+  }
+  return null;
 }

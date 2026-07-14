@@ -28,6 +28,8 @@ describe("value editor model", () => {
     expect(inferValueEditorKind("numeric(30, 10)", "9007199254740993")).toBe(
       "number",
     );
+    expect(inferValueEditorKind("bigint", "9007199254740993")).toBe("number");
+    expect(inferValueEditorKind("int8", "9007199254740993")).toBe("number");
   });
 
   it("pretty-prints and validates JSON without turning it into text", () => {
@@ -117,6 +119,39 @@ describe("value editor model", () => {
         nullable: false,
       }),
     ).toEqual({ ok: true, value: "9007199254740993.0000000001" });
+  });
+
+  it("validates integer shape and range before staging", () => {
+    expect(
+      parseValueEditorDraft({
+        state: "value",
+        draft: "1.5",
+        kind: "number",
+        columnType: "int4",
+        nullable: false,
+      }),
+    ).toEqual({ ok: false, error: "Enter a whole integer value." });
+    expect(
+      parseValueEditorDraft({
+        state: "value",
+        draft: "2147483648",
+        kind: "number",
+        columnType: "int4",
+        nullable: false,
+      }),
+    ).toEqual({ ok: false, error: "Integer is outside the 32-bit range." });
+  });
+
+  it("validates canonical UUID values", () => {
+    expect(
+      parseValueEditorDraft({
+        state: "value",
+        draft: "not-a-uuid",
+        kind: "text",
+        columnType: "uuid",
+        nullable: false,
+      }),
+    ).toEqual({ ok: false, error: "Enter a canonical UUID value." });
   });
 
   it("validates real calendar and timestamp values", () => {

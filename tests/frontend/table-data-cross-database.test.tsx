@@ -206,7 +206,18 @@ describe("cross-database table data view", () => {
     });
     await act(async () => {
       input?.dispatchEvent(new Event("change", { bubbles: true }));
-      await Promise.resolve();
+    });
+    expect(mocks.mutateTableRows).not.toHaveBeenCalled();
+
+    let importButton: HTMLButtonElement | undefined;
+    await vi.waitFor(() => {
+      importButton = [...document.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent?.trim() === "Import 1 row");
+      expect(importButton).toBeDefined();
+      expect(importButton?.disabled).toBe(false);
+    });
+    await act(async () => {
+      importButton!.click();
     });
 
     await vi.waitFor(() => expect(mocks.mutateTableRows).toHaveBeenCalled());
