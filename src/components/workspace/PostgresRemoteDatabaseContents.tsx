@@ -4,11 +4,18 @@ import {
   ChevronDown,
   ChevronRight,
   Folder,
+  GitCompareArrows,
   Network,
   RefreshCw,
   Table,
   TableProperties,
 } from "lucide-react";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 import { isViewObject } from "@/lib/databaseDialect";
 import { schemaService } from "@/services/tauri";
@@ -33,6 +40,7 @@ interface PostgresRemoteDatabaseContentsProps {
   connectionColor: string;
   filterText?: string;
   onTablesLoaded?: (schema: string, tables: TableInfo[]) => void;
+  onOpenSchemaSnapshots?: (database: string, schema: string) => void;
   onOpenTable: (
     database: string,
     schema: string,
@@ -52,6 +60,7 @@ export function PostgresRemoteDatabaseContents({
   connectionColor,
   filterText = "",
   onTablesLoaded,
+  onOpenSchemaSnapshots,
   onOpenTable,
 }: PostgresRemoteDatabaseContentsProps) {
   const databaseRevealRequest = useDatabaseNavigationStore(
@@ -259,26 +268,40 @@ export function PostgresRemoteDatabaseContents({
 
         return (
           <div key={schema} className="min-w-0">
-            <button
-              type="button"
-              aria-expanded={isExpanded}
-              aria-busy={loadState.status === "loading" || undefined}
-              onClick={() => toggleSchema(schema)}
-              className="flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))]"
-              title={`${isExpanded ? "Collapse" : "Expand"} ${database}.${schema}`}
-            >
-              {isExpanded ? (
-                <ChevronDown size={12} className="shrink-0 wb-muted" />
-              ) : (
-                <ChevronRight size={12} className="shrink-0 wb-muted" />
-              )}
-              <Network
-                size={12}
-                className="shrink-0"
-                style={{ color: connectionColor }}
-              />
-              <span className="truncate">{schema}</span>
-            </button>
+            <ContextMenu>
+              <ContextMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-expanded={isExpanded}
+                  aria-busy={loadState.status === "loading" || undefined}
+                  onClick={() => toggleSchema(schema)}
+                  className="flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))]"
+                  title={`${isExpanded ? "Collapse" : "Expand"} ${database}.${schema}`}
+                >
+                  {isExpanded ? (
+                    <ChevronDown size={12} className="shrink-0 wb-muted" />
+                  ) : (
+                    <ChevronRight size={12} className="shrink-0 wb-muted" />
+                  )}
+                  <Network
+                    size={12}
+                    className="shrink-0"
+                    style={{ color: connectionColor }}
+                  />
+                  <span className="truncate">{schema}</span>
+                </button>
+              </ContextMenuTrigger>
+              <ContextMenuContent className="w-56 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.35)]">
+                <ContextMenuItem
+                  className="text-[12px] focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]"
+                  disabled={!onOpenSchemaSnapshots}
+                  onClick={() => onOpenSchemaSnapshots?.(database, schema)}
+                >
+                  <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
+                  Schema Snapshots / Diff...
+                </ContextMenuItem>
+              </ContextMenuContent>
+            </ContextMenu>
 
             {isExpanded && (
               <div className="ml-[11px] border-l border-[hsl(var(--wb-border-subtle))] pl-2">

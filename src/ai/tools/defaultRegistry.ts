@@ -237,6 +237,23 @@ function workspaceTabSummaryFromTab(tab: {
   fileRelativePath?: string | null;
   results?: unknown[] | null;
   activeResultIndex?: number;
+  schemaDiffPlan?: {
+    id: string;
+    summary: {
+      total: number;
+      safe: number;
+      review: number;
+      destructive: number;
+    };
+    changes: Array<{
+      id: string;
+      summary: string;
+      risk: string;
+      relationName: string;
+      childName?: string | null;
+    }>;
+  };
+  selectedSchemaChangeId?: string | null;
   editorSelection?: {
     text: string;
     startLineNumber: number;
@@ -260,6 +277,12 @@ function workspaceTabSummaryFromTab(tab: {
     fileRelativePath: tab.fileRelativePath ?? null,
     resultSetCount: tab.results?.length ?? 0,
     activeResultIndex: tab.activeResultIndex ?? 0,
+    schemaDiffId: tab.schemaDiffPlan?.id ?? null,
+    schemaDiffSummary: tab.schemaDiffPlan?.summary ?? null,
+    selectedSchemaChange:
+      tab.schemaDiffPlan?.changes.find(
+        (change) => change.id === tab.selectedSchemaChangeId,
+      ) ?? null,
     selection: workspaceSelectionFromTab(tab),
   };
 }

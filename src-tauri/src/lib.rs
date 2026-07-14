@@ -116,6 +116,8 @@ pub fn run() {
             commands::schema::get_functions,
             commands::schema::get_database_functions,
             commands::schema::set_current_schema,
+            commands::schema_diff::capture_schema_snapshot,
+            commands::schema_diff::compare_schema_snapshots,
             // Table commands
             commands::table::preview_table_page,
             commands::table::export_table_data,

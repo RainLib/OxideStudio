@@ -151,7 +151,7 @@ pub struct CollectionPage {
     pub total: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ColumnInfo {
     pub name: String,
     pub data_type: String,

@@ -87,6 +87,36 @@ export function createAssistantAttachments(
             }),
           );
         }
+        const schemaDiffId = stringValue(tab?.schemaDiffId);
+        const selectedChange = record(tab?.selectedSchemaChange);
+        const schemaChangeId = stringValue(selectedChange?.id);
+        if (schemaDiffId && schemaChangeId) {
+          attachments.push(
+            attachment({
+              id: `${result.id}-schema-diff`,
+              kind: "schemaDiff",
+              label: stringValue(selectedChange?.summary) || "Schema change",
+              detail: [
+                stringValue(selectedChange?.risk),
+                stringValue(selectedChange?.relationName),
+              ]
+                .filter(Boolean)
+                .join(" · "),
+              action: actionRequest(
+                `${result.id}-reveal-schema-change`,
+                "schemaDiff.revealChange",
+                {
+                  projectId: context.projectId,
+                  tabId,
+                  schemaDiffId,
+                  schemaChangeId,
+                },
+                "Reveal schema change",
+                context,
+              ),
+            }),
+          );
+        }
       }
       const objectAttachment = databaseObjectAttachment(
         `${result.id}-active-object`,
@@ -354,6 +384,8 @@ function deduplicateAttachments(attachments: AssistantAttachment[]) {
       target.schemaName,
       target.objectName,
       target.tabId,
+      target.schemaDiffId,
+      target.schemaChangeId,
       target.range,
     ]);
     if (keys.has(key)) return false;

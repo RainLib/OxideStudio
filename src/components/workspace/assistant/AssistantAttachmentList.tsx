@@ -14,6 +14,7 @@ import {
   FileCode2,
   Loader2,
   Table2,
+  GitCompareArrows,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -137,5 +138,6 @@ function attachmentIcon(kind: AssistantAttachment["kind"]) {
   if (kind === "file") return FileCode2;
   if (kind === "result") return Table2;
   if (kind === "plan") return Braces;
+  if (kind === "schemaDiff") return GitCompareArrows;
   return FileCode2;
 }

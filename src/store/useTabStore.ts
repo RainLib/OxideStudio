@@ -13,6 +13,8 @@ import type {
   ExplainPlan,
   ExplainPlanMode,
   IndexInfo,
+  SchemaDiffPlan,
+  SchemaSnapshot,
   TableFilter,
   TableSort,
 } from "@/services/tauri/types";
@@ -114,7 +116,7 @@ async function refreshMetadataAfterQuery(
   schemaStore.bumpMetadataVersion();
 }
 
-export type TabType = "query" | "table" | "create_table";
+export type TabType = "query" | "table" | "create_table" | "schema_diff";
 
 export interface EditorSelectionState {
   text: string;
@@ -198,6 +200,10 @@ export interface TabData {
   filePreview?: ProjectFileImagePreview;
   isDirty?: boolean;
   fileError?: string | null;
+  schemaDiffPlan?: SchemaDiffPlan;
+  schemaDiffSource?: SchemaSnapshot;
+  schemaDiffTarget?: SchemaSnapshot;
+  selectedSchemaChangeId?: string | null;
 }
 
 function fileNameFromPath(relativePath: string) {
@@ -566,6 +572,12 @@ interface TabState {
     title?: string,
   ) => string;
   createTableTab: (connectionId: string, schemaName: string) => string;
+  openSchemaDiffTab: (
+    plan: SchemaDiffPlan,
+    source: SchemaSnapshot,
+    target: SchemaSnapshot,
+  ) => string;
+  selectSchemaDiffChange: (tabId: string, changeId: string | null) => void;
   retargetTableTabs: (
     connectionId: string,
     schemaName: string,
@@ -846,6 +858,62 @@ export const useTabStore = create<TabState>((set, get) => ({
       activeTabId: newTab.id,
     }));
     return newTab.id;
+  },
+
+  openSchemaDiffTab: (plan, source, target) => {
+    const existing = get().tabs.find(
+      (tab) => tab.type === "schema_diff" && tab.schemaDiffPlan?.id === plan.id,
+    );
+    const title = `Schema Diff · ${plan.targetSchemaName}`;
+    if (existing) {
+      set((state) => ({
+        activeTabId: existing.id,
+        tabs: state.tabs.map((tab) =>
+          tab.id === existing.id
+            ? {
+                ...tab,
+                title,
+                schemaDiffPlan: plan,
+                schemaDiffSource: source,
+                schemaDiffTarget: target,
+                selectedSchemaChangeId: plan.changes[0]?.id || null,
+              }
+            : tab,
+        ),
+      }));
+      return existing.id;
+    }
+
+    const tab: TabData = {
+      id: uuidv4(),
+      title,
+      type: "schema_diff",
+      sql: "",
+      connectionId: plan.targetConnectionId,
+      databaseName: plan.targetDatabaseName || undefined,
+      schemaName: plan.targetSchemaName,
+      results: null,
+      isExecuting: false,
+      error: null,
+      isPinned: false,
+      schemaDiffPlan: plan,
+      schemaDiffSource: source,
+      schemaDiffTarget: target,
+      selectedSchemaChangeId: plan.changes[0]?.id || null,
+    };
+    set((state) => ({
+      tabs: [...state.tabs, tab],
+      activeTabId: tab.id,
+    }));
+    return tab.id;
+  },
+
+  selectSchemaDiffChange: (tabId, changeId) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId ? { ...tab, selectedSchemaChangeId: changeId } : tab,
+      ),
+    }));
   },
 
   retargetTableTabs: (

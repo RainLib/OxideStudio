@@ -121,7 +121,7 @@ flowchart LR
 
 ### 4.2 Command 边界
 
-`src-tauri/src/commands/` 按领域组织 IPC：`connection`、`query`、`schema`、`table`、`transaction`、`project_files`、`store`、`settings`、`lsp`、`ai`、`window`。
+`src-tauri/src/commands/` 按领域组织 IPC：`connection`、`query`、`schema`、`schema_diff`、`table`、`transaction`、`project_files`、`store`、`settings`、`lsp`、`ai`、`window`。
 
 Command 的职责是：
 
@@ -210,7 +210,13 @@ Table Tab 使用服务端分页。前端保存 cell edits、新增行、删除�
 
 驱动结果先保留为 `rawPlan`，再规范化成稳定的 `ExplainPlanNode` 树。UI 只消费规范模型来展示 node type、relation/index、cost、estimated/actual rows、time 和 loops，同时保留 Raw 视图便于诊断。Analyze 会真实执行源查询，必须由编辑器显式确认；`query.explain` AI 工具只允许 estimate。计划 attachment 使用 `tabId + planId + nodeId`，旧计划或不存在节点由 `UiActionRegistry` 拒绝，不能退化为 DOM selector 查找。详细决策见 [ADR-0003](decisions/0003-explain-plan-safety.md)。
 
-### 5.5 AI 工具链
+### 5.5 Schema Snapshot 与 Diff
+
+Schema baseline 不读取可变的 Explorer 展示树，而是调用 Rust `capture_schema_snapshot` 对指定 `project + connection + database + schema` 进行一次完整 introspection。表级 columns/indexes/constraints 并行获取，表间以六个 permit 限流；任一失败都会中止，避免把部分结构保存为有效 snapshot。版本化 snapshot 与 fingerprint 作为 project-scoped MetaStore resource 持久化。
+
+`compare_schema_snapshots` 把 source 定义为 desired、fresh live target 定义为 actual，并在 Rust 纯领域层生成稳定 change、风险、可逆性、warning 和 dialect SQL。UI 只展示 review-only artifact；PostgreSQL preview 以 `ROLLBACK` 结束，MySQL 明示 DDL auto-commit。view/source 缺失、外键依赖顺序等无法证明安全的情况不会猜测，而会变成 manual review。AI action 通过 `tabId + schemaDiffId + schemaChangeId` 定位精确 change。完整边界见 [ADR-0005](decisions/0005-schema-snapshot-diff.md)。
+
+### 5.6 AI 工具链
 
 应用内 Assistant、CLI 与 MCP 共用 `src/ai/tools` 的 registry、policy 和 audit。工具调用必须携带活动项目/连接上下文，并经过权限判定；后端只读执行仍会再次扫描 SQL，避免 AI 绕过 UI 审批。
 

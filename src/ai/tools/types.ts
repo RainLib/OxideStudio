@@ -109,6 +109,20 @@ export type AiWorkspaceTabSummary = {
   fileRelativePath?: string | null;
   resultSetCount?: number;
   activeResultIndex?: number;
+  schemaDiffId?: string | null;
+  selectedSchemaChange?: {
+    id: string;
+    summary: string;
+    risk: string;
+    relationName: string;
+    childName?: string | null;
+  } | null;
+  schemaDiffSummary?: {
+    total: number;
+    safe: number;
+    review: number;
+    destructive: number;
+  } | null;
   selection?: AiWorkspaceSelection | null;
 };
 

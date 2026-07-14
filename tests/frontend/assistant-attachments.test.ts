@@ -182,4 +182,40 @@ describe("assistant UI attachments", () => {
       },
     });
   });
+
+  it("creates a stable attachment for the selected schema change", () => {
+    const attachment = createAssistantAttachments(
+      [
+        success("workspace.getActiveTab", {
+          id: "diff-tab-1",
+          type: "schema_diff",
+          title: "Schema Diff · public",
+          schemaDiffId: "diff-1",
+          selectedSchemaChange: {
+            id: "change-1",
+            summary: "Drop target-only column users.legacy",
+            risk: "destructive",
+            relationName: "users",
+            childName: "legacy",
+          },
+        }),
+      ],
+      toolContext,
+    ).find((item) => item.kind === "schemaDiff");
+
+    expect(attachment).toMatchObject({
+      kind: "schemaDiff",
+      label: "Drop target-only column users.legacy",
+      detail: "destructive · users",
+      action: {
+        action: "schemaDiff.revealChange",
+        target: {
+          projectId: "project-1",
+          tabId: "diff-tab-1",
+          schemaDiffId: "diff-1",
+          schemaChangeId: "change-1",
+        },
+      },
+    });
+  });
 });

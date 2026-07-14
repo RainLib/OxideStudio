@@ -12,6 +12,7 @@ import { SplitEditor } from "@/components/workspace/SplitEditor";
 import { TableDataView } from "@/components/workspace/TableDataView";
 import { CreateTableTab } from "@/components/workspace/CreateTableTab";
 import { ExplainPlanView } from "@/components/workspace/ExplainPlanView";
+import { SchemaDiffView } from "@/components/workspace/SchemaDiffView";
 import { SideToolWindow } from "@/components/workspace/SideToolWindow";
 import {
   WorkbenchGlobalTools,
@@ -86,8 +87,7 @@ export function WorkspacePage() {
   );
   const currentResult = queryResults[activeResultIndex];
   const isPlanView = activeTab?.queryOutputView === "plan";
-  const isQueryTab =
-    activeTab?.type !== "table" && activeTab?.type !== "create_table";
+  const isQueryTab = activeTab?.type === "query";
   const hasQueryResultSurface =
     Boolean(isQueryTab && activeTab) &&
     Boolean(
@@ -297,6 +297,8 @@ export function WorkspacePage() {
                       connectionId={activeTab.connectionId || ""}
                       schemaName={activeTab.schemaName || ""}
                     />
+                  ) : activeTab?.type === "schema_diff" ? (
+                    <SchemaDiffView />
                   ) : (
                     <div className="relative flex h-full min-h-0 flex-col gap-1">
                       <div

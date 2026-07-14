@@ -12,6 +12,7 @@ export const UI_ACTION_NAMES = [
   "editor.createQueryTab",
   "results.reveal",
   "plan.revealNode",
+  "schemaDiff.revealChange",
   "settings.open",
   "task.reveal",
 ] as const;
@@ -40,6 +41,8 @@ export type UiActionTarget = {
   columnName?: string;
   planId?: string;
   nodeId?: string;
+  schemaDiffId?: string;
+  schemaChangeId?: string;
   taskId?: string;
   panelId?: "databaseExplorer" | "assistant" | "results" | "editor" | "files" | "tasks";
   settingsSection?: string;
@@ -135,6 +138,7 @@ export type AssistantAttachmentKind =
   | "result"
   | "tab"
   | "plan"
+  | "schemaDiff"
   | "task";
 
 export type AssistantAttachment = {

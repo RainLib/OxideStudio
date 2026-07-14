@@ -325,6 +325,81 @@ export interface ConstraintInfo {
   definition?: string;
 }
 
+export interface SchemaRelationSnapshot {
+  name: string;
+  objectType?: string | null;
+  columns: ColumnInfo[];
+  indexes: IndexInfo[];
+  constraints: ConstraintInfo[];
+}
+
+export interface SchemaSnapshot {
+  version: number;
+  id: string;
+  fingerprint: string;
+  projectId: string;
+  connectionId: string;
+  connectionName: string;
+  driver: DatabaseDriver;
+  databaseName?: string | null;
+  schemaName: string;
+  capturedAt: number;
+  relations: SchemaRelationSnapshot[];
+  warnings: string[];
+}
+
+export type SchemaChangeRisk = "safe" | "review" | "destructive";
+export type SchemaChangeKind =
+  | "relationCreate"
+  | "relationDrop"
+  | "relationModify"
+  | "columnAdd"
+  | "columnDrop"
+  | "columnModify"
+  | "indexAdd"
+  | "indexDrop"
+  | "indexModify"
+  | "constraintAdd"
+  | "constraintDrop"
+  | "constraintModify";
+
+export interface SchemaChange {
+  id: string;
+  kind: SchemaChangeKind;
+  risk: SchemaChangeRisk;
+  schemaName: string;
+  relationName: string;
+  objectType?: string | null;
+  childName?: string | null;
+  summary: string;
+  sql: string[];
+  reversible: boolean;
+  manualReview: boolean;
+}
+
+export interface SchemaDiffSummary {
+  total: number;
+  safe: number;
+  review: number;
+  destructive: number;
+}
+
+export interface SchemaDiffPlan {
+  id: string;
+  sourceSnapshotId: string;
+  targetSnapshotId: string;
+  driver: DatabaseDriver;
+  targetConnectionId: string;
+  targetDatabaseName?: string | null;
+  targetSchemaName: string;
+  generatedAt: number;
+  transactional: boolean;
+  summary: SchemaDiffSummary;
+  changes: SchemaChange[];
+  migrationSql: string;
+  warnings: string[];
+}
+
 export interface FunctionParameterInfo {
   name: string;
   data_type: string;

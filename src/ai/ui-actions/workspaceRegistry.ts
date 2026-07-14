@@ -320,6 +320,51 @@ export function createWorkspaceUiActionRegistry() {
   });
 
   registry.register({
+    name: "schemaDiff.revealChange",
+    description: "Reveal one exact change in a schema diff artifact.",
+    stalePolicy: "project",
+    validateTarget: requireFields(
+      "projectId",
+      "tabId",
+      "schemaDiffId",
+      "schemaChangeId",
+    ),
+    execute: (target, context) => {
+      const tabStore = useTabStore.getState();
+      const tab = tabStore.tabs.find(
+        (candidate) => candidate.id === target.tabId,
+      );
+      if (!tab) return notFound(context.actionId, "Tab", target.tabId!);
+      const plan = tab.schemaDiffPlan;
+      if (
+        tab.type !== "schema_diff" ||
+        !plan ||
+        plan.id !== target.schemaDiffId
+      ) {
+        return notFound(
+          context.actionId,
+          "Schema diff",
+          target.schemaDiffId!,
+        );
+      }
+      if (
+        !plan.changes.some(
+          (change) => change.id === target.schemaChangeId,
+        )
+      ) {
+        return notFound(
+          context.actionId,
+          "Schema change",
+          target.schemaChangeId!,
+        );
+      }
+      tabStore.setActiveTab(tab.id);
+      tabStore.selectSchemaDiffChange(tab.id, target.schemaChangeId!);
+      useWorkbenchLayoutStore.getState().setActiveToolWindow("editor");
+    },
+  });
+
+  registry.register({
     name: "settings.open",
     description: "Open Settings without changing secret values.",
     execute: () => {

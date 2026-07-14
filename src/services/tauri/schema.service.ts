@@ -7,6 +7,8 @@ import type {
   ConstraintInfo,
   FunctionInfo,
   IndexInfo,
+  SchemaDiffPlan,
+  SchemaSnapshot,
 } from "./types";
 
 /**
@@ -229,6 +231,34 @@ export async function setCurrentSchema(
   });
 }
 
+export async function captureSchemaSnapshot(options: {
+  projectId: string;
+  connectionId: string;
+  connectionName: string;
+  driver: string;
+  database?: string | null;
+  schema: string;
+}): Promise<SchemaSnapshot> {
+  return invokeWithInterceptors<SchemaSnapshot>("capture_schema_snapshot", {
+    projectId: options.projectId,
+    connectionId: options.connectionId,
+    connectionName: options.connectionName,
+    driver: options.driver,
+    database: options.database || null,
+    schema: options.schema,
+  });
+}
+
+export async function compareSchemaSnapshots(
+  source: SchemaSnapshot,
+  target: SchemaSnapshot,
+): Promise<SchemaDiffPlan> {
+  return invokeWithInterceptors<SchemaDiffPlan>("compare_schema_snapshots", {
+    source,
+    target,
+  });
+}
+
 /**
  * 获取缓存的 schema 列表
  * @param connectionId - 连接 ID
@@ -305,6 +335,8 @@ export const schemaService = {
   getFunctions,
   getDatabaseFunctions,
   setCurrentSchema,
+  captureSchemaSnapshot,
+  compareSchemaSnapshots,
   getCachedSchemas,
   refreshSchemas,
   getCachedTables,

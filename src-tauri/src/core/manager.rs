@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[derive(Clone)]
 pub struct ConnectionManager {
     // thread-safe map of active connections
     connections: Arc<Mutex<HashMap<String, ManagedConnection>>>,

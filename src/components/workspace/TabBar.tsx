@@ -18,6 +18,7 @@ import {
   PanelRight,
   PanelTop,
   PanelBottom,
+  GitCompareArrows,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -49,6 +50,9 @@ const TabIcon = ({
   isImage?: boolean;
 }) => {
   if (type === "table") return <TableIcon size={12} className="wb-muted" />;
+  if (type === "schema_diff") {
+    return <GitCompareArrows size={12} className="text-amber-300" />;
+  }
   if (isImage) return <ImageIcon size={12} className="text-violet-400" />;
   if (isFile) return <FileCode2 size={12} className="text-sky-400" />;
   return <Terminal size={12} className="text-sky-400" />;

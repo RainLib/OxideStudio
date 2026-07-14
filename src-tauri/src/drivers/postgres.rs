@@ -1395,6 +1395,7 @@ impl DatabaseDriver for PostgresDriver {
         let pool = self
             .ensure_metadata_pool(&mut metadata_pool, database)
             .await?;
+        drop(metadata_pool);
 
         timeout(METADATA_QUERY_TIMEOUT, Self::schemas_on_pool(&pool))
             .await
@@ -1417,6 +1418,7 @@ impl DatabaseDriver for PostgresDriver {
         let pool = self
             .ensure_metadata_pool(&mut metadata_pool, database)
             .await?;
+        drop(metadata_pool);
 
         timeout(METADATA_QUERY_TIMEOUT, Self::tables_on_pool(&pool, schema))
             .await
@@ -1445,6 +1447,7 @@ impl DatabaseDriver for PostgresDriver {
         let pool = self
             .ensure_metadata_pool(&mut metadata_pool, database)
             .await?;
+        drop(metadata_pool);
 
         timeout(
             METADATA_QUERY_TIMEOUT,
@@ -1477,6 +1480,7 @@ impl DatabaseDriver for PostgresDriver {
         let pool = self
             .ensure_metadata_pool(&mut metadata_pool, database)
             .await?;
+        drop(metadata_pool);
 
         timeout(
             METADATA_QUERY_TIMEOUT,
@@ -1509,6 +1513,7 @@ impl DatabaseDriver for PostgresDriver {
         let pool = self
             .ensure_metadata_pool(&mut metadata_pool, database)
             .await?;
+        drop(metadata_pool);
 
         timeout(
             METADATA_QUERY_TIMEOUT,
@@ -1540,6 +1545,7 @@ impl DatabaseDriver for PostgresDriver {
         let pool = self
             .ensure_metadata_pool(&mut metadata_pool, database)
             .await?;
+        drop(metadata_pool);
 
         timeout(
             METADATA_QUERY_TIMEOUT,

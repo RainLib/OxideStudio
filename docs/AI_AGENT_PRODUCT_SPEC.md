@@ -171,7 +171,7 @@ type AgentToolContract = {
 | DB-06 | 只读查询 | 后端重新分类 SQL；限制 row/time/bytes；多语句只要含 mutation 即拒绝 read path | R1 |
 | DB-07 | DML 生成与执行 | 明确表、WHERE、预计行数；先 preview 或 transaction；无 WHERE 默认升级风险 | R2/R3 |
 | DB-08 | DDL / destructive | 生成 migration preview、依赖影响和 rollback 可能性；drop/truncate 逐目标批准 | R4 |
-| DB-09 | Schema diff/migration | 比较 snapshot，不直接拿 display tree；生成有序 migration 和不可逆标记 | R1-R4 |
+| DB-09 | Schema diff/migration | 比较版本化 snapshot，不直接拿 display tree；第一阶段已生成风险/可逆性 migration artifact，后续以 dependency DAG 排序并加入 dry-run、验证、apply journal 与 rollback 包 | R1-R4 |
 | DB-10 | 数据分析 | 对结果做统计/分组/异常解释，优先在 DB 聚合而不是搬运原始数据 | R1 |
 | DB-11 | 导入/导出 | 映射预览、编码/格式/错误策略、目标路径与敏感信息确认 | R2/R3 |
 | DB-12 | 运维诊断 | 查看 session、lock、slow query、容量和权限；kill/cancel session 单独批准 | R1/R3 |
@@ -259,6 +259,7 @@ type UiAction = {
 | `editor.createQueryTab` | 使用指定 connection/catalog/schema 创建 query tab | 缺目标时请求选择，不继承不相关项目状态 |
 | `results.reveal` | 激活 result tab，可选定位列/行 | 行已分页丢弃时提示重新加载 |
 | `plan.revealNode` | 选中 Explain Plan 节点并联动对象 | plan version 不一致时拒绝 |
+| `schemaDiff.revealChange` | 激活 Schema Diff artifact 并选中稳定 change；已存在对象可继续联动 Explorer | `tabId + schemaDiffId + schemaChangeId` 任一失效都拒绝；待创建对象不伪造 Explorer 定位 |
 | `settings.open` | 打开 AI/provider/privacy/keymap 等 section | 不允许 Agent 修改 secret 字段 |
 | `task.reveal` | 打开后台任务 trace | task 被清理时显示摘要而非空跳转 |
 
@@ -278,9 +279,9 @@ type UiAction = {
 - `UiActionRegistry` 与数据库 `AiToolRegistry` 已物理分离；导航 action 不获得 mutation approval，也不能调用 destructive tool。
 - action target 使用 `projectId + connectionId + databaseName + schemaName + objectName`、`tabId` 或 project-relative file path；不接受模型生成的 selector。
 - registry 返回 `PROJECT_CONTEXT_STALE`、`PROJECT_SWITCH_REQUIRED`、`DOCUMENT_REVISION_STALE`、`TARGET_NOT_FOUND`、`UNSUPPORTED_ACTION` 等稳定 code，并提供 recovery 文案。
-- Assistant 已把 active tab、selection、metadata object、project file、query result、LSP diagnostic 和 Explain Plan 转换为可点击 attachment。对象的 Reveal、Open data、Open DDL 是三个独立 action；计划 attachment 使用 `planId + nodeId` 精确定位规范化节点。
+- Assistant 已把 active tab、selection、metadata object、project file、query result、LSP diagnostic、Explain Plan 和 Schema Diff change 转换为可点击 attachment。对象的 Reveal、Open data、Open DDL 是三个独立 action；计划 attachment 使用 `planId + nodeId`，schema diff attachment 使用 `schemaDiffId + schemaChangeId` 精确定位不可变 artifact。
 - Database Explorer 能定位当前 database 及远程 PostgreSQL database 下的 schema/object；Monaco range 统一为 one-based，LSP 的 zero-based range 在 attachment boundary 转换。
-- `plan.revealNode` 已连接 Explain Plan surface，会校验 tab、plan version 和 node identity，再展开祖先、选中节点并滚动定位。`editor.previewPatch` 与 `task.reveal` 仍稳定返回 unsupported，不伪造成功。
+- `plan.revealNode` 与 `schemaDiff.revealChange` 已连接对应 artifact surface，会校验 tab、artifact version 和 node/change identity 后再定位。`editor.previewPatch` 与 `task.reveal` 仍稳定返回 unsupported，不伪造成功。
 
 ### 5.5 结构化错误基线（2026-07-15）
 
@@ -394,13 +395,13 @@ DataGrip 当前 AI 基线包含 schema-aware chat、自然语言生成 SQL、SQL
 | Error fix | 执行错误可 Explain/Fix | 有 LSP diagnostic tool，缺统一 vendor error 与一键 patch | P0 |
 | Query optimization | 可基于查询与计划解释优化 | 已有真实 estimate plan 工具与 artifact，缺热点规则、建议引用、前后 plan 对比和自动验证 | P1 完成优化闭环 |
 | Plan explanation | 支持 query plan AI explanation | 规范化 plan tree/raw artifact 和精确节点联动已完成；模型解释质量评测与索引/schema citation 尚缺 | P1 |
-| 页面交互 | attachment 可回到对象/代码 | `UiActionRegistry` 已支持稳定对象、文件、tab、结果、diagnostic 和 plan 跳转；patch/task surface 尚未完成 | 补 patch 与 durable task surface |
+| 页面交互 | attachment 可回到对象/代码 | `UiActionRegistry` 已支持稳定对象、文件、tab、结果、diagnostic、plan 和 schema diff change 跳转；patch/task surface 尚未完成 | 补 patch 与 durable task surface |
 | 长任务代理 | 以 IDE AI 工作流为主 | registry 架构适合扩展，但 runtime 循环在 UI | 引入 Deep Agents Agent mode 后可形成差异化 |
 | 多数据模型 | 重点是 SQL/database IDE | 已覆盖 Mongo/Redis/ES 的结构化工具方向 | Oxide 的差异化优势 |
 | 外部生态 | JetBrains 生态 | 已有 MCP/CLI/provider registry | 继续保持统一 policy |
 | 数据隐私 | 默认不把原始数据库数据提供给 AI | 有截断/隐藏 credential，缺“发送内容预览” | P0/P1 |
 
-AI 不能掩盖数据库 IDE 主能力差距。Value Editor 与 Explain Plan 的 P0 闭环已完成；schema diff/migration、diagram/FK navigation、data compare、semantic refactor/find usages、import mapping、session/lock 等仍需按 [DataGrip 能力差距](datagrip-gap-analysis.md) 路线推进。
+AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV Import Mapping 和 schema diff/migration preview 的第一阶段已完成；dependency-ordered migration apply、diagram/FK navigation、data compare、semantic refactor/find usages、native streaming import、session/lock 等仍需按 [DataGrip 能力差距](datagrip-gap-analysis.md) 路线推进。
 
 ## 9. 分阶段路线图
 
@@ -427,7 +428,7 @@ AI 不能掩盖数据库 IDE 主能力差距。Value Editor 与 Explain Plan 的
 ### Phase C：专业数据库 AI（P1）
 
 1. 在已有 Explain Plan artifact/节点导航上增加热点规则、AI explanation、索引/schema citation 和优化前后验证。
-2. schema snapshot/diff/migration plan 与安全验证。
+2. 在已有 schema snapshot/diff review artifact 上增加 dependency DAG、schema mapping、dry-run/apply journal、安全验证与 rollback 包。
 3. result analysis、data compare、导入映射和报告 artifact。
 4. session/lock/slow-query 诊断工具。
 5. project memory、skill 管理和黄金任务评测。

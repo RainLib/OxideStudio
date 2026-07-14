@@ -19,6 +19,7 @@ import {
   Network,
   Search,
   X,
+  GitCompareArrows,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -107,6 +108,8 @@ import { DataSourceDialog } from "./DataSourceDialog";
 import { DatabaseBrandIcon } from "@/components/icons/DatabaseBrandIcon";
 import { ConnectionGlyph } from "@/components/icons/ConnectionGlyph";
 import { RedisKeyDialog } from "./RedisKeyDialog";
+import { SchemaSnapshotDialog } from "./SchemaSnapshotDialog";
+import type { SchemaSnapshotIdentity } from "@/services/schemaSnapshotStore";
 import {
   PostgresDatabaseTree,
   postgresConnectionDatabaseName,
@@ -361,6 +364,8 @@ export function SchemaSidebar() {
   const [dataSourceRemovalError, setDataSourceRemovalError] = useState<
     string | null
   >(null);
+  const [schemaSnapshotIdentity, setSchemaSnapshotIdentity] =
+    useState<SchemaSnapshotIdentity | null>(null);
   const [capabilities, setCapabilities] = useState(() =>
     defaultDatabaseCapabilities(DEFAULT_DATABASE_DRIVER)
   );
@@ -3449,6 +3454,16 @@ export function SchemaSidebar() {
                                   databaseTables
                                 )
                               }
+                              onOpenSchemaSnapshots={(databaseName, schema) => {
+                                setSchemaSnapshotIdentity({
+                                  projectId: activeProjectId,
+                                  connectionId: connection.id,
+                                  connectionName: connection.name,
+                                  driver: connection.driver,
+                                  databaseName,
+                                  schemaName: schema,
+                                });
+                              }}
                               onOpenTable={(
                                 databaseName,
                                 schema,
@@ -3624,6 +3639,38 @@ export function SchemaSidebar() {
                                   </ContextMenuItem>
                                   <ContextMenuItem
                                     className={menuItemClass}
+                                    disabled={!supportsTableWorkspace(
+                                      defaultDatabaseCapabilities(
+                                        connection.driver,
+                                      ),
+                                    )}
+                                    onClick={() => {
+                                      void setActiveConnection(connection.id).then(
+                                        (connectionError) => {
+                                          if (connectionError) {
+                                            setNamespaceError(connectionError);
+                                            return;
+                                          }
+                                          setSchemaSnapshotIdentity({
+                                            projectId: activeProjectId,
+                                            connectionId: connection.id,
+                                            connectionName: connection.name,
+                                            driver: connection.driver,
+                                            databaseName:
+                                              connection.driver === "postgres"
+                                                ? connectedPostgresDatabase
+                                                : undefined,
+                                            schemaName: schema,
+                                          });
+                                        },
+                                      );
+                                    }}
+                                  >
+                                    <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
+                                    Schema Snapshots / Diff...
+                                  </ContextMenuItem>
+                                  <ContextMenuItem
+                                    className={menuItemClass}
                                     onClick={() =>
                                       void handleRenameDatabase(schema)
                                     }
@@ -3707,6 +3754,11 @@ export function SchemaSidebar() {
       <DataSourceDialog
         open={isDataSourceDialogOpen}
         onOpenChange={setIsDataSourceDialogOpen}
+      />
+      <SchemaSnapshotDialog
+        open={schemaSnapshotIdentity !== null}
+        identity={schemaSnapshotIdentity}
+        onClose={() => setSchemaSnapshotIdentity(null)}
       />
       <Dialog
         open={Boolean(pendingDataSourceRemoval)}

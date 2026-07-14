@@ -93,8 +93,8 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 
 | DataGrip 基线 | OxideStudio 状态 | 当前证据与差距 | 优先级 |
 | --- | --- | --- | --- |
-| Schema diff | 缺失 | 无结构快照比较、差异树和迁移 SQL | P1 |
-| Migration preview / apply | 缺失 | UI 生成单对象 DDL，但没有多对象 dependency plan、dry run 和 apply journal | P1 |
+| Schema diff | 已具备/部分 | 已有按 project/connection/database/schema 隔离的版本化快照、稳定 fingerprint、差异 rail、风险/可逆性与精确对象联动；尚缺 rename detection、完整 view/routine source 和 schema mapping | P1 |
+| Migration preview / apply | 已具备/部分 | PostgreSQL/MySQL 已生成 review-only artifact；PostgreSQL 默认 ROLLBACK guard，MySQL 明示 DDL auto-commit；外键顺序/无定义对象转人工复核。尚缺全局 dependency DAG、dry-run、apply journal、验证与 rollback 包 | P1 |
 | Database diagram | 缺失 | 已有 constraints 数据，尚未形成 ER graph、布局和导出 | P1 |
 | Explain Plan | 已具备/部分 | PostgreSQL/MySQL 支持 estimate/analyze、规范化节点树、raw plan、cost/rows/time 和取消；尚缺图形 plan、节点到表/索引的双向联动与多次计划对比 | P1 |
 | Object dependency / usages | 缺失 | 无依赖图和影响面分析 | P1 |
@@ -163,7 +163,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 
 ### P1：形成 schema 工程能力
 
-1. Schema snapshot + diff + migration SQL preview。
+1. Schema snapshot + diff + migration SQL preview 第一阶段已完成；继续补对象 source、rename detection、dependency DAG、schema mapping、dry-run/apply journal、验证与 rollback 包。
 2. ER diagram MVP，复用已有 PK/FK/constraint metadata。
 3. Data compare 与 tolerance。
 4. 外键 cell navigation 与 object dependency navigation。
@@ -201,4 +201,5 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 5. **DG-P0-04 Explain Plan MVP** 已完成：后端生成 driver-specific SQL 并强制单条只读源查询，PostgreSQL/MySQL 结果规范化为稳定 plan tree，UI 支持 tree/raw、estimate/analyze、取消和节点指标；AI 只允许无审批 estimate，并通过 `plan.revealNode` 回到精确节点。安全边界见 [ADR-0003](decisions/0003-explain-plan-safety.md)。
 6. **DG-P0-05 Driver 与文档一致性** 已完成：README 不声明 SQLite/SQL Server 已支持，`sqlx/sqlite` 明确仅用于 MetaStore；后端完整 capability list 成为连接 UI、Explorer 新建菜单和 AI `provider.list` 的权威目录，能力发现失败会保留内置目录且不阻塞应用壳。
 7. **DG-P0-07 CSV Import Mapping** 已完成：文件选择与写库解耦，用户先配置编码、delimiter、header、空值策略和逐列映射；提交前按目标列类型汇总错误，确认后复用后端原子 batch，任一数据库错误会回滚全部行。内存路径限制为 32 MiB/10 万行，超限文件不会尝试全量载入；后续以 native streaming importer 扩展。
-8. P0 日常闭环已全部完成；下一阶段优先推进 schema snapshot/diff/migration preview，以及完整 AI plan explanation/优化前后验证。
+8. **DG-P1-01 Schema snapshot/diff MVP** 已完成：快照使用稳定 catalog identity 与 fingerprint，抓取采用六路有界并发且不保存部分结果；差异在独立 artifact 展示 safe/review/destructive rail，PostgreSQL 使用 ROLLBACK guard，MySQL 标注 auto-commit，AI attachment 可回到精确 change。安全边界见 [ADR-0005](decisions/0005-schema-snapshot-diff.md)。
+9. 下一步为 schema dependency DAG / apply validation，以及完整 AI plan explanation/优化前后验证；不能把当前 review-only preview 描述为自动 migration 已完成。

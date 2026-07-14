@@ -150,4 +150,48 @@ describe("PostgresRemoteDatabaseContents", () => {
       "public"
     );
   });
+
+  it("routes schema snapshot actions with the exact remote database identity", async () => {
+    const onOpenSchemaSnapshots = vi.fn();
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <PostgresRemoteDatabaseContents
+          connectionId="pg-1"
+          database="analytics"
+          schemas={["public"]}
+          connectionColor="#5b8dd6"
+          onOpenSchemaSnapshots={onOpenSchemaSnapshots}
+          onOpenTable={vi.fn()}
+        />
+      );
+    });
+
+    const schemaButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("public")
+    );
+    await act(async () => {
+      schemaButton?.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          button: 2,
+          clientX: 20,
+          clientY: 20,
+        })
+      );
+      await Promise.resolve();
+    });
+
+    const snapshotItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>("[role='menuitem']")
+    ).find((item) => item.textContent?.includes("Schema Snapshots"));
+    expect(snapshotItem).toBeDefined();
+
+    await act(async () => {
+      snapshotItem?.click();
+    });
+
+    expect(onOpenSchemaSnapshots).toHaveBeenCalledWith("analytics", "public");
+  });
 });
