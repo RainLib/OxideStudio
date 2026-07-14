@@ -25,6 +25,7 @@ concurrency:
 env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
   OXIDE_RELEASE_BASE_URL: ${{ secrets.ALIYUN_OSS_PUBLIC_BASE_URL }}
+  WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
 
 jobs:
   validate:
@@ -33,6 +34,8 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      apple_signing_enabled: ${{ steps.signing.outputs.apple_signing_enabled }}
+      windows_signing_enabled: ${{ steps.signing.outputs.windows_signing_enabled }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -69,6 +72,7 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Validate signing and Aliyun configuration
+        id: signing
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -86,6 +90,9 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
         run: |
           node - <<'NODE'
           const required = [
@@ -100,19 +107,15 @@ jobs:
             "ALIYUN_OSS_REGION",
             "ALIYUN_OSS_ENDPOINT",
             "ALIYUN_OSS_PREFIX",
-            "APPLE_CERTIFICATE",
-            "APPLE_CERTIFICATE_PASSWORD",
-            "APPLE_ID",
-            "APPLE_PASSWORD",
-            "APPLE_TEAM_ID",
-            "KEYCHAIN_PASSWORD",
           ];
           const missing = required.filter((name) => !process.env[name]?.trim());
           if (missing.length) throw new Error(`Missing GitHub configuration: ${missing.join(", ")}`);
           if (!/^(1|true|yes|on)$/i.test(process.env.ALIYUN_OSS_ENABLED.trim())) {
             throw new Error("ALIYUN_OSS_ENABLED must be true to publish a release.");
           }
+
           NODE
+          node scripts/resolve-platform-signing.mjs
           node scripts/write-tauri-release-config.mjs
 
       - name: Test release manifest generator
@@ -176,10 +179,11 @@ jobs:
       - name: Configure Aliyun updater endpoint
         env:
           OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ matrix.id == 'windows' && secrets.WINDOWS_CERTIFICATE_THUMBPRINT || '' }}
         run: node scripts/write-tauri-release-config.mjs
 
       - name: Import Apple Developer ID certificate
-        if: matrix.id == 'macos'
+        if: matrix.id == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -208,7 +212,7 @@ jobs:
           test -n "$APPLE_SIGNING_IDENTITY"
           echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
 
-      - name: Build and sign universal macOS SQL LSP
+      - name: Build universal macOS SQL LSP
         if: matrix.id == 'macos'
         shell: bash
         run: |
@@ -224,30 +228,96 @@ jobs:
             vendor/sql-lsp/target/x86_64-apple-darwin/release/sql-lsp \
             -output src-tauri/binaries/sql-lsp
           chmod 0755 src-tauri/binaries/sql-lsp
+          lipo -verify_arch x86_64 arm64 src-tauri/binaries/sql-lsp
+
+      - name: Sign universal macOS SQL LSP
+        if: matrix.id == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
           codesign \
             --force \
             --options runtime \
             --timestamp \
             --sign "$APPLE_SIGNING_IDENTITY" \
             src-tauri/binaries/sql-lsp
-          lipo -verify_arch x86_64 arm64 src-tauri/binaries/sql-lsp
           codesign --verify --strict --verbose=2 src-tauri/binaries/sql-lsp
 
-      - name: Build signed Tauri bundles
+      - name: Import Windows Authenticode certificate
+        if: matrix.id == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true'
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $certificatePath = Join-Path $env:RUNNER_TEMP "oxide-studio-authenticode.pfx"
+          [IO.File]::WriteAllBytes(
+            $certificatePath,
+            [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+          )
+          $password = ConvertTo-SecureString `
+            $env:WINDOWS_CERTIFICATE_PASSWORD `
+            -AsPlainText `
+            -Force
+          $certificates = Import-PfxCertificate `
+            -FilePath $certificatePath `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -Password $password
+          $expectedThumbprint = ($env:WINDOWS_CERTIFICATE_THUMBPRINT -replace '\s', '').ToUpperInvariant()
+          $signingCertificate = $certificates |
+            Where-Object { $_.Thumbprint -eq $expectedThumbprint } |
+            Select-Object -First 1
+          if (-not $signingCertificate) {
+            throw "Imported certificate thumbprint does not match WINDOWS_CERTIFICATE_THUMBPRINT."
+          }
+          $signTool = Get-ChildItem `
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signTool) { throw "signtool.exe was not found." }
+          "WINDOWS_SIGNTOOL=$($signTool.FullName)" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Encoding utf8 `
+            -Append
+          "WINDOWS_CERTIFICATE_THUMBPRINT=$expectedThumbprint" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Encoding utf8 `
+            -Append
+
+      - name: Build and sign Windows SQL LSP
+        if: matrix.id == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          node scripts/prepare-sql-lsp.mjs
+          if ($LASTEXITCODE -ne 0) { throw "SQL LSP build failed." }
+          & $env:WINDOWS_SIGNTOOL sign `
+            /sha1 $env:WINDOWS_CERTIFICATE_THUMBPRINT `
+            /fd SHA256 `
+            /tr $env:WINDOWS_TIMESTAMP_URL `
+            /td SHA256 `
+            src-tauri\binaries\sql-lsp.exe
+          if ($LASTEXITCODE -ne 0) { throw "Signing sql-lsp.exe failed." }
+          & $env:WINDOWS_SIGNTOOL verify /pa /v src-tauri\binaries\sql-lsp.exe
+          if ($LASTEXITCODE -ne 0) { throw "Verifying sql-lsp.exe failed." }
+
+      - name: Build Tauri bundles
         uses: tauri-apps/tauri-action@v1
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
-          OXIDE_SKIP_SQL_LSP_PREPARE: ${{ matrix.id == 'macos' && '1' || '' }}
-          APPLE_ID: ${{ matrix.id == 'macos' && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ matrix.id == 'macos' && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ matrix.id == 'macos' && secrets.APPLE_TEAM_ID || '' }}
+          OXIDE_SKIP_SQL_LSP_PREPARE: ${{ (matrix.id == 'macos' || (matrix.id == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true')) && '1' || '' }}
+          APPLE_ID: ${{ matrix.id == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ matrix.id == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.id == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true' && secrets.APPLE_TEAM_ID || '' }}
         with:
           args: ${{ matrix.args }} --config src-tauri/tauri.release.conf.json
 
       - name: Verify macOS Developer ID signature and notarization ticket
-        if: matrix.id == 'macos'
+        if: matrix.id == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -259,6 +329,24 @@ jobs:
           codesign --verify --verbose=2 "$DMG_PATH"
           xcrun stapler validate "$APP_PATH"
           spctl --assess --type execute --verbose=2 "$APP_PATH"
+
+      - name: Verify Windows Authenticode signatures
+        if: matrix.id == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bundles = Get-ChildItem src-tauri\target -Recurse -File |
+            Where-Object {
+              $_.FullName -match '\\bundle\\(nsis|msi)\\' -and
+              $_.Extension -in ".exe", ".msi"
+            }
+          if (-not $bundles) { throw "No Windows installers were found." }
+          foreach ($bundle in $bundles) {
+            & $env:WINDOWS_SIGNTOOL verify /pa /v $bundle.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Authenticode verification failed: $($bundle.FullName)"
+            }
+          }
 
       - name: Upload bundles for OSS publication
         uses: actions/upload-artifact@v7
@@ -294,7 +382,7 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Download signed Tauri bundles
+      - name: Download Tauri bundles
         uses: actions/download-artifact@v8
         with:
           pattern: tauri-bundle-*

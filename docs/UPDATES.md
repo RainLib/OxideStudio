@@ -98,13 +98,18 @@ certificate and private key from Keychain Access as a password-protected
 | `APPLE_TEAM_ID` | Ten-character Apple Developer Team ID |
 | `KEYCHAIN_PASSWORD` | Random CI-only password used for the ephemeral runner keychain |
 
-The release workflow refuses to start when any of these values is missing. On
-the macOS runner it imports the certificate into an ephemeral keychain, lets
-Tauri sign and notarize the universal app, and then validates the Developer ID
-signature, stapled notarization ticket, and Gatekeeper assessment before
-uploading any artifact. The bundled SQL LSP executable is built for both Apple
-Silicon and Intel, merged with `lipo`, and signed separately with hardened
-runtime before Tauri seals the application bundle.
+When all six values are present, the macOS runner imports the certificate into
+an ephemeral keychain, lets Tauri sign and notarize the universal app, and then
+validates the Developer ID signature, stapled notarization ticket, and
+Gatekeeper assessment before uploading any artifact. The bundled SQL LSP
+executable is built for both Apple Silicon and Intel, merged with `lipo`, and
+signed separately with hardened runtime before Tauri seals the application
+bundle.
+
+When none of the Apple secrets exist, macOS signing and notarization are
+skipped and the unsigned/ad-hoc test bundle is still built. If only part of the
+group is configured, validation fails and lists the missing names; this avoids
+silently publishing a bundle that was expected to be signed.
 
 An ad-hoc signature (`signingIdentity: "-"`) is only suitable for local tests.
 It does not remove the Gatekeeper warning for downloaded software.
@@ -112,10 +117,28 @@ It does not remove the Gatekeeper warning for downloaded software.
 ### Windows Authenticode and SmartScreen
 
 Windows installer trust is separate from both Tauri updater signing and Apple
-signing. Production `.exe` and `.msi` bundles need Authenticode signing through
-a supported CA-backed certificate, Azure Artifact Signing, or another hardware
-or cloud signing provider wired through Tauri's `bundle.windows.signCommand`.
-Self-signed certificates are only appropriate for managed test machines.
+signing. The built-in workflow supports an exportable CA-backed Authenticode
+certificate in PFX format. Add all three repository secrets:
+
+| Secret | Value |
+| --- | --- |
+| `WINDOWS_CERTIFICATE` | Single-line base64 of the `.pfx` certificate and private key |
+| `WINDOWS_CERTIFICATE_PASSWORD` | Password protecting the `.pfx` |
+| `WINDOWS_CERTIFICATE_THUMBPRINT` | 40-character SHA-1 certificate thumbprint; spaces are accepted |
+
+The optional repository variable `WINDOWS_TIMESTAMP_URL` selects the RFC 3161
+timestamp service and defaults to `http://timestamp.digicert.com`. When the
+three secrets are present, the runner imports the certificate, signs the SQL
+LSP executable, configures Tauri to sign the application and `.exe`/`.msi`
+installers, timestamps them with SHA-256, and verifies every installer with
+`signtool`.
+
+When none of the Windows secrets exist, Authenticode is skipped and the
+unsigned test bundle is still built. A partially configured group fails
+validation. Certificates that cannot be exported to PFX, including many newer
+hardware-backed certificates, require Azure Artifact Signing or the provider's
+custom Tauri `bundle.windows.signCommand` instead. Self-signed certificates are
+only appropriate for managed test machines.
 
 Code signing displays a verified publisher and is required for a trustworthy
 distribution path, but SmartScreen also evaluates download reputation. For a

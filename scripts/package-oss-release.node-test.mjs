@@ -8,6 +8,7 @@ import {
   normalizeReleaseBaseUrl,
   writeReleaseConfig,
 } from "./write-tauri-release-config.mjs";
+import { resolvePlatformSigning } from "./resolve-platform-signing.mjs";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "oxide-release-"));
@@ -147,6 +148,68 @@ test("writes the updater endpoint and verification key into release config", asy
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("writes optional Windows Authenticode configuration", async () => {
+  const root = await mkdtemp(join(tmpdir(), "oxide-windows-signing-config-"));
+  try {
+    const output = join(root, "tauri.release.conf.json");
+    await writeReleaseConfig({
+      baseUrl: "https://downloads.example.com/releases",
+      publicKey: "updater-public-key",
+      output,
+      windowsCertificateThumbprint:
+        "01 23 45 67 89 ab cd ef 01 23 45 67 89 ab cd ef 01 23 45 67",
+      windowsTimestampUrl: "https://timestamp.example.com",
+    });
+    const config = JSON.parse(await readFile(output, "utf8"));
+    assert.deepEqual(config.bundle.windows, {
+      certificateThumbprint: "0123456789ABCDEF0123456789ABCDEF01234567",
+      digestAlgorithm: "sha256",
+      timestampUrl: "https://timestamp.example.com/",
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("skips platform signing only when each secret group is entirely absent", () => {
+  assert.deepEqual(
+    resolvePlatformSigning({}).map(({ output, enabled }) => ({
+      output,
+      enabled,
+    })),
+    [
+      { output: "apple_signing_enabled", enabled: false },
+      { output: "windows_signing_enabled", enabled: false },
+    ]
+  );
+
+  assert.throws(
+    () => resolvePlatformSigning({ APPLE_ID: "developer@example.com" }),
+    /macOS Developer ID signing is partially configured/
+  );
+  assert.throws(
+    () =>
+      resolvePlatformSigning({
+        WINDOWS_CERTIFICATE: "certificate",
+        WINDOWS_CERTIFICATE_PASSWORD: "password",
+      }),
+    /Windows Authenticode signing is partially configured.*WINDOWS_CERTIFICATE_THUMBPRINT/
+  );
+
+  const environment = {
+    APPLE_CERTIFICATE: "certificate",
+    APPLE_CERTIFICATE_PASSWORD: "password",
+    APPLE_ID: "developer@example.com",
+    APPLE_PASSWORD: "app-password",
+    APPLE_TEAM_ID: "TEAM123456",
+    KEYCHAIN_PASSWORD: "keychain-password",
+    WINDOWS_CERTIFICATE: "certificate",
+    WINDOWS_CERTIFICATE_PASSWORD: "password",
+    WINDOWS_CERTIFICATE_THUMBPRINT: "0123456789ABCDEF0123456789ABCDEF01234567",
+  };
+  assert.ok(resolvePlatformSigning(environment).every((group) => group.enabled));
 });
 
 test("rejects release config without an updater verification key", async () => {

@@ -16,7 +16,35 @@ export function normalizeReleaseBaseUrl(value) {
   return url.href.replace(/\/$/, "");
 }
 
-export async function writeReleaseConfig({ baseUrl, publicKey, output }) {
+function normalizeWindowsCertificateThumbprint(value) {
+  const thumbprint = value?.replace(/\s+/g, "").toUpperCase();
+  if (!thumbprint) return undefined;
+  if (!/^[0-9A-F]{40}$/.test(thumbprint)) {
+    throw new Error(
+      "WINDOWS_CERTIFICATE_THUMBPRINT must be a 40-character SHA-1 thumbprint."
+    );
+  }
+  return thumbprint;
+}
+
+function normalizeTimestampUrl(value) {
+  const url = new URL(value || "http://timestamp.digicert.com");
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("WINDOWS_TIMESTAMP_URL must use HTTP or HTTPS.");
+  }
+  if (url.username || url.password) {
+    throw new Error("WINDOWS_TIMESTAMP_URL cannot contain credentials.");
+  }
+  return url.href;
+}
+
+export async function writeReleaseConfig({
+  baseUrl,
+  publicKey,
+  output,
+  windowsCertificateThumbprint,
+  windowsTimestampUrl,
+}) {
   const normalizedBaseUrl = normalizeReleaseBaseUrl(baseUrl);
   const normalizedPublicKey = publicKey?.trim();
   if (!normalizedPublicKey) {
@@ -32,6 +60,18 @@ export async function writeReleaseConfig({ baseUrl, publicKey, output }) {
       },
     },
   };
+  const thumbprint = normalizeWindowsCertificateThumbprint(
+    windowsCertificateThumbprint
+  );
+  if (thumbprint) {
+    config.bundle = {
+      windows: {
+        certificateThumbprint: thumbprint,
+        digestAlgorithm: "sha256",
+        timestampUrl: normalizeTimestampUrl(windowsTimestampUrl),
+      },
+    };
+  }
 
   await mkdir(dirname(outputPath), { recursive: true });
   await writeFile(outputPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
@@ -46,7 +86,14 @@ async function main() {
   const publicKey = process.env.OXIDE_UPDATER_PUBLIC_KEY;
 
   const output = process.argv[2] || "src-tauri/tauri.release.conf.json";
-  const result = await writeReleaseConfig({ baseUrl, publicKey, output });
+  const result = await writeReleaseConfig({
+    baseUrl,
+    publicKey,
+    output,
+    windowsCertificateThumbprint:
+      process.env.WINDOWS_CERTIFICATE_THUMBPRINT,
+    windowsTimestampUrl: process.env.WINDOWS_TIMESTAMP_URL,
+  });
   console.log(`Tauri updater endpoint: ${result.endpoint}`);
 }
 
