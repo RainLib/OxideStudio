@@ -20,10 +20,23 @@ import type {
   AssistantPreparedTurn,
   AssistantToolCall,
   AssistantToolCallResult,
+  AssistantToolLoopEvent,
+  AssistantToolLoopOptions,
+  AssistantToolLoopResult,
   AssistantToolResultSummarizer,
   AssistantToolResultSummary,
   AssistantTurnInput,
 } from "./types";
+
+export const DEFAULT_ASSISTANT_TOOL_LOOP_LIMITS = {
+  maxFollowUpRounds: 4,
+  maxToolCalls: 12,
+} as const;
+
+const HARD_MAX_ASSISTANT_TOOL_LOOP_LIMITS = {
+  maxFollowUpRounds: 8,
+  maxToolCalls: 24,
+} as const;
 
 export type AssistantRuntimeOptions = {
   registry: AiToolRegistry;
@@ -192,6 +205,178 @@ export class AssistantRuntime {
     };
   }
 
+  async runToolLoop(
+    options: AssistantToolLoopOptions,
+  ): Promise<AssistantToolLoopResult> {
+    const context = options.context ?? options.turn.context;
+    const existingResults = options.existingResults ?? {};
+    const approvedStepIds = options.approvedStepIds ?? new Set<string>();
+    const limits = resolveToolLoopLimits(options.limits);
+    const completedResults: AssistantToolCallResult[] = [];
+    const followUpSteps: AssistantPlanStep[] = [];
+    const warnings: string[] = [];
+    const existingIds = new Set([
+      ...options.turn.suggestedPlan.map((step) => step.id),
+      ...Object.keys(existingResults),
+    ]);
+    const knownSignatures = new Set(
+      options.turn.suggestedPlan
+        .filter((step) => step.toolName)
+        .map(toolStepSignature),
+    );
+    let pendingSteps = options.steps.filter(
+      (step) => step.toolName && !existingResults[step.id],
+    );
+    let rounds = 0;
+    let toolCalls = 0;
+    let reachedLimit = false;
+    let failure: AssistantToolCallResult | null = null;
+
+    while (
+      pendingSteps.length > 0 &&
+      rounds < limits.maxFollowUpRounds &&
+      toolCalls < limits.maxToolCalls &&
+      !context.abortSignal?.aborted
+    ) {
+      const round = rounds + 1;
+      const roundResults: AssistantToolCallResult[] = [];
+
+      for (const step of pendingSteps) {
+        if (context.abortSignal?.aborted) break;
+        if (toolCalls >= limits.maxToolCalls) {
+          reachedLimit = true;
+          break;
+        }
+        if (!step.toolName || existingResults[step.id]) continue;
+
+        emitToolLoopEvent(options.onEvent, {
+          type: "stepStarted",
+          step,
+          round,
+          totalCalls: toolCalls,
+        });
+        if (context.abortSignal?.aborted) break;
+        const result =
+          step.requiresApproval && !approvedStepIds.has(step.id)
+            ? approvalRequiredResult(step)
+            : (
+                await this.executeToolCalls(
+                  [
+                    {
+                      id: step.id,
+                      toolName: step.toolName,
+                      input: step.input || {},
+                      approved: approvedStepIds.has(step.id),
+                    },
+                  ],
+                  context,
+                )
+              )[0];
+        toolCalls += 1;
+        if (!result) continue;
+
+        roundResults.push(result);
+        completedResults.push(result);
+        emitToolLoopEvent(options.onEvent, {
+          type: "stepCompleted",
+          step,
+          result,
+          round,
+          totalCalls: toolCalls,
+        });
+        if (result.status !== "success") {
+          failure = result;
+          break;
+        }
+      }
+
+      if (
+        context.abortSignal?.aborted ||
+        failure ||
+        roundResults.length === 0
+      ) {
+        break;
+      }
+
+      const summary = await this.summarizeToolResults(
+        options.summaryInput,
+        completedResults,
+        context,
+      );
+      if (context.abortSignal?.aborted) break;
+
+      rounds = round;
+      emitToolLoopEvent(options.onEvent, {
+        type: "roundSummarized",
+        summary,
+        round,
+        roundResults: [...roundResults],
+        completedResults: [...completedResults],
+      });
+
+      const normalized = this.normalizeSuggestedCalls(
+        summary.suggestedCalls ?? [],
+        existingIds,
+      );
+      const nextSteps: AssistantPlanStep[] = [];
+      for (const step of normalized.steps) {
+        const signature = toolStepSignature(step);
+        if (knownSignatures.has(signature)) continue;
+        knownSignatures.add(signature);
+        existingIds.add(step.id);
+        nextSteps.push(step);
+        followUpSteps.push(step);
+      }
+      if (nextSteps.length > 0 || normalized.warnings.length > 0) {
+        warnings.push(...normalized.warnings);
+        emitToolLoopEvent(options.onEvent, {
+          type: "planExtended",
+          steps: nextSteps,
+          warnings: normalized.warnings,
+        });
+      }
+
+      const safeFollowUps = nextSteps.filter(
+        (step) => step.toolName && !step.requiresApproval,
+      );
+      if (safeFollowUps.length === 0) break;
+      if (
+        rounds >= limits.maxFollowUpRounds ||
+        toolCalls >= limits.maxToolCalls
+      ) {
+        reachedLimit = true;
+        break;
+      }
+      pendingSteps = safeFollowUps;
+    }
+
+    if (reachedLimit && !context.abortSignal?.aborted) {
+      const warning = `Agent follow-up stopped after ${limits.maxFollowUpRounds} rounds or ${limits.maxToolCalls} tool calls.`;
+      warnings.push(warning);
+      emitToolLoopEvent(options.onEvent, { type: "limitReached", warning });
+    }
+
+    const common = {
+      results: completedResults,
+      followUpSteps,
+      warnings: uniqueStrings(warnings),
+      rounds,
+      toolCalls,
+    };
+    if (context.abortSignal?.aborted) {
+      return { ...common, status: "cancelled" };
+    }
+    if (failure) {
+      return {
+        ...common,
+        status: "failed",
+        error: failure.error || "Tool execution did not complete",
+      };
+    }
+    if (reachedLimit) return { ...common, status: "limitReached" };
+    return { ...common, status: "completed" };
+  }
+
   private createPlannerInput(
     input: AssistantTurnInput,
     contextOverrides?: Partial<AiToolExecutionContext>
@@ -317,6 +502,66 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
   const candidate = value as { then?: unknown } | null;
   return Boolean(candidate && typeof candidate.then === "function");
+}
+
+function resolveToolLoopLimits(
+  limits: AssistantToolLoopOptions["limits"],
+) {
+  return {
+    maxFollowUpRounds: boundedLoopLimit(
+      limits?.maxFollowUpRounds,
+      DEFAULT_ASSISTANT_TOOL_LOOP_LIMITS.maxFollowUpRounds,
+      HARD_MAX_ASSISTANT_TOOL_LOOP_LIMITS.maxFollowUpRounds,
+    ),
+    maxToolCalls: boundedLoopLimit(
+      limits?.maxToolCalls,
+      DEFAULT_ASSISTANT_TOOL_LOOP_LIMITS.maxToolCalls,
+      HARD_MAX_ASSISTANT_TOOL_LOOP_LIMITS.maxToolCalls,
+    ),
+  };
+}
+
+function boundedLoopLimit(
+  value: number | undefined,
+  fallback: number,
+  maximum: number,
+) {
+  return Number.isInteger(value) && value! > 0
+    ? Math.min(value!, maximum)
+    : fallback;
+}
+
+function approvalRequiredResult(
+  step: AssistantPlanStep,
+): AssistantToolCallResult {
+  return {
+    id: step.id,
+    toolName: step.toolName!,
+    status: "requiresApproval",
+    error: `${step.toolName} requires explicit approval`,
+  };
+}
+
+function emitToolLoopEvent(
+  listener: AssistantToolLoopOptions["onEvent"],
+  event: AssistantToolLoopEvent,
+) {
+  if (!listener) return;
+  try {
+    listener(event);
+  } catch {
+    // Observers must not change tool execution semantics.
+  }
+}
+
+function toolStepSignature(step: AssistantPlanStep) {
+  let input = "{}";
+  try {
+    input = JSON.stringify(step.input ?? {});
+  } catch {
+    input = "[unserializable]";
+  }
+  return `${step.toolName || "plan"}:${input}`;
 }
 
 function summarizeResultsLocally(

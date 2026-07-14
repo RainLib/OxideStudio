@@ -64,7 +64,7 @@ Deep Agents 的文件系统权限只约束其内置文件工具，不能替代 O
 | MCP / CLI 复用工具 | 已具备 | `src/ai/mcp`、`src/ai/cli` | 保持外部适配器定位 |
 | 模型 planner 与结果总结 | 已具备/部分 | `src/ai/assistant` | 增加 checkpoint、恢复、验证节点 |
 | LangGraph | 部分具备 | 当前主要为 `plan -> policy` 两节点 | Agent mode 引入完整状态图 |
-| 多轮工具循环 | 部分具备 | 循环和上限在 `AssistantSidebar` | 移入 runtime，UI 只渲染状态 |
+| 多轮工具循环 | 已具备/非持久 | `AssistantRuntime.runToolLoop` 已负责 policy、去重、预算、取消和 typed event；Sidebar 只投影状态 | 增加 approval pause token、checkpoint/resume 与 verification node |
 | 页面导航/编辑动作 | 已具备/部分 | `src/ai/ui-actions`、`databaseNavigation.ts`、`editorNavigation.ts`、`explainPlanNavigation.ts`、revision-bound patch preview | 补 durable task surface |
 | 持久 thread / memory | 缺失 | 无 checkpoint store | 项目隔离、可恢复、可清理 |
 | 子代理 | 缺失 | 无隔离的 subagent executor | 默认只读、受预算约束 |
@@ -283,6 +283,7 @@ type UiAction = {
 - Database Explorer 能定位当前 database 及远程 PostgreSQL database 下的 schema/object；Monaco range 统一为 one-based，LSP 的 zero-based range 在 attachment boundary 转换。
 - `plan.revealNode` 与 `schemaDiff.revealChange` 已连接对应 artifact surface，会校验 tab、artifact version 和 node/change identity 后再定位。
 - `editor.proposePatch` 是只读 artifact 工具：host 从当前 selection/整篇文档捕获 range、before text 和 revision，模型只能提出 replacement/title/rationale。`editor.previewPatch` 在 revision 与 before text 都匹配时打开 before/after；用户点击 Apply 后 tab store 再校验一次并写入，预览不会自动修改或执行 SQL。单侧内容限制 50,000 字符，binary preview 明确拒绝。`task.reveal` 仍稳定返回 unsupported，不伪造成功。
+- 有界多轮执行已从 `AssistantSidebar` 移入 `AssistantRuntime.runToolLoop`。Runtime 对模型 follow-up 重新走 manifest/policy、按 tool+input signature 去重、只接受精确 normalized step id 的批准、默认限制四轮/十二次调用，并发出 typed progress event；Sidebar 不再决定循环语义。当前 AbortController 与任务内存仍属于组件，尚不支持关闭后继续、checkpoint 或 crash resume。
 
 ### 5.5 结构化错误基线（2026-07-15）
 
@@ -412,7 +413,7 @@ AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV
 2. context snapshot/version、发送内容预览、database catalog identity。
 3. LSP duplicate/ranking 修复及回归测试。
 4. revision-bound Patch Preview/Apply 已完成；继续统一 vendor error 的 SQLSTATE/position/object，并把 Jump/Explain/Preview Fix/Validate 串为诊断闭环。
-5. 把工具循环从 `AssistantSidebar` 移到 runtime，Sidebar 变成纯视图。
+5. 有界工具循环、policy/去重/预算/取消已移入 runtime；继续把 controller、task state 和 approval pause 持久化，使 Sidebar 成为可卸载的纯视图。
 
 完成定义：AI 回答中的对象/错误/结果可以准确跳转；旧上下文和旧批准不能作用于新项目/数据库；重复列补全不再不可区分。
 

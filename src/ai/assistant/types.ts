@@ -106,3 +106,60 @@ export type AssistantPreparedTurn = {
   warnings: string[];
   notes: string[];
 };
+
+export type AssistantToolLoopLimits = {
+  maxFollowUpRounds: number;
+  maxToolCalls: number;
+};
+
+export type AssistantToolLoopEvent =
+  | {
+      type: "stepStarted";
+      step: AssistantPlanStep;
+      round: number;
+      totalCalls: number;
+    }
+  | {
+      type: "stepCompleted";
+      step: AssistantPlanStep;
+      result: AssistantToolCallResult;
+      round: number;
+      totalCalls: number;
+    }
+  | {
+      type: "roundSummarized";
+      summary: AssistantToolResultSummary;
+      round: number;
+      roundResults: AssistantToolCallResult[];
+      completedResults: AssistantToolCallResult[];
+    }
+  | {
+      type: "planExtended";
+      steps: AssistantPlanStep[];
+      warnings: string[];
+    }
+  | {
+      type: "limitReached";
+      warning: string;
+    };
+
+export type AssistantToolLoopOptions = {
+  turn: AssistantPreparedTurn;
+  summaryInput: AssistantTurnInput;
+  steps: AssistantPlanStep[];
+  context?: AiToolExecutionContext;
+  existingResults?: Readonly<Record<string, AssistantToolCallResult>>;
+  approvedStepIds?: ReadonlySet<string>;
+  limits?: Partial<AssistantToolLoopLimits>;
+  onEvent?: (event: AssistantToolLoopEvent) => void;
+};
+
+export type AssistantToolLoopResult = {
+  status: "completed" | "cancelled" | "failed" | "limitReached";
+  results: AssistantToolCallResult[];
+  followUpSteps: AssistantPlanStep[];
+  warnings: string[];
+  rounds: number;
+  toolCalls: number;
+  error?: string;
+};

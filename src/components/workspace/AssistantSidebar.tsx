@@ -10,6 +10,7 @@ import { useTabStore } from "@/store/useTabStore";
 import type {
   AssistantPlanStep,
   AssistantPreparedTurn,
+  AssistantToolLoopEvent,
   AssistantToolCallResult,
   AssistantToolResultSummary,
   AssistantTurnInput,
@@ -42,9 +43,6 @@ import type {
   AssistantAttachment,
   UiActionRequest,
 } from "@/ai/ui-actions/types";
-
-const MAX_AGENT_FOLLOW_UP_ROUNDS = 4;
-const MAX_AGENT_TOOL_CALLS = 12;
 
 export function AssistantSidebar() {
   const aiEnabled = useAiSettingsStore((state) => state.enabled);
@@ -321,54 +319,6 @@ export function AssistantSidebar() {
     }
   };
 
-  const executeStep = async (
-    turn: AssistantPreparedTurn,
-    step: AssistantPlanStep,
-    approved = false,
-    summarizeStep = true,
-    executionContext = turn.context,
-    summaryInput = activeTurnInput ?? { message, selectedText }
-  ) => {
-    if (!step.toolName) return null;
-
-    const [result] = await runtime.executeToolCalls(
-      [
-        {
-          id: step.id,
-          toolName: step.toolName,
-          input: step.input || {},
-          approved,
-        },
-      ],
-      executionContext
-    );
-    if (!result) return null;
-
-    const nextResults = { ...toolResultsRef.current, [step.id]: result };
-    toolResultsRef.current = nextResults;
-    setToolResults(nextResults);
-
-    if (summarizeStep && !executionContext.abortSignal?.aborted) {
-      const summary = await runtime.summarizeToolResults(
-        summaryInput,
-        [result],
-        executionContext
-      );
-      if (executionContext.abortSignal?.aborted) return result;
-      setToolSummaries((state) => ({ ...state, [step.id]: summary }));
-      appendAssistantMessage(
-        summary.message,
-        turn.requestId,
-        "normal",
-        createAssistantAttachments([result], executionContext)
-      );
-    }
-    if (result.status !== "success") {
-      setError(result.error || "Tool execution did not complete");
-    }
-    return result;
-  };
-
   const handleStopRunning = () => {
     const controller = activeAbortControllerRef.current;
     if (!controller || controller.signal.aborted) return;
@@ -459,23 +409,6 @@ export function AssistantSidebar() {
     setError(null);
     setIsCancelling(false);
     setIsRunningSafeSteps(true);
-    const completedResults: AssistantToolCallResult[] = [];
-    const existingIds = new Set([
-      ...turn.suggestedPlan.map((step) => step.id),
-      ...Object.keys(toolResultsRef.current),
-    ]);
-    const knownSignatures = new Set(
-      turn.suggestedPlan
-        .filter((step) => step.toolName)
-        .map(toolStepSignature)
-    );
-    let pendingSteps = steps.filter(
-      (step) => !toolResultsRef.current[step.id]
-    );
-    let round = 0;
-    let totalCalls = 0;
-    let reachedLimit = false;
-
     const appendPlanUpdates = (
       nextSteps: AssistantPlanStep[],
       warnings: string[]
@@ -495,108 +428,61 @@ export function AssistantSidebar() {
       });
     };
 
-    try {
-      while (
-        pendingSteps.length > 0 &&
-        round < MAX_AGENT_FOLLOW_UP_ROUNDS &&
-        totalCalls < MAX_AGENT_TOOL_CALLS
-      ) {
-        const roundResults: AssistantToolCallResult[] = [];
-        let roundFailed = false;
-
-        for (const step of pendingSteps) {
-          if (controller.signal.aborted) break;
-          if (totalCalls >= MAX_AGENT_TOOL_CALLS) {
-            reachedLimit = true;
-            break;
-          }
-          if (toolResultsRef.current[step.id]) continue;
-
-          setActiveStepId(step.id);
-          const result = await executeStep(
-            turn,
-            step,
-            initialApprovedStepIds.has(step.id),
-            false,
-            executionContext,
-            summaryInput
-          );
-          totalCalls += 1;
-          if (result) {
-            roundResults.push(result);
-            completedResults.push(result);
-          }
-          if (result && result.status !== "success") {
-            roundFailed = true;
-            break;
-          }
+    const handleLoopEvent = (event: AssistantToolLoopEvent) => {
+      if (event.type === "stepStarted") {
+        setActiveStepId(event.step.id);
+        return;
+      }
+      if (event.type === "stepCompleted") {
+        const nextResults = {
+          ...toolResultsRef.current,
+          [event.step.id]: event.result,
+        };
+        toolResultsRef.current = nextResults;
+        setToolResults(nextResults);
+        if (event.result.status !== "success") {
+          setError(event.result.error || "Tool execution did not complete");
         }
-
-        if (
-          controller.signal.aborted ||
-          roundFailed ||
-          roundResults.length === 0
-        ) {
-          break;
-        }
-
-        const summary = await runtime.summarizeToolResults(
-          summaryInput,
-          completedResults,
-          executionContext
-        );
-        if (controller.signal.aborted) break;
-
-        round += 1;
-        const lastResult = roundResults[roundResults.length - 1];
+        return;
+      }
+      if (event.type === "roundSummarized") {
+        const lastResult = event.roundResults[event.roundResults.length - 1];
         if (lastResult) {
           setToolSummaries((state) => ({
             ...state,
-            [lastResult.id]: summary,
+            [lastResult.id]: event.summary,
           }));
         }
         appendAssistantMessage(
-          summary.message,
+          event.summary.message,
           turn.requestId,
           "normal",
-          createAssistantAttachments(roundResults, executionContext)
+          createAssistantAttachments(event.roundResults, executionContext)
         );
-
-        const normalized = runtime.normalizeSuggestedCalls(
-          summary.suggestedCalls ?? [],
-          existingIds
-        );
-        const followUpSteps: AssistantPlanStep[] = [];
-        for (const step of normalized.steps) {
-          const signature = toolStepSignature(step);
-          if (knownSignatures.has(signature)) continue;
-          knownSignatures.add(signature);
-          existingIds.add(step.id);
-          followUpSteps.push(step);
-        }
-        appendPlanUpdates(followUpSteps, normalized.warnings);
-
-        const safeFollowUps = followUpSteps.filter(
-          (step) => step.toolName && !step.requiresApproval
-        );
-        if (safeFollowUps.length === 0) break;
-        if (
-          round >= MAX_AGENT_FOLLOW_UP_ROUNDS ||
-          totalCalls >= MAX_AGENT_TOOL_CALLS
-        ) {
-          reachedLimit = true;
-          break;
-        }
-        pendingSteps = safeFollowUps;
+        return;
       }
-
-      if (reachedLimit && !controller.signal.aborted) {
-        const warning = `Agent follow-up stopped after ${MAX_AGENT_FOLLOW_UP_ROUNDS} rounds or ${MAX_AGENT_TOOL_CALLS} tool calls.`;
-        appendPlanUpdates([], [warning]);
-        appendAssistantMessage(warning, turn.requestId);
+      if (event.type === "planExtended") {
+        appendPlanUpdates(event.steps, event.warnings);
+        return;
       }
-      if (controller.signal.aborted) {
+      appendPlanUpdates([], [event.warning]);
+      appendAssistantMessage(event.warning, turn.requestId);
+    };
+
+    try {
+      const result = await runtime.runToolLoop({
+        turn,
+        summaryInput,
+        steps,
+        context: executionContext,
+        existingResults: toolResultsRef.current,
+        approvedStepIds: initialApprovedStepIds,
+        onEvent: handleLoopEvent,
+      });
+      if (result.status === "cancelled") {
         setError("Assistant run cancelled");
+      } else if (result.status === "failed") {
+        setError(result.error || "Tool execution did not complete");
       }
     } catch (err: any) {
       setError(
@@ -741,16 +627,6 @@ export function AssistantSidebar() {
 
 function createConversationEntryId() {
   return `assistant-message-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function toolStepSignature(step: AssistantPlanStep) {
-  let input = "{}";
-  try {
-    input = JSON.stringify(step.input ?? {});
-  } catch {
-    input = "[unserializable]";
-  }
-  return `${step.toolName || "plan"}:${input}`;
 }
 
 function planResponseMessage(
