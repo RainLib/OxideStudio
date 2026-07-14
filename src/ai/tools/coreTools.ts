@@ -211,40 +211,46 @@ function providerListTool(): AiToolDefinition {
     permissions: ["read"],
     capabilities: ["provider", "metadata"],
     timeoutMs: 5_000,
-    execute: async () => ({
-      providers: listRegisteredDatabaseProviders().map((provider) => ({
-        id: provider.id,
-        displayName: provider.displayName,
-        priority: provider.priority ?? 0,
-        activated: provider.activated,
-        driverProfiles: (provider.driverProfiles ?? []).map(
-          (profile) => profile.driver,
-        ),
-        objectPreviewProviders: (provider.objectPreviewProviders ?? []).map(
-          (previewProvider) => previewProvider.id,
-        ),
-        aiToolFamilies: (provider.aiToolFamilies ?? []).map(
-          (family) => family.name,
-        ),
-      })),
-      driverProfiles: supportedDatabaseDriverProfiles().map((profile) => {
-        const capabilities = {
-          driver: profile.driver,
-          ...profile.capabilities,
-        } satisfies DatabaseCapabilities;
-        return {
-          driver: profile.driver,
-          menuLabel: profile.menuLabel,
-          displayName: profile.capabilities.displayName,
-          dataModel: profile.capabilities.dataModel,
-          lspLanguageId: profile.capabilities.lspLanguageId,
-          namespaceLabel: profile.capabilities.namespaceLabel,
-          defaultPort: profile.capabilities.defaultPort,
-          capabilities,
-          aiToolHints: aiToolHintsForCapabilities(capabilities),
-        };
-      }),
-    }),
+    execute: async () => {
+      const driverProfiles = supportedDatabaseDriverProfiles();
+      const supportedDrivers = new Set(
+        driverProfiles.map((profile) => String(profile.driver)),
+      );
+      return {
+        providers: listRegisteredDatabaseProviders().map((provider) => ({
+          id: provider.id,
+          displayName: provider.displayName,
+          priority: provider.priority ?? 0,
+          activated: provider.activated,
+          driverProfiles: (provider.driverProfiles ?? [])
+            .filter((profile) => supportedDrivers.has(String(profile.driver)))
+            .map((profile) => profile.driver),
+          objectPreviewProviders: (provider.objectPreviewProviders ?? []).map(
+            (previewProvider) => previewProvider.id,
+          ),
+          aiToolFamilies: (provider.aiToolFamilies ?? []).map(
+            (family) => family.name,
+          ),
+        })),
+        driverProfiles: driverProfiles.map((profile) => {
+          const capabilities = {
+            driver: profile.driver,
+            ...profile.capabilities,
+          } satisfies DatabaseCapabilities;
+          return {
+            driver: profile.driver,
+            menuLabel: profile.menuLabel,
+            displayName: profile.capabilities.displayName,
+            dataModel: profile.capabilities.dataModel,
+            lspLanguageId: profile.capabilities.lspLanguageId,
+            namespaceLabel: profile.capabilities.namespaceLabel,
+            defaultPort: profile.capabilities.defaultPort,
+            capabilities,
+            aiToolHints: aiToolHintsForCapabilities(capabilities),
+          };
+        }),
+      };
+    },
   };
 }
 

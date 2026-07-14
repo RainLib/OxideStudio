@@ -24,8 +24,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
-import { supportedDatabaseDriverProfiles } from "@/lib/databaseDialect";
 import type { DatabaseDriver } from "@/services/tauri";
+import { useEffect } from "react";
+import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
 
 const menuContentClass =
   "min-w-[238px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_16px_40px_rgba(0,0,0,0.42)]";
@@ -149,7 +150,16 @@ export function DatabaseExplorerToolbar({
   onRefresh,
   onToggleFilter,
 }: DatabaseExplorerToolbarProps) {
-  const driverProfiles = supportedDatabaseDriverProfiles();
+  const driverProfiles = useDatabaseDriverCatalogStore(
+    (state) => state.profiles,
+  );
+  const loadDatabaseDriverCatalog = useDatabaseDriverCatalogStore(
+    (state) => state.load,
+  );
+
+  useEffect(() => {
+    void loadDatabaseDriverCatalog();
+  }, [loadDatabaseDriverCatalog]);
 
   return (
     <div className="wb-explorer-toolbar gap-0.5 border-0 bg-transparent px-1.5">
@@ -163,8 +173,15 @@ export function DatabaseExplorerToolbar({
             <Plus size={14} />
           </button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" sideOffset={4} className={menuContentClass}>
-          <DropdownMenuItem className={menuItemClass} onClick={onNewQueryConsole}>
+        <DropdownMenuContent
+          align="start"
+          sideOffset={4}
+          className={menuContentClass}
+        >
+          <DropdownMenuItem
+            className={menuItemClass}
+            onClick={onNewQueryConsole}
+          >
             <SquareTerminal size={13} className="mr-2 text-sky-400" />
             Query Console
             <span className="ml-auto text-[10px] wb-muted">⌘T</span>
@@ -172,7 +189,10 @@ export function DatabaseExplorerToolbar({
           <DropdownMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
           <DropdownMenuSub>
             <DropdownMenuSubTrigger className={menuItemClass}>
-              <Database size={13} className="mr-2 text-[hsl(var(--wb-accent))]" />
+              <Database
+                size={13}
+                className="mr-2 text-[hsl(var(--wb-accent))]"
+              />
               Data Source
             </DropdownMenuSubTrigger>
             <DropdownMenuSubContent className={menuContentClass}>
@@ -196,7 +216,10 @@ export function DatabaseExplorerToolbar({
             <DropdownMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
           )}
           {canCreateNamespace && (
-            <DropdownMenuItem className={menuItemClass} onClick={onCreateNamespace}>
+            <DropdownMenuItem
+              className={menuItemClass}
+              onClick={onCreateNamespace}
+            >
               <Database size={13} className="mr-2" />
               {namespaceLabel.charAt(0).toUpperCase() + namespaceLabel.slice(1)}
             </DropdownMenuItem>

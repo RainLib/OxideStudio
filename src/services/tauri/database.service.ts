@@ -1,12 +1,15 @@
 import { invokeWithInterceptors } from "./client";
 import type { DatabaseCapabilities, DatabaseDriver } from "./types";
-import { registerDatabaseCapabilities } from "@/lib/databaseDialect";
+import {
+  registerDatabaseCapabilities,
+  registerRuntimeDatabaseCatalog,
+} from "@/lib/databaseDialect";
 
 const capabilitiesCache = new Map<string, Promise<DatabaseCapabilities>>();
 let capabilityListCache: Promise<DatabaseCapabilities[]> | null = null;
 
 function cloneCapabilities(
-  capabilities: DatabaseCapabilities
+  capabilities: DatabaseCapabilities,
 ): DatabaseCapabilities {
   return {
     ...capabilities,
@@ -15,14 +18,14 @@ function cloneCapabilities(
 }
 
 export async function getDatabaseCapabilities(
-  driver: DatabaseDriver
+  driver: DatabaseDriver,
 ): Promise<DatabaseCapabilities> {
   const cacheKey = String(driver);
   let cached = capabilitiesCache.get(cacheKey);
   if (!cached) {
     cached = invokeWithInterceptors<DatabaseCapabilities>(
       "get_database_capabilities",
-      { driver }
+      { driver },
     ).catch((error) => {
       capabilitiesCache.delete(cacheKey);
       throw error;
@@ -40,7 +43,7 @@ export async function listDatabaseCapabilities(): Promise<
 > {
   if (!capabilityListCache) {
     capabilityListCache = invokeWithInterceptors<DatabaseCapabilities[]>(
-      "list_database_capabilities"
+      "list_database_capabilities",
     ).catch((error) => {
       capabilityListCache = null;
       throw error;
@@ -48,7 +51,9 @@ export async function listDatabaseCapabilities(): Promise<
   }
 
   const capabilities = (await capabilityListCache).map(cloneCapabilities);
-  registerDatabaseCapabilities(capabilities);
+  if (capabilities.length > 0) {
+    registerRuntimeDatabaseCatalog(capabilities);
+  }
   return capabilities;
 }
 
@@ -58,7 +63,7 @@ export async function createDatabase(
   database: string,
   charset?: string,
   collation?: string,
-  owner?: string
+  owner?: string,
 ): Promise<string> {
   return invokeWithInterceptors<string>("create_database", {
     connectionId,
@@ -74,7 +79,7 @@ export async function dropDatabase(
   connectionId: string,
   driver: DatabaseDriver,
   database: string,
-  cascade = false
+  cascade = false,
 ): Promise<string> {
   return invokeWithInterceptors<string>("drop_database", {
     connectionId,
@@ -88,7 +93,7 @@ export async function renameDatabase(
   connectionId: string,
   driver: DatabaseDriver,
   oldName: string,
-  newName: string
+  newName: string,
 ): Promise<string> {
   return invokeWithInterceptors<string>("rename_database", {
     connectionId,

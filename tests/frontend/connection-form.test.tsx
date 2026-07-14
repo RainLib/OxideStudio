@@ -5,8 +5,15 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectionForm } from "@/components/connection/ConnectionForm";
-import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
-import { useConnectionStore, type ConnectionConfig } from "@/store/useConnectionStore";
+import {
+  defaultDatabaseCapabilities,
+  resetRuntimeDatabaseCatalogForTests,
+} from "@/lib/databaseDialect";
+import { resetDatabaseDriverCatalogStoreForTests } from "@/store/useDatabaseDriverCatalogStore";
+import {
+  useConnectionStore,
+  type ConnectionConfig,
+} from "@/store/useConnectionStore";
 
 const mocks = vi.hoisted(() => ({
   listDatabaseCapabilities: vi.fn(),
@@ -46,7 +53,7 @@ function selectedConnection(): ConnectionConfig {
 
 function buttonWithText(container: HTMLElement, text: string) {
   return Array.from(container.querySelectorAll("button")).find((button) =>
-    button.textContent?.includes(text)
+    button.textContent?.includes(text),
   );
 }
 
@@ -65,6 +72,8 @@ describe("ConnectionForm", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    resetRuntimeDatabaseCatalogForTests();
+    resetDatabaseDriverCatalogStoreForTests();
     mocks.listDatabaseCapabilities.mockResolvedValue([
       defaultDatabaseCapabilities("postgres"),
     ]);
@@ -113,14 +122,14 @@ describe("ConnectionForm", () => {
 
     await act(async () => {
       testButton?.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true })
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
       );
       await flushAsyncWork();
     });
 
     expect(onSubmit).not.toHaveBeenCalled();
     expect(testConnection).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "postgres-1" })
+      expect.objectContaining({ id: "postgres-1" }),
     );
     expect(saveConnection).not.toHaveBeenCalled();
     expect(connect).not.toHaveBeenCalled();
@@ -143,7 +152,7 @@ describe("ConnectionForm", () => {
 
     await act(async () => {
       testButton?.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true })
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
       );
       await flushAsyncWork();
     });
@@ -164,14 +173,15 @@ describe("ConnectionForm", () => {
       await flushAsyncWork();
     });
 
-    const hostInput = container.querySelector<HTMLInputElement>("#connection-host");
+    const hostInput =
+      container.querySelector<HTMLInputElement>("#connection-host");
     expect(hostInput).toBeTruthy();
 
     await act(async () => {
       if (!hostInput) return;
       const valueSetter = Object.getOwnPropertyDescriptor(
         HTMLInputElement.prototype,
-        "value"
+        "value",
       )?.set;
       valueSetter?.call(hostInput, "database.internal");
       hostInput.dispatchEvent(new Event("input", { bubbles: true }));
@@ -209,12 +219,13 @@ describe("ConnectionForm", () => {
 
     await act(async () => {
       buttonWithText(container, "SSH/SSL")?.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true })
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
       );
     });
 
     const sshHost = container.querySelector<HTMLInputElement>("#ssh-host");
-    const sshPassword = container.querySelector<HTMLInputElement>("#ssh-password");
+    const sshPassword =
+      container.querySelector<HTMLInputElement>("#ssh-password");
     expect(sshHost?.value).toBe("bastion.example.com");
     expect(sshPassword?.type).toBe("password");
 
@@ -222,7 +233,7 @@ describe("ConnectionForm", () => {
       if (!sshHost) return;
       const valueSetter = Object.getOwnPropertyDescriptor(
         HTMLInputElement.prototype,
-        "value"
+        "value",
       )?.set;
       valueSetter?.call(sshHost, "jump.internal");
       sshHost.dispatchEvent(new Event("input", { bubbles: true }));
@@ -236,7 +247,7 @@ describe("ConnectionForm", () => {
       }),
     });
     expect(updateConnectionConfig).not.toHaveBeenCalledWith(
-      expect.objectContaining({ connectionUrl: "" })
+      expect.objectContaining({ connectionUrl: "" }),
     );
   });
 
@@ -255,14 +266,18 @@ describe("ConnectionForm", () => {
     });
 
     expect(
-      container.querySelector('button[title="Database"]')?.getAttribute("aria-checked")
+      container
+        .querySelector('button[title="Database"]')
+        ?.getAttribute("aria-checked"),
     ).toBe("true");
 
     await act(async () => {
-      container.querySelector<HTMLButtonElement>('button[title="KeyRound"]')?.click();
+      container
+        .querySelector<HTMLButtonElement>('button[title="KeyRound"]')
+        ?.click();
       container
         .querySelector<HTMLButtonElement>(
-          'button[aria-label="Connection color #d95b5b"]'
+          'button[aria-label="Connection color #d95b5b"]',
         )
         ?.click();
     });
@@ -287,7 +302,7 @@ describe("ConnectionForm", () => {
     });
 
     const noColor = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="No connection background color"]'
+      'button[aria-label="No connection background color"]',
     );
     expect(noColor?.getAttribute("aria-checked")).toBe("true");
 

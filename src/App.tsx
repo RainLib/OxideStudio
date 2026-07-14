@@ -7,11 +7,15 @@ import { WorkspacePage } from "@/pages/workspace";
 import { Loader2 } from "lucide-react";
 import { LspConnectionSyncer } from "@/components/lsp";
 import { ErrorDisplay } from "@/components/shared";
+import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
 
 function App() {
   // All hooks must be called before any conditional returns
   const { loadConnections, isLoading, loadError } = useConnectionStore();
   const { loadSettings } = useSettingsStore();
+  const loadDatabaseDriverCatalog = useDatabaseDriverCatalogStore(
+    (state) => state.load,
+  );
 
   // Register app-wide shortcuts (not system-wide, only when app is focused)
   useShortcuts();
@@ -19,7 +23,10 @@ function App() {
   useEffect(() => {
     void loadSettings();
     void loadConnections();
-  }, [loadConnections, loadSettings]);
+    // Driver discovery must not gate the desktop shell. Older or partially
+    // configured backends fall back to the bundled profiles.
+    void loadDatabaseDriverCatalog();
+  }, [loadConnections, loadDatabaseDriverCatalog, loadSettings]);
 
   useEffect(() => {
     const reloadExternalSettings = () => {

@@ -31,6 +31,7 @@
 
 - **Tauri v2**: 跨平台应用框架。
 - **SQLx 与原生驱动**: 提供关系型数据库及 MongoDB、Redis、Elasticsearch 的统一访问能力。
+- **运行时能力目录**: 数据源创建菜单与 AI 能力列表以后端实际注册的 driver 为准；本地 metadata 使用 SQLite，但当前不等同于 SQLite 数据源支持。
 - **Tokio**: 高性能异步运行时。
 - **Anyhow/Thiserror**: 严谨的错误处理。
 

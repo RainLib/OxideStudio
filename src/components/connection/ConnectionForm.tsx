@@ -31,18 +31,14 @@ import {
   defaultDatabaseCapabilities,
   defaultDatabaseName,
   defaultDatabasePort,
-  supportedDatabaseDriverProfiles,
 } from "@/lib/databaseDialect";
 import { cn } from "@/lib/utils";
-import {
-  databaseService,
-  type DatabaseCapabilities,
-  type DatabaseDriver,
-} from "@/services/tauri";
+import { type DatabaseDriver } from "@/services/tauri";
 import {
   useConnectionStore,
   type ConnectionConfig,
 } from "@/store/useConnectionStore";
+import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
 
 const CONNECTION_COLORS = [
   "#d9904f",
@@ -71,20 +67,14 @@ const fieldClass =
 const labelClass =
   "flex h-7 items-center justify-end pr-3 text-[11px] text-[hsl(var(--wb-text-muted))]";
 
-function fallbackDriverCapabilities() {
-  return supportedDatabaseDriverProfiles().map((profile) =>
-    defaultDatabaseCapabilities(profile.driver)
-  );
-}
-
 function uniqueConnections(
   connections: ConnectionConfig[],
-  selectedConnection: ConnectionConfig | null
+  selectedConnection: ConnectionConfig | null,
 ) {
   if (!selectedConnection) return connections;
   if (connections.some((item) => item.id === selectedConnection.id)) {
     return connections.map((item) =>
-      item.id === selectedConnection.id ? selectedConnection : item
+      item.id === selectedConnection.id ? selectedConnection : item,
     );
   }
   return [selectedConnection, ...connections];
@@ -110,50 +100,25 @@ export function ConnectionForm({
   const [showSshPassphrase, setShowSshPassphrase] = useState(false);
   const [status, setStatus] = useState<ConnectionStatus>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const [driverCapabilities, setDriverCapabilities] =
-    useState<DatabaseCapabilities[]>(fallbackDriverCapabilities);
+  const driverProfiles = useDatabaseDriverCatalogStore(
+    (state) => state.profiles,
+  );
+  const loadDatabaseDriverCatalog = useDatabaseDriverCatalogStore(
+    (state) => state.load,
+  );
 
   useEffect(() => {
-    let cancelled = false;
-    databaseService
-      .listDatabaseCapabilities()
-      .then((capabilities) => {
-        if (!cancelled && capabilities.length > 0) {
-          setDriverCapabilities(capabilities);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setDriverCapabilities(fallbackDriverCapabilities());
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    void loadDatabaseDriverCatalog();
+  }, [loadDatabaseDriverCatalog]);
 
   useEffect(() => {
     setStatus(null);
     setSection("general");
   }, [selectedConnection?.id]);
 
-  const driverProfiles = useMemo(() => {
-    const profiles = new Map(
-      supportedDatabaseDriverProfiles().map((profile) => [
-        String(profile.driver),
-        profile,
-      ])
-    );
-    driverCapabilities.forEach((capabilities) => {
-      profiles.set(
-        String(capabilities.driver),
-        databaseDriverProfile(capabilities.driver)
-      );
-    });
-    return Array.from(profiles.values());
-  }, [driverCapabilities]);
-
   const dataSources = useMemo(
     () => uniqueConnections(connections, selectedConnection),
-    [connections, selectedConnection]
+    [connections, selectedConnection],
   );
 
   if (!selectedConnection) {
@@ -165,6 +130,11 @@ export function ConnectionForm({
   }
 
   const profile = databaseDriverProfile(selectedConnection.driver);
+  const editableDriverProfiles = driverProfiles.some(
+    (item) => item.driver === selectedConnection.driver,
+  )
+    ? driverProfiles
+    : [profile, ...driverProfiles];
   const capabilities = defaultDatabaseCapabilities(selectedConnection.driver);
   const generatedUrl = buildConnectionUrl({
     driver: selectedConnection.driver,
@@ -192,7 +162,7 @@ export function ConnectionForm({
   const updateField = (
     field: keyof ConnectionConfig,
     value: ConnectionConfig[keyof ConnectionConfig],
-    invalidateUrl = false
+    invalidateUrl = false,
   ) => {
     updateConnectionConfig({
       [field]: value,
@@ -202,7 +172,7 @@ export function ConnectionForm({
   };
 
   const updateSshTunnel = (
-    updates: Partial<NonNullable<ConnectionConfig["sshTunnel"]>>
+    updates: Partial<NonNullable<ConnectionConfig["sshTunnel"]>>,
   ) => {
     updateConnectionConfig({
       sshTunnel: {
@@ -223,7 +193,8 @@ export function ConnectionForm({
     updateConnectionConfig({
       driver,
       port:
-        !selectedConnection.port || selectedConnection.port === previousDefaultPort
+        !selectedConnection.port ||
+        selectedConnection.port === previousDefaultPort
           ? defaultDatabasePort(driver) || undefined
           : selectedConnection.port,
       database:
@@ -232,7 +203,8 @@ export function ConnectionForm({
           ? defaultDatabaseName(driver)
           : selectedConnection.database,
       icon:
-        !selectedConnection.icon || selectedConnection.icon === previousDefaultIcon
+        !selectedConnection.icon ||
+        selectedConnection.icon === previousDefaultIcon
           ? nextProfile.defaultIcon
           : selectedConnection.icon,
       connectionUrl: "",
@@ -267,7 +239,7 @@ export function ConnectionForm({
             database: parsed.database || "",
             sslMode: parsed.sslMode,
           }
-        : { connectionUrl: value }
+        : { connectionUrl: value },
     );
     setStatus(null);
   };
@@ -279,7 +251,7 @@ export function ConnectionForm({
       setStatus(
         error
           ? { type: "error", message: error }
-          : { type: "success", message: "Connection successful" }
+          : { type: "success", message: "Connection successful" },
       );
     } catch (error) {
       setStatus({
@@ -380,7 +352,7 @@ export function ConnectionForm({
                 "relative flex h-8 items-center px-3 text-[12px]",
                 section === value
                   ? "text-[hsl(var(--wb-text))] after:absolute after:bottom-0 after:left-2 after:right-2 after:h-0.5 after:bg-[hsl(var(--wb-accent))]"
-                  : "text-[hsl(var(--wb-text-muted))] hover:text-[hsl(var(--wb-text))]"
+                  : "text-[hsl(var(--wb-text-muted))] hover:text-[hsl(var(--wb-text))]",
               )}
               onClick={() => setSection(value)}
             >
@@ -392,7 +364,9 @@ export function ConnectionForm({
         <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
           {section === "general" && (
             <div className="mx-auto grid w-full max-w-[720px] grid-cols-[132px_minmax(0,1fr)] gap-y-2 px-6 py-5">
-              <label className={labelClass} htmlFor="connection-host">Host</label>
+              <label className={labelClass} htmlFor="connection-host">
+                Host
+              </label>
               <div className="grid grid-cols-[minmax(0,1fr)_116px] gap-2">
                 <input
                   id="connection-host"
@@ -411,18 +385,24 @@ export function ConnectionForm({
                     onChange={(event) =>
                       updateField(
                         "port",
-                        event.target.value ? Number(event.target.value) : undefined,
-                        true
+                        event.target.value
+                          ? Number(event.target.value)
+                          : undefined,
+                        true,
                       )
                     }
                     className={fieldClass}
-                    placeholder={String(defaultDatabasePort(selectedConnection.driver) || "")}
+                    placeholder={String(
+                      defaultDatabasePort(selectedConnection.driver) || "",
+                    )}
                     aria-label="Port"
                   />
                 </div>
               </div>
 
-              <label className={labelClass} htmlFor="connection-user">User</label>
+              <label className={labelClass} htmlFor="connection-user">
+                User
+              </label>
               <input
                 id="connection-user"
                 value={selectedConnection.user || ""}
@@ -433,7 +413,9 @@ export function ConnectionForm({
                 autoComplete="off"
               />
 
-              <label className={labelClass} htmlFor="connection-password">Password</label>
+              <label className={labelClass} htmlFor="connection-password">
+                Password
+              </label>
               <div className="relative">
                 <input
                   id="connection-password"
@@ -465,10 +447,14 @@ export function ConnectionForm({
                   updateField("database", event.target.value, true)
                 }
                 className={fieldClass}
-                placeholder={defaultDatabaseName(selectedConnection.driver) || "database"}
+                placeholder={
+                  defaultDatabaseName(selectedConnection.driver) || "database"
+                }
               />
 
-              <label className={labelClass} htmlFor="connection-url">URL</label>
+              <label className={labelClass} htmlFor="connection-url">
+                URL
+              </label>
               <div className="relative">
                 <input
                   id="connection-url"
@@ -526,24 +512,32 @@ export function ConnectionForm({
 
               {sshTunnel.enabled && (
                 <>
-                  <label className={labelClass} htmlFor="ssh-host">SSH host</label>
+                  <label className={labelClass} htmlFor="ssh-host">
+                    SSH host
+                  </label>
                   <div className="grid grid-cols-[minmax(0,1fr)_116px] gap-2">
                     <input
                       id="ssh-host"
                       value={sshTunnel.host}
-                      onChange={(event) => updateSshTunnel({ host: event.target.value })}
+                      onChange={(event) =>
+                        updateSshTunnel({ host: event.target.value })
+                      }
                       className={fieldClass}
                       placeholder="bastion.example.com"
                       autoComplete="off"
                     />
                     <div className="grid grid-cols-[30px_minmax(0,1fr)] items-center gap-2">
-                      <span className="text-right text-[11px] wb-muted">Port</span>
+                      <span className="text-right text-[11px] wb-muted">
+                        Port
+                      </span>
                       <input
                         type="number"
                         value={sshTunnel.port || ""}
                         onChange={(event) =>
                           updateSshTunnel({
-                            port: event.target.value ? Number(event.target.value) : 22,
+                            port: event.target.value
+                              ? Number(event.target.value)
+                              : 22,
                           })
                         }
                         className={fieldClass}
@@ -554,11 +548,15 @@ export function ConnectionForm({
                     </div>
                   </div>
 
-                  <label className={labelClass} htmlFor="ssh-username">Username</label>
+                  <label className={labelClass} htmlFor="ssh-username">
+                    Username
+                  </label>
                   <input
                     id="ssh-username"
                     value={sshTunnel.username}
-                    onChange={(event) => updateSshTunnel({ username: event.target.value })}
+                    onChange={(event) =>
+                      updateSshTunnel({ username: event.target.value })
+                    }
                     className={fieldClass}
                     autoComplete="off"
                   />
@@ -572,7 +570,10 @@ export function ConnectionForm({
                       })
                     }
                   >
-                    <SelectTrigger className={fieldClass} aria-label="SSH authentication method">
+                    <SelectTrigger
+                      className={fieldClass}
+                      aria-label="SSH authentication method"
+                    >
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
@@ -583,7 +584,9 @@ export function ConnectionForm({
 
                   {sshTunnel.authMethod === "password" ? (
                     <>
-                      <label className={labelClass} htmlFor="ssh-password">Password</label>
+                      <label className={labelClass} htmlFor="ssh-password">
+                        Password
+                      </label>
                       <div className="relative">
                         <input
                           id="ssh-password"
@@ -598,35 +601,53 @@ export function ConnectionForm({
                         <button
                           type="button"
                           className="wb-icon-button absolute right-0.5 top-0.5"
-                          onClick={() => setShowSshPassword((visible) => !visible)}
-                          title={showSshPassword ? "Hide SSH password" : "Show SSH password"}
+                          onClick={() =>
+                            setShowSshPassword((visible) => !visible)
+                          }
+                          title={
+                            showSshPassword
+                              ? "Hide SSH password"
+                              : "Show SSH password"
+                          }
                         >
-                          {showSshPassword ? <EyeOff size={12} /> : <Eye size={12} />}
+                          {showSshPassword ? (
+                            <EyeOff size={12} />
+                          ) : (
+                            <Eye size={12} />
+                          )}
                         </button>
                       </div>
                     </>
                   ) : (
                     <>
-                      <label className={labelClass} htmlFor="ssh-private-key">Private key</label>
+                      <label className={labelClass} htmlFor="ssh-private-key">
+                        Private key
+                      </label>
                       <input
                         id="ssh-private-key"
                         value={sshTunnel.privateKeyPath || ""}
                         onChange={(event) =>
-                          updateSshTunnel({ privateKeyPath: event.target.value })
+                          updateSshTunnel({
+                            privateKeyPath: event.target.value,
+                          })
                         }
                         className={cn(fieldClass, "font-mono text-[11px]")}
                         placeholder="~/.ssh/id_ed25519"
                         autoComplete="off"
                       />
 
-                      <label className={labelClass} htmlFor="ssh-passphrase">Passphrase</label>
+                      <label className={labelClass} htmlFor="ssh-passphrase">
+                        Passphrase
+                      </label>
                       <div className="relative">
                         <input
                           id="ssh-passphrase"
                           type={showSshPassphrase ? "text" : "password"}
                           value={sshTunnel.privateKeyPassphrase || ""}
                           onChange={(event) =>
-                            updateSshTunnel({ privateKeyPassphrase: event.target.value })
+                            updateSshTunnel({
+                              privateKeyPassphrase: event.target.value,
+                            })
                           }
                           className={cn(fieldClass, "pr-8")}
                           autoComplete="off"
@@ -634,10 +655,20 @@ export function ConnectionForm({
                         <button
                           type="button"
                           className="wb-icon-button absolute right-0.5 top-0.5"
-                          onClick={() => setShowSshPassphrase((visible) => !visible)}
-                          title={showSshPassphrase ? "Hide key passphrase" : "Show key passphrase"}
+                          onClick={() =>
+                            setShowSshPassphrase((visible) => !visible)
+                          }
+                          title={
+                            showSshPassphrase
+                              ? "Hide key passphrase"
+                              : "Show key passphrase"
+                          }
                         >
-                          {showSshPassphrase ? <EyeOff size={12} /> : <Eye size={12} />}
+                          {showSshPassphrase ? (
+                            <EyeOff size={12} />
+                          ) : (
+                            <Eye size={12} />
+                          )}
                         </button>
                       </div>
                     </>
@@ -658,7 +689,7 @@ export function ConnectionForm({
                         "text-[11px]",
                         sshTunnel.strictHostKeyChecking
                           ? "wb-muted"
-                          : "text-amber-400"
+                          : "text-amber-400",
                       )}
                     >
                       {sshTunnel.strictHostKeyChecking
@@ -682,7 +713,7 @@ export function ConnectionForm({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
-                  {driverProfiles.map((item) => (
+                  {editableDriverProfiles.map((item) => (
                     <SelectItem key={item.driver} value={item.driver}>
                       {item.menuLabel}
                     </SelectItem>
@@ -703,7 +734,7 @@ export function ConnectionForm({
                   className={cn(
                     "relative h-4 w-4 rounded-full border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))]",
                     !selectedConnection.color &&
-                      "ring-2 ring-[hsl(var(--wb-accent))] ring-offset-2 ring-offset-[hsl(var(--wb-editor))]"
+                      "ring-2 ring-[hsl(var(--wb-accent))] ring-offset-2 ring-offset-[hsl(var(--wb-editor))]",
                   )}
                   onClick={() => updateField("color", undefined)}
                   aria-label="No connection background color"
@@ -720,7 +751,7 @@ export function ConnectionForm({
                     className={cn(
                       "h-4 w-4 rounded-full border border-white/10 transition-transform hover:scale-110",
                       selectedConnection.color === color &&
-                        "ring-2 ring-[hsl(var(--wb-accent))] ring-offset-2 ring-offset-[hsl(var(--wb-editor))]"
+                        "ring-2 ring-[hsl(var(--wb-accent))] ring-offset-2 ring-offset-[hsl(var(--wb-editor))]",
                     )}
                     style={{ backgroundColor: color }}
                     onClick={() => updateField("color", color)}
@@ -747,7 +778,7 @@ export function ConnectionForm({
                       className={cn(
                         "flex h-7 w-7 items-center justify-center rounded-[4px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]",
                         isSelected &&
-                          "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+                          "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]",
                       )}
                       onClick={() => updateField("icon", icon)}
                       title={icon}
@@ -762,7 +793,9 @@ export function ConnectionForm({
                 })}
               </div>
 
-              <label className={labelClass} htmlFor="connection-tags">Tags</label>
+              <label className={labelClass} htmlFor="connection-tags">
+                Tags
+              </label>
               <input
                 id="connection-tags"
                 value={(selectedConnection.tags || []).join(", ")}
@@ -772,7 +805,7 @@ export function ConnectionForm({
                     event.target.value
                       .split(",")
                       .map((tag) => tag.trim())
-                      .filter(Boolean)
+                      .filter(Boolean),
                   )
                 }
                 className={fieldClass}
@@ -805,7 +838,7 @@ export function ConnectionForm({
                     ? "text-emerald-400"
                     : status.type === "error"
                       ? "text-red-400"
-                      : "wb-muted"
+                      : "wb-muted",
                 )}
               >
                 {status.type === "success" && <Check size={12} />}

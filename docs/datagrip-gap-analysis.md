@@ -155,7 +155,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | DG-P0-02 | Query History 2.0 | 记录 connection/schema/database、duration、success/error、row count；支持筛选、单条删除、复制到 editor 和 rerun | 已完成 |
 | DG-P0-03 | Value Editor | text/JSON/date/binary 类型有只读/可编辑大视图；明确 NULL、空串和未加载状态；提交沿用 mutation gate | 已完成 |
 | DG-P0-04 | Explain Plan MVP | PostgreSQL/MySQL 支持文本/JSON plan；只读执行；显示 cost/rows/time，失败可定位到 driver 能力 | 已完成 |
-| DG-P0-05 | Driver 与文档一致性 | 增加 SQLite driver，或从发布文档移除未实现支持；能力列表由 runtime registry 生成 | 待开始 |
+| DG-P0-05 | Driver 与文档一致性 | 增加 SQLite driver，或从发布文档移除未实现支持；能力列表由 runtime registry 生成 | 已完成：SQLite/SQL Server 明确为规划项；后端 capability list 驱动连接 UI、Explorer 与 AI，失败仅降级不阻塞启动 |
 | DG-P0-06 | 结构化错误协议 | connection/query/schema/table/file command 返回稳定 code、message、context、retryable；UI 不再解析字符串前缀 | 已完成 |
 | DG-P0-07 | CSV Import Mapping | 导入前预览、编码/delimiter/header、列映射、类型错误摘要和事务性提交 | 待开始 |
 | DG-P0-08 | LSP catalog scope 与候选排序 | `(connection, database, schema)` 严格隔离；显式 qualifier/当前 statement/DML target/active table 排序；同名列以 alias/table 区分；同 source 去重；覆盖跨 PostgreSQL database 回归 | 已完成 |
@@ -198,4 +198,5 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 3. **DG-P0-06 结构化错误协议** 已完成：envelope 与直接 Tauri rejection 统一为 `ApiError`，project revision conflict 不再依赖字符串前缀，错误 context 使用白名单且不包含 SQL、URL、密码或文件内容。
 4. **DG-P0-03 Value Editor** 已完成：类型感知大视图、四态值语义、JSON/binary/date 校验和既有 mutation gate 已有组件与模型测试。
 5. **DG-P0-04 Explain Plan MVP** 已完成：后端生成 driver-specific SQL 并强制单条只读源查询，PostgreSQL/MySQL 结果规范化为稳定 plan tree，UI 支持 tree/raw、estimate/analyze、取消和节点指标；AI 只允许无审批 estimate，并通过 `plan.revealNode` 回到精确节点。安全边界见 [ADR-0003](decisions/0003-explain-plan-safety.md)。
-6. 下一项为 **DG-P0-05 Driver 与文档一致性**，随后推进 **DG-P0-07 CSV Import Mapping**；完整 AI plan explanation/优化前后验证转入 P1。
+6. **DG-P0-05 Driver 与文档一致性** 已完成：README 不声明 SQLite/SQL Server 已支持，`sqlx/sqlite` 明确仅用于 MetaStore；后端完整 capability list 成为连接 UI、Explorer 新建菜单和 AI `provider.list` 的权威目录，能力发现失败会保留内置目录且不阻塞应用壳。
+7. 下一项推进 **DG-P0-07 CSV Import Mapping**；完整 AI plan explanation/优化前后验证转入 P1。

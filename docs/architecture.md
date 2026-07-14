@@ -98,7 +98,7 @@ flowchart LR
 
 ### 3.4 数据库能力与 Provider 扩展
 
-`src/lib/databaseDialect.ts` 定义前端 `DatabaseDriverProfile` 与默认 capabilities。后端 `get_database_capabilities` 返回运行时能力后，会覆盖前端默认值。`src/providers/` 将下列扩展点组合成 provider 注册：
+`src/lib/databaseDialect.ts` 定义前端 `DatabaseDriverProfile` 与离线 fallback capabilities。应用启动后非阻塞调用后端 `list_database_capabilities`，把该完整列表注册为当前构建的权威 driver catalog；Connection Form、Database Explorer 新建菜单和 AI `provider.list` 共用 `useDatabaseDriverCatalogStore`/同一 catalog。单 driver 的 `get_database_capabilities` 只更新能力，不得把未在完整列表中的 driver 误当成可创建。命令不可用或返回失败时保留内置 fallback，且不能阻塞主界面。`src/providers/` 将下列扩展点组合成 provider 注册：
 
 - 驱动显示信息和连接参数；
 - 数据库对象的创建、预览、删除查询模板；
@@ -149,7 +149,7 @@ SQL 拼接、标识符引用、只读判断、修订冲突和路径穿越防护�
 - Redis
 - Elasticsearch
 
-SQLite 和 SQL Server 当前没有运行时 driver；任何面向用户的支持列表都应以这里和 `databaseDialect.ts` 的交集为准。
+SQLite 和 SQL Server 当前没有运行时 driver；Cargo 中的 `sqlx/sqlite` feature 只服务本地 `MetaStore`，不代表可连接 SQLite 数据源。任何面向用户或 AI 的支持列表都以后端 `list_database_capabilities` 为权威来源，前端 profile 只提供显示/连接表单信息和离线降级。
 
 ### 4.4 本地持久化
 

@@ -9,6 +9,7 @@ import App from "@/App";
 const mocks = vi.hoisted(() => ({
   loadConnections: vi.fn(async () => undefined),
   loadSettings: vi.fn(() => new Promise<void>(() => undefined)),
+  loadDriverCatalog: vi.fn(() => new Promise<void>(() => undefined)),
 }));
 
 vi.mock("@/store/useConnectionStore", () => ({
@@ -21,6 +22,12 @@ vi.mock("@/store/useConnectionStore", () => ({
 
 vi.mock("@/store/useSettingsStore", () => ({
   useSettingsStore: () => ({ loadSettings: mocks.loadSettings }),
+}));
+
+vi.mock("@/store/useDatabaseDriverCatalogStore", () => ({
+  useDatabaseDriverCatalogStore: (
+    selector: (state: { load: typeof mocks.loadDriverCatalog }) => unknown,
+  ) => selector({ load: mocks.loadDriverCatalog }),
 }));
 
 vi.mock("@/hooks/useShortcuts", () => ({ useShortcuts: vi.fn() }));
@@ -53,6 +60,7 @@ describe("application startup", () => {
 
     expect(mocks.loadSettings).toHaveBeenCalledOnce();
     expect(mocks.loadConnections).toHaveBeenCalledOnce();
+    expect(mocks.loadDriverCatalog).toHaveBeenCalledOnce();
     expect(container.textContent).toContain("Loading...");
   });
 });

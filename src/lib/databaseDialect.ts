@@ -320,6 +320,7 @@ const DATABASE_DRIVER_PROFILES: Record<
 
 const runtimeCapabilities = new Map<string, DatabaseCapabilities>();
 const runtimeDriverProfiles = new Map<string, DatabaseDriverProfile>();
+let authoritativeDriverKeys: Set<string> | null = null;
 
 function capabilitiesKey(driver: DatabaseDriver | string) {
   return String(driver).trim().toLowerCase();
@@ -393,6 +394,26 @@ export function registerDatabaseCapabilities(
       cloneCapabilities(value),
     );
   }
+}
+
+/**
+ * Register the complete driver catalog advertised by the running backend.
+ *
+ * Individual capability lookups enrich one profile, but only the list command
+ * is authoritative about which drivers can actually be created in this build.
+ */
+export function registerRuntimeDatabaseCatalog(
+  capabilities: DatabaseCapabilities[],
+) {
+  registerDatabaseCapabilities(capabilities);
+  authoritativeDriverKeys = new Set(
+    capabilities.map((value) => capabilitiesKey(value.driver)),
+  );
+}
+
+export function resetRuntimeDatabaseCatalogForTests() {
+  authoritativeDriverKeys = null;
+  runtimeCapabilities.clear();
 }
 
 export function registerDatabaseDriverProfile(
@@ -492,10 +513,17 @@ export function supportedDatabaseDriverProfiles() {
   for (const [key, profile] of runtimeDriverProfiles) {
     profiles.set(key, profile);
   }
+  for (const [key, capabilities] of runtimeCapabilities) {
+    if (!profiles.has(key)) {
+      profiles.set(key, fallbackDatabaseDriverProfile(capabilities.driver));
+    }
+  }
 
-  return Array.from(profiles.values()).map((profile) =>
-    databaseDriverProfile(profile.driver),
-  );
+  return Array.from(profiles.entries())
+    .filter(
+      ([key]) => !authoritativeDriverKeys || authoritativeDriverKeys.has(key),
+    )
+    .map(([, profile]) => databaseDriverProfile(profile.driver));
 }
 
 export function supportedDatabaseDrivers() {
