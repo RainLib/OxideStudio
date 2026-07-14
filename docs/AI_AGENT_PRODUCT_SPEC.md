@@ -389,18 +389,18 @@ DataGrip 当前 AI 基线包含 schema-aware chat、自然语言生成 SQL、SQL
 
 | 能力 | DataGrip 基线 | OxideStudio 当前 | 结论 |
 | --- | --- | --- | --- |
-| Schema-aware AI | 对象可附加、可导航 | 有 workspace/metadata tools，缺附件 UI 与 provenance | P0 补附件和导航协议 |
+| Schema-aware AI | 对象可附加、可导航 | 已有带 provenance 的对象/文件/结果/diagnostic attachment 与 stable navigation；metadata citation 和 patch preview 仍缺 | P0/P1 补 citation 与 patch workflow |
 | Text-to-SQL | 成熟编辑器入口 | 已有模型 planner/inline 能力基础 | P0 补 dialect grounding、patch preview、验证 |
 | Error fix | 执行错误可 Explain/Fix | 有 LSP diagnostic tool，缺统一 vendor error 与一键 patch | P0 |
 | Query optimization | 可基于查询与计划解释优化 | 无 Explain Plan 主路径 | 先做 Explain Plan，再做 AI 优化 |
 | Plan explanation | 支持 query plan AI explanation | 缺 plan artifact/节点联动 | P0/P1 |
-| 页面交互 | attachment 可回到对象/代码 | workbench actions 尚未进入 AI | P0 建 `UiActionRegistry` |
+| 页面交互 | attachment 可回到对象/代码 | `UiActionRegistry` 已支持稳定对象、文件、tab、结果和 diagnostic 跳转；plan/task surface 尚未完成 | 随 Explain Plan 与 durable task surface 补齐 |
 | 长任务代理 | 以 IDE AI 工作流为主 | registry 架构适合扩展，但 runtime 循环在 UI | 引入 Deep Agents Agent mode 后可形成差异化 |
 | 多数据模型 | 重点是 SQL/database IDE | 已覆盖 Mongo/Redis/ES 的结构化工具方向 | Oxide 的差异化优势 |
 | 外部生态 | JetBrains 生态 | 已有 MCP/CLI/provider registry | 继续保持统一 policy |
 | 数据隐私 | 默认不把原始数据库数据提供给 AI | 有截断/隐藏 credential，缺“发送内容预览” | P0/P1 |
 
-AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、schema diff/migration、diagram/FK navigation、data compare、semantic refactor/find usages、import mapping、session/lock 等仍需按 [DataGrip 能力差距](datagrip-gap-analysis.md) 路线推进。
+AI 不能掩盖数据库 IDE 主能力差距。Value Editor 的 P0 闭环已完成；Explain Plan、schema diff/migration、diagram/FK navigation、data compare、semantic refactor/find usages、import mapping、session/lock 等仍需按 [DataGrip 能力差距](datagrip-gap-analysis.md) 路线推进。
 
 ## 9. 分阶段路线图
 

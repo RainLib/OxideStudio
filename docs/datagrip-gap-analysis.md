@@ -73,7 +73,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | --- | --- | --- | --- |
 | 服务端分页、排序、过滤 | 已具备/部分 | Table Tab 支持分页、filter、sort 和布局；多列排序历史与 query preview 细节不足 | P0 |
 | 行增删改、提交/回滚 | 已具备/部分 | 参数化 mutation、批量提交、草稿保护已存在；冲突展示和 generated key 反馈不足 | P0 |
-| Value Editor | 缺失 | 大文本、JSON、二进制、日期等没有独立值编辑器 | P0 |
+| Value Editor | 已具备/部分 | `Shift+Enter`/cell menu 打开独立大视图；text/JSON/date/binary/boolean/number 有类型校验，明确区分默认未加载、NULL、空串和值，修改复用 table draft/mutation gate；超大 LOB 的独立按需拉取仍待增强 | P1 |
 | Table / Tree / Text / Transpose | 缺失 | 当前以表格为主；文档数据库也缺少稳定的 tree/text 切换 | P1 |
 | 外键导航 | 缺失 | 已 introspect foreign key，但不能从 cell 跳转关联行 | P0/P1 |
 | Aggregate View | 缺失 | 多 cell 选择没有 sum/avg/min/max/count 汇总 | P1 |
@@ -153,7 +153,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | --- | --- | --- | --- |
 | DG-P0-01 | Search Everywhere 第一阶段 | 搜索 action、tab、数据源、当前 schema/table 和已加载 project files；选择数据源会真正激活连接；键盘可完成全部操作 | 已完成 |
 | DG-P0-02 | Query History 2.0 | 记录 connection/schema/database、duration、success/error、row count；支持筛选、单条删除、复制到 editor 和 rerun | 已完成 |
-| DG-P0-03 | Value Editor | text/JSON/date/binary 类型有只读/可编辑大视图；明确 NULL、空串和未加载状态；提交沿用 mutation gate | 待开始 |
+| DG-P0-03 | Value Editor | text/JSON/date/binary 类型有只读/可编辑大视图；明确 NULL、空串和未加载状态；提交沿用 mutation gate | 已完成 |
 | DG-P0-04 | Explain Plan MVP | PostgreSQL/MySQL 支持文本/JSON plan；只读执行；显示 cost/rows/time，失败可定位到 driver 能力 | 待开始 |
 | DG-P0-05 | Driver 与文档一致性 | 增加 SQLite driver，或从发布文档移除未实现支持；能力列表由 runtime registry 生成 | 待开始 |
 | DG-P0-06 | 结构化错误协议 | connection/query/schema/table/file command 返回稳定 code、message、context、retryable；UI 不再解析字符串前缀 | 已完成 |
@@ -196,4 +196,5 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 1. **DG-P0-08 LSP catalog scope 与候选排序** 已完成；证据覆盖跨 PostgreSQL database 配置、database-scoped metadata、同名列、alias 插入、模糊匹配、CTE/DML 作用域、全量 LSP tests 与 Clippy。
 2. **DG-P0-09 AI attachment 与页面动作** 的通用 registry、stable target、stale context、对象/文件/结果/LSP error 跳转已完成；Explain Plan attachment 随 DG-P0-04 补齐。
 3. **DG-P0-06 结构化错误协议** 已完成：envelope 与直接 Tauri rejection 统一为 `ApiError`，project revision conflict 不再依赖字符串前缀，错误 context 使用白名单且不包含 SQL、URL、密码或文件内容。
-4. 当前推进 **DG-P0-03 Value Editor**，随后完成 **DG-P0-04 Explain Plan MVP**；Explain Plan 完成后才启用 AI query optimization/plan explanation。
+4. **DG-P0-03 Value Editor** 已完成：类型感知大视图、四态值语义、JSON/binary/date 校验和既有 mutation gate 已有组件与模型测试。
+5. 当前推进 **DG-P0-04 Explain Plan MVP**；Explain Plan 完成后才启用 AI query optimization/plan explanation。

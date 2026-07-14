@@ -1,12 +1,14 @@
 import { GridCellKind, GridCell } from "@glideapps/glide-data-grid";
 
-export type DataType = "null" | "number" | "boolean" | "date" | "string";
+export type DataType =
+  "unloaded" | "null" | "number" | "boolean" | "date" | "string";
 
 /**
  * Detect the data type of a value
  */
 export function detectDataType(value: any): DataType {
-  if (value === null || value === undefined) return "null";
+  if (value === undefined) return "unloaded";
+  if (value === null) return "null";
   if (typeof value === "number") return "number";
   if (typeof value === "boolean") return "boolean";
 
@@ -28,6 +30,8 @@ export function formatValue(value: any, type?: DataType): string {
   switch (detectedType) {
     case "null":
       return "NULL";
+    case "unloaded":
+      return "NOT LOADED";
     case "number":
       return typeof value === "number" ? value.toLocaleString() : String(value);
     case "boolean":
@@ -40,6 +44,7 @@ export function formatValue(value: any, type?: DataType): string {
         return String(value);
       }
     default:
+      if (value === "") return "''";
       if (typeof value === "object") {
         try {
           return JSON.stringify(value);
@@ -54,9 +59,14 @@ export function formatValue(value: any, type?: DataType): string {
 /**
  * Create a GridCell with proper styling based on data type
  */
-export function createTypedCell(value: any, allowOverlay = true): GridCell {
+export function createTypedCell(
+  value: any,
+  allowOverlay = true,
+  unloadedLabel = "NOT LOADED",
+): GridCell {
   const type = detectDataType(value);
-  const displayData = formatValue(value, type);
+  const displayData =
+    type === "unloaded" ? unloadedLabel : formatValue(value, type);
 
   // Color coding for different types
   const themeOverride = (() => {
@@ -64,6 +74,11 @@ export function createTypedCell(value: any, allowOverlay = true): GridCell {
       case "null":
         return {
           textDark: "#52525b", // Zinc-600
+          fontStyle: "italic",
+        };
+      case "unloaded":
+        return {
+          textDark: "#71717a",
           fontStyle: "italic",
         };
       case "number":
@@ -85,7 +100,12 @@ export function createTypedCell(value: any, allowOverlay = true): GridCell {
     kind: GridCellKind.Text,
     allowOverlay,
     displayData,
-    data: type === "null" ? "" : displayData,
+    data:
+      type === "null" || type === "unloaded"
+        ? ""
+        : typeof value === "object"
+          ? JSON.stringify(value)
+          : String(value),
     themeOverride,
     contentAlign: type === "number" ? "right" : "left",
   };
@@ -96,14 +116,7 @@ export function createTypedCell(value: any, allowOverlay = true): GridCell {
  */
 export interface FilterState {
   operator:
-    | "equals"
-    | "contains"
-    | "startsWith"
-    | "endsWith"
-    | ">"
-    | "<"
-    | ">="
-    | "<=";
+    "equals" | "contains" | "startsWith" | "endsWith" | ">" | "<" | ">=" | "<=";
   value: string;
 }
 
@@ -141,7 +154,7 @@ export function applyFilter(rowValue: any, filter: FilterState): boolean {
 export function compareValues(
   a: any,
   b: any,
-  direction: "asc" | "desc"
+  direction: "asc" | "desc",
 ): number {
   // Handle null values
   if (a === null || a === undefined) return direction === "asc" ? -1 : 1;
