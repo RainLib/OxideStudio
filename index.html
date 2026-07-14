@@ -102,6 +102,36 @@
                 transform-origin: left;
             }
 
+            .loader-error {
+                display: none;
+                max-width: 420px;
+                color: rgba(255, 255, 255, 0.62);
+                font-size: 12px;
+                line-height: 1.6;
+                text-align: center;
+                word-break: break-word;
+            }
+
+            .loader-retry {
+                display: none;
+                border: 1px solid rgba(255, 255, 255, 0.16);
+                border-radius: 6px;
+                padding: 7px 14px;
+                background: rgba(255, 255, 255, 0.06);
+                color: rgba(255, 255, 255, 0.88);
+                font: inherit;
+                cursor: pointer;
+            }
+
+            #app-loader.has-error .loader-bar-bg {
+                display: none;
+            }
+
+            #app-loader.has-error .loader-error,
+            #app-loader.has-error .loader-retry {
+                display: block;
+            }
+
             @keyframes breath {
 
                 0%,
@@ -161,6 +191,8 @@
                 <div class="loader-bar-bg">
                     <div class="loader-bar-fill"></div>
                 </div>
+                <div id="loader-error" class="loader-error"></div>
+                <button id="loader-retry" class="loader-retry" type="button">Reload</button>
             </div>
         </div>
     </div>
@@ -180,6 +212,44 @@
         }
     </style>
     <div id="portal"></div>
+    <script>
+        (() => {
+            let startupError;
+
+            const describeError = (error) => {
+                if (error instanceof Error) return `${error.name}: ${error.message}`;
+                if (typeof error === "string") return error;
+                try {
+                    return JSON.stringify(error);
+                } catch {
+                    return String(error);
+                }
+            };
+
+            window.addEventListener("error", (event) => {
+                if (event.target === window) startupError = describeError(event.error ?? event.message);
+            });
+            window.addEventListener("unhandledrejection", (event) => {
+                startupError = describeError(event.reason);
+            });
+
+            window.setTimeout(() => {
+                const loader = document.getElementById("app-loader");
+                if (!loader) return;
+
+                loader.classList.add("has-error");
+                const error = document.getElementById("loader-error");
+                if (error) {
+                    error.textContent = startupError
+                        ? `OxideStudio failed to start: ${startupError}`
+                        : "OxideStudio did not finish starting. Reload the window to try again.";
+                }
+                document.getElementById("loader-retry")?.addEventListener("click", () => {
+                    window.location.reload();
+                });
+            }, 15000);
+        })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
 </body>
 

@@ -90,6 +90,9 @@ export async function writeReleaseConfig({
   const endpoint = `${normalizedBaseUrl}/latest.json`;
   const outputPath = resolve(output);
   const config = {
+    bundle: {
+      createUpdaterArtifacts: true,
+    },
     plugins: {
       updater: {
         endpoints: [endpoint],
@@ -101,12 +104,10 @@ export async function writeReleaseConfig({
     windowsCertificateThumbprint
   );
   if (thumbprint) {
-    config.bundle = {
-      windows: {
-        certificateThumbprint: thumbprint,
-        digestAlgorithm: "sha256",
-        timestampUrl: normalizeTimestampUrl(windowsTimestampUrl),
-      },
+    config.bundle.windows = {
+      certificateThumbprint: thumbprint,
+      digestAlgorithm: "sha256",
+      timestampUrl: normalizeTimestampUrl(windowsTimestampUrl),
     };
   }
 

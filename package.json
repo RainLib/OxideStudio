@@ -5,7 +5,8 @@
     "type": "module",
     "scripts": {
         "dev": "vite",
-        "build": "tsc && vite build",
+        "build": "tsc && vite build && node scripts/verify-frontend-bundle.mjs",
+        "verify:frontend-bundle": "node scripts/verify-frontend-bundle.mjs",
         "preview": "vite preview",
         "tauri": "tauri",
         "ai": "tsx scripts/oxide-ai.ts",

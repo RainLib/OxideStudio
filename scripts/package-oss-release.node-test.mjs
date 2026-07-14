@@ -163,6 +163,7 @@ test("writes the updater endpoint and verification key into release config", asy
       endpoints: ["https://downloads.example.com/releases/latest.json"],
       pubkey: "updater-public-key",
     });
+    assert.equal(config.bundle.createUpdaterArtifacts, true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -181,6 +182,7 @@ test("writes optional Windows Authenticode configuration", async () => {
       windowsTimestampUrl: "https://timestamp.example.com",
     });
     const config = JSON.parse(await readFile(output, "utf8"));
+    assert.equal(config.bundle.createUpdaterArtifacts, true);
     assert.deepEqual(config.bundle.windows, {
       certificateThumbprint: "0123456789ABCDEF0123456789ABCDEF01234567",
       digestAlgorithm: "sha256",
