@@ -6,17 +6,19 @@ import { useShortcuts } from "@/hooks/useShortcuts";
 import { WorkspacePage } from "@/pages/workspace";
 import { Loader2 } from "lucide-react";
 import { LspConnectionSyncer } from "@/components/lsp";
+import { ErrorDisplay } from "@/components/shared";
 
 function App() {
   // All hooks must be called before any conditional returns
-  const { loadConnections, isLoading } = useConnectionStore();
+  const { loadConnections, isLoading, loadError } = useConnectionStore();
   const { loadSettings } = useSettingsStore();
 
   // Register app-wide shortcuts (not system-wide, only when app is focused)
   useShortcuts();
 
   useEffect(() => {
-    void loadSettings().finally(() => loadConnections());
+    void loadSettings();
+    void loadConnections();
   }, [loadConnections, loadSettings]);
 
   useEffect(() => {
@@ -38,6 +40,19 @@ function App() {
       <div className="h-screen w-full flex items-center justify-center bg-background text-foreground">
         <Loader2 className="animate-spin mr-2" /> Loading...
       </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <ThemeProvider>
+        <div className="flex h-screen w-full items-center justify-center bg-background text-foreground">
+          <ErrorDisplay
+            error={loadError}
+            onRetry={() => void loadConnections()}
+          />
+        </div>
+      </ThemeProvider>
     );
   }
 

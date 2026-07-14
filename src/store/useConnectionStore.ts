@@ -12,9 +12,11 @@ import {
   defaultDatabaseName,
   defaultDatabasePort,
 } from "@/lib/databaseDialect";
+import { withTimeout } from "@/lib/withTimeout";
 
 const ACTIVE_PROJECT_KEY = "oxide-studio-active-project";
 const DEFAULT_PROJECT_ID = "sqls";
+export const CONNECTION_LOAD_TIMEOUT_MS = 15_000;
 
 export interface ConnectionConfig extends SavedConnection {
   host?: string;
@@ -31,6 +33,7 @@ interface ConnectionState {
   connectedConnectionIds: string[];
   isConnected: boolean;
   isLoading: boolean;
+  loadError: string | null;
   selectedConnection: ConnectionConfig | null;
 
   // Actions
@@ -112,12 +115,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectedConnectionIds: [],
   isConnected: false,
   isLoading: true,
+  loadError: null,
   selectedConnection: null,
 
   loadConnections: async () => {
+    set({ isLoading: true, loadError: null });
     try {
       const projectId = activeProjectId();
-      const connections = await readProjectConnections(projectId);
+      const connections = await withTimeout(
+        readProjectConnections(projectId),
+        CONNECTION_LOAD_TIMEOUT_MS,
+        "Loading saved data sources"
+      );
       const activeConnectionId = get().activeConnectionId;
       const activeConnectionExists = connections.some(
         (connection) => connection.id === activeConnectionId
@@ -136,10 +145,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             connectedConnectionIds.includes(activeConnectionId)
         ),
         selectedConnection: null,
-        isLoading: false,
+        loadError: null,
       });
     } catch (e) {
       console.error("Failed to load connections:", e);
+      set({
+        loadError: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
       set({ isLoading: false });
     }
   },

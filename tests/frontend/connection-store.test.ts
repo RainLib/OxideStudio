@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  CONNECTION_LOAD_TIMEOUT_MS,
   useConnectionStore,
   type ConnectionConfig,
 } from "@/store/useConnectionStore";
@@ -75,6 +76,7 @@ describe("connection store", () => {
       connectedConnectionIds: [],
       isConnected: false,
       isLoading: false,
+      loadError: null,
       selectedConnection: null,
     });
   });
@@ -415,6 +417,29 @@ describe("connection store", () => {
       ]),
       "project-a"
     );
+  });
+
+  it("leaves the startup loading screen when loading data sources stalls", async () => {
+    vi.useFakeTimers();
+    mocks.loadConnections.mockReturnValueOnce(new Promise(() => undefined));
+
+    try {
+      const loading = useConnectionStore.getState().loadConnections();
+      expect(useConnectionStore.getState()).toMatchObject({
+        isLoading: true,
+        loadError: null,
+      });
+
+      await vi.advanceTimersByTimeAsync(CONNECTION_LOAD_TIMEOUT_MS);
+      await loading;
+
+      expect(useConnectionStore.getState()).toMatchObject({
+        isLoading: false,
+        loadError: `Loading saved data sources timed out after ${CONNECTION_LOAD_TIMEOUT_MS}ms`,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("removes a saved data source and disconnects it when active", async () => {
