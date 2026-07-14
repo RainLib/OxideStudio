@@ -75,6 +75,56 @@ Never store the private key in the repository or OSS. Do not rotate or lose it
 without a separate key-migration release: installed clients only trust the
 public key compiled into their build.
 
+## Operating-system trust and installer warnings
+
+The Tauri updater signature above protects update integrity, but it does not
+establish an operating-system publisher identity. Distributable builds need a
+second, platform-native signature. Do not disable Gatekeeper, SmartScreen, or
+endpoint protection on user machines.
+
+### macOS Developer ID signing and notarization
+
+Public macOS builds must use a paid Apple Developer Program account, a
+`Developer ID Application` certificate, and Apple notarization. Export the
+certificate and private key from Keychain Access as a password-protected
+`.p12`, then add these repository secrets:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE` | Single-line base64 of the exported `.p12` (`openssl base64 -A -in certificate.p12`) |
+| `APPLE_CERTIFICATE_PASSWORD` | Password chosen when exporting the `.p12` |
+| `APPLE_ID` | Apple Developer account email |
+| `APPLE_PASSWORD` | Apple ID app-specific password, not the normal login password |
+| `APPLE_TEAM_ID` | Ten-character Apple Developer Team ID |
+| `KEYCHAIN_PASSWORD` | Random CI-only password used for the ephemeral runner keychain |
+
+The release workflow refuses to start when any of these values is missing. On
+the macOS runner it imports the certificate into an ephemeral keychain, lets
+Tauri sign and notarize the universal app, and then validates the Developer ID
+signature, stapled notarization ticket, and Gatekeeper assessment before
+uploading any artifact. The bundled SQL LSP executable is built for both Apple
+Silicon and Intel, merged with `lipo`, and signed separately with hardened
+runtime before Tauri seals the application bundle.
+
+An ad-hoc signature (`signingIdentity: "-"`) is only suitable for local tests.
+It does not remove the Gatekeeper warning for downloaded software.
+
+### Windows Authenticode and SmartScreen
+
+Windows installer trust is separate from both Tauri updater signing and Apple
+signing. Production `.exe` and `.msi` bundles need Authenticode signing through
+a supported CA-backed certificate, Azure Artifact Signing, or another hardware
+or cloud signing provider wired through Tauri's `bundle.windows.signCommand`.
+Self-signed certificates are only appropriate for managed test machines.
+
+Code signing displays a verified publisher and is required for a trustworthy
+distribution path, but SmartScreen also evaluates download reputation. For a
+new public binary, signing alone cannot guarantee that Microsoft shows no
+warning. Microsoft Store distribution is the only deterministic no-SmartScreen
+prompt path for consumer installs. Choose the signing provider before adding a
+Windows `signCommand`; the credentials and command are provider-specific and
+must not be stored in the repository.
+
 ## RAM user and AccessKey setup
 
 The release workflow authenticates to OSS with a dedicated RAM user's
@@ -176,7 +226,7 @@ The publish job performs these gates before updating `latest.json`:
 - Builds signed universal macOS, Linux x86_64, and Windows x86_64 bundles.
 - Generates `checksums.sha256`, `release.json`, and Tauri `latest.json`.
 - Verifies every updater bundle against `TAURI_UPDATER_PUBKEY` with
-  `minisign`.
+  a checksum-pinned official `minisign` 0.12 binary.
 - Downloads a pinned ossutil 2.3.0 archive and verifies its official SHA-256.
 - Uploads versioned files with the dedicated RAM user AccessKey.
 - Retrieves the public manifest and verifies that every platform URL is served
@@ -213,6 +263,10 @@ failures.
 ## References
 
 - [Tauri v2 Updater](https://v2.tauri.app/plugin/updater/)
+- [Tauri macOS code signing and notarization](https://v2.tauri.app/distribute/sign/macos/)
+- [Tauri Windows code signing](https://v2.tauri.app/distribute/sign/windows/)
+- [Apple Developer ID](https://developer.apple.com/support/developer-id/)
+- [Microsoft SmartScreen reputation for app developers](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)
 - [Alibaba Cloud ossutil 2.0](https://help.aliyun.com/en/oss/developer-reference/ossutil-overview/)
 - [Use a RAM user AccessKey to access OSS](https://www.alibabacloud.com/help/en/oss/developer-reference/use-the-accesskey-pair-of-a-ram-user-to-initiate-a-request)
 - [Alibaba Cloud identity and access best practices](https://www.alibabacloud.com/help/en/ram/product-overview/best-practices-for-identity-and-access-control)

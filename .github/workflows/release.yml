@@ -80,6 +80,12 @@ jobs:
           ALIYUN_OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
           ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
           ALIYUN_OSS_PREFIX: ${{ secrets.ALIYUN_OSS_PREFIX }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           node - <<'NODE'
           const required = [
@@ -94,6 +100,12 @@ jobs:
             "ALIYUN_OSS_REGION",
             "ALIYUN_OSS_ENDPOINT",
             "ALIYUN_OSS_PREFIX",
+            "APPLE_CERTIFICATE",
+            "APPLE_CERTIFICATE_PASSWORD",
+            "APPLE_ID",
+            "APPLE_PASSWORD",
+            "APPLE_TEAM_ID",
+            "KEYCHAIN_PASSWORD",
           ];
           const missing = required.filter((name) => !process.env[name]?.trim());
           if (missing.length) throw new Error(`Missing GitHub configuration: ${missing.join(", ")}`);
@@ -166,14 +178,87 @@ jobs:
           OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
         run: node scripts/write-tauri-release-config.mjs
 
+      - name: Import Apple Developer ID certificate
+        if: matrix.id == 'macos'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CERTIFICATE_PATH="$RUNNER_TEMP/oxide-studio-developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/oxide-studio-signing.keychain-db"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          APPLE_SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F'"' '/Developer ID Application/{print $2; exit}')"
+          test -n "$APPLE_SIGNING_IDENTITY"
+          echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Build and sign universal macOS SQL LSP
+        if: matrix.id == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release \
+            --manifest-path vendor/sql-lsp/Cargo.toml \
+            --target aarch64-apple-darwin
+          cargo build --release \
+            --manifest-path vendor/sql-lsp/Cargo.toml \
+            --target x86_64-apple-darwin
+          lipo -create \
+            vendor/sql-lsp/target/aarch64-apple-darwin/release/sql-lsp \
+            vendor/sql-lsp/target/x86_64-apple-darwin/release/sql-lsp \
+            -output src-tauri/binaries/sql-lsp
+          chmod 0755 src-tauri/binaries/sql-lsp
+          codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            src-tauri/binaries/sql-lsp
+          lipo -verify_arch x86_64 arm64 src-tauri/binaries/sql-lsp
+          codesign --verify --strict --verbose=2 src-tauri/binaries/sql-lsp
+
       - name: Build signed Tauri bundles
         uses: tauri-apps/tauri-action@v1
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          OXIDE_SKIP_SQL_LSP_PREPARE: ${{ matrix.id == 'macos' && '1' || '' }}
+          APPLE_ID: ${{ matrix.id == 'macos' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ matrix.id == 'macos' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.id == 'macos' && secrets.APPLE_TEAM_ID || '' }}
         with:
           args: ${{ matrix.args }} --config src-tauri/tauri.release.conf.json
+
+      - name: Verify macOS Developer ID signature and notarization ticket
+        if: matrix.id == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find src-tauri/target -type d -path '*/release/bundle/macos/*.app' -print -quit)"
+          DMG_PATH="$(find src-tauri/target -type f -path '*/release/bundle/dmg/*.dmg' -print -quit)"
+          test -n "$APP_PATH"
+          test -n "$DMG_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          codesign --verify --verbose=2 "$DMG_PATH"
+          xcrun stapler validate "$APP_PATH"
+          spctl --assess --type execute --verbose=2 "$APP_PATH"
 
       - name: Upload bundles for OSS publication
         uses: actions/upload-artifact@v7
@@ -226,14 +311,27 @@ jobs:
             --tag "$RELEASE_TAG" \
             --base-url "$OXIDE_RELEASE_BASE_URL"
 
+      - name: Install pinned minisign
+        shell: bash
+        run: |
+          set -euo pipefail
+          MINISIGN_ARCHIVE="$RUNNER_TEMP/minisign-0.12-linux.tar.gz"
+          curl --fail --location --retry 3 \
+            https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz \
+            --output "$MINISIGN_ARCHIVE"
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  $MINISIGN_ARCHIVE" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/minisign"
+          tar -xzf "$MINISIGN_ARCHIVE" -C "$RUNNER_TEMP/minisign"
+          sudo install -m 0755 \
+            "$RUNNER_TEMP/minisign/minisign-linux/x86_64/minisign" \
+            /usr/local/bin/minisign
+
       - name: Verify Tauri updater signatures locally
         env:
           OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y minisign
           PUBLIC_KEY_FILE="$RUNNER_TEMP/oxide-studio.pub"
           export PUBLIC_KEY_FILE
           node -e 'require("node:fs").writeFileSync(process.env.PUBLIC_KEY_FILE, Buffer.from(process.env.OXIDE_UPDATER_PUBLIC_KEY, "base64"))'
