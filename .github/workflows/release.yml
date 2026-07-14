@@ -35,10 +35,10 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: "npm"
@@ -127,11 +127,13 @@ jobs:
             args: ""
     runs-on: ${{ matrix.platform }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout repository and SQL LSP
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: "npm"
@@ -201,10 +203,10 @@ jobs:
       ALIYUN_OSS_PREFIX: ${{ secrets.ALIYUN_OSS_PREFIX }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
 
