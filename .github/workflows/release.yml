@@ -228,7 +228,7 @@ jobs:
             vendor/sql-lsp/target/x86_64-apple-darwin/release/sql-lsp \
             -output src-tauri/binaries/sql-lsp
           chmod 0755 src-tauri/binaries/sql-lsp
-          lipo -verify_arch x86_64 arm64 src-tauri/binaries/sql-lsp
+          lipo src-tauri/binaries/sql-lsp -verify_arch x86_64 arm64
 
       - name: Sign universal macOS SQL LSP
         if: matrix.id == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true'
