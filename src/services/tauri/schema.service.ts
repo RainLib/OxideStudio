@@ -5,6 +5,7 @@ import type {
   CollectionPage,
   ColumnInfo,
   ConstraintInfo,
+  ForeignKeyReferenceInfo,
   FunctionInfo,
   IndexInfo,
   SchemaDiffPlan,
@@ -203,6 +204,29 @@ export async function getDatabaseConstraints(
   );
 }
 
+export async function getReferencingForeignKeys(
+  connectionId: string,
+  schema: string,
+  table: string
+): Promise<ForeignKeyReferenceInfo[]> {
+  return invokeWithInterceptors<ForeignKeyReferenceInfo[]>(
+    "get_referencing_foreign_keys",
+    { connectionId, schema, table }
+  );
+}
+
+export async function getDatabaseReferencingForeignKeys(
+  connectionId: string,
+  database: string,
+  schema: string,
+  table: string
+): Promise<ForeignKeyReferenceInfo[]> {
+  return invokeWithInterceptors<ForeignKeyReferenceInfo[]>(
+    "get_database_referencing_foreign_keys",
+    { connectionId, database, schema, table }
+  );
+}
+
 export async function getDatabaseFunctions(
   connectionId: string,
   database: string,
@@ -332,6 +356,8 @@ export const schemaService = {
   getDatabaseIndexes,
   getConstraints,
   getDatabaseConstraints,
+  getReferencingForeignKeys,
+  getDatabaseReferencingForeignKeys,
   getFunctions,
   getDatabaseFunctions,
   setCurrentSchema,

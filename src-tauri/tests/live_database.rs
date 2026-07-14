@@ -531,6 +531,15 @@ async fn postgres_flow(
     assert!(constraints
         .iter()
         .any(|constraint| constraint.constraint_type == "CHECK"));
+    let references = manager
+        .get_referencing_foreign_keys(connection_id, schema, "accounts")
+        .await?;
+    assert!(references.iter().any(|reference| {
+        reference.schema == schema
+            && reference.table == "orders"
+            && reference.columns == ["account_id"]
+            && reference.referenced_columns == ["id"]
+    }));
 
     let functions = manager.get_functions(connection_id, schema).await?;
     let score_function = functions
@@ -940,6 +949,15 @@ async fn mysql_flow(
     assert!(constraints
         .iter()
         .any(|constraint| constraint.constraint_type == "CHECK"));
+    let references = manager
+        .get_referencing_foreign_keys(connection_id, database, "accounts")
+        .await?;
+    assert!(references.iter().any(|reference| {
+        reference.schema == database
+            && reference.table == "orders"
+            && reference.columns == ["account_id"]
+            && reference.referenced_columns == ["id"]
+    }));
 
     let functions = manager.get_functions(connection_id, database).await?;
     let score_function = functions

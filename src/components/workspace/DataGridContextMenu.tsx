@@ -55,7 +55,7 @@ export function DataGridContextMenu({
       />
       <div
         role="menu"
-        className="fixed z-50 w-[224px] overflow-hidden rounded-[6px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 shadow-[0_8px_18px_rgba(0,0,0,0.35)]"
+        className="fixed z-50 max-h-[320px] w-[224px] overflow-y-auto rounded-[6px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 shadow-[0_8px_18px_rgba(0,0,0,0.35)]"
         style={{ left, top }}
       >
         {items.map((item) => (

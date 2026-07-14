@@ -14,6 +14,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const mocks = vi.hoisted(() => ({
   exportTableData: vi.fn(),
   mutateTableRows: vi.fn(),
+  getDatabaseReferencingForeignKeys: vi.fn(async () => []),
   loadTableMetadata: vi.fn(async () => ({
     columns: [
       {
@@ -45,6 +46,7 @@ vi.mock("@/services/tauri", () => ({
       dataModel: "relational",
       supportsTableIndexes: true,
       supportsTableConstraints: true,
+      supportsForeignKeys: true,
     })),
   },
   queryService: {
@@ -53,6 +55,10 @@ vi.mock("@/services/tauri", () => ({
   tableService: {
     exportTableData: mocks.exportTableData,
     mutateTableRows: mocks.mutateTableRows,
+  },
+  schemaService: {
+    getDatabaseReferencingForeignKeys: mocks.getDatabaseReferencingForeignKeys,
+    getReferencingForeignKeys: vi.fn(async () => []),
   },
 }));
 
@@ -166,6 +172,17 @@ describe("cross-database table data view", () => {
   });
 
   it("binds metadata and row edits to the selected PostgreSQL database", async () => {
+    mocks.getDatabaseReferencingForeignKeys.mockResolvedValueOnce([
+      {
+        name: "audit_user_fk",
+        schema: "audit",
+        table: "events",
+        columns: ["user_id"],
+        referenced_schema: "public",
+        referenced_table: "users",
+        referenced_columns: ["id"],
+      },
+    ]);
     await act(async () => {
       root = createRoot(container);
       root.render(<TableDataView />);
@@ -181,6 +198,17 @@ describe("cross-database table data view", () => {
         table: "users",
       })
     );
+    expect(mocks.getDatabaseReferencingForeignKeys).toHaveBeenCalledWith(
+      "postgres-1",
+      "analytics",
+      "public",
+      "users"
+    );
+    await vi.waitFor(() => {
+      expect(mocks.gridProps?.referencingForeignKeys).toEqual([
+        expect.objectContaining({ table: "events", columns: ["user_id"] }),
+      ]);
+    });
     expect(mocks.toolbarProps).toMatchObject({
       readOnly: false,
       exportDisabled: true,

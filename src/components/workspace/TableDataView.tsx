@@ -11,7 +11,7 @@ import { useProjectStore } from "@/store/useProjectStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTaskStore } from "@/store/useTaskStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
-import { databaseService, tableService } from "@/services/tauri";
+import { databaseService, schemaService, tableService } from "@/services/tauri";
 import {
   loadTableDdl,
   loadTableMetadata,
@@ -20,6 +20,7 @@ import type {
   ColumnInfo,
   ConstraintInfo,
   DatabaseCapabilities,
+  ForeignKeyReferenceInfo,
   IndexInfo,
   TableExportFormat,
 } from "@/services/tauri/types";
@@ -109,6 +110,9 @@ export function TableDataView() {
   const [tableConstraints, setTableConstraints] = useState<ConstraintInfo[]>(
     []
   );
+  const [referencingForeignKeys, setReferencingForeignKeys] = useState<
+    ForeignKeyReferenceInfo[]
+  >([]);
   const [metadataError, setMetadataError] = useState<string | null>(null);
   const [isMetadataLoading, setIsMetadataLoading] = useState(false);
   const [showStructure, setShowStructure] = useState(false);
@@ -185,6 +189,7 @@ export function TableDataView() {
     setFallbackColumns([]);
     setTableIndexes([]);
     setTableConstraints([]);
+    setReferencingForeignKeys([]);
 
     try {
       const readiness = await ensureConnectionReady(tabConnectionId);
@@ -194,17 +199,37 @@ export function TableDataView() {
         throw new Error(readiness.message);
       }
 
-      const metadata = await loadTableMetadata({
-        projectId: activeProjectId,
-        connectionId: tabConnectionId,
-        driver,
-        databaseName: activeTab.databaseName,
-        schema: activeTab.schemaName,
-        table: activeTab.tableName,
-        includeIndexes: activeCapabilities.supportsTableIndexes,
-        includeConstraints: activeCapabilities.supportsTableConstraints,
-        force,
-      });
+      const reverseForeignKeys = activeCapabilities.supportsForeignKeys
+        ? activeTab.databaseName
+          ? schemaService.getDatabaseReferencingForeignKeys(
+              tabConnectionId,
+              activeTab.databaseName,
+              activeTab.schemaName,
+              activeTab.tableName
+            )
+          : schemaService.getReferencingForeignKeys(
+              tabConnectionId,
+              activeTab.schemaName,
+              activeTab.tableName
+            )
+        : Promise.resolve([]);
+      const [metadata, incomingForeignKeys] = await Promise.all([
+        loadTableMetadata({
+          projectId: activeProjectId,
+          connectionId: tabConnectionId,
+          driver,
+          databaseName: activeTab.databaseName,
+          schema: activeTab.schemaName,
+          table: activeTab.tableName,
+          includeIndexes: activeCapabilities.supportsTableIndexes,
+          includeConstraints: activeCapabilities.supportsTableConstraints,
+          force,
+        }),
+        reverseForeignKeys.catch((error) => {
+          console.warn("Failed to load reverse foreign keys:", error);
+          return [];
+        }),
+      ]);
       setTableMetadata(tabId, metadata);
       if (structureRequestRef.current !== requestId) return;
 
@@ -217,6 +242,7 @@ export function TableDataView() {
       );
       setTableIndexes(metadata.indexes);
       setTableConstraints(metadata.constraints);
+      setReferencingForeignKeys(incomingForeignKeys);
       if (metadata.ddl) setTableDdl(metadata.ddl);
     } catch (err: any) {
       if (structureRequestRef.current !== requestId) return;
@@ -235,6 +261,7 @@ export function TableDataView() {
     activeTab?.tableName,
     activeCapabilities.supportsTableConstraints,
     activeCapabilities.supportsTableIndexes,
+    activeCapabilities.supportsForeignKeys,
     activeProjectId,
     driver,
     setTableMetadata,
@@ -1225,6 +1252,8 @@ export function TableDataView() {
           readOnly={isGridReadOnly || activeTab.isExecuting}
           zoomPercent={gridZoomPercent}
           onSelectionSummaryChange={setGridSelectionSummary}
+          tableConstraints={tableConstraints}
+          referencingForeignKeys={referencingForeignKeys}
         />
         <div className="absolute bottom-3 left-1/2 z-40 flex h-8 -translate-x-1/2 items-center gap-0.5 rounded-[6px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised)/0.94)] px-1 shadow-[0_8px_22px_rgba(0,0,0,0.26)] backdrop-blur-sm">
           <button

@@ -1,8 +1,9 @@
 use crate::core::dialect::DatabaseKind;
 use crate::core::driver::DatabaseDriver;
 use crate::core::protocol::{
-    ColumnDef, ColumnInfo, ConstraintInfo, FunctionInfo, FunctionParameterInfo, IndexInfo,
-    ParameterizedStatement, QueryParameter, QueryResult, TableInfo,
+    ColumnDef, ColumnInfo, ConstraintInfo, ForeignKeyReferenceInfo, FunctionInfo,
+    FunctionParameterInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult,
+    TableInfo,
 };
 use crate::core::statement::{
     execution_mode, execution_statement_kind, split_sql_statements, QueryExecutionMode,
@@ -428,6 +429,64 @@ impl PostgresDriver {
                 referenced_table: row.try_get("referenced_table").ok(),
                 referenced_columns: row.try_get("referenced_columns").unwrap_or_default(),
                 definition: row.try_get("definition").ok(),
+            })
+            .collect())
+    }
+
+    async fn referencing_foreign_keys_on_pool(
+        pool: &Pool<Postgres>,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ForeignKeyReferenceInfo>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                c.conname AS constraint_name,
+                owner_ns.nspname AS owner_schema,
+                owner_table.relname AS owner_table,
+                COALESCE((
+                    SELECT array_agg(a.attname ORDER BY keys.ordinality)
+                    FROM unnest(c.conkey) WITH ORDINALITY AS keys(attnum, ordinality)
+                    JOIN pg_attribute a
+                      ON a.attrelid = c.conrelid
+                     AND a.attnum = keys.attnum
+                ), ARRAY[]::text[]) AS columns,
+                ref_ns.nspname AS referenced_schema,
+                ref_table.relname AS referenced_table,
+                COALESCE((
+                    SELECT array_agg(a.attname ORDER BY keys.ordinality)
+                    FROM unnest(c.confkey) WITH ORDINALITY AS keys(attnum, ordinality)
+                    JOIN pg_attribute a
+                      ON a.attrelid = c.confrelid
+                     AND a.attnum = keys.attnum
+                ), ARRAY[]::text[]) AS referenced_columns
+            FROM pg_constraint c
+            JOIN pg_class owner_table ON owner_table.oid = c.conrelid
+            JOIN pg_namespace owner_ns ON owner_ns.oid = owner_table.relnamespace
+            JOIN pg_class ref_table ON ref_table.oid = c.confrelid
+            JOIN pg_namespace ref_ns ON ref_ns.oid = ref_table.relnamespace
+            WHERE c.contype = 'f'
+              AND ref_ns.nspname = $1
+              AND ref_table.relname = $2
+            ORDER BY owner_ns.nspname, owner_table.relname, c.conname
+            "#,
+        )
+        .bind(schema)
+        .bind(table)
+        .persistent(false)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| ForeignKeyReferenceInfo {
+                name: row.try_get("constraint_name").unwrap_or_default(),
+                schema: row.try_get("owner_schema").unwrap_or_default(),
+                table: row.try_get("owner_table").unwrap_or_default(),
+                columns: row.try_get("columns").unwrap_or_default(),
+                referenced_schema: row.try_get("referenced_schema").unwrap_or_default(),
+                referenced_table: row.try_get("referenced_table").unwrap_or_default(),
+                referenced_columns: row.try_get("referenced_columns").unwrap_or_default(),
             })
             .collect())
     }
@@ -1523,6 +1582,43 @@ impl DatabaseDriver for PostgresDriver {
         .map_err(|_| {
             anyhow!(
                 "Timed out loading constraints from PostgreSQL database '{}', table '{}.{}'",
+                database,
+                schema,
+                table
+            )
+        })?
+    }
+
+    async fn get_referencing_foreign_keys(
+        &self,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ForeignKeyReferenceInfo>> {
+        let pool = self.get_pool().await?;
+        Self::referencing_foreign_keys_on_pool(&pool, schema, table).await
+    }
+
+    async fn get_database_referencing_foreign_keys(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ForeignKeyReferenceInfo>> {
+        let mut metadata_pool = self.metadata_pool.lock().await;
+        self.get_pool().await?;
+        let pool = self
+            .ensure_metadata_pool(&mut metadata_pool, database)
+            .await?;
+        drop(metadata_pool);
+
+        timeout(
+            METADATA_QUERY_TIMEOUT,
+            Self::referencing_foreign_keys_on_pool(&pool, schema, table),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Timed out loading referencing foreign keys from PostgreSQL database '{}', table '{}.{}'",
                 database,
                 schema,
                 table

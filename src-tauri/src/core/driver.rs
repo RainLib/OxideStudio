@@ -1,6 +1,6 @@
 use super::protocol::{
-    CollectionInfo, ColumnInfo, ConstraintInfo, FunctionInfo, IndexInfo, ParameterizedStatement,
-    QueryParameter, QueryResult, TableInfo,
+    CollectionInfo, ColumnInfo, ConstraintInfo, ForeignKeyReferenceInfo, FunctionInfo, IndexInfo,
+    ParameterizedStatement, QueryParameter, QueryResult, TableInfo,
 };
 use super::statement::StatementScanDialect;
 use anyhow::{anyhow, Result};
@@ -267,6 +267,29 @@ pub trait DatabaseDriver: Send + Sync {
         _table: &str,
     ) -> Result<Vec<ConstraintInfo>> {
         Err(unsupported_driver_feature("Database-scoped constraints"))
+    }
+
+    /// Find foreign keys owned by other relations that reference this table.
+    /// Implementations should query the database catalog instead of scanning
+    /// every table from the client.
+    async fn get_referencing_foreign_keys(
+        &self,
+        _schema: &str,
+        _table: &str,
+    ) -> Result<Vec<ForeignKeyReferenceInfo>> {
+        Ok(Vec::new())
+    }
+
+    /// Reverse foreign-key lookup in an explicitly selected server database.
+    async fn get_database_referencing_foreign_keys(
+        &self,
+        _database: &str,
+        _schema: &str,
+        _table: &str,
+    ) -> Result<Vec<ForeignKeyReferenceInfo>> {
+        Err(unsupported_driver_feature(
+            "Database-scoped referencing foreign keys",
+        ))
     }
 
     /// Get functions/procedures in a specific schema/database.

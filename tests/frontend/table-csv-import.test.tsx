@@ -53,6 +53,10 @@ vi.mock("@/services/tauri", () => ({
     mutateTableRows: mocks.mutateTableRows,
     previewTablePage: mocks.previewTablePage,
   },
+  schemaService: {
+    getDatabaseReferencingForeignKeys: vi.fn(async () => []),
+    getReferencingForeignKeys: vi.fn(async () => []),
+  },
 }));
 
 vi.mock("@/services/tableMetadataCache", () => ({

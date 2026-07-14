@@ -325,6 +325,16 @@ export interface ConstraintInfo {
   definition?: string;
 }
 
+export interface ForeignKeyReferenceInfo {
+  name: string;
+  schema: string;
+  table: string;
+  columns: string[];
+  referenced_schema: string;
+  referenced_table: string;
+  referenced_columns: string[];
+}
+
 export interface SchemaRelationSnapshot {
   name: string;
   objectType?: string | null;

@@ -2,8 +2,8 @@
 use crate::core::{
     manager::ConnectionManager,
     protocol::{
-        CollectionInfo, CollectionPage, ColumnInfo, ConstraintInfo, FunctionInfo, IndexInfo,
-        Response, TableInfo,
+        CollectionInfo, CollectionPage, ColumnInfo, ConstraintInfo, ForeignKeyReferenceInfo,
+        FunctionInfo, IndexInfo, Response, TableInfo,
     },
 };
 use tauri::State;
@@ -285,6 +285,52 @@ pub async fn get_database_constraints(
     Ok(schema_result(
         result,
         "DATABASE_CONSTRAINT_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "database": database,
+            "schema": schema,
+            "table": table,
+        }),
+    ))
+}
+
+/// Find foreign keys in other relations that reference the selected table.
+#[tauri::command]
+pub async fn get_referencing_foreign_keys(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    schema: String,
+    table: String,
+) -> Result<Response<Vec<ForeignKeyReferenceInfo>>, String> {
+    let result = manager
+        .get_referencing_foreign_keys(&connection_id, &schema, &table)
+        .await;
+    Ok(schema_result(
+        result,
+        "REFERENCING_FOREIGN_KEY_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "schema": schema,
+            "table": table,
+        }),
+    ))
+}
+
+/// Database-scoped reverse foreign-key lookup for PostgreSQL explorer tabs.
+#[tauri::command]
+pub async fn get_database_referencing_foreign_keys(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Response<Vec<ForeignKeyReferenceInfo>>, String> {
+    let result = manager
+        .get_database_referencing_foreign_keys(&connection_id, &database, &schema, &table)
+        .await;
+    Ok(schema_result(
+        result,
+        "DATABASE_REFERENCING_FOREIGN_KEY_LIST_FAILED",
         serde_json::json!({
             "connectionId": connection_id,
             "database": database,

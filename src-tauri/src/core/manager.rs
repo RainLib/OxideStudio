@@ -1,6 +1,7 @@
 use super::driver::DatabaseDriver;
 use super::protocol::{
-    ColumnInfo, ConstraintInfo, FunctionInfo, IndexInfo, ParameterizedStatement, QueryParameter,
+    ColumnInfo, ConstraintInfo, ForeignKeyReferenceInfo, FunctionInfo, IndexInfo,
+    ParameterizedStatement, QueryParameter,
 };
 use super::ssh::SshTunnel;
 use anyhow::{anyhow, Result};
@@ -409,6 +410,29 @@ impl ConnectionManager {
         let driver = self.get_driver(id).await?;
         driver
             .get_database_constraints(database, schema, table)
+            .await
+    }
+
+    pub async fn get_referencing_foreign_keys(
+        &self,
+        id: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ForeignKeyReferenceInfo>> {
+        let driver = self.get_driver(id).await?;
+        driver.get_referencing_foreign_keys(schema, table).await
+    }
+
+    pub async fn get_database_referencing_foreign_keys(
+        &self,
+        id: &str,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ForeignKeyReferenceInfo>> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .get_database_referencing_foreign_keys(database, schema, table)
             .await
     }
 

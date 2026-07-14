@@ -31,12 +31,14 @@ import { createTypedCell, applyFilter, compareValues } from "@/lib/gridUtils";
 import {
   ArrowDownAZ,
   ArrowUpAZ,
+  ArrowUpRight,
   Copy,
   Download,
   Eye,
   EyeOff,
   FileJson,
   RotateCcw,
+  Rows3,
   Search,
   CircleSlash2,
   SquarePen,
@@ -60,6 +62,15 @@ import {
   resultColumnIndexByGridId,
 } from "@/lib/gridColumns";
 import { ValueEditorDialog, type ValueEditorTarget } from "./ValueEditorDialog";
+import type {
+  ConstraintInfo,
+  ForeignKeyReferenceInfo,
+} from "@/services/tauri/types";
+import {
+  buildForeignKeyNavigationPlans,
+  foreignKeyNavigationLabel,
+  type ForeignKeyNavigationPlan,
+} from "@/lib/foreignKeyNavigation";
 
 interface GridValueEditorTarget extends ValueEditorTarget {
   tabId: string;
@@ -84,6 +95,8 @@ interface DataGridProps {
   readOnly?: boolean;
   zoomPercent?: number;
   onSelectionSummaryChange?: (summary: DataGridSelectionSummary) => void;
+  tableConstraints?: ConstraintInfo[];
+  referencingForeignKeys?: ForeignKeyReferenceInfo[];
 }
 
 function rangeIndexes(start: number, length: number) {
@@ -156,6 +169,8 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       readOnly = false,
       zoomPercent,
       onSelectionSummaryChange,
+      tableConstraints = [],
+      referencingForeignKeys = [],
     },
     ref,
   ) {
@@ -171,6 +186,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       setColumnHidden,
       showAllColumns,
       deleteRows,
+      findOrCreateTableTab,
+      loadTablePage,
+      setFilterMode,
+      setVisualFilters,
+      setSqlFilter,
     } = useTabStore();
     const dataGridSettings = useSettingsStore(
       (state) => state.settings.dataGrid,
@@ -1184,6 +1204,85 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       );
     }, [contextMenu.columnName, tableColumns]);
 
+    const contextForeignKeyPlans = useMemo(() => {
+      if (
+        activeTab?.type !== "table" ||
+        !activeTab.schemaName ||
+        !activeTab.tableName ||
+        !result ||
+        !contextMenu.columnName ||
+        contextMenu.row === undefined ||
+        contextMenu.row >= filteredRows.length
+      ) {
+        return [];
+      }
+
+      const resultRowIndex = sortedIndices[contextMenu.row];
+      if (resultRowIndex === undefined) return [];
+      const resultRow = result.rows[resultRowIndex];
+      if (!resultRow) return [];
+
+      const rowWithDrafts = resultRow.map(
+        (value: unknown, columnIndex: number) => {
+          const key = `${resultRowIndex}:${columnIndex}`;
+          return pendingEdits.has(key) ? pendingEdits.get(key) : value;
+        },
+      );
+
+      return buildForeignKeyNavigationPlans({
+        currentSchema: activeTab.schemaName,
+        currentTable: activeTab.tableName,
+        selectedColumn: contextMenu.columnName,
+        columns: result.columns.map((column) => column.name),
+        row: rowWithDrafts,
+        constraints: tableConstraints,
+        referencingForeignKeys,
+      });
+    }, [
+      activeTab?.schemaName,
+      activeTab?.tableName,
+      activeTab?.type,
+      contextMenu.columnName,
+      contextMenu.row,
+      filteredRows.length,
+      pendingEdits,
+      referencingForeignKeys,
+      result,
+      sortedIndices,
+      tableConstraints,
+    ]);
+
+    const handleForeignKeyNavigation = useCallback(
+      async (plan: ForeignKeyNavigationPlan) => {
+        if (activeTab?.type !== "table" || !activeTab.connectionId) return;
+
+        const targetTabId = findOrCreateTableTab(
+          activeTab.connectionId,
+          plan.schema,
+          plan.table,
+          "table",
+          activeTab.databaseName,
+        );
+        setFilterMode(targetTabId, "visual");
+        setVisualFilters(targetTabId, plan.filters);
+        setSqlFilter(targetTabId, "");
+        await loadTablePage(targetTabId, 0, null, plan.filters, {
+          discardAction:
+            plan.direction === "referenced"
+              ? "open the referenced row"
+              : "show referencing rows",
+        });
+      },
+      [
+        activeTab,
+        findOrCreateTableTab,
+        loadTablePage,
+        setFilterMode,
+        setSqlFilter,
+        setVisualFilters,
+      ],
+    );
+
     const contextMenuItems = useMemo<DataGridContextMenuItem[]>(() => {
       if (contextMenu.type === "header") {
         return [
@@ -1260,6 +1359,18 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
             icon: <Search size={12} />,
             onSelect: handleQuickFilter,
           },
+          ...contextForeignKeyPlans.map((plan, index) => ({
+            id: `foreign-key-${plan.direction}-${plan.constraintName}-${index}`,
+            label: foreignKeyNavigationLabel(plan),
+            icon:
+              plan.direction === "referenced" ? (
+                <ArrowUpRight size={12} />
+              ) : (
+                <Rows3 size={12} />
+              ),
+            separatorBefore: index === 0,
+            onSelect: () => void handleForeignKeyNavigation(plan),
+          })),
           {
             id: "set-cell-null",
             label: "Set NULL",
@@ -1292,6 +1403,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       handleOpenValueEditor,
       handleShowAllColumns,
       handleQuickFilter,
+      handleForeignKeyNavigation,
       handleSetCellNull,
       handleSortAsc,
       handleSortDesc,
@@ -1301,6 +1413,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       selectedRowIndexes.length,
       columns.length,
       hiddenColumns.length,
+      contextForeignKeyPlans,
     ]);
 
     // Draw borders after cells are rendered

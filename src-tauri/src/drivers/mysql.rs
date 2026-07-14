@@ -1,7 +1,8 @@
 use crate::core::driver::DatabaseDriver;
 use crate::core::protocol::{
-    ColumnDef, ColumnInfo, ConstraintInfo, FunctionInfo, FunctionParameterInfo, IndexInfo,
-    ParameterizedStatement, QueryParameter, QueryResult, TableInfo,
+    ColumnDef, ColumnInfo, ConstraintInfo, ForeignKeyReferenceInfo, FunctionInfo,
+    FunctionParameterInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult,
+    TableInfo,
 };
 use crate::core::statement::{
     classify_statement, execution_mode, execution_statement_kind, has_multiple_statements,
@@ -959,6 +960,64 @@ impl DatabaseDriver for MysqlDriver {
                     referenced_columns,
                     definition: mysql_string_by_index(row, 6),
                 }
+            })
+            .collect())
+    }
+
+    async fn get_referencing_foreign_keys(
+        &self,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ForeignKeyReferenceInfo>> {
+        let pool = self.get_pool(None).await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                kcu.constraint_name,
+                kcu.table_schema,
+                kcu.table_name,
+                GROUP_CONCAT(kcu.column_name ORDER BY kcu.ordinal_position SEPARATOR ',') AS columns,
+                kcu.referenced_table_schema,
+                kcu.referenced_table_name,
+                GROUP_CONCAT(kcu.referenced_column_name ORDER BY kcu.ordinal_position SEPARATOR ',') AS referenced_columns
+            FROM information_schema.key_column_usage kcu
+            WHERE kcu.referenced_table_schema = ?
+              AND kcu.referenced_table_name = ?
+            GROUP BY
+                kcu.constraint_name,
+                kcu.table_schema,
+                kcu.table_name,
+                kcu.referenced_table_schema,
+                kcu.referenced_table_name
+            ORDER BY kcu.table_schema, kcu.table_name, kcu.constraint_name
+            "#,
+        )
+        .bind(schema)
+        .bind(table)
+        .persistent(false)
+        .fetch_all(&pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| ForeignKeyReferenceInfo {
+                name: mysql_string_by_index(row, 0).unwrap_or_default(),
+                schema: mysql_string_by_index(row, 1).unwrap_or_default(),
+                table: mysql_string_by_index(row, 2).unwrap_or_default(),
+                columns: mysql_string_by_index(row, 3)
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|column| !column.is_empty())
+                    .map(ToString::to_string)
+                    .collect(),
+                referenced_schema: mysql_string_by_index(row, 4).unwrap_or_default(),
+                referenced_table: mysql_string_by_index(row, 5).unwrap_or_default(),
+                referenced_columns: mysql_string_by_index(row, 6)
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|column| !column.is_empty())
+                    .map(ToString::to_string)
+                    .collect(),
             })
             .collect())
     }

@@ -113,6 +113,8 @@ pub fn run() {
             commands::schema::get_database_indexes,
             commands::schema::get_constraints,
             commands::schema::get_database_constraints,
+            commands::schema::get_referencing_foreign_keys,
+            commands::schema::get_database_referencing_foreign_keys,
             commands::schema::get_functions,
             commands::schema::get_database_functions,
             commands::schema::set_current_schema,

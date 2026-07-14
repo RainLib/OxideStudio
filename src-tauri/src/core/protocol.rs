@@ -186,6 +186,21 @@ pub struct ConstraintInfo {
     pub definition: Option<String>,
 }
 
+/// A foreign key whose owning table references another relation.
+///
+/// This includes the owning relation so reverse lookups can navigate from a
+/// referenced row to all rows that point at it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKeyReferenceInfo {
+    pub name: String,
+    pub schema: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub referenced_schema: String,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FunctionParameterInfo {
     pub name: String,

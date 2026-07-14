@@ -60,6 +60,28 @@ describe("tauri api client", () => {
     });
   });
 
+  it("classifies reverse foreign-key discovery as schema metadata", async () => {
+    mocks.invoke.mockRejectedValueOnce(new Error("catalog unavailable"));
+
+    await expect(
+      invokeCommand("get_database_referencing_foreign_keys", {
+        connectionId: "connection-1",
+        database: "analytics",
+        schema: "public",
+        table: "users",
+      }),
+    ).rejects.toMatchObject({
+      code: "SCHEMA_COMMAND_FAILED",
+      category: "schema",
+      context: {
+        connectionId: "connection-1",
+        database: "analytics",
+        schema: "public",
+        table: "users",
+      },
+    });
+  });
+
   it("preserves structured command rejections", async () => {
     mocks.invoke.mockRejectedValueOnce({
       code: "REVISION_CONFLICT",
