@@ -65,4 +65,17 @@ describe("desktop unsaved changes guard", () => {
     closeHandler?.({ preventDefault });
     expect(preventDefault).toHaveBeenCalledTimes(1);
   });
+
+  it("allows Tauri to destroy a clean window", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<GuardHarness />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const preventDefault = vi.fn();
+    closeHandler?.({ preventDefault });
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
 });

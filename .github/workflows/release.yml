@@ -24,7 +24,7 @@ concurrency:
 
 env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-  OXIDE_RELEASE_BASE_URL: ${{ vars.OXIDE_RELEASE_BASE_URL }}
+  OXIDE_RELEASE_BASE_URL: ${{ secrets.ALIYUN_OSS_PUBLIC_BASE_URL }}
 
 jobs:
   validate:
@@ -72,13 +72,14 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.OXIDE_UPDATER_PUBLIC_KEY }}
-          ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.ALIYUN_OIDC_PROVIDER_ARN }}
-          ALIYUN_ROLE_ARN: ${{ vars.ALIYUN_ROLE_ARN }}
-          ALIYUN_OSS_BUCKET: ${{ vars.ALIYUN_OSS_BUCKET }}
-          ALIYUN_OSS_REGION: ${{ vars.ALIYUN_OSS_REGION }}
-          ALIYUN_OSS_ENDPOINT: ${{ vars.ALIYUN_OSS_ENDPOINT }}
-          ALIYUN_OSS_PREFIX: ${{ vars.ALIYUN_OSS_PREFIX }}
+          OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+          ALIYUN_OSS_ENABLED: ${{ secrets.ALIYUN_OSS_ENABLED }}
+          ALIYUN_OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
+          ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
+          ALIYUN_OSS_PREFIX: ${{ secrets.ALIYUN_OSS_PREFIX }}
         run: |
           node - <<'NODE'
           const required = [
@@ -86,15 +87,19 @@ jobs:
             "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
             "OXIDE_UPDATER_PUBLIC_KEY",
             "OXIDE_RELEASE_BASE_URL",
-            "ALIYUN_OIDC_PROVIDER_ARN",
-            "ALIYUN_ROLE_ARN",
+            "ALIYUN_OSS_ACCESS_KEY_ID",
+            "ALIYUN_OSS_ACCESS_KEY_SECRET",
             "ALIYUN_OSS_BUCKET",
+            "ALIYUN_OSS_ENABLED",
             "ALIYUN_OSS_REGION",
             "ALIYUN_OSS_ENDPOINT",
             "ALIYUN_OSS_PREFIX",
           ];
           const missing = required.filter((name) => !process.env[name]?.trim());
           if (missing.length) throw new Error(`Missing GitHub configuration: ${missing.join(", ")}`);
+          if (!/^(1|true|yes|on)$/i.test(process.env.ALIYUN_OSS_ENABLED.trim())) {
+            throw new Error("ALIYUN_OSS_ENABLED must be true to publish a release.");
+          }
           NODE
           node scripts/write-tauri-release-config.mjs
 
@@ -155,6 +160,8 @@ jobs:
         run: npm ci
 
       - name: Configure Aliyun updater endpoint
+        env:
+          OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
         run: node scripts/write-tauri-release-config.mjs
 
       - name: Build signed Tauri bundles
@@ -162,7 +169,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.OXIDE_UPDATER_PUBLIC_KEY }}
+          OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
         with:
           args: ${{ matrix.args }} --config src-tauri/tauri.release.conf.json
 
@@ -186,15 +193,12 @@ jobs:
     name: Publish and verify Aliyun OSS release
     needs: [validate, build]
     runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-      id-token: write
     env:
       RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-      ALIYUN_OSS_BUCKET: ${{ vars.ALIYUN_OSS_BUCKET }}
-      ALIYUN_OSS_REGION: ${{ vars.ALIYUN_OSS_REGION }}
-      ALIYUN_OSS_ENDPOINT: ${{ vars.ALIYUN_OSS_ENDPOINT }}
-      ALIYUN_OSS_PREFIX: ${{ vars.ALIYUN_OSS_PREFIX }}
+      ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+      ALIYUN_OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
+      ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
+      ALIYUN_OSS_PREFIX: ${{ secrets.ALIYUN_OSS_PREFIX }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -223,7 +227,7 @@ jobs:
 
       - name: Verify Tauri updater signatures locally
         env:
-          OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.OXIDE_UPDATER_PUBLIC_KEY }}
+          OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
         shell: bash
         run: |
           set -euo pipefail
@@ -259,22 +263,12 @@ jobs:
           sudo install -m 0755 "$OSSUTIL_BIN" /usr/local/bin/ossutil
           ossutil version
 
-      - name: Obtain short-lived Aliyun credentials
-        id: aliyun
-        uses: aliyun/configure-aliyun-credentials-action@v1
-        with:
-          role-to-assume: ${{ vars.ALIYUN_ROLE_ARN }}
-          oidc-provider-arn: ${{ vars.ALIYUN_OIDC_PROVIDER_ARN }}
-          role-session-name: oxide-studio-github-release
-          role-session-expiration: 1800
-
       - name: Upload immutable version and publish latest manifest
         env:
-          OSS_ACCESS_KEY_ID: ${{ steps.aliyun.outputs.aliyun-access-key-id }}
-          OSS_ACCESS_KEY_SECRET: ${{ steps.aliyun.outputs.aliyun-access-key-secret }}
-          OSS_SESSION_TOKEN: ${{ steps.aliyun.outputs.aliyun-security-token }}
-          OSS_REGION: ${{ vars.ALIYUN_OSS_REGION }}
-          OSS_ENDPOINT: ${{ vars.ALIYUN_OSS_ENDPOINT }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
+          OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
         shell: bash
         run: |
           set -euo pipefail

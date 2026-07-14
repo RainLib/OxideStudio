@@ -16,6 +16,7 @@
         "core:window:allow-maximize",
         "core:window:allow-toggle-maximize",
         "core:window:allow-close",
+        "core:window:allow-destroy",
         "core:window:allow-set-decorations",
         "core:window:allow-set-title-bar-style"
     ]

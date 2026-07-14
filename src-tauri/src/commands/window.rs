@@ -6,6 +6,16 @@ use tauri::{
 
 static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 
+fn new_window_title(target_os: &str) -> &'static str {
+    if target_os == "macos" {
+        // macOS uses an overlay title bar. A native title would be painted on
+        // top of the project selector rendered by the webview.
+        ""
+    } else {
+        "OxideStudio"
+    }
+}
+
 #[tauri::command]
 pub async fn create_new_window(app: AppHandle) -> Result<String, String> {
     println!("[create_new_window] Command invoked!");
@@ -57,7 +67,7 @@ pub async fn create_new_window(app: AppHandle) -> Result<String, String> {
         window_label.clone(),
         WebviewUrl::App("index.html".into()),
     )
-    .title("OxideStudio")
+    .title(new_window_title(std::env::consts::OS))
     .inner_size(1200.0, 800.0)
     .min_inner_size(1200.0, 800.0)
     .focused(true);
@@ -74,7 +84,7 @@ pub async fn create_new_window(app: AppHandle) -> Result<String, String> {
     }
 
     println!("[create_new_window] Building window...");
-    let _window = builder.build().map_err(|e| {
+    let window = builder.build().map_err(|e| {
         println!("[create_new_window] Failed to build window: {}", e);
         e.to_string()
     })?;
@@ -82,7 +92,7 @@ pub async fn create_new_window(app: AppHandle) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
         use tauri::TitleBarStyle;
-        let _ = _window.set_title_bar_style(TitleBarStyle::Overlay);
+        let _ = window.set_title_bar_style(TitleBarStyle::Overlay);
     }
 
     Ok(window_label)
@@ -91,4 +101,30 @@ pub async fn create_new_window(app: AppHandle) -> Result<String, String> {
 #[tauri::command]
 pub fn close_current_window(window: WebviewWindow) -> Result<(), String> {
     window.close().map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::new_window_title;
+
+    #[test]
+    fn macos_overlay_window_has_no_native_title() {
+        assert_eq!(new_window_title("macos"), "");
+        assert_eq!(new_window_title("linux"), "OxideStudio");
+        assert_eq!(new_window_title("windows"), "OxideStudio");
+    }
+
+    #[test]
+    fn desktop_capability_allows_guarded_window_destroy() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../../capabilities/default.json"))
+                .expect("default desktop capability must be valid JSON");
+        let permissions = capability["permissions"]
+            .as_array()
+            .expect("default desktop capability must list permissions");
+
+        assert!(permissions.contains(&serde_json::Value::String(
+            "core:window:allow-destroy".to_string()
+        )));
+    }
 }
