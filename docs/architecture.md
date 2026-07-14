@@ -206,6 +206,8 @@ Table Tab 使用服务端分页。前端保存 cell edits、新增行、删除�
 
 Foreign-key row navigation 不扫描 Explorer 树。当前表的 outgoing constraints 与 PostgreSQL/MySQL 系统目录返回的 incoming references 被转换为纯 `ForeignKeyNavigationPlan`；复合键必须全部有非 NULL 值，并映射为结构化参数化 filters。目标 tab 继承源 tab 的 connection/database scope，复用 tab 时仍经过草稿丢弃保护。详细边界见 [ADR-0007](decisions/0007-foreign-key-row-navigation.md)。
 
+Table 与 Query grid 共用 selection aggregate：Glide range/row/column selection 先去重并限制为 50,000 cells，`useDeferredValue` 避免拖选重算阻塞 canvas。聚合层区分 SQL NULL 与新行 DEFAULT，只有元数据标记的数值列参与 sum/avg/min/max；`bigint`/`numeric` 使用 `BigInt coefficient + scale` 定点累计。跨 tab/result 的旧 selection 会被拒绝。详细性能与精度边界见 [ADR-0008](decisions/0008-selection-aggregate-budget.md)。
+
 ### 5.4 Explain Plan
 
 编辑器只提交原始 SQL、target identity、mode 和 query id；不允许前端拼接 `EXPLAIN`。Rust 先复用 dialect-aware statement scanner，要求恰好一条只读源查询并拒绝已有 `EXPLAIN`，再生成 PostgreSQL/MySQL 的 estimate/analyze 语句，并通过既有 query cancellation 与 database/schema 路由在只读事务内执行。

@@ -1,6 +1,7 @@
 import {
   forwardRef,
   useCallback,
+  useDeferredValue,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -71,12 +72,19 @@ import {
   foreignKeyNavigationLabel,
   type ForeignKeyNavigationPlan,
 } from "@/lib/foreignKeyNavigation";
+import {
+  collectSelectionCoordinates,
+  summarizeSelection,
+} from "@/lib/selectionAggregate";
+import { SelectionAggregateBar } from "./SelectionAggregateBar";
 
 interface GridValueEditorTarget extends ValueEditorTarget {
   tabId: string;
   rowIndex: number;
   columnIndex: number;
 }
+
+const EMPTY_PENDING_EDITS = new Map<string, unknown>();
 
 export interface DataGridHandle {
   openSearch: () => void;
@@ -209,7 +217,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     const result = activeTab?.results?.[resultIndex] ?? activeTab?.results?.[0];
     const error = activeTab?.error;
     const gridState = activeTab?.gridState;
-    const pendingEdits = activeTab?.pendingEdits || new Map();
+    const pendingEdits = activeTab?.pendingEdits || EMPTY_PENDING_EDITS;
     const isEditable = activeTab?.type === "table" && !readOnly;
     const columnWidths = activeTab?.columnWidths || {};
     const columnOrder = activeTab?.columnOrder || [];
@@ -221,6 +229,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       columns: CompactSelection.empty(),
       rows: CompactSelection.empty(),
     });
+    const gridSelectionContext = useMemo(
+      () => ({ activeTabId, resultIndex, selection: gridSelection }),
+      [activeTabId, gridSelection, resultIndex],
+    );
+    const deferredGridSelectionContext = useDeferredValue(gridSelectionContext);
     const [showSearch, setShowSearch] = useState(false);
     const [valueEditorTarget, setValueEditorTarget] =
       useState<GridValueEditorTarget | null>(null);
@@ -243,6 +256,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
 
     useEffect(() => {
       setValueEditorTarget(null);
+      setGridSelection({
+        columns: CompactSelection.empty(),
+        rows: CompactSelection.empty(),
+      });
+      setContextMenu({ type: null, x: 0, y: 0 });
     }, [activeTabId, resultIndex]);
 
     // Column definitions
@@ -464,6 +482,83 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         selectedRowCount: selectedRowIndexes.length,
       });
     }, [onSelectionSummaryChange, selectedRowIndexes.length]);
+
+    const aggregateColumnMetadata = useMemo(
+      () =>
+        columns.map((visualColumn) => {
+          const originalColumnIndex = result
+            ? resultColumnIndexByGridId(result.columns, visualColumn.id)
+            : -1;
+          const resultColumn = result?.columns[originalColumnIndex];
+          return {
+            originalColumnIndex,
+            dataType:
+              resultColumn?.data_type ||
+              tableColumns?.find(
+                (columnInfo) => columnInfo.name === resultColumn?.name,
+              )?.data_type,
+          };
+        }),
+      [columns, result, tableColumns],
+    );
+
+    const selectionAggregate = useMemo(() => {
+      if (
+        !result ||
+        columns.length === 0 ||
+        deferredGridSelectionContext.activeTabId !== activeTabId ||
+        deferredGridSelectionContext.resultIndex !== resultIndex
+      ) {
+        return null;
+      }
+      const deferredGridSelection = deferredGridSelectionContext.selection;
+      const current = deferredGridSelection.current;
+      const selection = collectSelectionCoordinates({
+        ranges: current ? [current.range, ...current.rangeStack] : [],
+        rows: deferredGridSelection.rows.toArray(),
+        columns: deferredGridSelection.columns.toArray(),
+        rowCount: filteredRows.length + newRowsCount,
+        columnCount: columns.length,
+      });
+      if (selection.coordinates.length <= 1) return null;
+
+      const cells = selection.coordinates.map(([row, column]) => {
+        const columnMetadata = aggregateColumnMetadata[column];
+        if (!columnMetadata) return { value: undefined };
+        const { originalColumnIndex } = columnMetadata;
+        if (originalColumnIndex < 0) return { value: undefined };
+
+        const isNewRow = row >= filteredRows.length;
+        const rowKey = isNewRow
+          ? -1 - (row - filteredRows.length)
+          : sortedIndices[row];
+        if (rowKey === undefined) return { value: undefined };
+        const editKey = `${rowKey}:${originalColumnIndex}`;
+        const value = pendingEdits.has(editKey)
+          ? pendingEdits.get(editKey)
+          : isNewRow
+            ? undefined
+            : result.rows[rowKey]?.[originalColumnIndex];
+
+        return {
+          value,
+          dataType: columnMetadata.dataType,
+        };
+      });
+
+      return summarizeSelection(cells, selection.truncated);
+    }, [
+      columns,
+      activeTabId,
+      aggregateColumnMetadata,
+      deferredGridSelectionContext,
+      filteredRows.length,
+      newRowsCount,
+      pendingEdits,
+      result,
+      resultIndex,
+      sortedIndices,
+    ]);
 
     // Update getCellContent to handle missing result & new rows
     const getCellContent = useCallback(
@@ -1626,6 +1721,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                     </span>
                   </div>
                 </div>
+              )}
+              {selectionAggregate && (
+                <SelectionAggregateBar aggregate={selectionAggregate} />
               )}
             </>
           )}

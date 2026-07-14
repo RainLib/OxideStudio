@@ -401,7 +401,7 @@ DataGrip 当前 AI 基线包含 schema-aware chat、自然语言生成 SQL、SQL
 | 外部生态 | JetBrains 生态 | 已有 MCP/CLI/provider registry | 继续保持统一 policy |
 | 数据隐私 | 默认不把原始数据库数据提供给 AI | 有截断/隐藏 credential，缺“发送内容预览” | P0/P1 |
 
-AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV Import Mapping、双向复合外键 row navigation，以及 schema diff 的 snapshot + dependency-ordered review/preflight 已完成；migration apply/verify、diagram、data compare、semantic refactor/find usages、native streaming import、session/lock 等仍需按 [DataGrip 能力差距](datagrip-gap-analysis.md) 路线推进。
+AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV Import Mapping、双向复合外键 row navigation、precision-safe Aggregate View，以及 schema diff 的 snapshot + dependency-ordered review/preflight 已完成；migration apply/verify、diagram、data compare、semantic refactor/find usages、native streaming import、session/lock 等仍需按 [DataGrip 能力差距](datagrip-gap-analysis.md) 路线推进。
 
 ## 9. 分阶段路线图
 

@@ -76,7 +76,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | Value Editor | 已具备/部分 | `Shift+Enter`/cell menu 打开独立大视图；text/JSON/date/binary/boolean/number 有类型校验，明确区分默认未加载、NULL、空串和值，修改复用 table draft/mutation gate；超大 LOB 的独立按需拉取仍待增强 | P1 |
 | Table / Tree / Text / Transpose | 缺失 | 当前以表格为主；文档数据库也缺少稳定的 tree/text 切换 | P1 |
 | 外键导航 | 已具备/部分 | PostgreSQL/MySQL 可从 FK cell 跳到 referenced row，也可从主键/唯一键 cell 查看 referencing rows；复合键原子映射、NULL 不误跳、保留 connection/database/schema scope。尚缺键盘快捷键、关系路径历史和图内联动 | P1 |
-| Aggregate View | 缺失 | 多 cell 选择没有 sum/avg/min/max/count 汇总 | P1 |
+| Aggregate View | 已具备/部分 | Table/Query grid 的 range/row/column 多选支持 cells/distinct/NULL/default 与类型感知 sum/avg/min/max；decimal/bigint 用定点精确累计，50k cell 有界采样且明确标记。尚缺自定义函数和 server-wide aggregate | P1 |
 | Data compare | 缺失 | 不能比较表或两个结果集并设置 tolerance | P1 |
 | 当前结果内查找 | 部分具备 | 有 grid search/filter；缺少列范围、正则和匹配导航 | P0 |
 
