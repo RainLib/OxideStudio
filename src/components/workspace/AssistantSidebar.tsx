@@ -11,6 +11,7 @@ import type {
   AssistantPlanStep,
   AssistantPreparedTurn,
   AssistantToolLoopEvent,
+  AssistantToolLoopResult,
   AssistantToolCallResult,
   AssistantToolResultSummary,
   AssistantTurnInput,
@@ -43,6 +44,20 @@ import type {
   AssistantAttachment,
   UiActionRequest,
 } from "@/ai/ui-actions/types";
+import { useProjectStore } from "@/store/useProjectStore";
+import { useTaskStore } from "@/store/useTaskStore";
+import {
+  ASSISTANT_TASK_SESSION_ID,
+  assistantTaskService,
+  type AssistantTaskRecord,
+} from "@/services/tauri/assistant-task.service";
+import {
+  assistantTaskHasPendingApproval,
+  createAssistantTaskRecord,
+  finishAssistantTask,
+  reduceAssistantTaskEvent,
+} from "@/ai/assistant/taskCheckpoint";
+import { assistantTaskToWorkbenchTask } from "@/lib/assistantTaskProjection";
 
 export function AssistantSidebar() {
   const aiEnabled = useAiSettingsStore((state) => state.enabled);
@@ -87,6 +102,7 @@ export function AssistantSidebar() {
     []
   );
   const { tabs, activeTabId } = useTabStore();
+  const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const auditEntries = useAiAuditStore((state) => state.entries);
   const recordAuditEntry = useAiAuditStore((state) => state.record);
   const clearAuditEntries = useAiAuditStore((state) => state.clear);
@@ -115,6 +131,9 @@ export function AssistantSidebar() {
   >({});
   const toolResultsRef = useRef<Record<string, AssistantToolCallResult>>({});
   const activeAbortControllerRef = useRef<AbortController | null>(null);
+  const assistantTaskRef = useRef<AssistantTaskRecord | null>(null);
+  const assistantTaskSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const previousProjectIdRef = useRef(activeProjectId);
   const submissionIdRef = useRef(0);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const [isPlanning, setIsPlanning] = useState(false);
@@ -177,6 +196,84 @@ export function AssistantSidebar() {
       },
     ]);
   };
+
+  const saveAssistantTask = (task: AssistantTaskRecord) => {
+    assistantTaskRef.current = task;
+    if (useProjectStore.getState().activeProjectId === task.projectId) {
+      useTaskStore.getState().upsertTask(assistantTaskToWorkbenchTask(task));
+    }
+    const save = assistantTaskSaveQueueRef.current
+      .catch(() => undefined)
+      .then(() => assistantTaskService.save(task));
+    assistantTaskSaveQueueRef.current = save.catch((error) => {
+      console.warn("Failed to persist assistant task", error);
+    });
+    return assistantTaskSaveQueueRef.current;
+  };
+
+  const beginAssistantTask = (turn: AssistantPreparedTurn) => {
+    const task = createAssistantTaskRecord({
+      projectId: activeProjectId,
+      sessionId: ASSISTANT_TASK_SESSION_ID,
+      turn,
+    });
+    void saveAssistantTask(task);
+    return task;
+  };
+
+  const recordAssistantTaskEvent = (event: AssistantToolLoopEvent) => {
+    const current = assistantTaskRef.current;
+    if (!current || event.type === "roundSummarized") return;
+    void saveAssistantTask(reduceAssistantTaskEvent(current, event));
+  };
+
+  const settleAssistantTask = async (
+    result:
+      | AssistantToolLoopResult
+      | "awaitingApproval"
+      | "completed"
+      | "cancelled",
+  ) => {
+    const current = assistantTaskRef.current;
+    if (!current) return;
+    const outcome =
+      typeof result !== "string" &&
+      result.status === "completed" &&
+      assistantTaskHasPendingApproval(current)
+        ? "awaitingApproval"
+        : result;
+    await saveAssistantTask(finishAssistantTask(current, outcome));
+  };
+
+  useEffect(() => {
+    const previousProjectId = previousProjectIdRef.current;
+    if (previousProjectId === activeProjectId) return;
+    previousProjectIdRef.current = activeProjectId;
+    submissionIdRef.current += 1;
+    activeAbortControllerRef.current?.abort();
+    const task = assistantTaskRef.current;
+    if (
+      task &&
+      task.projectId === previousProjectId &&
+      (task.status === "running" || task.status === "awaiting_approval")
+    ) {
+      void saveAssistantTask(finishAssistantTask(task, "cancelled"));
+    }
+    assistantTaskRef.current = null;
+    toolResultsRef.current = {};
+    setActiveTurnInput(null);
+    setConversationEntries([]);
+    setPreparedTurn(null);
+    setPreparedMode(null);
+    setApprovedStepIds(new Set());
+    setActiveStepId(null);
+    setToolResults({});
+    setToolSummaries({});
+    setIsPlanning(false);
+    setPendingMode(null);
+    setIsCancelling(false);
+    setError(null);
+  }, [activeProjectId]);
 
   const handleSubmit = async () => {
     const prompt = message.trim();
@@ -286,6 +383,7 @@ export function AssistantSidebar() {
       );
 
       if (resolvedMode === "agent") {
+        const task = beginAssistantTask(turn);
         const automaticSteps = turn.suggestedPlan.filter(
           (step) => step.toolName && !step.requiresApproval
         );
@@ -296,6 +394,10 @@ export function AssistantSidebar() {
             automaticSteps,
             requestController
           );
+        } else if (assistantTaskHasPendingApproval(task)) {
+          await settleAssistantTask("awaitingApproval");
+        } else {
+          await settleAssistantTask("completed");
         }
       }
     } catch (err: any) {
@@ -406,6 +508,15 @@ export function AssistantSidebar() {
       audit: recordAuditEntry,
     };
     activeAbortControllerRef.current = controller;
+    if (assistantTaskRef.current) {
+      void saveAssistantTask({
+        ...assistantTaskRef.current,
+        status: "running",
+        detail: "Running tools",
+        finishedAt: null,
+        updatedAt: Date.now(),
+      });
+    }
     setError(null);
     setIsCancelling(false);
     setIsRunningSafeSteps(true);
@@ -429,6 +540,7 @@ export function AssistantSidebar() {
     };
 
     const handleLoopEvent = (event: AssistantToolLoopEvent) => {
+      recordAssistantTaskEvent(event);
       if (event.type === "stepStarted") {
         setActiveStepId(event.step.id);
         return;
@@ -479,6 +591,7 @@ export function AssistantSidebar() {
         approvedStepIds: initialApprovedStepIds,
         onEvent: handleLoopEvent,
       });
+      await settleAssistantTask(result);
       if (result.status === "cancelled") {
         setError("Assistant run cancelled");
       } else if (result.status === "failed") {
@@ -530,6 +643,7 @@ export function AssistantSidebar() {
     setPendingMode(null);
     setIsCancelling(false);
     setError(null);
+    assistantTaskRef.current = null;
   };
 
   const handleModeChange = (mode: AssistantMode) => {

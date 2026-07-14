@@ -58,6 +58,51 @@ pub struct QueryHistoryItem {
     pub finished_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantTaskPlanStep {
+    pub id: String,
+    pub title: String,
+    pub tool_name: Option<String>,
+    pub requires_approval: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantTaskCompletedStep {
+    pub id: String,
+    pub tool_name: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantTaskCheckpoint {
+    pub version: u32,
+    pub mode: String,
+    pub plan: Vec<AssistantTaskPlanStep>,
+    pub completed_steps: Vec<AssistantTaskCompletedStep>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantTaskRecord {
+    pub id: String,
+    pub project_id: String,
+    pub request_id: String,
+    pub session_id: String,
+    pub status: String,
+    pub title: String,
+    pub detail: Option<String>,
+    pub current_step_id: Option<String>,
+    pub current_tool_name: Option<String>,
+    pub progress: Option<f64>,
+    pub checkpoint: AssistantTaskCheckpoint,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub finished_at: Option<i64>,
+}
+
 fn default_project_id() -> String {
     "sqls".to_string()
 }
@@ -188,6 +233,41 @@ impl MetaStore {
         .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_query_history_project_connection ON query_history(project_id, connection_id, started_at DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS assistant_tasks (
+                project_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('running', 'awaiting_approval', 'completed', 'failed', 'cancelled', 'interrupted')),
+                title TEXT NOT NULL,
+                detail TEXT,
+                current_step_id TEXT,
+                current_tool_name TEXT,
+                progress REAL,
+                checkpoint JSON NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                PRIMARY KEY(project_id, id),
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_assistant_tasks_project_time ON assistant_tasks(project_id, updated_at DESC, id DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_assistant_tasks_project_status ON assistant_tasks(project_id, status, updated_at DESC)",
         )
         .execute(&self.pool)
         .await?;
@@ -404,6 +484,10 @@ impl MetaStore {
 
         let mut tx = self.pool.begin().await?;
         sqlx::query("DELETE FROM query_history WHERE project_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM assistant_tasks WHERE project_id = ?")
             .bind(id)
             .execute(&mut *tx)
             .await?;
@@ -716,6 +800,125 @@ impl MetaStore {
         Ok(())
     }
 
+    pub async fn save_assistant_task(&self, task: &AssistantTaskRecord) -> Result<()> {
+        validate_assistant_task(task)?;
+        if self.get_project(&task.project_id).await?.is_none() {
+            anyhow::bail!("assistant task project not found: {}", task.project_id);
+        }
+        let checkpoint = serde_json::to_value(&task.checkpoint)?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO assistant_tasks (
+                project_id, id, request_id, session_id, status, title, detail,
+                current_step_id, current_tool_name, progress, checkpoint,
+                created_at, updated_at, finished_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, id) DO UPDATE SET
+                request_id = excluded.request_id,
+                session_id = excluded.session_id,
+                status = excluded.status,
+                title = excluded.title,
+                detail = excluded.detail,
+                current_step_id = excluded.current_step_id,
+                current_tool_name = excluded.current_tool_name,
+                progress = excluded.progress,
+                checkpoint = excluded.checkpoint,
+                updated_at = excluded.updated_at,
+                finished_at = excluded.finished_at
+            "#,
+        )
+        .bind(&task.project_id)
+        .bind(&task.id)
+        .bind(&task.request_id)
+        .bind(&task.session_id)
+        .bind(&task.status)
+        .bind(&task.title)
+        .bind(&task.detail)
+        .bind(&task.current_step_id)
+        .bind(&task.current_tool_name)
+        .bind(task.progress)
+        .bind(checkpoint)
+        .bind(task.created_at)
+        .bind(task.updated_at)
+        .bind(task.finished_at)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM assistant_tasks
+            WHERE project_id = ?
+              AND status NOT IN ('running', 'awaiting_approval')
+              AND id IN (
+                  SELECT id FROM assistant_tasks
+                  WHERE project_id = ?
+                    AND status NOT IN ('running', 'awaiting_approval')
+                  ORDER BY updated_at DESC, id DESC
+                  LIMIT -1 OFFSET 100
+              )
+            "#,
+        )
+        .bind(&task.project_id)
+        .bind(&task.project_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn get_assistant_tasks(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<AssistantTaskRecord>> {
+        let now = current_timestamp_millis();
+        sqlx::query(
+            r#"
+            UPDATE assistant_tasks
+            SET status = 'interrupted',
+                detail = 'Application closed before the task completed',
+                updated_at = ?,
+                finished_at = ?
+            WHERE project_id = ?
+              AND session_id <> ?
+              AND status IN ('running', 'awaiting_approval')
+            "#,
+        )
+        .bind(now)
+        .bind(now)
+        .bind(project_id)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM assistant_tasks
+            WHERE project_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(project_id)
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(assistant_task_from_row).collect()
+    }
+
+    pub async fn clear_finished_assistant_tasks(&self, project_id: &str) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM assistant_tasks WHERE project_id = ? AND status NOT IN ('running', 'awaiting_approval')",
+        )
+        .bind(project_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // --- Metadata/Resource Operations ---
 
     /// Upsert resources without deleting siblings. Kept for callers that append metadata.
@@ -952,6 +1155,114 @@ impl MetaStore {
     }
 }
 
+fn validate_assistant_task(task: &AssistantTaskRecord) -> Result<()> {
+    const ALLOWED_STATUSES: [&str; 6] = [
+        "running",
+        "awaiting_approval",
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted",
+    ];
+    if task.id.trim().is_empty()
+        || task.project_id.trim().is_empty()
+        || task.request_id.trim().is_empty()
+        || task.session_id.trim().is_empty()
+    {
+        anyhow::bail!("assistant task identity fields are required");
+    }
+    if task.id.chars().count() > 200
+        || task.project_id.chars().count() > 200
+        || task.request_id.chars().count() > 200
+        || task.session_id.chars().count() > 200
+    {
+        anyhow::bail!("assistant task identity fields must not exceed 200 characters");
+    }
+    if !ALLOWED_STATUSES.contains(&task.status.as_str()) {
+        anyhow::bail!("unsupported assistant task status: {}", task.status);
+    }
+    if task.title.trim().is_empty() || task.title.chars().count() > 200 {
+        anyhow::bail!("assistant task title must contain 1 to 200 characters");
+    }
+    if task
+        .detail
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 2_000)
+    {
+        anyhow::bail!("assistant task detail must not exceed 2,000 characters");
+    }
+    if task.checkpoint.version != 1 || task.checkpoint.mode != "agent" {
+        anyhow::bail!("unsupported assistant task checkpoint");
+    }
+    if task.checkpoint.plan.len() > 100 || task.checkpoint.completed_steps.len() > 100 {
+        anyhow::bail!("assistant task checkpoint exceeds the 100-step limit");
+    }
+    for step in &task.checkpoint.plan {
+        if step.id.trim().is_empty()
+            || step.id.chars().count() > 120
+            || step.title.trim().is_empty()
+            || step.title.chars().count() > 200
+            || step
+                .tool_name
+                .as_ref()
+                .is_some_and(|value| value.chars().count() > 200)
+        {
+            anyhow::bail!("assistant task plan step exceeds its field limits");
+        }
+    }
+    for step in &task.checkpoint.completed_steps {
+        if step.id.trim().is_empty()
+            || step.id.chars().count() > 120
+            || step.tool_name.trim().is_empty()
+            || step.tool_name.chars().count() > 200
+            || !["success", "requiresApproval", "error"].contains(&step.status.as_str())
+        {
+            anyhow::bail!("assistant task completed step is invalid");
+        }
+    }
+    if serde_json::to_vec(&task.checkpoint)?.len() > 64 * 1024 {
+        anyhow::bail!("assistant task checkpoint exceeds 64 KiB");
+    }
+    if task
+        .current_step_id
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 120)
+        || task
+            .current_tool_name
+            .as_ref()
+            .is_some_and(|value| value.chars().count() > 200)
+    {
+        anyhow::bail!("assistant task current step fields exceed their limits");
+    }
+    if task
+        .progress
+        .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+    {
+        anyhow::bail!("assistant task progress must be between 0 and 1");
+    }
+    Ok(())
+}
+
+fn assistant_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<AssistantTaskRecord> {
+    let checkpoint: serde_json::Value = row.get("checkpoint");
+    Ok(AssistantTaskRecord {
+        id: row.get("id"),
+        project_id: row.get("project_id"),
+        request_id: row.get("request_id"),
+        session_id: row.get("session_id"),
+        status: row.get("status"),
+        title: row.get("title"),
+        detail: row.get("detail"),
+        current_step_id: row.get("current_step_id"),
+        current_tool_name: row.get("current_tool_name"),
+        progress: row.get("progress"),
+        checkpoint: serde_json::from_value(checkpoint)?,
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        finished_at: row.get("finished_at"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1175,5 +1486,147 @@ mod tests {
         let retained = store.get_query_history("sqls", 500).await.unwrap();
         assert_eq!(retained.first().unwrap().id, "entry-504");
         assert_eq!(retained.last().unwrap().id, "entry-005");
+    }
+
+    #[tokio::test]
+    async fn stores_project_scoped_assistant_tasks_and_interrupts_only_old_sessions() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = MetaStore { pool };
+        store.init().await.unwrap();
+        for id in ["project-a", "project-b"] {
+            store
+                .save_project(&Project {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                    root_path: None,
+                    created_at: 1,
+                    updated_at: 1,
+                })
+                .await
+                .unwrap();
+        }
+
+        let task =
+            |id: &str, project_id: &str, session_id: &str, status: &str| AssistantTaskRecord {
+                id: id.to_string(),
+                project_id: project_id.to_string(),
+                request_id: format!("request-{id}"),
+                session_id: session_id.to_string(),
+                status: status.to_string(),
+                title: "Assistant task".to_string(),
+                detail: None,
+                current_step_id: Some("inspect".to_string()),
+                current_tool_name: Some("metadata.listObjects".to_string()),
+                progress: Some(0.5),
+                checkpoint: AssistantTaskCheckpoint {
+                    version: 1,
+                    mode: "agent".to_string(),
+                    plan: vec![AssistantTaskPlanStep {
+                        id: "inspect".to_string(),
+                        title: "Inspect metadata".to_string(),
+                        tool_name: Some("metadata.listObjects".to_string()),
+                        requires_approval: false,
+                    }],
+                    completed_steps: vec![],
+                },
+                created_at: 10,
+                updated_at: 10,
+                finished_at: None,
+            };
+        store
+            .save_assistant_task(&task("running-a", "project-a", "old-session", "running"))
+            .await
+            .unwrap();
+        let mut completed = task("completed-a", "project-a", "old-session", "completed");
+        completed.finished_at = Some(12);
+        store.save_assistant_task(&completed).await.unwrap();
+        store
+            .save_assistant_task(&task("running-b", "project-b", "old-session", "running"))
+            .await
+            .unwrap();
+
+        let project_a = store
+            .get_assistant_tasks("project-a", "new-session", 50)
+            .await
+            .unwrap();
+        assert_eq!(project_a.len(), 2);
+        assert_eq!(
+            project_a
+                .iter()
+                .find(|candidate| candidate.id == "running-a")
+                .unwrap()
+                .status,
+            "interrupted"
+        );
+        assert_eq!(
+            project_a
+                .iter()
+                .find(|candidate| candidate.id == "completed-a")
+                .unwrap()
+                .status,
+            "completed"
+        );
+
+        let project_b = store
+            .get_assistant_tasks("project-b", "old-session", 50)
+            .await
+            .unwrap();
+        assert_eq!(project_b.len(), 1);
+        assert_eq!(project_b[0].status, "running");
+
+        store
+            .clear_finished_assistant_tasks("project-a")
+            .await
+            .unwrap();
+        assert!(store
+            .get_assistant_tasks("project-a", "new-session", 50)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .get_assistant_tasks("project-b", "old-session", 50)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_unbounded_or_invalid_assistant_task_checkpoints() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = MetaStore { pool };
+        store.init().await.unwrap();
+        let task = AssistantTaskRecord {
+            id: "invalid".to_string(),
+            project_id: "sqls".to_string(),
+            request_id: "request-invalid".to_string(),
+            session_id: "session".to_string(),
+            status: "running".to_string(),
+            title: "Assistant task".to_string(),
+            detail: None,
+            current_step_id: None,
+            current_tool_name: None,
+            progress: Some(2.0),
+            checkpoint: AssistantTaskCheckpoint {
+                version: 1,
+                mode: "agent".to_string(),
+                plan: vec![],
+                completed_steps: vec![],
+            },
+            created_at: 1,
+            updated_at: 1,
+            finished_at: None,
+        };
+        assert!(store.save_assistant_task(&task).await.is_err());
     }
 }

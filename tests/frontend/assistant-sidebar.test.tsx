@@ -11,6 +11,8 @@ import { useAiAuditStore } from "@/store/useAiAuditStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
+import { useProjectStore } from "@/store/useProjectStore";
+import { useTaskStore } from "@/store/useTaskStore";
 
 const mocks = vi.hoisted(() => ({
   chatCompletion: vi.fn(async () => ({
@@ -47,11 +49,19 @@ const mocks = vi.hoisted(() => ({
     deleted: 0,
     rowsAffected: 0,
   })),
+  saveAssistantTask: vi.fn(async () => undefined),
 }));
 
 vi.mock("@/services/tauri/ai.service", () => ({
   aiService: {
     chatCompletion: mocks.chatCompletion,
+  },
+}));
+
+vi.mock("@/services/tauri/assistant-task.service", () => ({
+  ASSISTANT_TASK_SESSION_ID: "assistant-session:test",
+  assistantTaskService: {
+    save: mocks.saveAssistantTask,
   },
 }));
 
@@ -82,6 +92,8 @@ const initialAiAuditState = useAiAuditStore.getState();
 const initialConnectionState = useConnectionStore.getState();
 const initialSchemaState = useSchemaStore.getState();
 const initialTabState = useTabStore.getState();
+const initialProjectState = useProjectStore.getState();
+const initialTaskState = useTaskStore.getState();
 
 function buttonWithText(container: ParentNode, text: string) {
   return Array.from(container.querySelectorAll("button")).find((button) =>
@@ -112,6 +124,11 @@ describe("AssistantSidebar", () => {
     vi.clearAllMocks();
     useAiAuditStore.setState({ entries: [] });
     mocks.cancelQuery.mockResolvedValue("cancelled");
+    useProjectStore.setState({
+      activeProjectId: "project-a",
+      activeProjectName: "Project A",
+    });
+    useTaskStore.setState({ tasks: [] });
     useAiSettingsStore.setState(
       {
         ...initialAiSettings,
@@ -178,6 +195,8 @@ describe("AssistantSidebar", () => {
     useConnectionStore.setState(initialConnectionState, true);
     useSchemaStore.setState(initialSchemaState, true);
     useTabStore.setState(initialTabState, true);
+    useProjectStore.setState(initialProjectState, true);
+    useTaskStore.setState(initialTaskState, true);
   });
 
   it("runs safe workspace tools automatically in Agent mode", async () => {
@@ -224,6 +243,18 @@ describe("AssistantSidebar", () => {
         }),
       ])
     );
+    await vi.waitFor(() =>
+      expect(mocks.saveAssistantTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: "project-a",
+          status: "completed",
+          progress: 1,
+        }),
+      ),
+    );
+    const persisted = JSON.stringify(mocks.saveAssistantTask.mock.calls.at(-1)?.[0]);
+    expect(persisted).not.toContain("SELECT * FROM users");
+    expect(persisted).not.toContain('"rows"');
   });
 
   it("shows mutation inputs and consumes approval for exactly one execution", async () => {
@@ -258,6 +289,11 @@ describe("AssistantSidebar", () => {
       "UPDATE users SET active = false WHERE id = 1"
     );
     expect(mocks.executeQuery).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(mocks.saveAssistantTask).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "awaiting_approval" }),
+      ),
+    );
 
     await act(async () => {
       buttonWithText(container, "Approve")?.dispatchEvent(
@@ -288,6 +324,11 @@ describe("AssistantSidebar", () => {
     );
     expect(buttonWithText(container, "Approve")).toBeTruthy();
     expect(buttonWithText(container, "Run approved")).toBeUndefined();
+    await vi.waitFor(() =>
+      expect(mocks.saveAssistantTask).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "completed" }),
+      ),
+    );
   });
 
   it("starts a new chat without remounting the assistant panel", async () => {
@@ -377,6 +418,54 @@ describe("AssistantSidebar", () => {
     });
 
     expect(container.textContent).toContain("Assistant run cancelled");
+  });
+
+  it("cancels and isolates an agent task when the active project changes", async () => {
+    useAiSettingsStore.setState({ assistantMode: "agent" });
+    let resolveQuery: (value: any[]) => void = () => undefined;
+    mocks.executeReadOnlyQuery.mockImplementationOnce(
+      () =>
+        new Promise<any[]>((resolve) => {
+          resolveQuery = resolve;
+        }),
+    );
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    const textarea = container.querySelector("textarea");
+    await act(async () => {
+      setTextareaValue(textarea!, "run current query");
+      container.querySelector('button[aria-label="Run agent"]')?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await flushAsyncWork();
+    });
+    const queryId = mocks.executeReadOnlyQuery.mock.calls[0]?.[3];
+
+    await act(async () => {
+      useProjectStore.setState({
+        activeProjectId: "project-b",
+        activeProjectName: "Project B",
+      });
+      await flushAsyncWork();
+    });
+    expect(mocks.cancelQuery).toHaveBeenCalledWith(queryId);
+    expect(container.textContent).not.toContain("run current query");
+
+    await act(async () => {
+      resolveQuery([]);
+      await flushAsyncWork();
+    });
+    await vi.waitFor(() =>
+      expect(mocks.saveAssistantTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: "project-a",
+          status: "cancelled",
+        }),
+      ),
+    );
   });
 
   it("sends Chat mode requests with bounded workspace context and history", async () => {

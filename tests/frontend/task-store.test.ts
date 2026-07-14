@@ -50,4 +50,70 @@ describe("task store", () => {
       expect.objectContaining({ id: runningId, status: "running" }),
     ]);
   });
+
+  it("replaces project-scoped persistent agent history without removing local tasks", () => {
+    const queryId = useTaskStore.getState().startTask({
+      kind: "query",
+      title: "Run query",
+    });
+    useTaskStore.getState().upsertTask({
+      id: "agent:old",
+      kind: "agent",
+      title: "Old agent",
+      status: "success",
+      startedAt: 1,
+      projectId: "old-project",
+      persistent: true,
+    });
+    useTaskStore.getState().replacePersistentAgentTasks("project-a", [
+      {
+        id: "agent:current",
+        kind: "agent",
+        title: "Current agent",
+        status: "waiting",
+        startedAt: 2,
+        projectId: "project-a",
+        persistent: true,
+      },
+    ]);
+
+    expect(useTaskStore.getState().tasks).toEqual([
+      expect.objectContaining({ id: "agent:current", status: "waiting" }),
+      expect.objectContaining({ id: queryId, status: "running" }),
+    ]);
+    useTaskStore.getState().clearFinished();
+    expect(useTaskStore.getState().tasks.map((task) => task.id)).toEqual([
+      "agent:current",
+      queryId,
+    ]);
+  });
+
+  it("does not let delayed hydration remove a newly started agent task", () => {
+    useTaskStore.getState().upsertTask({
+      id: "agent:new",
+      kind: "agent",
+      title: "New agent",
+      status: "running",
+      startedAt: 2,
+      projectId: "project-a",
+      persistent: true,
+    });
+
+    useTaskStore.getState().replacePersistentAgentTasks("project-a", [
+      {
+        id: "agent:history",
+        kind: "agent",
+        title: "Agent history",
+        status: "success",
+        startedAt: 1,
+        projectId: "project-a",
+        persistent: true,
+      },
+    ]);
+
+    expect(useTaskStore.getState().tasks.map((task) => task.id)).toEqual([
+      "agent:history",
+      "agent:new",
+    ]);
+  });
 });

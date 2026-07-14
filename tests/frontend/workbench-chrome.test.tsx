@@ -13,11 +13,24 @@ import { APP_EVENT_OPEN_COMMAND_PALETTE } from "@/lib/actions";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useTaskStore } from "@/store/useTaskStore";
 
+const mocks = vi.hoisted(() => ({
+  listAssistantTasks: vi.fn(async () => []),
+  clearAssistantTasks: vi.fn(async () => undefined),
+}));
+
+vi.mock("@/services/tauri/assistant-task.service", () => ({
+  assistantTaskService: {
+    list: mocks.listAssistantTasks,
+    clearFinished: mocks.clearAssistantTasks,
+  },
+}));
+
 describe("WorkbenchChrome", () => {
   let container: HTMLDivElement;
   let root: Root | null = null;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     container = document.createElement("div");
     document.body.appendChild(container);
     useProjectStore.setState({ activeProjectName: "sqls" });
@@ -116,5 +129,73 @@ describe("WorkbenchChrome", () => {
 
     expect(listener).toHaveBeenCalledOnce();
     window.removeEventListener(APP_EVENT_OPEN_COMMAND_PALETTE, listener);
+  });
+
+  it("hydrates interrupted and approval-waiting agent tasks for the active project", async () => {
+    useProjectStore.setState({
+      activeProjectId: "project-a",
+      activeProjectName: "Project A",
+    });
+    mocks.listAssistantTasks.mockResolvedValueOnce([
+      {
+        id: "agent:waiting",
+        projectId: "project-a",
+        requestId: "request-1",
+        sessionId: "old-session",
+        status: "awaiting_approval",
+        title: "Assistant agent task",
+        detail: "Waiting for approval",
+        progress: 0.5,
+        checkpoint: {
+          version: 1,
+          mode: "agent",
+          plan: [],
+          completedSteps: [],
+        },
+        createdAt: 10,
+        updatedAt: 20,
+        finishedAt: null,
+      },
+      {
+        id: "agent:interrupted",
+        projectId: "project-a",
+        requestId: "request-2",
+        sessionId: "old-session",
+        status: "interrupted",
+        title: "Assistant agent task",
+        detail: "Application closed before the task completed",
+        checkpoint: {
+          version: 1,
+          mode: "agent",
+          plan: [],
+          completedSteps: [],
+        },
+        createdAt: 30,
+        updatedAt: 40,
+        finishedAt: 40,
+      },
+    ]);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <WorkbenchStatusBar
+          isIntrospecting={false}
+          secondaryPanelOpen={false}
+          onToggleSecondaryPanel={vi.fn()}
+        />,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.listAssistantTasks).toHaveBeenCalledWith("project-a");
+    expect(useTaskStore.getState().tasks).toEqual([
+      expect.objectContaining({ id: "agent:waiting", status: "waiting" }),
+      expect.objectContaining({
+        id: "agent:interrupted",
+        status: "interrupted",
+      }),
+    ]);
   });
 });

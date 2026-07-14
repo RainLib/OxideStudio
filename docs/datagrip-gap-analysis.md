@@ -139,7 +139,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | Explain/Fix SQL error | 部分具备 | LSP diagnostic 已可点击 Jump 到精确 range，通用 patch 可安全预览/应用；vendor error 尚未统一为 SQLSTATE/position/object，自动 Fix → Validate 仍缺失 | P0 |
 | Query optimization / plan explanation | 部分具备 | `query.explain` 只生成 estimate plan，模型可读取真实规范化计划；尚缺热点规则、索引/schema citation、优化前后 plan 对比与验证闭环 | P1 |
 | IDE 页面跳转和联动 | 已具备/部分 | typed `UiActionRegistry` 已覆盖 project/file/tab/panel/connection/object/editor/result/plan/patch/settings，含 stable target 与 stale-context；task surface 待补 | P1 |
-| 多轮 durable agent | 部分具备 | `AssistantRuntime` 已拥有有界 tool loop、follow-up policy/去重、step-id approval、typed event 与取消检查；LangGraph 当前主要为 `plan -> policy`，仍缺 checkpoint/resume、持久 thread、approval pause token 和 subagent | P1 |
+| 多轮 durable agent | 部分具备 | `AssistantRuntime` 已拥有有界 loop/policy/去重/取消；project-scoped task summary 可在 TaskStatusCenter 恢复 interrupted/waiting/history，且不落 prompt/input/output/approval；仍缺 executable checkpoint/resume、持久 thread、idempotency receipt、task.reveal 和 subagent | P1 |
 | 工具安全与多数据模型 | 已具备/优势 | registry、capability、approval、MCP/CLI 以及 Mongo/Redis/ES 结构化 mutation 已形成独立方向 | — |
 | AI 数据治理 | 部分具备 | credential 隔离、上下文截断和有界结果已有；缺发送内容预览、项目级 retention 和 attachment 敏感级别 | P0/P1 |
 

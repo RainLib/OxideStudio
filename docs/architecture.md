@@ -226,6 +226,8 @@ Schema baseline 不读取可变的 Explorer 展示树，而是调用 Rust `captu
 
 当前 LangGraph 主要承担 `plan -> policy`。有界多轮工具循环已由 `AssistantRuntime.runToolLoop` 接管：Runtime 负责工具/输入签名去重、follow-up policy 归一化、精确 step-id 审批、默认四轮/十二次预算、失败停止与 AbortSignal，并通过 typed event 向 React 暴露步骤、结果、summary、plan extension 和 limit。Sidebar 只投影瞬时 UI 状态，但 controller 和生命周期仍在组件内，尚无 checkpoint/resume，因此不能把它描述为 durable agent 已完成。页面联动由 `src/ai/ui-actions` 提供独立 typed navigation layer：Assistant tool result 会生成带 provenance 的 attachment，registry 负责项目/context/revision/plan 校验，Database Explorer、Monaco 与 Explain Plan 只接收稳定语义 target。Runtime 边界见 [ADR-0010](decisions/0010-assistant-runtime-tool-loop.md)。
 
+Agent mode 的任务摘要写入独立 `assistant_tasks` 表，不复用需要数据库连接外键的 metadata resources。落盘 schema 只允许 plan step 的 id/title/tool/approval risk 与 completed status，不包含 prompt、tool input/output、SQL、结果行或批准 token；前端按顺序写入，后端限制 100 steps、64 KiB checkpoint 和每项目 100 条终态记录。TaskStatusCenter 按 project hydration；不同 application session 遗留的 running/awaiting task 会转为 interrupted，项目切换会取消旧 task 并清除旧批准。该层提供可回看的 durable summary，不提供执行 resume。见 [ADR-0011](decisions/0011-agent-task-summary-persistence.md)。
+
 编辑器修改采用两段式边界：只读 `editor.proposePatch` 工具根据当前 tab/selection 生成绑定 document revision 的 patch artifact；`editor.previewPatch` 只打开 before/after surface。只有用户点击 Apply，tab store 才再次核对整篇 revision 与 range 的原始文本并更新 Monaco 内容，预览本身不会写入或执行 SQL。单侧文本限制为 50,000 字符，binary preview 不进入文本 patch 链路。durable task action 仍须等待对应 Task surface。目标状态机、Deep Agents 分层与完整页面动作协议见 [AI Agent 产品与技术规格](AI_AGENT_PRODUCT_SPEC.md)，补丁决策见 [ADR-0009](decisions/0009-revision-bound-editor-patch.md)。
 
 ## 6. 测试与质量门
@@ -242,6 +244,6 @@ Schema baseline 不读取可变的 Explorer 展示树，而是调用 Rust `captu
 3. `tauri::generate_handler!` 是手工总表，新增命令容易漏注册，应增加命令契约测试或代码生成。
 4. Search Everywhere 目前只索引内存中已知范围，还没有覆盖 MetaStore 的全项目对象索引。
 5. provider capability 同时存在前端默认值和后端运行时值，需要持续用契约测试防止漂移。
-6. Assistant 的多轮执行、调用上限和批准协调仍部分耦合在 UI；页面 action 已有 stale-context 防护，但 agent runtime 仍需要 checkpoint/resume 和批准 token 的 context binding。
+6. Assistant 的循环语义已移入 Runtime，项目级 task summary 已持久化；剩余债务是把 AbortController/task state 从 Sidebar 生命周期移出，增加 idempotency receipt、真正 checkpoint/resume 和不可重放的 approval pause token。页面 action 已有 stale-context 防护。
 
 DataGrip 对标差距、优先级和验收标准见 [datagrip-gap-analysis.md](datagrip-gap-analysis.md)。

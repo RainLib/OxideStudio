@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Bell,
   CheckCircle2,
@@ -9,6 +9,9 @@ import {
   XCircle,
 } from "lucide-react";
 import { useTaskStore, type WorkbenchTask } from "@/store/useTaskStore";
+import { useProjectStore } from "@/store/useProjectStore";
+import { assistantTaskService } from "@/services/tauri/assistant-task.service";
+import { assistantTaskToWorkbenchTask } from "@/lib/assistantTaskProjection";
 import { cn } from "@/lib/utils";
 
 function taskAge(task: WorkbenchTask) {
@@ -34,15 +37,45 @@ function taskIcon(task: WorkbenchTask) {
 }
 
 export function TaskStatusCenter() {
-  const { tasks, clearFinished } = useTaskStore();
+  const { tasks, clearFinished, replacePersistentAgentTasks } = useTaskStore();
+  const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const [open, setOpen] = useState(false);
-  const runningTasks = tasks.filter((task) => task.status === "running");
+  const activeTasks = tasks.filter(
+    (task) => task.status === "running" || task.status === "waiting",
+  );
   const latestTask = useMemo(
     () =>
-      runningTasks[runningTasks.length - 1] || tasks[tasks.length - 1] || null,
-    [runningTasks, tasks]
+      activeTasks[activeTasks.length - 1] || tasks[tasks.length - 1] || null,
+    [activeTasks, tasks]
   );
   const visibleTasks = [...tasks].reverse().slice(0, 10);
+
+  useEffect(() => {
+    let cancelled = false;
+    void assistantTaskService
+      .list(activeProjectId)
+      .then((records) => {
+        if (!cancelled) {
+          replacePersistentAgentTasks(
+            activeProjectId,
+            records.map(assistantTaskToWorkbenchTask),
+          );
+        }
+      })
+      .catch((error) => {
+        console.warn("Failed to load assistant task history", error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectId, replacePersistentAgentTasks]);
+
+  const handleClearFinished = () => {
+    clearFinished();
+    void assistantTaskService.clearFinished(activeProjectId).catch((error) => {
+      console.warn("Failed to clear assistant task history", error);
+    });
+  };
 
   return (
     <div className="relative h-full">
@@ -71,9 +104,9 @@ export function TaskStatusCenter() {
                 </span>
               )}
             </span>
-            {runningTasks.length > 1 && (
+            {activeTasks.length > 1 && (
               <span className="rounded-[3px] bg-[hsl(var(--wb-active))] px-1 text-[10px] text-[hsl(var(--wb-text))]">
-                {runningTasks.length}
+                {activeTasks.length}
               </span>
             )}
             <ChevronUp
@@ -112,7 +145,7 @@ export function TaskStatusCenter() {
             <button
               type="button"
               className="wb-icon-button"
-              onClick={clearFinished}
+              onClick={handleClearFinished}
               title="Clear finished tasks"
             >
               <Trash2 size={12} />
@@ -138,7 +171,7 @@ export function TaskStatusCenter() {
                     )}
                   </div>
                   <span className="text-[10px] text-[hsl(var(--wb-text-muted))]">
-                    {task.status === "running" ? "running" : taskAge(task)}
+                    {taskStatusLabel(task)}
                   </span>
                 </div>
               ))
@@ -152,4 +185,11 @@ export function TaskStatusCenter() {
       )}
     </div>
   );
+}
+
+function taskStatusLabel(task: WorkbenchTask) {
+  if (task.status === "running") return "running";
+  if (task.status === "waiting") return "waiting";
+  if (task.status === "interrupted") return "interrupted";
+  return taskAge(task);
 }

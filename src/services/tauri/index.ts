@@ -19,6 +19,7 @@
 // 服务导出
 export * from "./connection.service";
 export * from "./ai.service";
+export * from "./assistant-task.service";
 export * from "./database.service";
 export * from "./query.service";
 export * from "./query-history.service";

@@ -171,6 +171,9 @@ pub fn run() {
             commands::store::get_query_history,
             commands::store::delete_query_history_entry,
             commands::store::clear_query_history,
+            commands::store::save_assistant_task,
+            commands::store::get_assistant_tasks,
+            commands::store::clear_finished_assistant_tasks,
             // Project file commands
             commands::project_files::set_project_root,
             commands::project_files::list_project_entries,

@@ -1,7 +1,14 @@
 import { create } from "zustand";
 
-export type TaskStatus = "running" | "success" | "error" | "cancelled";
+export type TaskStatus =
+  | "running"
+  | "waiting"
+  | "success"
+  | "error"
+  | "cancelled"
+  | "interrupted";
 export type TaskKind =
+  | "agent"
   | "query"
   | "table"
   | "import"
@@ -20,6 +27,8 @@ export interface WorkbenchTask {
   startedAt: number;
   finishedAt?: number | null;
   error?: string | null;
+  projectId?: string | null;
+  persistent?: boolean;
 }
 
 interface TaskState {
@@ -32,9 +41,17 @@ interface TaskState {
     id: string,
     updates: Partial<Pick<WorkbenchTask, "title" | "detail" | "progress">>
   ) => void;
+  upsertTask: (task: WorkbenchTask) => void;
+  setTaskRunning: (id: string, detail?: string | null) => void;
+  setTaskWaiting: (id: string, detail?: string | null) => void;
   finishTask: (id: string, detail?: string | null) => void;
   failTask: (id: string, error: string, detail?: string | null) => void;
   cancelTask: (id: string, detail?: string | null) => void;
+  interruptTask: (id: string, detail?: string | null) => void;
+  replacePersistentAgentTasks: (
+    projectId: string,
+    tasks: WorkbenchTask[],
+  ) => void;
   clearFinished: () => void;
 }
 
@@ -51,7 +68,7 @@ function taskId(kind: TaskKind) {
 function completeTask(
   tasks: WorkbenchTask[],
   id: string,
-  status: Exclude<TaskStatus, "running">,
+  status: Exclude<TaskStatus, "running" | "waiting">,
   detail?: string | null,
   error?: string | null
 ) {
@@ -101,6 +118,46 @@ export const useTaskStore = create<TaskState>((set) => ({
     }));
   },
 
+  upsertTask: (task) => {
+    set((state) => ({
+      tasks: [...state.tasks.filter((candidate) => candidate.id !== task.id), task]
+        .sort((left, right) => left.startedAt - right.startedAt)
+        .slice(-MAX_TASK_HISTORY),
+    }));
+  },
+
+  setTaskRunning: (id, detail) => {
+    set((state) => ({
+      tasks: state.tasks.map((task) =>
+        task.id === id
+          ? {
+              ...task,
+              status: "running",
+              detail: detail ?? task.detail,
+              error: null,
+              finishedAt: null,
+            }
+          : task,
+      ),
+    }));
+  },
+
+  setTaskWaiting: (id, detail) => {
+    set((state) => ({
+      tasks: state.tasks.map((task) =>
+        task.id === id
+          ? {
+              ...task,
+              status: "waiting",
+              detail: detail ?? task.detail,
+              error: null,
+              finishedAt: null,
+            }
+          : task,
+      ),
+    }));
+  },
+
   finishTask: (id, detail) => {
     set((state) => ({
       tasks: completeTask(state.tasks, id, "success", detail),
@@ -119,9 +176,48 @@ export const useTaskStore = create<TaskState>((set) => ({
     }));
   },
 
+  interruptTask: (id, detail) => {
+    set((state) => ({
+      tasks: completeTask(state.tasks, id, "interrupted", detail),
+    }));
+  },
+
+  replacePersistentAgentTasks: (projectId, tasks) => {
+    set((state) => {
+      const persistentTasks = tasks.filter(
+        (task) => task.kind === "agent" && task.persistent,
+      );
+      const persistentTaskIds = new Set(
+        persistentTasks.map((task) => task.id),
+      );
+      const activeLocalTasks = state.tasks.filter(
+        (task) =>
+          task.kind === "agent" &&
+          task.persistent &&
+          task.projectId === projectId &&
+          (task.status === "running" || task.status === "waiting") &&
+          !persistentTaskIds.has(task.id),
+      );
+
+      return {
+        tasks: [
+          ...state.tasks.filter(
+            (task) => !(task.kind === "agent" && task.persistent),
+          ),
+          ...activeLocalTasks,
+          ...persistentTasks,
+        ]
+        .sort((left, right) => left.startedAt - right.startedAt)
+        .slice(-MAX_TASK_HISTORY),
+      };
+    });
+  },
+
   clearFinished: () => {
     set((state) => ({
-      tasks: state.tasks.filter((task) => task.status === "running"),
+      tasks: state.tasks.filter(
+        (task) => task.status === "running" || task.status === "waiting",
+      ),
     }));
   },
 }));

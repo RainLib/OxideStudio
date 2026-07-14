@@ -50,7 +50,7 @@ Assistant UI / Inline AI / Error Fix / Explain Plan
 - **Deep Agents 是 LangGraph 之上的 agent harness，不是替换底层图运行时**。现有两节点 `plan -> policy` 图可逐步替换成完整 Agent mode，同时保持 planner contract。
 - **桌面 WebView 使用环境适配入口并延迟加载**。只有用户第一次进入 Agent mode 时加载 Agent 运行时，避免增加首屏启动风险和普通查询路径体积。
 - **模型调用继续经过 Tauri/Rust**。API key、代理和 provider credential 不进入前端状态；前端只拿到流式事件和结构化响应。
-- **持久化使用项目级本地 checkpoint store**。通过 Tauri adapter 存储 thread、checkpoint、approval 和 tool result 摘要；默认不永久保存原始结果行。
+- **持久化使用项目级本地 checkpoint store**。已落地层只保存 task/plan/completed-status 安全摘要，不保存 prompt、tool input/output、SQL、原始结果行或批准 token；后续 resumable checkpoint 仍必须遵守相同最小化原则。
 - **MCP 只用于外部客户端**。应用内页面交互使用直接 TypeScript action bus，避免序列化页面状态、额外网络跳转和外部 host 权限错配。
 
 Deep Agents 的文件系统权限只约束其内置文件工具，不能替代 Oxide 对自定义工具、MCP 工具和数据库写操作的 policy。Oxide 的批准门和后端只读校验始终是最终裁决者。
@@ -66,7 +66,7 @@ Deep Agents 的文件系统权限只约束其内置文件工具，不能替代 O
 | LangGraph | 部分具备 | 当前主要为 `plan -> policy` 两节点 | Agent mode 引入完整状态图 |
 | 多轮工具循环 | 已具备/非持久 | `AssistantRuntime.runToolLoop` 已负责 policy、去重、预算、取消和 typed event；Sidebar 只投影状态 | 增加 approval pause token、checkpoint/resume 与 verification node |
 | 页面导航/编辑动作 | 已具备/部分 | `src/ai/ui-actions`、`databaseNavigation.ts`、`editorNavigation.ts`、`explainPlanNavigation.ts`、revision-bound patch preview | 补 durable task surface |
-| 持久 thread / memory | 缺失 | 无 checkpoint store | 项目隔离、可恢复、可清理 |
+| 持久 thread / memory | 部分具备 | `assistant_tasks` 已保存项目级安全 task summary，TaskStatusCenter 可恢复 interrupted/waiting/history | 增加 thread retention、idempotency receipt 与真正 checkpoint/resume |
 | 子代理 | 缺失 | 无隔离的 subagent executor | 默认只读、受预算约束 |
 | Agent 可观测性与评测 | 部分具备 | 有 audit hook，缺完整 trace/eval | 结构化 trace、回放、黄金任务集 |
 
@@ -284,6 +284,7 @@ type UiAction = {
 - `plan.revealNode` 与 `schemaDiff.revealChange` 已连接对应 artifact surface，会校验 tab、artifact version 和 node/change identity 后再定位。
 - `editor.proposePatch` 是只读 artifact 工具：host 从当前 selection/整篇文档捕获 range、before text 和 revision，模型只能提出 replacement/title/rationale。`editor.previewPatch` 在 revision 与 before text 都匹配时打开 before/after；用户点击 Apply 后 tab store 再校验一次并写入，预览不会自动修改或执行 SQL。单侧内容限制 50,000 字符，binary preview 明确拒绝。`task.reveal` 仍稳定返回 unsupported，不伪造成功。
 - 有界多轮执行已从 `AssistantSidebar` 移入 `AssistantRuntime.runToolLoop`。Runtime 对模型 follow-up 重新走 manifest/policy、按 tool+input signature 去重、只接受精确 normalized step id 的批准、默认限制四轮/十二次调用，并发出 typed progress event；Sidebar 不再决定循环语义。当前 AbortController 与任务内存仍属于组件，尚不支持关闭后继续、checkpoint 或 crash resume。
+- Agent task 的安全摘要已进入 project-scoped MetaStore 与 TaskStatusCenter：只保留 plan identity/risk 和 completed status，后端限制 100 steps、64 KiB 与每项目 100 条终态历史；旧 session 的 active task 自动标记 interrupted。项目切换会取消旧运行、清空旧对话/批准。异步 history hydration 会保留同项目刚启动但尚未出现在查询结果中的 active task，避免旧快照覆盖新任务。该摘要不可执行，批准不会落盘，`task.reveal` 与 checkpoint resume 仍未完成。
 
 ### 5.5 结构化错误基线（2026-07-15）
 
@@ -413,14 +414,14 @@ AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV
 2. context snapshot/version、发送内容预览、database catalog identity。
 3. LSP duplicate/ranking 修复及回归测试。
 4. revision-bound Patch Preview/Apply 已完成；继续统一 vendor error 的 SQLSTATE/position/object，并把 Jump/Explain/Preview Fix/Validate 串为诊断闭环。
-5. 有界工具循环、policy/去重/预算/取消已移入 runtime；继续把 controller、task state 和 approval pause 持久化，使 Sidebar 成为可卸载的纯视图。
+5. 有界工具循环、policy/去重/预算/取消已移入 runtime，安全 task summary 已持久化；继续把 controller、可执行 checkpoint 和 approval pause 移出 Sidebar，使其成为可卸载的纯视图。
 
 完成定义：AI 回答中的对象/错误/结果可以准确跳转；旧上下文和旧批准不能作用于新项目/数据库；重复列补全不再不可区分。
 
 ### Phase B：Deep Agents Agent mode（P0/P1）
 
 1. 延迟加载 desktop-compatible Deep Agents runtime，包装现有 registry tools。
-2. 项目级 thread/checkpoint store、cancel/resume、预算和 trace。
+2. 项目级安全 task summary 已完成；继续补 thread retention、可执行 checkpoint、idempotency receipt、cancel/resume 和 trace。
 3. 默认只读 subagent，按 schema research、query review、verification 隔离上下文。
 4. HITL 与现有 approval UI 对接；数据库 policy 仍由 registry/Rust 执行。
 5. 未配置 provider、runtime 加载失败或离线时可靠降级。

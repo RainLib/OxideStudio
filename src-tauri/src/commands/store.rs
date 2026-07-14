@@ -1,7 +1,7 @@
 use crate::core::{
     config::ConfigManager,
     protocol::CommandError,
-    store::{MetaStore, Project, QueryHistoryItem, Resource, SavedConnection},
+    store::{AssistantTaskRecord, MetaStore, Project, QueryHistoryItem, Resource, SavedConnection},
 };
 use anyhow::Result;
 use tauri::State;
@@ -248,6 +248,41 @@ pub async fn clear_query_history(
 ) -> Result<(), String> {
     meta_store
         .clear_query_history(&project_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn save_assistant_task(
+    meta_store: State<'_, MetaStore>,
+    task: AssistantTaskRecord,
+) -> Result<(), String> {
+    meta_store
+        .save_assistant_task(&task)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn get_assistant_tasks(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+    session_id: String,
+    limit: Option<i64>,
+) -> Result<Vec<AssistantTaskRecord>, String> {
+    meta_store
+        .get_assistant_tasks(&project_id, &session_id, limit.unwrap_or(50))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn clear_finished_assistant_tasks(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+) -> Result<(), String> {
+    meta_store
+        .clear_finished_assistant_tasks(&project_id)
         .await
         .map_err(|error| error.to_string())
 }
