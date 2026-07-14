@@ -1,4 +1,4 @@
-name: Release Build
+name: Release to Aliyun OSS
 
 on:
   push:
@@ -7,30 +7,32 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag matching package.json, for example v0.2.0"
+        description: "Release tag matching package.json, for example v0.1.1"
         required: true
+        type: string
+      release_notes:
+        description: "Optional notes shown by the desktop updater"
+        required: false
         type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  OXIDE_RELEASE_BASE_URL: ${{ vars.OXIDE_RELEASE_BASE_URL }}
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: "macos-latest"
-            args: "--target universal-apple-darwin"
-            name: "macOS"
-          - platform: "ubuntu-22.04"
-            name: "Linux"
-          - platform: "windows-latest"
-            name: "Windows"
-
-    runs-on: ${{ matrix.platform }}
-    name: Build for ${{ matrix.name }}
-
+  validate:
+    name: Validate release
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,14 +40,102 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Validate versions and release tag
+        id: version
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require("node:fs");
+          const packageVersion = require("./package.json").version;
+          const tauriVersion = require("./src-tauri/tauri.conf.json").version;
+          const cargo = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
+          const cargoVersion = cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+          const expectedTag = `v${packageVersion}`;
+          if (process.env.RELEASE_TAG !== expectedTag) {
+            throw new Error(`Release tag ${process.env.RELEASE_TAG} must match ${expectedTag}.`);
+          }
+          if (tauriVersion !== packageVersion || cargoVersion !== packageVersion) {
+            throw new Error(`Version mismatch: package=${packageVersion}, tauri=${tauriVersion}, cargo=${cargoVersion}.`);
+          }
+          NODE
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Validate signing and Aliyun configuration
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.OXIDE_UPDATER_PUBLIC_KEY }}
+          ALIYUN_OIDC_PROVIDER_ARN: ${{ vars.ALIYUN_OIDC_PROVIDER_ARN }}
+          ALIYUN_ROLE_ARN: ${{ vars.ALIYUN_ROLE_ARN }}
+          ALIYUN_OSS_BUCKET: ${{ vars.ALIYUN_OSS_BUCKET }}
+          ALIYUN_OSS_REGION: ${{ vars.ALIYUN_OSS_REGION }}
+          ALIYUN_OSS_ENDPOINT: ${{ vars.ALIYUN_OSS_ENDPOINT }}
+          ALIYUN_OSS_PREFIX: ${{ vars.ALIYUN_OSS_PREFIX }}
+        run: |
+          node - <<'NODE'
+          const required = [
+            "TAURI_SIGNING_PRIVATE_KEY",
+            "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+            "OXIDE_UPDATER_PUBLIC_KEY",
+            "OXIDE_RELEASE_BASE_URL",
+            "ALIYUN_OIDC_PROVIDER_ARN",
+            "ALIYUN_ROLE_ARN",
+            "ALIYUN_OSS_BUCKET",
+            "ALIYUN_OSS_REGION",
+            "ALIYUN_OSS_ENDPOINT",
+            "ALIYUN_OSS_PREFIX",
+          ];
+          const missing = required.filter((name) => !process.env[name]?.trim());
+          if (missing.length) throw new Error(`Missing GitHub configuration: ${missing.join(", ")}`);
+          NODE
+          node scripts/write-tauri-release-config.mjs
+
+      - name: Test release manifest generator
+        run: npm run test:release
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: macos
+            name: macOS universal
+            platform: macos-latest
+            args: "--target universal-apple-darwin"
+          - id: linux
+            name: Linux x86_64
+            platform: ubuntu-22.04
+            args: ""
+          - id: windows
+            name: Windows x86_64
+            platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
           cache: "npm"
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install Rust targets for universal macOS binary
-        if: matrix.platform == 'macos-latest'
+        if: matrix.id == 'macos'
         run: |
           rustup target add aarch64-apple-darwin
           rustup target add x86_64-apple-darwin
@@ -55,42 +145,165 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
-      - name: Install dependencies (Ubuntu only)
-        if: matrix.platform == 'ubuntu-22.04'
+      - name: Install Linux bundle dependencies
+        if: matrix.id == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
 
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Validate release version
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-        run: node -e "const expected = 'v' + require('./package.json').version; if (process.env.RELEASE_TAG !== expected) { throw new Error('Release tag ' + process.env.RELEASE_TAG + ' must match ' + expected); }"
+      - name: Configure Aliyun updater endpoint
+        run: node scripts/write-tauri-release-config.mjs
 
-      - name: Validate updater signing configuration
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.OXIDE_UPDATER_PUBLIC_KEY }}
-        run: node -e "for (const key of ['TAURI_SIGNING_PRIVATE_KEY', 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD', 'OXIDE_UPDATER_PUBLIC_KEY']) { if (!process.env[key]?.trim()) throw new Error('Missing required GitHub Actions secret ' + key); }"
-
-      - name: Build Tauri app
+      - name: Build signed Tauri bundles
         uses: tauri-apps/tauri-action@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.OXIDE_UPDATER_PUBLIC_KEY }}
         with:
-          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-          releaseName: "OxideStudio __VERSION__"
-          generateReleaseNotes: true
-          releaseDraft: false
-          prerelease: false
-          uploadUpdaterJson: true
-          uploadUpdaterSignatures: true
-          updaterJsonPreferNsis: true
-          uploadWorkflowArtifacts: true
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} --config src-tauri/tauri.release.conf.json
+
+      - name: Upload bundles for OSS publication
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-bundle-${{ matrix.id }}
+          if-no-files-found: error
+          retention-days: 3
+          path: |
+            src-tauri/target/**/release/bundle/**/*.AppImage
+            src-tauri/target/**/release/bundle/**/*.deb
+            src-tauri/target/**/release/bundle/**/*.dmg
+            src-tauri/target/**/release/bundle/**/*.exe
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.rpm
+            src-tauri/target/**/release/bundle/**/*.tar.gz
+            src-tauri/target/**/release/bundle/**/*.sig
+
+  publish:
+    name: Publish and verify Aliyun OSS release
+    needs: [validate, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      ALIYUN_OSS_BUCKET: ${{ vars.ALIYUN_OSS_BUCKET }}
+      ALIYUN_OSS_REGION: ${{ vars.ALIYUN_OSS_REGION }}
+      ALIYUN_OSS_ENDPOINT: ${{ vars.ALIYUN_OSS_ENDPOINT }}
+      ALIYUN_OSS_PREFIX: ${{ vars.ALIYUN_OSS_PREFIX }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download signed Tauri bundles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tauri-bundle-*
+          path: release-input
+
+      - name: Build static updater manifest and checksums
+        env:
+          RELEASE_NOTES: ${{ github.event_name == 'workflow_dispatch' && inputs.release_notes || '' }}
+        run: |
+          node scripts/package-oss-release.mjs \
+            --input release-input \
+            --output release-output \
+            --version "$RELEASE_VERSION" \
+            --tag "$RELEASE_TAG" \
+            --base-url "$OXIDE_RELEASE_BASE_URL"
+
+      - name: Verify Tauri updater signatures locally
+        env:
+          OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.OXIDE_UPDATER_PUBLIC_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          PUBLIC_KEY_FILE="$RUNNER_TEMP/oxide-studio.pub"
+          export PUBLIC_KEY_FILE
+          node -e 'require("node:fs").writeFileSync(process.env.PUBLIC_KEY_FILE, Buffer.from(process.env.OXIDE_UPDATER_PUBLIC_KEY, "base64"))'
+          SIGNATURE_COUNT=0
+          while IFS= read -r -d '' SIGNATURE_FILE; do
+            ARTIFACT_FILE="${SIGNATURE_FILE%.sig}"
+            MINISIGN_FILE="$RUNNER_TEMP/$(basename "$SIGNATURE_FILE").minisig"
+            export SIGNATURE_FILE MINISIGN_FILE
+            node -e 'const fs=require("node:fs"); fs.writeFileSync(process.env.MINISIGN_FILE, Buffer.from(fs.readFileSync(process.env.SIGNATURE_FILE, "utf8").trim(), "base64"))'
+            minisign -Vm "$ARTIFACT_FILE" -p "$PUBLIC_KEY_FILE" -x "$MINISIGN_FILE"
+            SIGNATURE_COUNT=$((SIGNATURE_COUNT + 1))
+          done < <(find "release-output/$RELEASE_TAG" -type f -name '*.sig' -print0)
+          test "$SIGNATURE_COUNT" -gt 0
+
+      - name: Install pinned ossutil
+        shell: bash
+        run: |
+          set -euo pipefail
+          OSSUTIL_ARCHIVE="$RUNNER_TEMP/ossutil-2.3.0-linux-amd64.zip"
+          curl --fail --location --retry 3 \
+            https://gosspublic.alicdn.com/ossutil/v2/2.3.0/ossutil-2.3.0-linux-amd64.zip \
+            --output "$OSSUTIL_ARCHIVE"
+          echo "3ae4d9fc85a7a6e9f5654d1599766f1a3a42a3692870887b5ae9338d582ef65a  $OSSUTIL_ARCHIVE" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/ossutil"
+          unzip -q "$OSSUTIL_ARCHIVE" -d "$RUNNER_TEMP/ossutil"
+          OSSUTIL_BIN="$(find "$RUNNER_TEMP/ossutil" -type f -name ossutil -print -quit)"
+          test -n "$OSSUTIL_BIN"
+          sudo install -m 0755 "$OSSUTIL_BIN" /usr/local/bin/ossutil
+          ossutil version
+
+      - name: Obtain short-lived Aliyun credentials
+        id: aliyun
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars.ALIYUN_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIYUN_OIDC_PROVIDER_ARN }}
+          role-session-name: oxide-studio-github-release
+          role-session-expiration: 1800
+
+      - name: Upload immutable version and publish latest manifest
+        env:
+          OSS_ACCESS_KEY_ID: ${{ steps.aliyun.outputs.aliyun-access-key-id }}
+          OSS_ACCESS_KEY_SECRET: ${{ steps.aliyun.outputs.aliyun-access-key-secret }}
+          OSS_SESSION_TOKEN: ${{ steps.aliyun.outputs.aliyun-security-token }}
+          OSS_REGION: ${{ vars.ALIYUN_OSS_REGION }}
+          OSS_ENDPOINT: ${{ vars.ALIYUN_OSS_ENDPOINT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PREFIX="${ALIYUN_OSS_PREFIX#/}"
+          PREFIX="${PREFIX%/}"
+          DESTINATION="oss://${ALIYUN_OSS_BUCKET}/${PREFIX}"
+          while IFS= read -r -d '' FILE; do
+            OBJECT_PATH="${FILE#release-output/$RELEASE_TAG/}"
+            ossutil cp "$FILE" "$DESTINATION/$RELEASE_TAG/$OBJECT_PATH" \
+              --force \
+              --cache-control "public,max-age=31536000,immutable"
+          done < <(find "release-output/$RELEASE_TAG" -type f -print0)
+          ossutil stat "$DESTINATION/$RELEASE_TAG/release.json"
+          ossutil cp release-output/latest.json "$DESTINATION/latest.json" \
+            --force \
+            --content-type "application/json; charset=utf-8" \
+            --cache-control "no-cache,no-store,must-revalidate"
+          ossutil stat "$DESTINATION/latest.json"
+
+      - name: Verify public update downloads use Aliyun OSS
+        run: node scripts/verify-oss-release.mjs
+
+      - name: Preserve release index
+        uses: actions/upload-artifact@v4
+        with:
+          name: oxide-studio-${{ needs.validate.outputs.tag }}-release-index
+          retention-days: 30
+          path: |
+            release-output/latest.json
+            release-output/${{ needs.validate.outputs.tag }}/latest.json
+            release-output/${{ needs.validate.outputs.tag }}/release.json
+            release-output/${{ needs.validate.outputs.tag }}/checksums.sha256

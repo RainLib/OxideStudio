@@ -1,7 +1,7 @@
 {
     "name": "oxide-studio",
     "private": true,
-    "version": "0.1.0",
+    "version": "0.1.1",
     "type": "module",
     "scripts": {
         "dev": "vite",
@@ -11,6 +11,7 @@
         "ai": "tsx scripts/oxide-ai.ts",
         "ai:mcp": "tsx scripts/oxide-ai.ts mcp stdio",
         "test": "vitest run",
+        "test:release": "node --test scripts/*.node-test.mjs",
         "test:live-db": "bash scripts/test-live-databases.sh"
     },
     "dependencies": {

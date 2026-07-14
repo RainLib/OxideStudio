@@ -87,11 +87,10 @@ describe("app update service", () => {
   it("uses the package version in a browser and rejects update checks", async () => {
     mocks.isTauri.mockReturnValue(false);
 
-    await expect(getCurrentAppVersion()).resolves.toBe("0.1.0");
+    await expect(getCurrentAppVersion()).resolves.toBe("0.1.1");
     await expect(checkForAppUpdate()).rejects.toBeInstanceOf(
       AppUpdateUnsupportedError
     );
     expect(mocks.check).not.toHaveBeenCalled();
   });
 });
-
