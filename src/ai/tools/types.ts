@@ -116,13 +116,18 @@ export type AiWorkspaceTabSummary = {
     risk: string;
     relationName: string;
     childName?: string | null;
+    phase: string;
+    order: number;
+    blockedReason?: string | null;
   } | null;
   schemaDiffSummary?: {
     total: number;
     safe: number;
     review: number;
     destructive: number;
+    blocked: number;
   } | null;
+  schemaPreflightCheckCount?: number;
   selection?: AiWorkspaceSelection | null;
 };
 

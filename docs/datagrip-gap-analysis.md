@@ -34,7 +34,7 @@ DataGrip 的官方能力基线主要来自：
 OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 → 查看/编辑表数据”的骨架，并在多数据模型、Tauri 安全边界、项目文件和 AI 工具一致性上形成了自己的方向。与 DataGrip 的主要差距不在单个按钮，而在五条专业闭环尚未形成：
 
 1. **发现闭环**：Search Everywhere、对象导航、find usages、数据库全文搜索仍不完整。
-2. **变更闭环**：schema diff、migration preview、data compare、VCS/DDL data source 缺失。
+2. **变更闭环**：schema diff/migration review 与 preflight 已形成第一条闭环；自动 apply/verify、data compare、VCS/DDL data source 仍缺失。
 3. **数据工作闭环**：Value Editor 已有类型感知主路径，但外键导航、聚合视图、多视图模式和导入映射不足。
 4. **诊断闭环**：Explain Plan 与结构化错误已有主路径，但 vendor error、会话/锁/运行监控仍不足。
 5. **智能协作闭环**：AI 已有工具、审批、对象/结果/错误/plan attachment 和稳定页面跳转，但 patch preview、持久任务和 plan-grounded 自动优化仍待完成；LSP 的 catalog 隔离与同名列 P0 排序已经关闭，高级派生表/临时对象语义仍不足。
@@ -93,8 +93,8 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 
 | DataGrip 基线 | OxideStudio 状态 | 当前证据与差距 | 优先级 |
 | --- | --- | --- | --- |
-| Schema diff | 已具备/部分 | 已有按 project/connection/database/schema 隔离的版本化快照、稳定 fingerprint、差异 rail、风险/可逆性与精确对象联动；尚缺 rename detection、完整 view/routine source 和 schema mapping | P1 |
-| Migration preview / apply | 已具备/部分 | PostgreSQL/MySQL 已生成 review-only artifact；PostgreSQL 默认 ROLLBACK guard，MySQL 明示 DDL auto-commit；外键顺序/无定义对象转人工复核。尚缺全局 dependency DAG、dry-run、apply journal、验证与 rollback 包 | P1 |
+| Schema diff | 已具备/部分 | 已有按 project/connection/database/schema 隔离的版本化快照、稳定 fingerprint、差异 rail、phase/order/dependsOn、风险/可逆/blocked 状态与精确对象联动；尚缺 rename detection、完整 view/routine source 和 schema mapping | P1 |
+| Migration preview / apply | 已具备/部分 | PostgreSQL/MySQL 已生成 review-only artifact；已按 relation/column/index/constraint DAG 排序并生成 NOT NULL/UNIQUE/FK/drop 等只读 preflight，无法完整重建会阻断 drop。尚缺跨对象完整 dependency graph、server dry-run、apply journal、post-verify 与 rollback 包 | P1 |
 | Database diagram | 缺失 | 已有 constraints 数据，尚未形成 ER graph、布局和导出 | P1 |
 | Explain Plan | 已具备/部分 | PostgreSQL/MySQL 支持 estimate/analyze、规范化节点树、raw plan、cost/rows/time 和取消；尚缺图形 plan、节点到表/索引的双向联动与多次计划对比 | P1 |
 | Object dependency / usages | 缺失 | 无依赖图和影响面分析 | P1 |
@@ -163,7 +163,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 
 ### P1：形成 schema 工程能力
 
-1. Schema snapshot + diff + migration SQL preview 第一阶段已完成；继续补对象 source、rename detection、dependency DAG、schema mapping、dry-run/apply journal、验证与 rollback 包。
+1. Schema snapshot + diff + migration SQL preview 前两阶段已完成；继续补对象 source、rename detection、跨对象 dependency graph、schema mapping、server dry-run/apply journal、post-verify 与 rollback 包。
 2. ER diagram MVP，复用已有 PK/FK/constraint metadata。
 3. Data compare 与 tolerance。
 4. 外键 cell navigation 与 object dependency navigation。
@@ -202,4 +202,5 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 6. **DG-P0-05 Driver 与文档一致性** 已完成：README 不声明 SQLite/SQL Server 已支持，`sqlx/sqlite` 明确仅用于 MetaStore；后端完整 capability list 成为连接 UI、Explorer 新建菜单和 AI `provider.list` 的权威目录，能力发现失败会保留内置目录且不阻塞应用壳。
 7. **DG-P0-07 CSV Import Mapping** 已完成：文件选择与写库解耦，用户先配置编码、delimiter、header、空值策略和逐列映射；提交前按目标列类型汇总错误，确认后复用后端原子 batch，任一数据库错误会回滚全部行。内存路径限制为 32 MiB/10 万行，超限文件不会尝试全量载入；后续以 native streaming importer 扩展。
 8. **DG-P1-01 Schema snapshot/diff MVP** 已完成：快照使用稳定 catalog identity 与 fingerprint，抓取采用六路有界并发且不保存部分结果；差异在独立 artifact 展示 safe/review/destructive rail，PostgreSQL 使用 ROLLBACK guard，MySQL 标注 auto-commit，AI attachment 可回到精确 change。安全边界见 [ADR-0005](decisions/0005-schema-snapshot-diff.md)。
-9. 下一步为 schema dependency DAG / apply validation，以及完整 AI plan explanation/优化前后验证；不能把当前 review-only preview 描述为自动 migration 已完成。
+9. **DG-P1-01 Migration DAG / preflight** 已完成支持对象的第二阶段：外键拆为独立依赖 change，changed index/constraint 拆为 drop/recreate，拓扑排序输出 phase/order/dependsOn；无法完整重建时阻断当前 change 及其依赖，另生成只读 preflight surface。边界见 [ADR-0006](decisions/0006-migration-dependency-preflight.md)。
+10. 下一步为完整 source/dependency capture、server dry-run/apply journal/post-verify，以及 AI plan explanation/优化前后验证；不能把当前 review-only artifact 描述为自动 migration 已完成。

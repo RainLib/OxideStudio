@@ -244,6 +244,7 @@ function workspaceTabSummaryFromTab(tab: {
       safe: number;
       review: number;
       destructive: number;
+      blocked: number;
     };
     changes: Array<{
       id: string;
@@ -251,7 +252,11 @@ function workspaceTabSummaryFromTab(tab: {
       risk: string;
       relationName: string;
       childName?: string | null;
+      phase: string;
+      order: number;
+      blockedReason?: string | null;
     }>;
+    preflightChecks: Array<unknown>;
   };
   selectedSchemaChangeId?: string | null;
   editorSelection?: {
@@ -279,6 +284,7 @@ function workspaceTabSummaryFromTab(tab: {
     activeResultIndex: tab.activeResultIndex ?? 0,
     schemaDiffId: tab.schemaDiffPlan?.id ?? null,
     schemaDiffSummary: tab.schemaDiffPlan?.summary ?? null,
+    schemaPreflightCheckCount: tab.schemaDiffPlan?.preflightChecks.length ?? 0,
     selectedSchemaChange:
       tab.schemaDiffPlan?.changes.find(
         (change) => change.id === tab.selectedSchemaChangeId,

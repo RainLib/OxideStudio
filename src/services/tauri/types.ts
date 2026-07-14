@@ -362,6 +362,13 @@ export type SchemaChangeKind =
   | "constraintAdd"
   | "constraintDrop"
   | "constraintModify";
+export type SchemaChangePhase =
+  | "dropDependencies"
+  | "dropRelations"
+  | "createRelations"
+  | "alterRelations"
+  | "createDependencies"
+  | "manualReview";
 
 export interface SchemaChange {
   id: string;
@@ -375,6 +382,18 @@ export interface SchemaChange {
   sql: string[];
   reversible: boolean;
   manualReview: boolean;
+  phase: SchemaChangePhase;
+  order: number;
+  dependsOn: string[];
+  blockedReason?: string | null;
+}
+
+export interface SchemaPreflightCheck {
+  id: string;
+  changeId: string;
+  label: string;
+  sql: string;
+  expectation: string;
 }
 
 export interface SchemaDiffSummary {
@@ -382,6 +401,7 @@ export interface SchemaDiffSummary {
   safe: number;
   review: number;
   destructive: number;
+  blocked: number;
 }
 
 export interface SchemaDiffPlan {
@@ -397,6 +417,8 @@ export interface SchemaDiffPlan {
   summary: SchemaDiffSummary;
   changes: SchemaChange[];
   migrationSql: string;
+  preflightChecks: SchemaPreflightCheck[];
+  preflightSql: string;
   warnings: string[];
 }
 

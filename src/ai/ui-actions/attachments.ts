@@ -99,6 +99,7 @@ export function createAssistantAttachments(
               detail: [
                 stringValue(selectedChange?.risk),
                 stringValue(selectedChange?.relationName),
+                stringValue(selectedChange?.blockedReason) ? "blocked" : "",
               ]
                 .filter(Boolean)
                 .join(" · "),

@@ -44,7 +44,7 @@ const plan: SchemaDiffPlan = {
   targetSchemaName: "public",
   generatedAt: 2,
   transactional: true,
-  summary: { total: 1, safe: 0, review: 0, destructive: 1 },
+  summary: { total: 1, safe: 0, review: 0, destructive: 1, blocked: 0 },
   changes: [
     {
       id: "change-1",
@@ -57,9 +57,14 @@ const plan: SchemaDiffPlan = {
       sql: ["ALTER TABLE users DROP COLUMN legacy;"],
       reversible: false,
       manualReview: true,
+      phase: "alterRelations",
+      order: 1,
+      dependsOn: [],
     },
   ],
   migrationSql: "-- preview",
+  preflightChecks: [],
+  preflightSql: "-- no checks",
   warnings: [],
 };
 

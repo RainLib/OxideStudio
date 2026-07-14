@@ -5,7 +5,10 @@ use crate::core::{
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    str::FromStr,
+};
 
 pub const SCHEMA_SNAPSHOT_VERSION: u32 = 1;
 
@@ -37,7 +40,7 @@ pub struct SchemaSnapshot {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub enum SchemaChangeRisk {
     Safe,
@@ -45,7 +48,7 @@ pub enum SchemaChangeRisk {
     Destructive,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub enum SchemaChangeKind {
     RelationCreate,
@@ -62,6 +65,17 @@ pub enum SchemaChangeKind {
     ConstraintModify,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub enum SchemaChangePhase {
+    DropDependencies,
+    DropRelations,
+    CreateRelations,
+    AlterRelations,
+    CreateDependencies,
+    ManualReview,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaChange {
@@ -76,6 +90,21 @@ pub struct SchemaChange {
     pub sql: Vec<String>,
     pub reversible: bool,
     pub manual_review: bool,
+    pub phase: SchemaChangePhase,
+    pub order: usize,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    pub blocked_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaPreflightCheck {
+    pub id: String,
+    pub change_id: String,
+    pub label: String,
+    pub sql: String,
+    pub expectation: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,6 +114,7 @@ pub struct SchemaDiffSummary {
     pub safe: usize,
     pub review: usize,
     pub destructive: usize,
+    pub blocked: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,6 +132,8 @@ pub struct SchemaDiffPlan {
     pub summary: SchemaDiffSummary,
     pub changes: Vec<SchemaChange>,
     pub migration_sql: String,
+    pub preflight_checks: Vec<SchemaPreflightCheck>,
+    pub preflight_sql: String,
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -205,8 +237,59 @@ pub fn compare_schema_snapshots(
                     true,
                     manual_review,
                 ));
+                for constraint in source_relation
+                    .constraints
+                    .iter()
+                    .filter(|constraint| is_foreign_constraint(constraint))
+                {
+                    let sql = add_constraint_sql(kind, target_schema, &relation_name, constraint);
+                    if sql.is_none() {
+                        warnings.push(format!(
+                            "Foreign key {}.{} requires an exact source definition including referential actions.",
+                            relation_name, constraint.name
+                        ));
+                    }
+                    changes.push(change(
+                        SchemaChangeKind::ConstraintAdd,
+                        SchemaChangeRisk::Review,
+                        target_schema,
+                        &relation_name,
+                        source_relation.object_type.clone(),
+                        Some(constraint.name.clone()),
+                        format!("Add foreign key {} on {}", constraint.name, relation_name),
+                        sql.into_iter().collect(),
+                        true,
+                        true,
+                    ));
+                }
             }
             (None, Some(target_relation)) => {
+                for constraint in target_relation
+                    .constraints
+                    .iter()
+                    .filter(|constraint| is_foreign_constraint(constraint))
+                {
+                    changes.push(change(
+                        SchemaChangeKind::ConstraintDrop,
+                        SchemaChangeRisk::Review,
+                        target_schema,
+                        &relation_name,
+                        target_relation.object_type.clone(),
+                        Some(constraint.name.clone()),
+                        format!(
+                            "Drop foreign key {} before removing {}",
+                            constraint.name, relation_name
+                        ),
+                        vec![kind.drop_constraint_query(
+                            Some(target_schema),
+                            &relation_name,
+                            &constraint.name,
+                            &constraint.constraint_type,
+                        )],
+                        true,
+                        true,
+                    ));
+                }
                 let object_flags = relation_flags(target_relation.object_type.as_deref());
                 changes.push(change(
                     SchemaChangeKind::RelationDrop,
@@ -243,11 +326,14 @@ pub fn compare_schema_snapshots(
         }
     }
 
+    let (changes, preflight_checks) =
+        finalize_change_plan(kind, source, target, changes, &mut warnings);
     warnings.sort();
     warnings.dedup();
     let summary = summarize_changes(&changes);
     let transactional = kind == DatabaseKind::Postgres;
     let migration_sql = render_migration_sql(kind, source, target, &changes, &warnings);
+    let preflight_sql = render_preflight_sql(source, target, &preflight_checks);
     let id = stable_id(
         "schema-diff",
         &format!(
@@ -269,6 +355,8 @@ pub fn compare_schema_snapshots(
         summary,
         changes,
         migration_sql,
+        preflight_checks,
+        preflight_sql,
         warnings,
     })
 }
@@ -525,24 +613,38 @@ fn compare_indexes(
                     &source.name,
                     source_index,
                 );
+                let can_rebuild = replacement.is_ok();
+                changes.push(change(
+                    SchemaChangeKind::IndexDrop,
+                    SchemaChangeRisk::Review,
+                    target_schema,
+                    &target.name,
+                    target.object_type.clone(),
+                    Some(index_name.to_string()),
+                    format!("Drop changed index {} on {}", index_name, target.name),
+                    if can_rebuild {
+                        vec![kind.drop_index_query(Some(target_schema), &target.name, index_name)]
+                    } else {
+                        Vec::new()
+                    },
+                    true,
+                    true,
+                ));
                 let sql = match replacement {
-                    Ok(replacement) => vec![
-                        kind.drop_index_query(Some(target_schema), &target.name, index_name),
-                        replacement,
-                    ],
+                    Ok(replacement) => vec![replacement],
                     Err(warning) => {
                         warnings.push(warning);
                         Vec::new()
                     }
                 };
                 changes.push(change(
-                    SchemaChangeKind::IndexModify,
+                    SchemaChangeKind::IndexAdd,
                     SchemaChangeRisk::Review,
                     target_schema,
                     &source.name,
                     source.object_type.clone(),
                     Some(index_name.to_string()),
-                    format!("Recreate changed index {} on {}", index_name, source.name),
+                    format!("Create replacement index {} on {}", index_name, source.name),
                     sql,
                     true,
                     true,
@@ -631,32 +733,46 @@ fn compare_constraints(
             {
                 let add_sql =
                     add_constraint_sql(kind, target_schema, &source.name, source_constraint);
-                let mut sql = vec![kind.drop_constraint_query(
-                    Some(target_schema),
-                    &target.name,
-                    constraint_name,
-                    &target_constraint.constraint_type,
-                )];
-                if let Some(add_sql) = add_sql {
-                    sql.push(add_sql);
-                } else {
+                if add_sql.is_none() {
                     warnings.push(format!(
                         "Constraint {}.{} has no executable replacement definition.",
                         source.name, constraint_name
                     ));
                 }
                 changes.push(change(
-                    SchemaChangeKind::ConstraintModify,
+                    SchemaChangeKind::ConstraintDrop,
+                    SchemaChangeRisk::Review,
+                    target_schema,
+                    &target.name,
+                    target.object_type.clone(),
+                    Some(constraint_name.to_string()),
+                    format!(
+                        "Drop changed constraint {} on {}",
+                        constraint_name, target.name
+                    ),
+                    add_sql.as_ref().map_or_else(Vec::new, |_| {
+                        vec![kind.drop_constraint_query(
+                            Some(target_schema),
+                            &target.name,
+                            constraint_name,
+                            &target_constraint.constraint_type,
+                        )]
+                    }),
+                    true,
+                    true,
+                ));
+                changes.push(change(
+                    SchemaChangeKind::ConstraintAdd,
                     SchemaChangeRisk::Review,
                     target_schema,
                     &source.name,
                     source.object_type.clone(),
                     Some(constraint_name.to_string()),
                     format!(
-                        "Recreate changed constraint {} on {}",
+                        "Create replacement constraint {} on {}",
                         constraint_name, source.name
                     ),
-                    sql,
+                    add_sql.into_iter().collect(),
                     true,
                     true,
                 ));
@@ -695,17 +811,6 @@ fn create_relation_sql(
             )],
         );
     }
-    if relation.constraints.iter().any(|constraint| {
-        constraint
-            .constraint_type
-            .to_ascii_uppercase()
-            .contains("FOREIGN")
-    }) {
-        warnings.push(format!(
-            "Relation {} contains foreign keys; validate referenced relation creation order before execution.",
-            relation.name
-        ));
-    }
     let mut definitions = relation
         .columns
         .iter()
@@ -721,7 +826,11 @@ fn create_relation_sql(
             .to_ascii_uppercase()
             .contains("PRIMARY")
     });
-    for constraint in &relation.constraints {
+    for constraint in relation
+        .constraints
+        .iter()
+        .filter(|constraint| !is_foreign_constraint(constraint))
+    {
         if let Some(clause) = inline_constraint_clause(kind, constraint) {
             definitions.push(format!("  {clause}"));
         } else {
@@ -1056,6 +1165,13 @@ fn constraint_definition_sql(kind: DatabaseKind, constraint: &ConstraintInfo) ->
     Some(definition.to_string())
 }
 
+fn is_foreign_constraint(constraint: &ConstraintInfo) -> bool {
+    constraint
+        .constraint_type
+        .to_ascii_uppercase()
+        .contains("FOREIGN")
+}
+
 fn column_structure_changed(source: &ColumnInfo, target: &ColumnInfo) -> bool {
     source.data_type != target.data_type
         || source.is_nullable != target.is_nullable
@@ -1114,6 +1230,671 @@ fn change(
         sql,
         reversible,
         manual_review,
+        phase: phase_for_kind(kind),
+        order: 0,
+        depends_on: Vec::new(),
+        blocked_reason: None,
+    }
+}
+
+fn phase_for_kind(kind: SchemaChangeKind) -> SchemaChangePhase {
+    match kind {
+        SchemaChangeKind::ConstraintDrop | SchemaChangeKind::IndexDrop => {
+            SchemaChangePhase::DropDependencies
+        }
+        SchemaChangeKind::RelationDrop => SchemaChangePhase::DropRelations,
+        SchemaChangeKind::RelationCreate => SchemaChangePhase::CreateRelations,
+        SchemaChangeKind::ColumnAdd
+        | SchemaChangeKind::ColumnDrop
+        | SchemaChangeKind::ColumnModify
+        | SchemaChangeKind::RelationModify
+        | SchemaChangeKind::ConstraintModify
+        | SchemaChangeKind::IndexModify => SchemaChangePhase::AlterRelations,
+        SchemaChangeKind::ConstraintAdd | SchemaChangeKind::IndexAdd => {
+            SchemaChangePhase::CreateDependencies
+        }
+    }
+}
+
+fn finalize_change_plan(
+    kind: DatabaseKind,
+    source: &SchemaSnapshot,
+    target: &SchemaSnapshot,
+    mut changes: Vec<SchemaChange>,
+    warnings: &mut Vec<String>,
+) -> (Vec<SchemaChange>, Vec<SchemaPreflightCheck>) {
+    for change in &mut changes {
+        if change.sql.is_empty() {
+            change.blocked_reason =
+                Some("No complete executable definition is available for this change.".to_string());
+        }
+    }
+
+    let relation_creates = change_id_map(&changes, SchemaChangeKind::RelationCreate);
+    let constraint_drops = child_change_id_map(&changes, SchemaChangeKind::ConstraintDrop);
+    let index_drops = child_change_id_map(&changes, SchemaChangeKind::IndexDrop);
+    let column_adds = child_change_id_map(&changes, SchemaChangeKind::ColumnAdd);
+
+    for change in &mut changes {
+        let mut dependencies = Vec::new();
+        match change.kind {
+            SchemaChangeKind::RelationDrop => {
+                let mut unresolved = Vec::new();
+                for relation in &target.relations {
+                    for constraint in relation
+                        .constraints
+                        .iter()
+                        .filter(|constraint| is_foreign_constraint(constraint))
+                    {
+                        let references_target = constraint.referenced_table.as_deref()
+                            == Some(change.relation_name.as_str())
+                            && constraint
+                                .referenced_schema
+                                .as_deref()
+                                .is_none_or(|schema| schema == target.schema_name);
+                        let belongs_to_target = relation.name == change.relation_name;
+                        if references_target || belongs_to_target {
+                            let dependency =
+                                constraint_drops.get(&child_key(&relation.name, &constraint.name));
+                            if dependency.is_none() {
+                                unresolved.push(format!("{}.{}", relation.name, constraint.name));
+                            }
+                            add_dependency(&mut dependencies, dependency);
+                        }
+                    }
+                }
+                if !unresolved.is_empty() {
+                    block_change(
+                        change,
+                        format!(
+                            "Foreign keys must be removed before this relation: {}.",
+                            unresolved.join(", ")
+                        ),
+                        warnings,
+                    );
+                }
+            }
+            SchemaChangeKind::ColumnDrop => {
+                if let Some(column_name) = change.child_name.as_deref() {
+                    if let Some(relation) = relation_by_name(target, &change.relation_name) {
+                        let mut unresolved = Vec::new();
+                        for constraint in relation.constraints.iter().filter(|constraint| {
+                            constraint
+                                .columns
+                                .iter()
+                                .any(|column| column == column_name)
+                        }) {
+                            let dependency =
+                                constraint_drops.get(&child_key(&relation.name, &constraint.name));
+                            if dependency.is_none() {
+                                unresolved.push(constraint.name.clone());
+                            }
+                            add_dependency(&mut dependencies, dependency);
+                        }
+                        let constraint_names = relation
+                            .constraints
+                            .iter()
+                            .map(|constraint| constraint.name.as_str())
+                            .collect::<std::collections::HashSet<_>>();
+                        for index in relation.indexes.iter().filter(|index| {
+                            !index.is_primary
+                                && !constraint_names.contains(index.name.as_str())
+                                && index.columns.iter().any(|column| column == column_name)
+                        }) {
+                            let dependency =
+                                index_drops.get(&child_key(&relation.name, &index.name));
+                            if dependency.is_none() {
+                                unresolved.push(index.name.clone());
+                            }
+                            add_dependency(&mut dependencies, dependency);
+                        }
+                        if !unresolved.is_empty() {
+                            block_change(
+                                change,
+                                format!(
+                                    "Dependent objects must be removed before this column: {}.",
+                                    unresolved.join(", ")
+                                ),
+                                warnings,
+                            );
+                        }
+                    }
+                }
+            }
+            SchemaChangeKind::ColumnModify => {
+                if let Some(column_name) = change.child_name.as_deref() {
+                    let source_column = column_by_name(source, &change.relation_name, column_name);
+                    let target_column = column_by_name(target, &change.relation_name, column_name);
+                    if source_column
+                        .zip(target_column)
+                        .is_some_and(|(source, target)| source.data_type != target.data_type)
+                    {
+                        let mut unsupported_dependencies = Vec::new();
+                        if let Some(relation) = relation_by_name(target, &change.relation_name) {
+                            for constraint in relation.constraints.iter().filter(|constraint| {
+                                constraint
+                                    .columns
+                                    .iter()
+                                    .any(|column| column == column_name)
+                            }) {
+                                let dependency = constraint_drops
+                                    .get(&child_key(&relation.name, &constraint.name));
+                                if dependency.is_none() {
+                                    unsupported_dependencies.push(constraint.name.clone());
+                                }
+                                add_dependency(&mut dependencies, dependency);
+                            }
+                            let constraint_names = relation
+                                .constraints
+                                .iter()
+                                .map(|constraint| constraint.name.as_str())
+                                .collect::<std::collections::HashSet<_>>();
+                            for index in relation.indexes.iter().filter(|index| {
+                                !index.is_primary
+                                    && !constraint_names.contains(index.name.as_str())
+                                    && index.columns.iter().any(|column| column == column_name)
+                            }) {
+                                let dependency =
+                                    index_drops.get(&child_key(&relation.name, &index.name));
+                                if dependency.is_none() {
+                                    unsupported_dependencies.push(index.name.clone());
+                                }
+                                add_dependency(&mut dependencies, dependency);
+                            }
+                        }
+                        if !unsupported_dependencies.is_empty() {
+                            let reason = format!(
+                                "Type change depends on unchanged objects that require an explicit rebuild: {}.",
+                                unsupported_dependencies.join(", ")
+                            );
+                            warnings.push(format!(
+                                "{}.{}: {reason}",
+                                change.relation_name, column_name
+                            ));
+                            change.blocked_reason = Some(reason);
+                            change.sql.clear();
+                            change.manual_review = true;
+                        }
+                    }
+                }
+            }
+            SchemaChangeKind::ConstraintAdd => {
+                add_dependency(
+                    &mut dependencies,
+                    relation_creates.get(&change.relation_name),
+                );
+                if let Some(child_name) = change.child_name.as_deref() {
+                    add_dependency(
+                        &mut dependencies,
+                        constraint_drops.get(&child_key(&change.relation_name, child_name)),
+                    );
+                    if let Some(constraint) =
+                        constraint_by_name(source, &change.relation_name, child_name)
+                    {
+                        if let Some(referenced_table) = constraint.referenced_table.as_deref() {
+                            if constraint
+                                .referenced_schema
+                                .as_deref()
+                                .is_none_or(|schema| schema == source.schema_name)
+                            {
+                                add_dependency(
+                                    &mut dependencies,
+                                    relation_creates.get(referenced_table),
+                                );
+                            }
+                        }
+                        for column in &constraint.columns {
+                            add_dependency(
+                                &mut dependencies,
+                                column_adds.get(&child_key(&change.relation_name, column)),
+                            );
+                        }
+                    }
+                }
+            }
+            SchemaChangeKind::IndexAdd => {
+                add_dependency(
+                    &mut dependencies,
+                    relation_creates.get(&change.relation_name),
+                );
+                if let Some(child_name) = change.child_name.as_deref() {
+                    add_dependency(
+                        &mut dependencies,
+                        index_drops.get(&child_key(&change.relation_name, child_name)),
+                    );
+                    if let Some(index) = index_by_name(source, &change.relation_name, child_name) {
+                        for column in &index.columns {
+                            add_dependency(
+                                &mut dependencies,
+                                column_adds.get(&child_key(&change.relation_name, column)),
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        dependencies.sort();
+        dependencies.dedup();
+        change.depends_on = dependencies;
+    }
+
+    propagate_blocked_dependencies(&mut changes, warnings);
+    let mut changes = topologically_order_changes(changes, warnings);
+    for (index, change) in changes.iter_mut().enumerate() {
+        change.order = index + 1;
+        if change.blocked_reason.is_some() {
+            change.phase = SchemaChangePhase::ManualReview;
+        }
+    }
+    let preflight_checks = build_preflight_checks(kind, source, target, &changes);
+    (changes, preflight_checks)
+}
+
+fn change_id_map(changes: &[SchemaChange], kind: SchemaChangeKind) -> BTreeMap<String, String> {
+    changes
+        .iter()
+        .filter(|change| change.kind == kind)
+        .map(|change| (change.relation_name.clone(), change.id.clone()))
+        .collect()
+}
+
+fn child_change_id_map(
+    changes: &[SchemaChange],
+    kind: SchemaChangeKind,
+) -> BTreeMap<String, String> {
+    changes
+        .iter()
+        .filter(|change| change.kind == kind)
+        .filter_map(|change| {
+            change.child_name.as_deref().map(|child_name| {
+                (
+                    child_key(&change.relation_name, child_name),
+                    change.id.clone(),
+                )
+            })
+        })
+        .collect()
+}
+
+fn child_key(relation_name: &str, child_name: &str) -> String {
+    format!("{relation_name}\0{child_name}")
+}
+
+fn add_dependency(dependencies: &mut Vec<String>, dependency: Option<&String>) {
+    if let Some(dependency) = dependency {
+        dependencies.push(dependency.clone());
+    }
+}
+
+fn block_change(change: &mut SchemaChange, reason: String, warnings: &mut Vec<String>) {
+    warnings.push(format!("{}: {reason}", change.summary));
+    change.blocked_reason = Some(reason);
+    change.sql.clear();
+    change.manual_review = true;
+}
+
+fn relation_by_name<'a>(
+    snapshot: &'a SchemaSnapshot,
+    relation_name: &str,
+) -> Option<&'a SchemaRelationSnapshot> {
+    snapshot
+        .relations
+        .iter()
+        .find(|relation| relation.name == relation_name)
+}
+
+fn column_by_name<'a>(
+    snapshot: &'a SchemaSnapshot,
+    relation_name: &str,
+    column_name: &str,
+) -> Option<&'a ColumnInfo> {
+    relation_by_name(snapshot, relation_name)?
+        .columns
+        .iter()
+        .find(|column| column.name == column_name)
+}
+
+fn constraint_by_name<'a>(
+    snapshot: &'a SchemaSnapshot,
+    relation_name: &str,
+    constraint_name: &str,
+) -> Option<&'a ConstraintInfo> {
+    relation_by_name(snapshot, relation_name)?
+        .constraints
+        .iter()
+        .find(|constraint| constraint.name == constraint_name)
+}
+
+fn index_by_name<'a>(
+    snapshot: &'a SchemaSnapshot,
+    relation_name: &str,
+    index_name: &str,
+) -> Option<&'a IndexInfo> {
+    relation_by_name(snapshot, relation_name)?
+        .indexes
+        .iter()
+        .find(|index| index.name == index_name)
+}
+
+fn propagate_blocked_dependencies(changes: &mut [SchemaChange], warnings: &mut Vec<String>) {
+    loop {
+        let blocked_ids = changes
+            .iter()
+            .filter(|change| change.blocked_reason.is_some())
+            .map(|change| change.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let mut next_blocked = Vec::new();
+        for (index, change) in changes.iter().enumerate() {
+            if change.blocked_reason.is_none()
+                && change
+                    .depends_on
+                    .iter()
+                    .any(|dependency| blocked_ids.contains(dependency.as_str()))
+            {
+                next_blocked.push(index);
+            }
+        }
+        if next_blocked.is_empty() {
+            break;
+        }
+        for index in next_blocked {
+            let change = &mut changes[index];
+            let reason =
+                "A required predecessor is blocked and must be resolved first.".to_string();
+            warnings.push(format!("{}: {reason}", change.summary));
+            change.blocked_reason = Some(reason);
+            change.sql.clear();
+            change.manual_review = true;
+        }
+    }
+}
+
+fn topologically_order_changes(
+    changes: Vec<SchemaChange>,
+    warnings: &mut Vec<String>,
+) -> Vec<SchemaChange> {
+    let mut changes_by_id = changes
+        .into_iter()
+        .map(|change| (change.id.clone(), change))
+        .collect::<BTreeMap<_, _>>();
+    let known_ids = changes_by_id
+        .keys()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut indegrees = BTreeMap::<String, usize>::new();
+    let mut dependents = BTreeMap::<String, Vec<String>>::new();
+    for change in changes_by_id.values() {
+        let dependencies = change
+            .depends_on
+            .iter()
+            .filter(|dependency| known_ids.contains(*dependency))
+            .collect::<Vec<_>>();
+        indegrees.insert(change.id.clone(), dependencies.len());
+        for dependency in dependencies {
+            dependents
+                .entry(dependency.clone())
+                .or_default()
+                .push(change.id.clone());
+        }
+    }
+
+    let mut ready = changes_by_id
+        .values()
+        .filter(|change| indegrees.get(&change.id).copied().unwrap_or(0) == 0)
+        .map(owned_change_sort_key)
+        .collect::<BTreeSet<_>>();
+    let mut ordered = Vec::with_capacity(changes_by_id.len());
+    while let Some(key) = ready.pop_first() {
+        let id = key.4;
+        let Some(change) = changes_by_id.remove(&id) else {
+            continue;
+        };
+        if let Some(children) = dependents.get(&id) {
+            for child_id in children {
+                let Some(indegree) = indegrees.get_mut(child_id) else {
+                    continue;
+                };
+                *indegree = indegree.saturating_sub(1);
+                if *indegree == 0 {
+                    if let Some(child) = changes_by_id.get(child_id) {
+                        ready.insert(owned_change_sort_key(child));
+                    }
+                }
+            }
+        }
+        ordered.push(change);
+    }
+
+    if !changes_by_id.is_empty() {
+        warnings.push(
+            "Migration dependency cycle detected; remaining changes require manual ordering."
+                .to_string(),
+        );
+        let mut remaining = changes_by_id.into_values().collect::<Vec<_>>();
+        remaining.sort_by_key(owned_change_sort_key);
+        for mut change in remaining {
+            change.blocked_reason = Some(
+                "Dependency cycle requires manual ordering before SQL can be generated."
+                    .to_string(),
+            );
+            change.sql.clear();
+            change.manual_review = true;
+            ordered.push(change);
+        }
+    }
+    ordered
+}
+
+fn owned_change_sort_key(
+    change: &SchemaChange,
+) -> (SchemaChangePhase, String, String, SchemaChangeKind, String) {
+    (
+        change.phase,
+        change.relation_name.clone(),
+        change.child_name.clone().unwrap_or_default(),
+        change.kind,
+        change.id.clone(),
+    )
+}
+
+fn build_preflight_checks(
+    kind: DatabaseKind,
+    source: &SchemaSnapshot,
+    target: &SchemaSnapshot,
+    changes: &[SchemaChange],
+) -> Vec<SchemaPreflightCheck> {
+    let mut checks = Vec::new();
+    let created_relations = changes
+        .iter()
+        .filter(|change| change.kind == SchemaChangeKind::RelationCreate)
+        .map(|change| change.relation_name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    for change in changes {
+        let relation = kind.qualified_table(Some(&target.schema_name), &change.relation_name);
+        match change.kind {
+            SchemaChangeKind::RelationDrop => checks.push(preflight_check(
+                change,
+                "Count rows before relation drop",
+                format!("SELECT COUNT(*) AS affected_rows FROM {relation};"),
+                "Review affected_rows and confirm that backups or rollback procedures exist.",
+            )),
+            SchemaChangeKind::ColumnDrop => {
+                if let Some(column_name) = change.child_name.as_deref() {
+                    let column = kind.quote_identifier(column_name);
+                    checks.push(preflight_check(
+                        change,
+                        "Count populated values before column drop",
+                        format!(
+                            "SELECT COUNT(*) AS populated_rows FROM {relation} WHERE {column} IS NOT NULL;"
+                        ),
+                        "Review populated_rows; any value greater than zero represents data loss.",
+                    ));
+                }
+            }
+            SchemaChangeKind::ColumnAdd => {
+                if let Some(column_name) = change.child_name.as_deref() {
+                    if column_by_name(source, &change.relation_name, column_name)
+                        .is_some_and(|column| !column.is_nullable && column.default_value.is_none())
+                    {
+                        checks.push(preflight_check(
+                            change,
+                            "Verify table is empty before adding required column",
+                            format!("SELECT COUNT(*) AS blocking_rows FROM {relation};"),
+                            "blocking_rows must be 0 unless a backfill/default strategy is added.",
+                        ));
+                    }
+                }
+            }
+            SchemaChangeKind::ColumnModify => {
+                if let Some(column_name) = change.child_name.as_deref() {
+                    let source_column = column_by_name(source, &change.relation_name, column_name);
+                    let target_column = column_by_name(target, &change.relation_name, column_name);
+                    if source_column
+                        .zip(target_column)
+                        .is_some_and(|(source, target)| !source.is_nullable && target.is_nullable)
+                    {
+                        let column = kind.quote_identifier(column_name);
+                        checks.push(preflight_check(
+                            change,
+                            "Verify nullable values before SET NOT NULL",
+                            format!(
+                                "SELECT COUNT(*) AS blocking_rows FROM {relation} WHERE {column} IS NULL;"
+                            ),
+                            "blocking_rows must be 0.",
+                        ));
+                    }
+                }
+            }
+            SchemaChangeKind::ConstraintAdd => {
+                if let Some(constraint_name) = change.child_name.as_deref() {
+                    if let Some(constraint) =
+                        constraint_by_name(source, &change.relation_name, constraint_name)
+                    {
+                        let normalized = constraint.constraint_type.to_ascii_uppercase();
+                        if normalized.contains("UNIQUE") && !constraint.columns.is_empty() {
+                            let columns = constraint
+                                .columns
+                                .iter()
+                                .map(|column| kind.quote_identifier(column))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let non_null = constraint
+                                .columns
+                                .iter()
+                                .map(|column| {
+                                    format!("{} IS NOT NULL", kind.quote_identifier(column))
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" AND ");
+                            let nulls_not_distinct =
+                                constraint.definition.as_deref().is_some_and(|definition| {
+                                    definition
+                                        .to_ascii_uppercase()
+                                        .contains("NULLS NOT DISTINCT")
+                                });
+                            let where_clause = if nulls_not_distinct {
+                                String::new()
+                            } else {
+                                format!(" WHERE {non_null}")
+                            };
+                            checks.push(preflight_check(
+                                change,
+                                "Find duplicate keys before UNIQUE constraint",
+                                format!(
+                                    "SELECT {columns}, COUNT(*) AS duplicate_count FROM {relation}{where_clause} GROUP BY {columns} HAVING COUNT(*) > 1 LIMIT 50;"
+                                ),
+                                "The query must return no rows.",
+                            ));
+                        } else if is_foreign_constraint(constraint) {
+                            let depends_on_new_relation = created_relations
+                                .contains(change.relation_name.as_str())
+                                || constraint
+                                    .referenced_table
+                                    .as_deref()
+                                    .is_some_and(|table| created_relations.contains(table));
+                            if depends_on_new_relation {
+                                continue;
+                            }
+                            if let Some(sql) = foreign_key_preflight_sql(
+                                kind,
+                                &target.schema_name,
+                                &change.relation_name,
+                                constraint,
+                            ) {
+                                checks.push(preflight_check(
+                                    change,
+                                    "Find orphan rows before FOREIGN KEY",
+                                    sql,
+                                    "blocking_rows must be 0.",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    checks
+}
+
+fn foreign_key_preflight_sql(
+    kind: DatabaseKind,
+    target_schema: &str,
+    relation_name: &str,
+    constraint: &ConstraintInfo,
+) -> Option<String> {
+    let referenced_table = constraint.referenced_table.as_deref()?;
+    if constraint.columns.is_empty()
+        || constraint.columns.len() != constraint.referenced_columns.len()
+    {
+        return None;
+    }
+    let local_relation = kind.qualified_table(Some(target_schema), relation_name);
+    let referenced_relation = kind.qualified_table(
+        constraint
+            .referenced_schema
+            .as_deref()
+            .or(Some(target_schema)),
+        referenced_table,
+    );
+    let local_not_null = constraint
+        .columns
+        .iter()
+        .map(|column| format!("child.{} IS NOT NULL", kind.quote_identifier(column)))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let joins = constraint
+        .columns
+        .iter()
+        .zip(&constraint.referenced_columns)
+        .map(|(local, referenced)| {
+            format!(
+                "parent.{} = child.{}",
+                kind.quote_identifier(referenced),
+                kind.quote_identifier(local)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    Some(format!(
+        "SELECT COUNT(*) AS blocking_rows FROM {local_relation} AS child WHERE {local_not_null} AND NOT EXISTS (SELECT 1 FROM {referenced_relation} AS parent WHERE {joins});"
+    ))
+}
+
+fn preflight_check(
+    change: &SchemaChange,
+    label: &str,
+    sql: String,
+    expectation: &str,
+) -> SchemaPreflightCheck {
+    SchemaPreflightCheck {
+        id: stable_id("schema-preflight", &format!("{}:{label}", change.id)),
+        change_id: change.id.clone(),
+        label: label.to_string(),
+        sql,
+        expectation: expectation.to_string(),
     }
 }
 
@@ -1131,6 +1912,10 @@ fn summarize_changes(changes: &[SchemaChange]) -> SchemaDiffSummary {
         destructive: changes
             .iter()
             .filter(|change| change.risk == SchemaChangeRisk::Destructive)
+            .count(),
+        blocked: changes
+            .iter()
+            .filter(|change| change.blocked_reason.is_some())
             .count(),
     }
 }
@@ -1162,6 +1947,15 @@ fn render_migration_sql(
     for warning in warnings {
         lines.push(format!("-- WARNING: {warning}"));
     }
+    let blocked_count = changes
+        .iter()
+        .filter(|change| change.blocked_reason.is_some())
+        .count();
+    if blocked_count > 0 {
+        lines.push(format!(
+            "-- PLAN BLOCKED: {blocked_count} change(s) require resolution; do not execute this script as a migration."
+        ));
+    }
     lines.push(String::new());
     if kind == DatabaseKind::Postgres && !changes.is_empty() {
         lines.push("BEGIN;".to_string());
@@ -1171,7 +1965,16 @@ fn render_migration_sql(
         lines.push("-- No schema differences detected.".to_string());
     }
     for change in changes {
-        lines.push(format!("-- {:?}: {}", change.risk, change.summary));
+        lines.push(format!(
+            "-- Step {} · {:?} · {:?}: {}",
+            change.order, change.phase, change.risk, change.summary
+        ));
+        if !change.depends_on.is_empty() {
+            lines.push(format!("-- Depends on: {}", change.depends_on.join(", ")));
+        }
+        if let Some(reason) = change.blocked_reason.as_deref() {
+            lines.push(format!("-- BLOCKED: {reason}"));
+        }
         if change.sql.is_empty() {
             lines.push("-- MANUAL REVIEW REQUIRED: no safe SQL was generated.".to_string());
         } else {
@@ -1182,6 +1985,37 @@ fn render_migration_sql(
     if kind == DatabaseKind::Postgres && !changes.is_empty() {
         lines.push("-- Replace ROLLBACK with COMMIT only after review and validation.".to_string());
         lines.push("ROLLBACK;".to_string());
+    }
+    lines.join("\n")
+}
+
+fn render_preflight_sql(
+    source: &SchemaSnapshot,
+    target: &SchemaSnapshot,
+    checks: &[SchemaPreflightCheck],
+) -> String {
+    let mut lines = vec![
+        "-- OxideStudio schema migration preflight".to_string(),
+        format!(
+            "-- Desired source: {} / {}",
+            source.connection_name, source.schema_name
+        ),
+        format!(
+            "-- Actual target: {} / {}",
+            target.connection_name, target.schema_name
+        ),
+        "-- Read-only checks only; inspect every expectation before migration execution."
+            .to_string(),
+        String::new(),
+    ];
+    if checks.is_empty() {
+        lines.push("-- No generated preflight checks for this plan.".to_string());
+    }
+    for (index, check) in checks.iter().enumerate() {
+        lines.push(format!("-- Check {}: {}", index + 1, check.label));
+        lines.push(format!("-- Expectation: {}", check.expectation));
+        lines.push(check.sql.clone());
+        lines.push(String::new());
     }
     lines.join("\n")
 }
@@ -1379,6 +2213,13 @@ mod tests {
             referenced_columns: vec!["id".to_string()],
             ..constraint("users_account_fk", "FOREIGN KEY", &["id"])
         }];
+        source.relations.push(SchemaRelationSnapshot {
+            name: "accounts".to_string(),
+            object_type: Some("BASE TABLE".to_string()),
+            columns: vec![column("id", "int4", false)],
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        });
         source = finalize_schema_snapshot(source).unwrap();
         let mut target = snapshot("actual", vec![column("id", "int4", false)]);
         target.relations.clear();
@@ -1386,13 +2227,24 @@ mod tests {
 
         let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
 
-        assert_eq!(plan.changes[0].kind, SchemaChangeKind::RelationCreate);
-        assert_eq!(plan.changes[0].risk, SchemaChangeRisk::Review);
-        assert!(plan.changes[0].manual_review);
-        assert!(plan
-            .warnings
+        let relation_creates = plan
+            .changes
             .iter()
-            .any(|warning| warning.contains("creation order")));
+            .filter(|change| change.kind == SchemaChangeKind::RelationCreate)
+            .collect::<Vec<_>>();
+        let foreign_key = plan
+            .changes
+            .iter()
+            .find(|change| change.child_name.as_deref() == Some("users_account_fk"))
+            .unwrap();
+        assert_eq!(relation_creates.len(), 2);
+        assert_eq!(foreign_key.kind, SchemaChangeKind::ConstraintAdd);
+        assert_eq!(foreign_key.risk, SchemaChangeRisk::Review);
+        assert!(foreign_key.manual_review);
+        assert_eq!(foreign_key.depends_on.len(), 2);
+        assert!(relation_creates
+            .iter()
+            .all(|create| create.order < foreign_key.order));
         assert!(plan.migration_sql.contains("FOREIGN KEY"));
     }
 
@@ -1539,5 +2391,134 @@ mod tests {
             .unwrap();
         assert!(foreign_key.sql.is_empty());
         assert!(foreign_key.manual_review);
+    }
+
+    #[test]
+    fn target_only_relations_drop_foreign_keys_before_both_sides() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        source.relations.clear();
+        source = finalize_schema_snapshot(source).unwrap();
+
+        let mut target = snapshot("actual", vec![column("id", "int4", false)]);
+        target.relations[0].constraints = vec![ConstraintInfo {
+            referenced_schema: Some("public".to_string()),
+            referenced_table: Some("accounts".to_string()),
+            referenced_columns: vec!["id".to_string()],
+            ..constraint("users_account_fk", "FOREIGN KEY", &["id"])
+        }];
+        target.relations.push(SchemaRelationSnapshot {
+            name: "accounts".to_string(),
+            object_type: Some("BASE TABLE".to_string()),
+            columns: vec![column("id", "int4", false)],
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        });
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+
+        let foreign_key_drop = plan
+            .changes
+            .iter()
+            .find(|change| change.child_name.as_deref() == Some("users_account_fk"))
+            .unwrap();
+        let relation_drops = plan
+            .changes
+            .iter()
+            .filter(|change| change.kind == SchemaChangeKind::RelationDrop)
+            .collect::<Vec<_>>();
+        assert_eq!(foreign_key_drop.phase, SchemaChangePhase::DropDependencies);
+        assert_eq!(relation_drops.len(), 2);
+        assert!(relation_drops.iter().all(|drop| {
+            drop.depends_on.contains(&foreign_key_drop.id) && foreign_key_drop.order < drop.order
+        }));
+        assert_eq!(plan.preflight_checks.len(), 2);
+    }
+
+    #[test]
+    fn preflight_covers_required_columns_not_null_and_unique_constraints() {
+        let mut source = snapshot(
+            "desired",
+            vec![
+                column("id", "int4", false),
+                column("email", "text", false),
+                column("tenant_id", "int4", false),
+            ],
+        );
+        source.relations[0].constraints = vec![constraint("users_email_key", "UNIQUE", &["email"])];
+        source = finalize_schema_snapshot(source).unwrap();
+        let target = snapshot(
+            "actual",
+            vec![column("id", "int4", false), column("email", "text", true)],
+        );
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+
+        assert_eq!(plan.preflight_checks.len(), 3);
+        assert!(plan.preflight_sql.contains("blocking_rows"));
+        assert!(plan.preflight_sql.contains("IS NULL"));
+        assert!(plan.preflight_sql.contains("duplicate_count"));
+        assert!(plan.preflight_sql.contains("HAVING COUNT(*) > 1"));
+    }
+
+    #[test]
+    fn type_change_with_unchanged_dependency_is_blocked_instead_of_half_generated() {
+        let mut source = snapshot("desired", vec![column("id", "bigint", false)]);
+        source.relations[0].indexes = vec![index("users_id_idx", &["id"], "btree")];
+        source = finalize_schema_snapshot(source).unwrap();
+        let mut target = snapshot("actual", vec![column("id", "int4", false)]);
+        target.relations[0].indexes = vec![index("users_id_idx", &["id"], "btree")];
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+
+        let type_change = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::ColumnModify)
+            .unwrap();
+        assert!(type_change.blocked_reason.is_some());
+        assert!(type_change.sql.is_empty());
+        assert_eq!(type_change.phase, SchemaChangePhase::ManualReview);
+        assert_eq!(plan.summary.blocked, 1);
+        assert!(plan.migration_sql.contains("PLAN BLOCKED"));
+        assert!(!plan.migration_sql.contains("ALTER COLUMN \"id\" TYPE"));
+    }
+
+    #[test]
+    fn dependency_cycle_is_blocked_without_emitting_partial_sql() {
+        let mut first = change(
+            SchemaChangeKind::ColumnAdd,
+            SchemaChangeRisk::Safe,
+            "public",
+            "users",
+            Some("BASE TABLE".to_string()),
+            Some("first".to_string()),
+            "Add first".to_string(),
+            vec!["ALTER TABLE users ADD first int;".to_string()],
+            true,
+            false,
+        );
+        let mut second = change(
+            SchemaChangeKind::ColumnAdd,
+            SchemaChangeRisk::Safe,
+            "public",
+            "users",
+            Some("BASE TABLE".to_string()),
+            Some("second".to_string()),
+            "Add second".to_string(),
+            vec!["ALTER TABLE users ADD second int;".to_string()],
+            true,
+            false,
+        );
+        first.depends_on = vec![second.id.clone()];
+        second.depends_on = vec![first.id.clone()];
+        let mut warnings = Vec::new();
+
+        let ordered = topologically_order_changes(vec![first, second], &mut warnings);
+
+        assert!(ordered.iter().all(|change| change.sql.is_empty()));
+        assert!(ordered.iter().all(|change| change.blocked_reason.is_some()));
+        assert!(warnings.iter().any(|warning| warning.contains("cycle")));
     }
 }

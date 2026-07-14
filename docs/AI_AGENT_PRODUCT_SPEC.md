@@ -171,7 +171,7 @@ type AgentToolContract = {
 | DB-06 | 只读查询 | 后端重新分类 SQL；限制 row/time/bytes；多语句只要含 mutation 即拒绝 read path | R1 |
 | DB-07 | DML 生成与执行 | 明确表、WHERE、预计行数；先 preview 或 transaction；无 WHERE 默认升级风险 | R2/R3 |
 | DB-08 | DDL / destructive | 生成 migration preview、依赖影响和 rollback 可能性；drop/truncate 逐目标批准 | R4 |
-| DB-09 | Schema diff/migration | 比较版本化 snapshot，不直接拿 display tree；第一阶段已生成风险/可逆性 migration artifact，后续以 dependency DAG 排序并加入 dry-run、验证、apply journal 与 rollback 包 | R1-R4 |
+| DB-09 | Schema diff/migration | 比较版本化 snapshot，不直接拿 display tree；已生成 phase/order/dependsOn、风险/可逆/blocked migration artifact 与只读 preflight；后续补 server dry-run、post-verify、apply journal 与 rollback 包 | R1-R4 |
 | DB-10 | 数据分析 | 对结果做统计/分组/异常解释，优先在 DB 聚合而不是搬运原始数据 | R1 |
 | DB-11 | 导入/导出 | 映射预览、编码/格式/错误策略、目标路径与敏感信息确认 | R2/R3 |
 | DB-12 | 运维诊断 | 查看 session、lock、slow query、容量和权限；kill/cancel session 单独批准 | R1/R3 |
@@ -401,7 +401,7 @@ DataGrip 当前 AI 基线包含 schema-aware chat、自然语言生成 SQL、SQL
 | 外部生态 | JetBrains 生态 | 已有 MCP/CLI/provider registry | 继续保持统一 policy |
 | 数据隐私 | 默认不把原始数据库数据提供给 AI | 有截断/隐藏 credential，缺“发送内容预览” | P0/P1 |
 
-AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV Import Mapping 和 schema diff/migration preview 的第一阶段已完成；dependency-ordered migration apply、diagram/FK navigation、data compare、semantic refactor/find usages、native streaming import、session/lock 等仍需按 [DataGrip 能力差距](datagrip-gap-analysis.md) 路线推进。
+AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV Import Mapping，以及 schema diff 的 snapshot + dependency-ordered review/preflight 已完成；migration apply/verify、diagram/FK navigation、data compare、semantic refactor/find usages、native streaming import、session/lock 等仍需按 [DataGrip 能力差距](datagrip-gap-analysis.md) 路线推进。
 
 ## 9. 分阶段路线图
 
@@ -428,7 +428,7 @@ AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV
 ### Phase C：专业数据库 AI（P1）
 
 1. 在已有 Explain Plan artifact/节点导航上增加热点规则、AI explanation、索引/schema citation 和优化前后验证。
-2. 在已有 schema snapshot/diff review artifact 上增加 dependency DAG、schema mapping、dry-run/apply journal、安全验证与 rollback 包。
+2. 在已有 schema snapshot/diff、支持对象 dependency DAG 与 preflight 上增加完整 source/dependency capture、schema mapping、server dry-run、post-verify、apply journal 与 rollback 包。
 3. result analysis、data compare、导入映射和报告 artifact。
 4. session/lock/slow-query 诊断工具。
 5. project memory、skill 管理和黄金任务评测。

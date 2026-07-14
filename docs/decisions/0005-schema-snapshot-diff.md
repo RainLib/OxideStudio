@@ -38,5 +38,5 @@ The frontend opens one reusable Schema Diff artifact tab per plan. Its migration
 - Capture performs bounded parallel I/O and atomically rejects incomplete metadata.
 - Migration SQL is reviewable but cannot bypass the existing query execution gate.
 - The first version covers PostgreSQL/MySQL tables, columns, indexes, and constraints using currently captured metadata.
-- Full object source capture, dependency topological ordering, rename detection, schema mapping, apply journal, dry-run validation, and rollback generation remain P1 work. Until dependency ordering is implemented, foreign-key table creation is always marked for manual review.
+- Supported relation/column/index/constraint ordering and read-only preflight were added in [ADR-0006](0006-migration-dependency-preflight.md). Full object source/dependency capture, rename detection, schema mapping, apply journal, server dry-run, post-verification, and rollback generation remain P1 work.
 - Snapshot deletion rewrites only the matching scoped resource collection; snapshots never cross project, connection, database, or schema boundaries.

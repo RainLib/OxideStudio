@@ -214,7 +214,7 @@ Table Tab 使用服务端分页。前端保存 cell edits、新增行、删除�
 
 Schema baseline 不读取可变的 Explorer 展示树，而是调用 Rust `capture_schema_snapshot` 对指定 `project + connection + database + schema` 进行一次完整 introspection。表级 columns/indexes/constraints 并行获取，表间以六个 permit 限流；任一失败都会中止，避免把部分结构保存为有效 snapshot。版本化 snapshot 与 fingerprint 作为 project-scoped MetaStore resource 持久化。
 
-`compare_schema_snapshots` 把 source 定义为 desired、fresh live target 定义为 actual，并在 Rust 纯领域层生成稳定 change、风险、可逆性、warning 和 dialect SQL。UI 只展示 review-only artifact；PostgreSQL preview 以 `ROLLBACK` 结束，MySQL 明示 DDL auto-commit。view/source 缺失、外键依赖顺序等无法证明安全的情况不会猜测，而会变成 manual review。AI action 通过 `tabId + schemaDiffId + schemaChangeId` 定位精确 change。完整边界见 [ADR-0005](decisions/0005-schema-snapshot-diff.md)。
+`compare_schema_snapshots` 把 source 定义为 desired、fresh live target 定义为 actual，并在 Rust 纯领域层生成稳定 change、风险、可逆性、warning 和 dialect SQL。支持对象通过 dependency graph 拓扑排序并携带 phase/order/dependsOn；外键脱离 `CREATE TABLE`，changed index/constraint 拆为 drop/recreate。无法完整重建、依赖被阻断或出现 cycle 时清除 runnable SQL，而不是猜测或添加 `CASCADE`。artifact 另有 NOT NULL/UNIQUE/FK/drop 等只读 preflight surface。PostgreSQL migration preview 以 `ROLLBACK` 结束，MySQL 明示 DDL auto-commit。AI action 通过 `tabId + schemaDiffId + schemaChangeId` 定位精确 change。完整边界见 [ADR-0005](decisions/0005-schema-snapshot-diff.md) 与 [ADR-0006](decisions/0006-migration-dependency-preflight.md)。
 
 ### 5.6 AI 工具链
 

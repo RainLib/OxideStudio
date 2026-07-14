@@ -6,6 +6,8 @@ import {
   Clipboard,
   Code2,
   GitCompareArrows,
+  ListChecks,
+  OctagonX,
   ShieldAlert,
   TerminalSquare,
 } from "lucide-react";
@@ -48,11 +50,17 @@ export function SchemaDiffView() {
     (state) => state.setActiveToolWindow,
   );
   const [copied, setCopied] = useState(false);
+  const [previewSurface, setPreviewSurface] = useState<"migration" | "preflight">(
+    "migration",
+  );
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
   const plan = activeTab?.schemaDiffPlan;
   const source = activeTab?.schemaDiffSource;
   const target = activeTab?.schemaDiffTarget;
-  const sqlLines = useMemo(() => plan?.migrationSql.split("\n") || [], [plan]);
+  const previewSql = previewSurface === "migration"
+    ? plan?.migrationSql || ""
+    : plan?.preflightSql || "";
+  const sqlLines = useMemo(() => previewSql.split("\n"), [previewSql]);
 
   if (!activeTab || activeTab.type !== "schema_diff" || !plan || !source || !target) {
     return null;
@@ -63,17 +71,22 @@ export function SchemaDiffView() {
   );
 
   const copySql = async () => {
-    await navigator.clipboard.writeText(plan.migrationSql);
+    await navigator.clipboard.writeText(previewSql);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1_500);
   };
 
   const openInConsole = () => {
-    createTab("query", `migration [${plan.targetSchemaName}]`, plan.migrationSql, {
-      connectionId: plan.targetConnectionId,
-      databaseName: plan.targetDatabaseName || undefined,
-      schemaName: plan.targetSchemaName,
-    });
+    createTab(
+      "query",
+      `${previewSurface === "migration" ? "migration" : "preflight"} [${plan.targetSchemaName}]`,
+      previewSql,
+      {
+        connectionId: plan.targetConnectionId,
+        databaseName: plan.targetDatabaseName || undefined,
+        schemaName: plan.targetSchemaName,
+      },
+    );
     setActiveToolWindow("editor");
   };
 
@@ -125,13 +138,22 @@ export function SchemaDiffView() {
             onClick={() => void copySql()}
           >
             {copied ? <Check size={12} /> : <Clipboard size={12} />}
-            {copied ? "Copied" : "Copy SQL"}
+            {copied ? "Copied" : `Copy ${previewSurface === "migration" ? "SQL" : "checks"}`}
           </button>
           <button
             type="button"
             className="wb-primary-button h-7 gap-1.5 px-2.5 text-[10px]"
             onClick={openInConsole}
-            disabled={plan.changes.length === 0}
+            title={
+              previewSurface === "migration" && plan.summary.blocked > 0
+                ? "Resolve blocked changes before opening a runnable migration console"
+                : undefined
+            }
+            disabled={
+              previewSurface === "migration"
+                ? plan.changes.length === 0 || plan.summary.blocked > 0
+                : plan.preflightChecks.length === 0
+            }
           >
             <TerminalSquare size={12} />
             Open in console
@@ -141,7 +163,7 @@ export function SchemaDiffView() {
 
       <div className="grid min-h-0 flex-1 grid-cols-[330px_minmax(0,1fr)]">
         <aside className="flex min-h-0 flex-col border-r border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))]">
-          <div className="grid grid-cols-3 border-b border-[hsl(var(--wb-border-subtle))]">
+          <div className="grid grid-cols-4 border-b border-[hsl(var(--wb-border-subtle))]">
             <RiskMetric label="Safe" value={plan.summary.safe} risk="safe" />
             <RiskMetric label="Review" value={plan.summary.review} risk="review" />
             <RiskMetric
@@ -149,6 +171,7 @@ export function SchemaDiffView() {
               value={plan.summary.destructive}
               risk="destructive"
             />
+            <BlockedMetric value={plan.summary.blocked} />
           </div>
 
           <div className="flex h-8 shrink-0 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] px-3 text-[10px]">
@@ -193,12 +216,19 @@ export function SchemaDiffView() {
                         </span>
                       </span>
                       <span className="mt-1 block text-[9px] leading-4 wb-muted">
+                        Step {change.order} · {formatPhase(change.phase)}
+                      </span>
+                      <span className="mt-0.5 block text-[9px] leading-4 wb-muted">
                         {change.summary}
                       </span>
-                      {(change.manualReview || !change.reversible) && (
+                      {(change.blockedReason || change.manualReview || !change.reversible) && (
                         <span className="mt-1.5 flex items-center gap-1 text-[8px] text-amber-300/90">
                           <AlertTriangle size={9} />
-                          {change.reversible ? "Manual review" : "Not automatically reversible"}
+                          {change.blockedReason
+                            ? `Blocked · ${change.blockedReason}`
+                            : change.reversible
+                              ? "Manual review"
+                              : "Not automatically reversible"}
                         </span>
                       )}
                     </span>
@@ -211,12 +241,26 @@ export function SchemaDiffView() {
 
         <main className="flex min-h-0 min-w-0 flex-col">
           <div className="flex h-8 shrink-0 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.62)] px-3 text-[10px]">
-            <span className="flex items-center gap-1.5 font-medium">
-              <Code2 size={12} className="text-[hsl(var(--wb-accent))]" />
-              Migration SQL preview
+            <span className="flex items-center gap-1 rounded-[4px] bg-[hsl(var(--wb-panel-raised)/0.55)] p-0.5">
+              <PreviewSwitch
+                active={previewSurface === "migration"}
+                label="Migration"
+                icon={Code2}
+                onClick={() => setPreviewSurface("migration")}
+              />
+              <PreviewSwitch
+                active={previewSurface === "preflight"}
+                label={`Preflight ${plan.preflightChecks.length}`}
+                icon={ListChecks}
+                onClick={() => setPreviewSurface("preflight")}
+              />
             </span>
             <span className="flex items-center gap-1.5 wb-muted">
-              {plan.transactional ? "PostgreSQL · ROLLBACK guard" : "MySQL · DDL may auto-commit"}
+              {previewSurface === "preflight"
+                ? "Read-only validation queries"
+                : plan.transactional
+                  ? "PostgreSQL · ROLLBACK guard"
+                  : "MySQL · DDL may auto-commit"}
             </span>
           </div>
 
@@ -243,6 +287,8 @@ export function SchemaDiffView() {
                       "whitespace-pre px-3 align-top",
                       line.startsWith("-- WARNING")
                         ? "text-amber-300"
+                        : line.startsWith("-- BLOCKED") || line.startsWith("-- PLAN BLOCKED")
+                          ? "text-red-300"
                         : line.startsWith("--")
                           ? "text-[hsl(var(--wb-text-muted))]"
                           : "text-[hsl(var(--wb-text))]",
@@ -278,6 +324,49 @@ function RiskMetric({
       <div className="mt-1 text-[8px] uppercase tracking-[0.12em] wb-muted">{label}</div>
     </div>
   );
+}
+
+function BlockedMetric({ value }: { value: number }) {
+  return (
+    <div className="border-r border-[hsl(var(--wb-border-subtle))] px-2 py-2 last:border-r-0">
+      <div className="flex items-center gap-1 font-mono text-[15px] font-semibold leading-none text-red-300">
+        <OctagonX size={11} /> {value}
+      </div>
+      <div className="mt-1 text-[8px] uppercase tracking-[0.12em] wb-muted">Blocked</div>
+    </div>
+  );
+}
+
+function PreviewSwitch({
+  active,
+  label,
+  icon: Icon,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  icon: typeof Code2;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        "flex h-5 items-center gap-1 rounded-[3px] px-2 text-[9px] transition-colors",
+        active
+          ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+          : "wb-muted hover:text-[hsl(var(--wb-text))]",
+      )}
+      onClick={onClick}
+    >
+      <Icon size={10} />
+      {label}
+    </button>
+  );
+}
+
+function formatPhase(phase: SchemaChange["phase"]) {
+  return phase.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
 }
 
 function formatTimestamp(value: number) {
