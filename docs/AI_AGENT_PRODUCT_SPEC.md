@@ -65,7 +65,7 @@ Deep Agents 的文件系统权限只约束其内置文件工具，不能替代 O
 | 模型 planner 与结果总结 | 已具备/部分 | `src/ai/assistant` | 增加 checkpoint、恢复、验证节点 |
 | LangGraph | 部分具备 | 当前主要为 `plan -> policy` 两节点 | Agent mode 引入完整状态图 |
 | 多轮工具循环 | 已具备/非持久 | `AssistantRuntime.runToolLoop` 已负责 policy、去重、预算、取消和 typed event；Sidebar 只投影状态 | 增加 approval pause token、checkpoint/resume 与 verification node |
-| 页面导航/编辑动作 | 已具备/部分 | `src/ai/ui-actions`、`databaseNavigation.ts`、`editorNavigation.ts`、`explainPlanNavigation.ts`、revision-bound patch preview | 补 durable task surface |
+| 页面导航/编辑动作 | 已具备 | `src/ai/ui-actions`、database/editor/plan/task semantic navigation、revision-bound patch preview | 扩展更多 artifact action，不允许 selector 跳转 |
 | 持久 thread / memory | 部分具备 | `assistant_tasks` 已保存项目级安全 task summary，TaskStatusCenter 可恢复 interrupted/waiting/history | 增加 thread retention、idempotency receipt 与真正 checkpoint/resume |
 | 子代理 | 缺失 | 无隔离的 subagent executor | 默认只读、受预算约束 |
 | Agent 可观测性与评测 | 部分具备 | 有 audit hook，缺完整 trace/eval | 结构化 trace、回放、黄金任务集 |
@@ -261,7 +261,7 @@ type UiAction = {
 | `plan.revealNode` | 选中 Explain Plan 节点并联动对象 | plan version 不一致时拒绝 |
 | `schemaDiff.revealChange` | 激活 Schema Diff artifact 并选中稳定 change；已存在对象可继续联动 Explorer | `tabId + schemaDiffId + schemaChangeId` 任一失效都拒绝；待创建对象不伪造 Explorer 定位 |
 | `settings.open` | 打开 AI/provider/privacy/keymap 等 section | 不允许 Agent 修改 secret 字段 |
-| `task.reveal` | 打开后台任务 trace | task 被清理时显示摘要而非空跳转 |
+| `task.reveal` | 打开后台任务安全摘要 | task 被清理时返回 `TARGET_NOT_FOUND` 与 recovery，不做空跳转 |
 
 ### 5.3 交互场景
 
@@ -282,9 +282,9 @@ type UiAction = {
 - Assistant 已把 active tab、selection、metadata object、project file、query result、LSP diagnostic、Explain Plan、Schema Diff change 和 editor patch 转换为可点击 attachment。对象的 Reveal、Open data、Open DDL 是三个独立 action；计划 attachment 使用 `planId + nodeId`，schema diff attachment 使用 `schemaDiffId + schemaChangeId` 精确定位不可变 artifact。
 - Database Explorer 能定位当前 database 及远程 PostgreSQL database 下的 schema/object；Monaco range 统一为 one-based，LSP 的 zero-based range 在 attachment boundary 转换。
 - `plan.revealNode` 与 `schemaDiff.revealChange` 已连接对应 artifact surface，会校验 tab、artifact version 和 node/change identity 后再定位。
-- `editor.proposePatch` 是只读 artifact 工具：host 从当前 selection/整篇文档捕获 range、before text 和 revision，模型只能提出 replacement/title/rationale。`editor.previewPatch` 在 revision 与 before text 都匹配时打开 before/after；用户点击 Apply 后 tab store 再校验一次并写入，预览不会自动修改或执行 SQL。单侧内容限制 50,000 字符，binary preview 明确拒绝。`task.reveal` 仍稳定返回 unsupported，不伪造成功。
+- `editor.proposePatch` 是只读 artifact 工具：host 从当前 selection/整篇文档捕获 range、before text 和 revision，模型只能提出 replacement/title/rationale。`editor.previewPatch` 在 revision 与 before text 都匹配时打开 before/after；用户点击 Apply 后 tab store 再校验一次并写入，预览不会自动修改或执行 SQL。单侧内容限制 50,000 字符，binary preview 明确拒绝。
 - 有界多轮执行已从 `AssistantSidebar` 移入 `AssistantRuntime.runToolLoop`。Runtime 对模型 follow-up 重新走 manifest/policy、按 tool+input signature 去重、只接受精确 normalized step id 的批准、默认限制四轮/十二次调用，并发出 typed progress event；Sidebar 不再决定循环语义。当前 AbortController 与任务内存仍属于组件，尚不支持关闭后继续、checkpoint 或 crash resume。
-- Agent task 的安全摘要已进入 project-scoped MetaStore 与 TaskStatusCenter：只保留 plan identity/risk 和 completed status，后端限制 100 steps、64 KiB 与每项目 100 条终态历史；旧 session 的 active task 自动标记 interrupted。项目切换会取消旧运行、清空旧对话/批准。异步 history hydration 会保留同项目刚启动但尚未出现在查询结果中的 active task，避免旧快照覆盖新任务。该摘要不可执行，批准不会落盘，`task.reveal` 与 checkpoint resume 仍未完成。
+- Agent task 的安全摘要已进入 project-scoped MetaStore 与 TaskStatusCenter：只保留 plan identity/risk 和 completed status，后端限制 100 steps、64 KiB 与每项目 100 条终态历史；旧 session 的 active task 自动标记 interrupted。项目切换会取消旧运行、清空旧对话/批准。异步 history hydration 会保留同项目刚启动但尚未出现在查询结果中的 active task，避免旧快照覆盖新任务。每个 Agent plan 都提供 `task.reveal` attachment，可按 `projectId + taskId` 从内存或 retained history 打开精确详情；清理后的目标返回 `TARGET_NOT_FOUND`。该摘要不可执行，批准不会落盘，checkpoint resume 仍未完成。
 
 ### 5.5 结构化错误基线（2026-07-15）
 
@@ -398,7 +398,7 @@ DataGrip 当前 AI 基线包含 schema-aware chat、自然语言生成 SQL、SQL
 | Error fix | 执行错误可 Explain/Fix | LSP diagnostic 可精确跳转且已有通用 patch preview；vendor error 的 SQLSTATE/position/object 统一与自动生成修复仍缺 | P0 |
 | Query optimization | 可基于查询与计划解释优化 | 已有真实 estimate plan 工具与 artifact，缺热点规则、建议引用、前后 plan 对比和自动验证 | P1 完成优化闭环 |
 | Plan explanation | 支持 query plan AI explanation | 规范化 plan tree/raw artifact 和精确节点联动已完成；模型解释质量评测与索引/schema citation 尚缺 | P1 |
-| 页面交互 | attachment 可回到对象/代码 | `UiActionRegistry` 已支持稳定对象、文件、tab、结果、diagnostic、plan、schema diff change 和 patch preview；task surface 尚未完成 | 补 durable task surface |
+| 页面交互 | attachment 可回到对象/代码/任务 | `UiActionRegistry` 已支持稳定对象、文件、tab、结果、diagnostic、plan、schema diff change、patch preview 和 durable task summary | 继续覆盖新增 artifact |
 | 长任务代理 | 以 IDE AI 工作流为主 | registry 架构适合扩展，但 runtime 循环在 UI | 引入 Deep Agents Agent mode 后可形成差异化 |
 | 多数据模型 | 重点是 SQL/database IDE | 已覆盖 Mongo/Redis/ES 的结构化工具方向 | Oxide 的差异化优势 |
 | 外部生态 | JetBrains 生态 | 已有 MCP/CLI/provider registry | 继续保持统一 policy |

@@ -17,6 +17,21 @@ export type TaskKind =
   | "lsp"
   | "other";
 
+export type WorkbenchTaskStepStatus =
+  | "pending"
+  | "running"
+  | "success"
+  | "requiresApproval"
+  | "error";
+
+export interface WorkbenchTaskStep {
+  id: string;
+  title: string;
+  toolName?: string | null;
+  requiresApproval: boolean;
+  status: WorkbenchTaskStepStatus;
+}
+
 export interface WorkbenchTask {
   id: string;
   kind: TaskKind;
@@ -29,6 +44,8 @@ export interface WorkbenchTask {
   error?: string | null;
   projectId?: string | null;
   persistent?: boolean;
+  currentStepId?: string | null;
+  steps?: WorkbenchTaskStep[];
 }
 
 interface TaskState {

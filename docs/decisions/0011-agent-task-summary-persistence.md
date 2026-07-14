@@ -30,4 +30,4 @@ Each application process has a random session id. When task history is read, `ru
 
 Task status and bounded plan history survive a restart without placing database content or reusable authorization on disk. The Task Status Center can distinguish waiting, interrupted, completed, failed and cancelled work.
 
-This is a durable summary, not a durable Agent runtime. It cannot replay a tool, resume a graph, reveal the original conversation, or prove whether an external mutation committed. True checkpoint/resume still requires versioned runtime state, idempotency receipts, non-replayable approval pause tokens, an explicit thread-retention/encryption policy, and a `task.reveal` surface.
+This is a durable summary, not a durable Agent runtime. It cannot replay a tool, resume a graph, reveal the original conversation, or prove whether an external mutation committed. The shipped `task.reveal` surface can display only this safe summary. True checkpoint/resume still requires versioned runtime state, idempotency receipts, non-replayable approval pause tokens, and an explicit thread-retention/encryption policy.

@@ -233,6 +233,9 @@ describe("AssistantSidebar", () => {
       expect.any(String)
     );
     expect(container.textContent).toContain("tool calls succeeded");
+    expect(
+      container.querySelector('button[title="Reveal task details"]'),
+    ).not.toBeNull();
     expect(container.textContent).toContain("Activity");
     expect(container.textContent).toContain("query.runReadOnly");
     expect(useAiAuditStore.getState().entries).toEqual(

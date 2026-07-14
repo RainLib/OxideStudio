@@ -1,5 +1,6 @@
 import type { AssistantToolCallResult } from "@/ai/assistant/types";
 import type { AiToolExecutionContext } from "@/ai/tools/types";
+import type { AssistantTaskRecord } from "@/services/tauri/assistant-task.service";
 import {
   captureWorkspaceUiActionContext,
   documentRevisionForTab,
@@ -13,6 +14,25 @@ import type {
 } from "./types";
 
 const MAX_ATTACHMENTS_PER_MESSAGE = 8;
+
+export function createAssistantTaskAttachment(
+  task: AssistantTaskRecord,
+): AssistantAttachment {
+  const context = captureWorkspaceUiActionContext();
+  return attachment({
+    id: `${task.id}-attachment`,
+    kind: "task",
+    label: task.title,
+    detail: `${task.checkpoint.plan.length} recorded step${task.checkpoint.plan.length === 1 ? "" : "s"}`,
+    action: actionRequest(
+      `${task.id}-reveal`,
+      "task.reveal",
+      { projectId: task.projectId, taskId: task.id },
+      "Reveal task details",
+      context,
+    ),
+  });
+}
 
 export function createAssistantAttachments(
   results: AssistantToolCallResult[],
@@ -434,6 +454,7 @@ function deduplicateAttachments(attachments: AssistantAttachment[]) {
       target.schemaDiffId,
       target.schemaChangeId,
       target.patchId,
+      target.taskId,
       target.range,
     ]);
     if (keys.has(key)) return false;

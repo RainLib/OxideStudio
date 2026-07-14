@@ -4,6 +4,9 @@ import type { WorkbenchTask } from "@/store/useTaskStore";
 export function assistantTaskToWorkbenchTask(
   task: AssistantTaskRecord,
 ): WorkbenchTask {
+  const completedById = new Map(
+    task.checkpoint.completedSteps.map((step) => [step.id, step.status]),
+  );
   return {
     id: task.id,
     kind: "agent",
@@ -23,5 +26,16 @@ export function assistantTaskToWorkbenchTask(
     error: task.status === "failed" ? task.detail : null,
     projectId: task.projectId,
     persistent: true,
+    currentStepId: task.currentStepId,
+    steps: task.checkpoint.plan.map((step) => ({
+      ...step,
+      status:
+        completedById.get(step.id) ??
+        (step.id === task.currentStepId
+          ? "running"
+          : task.status === "awaiting_approval" && step.requiresApproval
+            ? "requiresApproval"
+            : "pending"),
+    })),
   };
 }

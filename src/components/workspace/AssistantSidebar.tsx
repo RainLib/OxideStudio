@@ -38,6 +38,7 @@ import { AssistantPlanView } from "./assistant/AssistantPlanView";
 import { AssistantPromptBox } from "./assistant/AssistantPromptBox";
 import {
   createAssistantAttachments,
+  createAssistantTaskAttachment,
   createWorkspaceUiActionRegistry,
 } from "@/ai/ui-actions";
 import type {
@@ -377,13 +378,15 @@ export function AssistantSidebar() {
       if (requestController.signal.aborted) return;
       setPreparedTurn(turn);
       setPreparedMode(resolvedMode);
-      appendAssistantMessage(
-        planResponseMessage(turn, resolvedMode),
-        turn.requestId
-      );
 
       if (resolvedMode === "agent") {
         const task = beginAssistantTask(turn);
+        appendAssistantMessage(
+          planResponseMessage(turn, resolvedMode),
+          turn.requestId,
+          "normal",
+          [createAssistantTaskAttachment(task)],
+        );
         const automaticSteps = turn.suggestedPlan.filter(
           (step) => step.toolName && !step.requiresApproval
         );
@@ -399,6 +402,11 @@ export function AssistantSidebar() {
         } else {
           await settleAssistantTask("completed");
         }
+      } else {
+        appendAssistantMessage(
+          planResponseMessage(turn, resolvedMode),
+          turn.requestId,
+        );
       }
     } catch (err: any) {
       if (requestController.signal.aborted) return;

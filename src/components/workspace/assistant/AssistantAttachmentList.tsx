@@ -16,6 +16,7 @@ import {
   Table2,
   GitCompareArrows,
   FileDiff,
+  ListChecks,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -141,5 +142,6 @@ function attachmentIcon(kind: AssistantAttachment["kind"]) {
   if (kind === "plan") return Braces;
   if (kind === "schemaDiff") return GitCompareArrows;
   if (kind === "patch") return FileDiff;
+  if (kind === "task") return ListChecks;
   return FileCode2;
 }

@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { createAssistantAttachments } from "@/ai/ui-actions/attachments";
+import {
+  createAssistantAttachments,
+  createAssistantTaskAttachment,
+} from "@/ai/ui-actions/attachments";
 import { resetUiActionContextTracker } from "@/ai/ui-actions/context";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useProjectStore } from "@/store/useProjectStore";
@@ -89,6 +92,47 @@ describe("assistant UI attachments", () => {
     expect(
       attachment?.secondaryActions?.map((action) => action.action),
     ).toEqual(["database.openObjectData", "database.openObjectDdl"]);
+  });
+
+  it("creates a project-bound durable task attachment without task payloads", () => {
+    const attachment = createAssistantTaskAttachment({
+      id: "agent:request-1",
+      projectId: "project-1",
+      requestId: "request-1",
+      sessionId: "session-1",
+      status: "completed",
+      title: "Assistant agent task",
+      detail: "Completed",
+      checkpoint: {
+        version: 1,
+        mode: "agent",
+        plan: [
+          {
+            id: "step-1",
+            title: "Inspect schema",
+            toolName: "metadata.listObjects",
+            requiresApproval: false,
+          },
+        ],
+        completedSteps: [],
+      },
+      createdAt: 1,
+      updatedAt: 2,
+      finishedAt: 2,
+    });
+
+    expect(attachment).toMatchObject({
+      kind: "task",
+      detail: "1 recorded step",
+      action: {
+        action: "task.reveal",
+        target: {
+          projectId: "project-1",
+          taskId: "agent:request-1",
+        },
+      },
+    });
+    expect(JSON.stringify(attachment)).not.toContain("metadata.listObjects");
   });
 
   it("does not collapse same-named objects from different schemas", () => {

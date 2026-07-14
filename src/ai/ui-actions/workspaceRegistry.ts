@@ -10,6 +10,10 @@ import { useConnectionStore } from "@/store/useConnectionStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
+import { useTaskStore } from "@/store/useTaskStore";
+import { assistantTaskService } from "@/services/tauri/assistant-task.service";
+import { assistantTaskToWorkbenchTask } from "@/lib/assistantTaskProjection";
+import { requestTaskReveal } from "@/lib/taskNavigation";
 import {
   captureWorkspaceUiActionContext,
   documentRevisionForTab,
@@ -77,16 +81,14 @@ export function createWorkspaceUiActionRegistry() {
     name: "workspace.focusPanel",
     description: "Show and focus a workbench panel.",
     validateTarget: requireFields("projectId", "panelId"),
-    execute: (target, context) => {
+    execute: (target) => {
       if (target.panelId === "files") {
         requestProjectFilesPanel();
         return;
       }
       if (target.panelId === "tasks") {
-        return unsupported(
-          context.actionId,
-          "Task Center navigation is not available yet.",
-        );
+        requestTaskReveal({ projectId: target.projectId });
+        return;
       }
       useWorkbenchLayoutStore
         .getState()
@@ -408,11 +410,34 @@ export function createWorkspaceUiActionRegistry() {
   registry.register({
     name: "task.reveal",
     description: "Reveal a durable background task.",
-    execute: (_target, context) =>
-      unsupported(
-        context.actionId,
-        "Durable agent tasks are not available yet.",
-      ),
+    stalePolicy: "project",
+    validateTarget: requireFields("projectId", "taskId"),
+    execute: async (target, context) => {
+      let task = useTaskStore
+        .getState()
+        .tasks.find(
+          (candidate) =>
+            candidate.id === target.taskId &&
+            candidate.projectId === target.projectId &&
+            candidate.kind === "agent" &&
+            candidate.persistent,
+        );
+      if (!task) {
+        const records = await assistantTaskService.list(target.projectId, 100);
+        const projectedTasks = records.map(assistantTaskToWorkbenchTask);
+        useTaskStore
+          .getState()
+          .replacePersistentAgentTasks(target.projectId, projectedTasks);
+        task = projectedTasks.find(
+          (candidate) => candidate.id === target.taskId,
+        );
+      }
+      if (!task) return notFound(context.actionId, "Task", target.taskId!);
+      requestTaskReveal({
+        projectId: target.projectId,
+        taskId: task.id,
+      });
+    },
   });
 
   return registry;
@@ -516,8 +541,4 @@ function notFound(actionId: string, targetType: string, identity: string) {
     `${targetType} not found: ${identity}`,
     "Refresh the workspace context and try again.",
   );
-}
-
-function unsupported(actionId: string, message: string) {
-  return uiActionResult(actionId, "unsupported", "UNSUPPORTED_ACTION", message);
 }

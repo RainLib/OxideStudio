@@ -125,7 +125,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | DataGrip 基线 | OxideStudio 状态 | 当前证据与差距 | 优先级 |
 | --- | --- | --- | --- |
 | 查询取消、事务 | 已具备/部分 | PostgreSQL/MySQL 有 tracked cancellation 和命名事务；session 可视化、锁与 idle transaction 提示不足 | P0 |
-| 后台任务与进度 | 部分具备 | 有 TaskStatusCenter；缺少可回看日志、任务详情和 retry | P1 |
+| 后台任务与进度 | 部分具备 | TaskStatusCenter 已有 project-scoped Agent history、精确 task reveal、安全步骤详情；仍缺完整执行日志、retry/resume 和通用任务详情 | P1 |
 | 结构化错误 | 已具备/部分 | connection/query/schema/table/project-file 已统一稳定 code、category、safe context、retryable；vendor SQLSTATE/position/object 仍待驱动层补齐 | P0 |
 | destructive safety | 已具备/部分 | SQL 分类、确认、参数化 mutation、AI policy 和 read-only backend gate 已有；权限模型与审计导出不足 | P0/P1 |
 | AI 辅助 | 部分具备/有差异化基础 | 共享工具 registry、MCP/CLI、审批、审计和不覆盖用户输入的 Patch Preview/Apply 是优势；但 schema citation、完整 SQL 错误修复、查询优化和 plan explanation 尚未形成对应用户闭环 | P0/P1 |
@@ -138,8 +138,8 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | Text-to-SQL 与 dialect grounding | 部分具备 | 有模型 planner、inline completion、dialect context 和 revision-bound Patch Preview/Apply；缺 metadata citation 与执行前 parse/LSP/EXPLAIN 验证闭环 | P0 |
 | Explain/Fix SQL error | 部分具备 | LSP diagnostic 已可点击 Jump 到精确 range，通用 patch 可安全预览/应用；vendor error 尚未统一为 SQLSTATE/position/object，自动 Fix → Validate 仍缺失 | P0 |
 | Query optimization / plan explanation | 部分具备 | `query.explain` 只生成 estimate plan，模型可读取真实规范化计划；尚缺热点规则、索引/schema citation、优化前后 plan 对比与验证闭环 | P1 |
-| IDE 页面跳转和联动 | 已具备/部分 | typed `UiActionRegistry` 已覆盖 project/file/tab/panel/connection/object/editor/result/plan/patch/settings，含 stable target 与 stale-context；task surface 待补 | P1 |
-| 多轮 durable agent | 部分具备 | `AssistantRuntime` 已拥有有界 loop/policy/去重/取消；project-scoped task summary 可在 TaskStatusCenter 恢复 interrupted/waiting/history，且不落 prompt/input/output/approval；仍缺 executable checkpoint/resume、持久 thread、idempotency receipt、task.reveal 和 subagent | P1 |
+| IDE 页面跳转和联动 | 已具备 | typed `UiActionRegistry` 已覆盖 project/file/tab/panel/connection/object/editor/result/plan/schema diff/patch/task/settings，含 stable target 与 stale-context | 持续覆盖新增 artifact |
+| 多轮 durable agent | 部分具备 | `AssistantRuntime` 已拥有有界 loop/policy/去重/取消；project-scoped task summary 可恢复 interrupted/waiting/history 并精确 reveal，且不落 prompt/input/output/approval；仍缺 executable checkpoint/resume、持久 thread、idempotency receipt 和 subagent | P1 |
 | 工具安全与多数据模型 | 已具备/优势 | registry、capability、approval、MCP/CLI 以及 Mongo/Redis/ES 结构化 mutation 已形成独立方向 | — |
 | AI 数据治理 | 部分具备 | credential 隔离、上下文截断和有界结果已有；缺发送内容预览、项目级 retention 和 attachment 敏感级别 | P0/P1 |
 

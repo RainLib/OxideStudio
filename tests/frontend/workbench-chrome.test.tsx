@@ -12,6 +12,7 @@ import {
 import { APP_EVENT_OPEN_COMMAND_PALETTE } from "@/lib/actions";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useTaskStore } from "@/store/useTaskStore";
+import { requestTaskReveal, useTaskNavigationStore } from "@/lib/taskNavigation";
 
 const mocks = vi.hoisted(() => ({
   listAssistantTasks: vi.fn(async () => []),
@@ -35,6 +36,7 @@ describe("WorkbenchChrome", () => {
     document.body.appendChild(container);
     useProjectStore.setState({ activeProjectName: "sqls" });
     useTaskStore.setState({ tasks: [] });
+    useTaskNavigationStore.setState({ request: null });
   });
 
   afterEach(() => {
@@ -197,5 +199,79 @@ describe("WorkbenchChrome", () => {
         status: "interrupted",
       }),
     ]);
+  });
+
+  it("opens an exact task summary and recorded steps from semantic navigation", async () => {
+    useProjectStore.setState({
+      activeProjectId: "project-a",
+      activeProjectName: "Project A",
+    });
+    mocks.listAssistantTasks.mockResolvedValueOnce([
+      {
+        id: "agent:details",
+        projectId: "project-a",
+        requestId: "request-details",
+        sessionId: "session-current",
+        status: "awaiting_approval",
+        title: "Assistant agent task",
+        detail: "Waiting for approval",
+        progress: 0.5,
+        checkpoint: {
+          version: 1,
+          mode: "agent",
+          plan: [
+            {
+              id: "step-1",
+              title: "Inspect schema",
+              toolName: "metadata.listObjects",
+              requiresApproval: false,
+            },
+            {
+              id: "step-2",
+              title: "Apply reviewed change",
+              toolName: "table.updateRows",
+              requiresApproval: true,
+            },
+          ],
+          completedSteps: [
+            {
+              id: "step-1",
+              toolName: "metadata.listObjects",
+              status: "success",
+            },
+          ],
+        },
+        createdAt: 10,
+        updatedAt: 20,
+        finishedAt: null,
+      },
+    ]);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <WorkbenchStatusBar
+          isIntrospecting={false}
+          secondaryPanelOpen={false}
+          onToggleSecondaryPanel={vi.fn()}
+        />,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      requestTaskReveal({
+        projectId: "project-a",
+        taskId: "agent:details",
+      });
+    });
+
+    expect(container.querySelector('[data-task-id="agent:details"]')).not.toBeNull();
+    expect(container.textContent).toContain("Recorded steps");
+    expect(container.textContent).toContain("Inspect schema");
+    expect(container.textContent).toContain("metadata.listObjects");
+    expect(container.textContent).toContain("approval");
+    expect(container.textContent).toContain("Safe summary only");
   });
 });
