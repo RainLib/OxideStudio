@@ -14,7 +14,7 @@
 
 ## ✨ 核心优势
 
-- **🗄️ 多数据库支持**: 支持 PostgreSQL、MySQL、SQLite、SQL Server、MongoDB、Redis 和 Elasticsearch。
+- **🗄️ 多数据库支持**: 当前运行时支持 PostgreSQL、MySQL/MariaDB、MongoDB、Redis 和 Elasticsearch；SQLite、SQL Server 在规划中。
 - **🔌 数据源管理**: 可在 Database Explorer 中新建、编辑、刷新和安全移除数据源。
 - **📁 项目工作区**: 将项目关联到本地目录，支持自动目录命名、显示别名、文件编辑和常见图片预览。
 - **🎨 现代化 UI**: 基于 React + Tailwind CSS + Shadcn UI，提供丝滑的操作体验。
@@ -147,7 +147,7 @@ OxideStudio/
 │   └── Cargo.toml      # Rust 依赖配置
 ├── vendor/sql-lsp/     # 内置 SQL/NoSQL Language Server 子模块
 ├── tests/frontend/     # Vitest 前端测试
-├── docs/               # 架构、开发与发布文档
+├── docs/               # 架构、DataGrip 对标、开发与发布文档
 ├── .vscode/            # VS Code 编辑器配置
 └── components.json     # Shadcn UI 配置
 ```
@@ -161,7 +161,11 @@ OxideStudio/
 - [x] Phase 3: SQL 执行引擎与 Glide Data Grid 数据展示
 - [x] Phase 4: SQL/NoSQL 智能补全与 AI 工具集成
 - [x] Phase 5: 表数据与结构管理、导入导出
-- [ ] Phase 6: SSH 隧道与更多数据库驱动
+- [x] Phase 6: SSH 隧道与项目化数据源管理
+- [ ] Phase 7: SQLite、SQL Server 等更多驱动与专业数据库工作流
+
+完整的当前架构、DataGrip 对标矩阵和优先路线图见
+[`docs/README.md`](docs/README.md)。
 
 ---
 
