@@ -209,18 +209,21 @@ Secrets**:
 | `ALIYUN_OSS_REGION` | `cn-hangzhou` | OSS Signature V4 region |
 | `ALIYUN_OSS_ENDPOINT` | `oss-cn-hangzhou.aliyuncs.com` | Public OSS API endpoint used by GitHub runners |
 | `ALIYUN_OSS_PREFIX` | `oxide-studio/releases` | Object prefix controlled by the RAM user |
-| `ALIYUN_OSS_PUBLIC_BASE_URL` | `https://download.example.com/oxide-studio/releases` | Public HTTPS base URL compiled into the app and written into manifests |
+| `ALIYUN_OSS_PUBLIC_BASE_URL` | `https://download.example.com` | Public HTTPS bucket/CDN base URL compiled into the app and written into manifests |
 
 `ALIYUN_OSS_PUBLIC_BASE_URL` may use an OSS public domain or an Aliyun CDN
-custom domain. It must map exactly to the bucket and prefix above. For a
-private bucket, configure CDN origin authentication; clients still need
-anonymous HTTPS read access through the public base URL. The updater does not
-require browser CORS, but the endpoint must support normal GET/HEAD requests
-and redirects.
+custom domain. It may point to the public bucket/CDN root, in which case the
+workflow appends `ALIYUN_OSS_PREFIX`, or it may already include that exact
+prefix; the resolver avoids duplicating it. The resulting URL must map to the
+bucket and prefix above. For a private bucket, configure CDN origin
+authentication; clients still need anonymous HTTPS read access through the
+resolved public base URL. The updater does not require browser CORS, but the
+endpoint must support normal GET/HEAD requests and redirects.
 
 `TAURI_UPDATER_ENDPOINT` is intentionally not used. The workflow derives the
-only trusted endpoint as `<ALIYUN_OSS_PUBLIC_BASE_URL>/latest.json`, preventing
-the build configuration and published manifest from drifting apart.
+only trusted endpoint from `ALIYUN_OSS_PUBLIC_BASE_URL`, `ALIYUN_OSS_PREFIX`,
+and `/latest.json`, preventing the upload path, build configuration, and
+published manifest from drifting apart.
 
 Do not use an OSS `-internal` endpoint in GitHub Actions because GitHub-hosted
 runners are outside the Aliyun VPC.

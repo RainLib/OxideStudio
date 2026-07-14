@@ -10,7 +10,7 @@ import {
 } from "node:fs/promises";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { normalizeReleaseBaseUrl } from "./write-tauri-release-config.mjs";
+import { resolveReleaseBaseUrl } from "./write-tauri-release-config.mjs";
 
 const ASSET_PATTERNS = [
   /\.dmg$/i,
@@ -101,6 +101,7 @@ export async function packageOssRelease({
   version,
   tag = `v${version}`,
   baseUrl,
+  objectPrefix,
   notes = `OxideStudio ${tag}`,
   pubDate = new Date().toISOString(),
 }) {
@@ -109,7 +110,7 @@ export async function packageOssRelease({
     throw new Error(`Release tag ${tag} must match v${version}.`);
   }
 
-  const normalizedBaseUrl = normalizeReleaseBaseUrl(baseUrl);
+  const normalizedBaseUrl = resolveReleaseBaseUrl(baseUrl, objectPrefix);
   const inputPath = resolve(input);
   const outputPath = resolve(output);
   const versionPath = join(outputPath, tag);
@@ -255,6 +256,7 @@ async function main() {
     version,
     tag,
     baseUrl,
+    objectPrefix: process.env.ALIYUN_OSS_PREFIX,
     notes: process.env.RELEASE_NOTES?.trim() || `OxideStudio ${tag}`,
     pubDate: process.env.RELEASE_PUB_DATE || new Date().toISOString(),
   });

@@ -16,6 +16,42 @@ export function normalizeReleaseBaseUrl(value) {
   return url.href.replace(/\/$/, "");
 }
 
+export function normalizeOssPrefix(value) {
+  const prefix = value?.trim().replace(/^\/+|\/+$/g, "");
+  if (!prefix) return "";
+  if (
+    prefix.includes("\\") ||
+    prefix
+      .split("/")
+      .some(
+        (segment) => !segment || segment === "." || segment === ".."
+      )
+  ) {
+    throw new Error("ALIYUN_OSS_PREFIX must be a clean OSS object prefix.");
+  }
+  return prefix;
+}
+
+export function resolveReleaseBaseUrl(baseUrl, objectPrefix) {
+  const normalizedBaseUrl = normalizeReleaseBaseUrl(baseUrl);
+  const normalizedPrefix = normalizeOssPrefix(objectPrefix);
+  if (!normalizedPrefix) return normalizedBaseUrl;
+
+  const url = new URL(normalizedBaseUrl);
+  const basePath = url.pathname.replace(/\/+$/, "");
+  const encodedPrefix = normalizedPrefix
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  const prefixPath = `/${encodedPrefix}`;
+  if (basePath === prefixPath || basePath.endsWith(prefixPath)) {
+    return normalizedBaseUrl;
+  }
+
+  url.pathname = `${basePath}${prefixPath}`;
+  return url.href.replace(/\/$/, "");
+}
+
 function normalizeWindowsCertificateThumbprint(value) {
   const thumbprint = value?.replace(/\s+/g, "").toUpperCase();
   if (!thumbprint) return undefined;
@@ -40,12 +76,13 @@ function normalizeTimestampUrl(value) {
 
 export async function writeReleaseConfig({
   baseUrl,
+  objectPrefix,
   publicKey,
   output,
   windowsCertificateThumbprint,
   windowsTimestampUrl,
 }) {
-  const normalizedBaseUrl = normalizeReleaseBaseUrl(baseUrl);
+  const normalizedBaseUrl = resolveReleaseBaseUrl(baseUrl, objectPrefix);
   const normalizedPublicKey = publicKey?.trim();
   if (!normalizedPublicKey) {
     throw new Error("Missing OXIDE_UPDATER_PUBLIC_KEY.");
@@ -88,6 +125,7 @@ async function main() {
   const output = process.argv[2] || "src-tauri/tauri.release.conf.json";
   const result = await writeReleaseConfig({
     baseUrl,
+    objectPrefix: process.env.ALIYUN_OSS_PREFIX,
     publicKey,
     output,
     windowsCertificateThumbprint:

@@ -6,9 +6,11 @@ import test from "node:test";
 import { packageOssRelease } from "./package-oss-release.mjs";
 import {
   normalizeReleaseBaseUrl,
+  resolveReleaseBaseUrl,
   writeReleaseConfig,
 } from "./write-tauri-release-config.mjs";
 import { resolvePlatformSigning } from "./resolve-platform-signing.mjs";
+import { verifyOssRelease } from "./verify-oss-release.mjs";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "oxide-release-"));
@@ -51,7 +53,8 @@ test("builds signed updater metadata for every desktop target", async () => {
       input: files.input,
       output: files.output,
       version: "0.1.1",
-      baseUrl: "https://downloads.example.com/oxide-studio/",
+      baseUrl: "https://downloads.example.com/",
+      objectPrefix: "oxide-studio/releases",
       pubDate: "2026-07-14T00:00:00.000Z",
     });
 
@@ -68,7 +71,7 @@ test("builds signed updater metadata for every desktop target", async () => {
     );
     assert.match(
       result.latest.platforms["windows-x86_64"].url,
-      /v0\.1\.1\/windows\/OxideStudio_0\.1\.1_x64-setup\.exe$/
+      /oxide-studio\/releases\/v0\.1\.1\/windows\/OxideStudio_0\.1\.1_x64-setup\.exe$/
     );
     assert.equal(result.release.files.length, 9);
     assert.equal(
@@ -129,6 +132,20 @@ test("requires a clean HTTPS release base URL", () => {
     () => normalizeReleaseBaseUrl("https://user@example.com/releases"),
     /cannot contain credentials/
   );
+  assert.equal(
+    resolveReleaseBaseUrl(
+      "https://downloads.example.com",
+      "/oxide-studio/releases/"
+    ),
+    "https://downloads.example.com/oxide-studio/releases"
+  );
+  assert.equal(
+    resolveReleaseBaseUrl(
+      "https://downloads.example.com/oxide-studio/releases",
+      "oxide-studio/releases"
+    ),
+    "https://downloads.example.com/oxide-studio/releases"
+  );
 });
 
 test("writes the updater endpoint and verification key into release config", async () => {
@@ -136,7 +153,8 @@ test("writes the updater endpoint and verification key into release config", asy
   try {
     const output = join(root, "tauri.release.conf.json");
     await writeReleaseConfig({
-      baseUrl: "https://downloads.example.com/releases/",
+      baseUrl: "https://downloads.example.com/",
+      objectPrefix: "releases",
       publicKey: "  updater-public-key  ",
       output,
     });
@@ -171,6 +189,43 @@ test("writes optional Windows Authenticode configuration", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("retries the public manifest after an OSS or CDN propagation delay", async () => {
+  const assetUrl =
+    "https://downloads.example.com/oxide-studio/releases/v0.1.2/linux/app.AppImage";
+  const update = { signature: "signature", url: assetUrl };
+  const payload = {
+    version: "0.1.2",
+    platforms: {
+      "darwin-aarch64": update,
+      "darwin-x86_64": update,
+      "linux-x86_64": update,
+      "windows-x86_64": update,
+    },
+  };
+  let manifestAttempts = 0;
+  const fetchImpl = async (_url, options = {}) => {
+    if (options.method === "HEAD") return new Response(null, { status: 200 });
+    manifestAttempts += 1;
+    if (manifestAttempts === 1) {
+      return new Response("not ready", { status: 404 });
+    }
+    return Response.json(payload);
+  };
+
+  const result = await verifyOssRelease({
+    manifestUrl: "https://downloads.example.com/oxide-studio/releases/latest.json",
+    version: "0.1.2",
+    baseUrl: "https://downloads.example.com",
+    objectPrefix: "oxide-studio/releases",
+    fetchImpl,
+    retryDelayMs: 0,
+    waitImpl: async () => {},
+  });
+
+  assert.equal(result.version, "0.1.2");
+  assert.equal(manifestAttempts, 2);
 });
 
 test("skips platform signing only when each secret group is entirely absent", () => {
