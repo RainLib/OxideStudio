@@ -49,6 +49,12 @@ import {
   metadataRefreshNamespaces,
   queryMayChangeMetadata,
 } from "@/lib/sqlAnalysis";
+import {
+  applyEditorTextPatch,
+  type EditorPatchApplyResult,
+  type EditorPatchPreview,
+} from "@/lib/editorPatch";
+import { documentTextRevision } from "@/lib/documentRevision";
 
 async function refreshMetadataAfterQuery(
   connectionId: string,
@@ -192,6 +198,7 @@ export interface TabData {
   tableFilterSql?: string | null;
   tableFilters?: TableFilter[] | null;
   editorSelection?: EditorSelectionState | null;
+  editorPatchPreview?: EditorPatchPreview | null;
   lspDiagnostics?: Diagnostic[];
   fileProjectId?: string;
   fileRootPath?: string;
@@ -628,6 +635,12 @@ interface TabState {
     id: string,
     selection: EditorSelectionState | null,
   ) => void;
+  previewEditorPatch: (tabId: string, patch: EditorPatchPreview) => void;
+  dismissEditorPatch: (tabId: string, patchId?: string) => void;
+  applyEditorPatchPreview: (
+    tabId: string,
+    patchId: string,
+  ) => EditorPatchApplyResult;
   setLspDiagnostics: (id: string, diagnostics: Diagnostic[]) => void;
   setActiveResultIndex: (id: string, index: number) => void;
   setQueryOutputView: (id: string, view: "results" | "plan") => void;
@@ -1278,6 +1291,56 @@ export const useTabStore = create<TabState>((set, get) => ({
         t.id === id ? { ...t, editorSelection: selection } : t,
       ),
     }));
+  },
+
+  previewEditorPatch: (tabId, patch) => {
+    set((state) => {
+      const acceptsPatch = state.tabs.some(
+        (tab) => tab.id === tabId && tab.type === "query" && !tab.filePreview,
+      );
+      if (!acceptsPatch) return {};
+      return {
+        activeTabId: tabId,
+        tabs: state.tabs.map((tab) =>
+          tab.id === tabId ? { ...tab, editorPatchPreview: patch } : tab,
+        ),
+      };
+    });
+  },
+
+  dismissEditorPatch: (tabId, patchId) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId &&
+        (!patchId || tab.editorPatchPreview?.id === patchId)
+          ? { ...tab, editorPatchPreview: null }
+          : tab,
+      ),
+    }));
+  },
+
+  applyEditorPatchPreview: (tabId, patchId) => {
+    const tab = get().tabs.find((candidate) => candidate.id === tabId);
+    if (!tab || !tab.editorPatchPreview || tab.editorPatchPreview.id !== patchId) {
+      return { status: "notFound", message: "Patch preview is no longer available." };
+    }
+    const patch = tab.editorPatchPreview;
+    if (documentTextRevision(tab.fileRevision, tab.sql) !== patch.expectedRevision) {
+      return {
+        status: "stale",
+        message: "The editor document changed after this patch was proposed.",
+      };
+    }
+    const result = applyEditorTextPatch(
+      tab.sql,
+      patch.range,
+      patch.originalText,
+      patch.replacement,
+    );
+    if (result.status !== "success") return result;
+    get().updateTabSql(tabId, result.text);
+    get().dismissEditorPatch(tabId, patchId);
+    return result;
   },
 
   setLspDiagnostics: (id: string, diagnostics: Diagnostic[]) => {

@@ -200,6 +200,48 @@ describe("workspace AI tools", () => {
     });
   });
 
+  it("proposes a bounded editor patch without mutating the document", async () => {
+    setWorkspaceConnection({
+      id: "postgres-1",
+      driver: "postgres",
+      namespace: "public",
+      tab: { sql: "SELECT * FROM users" },
+    });
+    useTabStore.setState((state) => ({
+      tabs: state.tabs.map((tab) => ({
+        ...tab,
+        editorSelection: {
+          text: "*",
+          startLineNumber: 1,
+          startColumn: 8,
+          endLineNumber: 1,
+          endColumn: 9,
+        },
+      })),
+    }));
+
+    const artifact = await createWorkspaceAiToolRegistry().execute<{
+      originalText: string;
+      replacement: string;
+      documentRevision: string;
+    }>(
+      "editor.proposePatch",
+      {
+        replacement: "id, email",
+        title: "Select explicit columns",
+      },
+      createWorkspaceAiToolContext("patch-request"),
+    );
+
+    expect(artifact).toMatchObject({
+      originalText: "*",
+      replacement: "id, email",
+      documentRevision: expect.any(String),
+    });
+    expect(useTabStore.getState().tabs[0]?.sql).toBe("SELECT * FROM users");
+    expect(useTabStore.getState().tabs[0]?.editorPatchPreview).toBeUndefined();
+  });
+
   it("passes active search index context to read query execution", async () => {
     const registry = createWorkspaceAiToolRegistry();
 

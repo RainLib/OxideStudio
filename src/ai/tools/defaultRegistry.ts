@@ -39,6 +39,8 @@ import { createAiToolRegistry } from "./registry";
 import type { AiToolFamily } from "./families";
 import type {
   AiDescribeObjectInput,
+  AiEditorPatchArtifact,
+  AiEditorPatchInput,
   AiDocumentMutationInput,
   AiKeyValueMutationInput,
   AiListObjectsInput,
@@ -57,6 +59,12 @@ import type {
   AiWorkspaceSelection,
   AiWorkspaceTabSummary,
 } from "./types";
+import {
+  fullDocumentRange,
+  textInEditorRange,
+  type EditorTextRange,
+} from "@/lib/editorPatch";
+import { documentTextRevision } from "@/lib/documentRevision";
 
 export type WorkspaceAiToolRegistryOptions = {
   families?: AiToolFamily[];
@@ -121,6 +129,8 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
       );
       return activeTab ? workspaceSelectionFromTab(activeTab) : null;
     },
+
+    proposeEditorPatch: (input) => proposeEditorPatch(input),
 
     listCollections: async (input, context) => {
       const connectionId = input.connectionId || context.activeConnectionId;
@@ -192,6 +202,49 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
       explainLspDiagnostics(input, context),
 
     mutateNamespace: async (input, context) => mutateNamespace(input, context),
+  };
+}
+
+const MAX_EDITOR_PATCH_TEXT = 50_000;
+
+function proposeEditorPatch(input: AiEditorPatchInput): AiEditorPatchArtifact {
+  const tabState = useTabStore.getState();
+  const tabId = input.tabId || tabState.activeTabId;
+  const tab = tabState.tabs.find((candidate) => candidate.id === tabId);
+  if (!tab || tab.type !== "query" || tab.filePreview) {
+    throw new Error("A writable SQL editor tab is required for a patch proposal");
+  }
+  const range: EditorTextRange =
+    input.range ||
+    (tab.editorSelection
+      ? {
+          startLine: tab.editorSelection.startLineNumber,
+          startColumn: tab.editorSelection.startColumn,
+          endLine: tab.editorSelection.endLineNumber,
+          endColumn: tab.editorSelection.endColumn,
+        }
+      : fullDocumentRange(tab.sql));
+  const originalText = textInEditorRange(tab.sql, range);
+  if (originalText === null) throw new Error("Patch range is outside the editor document");
+  if (
+    originalText.length > MAX_EDITOR_PATCH_TEXT ||
+    input.replacement.length > MAX_EDITOR_PATCH_TEXT
+  ) {
+    throw new Error(
+      "Patch text exceeds 50,000 characters; select a narrower editor range",
+    );
+  }
+  const revision = documentTextRevision(tab.fileRevision, tab.sql);
+  return {
+    patchId: `patch-${createRequestId()}`,
+    tabId: tab.id,
+    tabTitle: tab.title,
+    range,
+    originalText,
+    replacement: input.replacement,
+    documentRevision: revision,
+    title: input.title?.trim().slice(0, 160) || "AI SQL patch",
+    rationale: input.rationale?.trim().slice(0, 2_000) || null,
   };
 }
 

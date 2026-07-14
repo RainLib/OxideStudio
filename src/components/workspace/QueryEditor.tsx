@@ -85,8 +85,11 @@ import { ProjectFileImagePreview } from "./ProjectFileImagePreview";
 import { openProjectFileInEditor } from "@/lib/projectFileOpen";
 import {
   APP_EVENT_REVEAL_EDITOR_RANGE,
+  requestEditorRangeReveal,
   type EditorRangeNavigationDetail,
 } from "@/lib/editorNavigation";
+import { documentTextRevision } from "@/lib/documentRevision";
+import { EditorPatchPreviewPanel } from "./EditorPatchPreviewPanel";
 import type { QueryHistoryItem } from "@/lib/queryHistory";
 import {
   boundedInlineContext,
@@ -259,6 +262,8 @@ export function QueryEditor({
     setTargetDatabase,
     setEditorSelection,
     setLspDiagnostics,
+    applyEditorPatchPreview,
+    dismissEditorPatch,
   } = useTabStore(); // line 15...
   const activeConnectionId = useConnectionStore(
     (state) => state.activeConnectionId,
@@ -1833,6 +1838,36 @@ export function QueryEditor({
           isExecuting={activeTab.isExecuting}
           onClose={() => setParameterExecution(null)}
           onRun={handleRunParameterizedSql}
+        />
+      )}
+
+      {!isProjectFilePreview && activeTab.editorPatchPreview && (
+        <EditorPatchPreviewPanel
+          key={activeTab.editorPatchPreview.id}
+          patch={activeTab.editorPatchPreview}
+          stale={
+            documentTextRevision(activeTab.fileRevision, activeTab.sql) !==
+            activeTab.editorPatchPreview.expectedRevision
+          }
+          onDismiss={() =>
+            dismissEditorPatch(activeTab.id, activeTab.editorPatchPreview!.id)
+          }
+          onApply={() => {
+            const result = applyEditorPatchPreview(
+              activeTab.id,
+              activeTab.editorPatchPreview!.id,
+            );
+            if (result.status === "success") {
+              window.requestAnimationFrame(() =>
+                requestEditorRangeReveal({
+                  tabId: activeTab.id,
+                  range: result.appliedRange,
+                  focus: true,
+                }),
+              );
+            }
+            return result;
+          }}
         />
       )}
 

@@ -151,6 +151,52 @@ export function createAssistantAttachments(
       }
     }
 
+    if (result.toolName === "editor.proposePatch") {
+      const patch = record(result.output);
+      const tabId = stringValue(patch?.tabId);
+      const patchId = stringValue(patch?.patchId);
+      const range = uiRange(patch?.range);
+      const originalText = rawString(patch?.originalText);
+      const replacement = rawString(patch?.replacement);
+      const revision = stringValue(patch?.documentRevision);
+      if (
+        tabId &&
+        patchId &&
+        range &&
+        originalText !== undefined &&
+        replacement !== undefined &&
+        revision
+      ) {
+        const title = stringValue(patch?.title) || "AI SQL patch";
+        const rationale = stringValue(patch?.rationale);
+        attachments.push(
+          attachment({
+            id: `${result.id}-${patchId}`,
+            kind: "patch",
+            label: title,
+            detail: rationale || `${range.startLine}:${range.startColumn}–${range.endLine}:${range.endColumn}`,
+            action: actionRequest(
+              `${result.id}-preview-${patchId}`,
+              "editor.previewPatch",
+              {
+                projectId: context.projectId,
+                tabId,
+                patchId,
+                range,
+                originalText,
+                sql: replacement,
+                title,
+                rationale,
+              },
+              "Preview patch",
+              context,
+              revision,
+            ),
+          }),
+        );
+      }
+    }
+
     if (result.toolName === "metadata.describeObject") {
       const description = record(result.output);
       const objectAttachment = databaseObjectAttachment(
@@ -387,6 +433,7 @@ function deduplicateAttachments(attachments: AssistantAttachment[]) {
       target.tabId,
       target.schemaDiffId,
       target.schemaChangeId,
+      target.patchId,
       target.range,
     ]);
     if (keys.has(key)) return false;
@@ -403,6 +450,10 @@ function record(value: unknown): Record<string, unknown> | null {
 
 function stringValue(value: unknown) {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function rawString(value: unknown) {
+  return typeof value === "string" ? value : undefined;
 }
 
 function numberValue(value: unknown) {
@@ -442,6 +493,17 @@ function lspRange(value: unknown) {
     endLine: zeroBased.endLine + 1,
     endColumn: zeroBased.endColumn + 1,
   };
+}
+
+function uiRange(value: unknown) {
+  const range = record(value);
+  if (!range) return null;
+  return numericRange({
+    startLine: range.startLine,
+    startColumn: range.startColumn,
+    endLine: range.endLine,
+    endColumn: range.endColumn,
+  });
 }
 
 function numericRange(

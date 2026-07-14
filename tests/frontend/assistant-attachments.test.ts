@@ -183,6 +183,45 @@ describe("assistant UI attachments", () => {
     });
   });
 
+  it("creates a revision-bound patch preview attachment", () => {
+    const [attachment] = createAssistantAttachments(
+      [
+        success("editor.proposePatch", {
+          patchId: "patch-1",
+          tabId: "tab-1",
+          tabTitle: "Query",
+          range: {
+            startLine: 1,
+            startColumn: 1,
+            endLine: 1,
+            endColumn: 20,
+          },
+          originalText: "select * from users",
+          replacement: "select id from users",
+          documentRevision: "memory:revision-1",
+          title: "Select explicit columns",
+          rationale: "Avoid SELECT *",
+        }),
+      ],
+      toolContext,
+    );
+
+    expect(attachment).toMatchObject({
+      kind: "patch",
+      label: "Select explicit columns",
+      action: {
+        action: "editor.previewPatch",
+        target: {
+          tabId: "tab-1",
+          patchId: "patch-1",
+          originalText: "select * from users",
+          sql: "select id from users",
+        },
+        issuedAgainst: { documentRevision: "memory:revision-1" },
+      },
+    });
+  });
+
   it("creates a stable attachment for the selected schema change", () => {
     const attachment = createAssistantAttachments(
       [

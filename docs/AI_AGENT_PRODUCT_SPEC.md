@@ -65,7 +65,7 @@ Deep Agents 的文件系统权限只约束其内置文件工具，不能替代 O
 | 模型 planner 与结果总结 | 已具备/部分 | `src/ai/assistant` | 增加 checkpoint、恢复、验证节点 |
 | LangGraph | 部分具备 | 当前主要为 `plan -> policy` 两节点 | Agent mode 引入完整状态图 |
 | 多轮工具循环 | 部分具备 | 循环和上限在 `AssistantSidebar` | 移入 runtime，UI 只渲染状态 |
-| 页面导航/编辑动作 | 已具备/部分 | `src/ai/ui-actions`、`databaseNavigation.ts`、`editorNavigation.ts`、`explainPlanNavigation.ts` | 补 patch/task surface |
+| 页面导航/编辑动作 | 已具备/部分 | `src/ai/ui-actions`、`databaseNavigation.ts`、`editorNavigation.ts`、`explainPlanNavigation.ts`、revision-bound patch preview | 补 durable task surface |
 | 持久 thread / memory | 缺失 | 无 checkpoint store | 项目隔离、可恢复、可清理 |
 | 子代理 | 缺失 | 无隔离的 subagent executor | 默认只读、受预算约束 |
 | Agent 可观测性与评测 | 部分具备 | 有 audit hook，缺完整 trace/eval | 结构化 trace、回放、黄金任务集 |
@@ -183,7 +183,7 @@ type AgentToolContract = {
 | ID | 功能点 | 逻辑要求 | 验收标准 |
 | --- | --- | --- | --- |
 | EDT-01 | Inline completion | 使用 LSP 结构上下文 + 可选模型补全；模型建议必须再过 syntax/diagnostic 校验 | 不阻塞键入，超时静默退回 LSP |
-| EDT-02 | 结构化 patch | patch 带 tab id、base revision、range 和 before hash；冲突时重新生成 | 不会覆盖用户刚输入的内容 |
+| EDT-02 | 结构化 patch | 已落地的 patch 带 tab id、base revision、one-based range 和 host 捕获的 before text；打开预览与 Apply 都校验 stale，冲突时重新生成 | 不会覆盖用户刚输入的内容 |
 | EDT-03 | Apply / Insert / New console | 用户可选择替换选区、插入光标或新建 query tab | 默认不破坏原 SQL |
 | EDT-04 | 一键修复 | diagnostic/error 卡片提供 Explain、Fix、Jump、Run validation | 修复后 diagnostic 消失或显示剩余问题 |
 | EDT-05 | SQL inspections | 检查未限定列、潜在笛卡尔积、无 WHERE 变更、类型转换和 dialect 风险 | 每条 inspection 有准确 range 与抑制方式 |
@@ -255,7 +255,7 @@ type UiAction = {
 | `database.openObjectData` | 打开表/collection data tab | 使用 object 所属 connection，不使用全局旧连接 |
 | `database.openObjectDdl` | 打开对象 DDL/source tab | provider 不支持时显示 capability 原因 |
 | `editor.revealRange` | 激活 tab、滚动并高亮 range | revision 不一致时只定位，不应用 patch |
-| `editor.previewPatch` | 打开 before/after diff | apply 是另一个需要确认的动作 |
+| `editor.previewPatch` | 打开 revision-bound before/after diff，不修改 SQL | Apply 只能由用户在预览面板触发，并再次校验 revision/range |
 | `editor.createQueryTab` | 使用指定 connection/catalog/schema 创建 query tab | 缺目标时请求选择，不继承不相关项目状态 |
 | `results.reveal` | 激活 result tab，可选定位列/行 | 行已分页丢弃时提示重新加载 |
 | `plan.revealNode` | 选中 Explain Plan 节点并联动对象 | plan version 不一致时拒绝 |
@@ -279,9 +279,10 @@ type UiAction = {
 - `UiActionRegistry` 与数据库 `AiToolRegistry` 已物理分离；导航 action 不获得 mutation approval，也不能调用 destructive tool。
 - action target 使用 `projectId + connectionId + databaseName + schemaName + objectName`、`tabId` 或 project-relative file path；不接受模型生成的 selector。
 - registry 返回 `PROJECT_CONTEXT_STALE`、`PROJECT_SWITCH_REQUIRED`、`DOCUMENT_REVISION_STALE`、`TARGET_NOT_FOUND`、`UNSUPPORTED_ACTION` 等稳定 code，并提供 recovery 文案。
-- Assistant 已把 active tab、selection、metadata object、project file、query result、LSP diagnostic、Explain Plan 和 Schema Diff change 转换为可点击 attachment。对象的 Reveal、Open data、Open DDL 是三个独立 action；计划 attachment 使用 `planId + nodeId`，schema diff attachment 使用 `schemaDiffId + schemaChangeId` 精确定位不可变 artifact。
+- Assistant 已把 active tab、selection、metadata object、project file、query result、LSP diagnostic、Explain Plan、Schema Diff change 和 editor patch 转换为可点击 attachment。对象的 Reveal、Open data、Open DDL 是三个独立 action；计划 attachment 使用 `planId + nodeId`，schema diff attachment 使用 `schemaDiffId + schemaChangeId` 精确定位不可变 artifact。
 - Database Explorer 能定位当前 database 及远程 PostgreSQL database 下的 schema/object；Monaco range 统一为 one-based，LSP 的 zero-based range 在 attachment boundary 转换。
-- `plan.revealNode` 与 `schemaDiff.revealChange` 已连接对应 artifact surface，会校验 tab、artifact version 和 node/change identity 后再定位。`editor.previewPatch` 与 `task.reveal` 仍稳定返回 unsupported，不伪造成功。
+- `plan.revealNode` 与 `schemaDiff.revealChange` 已连接对应 artifact surface，会校验 tab、artifact version 和 node/change identity 后再定位。
+- `editor.proposePatch` 是只读 artifact 工具：host 从当前 selection/整篇文档捕获 range、before text 和 revision，模型只能提出 replacement/title/rationale。`editor.previewPatch` 在 revision 与 before text 都匹配时打开 before/after；用户点击 Apply 后 tab store 再校验一次并写入，预览不会自动修改或执行 SQL。单侧内容限制 50,000 字符，binary preview 明确拒绝。`task.reveal` 仍稳定返回 unsupported，不伪造成功。
 
 ### 5.5 结构化错误基线（2026-07-15）
 
@@ -390,12 +391,12 @@ DataGrip 当前 AI 基线包含 schema-aware chat、自然语言生成 SQL、SQL
 
 | 能力 | DataGrip 基线 | OxideStudio 当前 | 结论 |
 | --- | --- | --- | --- |
-| Schema-aware AI | 对象可附加、可导航 | 已有带 provenance 的对象/文件/结果/diagnostic attachment 与 stable navigation；metadata citation 和 patch preview 仍缺 | P0/P1 补 citation 与 patch workflow |
-| Text-to-SQL | 成熟编辑器入口 | 已有模型 planner/inline 能力基础 | P0 补 dialect grounding、patch preview、验证 |
-| Error fix | 执行错误可 Explain/Fix | 有 LSP diagnostic tool，缺统一 vendor error 与一键 patch | P0 |
+| Schema-aware AI | 对象可附加、可导航 | 已有带 provenance 的对象/文件/结果/diagnostic/patch attachment 与 stable navigation；metadata citation 仍缺 | P1 补 citation |
+| Text-to-SQL | 成熟编辑器入口 | 已有模型 planner/inline 基础与 revision-bound patch preview/Apply | P0 补 metadata grounding、parse/LSP/EXPLAIN 验证 |
+| Error fix | 执行错误可 Explain/Fix | LSP diagnostic 可精确跳转且已有通用 patch preview；vendor error 的 SQLSTATE/position/object 统一与自动生成修复仍缺 | P0 |
 | Query optimization | 可基于查询与计划解释优化 | 已有真实 estimate plan 工具与 artifact，缺热点规则、建议引用、前后 plan 对比和自动验证 | P1 完成优化闭环 |
 | Plan explanation | 支持 query plan AI explanation | 规范化 plan tree/raw artifact 和精确节点联动已完成；模型解释质量评测与索引/schema citation 尚缺 | P1 |
-| 页面交互 | attachment 可回到对象/代码 | `UiActionRegistry` 已支持稳定对象、文件、tab、结果、diagnostic、plan 和 schema diff change 跳转；patch/task surface 尚未完成 | 补 patch 与 durable task surface |
+| 页面交互 | attachment 可回到对象/代码 | `UiActionRegistry` 已支持稳定对象、文件、tab、结果、diagnostic、plan、schema diff change 和 patch preview；task surface 尚未完成 | 补 durable task surface |
 | 长任务代理 | 以 IDE AI 工作流为主 | registry 架构适合扩展，但 runtime 循环在 UI | 引入 Deep Agents Agent mode 后可形成差异化 |
 | 多数据模型 | 重点是 SQL/database IDE | 已覆盖 Mongo/Redis/ES 的结构化工具方向 | Oxide 的差异化优势 |
 | 外部生态 | JetBrains 生态 | 已有 MCP/CLI/provider registry | 继续保持统一 policy |
@@ -410,7 +411,7 @@ AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV
 1. `UiActionRegistry`、稳定 target identity、可点击 attachment。
 2. context snapshot/version、发送内容预览、database catalog identity。
 3. LSP duplicate/ranking 修复及回归测试。
-4. 统一 diagnostic/vendor error envelope，一键 Jump/Explain/Preview Fix。
+4. revision-bound Patch Preview/Apply 已完成；继续统一 vendor error 的 SQLSTATE/position/object，并把 Jump/Explain/Preview Fix/Validate 串为诊断闭环。
 5. 把工具循环从 `AssistantSidebar` 移到 runtime，Sidebar 变成纯视图。
 
 完成定义：AI 回答中的对象/错误/结果可以准确跳转；旧上下文和旧批准不能作用于新项目/数据库；重复列补全不再不可区分。

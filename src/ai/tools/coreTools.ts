@@ -46,6 +46,11 @@ export const CORE_AI_TOOL_FAMILIES: AiToolFamily[] = [
     tools: [workspaceSelectionTool],
   },
   {
+    name: "editor.patch",
+    requiredAdapters: ["proposeEditorPatch"],
+    tools: [editorPatchTool],
+  },
+  {
     name: "metadata.collections",
     requiredAdapters: ["listCollections"],
     tools: [listCollectionsTool],
@@ -347,6 +352,71 @@ function workspaceSelectionTool(adapters: AiToolAdapters): AiToolDefinition {
     capabilities: ["workspace"],
     timeoutMs: 5_000,
     execute: async () => adapters.getWorkspaceSelection?.() ?? null,
+  };
+}
+
+function editorPatchTool(adapters: AiToolAdapters): AiToolDefinition {
+  const positionProperties = {
+    startLine: { type: "integer", description: "One-based start line." },
+    startColumn: { type: "integer", description: "One-based start column." },
+    endLine: { type: "integer", description: "One-based end line." },
+    endColumn: { type: "integer", description: "One-based end column." },
+  };
+  return {
+    name: "editor.proposePatch",
+    description:
+      "Create a revision-bound before/after patch preview for the active SQL editor. This never edits the document; the user must open and apply the preview.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string", description: "Defaults to the active tab." },
+        range: {
+          type: "object",
+          properties: positionProperties,
+          required: ["startLine", "startColumn", "endLine", "endColumn"],
+          additionalProperties: false,
+          description:
+            "Optional one-based replacement range. Defaults to the current selection, then the whole document.",
+        },
+        replacement: {
+          type: "string",
+          description: "Exact replacement text. An empty string proposes deletion.",
+        },
+        title: { type: "string", description: "Short review title." },
+        rationale: { type: "string", description: "Why this patch is proposed." },
+      },
+      required: ["replacement"],
+      additionalProperties: false,
+    },
+    permissions: ["read"],
+    capabilities: ["workspace"],
+    timeoutMs: 5_000,
+    resultLimit: { maxRows: 1, maxBytes: 450_000 },
+    execute: async (input, context) => {
+      const payload = assertObject(input);
+      const replacement = payload.replacement;
+      if (typeof replacement !== "string") {
+        throw new Error("replacement is required");
+      }
+      return adapters.proposeEditorPatch?.(
+        {
+          tabId: optionalString(payload, "tabId"),
+          range:
+            payload.range && typeof payload.range === "object"
+              ? (payload.range as {
+                  startLine: number;
+                  startColumn: number;
+                  endLine: number;
+                  endColumn: number;
+                })
+              : null,
+          replacement,
+          title: optionalString(payload, "title"),
+          rationale: optionalString(payload, "rationale"),
+        },
+        context,
+      );
+    },
   };
 }
 

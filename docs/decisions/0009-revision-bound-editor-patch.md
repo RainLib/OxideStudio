@@ -1,0 +1,27 @@
+# ADR-0009: Revision-bound AI editor patch preview
+
+- Status: Accepted
+- Date: 2026-07-15
+- Scope: AI Agent / SQL editor integration
+
+## Context
+
+Natural-language SQL generation, error fixing, and query optimization all need to propose editor changes. Applying model text directly is unsafe: the user may continue typing while the model is running, a stale attachment may be clicked later, or a model-generated range may not describe the content shown in a diff. A database approval dialog is also the wrong boundary because editing SQL is not database execution, while previewing a patch must not imply that it has been applied.
+
+## Decision
+
+`editor.proposePatch` is registered as a read-only AI tool. The host, not the model, resolves the writable active query tab and captures a one-based Monaco range, the exact original text in that range, and a revision derived from the current document. The model supplies the replacement, title, and rationale. If no explicit range is supplied, the host uses the current non-empty selection and otherwise the full document.
+
+The tool returns an immutable patch artifact and does not update the tab. Attachment generation binds `editor.previewPatch` to the artifact's project, tab, range, original text, and document revision. The UI action checks the issued revision and confirms that the range still contains the captured original text before opening a two-column before/after panel.
+
+Apply is a direct user action in that panel. The tab store independently verifies the whole-document revision and original range contents immediately before replacing text. A mismatch returns a stale result and preserves the current document. Successful Apply marks the tab dirty, clears the preview, and reveals the applied range; it never executes the SQL.
+
+Patch `originalText` and replacement are each limited to 50,000 characters. Empty values remain valid to support insertion and deletion. Binary/project image previews are rejected. The lightweight document hash is an optimistic-concurrency identity, not a cryptographic trust boundary; exact range-content comparison is still required.
+
+## Consequences
+
+- AI-generated SQL can participate in page interactions without silently overwriting concurrent edits.
+- Preview and Apply are distinct, observable states; neither implies query execution or database mutation approval.
+- Selection and CRLF documents use the same one-based UTF-16 coordinate convention as Monaco.
+- Whole-file rewrites above the content budget require a narrower selection or a future streaming/file patch artifact.
+- Automatic parse/LSP/EXPLAIN validation and vendor-error-to-patch generation remain separate follow-up stages; the generic safe patch surface is now reusable by them.

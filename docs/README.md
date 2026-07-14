@@ -10,6 +10,7 @@
 - [ADR-0006：Migration 依赖排序与 Preflight](decisions/0006-migration-dependency-preflight.md)：拓扑排序、blocked 传播和只读数据检查。
 - [ADR-0007：外键行导航](decisions/0007-foreign-key-row-navigation.md)：系统目录反向索引、复合键原子映射和结构化过滤。
 - [ADR-0008：选择聚合性能预算](decisions/0008-selection-aggregate-budget.md)：多选去重、有界计算和 decimal/bigint 精度策略。
+- [ADR-0009：AI 编辑器补丁预览](decisions/0009-revision-bound-editor-patch.md)：只读 artifact、文档 revision、before 校验和显式 Apply 边界。
 - [AI Agent 产品与技术规格](AI_AGENT_PRODUCT_SPEC.md)：完整能力矩阵、状态机、页面动作协议、安全模型、Deep Agents 分层方案和 LSP 相关性规则。
 - [AI / Agent 集成](AI_AGENT_INTEGRATION.md)：应用内 Assistant、CLI、MCP、工具策略与审计。
 - [LSP 集成](LSP_INTEGRATION.md)：SQL LSP 生命周期、文档同步和协议边界。

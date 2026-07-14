@@ -37,7 +37,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 2. **变更闭环**：schema diff/migration review 与 preflight 已形成第一条闭环；自动 apply/verify、data compare、VCS/DDL data source 仍缺失。
 3. **数据工作闭环**：Value Editor 已有类型感知主路径，但外键导航、聚合视图、多视图模式和导入映射不足。
 4. **诊断闭环**：Explain Plan 与结构化错误已有主路径，但 vendor error、会话/锁/运行监控仍不足。
-5. **智能协作闭环**：AI 已有工具、审批、对象/结果/错误/plan attachment 和稳定页面跳转，但 patch preview、持久任务和 plan-grounded 自动优化仍待完成；LSP 的 catalog 隔离与同名列 P0 排序已经关闭，高级派生表/临时对象语义仍不足。
+5. **智能协作闭环**：AI 已有工具、审批、对象/结果/错误/plan/patch attachment、稳定页面跳转和 revision-bound Patch Preview/Apply，但持久任务、vendor error 结构化诊断和 plan-grounded 自动优化仍待完成；LSP 的 catalog 隔离与同名列 P0 排序已经关闭，高级派生表/临时对象语义仍不足。
 
 按日常数据库开发主路径估算，当前完成度约为 **55%–65%**；按 DataGrip 全功能面估算约为 **35%–45%**。这是工程规划区间，不是营销评分。
 
@@ -128,17 +128,17 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | 后台任务与进度 | 部分具备 | 有 TaskStatusCenter；缺少可回看日志、任务详情和 retry | P1 |
 | 结构化错误 | 已具备/部分 | connection/query/schema/table/project-file 已统一稳定 code、category、safe context、retryable；vendor SQLSTATE/position/object 仍待驱动层补齐 | P0 |
 | destructive safety | 已具备/部分 | SQL 分类、确认、参数化 mutation、AI policy 和 read-only backend gate 已有；权限模型与审计导出不足 | P0/P1 |
-| AI 辅助 | 部分具备/有差异化基础 | 共享工具 registry、MCP/CLI、审批与审计是优势；但 DataGrip 已有 schema-aware chat、对象/选区/UI 附件、SQL 错误修复、查询优化和 plan explanation，Oxide 尚未形成对应用户闭环 | P0/P1 |
+| AI 辅助 | 部分具备/有差异化基础 | 共享工具 registry、MCP/CLI、审批、审计和不覆盖用户输入的 Patch Preview/Apply 是优势；但 schema citation、完整 SQL 错误修复、查询优化和 plan explanation 尚未形成对应用户闭环 | P0/P1 |
 
 ### 3.9 AI Agent 与 IDE 交互
 
 | DataGrip / 专业 Agent 基线 | OxideStudio 状态 | 当前证据与差距 | 优先级 |
 | --- | --- | --- | --- |
-| Schema/object/selection/UI attachment | 已具备/部分 | tool result 已生成带 provenance 的对象、文件、结果、tab、selection、diagnostic 与 Explain Plan attachment；patch/task artifact 尚未完成 | P0/P1 |
-| Text-to-SQL 与 dialect grounding | 部分具备 | 有模型 planner、inline completion 和 dialect context；缺少 metadata citation、patch preview 与执行前验证闭环 | P0 |
-| Explain/Fix SQL error | 部分具备 | LSP diagnostic 已可点击 Jump 到精确 range；vendor error 尚未统一为 code/position/object，Preview Fix → Validate 仍缺失 | P0 |
+| Schema/object/selection/UI attachment | 已具备/部分 | tool result 已生成带 provenance 的对象、文件、结果、tab、selection、diagnostic、Explain Plan、Schema Diff 与 patch attachment；task artifact 尚未完成 | P1 |
+| Text-to-SQL 与 dialect grounding | 部分具备 | 有模型 planner、inline completion、dialect context 和 revision-bound Patch Preview/Apply；缺 metadata citation 与执行前 parse/LSP/EXPLAIN 验证闭环 | P0 |
+| Explain/Fix SQL error | 部分具备 | LSP diagnostic 已可点击 Jump 到精确 range，通用 patch 可安全预览/应用；vendor error 尚未统一为 SQLSTATE/position/object，自动 Fix → Validate 仍缺失 | P0 |
 | Query optimization / plan explanation | 部分具备 | `query.explain` 只生成 estimate plan，模型可读取真实规范化计划；尚缺热点规则、索引/schema citation、优化前后 plan 对比与验证闭环 | P1 |
-| IDE 页面跳转和联动 | 已具备/部分 | typed `UiActionRegistry` 已覆盖 project/file/tab/panel/connection/object/editor/result/plan/settings，含 stable target 与 stale-context；patch/task surface 待补 | P0/P1 |
+| IDE 页面跳转和联动 | 已具备/部分 | typed `UiActionRegistry` 已覆盖 project/file/tab/panel/connection/object/editor/result/plan/patch/settings，含 stable target 与 stale-context；task surface 待补 | P1 |
 | 多轮 durable agent | 部分具备 | Sidebar 有有界多轮工具循环，LangGraph 当前主要为 `plan -> policy`；缺 checkpoint/resume、runtime-owned loop、持久 thread 和 subagent | P1 |
 | 工具安全与多数据模型 | 已具备/优势 | registry、capability、approval、MCP/CLI 以及 Mongo/Redis/ES 结构化 mutation 已形成独立方向 | — |
 | AI 数据治理 | 部分具备 | credential 隔离、上下文截断和有界结果已有；缺发送内容预览、项目级 retention 和 attachment 敏感级别 | P0/P1 |
@@ -159,7 +159,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | DG-P0-06 | 结构化错误协议 | connection/query/schema/table/file command 返回稳定 code、message、context、retryable；UI 不再解析字符串前缀 | 已完成 |
 | DG-P0-07 | CSV Import Mapping | 导入前预览、编码/delimiter/header、列映射、类型错误摘要和事务性提交 | 已完成：支持 BOM/UTF-8/UTF-16/GB18030、delimiter 自动识别、表头/位置映射、类型预检和 PostgreSQL/MySQL 原子 batch；32 MiB/10 万行以上明确转入 native streaming P1 |
 | DG-P0-08 | LSP catalog scope 与候选排序 | `(connection, database, schema)` 严格隔离；显式 qualifier/当前 statement/DML target/active table 排序；同名列以 alias/table 区分；同 source 去重；覆盖跨 PostgreSQL database 回归 | 已完成 |
-| DG-P0-09 | AI attachment 与页面动作 | 对象、错误、结果、执行计划引用可点击并准确跳转；stable target、stale context 和同名对象有测试；导航不与数据库 mutation 混为一个动作 | 已完成：对象/文件/结果/LSP error/plan 均有精确跳转与 stale target 测试 |
+| DG-P0-09 | AI attachment 与页面动作 | 对象、错误、结果、执行计划引用可点击并准确跳转；stable target、stale context 和同名对象有测试；导航不与数据库 mutation 混为一个动作 | 已完成：对象/文件/结果/LSP error/plan/schema diff/patch 均有精确跳转或 artifact surface 与 stale target 测试；patch 仅由用户 Apply |
 
 ### P1：形成 schema 工程能力
 
@@ -195,7 +195,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 近期顺序调整为：
 
 1. **DG-P0-08 LSP catalog scope 与候选排序** 已完成；证据覆盖跨 PostgreSQL database 配置、database-scoped metadata、同名列、alias 插入、模糊匹配、CTE/DML 作用域、全量 LSP tests 与 Clippy。
-2. **DG-P0-09 AI attachment 与页面动作** 已完成：通用 registry、stable target、stale context、对象/文件/结果/LSP error/plan attachment 与精确节点跳转均有回归测试。
+2. **DG-P0-09 AI attachment 与页面动作** 已完成：通用 registry、stable target、stale context、对象/文件/结果/LSP error/plan/schema diff/patch attachment 均有回归测试；patch proposal 不修改 editor，打开预览与用户 Apply 分离并两次校验 revision/range。
 3. **DG-P0-06 结构化错误协议** 已完成：envelope 与直接 Tauri rejection 统一为 `ApiError`，project revision conflict 不再依赖字符串前缀，错误 context 使用白名单且不包含 SQL、URL、密码或文件内容。
 4. **DG-P0-03 Value Editor** 已完成：类型感知大视图、四态值语义、JSON/binary/date 校验和既有 mutation gate 已有组件与模型测试。
 5. **DG-P0-04 Explain Plan MVP** 已完成：后端生成 driver-specific SQL 并强制单条只读源查询，PostgreSQL/MySQL 结果规范化为稳定 plan tree，UI 支持 tree/raw、estimate/analyze、取消和节点指标；AI 只允许无审批 estimate，并通过 `plan.revealNode` 回到精确节点。安全边界见 [ADR-0003](decisions/0003-explain-plan-safety.md)。

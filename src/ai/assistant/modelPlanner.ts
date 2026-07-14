@@ -300,6 +300,7 @@ function serializeModelToolOutput(output: unknown) {
 const MODEL_PLANNER_INSTRUCTIONS = [
   "Choose tools only from manifest.tools.",
   "Use read-only tools before mutation tools when context is missing.",
+  "For requests to generate, rewrite, optimize, or fix SQL in an editor, prefer editor.proposePatch; it creates a review artifact and never edits the document directly.",
   "Never mark a mutating or destructive action as approved; the runtime approval policy controls execution.",
   "Keep inputs bounded and explicit, including connectionId, namespace, collection, table, index, or key when known.",
   "Return an empty steps array when the user intent is unclear.",

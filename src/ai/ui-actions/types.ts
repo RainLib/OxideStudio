@@ -43,6 +43,9 @@ export type UiActionTarget = {
   nodeId?: string;
   schemaDiffId?: string;
   schemaChangeId?: string;
+  patchId?: string;
+  originalText?: string;
+  rationale?: string;
   taskId?: string;
   panelId?: "databaseExplorer" | "assistant" | "results" | "editor" | "files" | "tasks";
   settingsSection?: string;
@@ -139,6 +142,7 @@ export type AssistantAttachmentKind =
   | "tab"
   | "plan"
   | "schemaDiff"
+  | "patch"
   | "task";
 
 export type AssistantAttachment = {

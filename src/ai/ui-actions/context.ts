@@ -3,6 +3,7 @@ import { useProjectStore } from "@/store/useProjectStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore, type TabData } from "@/store/useTabStore";
 import type { UiActionContextSnapshot } from "./types";
+import { documentTextRevision } from "@/lib/documentRevision";
 
 let contextVersion = 0;
 let lastContextSignature = "";
@@ -48,15 +49,5 @@ export function resetUiActionContextTracker() {
 }
 
 function documentRevisionForTabData(tab: TabData) {
-  const sourceRevision = tab.fileRevision || "memory";
-  return `${sourceRevision}:${hashText(tab.sql)}`;
-}
-
-function hashText(value: string) {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36);
+  return documentTextRevision(tab.fileRevision, tab.sql);
 }

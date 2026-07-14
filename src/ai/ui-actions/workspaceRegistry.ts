@@ -16,6 +16,7 @@ import {
 } from "./context";
 import { UiActionRegistry, uiActionResult } from "./registry";
 import type { UiActionTarget } from "./types";
+import { textInEditorRange } from "@/lib/editorPatch";
 
 export function createWorkspaceUiActionRegistry() {
   const registry = new UiActionRegistry({
@@ -238,8 +239,40 @@ export function createWorkspaceUiActionRegistry() {
     name: "editor.previewPatch",
     description: "Preview a revision-bound editor patch.",
     stalePolicy: "document",
-    execute: (_target, context) =>
-      unsupported(context.actionId, "Patch preview is not available yet."),
+    validateTarget: validatePatchTarget,
+    execute: (target, context) => {
+      const tab = useTabStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === target.tabId);
+      if (!tab) return notFound(context.actionId, "Tab", target.tabId!);
+      if (tab.type !== "query" || tab.filePreview) {
+        return uiActionResult(
+          context.actionId,
+          "invalid",
+          "INVALID_TARGET",
+          "A writable SQL editor tab is required for patch preview.",
+        );
+      }
+      if (textInEditorRange(tab.sql, target.range!) !== target.originalText) {
+        return uiActionResult(
+          context.actionId,
+          "stale",
+          "DOCUMENT_REVISION_STALE",
+          "The proposed before text no longer matches the editor range.",
+          "Refresh the proposal against the current editor document.",
+        );
+      }
+      useTabStore.getState().previewEditorPatch(tab.id, {
+        id: target.patchId!,
+        title: target.title?.trim() || "AI SQL patch",
+        rationale: target.rationale,
+        range: target.range!,
+        originalText: target.originalText!,
+        replacement: target.sql!,
+        expectedRevision: context.issuedAgainst.documentRevision!,
+      });
+      useWorkbenchLayoutStore.getState().setActiveToolWindow("editor");
+    },
   });
 
   registry.register({
@@ -443,6 +476,36 @@ function validateRange(target: UiActionTarget) {
     return "Editor range end must not precede its start.";
   }
   return null;
+}
+
+function validatePatchTarget(target: UiActionTarget) {
+  const required = requireFields(
+    "projectId",
+    "tabId",
+    "patchId",
+    "range",
+  )(target);
+  if (required) return required;
+  if (typeof target.sql !== "string") return "sql replacement is required.";
+  if (typeof target.originalText !== "string") {
+    return "originalText is required.";
+  }
+  if (target.sql.length > 50_000 || target.originalText.length > 50_000) {
+    return "Patch text must not exceed 50,000 characters.";
+  }
+  if (target.title !== undefined && typeof target.title !== "string") {
+    return "Patch title must be text.";
+  }
+  if (target.rationale !== undefined && typeof target.rationale !== "string") {
+    return "Patch rationale must be text.";
+  }
+  if ((target.title?.length || 0) > 160) {
+    return "Patch title must not exceed 160 characters.";
+  }
+  if ((target.rationale?.length || 0) > 2_000) {
+    return "Patch rationale must not exceed 2,000 characters.";
+  }
+  return validateRange(target);
 }
 
 function notFound(actionId: string, targetType: string, identity: string) {

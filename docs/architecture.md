@@ -224,7 +224,9 @@ Schema baseline 不读取可变的 Explorer 展示树，而是调用 Rust `captu
 
 应用内 Assistant、CLI 与 MCP 共用 `src/ai/tools` 的 registry、policy 和 audit。工具调用必须携带活动项目/连接上下文，并经过权限判定；后端只读执行仍会再次扫描 SQL，避免 AI 绕过 UI 审批。
 
-当前 LangGraph 主要承担 `plan -> policy`，多轮工具循环仍由 Assistant React 组件编排，因此不能把它描述为 durable agent 已完成。页面联动由 `src/ai/ui-actions` 提供独立 typed navigation layer：Assistant tool result 会生成带 provenance 的 attachment，registry 负责项目/context/revision/plan 校验，Database Explorer、Monaco 与 Explain Plan 只接收稳定语义 target。patch preview 和 durable task action 仍须等待对应工作台 surface。目标状态机、Deep Agents 分层与完整页面动作协议见 [AI Agent 产品与技术规格](AI_AGENT_PRODUCT_SPEC.md)。
+当前 LangGraph 主要承担 `plan -> policy`，多轮工具循环仍由 Assistant React 组件编排，因此不能把它描述为 durable agent 已完成。页面联动由 `src/ai/ui-actions` 提供独立 typed navigation layer：Assistant tool result 会生成带 provenance 的 attachment，registry 负责项目/context/revision/plan 校验，Database Explorer、Monaco 与 Explain Plan 只接收稳定语义 target。
+
+编辑器修改采用两段式边界：只读 `editor.proposePatch` 工具根据当前 tab/selection 生成绑定 document revision 的 patch artifact；`editor.previewPatch` 只打开 before/after surface。只有用户点击 Apply，tab store 才再次核对整篇 revision 与 range 的原始文本并更新 Monaco 内容，预览本身不会写入或执行 SQL。单侧文本限制为 50,000 字符，binary preview 不进入文本 patch 链路。durable task action 仍须等待对应 Task surface。目标状态机、Deep Agents 分层与完整页面动作协议见 [AI Agent 产品与技术规格](AI_AGENT_PRODUCT_SPEC.md)，补丁决策见 [ADR-0009](decisions/0009-revision-bound-editor-patch.md)。
 
 ## 6. 测试与质量门
 

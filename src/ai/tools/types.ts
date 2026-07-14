@@ -13,6 +13,7 @@ import type {
   TableRowUpdate,
 } from "@/services/tauri/types";
 import type { CompletionItem, Diagnostic } from "@/services/lsp/types";
+import type { EditorTextRange } from "@/lib/editorPatch";
 
 export type AiToolPermission = "read" | "write" | "destructive" | "external";
 
@@ -234,6 +235,26 @@ export type AiLspDiagnosticsExplanation = {
   diagnostics: AiExplainedDiagnostic[];
 };
 
+export type AiEditorPatchInput = {
+  tabId?: string | null;
+  range?: EditorTextRange | null;
+  replacement: string;
+  title?: string | null;
+  rationale?: string | null;
+};
+
+export type AiEditorPatchArtifact = {
+  patchId: string;
+  tabId: string;
+  tabTitle: string;
+  range: EditorTextRange;
+  originalText: string;
+  replacement: string;
+  documentRevision: string;
+  title: string;
+  rationale?: string | null;
+};
+
 export type AiNamespaceMutationInput = {
   operation: "create" | "drop";
   connectionId?: string | null;
@@ -291,6 +312,10 @@ export type AiToolAdapters = {
     Promise<AiWorkspaceTabSummary | null> | AiWorkspaceTabSummary | null;
   getWorkspaceSelection?: () =>
     Promise<AiWorkspaceSelection | null> | AiWorkspaceSelection | null;
+  proposeEditorPatch?: (
+    input: AiEditorPatchInput,
+    context: AiToolExecutionContext,
+  ) => Promise<AiEditorPatchArtifact> | AiEditorPatchArtifact;
   listCollections?: (
     input: { connectionId?: string | null; namespace?: string | null },
     context: AiToolExecutionContext,
