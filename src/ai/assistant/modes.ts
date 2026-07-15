@@ -20,7 +20,7 @@ export const ASSISTANT_MODE_OPTIONS: readonly AssistantModeOption[] = [
     id: "plan",
     label: "Plan",
     shortDescription: "Review first",
-    description: "Builds a reviewable plan without running database tools.",
+    description: "Uses read-only metadata and analysis tools to build a reviewable plan.",
   },
   {
     id: "agent",

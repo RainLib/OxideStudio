@@ -10,11 +10,15 @@ import { ThemeContext, type ThemeContextType } from "@/theme/ThemeProvider";
 
 const mocks = vi.hoisted(() => ({
   testProvider: vi.fn(),
+  hasProviderSecret: vi.fn(),
+  setProviderSecret: vi.fn(),
 }));
 
 vi.mock("@/services/tauri/ai.service", () => ({
   aiService: {
     testProvider: mocks.testProvider,
+    hasProviderSecret: mocks.hasProviderSecret,
+    setProviderSecret: mocks.setProviderSecret,
   },
 }));
 
@@ -48,6 +52,8 @@ describe("AI settings", () => {
       message: "AI provider connection is available",
       model: "gpt-test",
     });
+    mocks.hasProviderSecret.mockResolvedValue(false);
+    mocks.setProviderSecret.mockResolvedValue(true);
     useAiSettingsStore.setState(
       {
         ...initialAiSettings,
@@ -123,6 +129,10 @@ describe("AI settings", () => {
       apiKey: "test-key",
       timeoutMs: 30_000,
     });
+    expect(mocks.setProviderSecret).toHaveBeenCalledWith(
+      "https://api.openai.com/v1",
+      "test-key",
+    );
     expect(document.body.textContent).toContain(
       "AI provider connection is available: gpt-test"
     );

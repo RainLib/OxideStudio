@@ -12,6 +12,8 @@ dist
 dist-ssr
 *.local
 src-tauri/tauri.release.conf.json
+src-tauri/binaries/oxide-agent-host-*
+src-tauri/binaries/oxide-agent-*
 
 # Local Tauri updater signing keys
 /oxide-studio.key

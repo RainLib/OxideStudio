@@ -1,7 +1,6 @@
 import type { AiToolRegistry } from "@/ai/tools/registry";
 import {
   DEFAULT_AI_TOOL_POLICY,
-  approveAiToolForPolicy,
 } from "@/ai/tools/policy";
 import { createAiToolManifest } from "@/ai/tools/manifest";
 import type { AiToolManifestEnvironment } from "@/ai/tools/manifest";
@@ -27,7 +26,6 @@ export type McpToolAdapterOptions = {
 };
 
 export type McpToolCallOptions = {
-  approved?: boolean;
   contextOverrides?: McpContextOverrides;
   abortSignal?: AbortSignal;
 };
@@ -110,9 +108,6 @@ export class McpToolAdapter {
     options: McpToolCallOptions = {}
   ): Promise<McpToolCallResult> {
     try {
-      const policy = options.approved
-        ? approveAiToolForPolicy(this.policy, name)
-        : this.policy;
       const context = applyContextOverrides(
         this.createContext(),
         options.contextOverrides
@@ -123,7 +118,7 @@ export class McpToolAdapter {
         options.abortSignal
           ? { ...context, abortSignal: options.abortSignal }
           : context,
-        policy
+        this.policy
       );
       return {
         content: [

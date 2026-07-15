@@ -40,11 +40,27 @@ export function resolvePlatformSigning(environment) {
   });
 }
 
+export function assertPlatformSigningPolicy(groups, environment) {
+  const unsigned = groups.filter((group) => !group.enabled);
+  if (unsigned.length === 0) return;
+  const explicitlyAllowed = /^(?:1|true|yes|on)$/iu.test(
+    environment.ALLOW_UNSIGNED_RELEASE ?? ""
+  );
+  if (!explicitlyAllowed) {
+    throw new Error(
+      `Production releases require platform signing; missing complete configuration for: ${unsigned
+        .map((group) => group.label)
+        .join(", ")}. Use the workflow_dispatch test-only unsigned switch only for non-production validation.`
+    );
+  }
+}
+
 async function main() {
   const outputPath = process.env.GITHUB_OUTPUT;
   if (!outputPath) throw new Error("Missing GITHUB_OUTPUT.");
 
   const groups = resolvePlatformSigning(process.env);
+  assertPlatformSigningPolicy(groups, process.env);
   await appendFile(
     outputPath,
     `${groups.map((group) => `${group.output}=${group.enabled}`).join("\n")}\n`,

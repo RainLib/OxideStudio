@@ -10,6 +10,8 @@ import { ThemeContext, type ThemeContextType } from "@/theme/ThemeProvider";
 vi.mock("@/services/tauri/ai.service", () => ({
   aiService: {
     testProvider: vi.fn(),
+    hasProviderSecret: vi.fn(async () => false),
+    setProviderSecret: vi.fn(async () => true),
   },
 }));
 
@@ -53,40 +55,42 @@ describe("Workbench settings entry", () => {
       root.render(
         <ThemeContext.Provider value={themeContext}>
           <AppBar title="sqls" />
-        </ThemeContext.Provider>
+        </ThemeContext.Provider>,
       );
       await flushAsyncWork();
     });
 
     const settingsButton = container.querySelector(
-      'button[aria-label="Settings"]'
+      'button[aria-label="Settings"]',
     );
     expect(settingsButton).toBeTruthy();
 
     await act(async () => {
       settingsButton?.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true })
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
       );
       await flushAsyncWork();
     });
 
-    const settingsMenuItem = Array.from(document.querySelectorAll("button")).find(
-      (button) => button.textContent?.includes("Settings...")
-    );
+    const settingsMenuItem = Array.from(
+      document.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("Settings..."));
     expect(settingsMenuItem).toBeTruthy();
 
     await act(async () => {
       settingsMenuItem?.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true })
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
       );
       await flushAsyncWork();
     });
 
-    expect(document.body.textContent).toContain("Settings");
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain("Settings");
+    });
     expect(document.body.textContent).toContain("AI Assistant");
 
     const aiTab = Array.from(document.querySelectorAll("button")).find(
-      (button) => button.textContent?.includes("AI Assistant")
+      (button) => button.textContent?.includes("AI Assistant"),
     );
     expect(aiTab).toBeTruthy();
 
@@ -96,7 +100,7 @@ describe("Workbench settings entry", () => {
           bubbles: true,
           cancelable: true,
           button: 0,
-        })
+        }),
       );
       await flushAsyncWork();
     });

@@ -14,13 +14,24 @@ export function captureWorkspaceUiActionContext(): UiActionContextSnapshot {
   const schema = useSchemaStore.getState();
   const tabState = useTabStore.getState();
   const activeTab = tabState.tabs.find((tab) => tab.id === tabState.activeTabId);
+  const activeConnection = connection.connections.find(
+    (candidate) => candidate.id === connection.activeConnectionId,
+  );
   const documentRevision = activeTab ? documentRevisionForTabData(activeTab) : null;
+  const selectionRevision = activeTab
+    ? selectionRevisionForTabData(activeTab)
+    : null;
+  const activeDatabaseName =
+    activeTab?.databaseName ?? activeConnection?.database ?? null;
   const signature = JSON.stringify([
     project.activeProjectId,
     connection.activeConnectionId,
+    activeConnection?.driver ?? null,
+    activeDatabaseName,
     schema.currentSchema,
     tabState.activeTabId,
     documentRevision,
+    selectionRevision,
   ]);
 
   if (signature !== lastContextSignature) {
@@ -32,9 +43,12 @@ export function captureWorkspaceUiActionContext(): UiActionContextSnapshot {
     projectId: project.activeProjectId,
     contextVersion,
     activeConnectionId: connection.activeConnectionId,
+    activeDriver: activeConnection?.driver ?? null,
+    activeDatabaseName,
     activeNamespace: schema.currentSchema,
     activeTabId: tabState.activeTabId,
     documentRevision,
+    selectionRevision,
   };
 }
 
@@ -50,4 +64,16 @@ export function resetUiActionContextTracker() {
 
 function documentRevisionForTabData(tab: TabData) {
   return documentTextRevision(tab.fileRevision, tab.sql);
+}
+
+function selectionRevisionForTabData(tab: TabData) {
+  const selection = tab.editorSelection;
+  if (!selection?.text) return null;
+  return JSON.stringify([
+    selection.startLineNumber,
+    selection.startColumn,
+    selection.endLineNumber,
+    selection.endColumn,
+    documentTextRevision(null, selection.text),
+  ]);
 }

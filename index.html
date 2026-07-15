@@ -1,256 +1,552 @@
 <!doctype html>
 <html lang="en">
-
-<head>
+  <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/oxide-logo.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OxideStudio</title>
-    <style>
-        html,
-        body {
-            background-color: #131313;
-            color: #e0e0e0;
-            margin: 0;
-            padding: 0;
-            height: 100%;
-            overflow: hidden;
-            /* Prevent scrolling during load */
+    <script>
+      (() => {
+        try {
+          const stored = localStorage.getItem("oxide-studio-theme") || "system";
+          const dark =
+            stored === "dark" ||
+            (stored === "system" &&
+              matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+          document.documentElement.style.colorScheme = dark ? "dark" : "light";
+        } catch {
+          document.documentElement.classList.add("dark");
+          document.documentElement.style.colorScheme = "dark";
         }
+      })();
+    </script>
+    <style>
+      html {
+        --startup-frame: hsl(220 14% 93%);
+        --startup-titlebar: hsl(276 22% 88%);
+        --startup-panel: hsl(220 13% 96%);
+        --startup-editor: hsl(0 0% 100%);
+        --startup-status: hsl(219 13% 91%);
+        --startup-border: hsl(220 12% 88%);
+        --startup-text: rgba(24, 24, 27, 0.74);
+        --startup-muted: rgba(24, 24, 27, 0.62);
+        --startup-placeholder: rgba(24, 24, 27, 0.14);
+        --startup-placeholder-soft: rgba(24, 24, 27, 0.08);
+        --startup-action: rgba(24, 24, 27, 0.9);
+        --startup-error: #b42318;
+      }
+
+      html.dark {
+        --startup-frame: hsl(220 8% 10%);
+        --startup-titlebar: hsl(288 18% 25%);
+        --startup-panel: hsl(220 8% 14%);
+        --startup-editor: hsl(220 8% 12%);
+        --startup-status: hsl(220 8% 15%);
+        --startup-border: hsl(220 9% 19%);
+        --startup-text: rgba(255, 255, 255, 0.8);
+        --startup-muted: rgba(255, 255, 255, 0.62);
+        --startup-placeholder: rgba(255, 255, 255, 0.13);
+        --startup-placeholder-soft: rgba(255, 255, 255, 0.06);
+        --startup-action: rgba(255, 255, 255, 0.88);
+        --startup-error: #fb7185;
+      }
+
+      html,
+      body {
+        background-color: var(--startup-frame);
+        color: var(--startup-text);
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        /* Prevent scrolling during load */
+      }
     </style>
-</head>
+  </head>
 
-<body>
+  <body>
     <div id="root">
-        <!-- Static Loading State -->
-        <style>
-            body,
-            html {
-                margin: 0;
-                padding: 0;
-                width: 100%;
-                height: 100%;
-                background-color: #09090b;
-                /* Zinc-950 */
-                font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                overflow: hidden;
-            }
+      <!-- Static Loading State -->
+      <style>
+        body,
+        html {
+          width: 100%;
+          height: 100%;
+          margin: 0;
+          overflow: hidden;
+          background: var(--startup-frame);
+          font-family:
+            "Inter",
+            -apple-system,
+            BlinkMacSystemFont,
+            "Segoe UI",
+            Roboto,
+            sans-serif;
+        }
 
-            #app-loader {
-                position: fixed;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                background-color: #09090b;
-                z-index: 9999;
-                transition: opacity 0.5s ease-out;
-            }
+        #app-loader {
+          position: fixed;
+          inset: 0;
+          z-index: 9999;
+          display: flex;
+          flex-direction: column;
+          background:
+            linear-gradient(
+                90deg,
+                var(--startup-titlebar) 0,
+                var(--startup-titlebar) 360px,
+                var(--startup-frame) min(62vw, 960px),
+                var(--startup-frame) 100%
+              )
+              top / 100% 76px no-repeat,
+            var(--startup-frame);
+          color: var(--startup-text);
+          contain: strict;
+        }
 
-            .loader-content {
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                gap: 24px;
-                position: relative;
-            }
+        .startup-titlebar {
+          position: relative;
+          height: 36px;
+          flex: 0 0 36px;
+          user-select: none;
+        }
 
-            .logo-container {
-                position: relative;
-                width: 72px;
-                height: 72px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                animation: breath 3s infinite ease-in-out;
-            }
+        .loader-drag-region {
+          position: absolute;
+          inset: 0;
+        }
 
-            .logo-image {
-                width: 100%;
-                height: 100%;
-                object-fit: contain;
-            }
+        .startup-workspace {
+          display: flex;
+          min-height: 0;
+          flex: 1;
+          gap: 4px;
+          padding: 2px 4px 3px;
+        }
 
-            .loader-text {
-                font-size: 14px;
-                font-weight: 500;
-                letter-spacing: 0.2em;
-                color: rgba(255, 255, 255, 0.8);
-                text-transform: uppercase;
-                animation: fade-in-up 0.8s ease-out;
-            }
+        .startup-panel,
+        .startup-editor {
+          min-height: 0;
+          overflow: hidden;
+          border-radius: 6px;
+          background: var(--startup-panel);
+          box-shadow: inset 0 0 0 1px var(--startup-border);
+        }
 
-            .loader-bar-bg {
-                width: 140px;
-                height: 2px;
-                background-color: rgba(255, 255, 255, 0.1);
-                border-radius: 4px;
-                overflow: hidden;
-                margin-top: 8px;
-            }
+        .startup-panel {
+          width: min(280px, 36vw);
+          flex: 0 0 min(280px, 36vw);
+        }
 
-            .loader-bar-fill {
-                width: 50%;
-                height: 100%;
-                background-color: #ea580c;
-                border-radius: 4px;
-                animation: shimmer 1.5s infinite linear;
-                transform-origin: left;
-            }
+        .startup-editor {
+          position: relative;
+          flex: 1;
+          background: var(--startup-editor);
+        }
 
-            .loader-error {
-                display: none;
-                max-width: 420px;
-                color: rgba(255, 255, 255, 0.62);
-                font-size: 12px;
-                line-height: 1.6;
-                text-align: center;
-                word-break: break-word;
-            }
+        .startup-panel-header,
+        .startup-editor-tabs {
+          display: flex;
+          height: 32px;
+          align-items: center;
+          border-bottom: 1px solid var(--startup-border);
+          padding: 0 10px;
+          font-size: 12px;
+          font-weight: 600;
+        }
 
-            .loader-retry {
-                display: none;
-                border: 1px solid rgba(255, 255, 255, 0.16);
-                border-radius: 6px;
-                padding: 7px 14px;
-                background: rgba(255, 255, 255, 0.06);
-                color: rgba(255, 255, 255, 0.88);
-                font: inherit;
-                cursor: pointer;
-            }
+        .startup-panel-header {
+          justify-content: space-between;
+        }
 
-            #app-loader.has-error .loader-bar-bg {
-                display: none;
-            }
+        .startup-toolbar {
+          display: flex;
+          height: 30px;
+          align-items: center;
+          gap: 12px;
+          border-bottom: 1px solid var(--startup-border);
+          padding: 0 10px;
+        }
 
-            #app-loader.has-error .loader-error,
-            #app-loader.has-error .loader-retry {
-                display: block;
-            }
+        .startup-tool {
+          display: inline-flex;
+          width: 14px;
+          height: 14px;
+          align-items: center;
+          justify-content: center;
+          color: var(--startup-muted);
+          font-size: 14px;
+          line-height: 1;
+        }
 
-            @keyframes breath {
+        .startup-data-loading {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 11px 12px;
+          color: var(--startup-muted);
+          font-size: 11px;
+        }
 
-                0%,
-                100% {
-                    transform: rotate(45deg) scale(1);
-                    border-color: rgba(255, 255, 255, 0.1);
-                }
+        .startup-cached-row {
+          display: flex;
+          height: 24px;
+          min-width: 0;
+          align-items: center;
+          gap: 6px;
+          padding: 0 7px;
+          color: var(--startup-muted);
+          font-size: 11px;
+        }
 
-                50% {
-                    transform: rotate(45deg) scale(1.05);
-                    border-color: rgba(255, 255, 255, 0.2);
-                }
-            }
+        .startup-cached-row-name {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-weight: 500;
+        }
 
-            @keyframes inner-pulse {
+        .startup-cached-icon {
+          width: 10px;
+          height: 10px;
+          flex: 0 0 10px;
+          border-radius: 3px;
+        }
 
-                0%,
-                100% {
-                    transform: rotate(45deg) scale(1);
-                    opacity: 1;
-                }
+        .startup-empty-data {
+          padding: 11px 12px;
+          color: var(--startup-muted);
+          font-size: 11px;
+        }
 
-                50% {
-                    transform: rotate(45deg) scale(0.85);
-                    opacity: 0.8;
-                }
-            }
+        .startup-welcome {
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          width: min(460px, calc(100% - 48px));
+          transform: translate(-50%, calc(-50% - 18px));
+          text-align: center;
+        }
 
-            @keyframes shimmer {
-                0% {
-                    transform: translateX(-100%);
-                }
+        .startup-welcome-title {
+          font-size: 14px;
+          font-weight: 600;
+        }
 
-                100% {
-                    transform: translateX(200%);
-                }
-            }
+        .startup-welcome-detail {
+          margin-top: 6px;
+          color: var(--startup-muted);
+          font-size: 11px;
+        }
 
-            @keyframes fade-in-up {
-                from {
-                    opacity: 0;
-                    transform: translateY(10px);
-                }
+        .startup-actions {
+          display: flex;
+          justify-content: center;
+          gap: 8px;
+          margin-top: 18px;
+        }
 
-                to {
-                    opacity: 1;
-                    transform: translateY(0);
-                }
-            }
-        </style>
-        <div id="app-loader">
-            <div class="loader-content">
-                <div class="logo-container">
-                    <img class="logo-image" src="/oxide-logo.png" alt="" />
-                </div>
-                <div class="loader-text">OXIDE STUDIO</div>
-                <div class="loader-bar-bg">
-                    <div class="loader-bar-fill"></div>
-                </div>
-                <div id="loader-error" class="loader-error"></div>
-                <button id="loader-retry" class="loader-retry" type="button">Reload</button>
-            </div>
+        .startup-action-preview {
+          display: block;
+          width: 112px;
+          padding: 13px 12px;
+          border: 1px solid var(--startup-border);
+          border-radius: 6px;
+          background: var(--startup-panel);
+          color: var(--startup-text);
+          font: inherit;
+          text-align: left;
+          cursor: pointer;
+          transition:
+            background-color 120ms ease,
+            border-color 120ms ease;
+        }
+
+        .startup-action-preview:hover,
+        .startup-action-preview:focus-visible {
+          border-color: rgba(234, 88, 12, 0.5);
+          background: var(--startup-placeholder-soft);
+          outline: none;
+        }
+
+        .startup-action-preview:disabled {
+          cursor: wait;
+          opacity: 0.76;
+        }
+
+        .startup-action-title {
+          font-size: 11px;
+          font-weight: 600;
+        }
+
+        .startup-action-detail {
+          margin-top: 5px;
+          color: var(--startup-muted);
+          font-size: 9px;
+        }
+
+        .startup-status {
+          display: flex;
+          height: 22px;
+          flex: 0 0 22px;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 7px;
+          border-top: 1px solid var(--startup-border);
+          padding: 0 9px;
+          background: var(--startup-status);
+          color: var(--startup-muted);
+          font-size: 11px;
+        }
+
+        .startup-data-spinner {
+          width: 8px;
+          height: 8px;
+          border: 1.5px solid var(--startup-placeholder);
+          border-top-color: #ea580c;
+          border-radius: 50%;
+          animation: startup-spin 0.8s linear infinite;
+        }
+
+        .loader-error {
+          display: none;
+          max-width: min(520px, 55vw);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: var(--startup-error);
+        }
+
+        .loader-retry {
+          display: none;
+          border: 0;
+          padding: 0;
+          background: transparent;
+          color: var(--startup-action);
+          font: inherit;
+          cursor: pointer;
+          text-decoration: underline;
+          text-underline-offset: 2px;
+        }
+
+        #app-loader.has-error .loader-error,
+        #app-loader.has-error .loader-retry {
+          display: block;
+        }
+
+        @keyframes startup-spin {
+          to {
+            transform: rotate(360deg);
+          }
+        }
+
+        @media (max-width: 640px) {
+          .startup-panel {
+            width: 34vw;
+            flex-basis: 34vw;
+          }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          .startup-data-spinner {
+            animation: none;
+          }
+        }
+      </style>
+      <div id="app-loader">
+        <div class="startup-titlebar">
+          <div
+            class="loader-drag-region"
+            data-tauri-drag-region
+            aria-hidden="true"
+          ></div>
         </div>
+        <div class="startup-workspace">
+          <aside class="startup-panel">
+            <div class="startup-panel-header">
+              <span>Database Explorer</span>
+            </div>
+            <div class="startup-toolbar">
+              <span class="startup-tool">+</span>
+              <span class="startup-tool">↻</span>
+              <span class="startup-tool">▣</span>
+              <span class="startup-tool">⌕</span>
+            </div>
+            <div id="startup-data-region" class="startup-data-loading">
+              <span class="startup-data-spinner"></span>
+              <span>Loading data sources…</span>
+            </div>
+          </aside>
+          <main class="startup-editor">
+            <div class="startup-welcome">
+              <div class="startup-welcome-title">Start working with SQL</div>
+              <div class="startup-welcome-detail">
+                Open a console or keep queries as files in your project
+                directory.
+              </div>
+              <div class="startup-actions">
+                <button
+                  class="startup-action-preview"
+                  type="button"
+                  data-startup-intent="new-query"
+                >
+                  <div class="startup-action-title">New Query</div>
+                  <div class="startup-action-detail">Open a SQL console</div>
+                </button>
+                <button
+                  class="startup-action-preview"
+                  type="button"
+                  data-startup-intent="project-files"
+                >
+                  <div class="startup-action-title">Project Files</div>
+                  <div class="startup-action-detail">Create or open files</div>
+                </button>
+                <button
+                  class="startup-action-preview"
+                  type="button"
+                  data-startup-intent="command-palette"
+                >
+                  <div class="startup-action-title">Find an Action</div>
+                  <div class="startup-action-detail">Open command palette</div>
+                </button>
+              </div>
+            </div>
+          </main>
+        </div>
+        <div class="startup-status" role="status" aria-live="polite">
+          <span id="loader-error" class="loader-error"></span>
+          <button id="loader-retry" class="loader-retry" type="button">
+            Reload
+          </button>
+        </div>
+      </div>
     </div>
     <style>
-        #portal {
-            position: fixed;
-            left: 0;
-            top: 0;
-            width: 100%;
-            height: 100%;
-            z-index: 9999;
-            pointer-events: none;
-        }
+      #portal {
+        position: fixed;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 9999;
+        pointer-events: none;
+      }
 
-        #portal>* {
-            pointer-events: auto;
-        }
+      #portal > * {
+        pointer-events: auto;
+      }
     </style>
     <div id="portal"></div>
     <script>
-        (() => {
-            let startupError;
+      (() => {
+        let startupError;
+        window.__oxideStartupIntents = window.__oxideStartupIntents || [];
 
-            const describeError = (error) => {
-                if (error instanceof Error) return `${error.name}: ${error.message}`;
-                if (typeof error === "string") return error;
-                try {
-                    return JSON.stringify(error);
-                } catch {
-                    return String(error);
-                }
-            };
+        document.querySelectorAll("[data-startup-intent]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const intent = button.getAttribute("data-startup-intent");
+            if (!intent) return;
+            if (!window.__oxideStartupIntents.includes(intent)) {
+              window.__oxideStartupIntents.push(intent);
+            }
+            button.disabled = true;
+            const detail = button.querySelector(".startup-action-detail");
+            if (detail) detail.textContent = "Opening…";
+          });
+        });
 
-            window.addEventListener("error", (event) => {
-                if (event.target === window) startupError = describeError(event.error ?? event.message);
-            });
-            window.addEventListener("unhandledrejection", (event) => {
-                startupError = describeError(event.reason);
-            });
+        try {
+          const projectId =
+            localStorage.getItem("oxide-studio-active-project") || "sqls";
+          const raw = localStorage.getItem(
+            `oxide-studio-data-sources:${projectId}`,
+          );
+          const cached = raw ? JSON.parse(raw) : null;
+          if (cached?.version === 1 && Array.isArray(cached.items)) {
+            const items = cached.items.filter(
+              (item) =>
+                item &&
+                typeof item.id === "string" &&
+                typeof item.name === "string" &&
+                typeof item.driver === "string",
+            );
+            const region = document.getElementById("startup-data-region");
+            if (region) {
+              const colors = {
+                postgres: "#5b8dd6",
+                mysql: "#d9904f",
+                redis: "#d95b5b",
+                elasticsearch: "#d6ad5b",
+                mongodb: "#5fb878",
+              };
+              region.className = "";
+              if (items.length === 0) {
+                const empty = document.createElement("div");
+                empty.className = "startup-empty-data";
+                empty.textContent = "No data sources";
+                region.replaceChildren(empty);
+              } else {
+                region.replaceChildren(
+                  ...items.map((item) => {
+                    const row = document.createElement("div");
+                    row.className = "startup-cached-row";
+                    const chevron = document.createElement("span");
+                    chevron.textContent = "›";
+                    const icon = document.createElement("span");
+                    icon.className = "startup-cached-icon";
+                    icon.style.backgroundColor =
+                      colors[item.driver] || "#75a7ff";
+                    const name = document.createElement("span");
+                    name.className = "startup-cached-row-name";
+                    name.textContent = item.name;
+                    row.append(chevron, icon, name);
+                    return row;
+                  }),
+                );
+              }
+            }
+          }
+        } catch {
+          // The backend remains canonical when the optional display cache is absent.
+        }
 
-            window.setTimeout(() => {
-                const loader = document.getElementById("app-loader");
-                if (!loader) return;
+        const describeError = (error) => {
+          if (error instanceof Error) return `${error.name}: ${error.message}`;
+          if (typeof error === "string") return error;
+          try {
+            return JSON.stringify(error);
+          } catch {
+            return String(error);
+          }
+        };
 
-                loader.classList.add("has-error");
-                const error = document.getElementById("loader-error");
-                if (error) {
-                    error.textContent = startupError
-                        ? `OxideStudio failed to start: ${startupError}`
-                        : "OxideStudio did not finish starting. Reload the window to try again.";
-                }
-                document.getElementById("loader-retry")?.addEventListener("click", () => {
-                    window.location.reload();
-                });
-            }, 15000);
-        })();
+        window.addEventListener("error", (event) => {
+          if (event.target === window)
+            startupError = describeError(event.error ?? event.message);
+        });
+        window.addEventListener("unhandledrejection", (event) => {
+          startupError = describeError(event.reason);
+        });
+
+        document
+          .getElementById("loader-retry")
+          ?.addEventListener("click", () => window.location.reload());
+
+        window.setTimeout(() => {
+          const loader = document.getElementById("app-loader");
+          if (!loader) return;
+
+          loader.classList.add("has-error");
+          const error = document.getElementById("loader-error");
+          if (error) {
+            error.textContent = startupError
+              ? `OxideStudio failed to start: ${startupError}`
+              : "OxideStudio did not finish starting. Reload the window to try again.";
+          }
+        }, 15000);
+      })();
     </script>
     <script type="module" src="/src/main.tsx"></script>
-</body>
-
+  </body>
 </html>

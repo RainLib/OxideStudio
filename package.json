@@ -3,6 +3,10 @@
     "private": true,
     "version": "0.1.2",
     "type": "module",
+    "workspaces": [
+        "agent-contract",
+        "agent-host"
+    ],
     "scripts": {
         "dev": "vite",
         "build": "tsc && vite build && node scripts/verify-frontend-bundle.mjs",
@@ -13,10 +17,16 @@
         "ai:mcp": "tsx scripts/oxide-ai.ts mcp stdio",
         "test": "vitest run",
         "test:release": "node --test scripts/*.node-test.mjs",
-        "test:live-db": "bash scripts/test-live-databases.sh"
+        "test:live-db": "bash scripts/test-live-databases.sh",
+        "agent-host:build": "npm run build --workspace @oxide/agent-host",
+    "agent-host:package": "npm run package --workspace @oxide/agent-host --",
+    "oxide-agent:prepare": "node scripts/prepare-oxide-agent.mjs",
+        "test:agent-contract": "npm test --workspace @oxide/agent-contract",
+        "test:agent-host": "npm test --workspace @oxide/agent-host"
     },
     "dependencies": {
         "@glideapps/glide-data-grid": "6.0.4-alpha24",
+        "@langchain/core": "1.2.3",
         "@langchain/langgraph": "^1.4.7",
         "@monaco-editor/react": "^4.7.0",
         "@radix-ui/react-checkbox": "^1.3.3",

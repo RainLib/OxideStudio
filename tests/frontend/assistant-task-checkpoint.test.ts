@@ -11,6 +11,7 @@ import type {
   AssistantPreparedTurn,
   AssistantToolLoopEvent,
 } from "@/ai/assistant/types";
+import { createWorkspaceContextBinding } from "@/ai/workspaceContext";
 
 const turn: AssistantPreparedTurn = {
   requestId: "request-1",
@@ -20,7 +21,20 @@ const turn: AssistantPreparedTurn = {
     mode: "model",
     description: "Planner",
   },
-  context: { requestId: "request-1" },
+  context: {
+    requestId: "request-1",
+    workspaceContext: createWorkspaceContextBinding({
+      projectId: "project-a",
+      contextVersion: 7,
+      activeConnectionId: "postgres-1",
+      activeDriver: "postgres",
+      activeDatabaseName: "app",
+      activeNamespace: "public",
+      activeTabId: "query-1",
+      documentRevision: "memory:document-hash",
+      selectionRevision: null,
+    }),
+  },
   availableTools: [],
   suggestedPlan: [
     {
@@ -69,8 +83,18 @@ describe("assistant task checkpoint", () => {
     expect(serialized).not.toContain("UPDATE users");
     expect(serialized).not.toContain("private-result");
     expect(task.checkpoint).toEqual({
-      version: 2,
+      version: 3,
       mode: "agent",
+      context: expect.objectContaining({
+        version: 1,
+        contextVersion: 7,
+        fingerprint: expect.stringMatching(/^ctx-/u),
+        projectId: "project-a",
+        activeConnectionId: "postgres-1",
+        activeDatabaseName: "app",
+        activeNamespace: "public",
+        activeTabId: "query-1",
+      }),
       plan: [
         expect.objectContaining({
           id: "read",
@@ -114,7 +138,7 @@ describe("assistant task checkpoint", () => {
     );
 
     expect(started.checkpoint).toMatchObject({
-      version: 2,
+      version: 3,
       executionReceipts: [
         {
           stepId: "write",

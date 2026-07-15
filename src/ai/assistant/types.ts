@@ -150,8 +150,20 @@ export type AssistantToolLoopOptions = {
   context?: AiToolExecutionContext;
   existingResults?: Readonly<Record<string, AssistantToolCallResult>>;
   approvedStepIds?: ReadonlySet<string>;
+  /**
+   * When false, raw tool outputs never reach the configured model summarizer.
+   * The loop emits a local count/error summary and will not add model follow-ups.
+   */
+  shareToolResultsWithModel?: boolean;
   limits?: Partial<AssistantToolLoopLimits>;
   onEvent?: (event: AssistantToolLoopEvent) => void;
+  beforeToolExecution?: (execution: {
+    stepId: string;
+    title: string;
+    toolName: string;
+    round: number;
+    totalCalls: number;
+  }) => Promise<void> | void;
   beforeApprovedToolExecution?: (execution: {
     stepId: string;
     title: string;

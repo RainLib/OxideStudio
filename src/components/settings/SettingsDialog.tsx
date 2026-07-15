@@ -8,7 +8,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { aiService } from "@/services/tauri/ai.service";
+import { agentHostService } from "@/services/tauri/agent-host.service";
 import { useAiSettingsStore } from "@/store/useAiSettingsStore";
+import { useProjectStore } from "@/store/useProjectStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { ThemeContext } from "@/theme/ThemeProvider";
 import { cn } from "@/lib/utils";
@@ -119,12 +121,25 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const aiModel = useAiSettingsStore((state) => state.model);
   const aiApiKey = useAiSettingsStore((state) => state.apiKey);
   const aiTimeoutMs = useAiSettingsStore((state) => state.timeoutMs);
+  const aiStreaming = useAiSettingsStore((state) => state.streaming);
+  const aiToolCalling = useAiSettingsStore((state) => state.toolCalling);
+  const aiStructuredOutput = useAiSettingsStore(
+    (state) => state.structuredOutput
+  );
+  const aiMaxInputTokens = useAiSettingsStore(
+    (state) => state.maxInputTokens
+  );
+  const aiMaxOutputTokens = useAiSettingsStore(
+    (state) => state.maxOutputTokens
+  );
   const aiInlineCompletionProtocol = useAiSettingsStore(
     (state) => state.inlineCompletionProtocol
   );
   const aiInlineCompletionModel = useAiSettingsStore(
     (state) => state.inlineCompletionModel
   );
+  const activeProjectId = useProjectStore((state) => state.activeProjectId);
+  const activeProjectName = useProjectStore((state) => state.activeProjectName);
   const setAiEnabled = useAiSettingsStore((state) => state.setEnabled);
   const updateAiSettings = useAiSettingsStore((state) => state.updateSettings);
   const [activeSection, setActiveSection] =
@@ -141,6 +156,32 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     message: string;
   } | null>(null);
   const [isTestingAi, setIsTestingAi] = useState(false);
+  const [hasAiProviderSecret, setHasAiProviderSecret] = useState(false);
+  const [isClearingAgentState, setIsClearingAgentState] = useState(false);
+  const [agentStateMessage, setAgentStateMessage] = useState<{
+    status: "success" | "error";
+    message: string;
+  } | null>(null);
+
+  useEffect(() => {
+    const baseUrl = aiBaseUrl.trim();
+    if (!open || !baseUrl) {
+      setHasAiProviderSecret(false);
+      return;
+    }
+    let active = true;
+    void aiService
+      .hasProviderSecret(baseUrl)
+      .then((available) => {
+        if (active) setHasAiProviderSecret(available);
+      })
+      .catch(() => {
+        if (active) setHasAiProviderSecret(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [aiBaseUrl, open]);
 
   const visibleTree = useMemo(() => {
     const filter = filterText.trim().toLowerCase();
@@ -180,6 +221,11 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
         apiKey: aiApiKey.trim() || undefined,
         timeoutMs: aiTimeoutMs,
       });
+      if (aiApiKey.trim()) {
+        await aiService.setProviderSecret(aiBaseUrl.trim(), aiApiKey.trim());
+        updateAiSettings({ apiKey: "" });
+        setHasAiProviderSecret(true);
+      }
       setAiTestState({
         status: "success",
         message: `${result.message}: ${result.model}`,
@@ -191,6 +237,58 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       });
     } finally {
       setIsTestingAi(false);
+    }
+  };
+
+  const persistAiProviderSecret = async () => {
+    const secret = aiApiKey.trim();
+    if (!secret || !aiBaseUrl.trim()) return;
+    try {
+      await aiService.setProviderSecret(aiBaseUrl.trim(), secret);
+      updateAiSettings({ apiKey: "" });
+      setHasAiProviderSecret(true);
+    } catch (error: any) {
+      setAiTestState({
+        status: "error",
+        message: error?.message || String(error),
+      });
+    }
+  };
+
+  const removeAiProviderSecret = async () => {
+    if (!aiBaseUrl.trim()) return;
+    try {
+      await aiService.setProviderSecret(aiBaseUrl.trim());
+      updateAiSettings({ apiKey: "" });
+      setHasAiProviderSecret(false);
+    } catch (error: any) {
+      setAiTestState({
+        status: "error",
+        message: error?.message || String(error),
+      });
+    }
+  };
+
+  const clearCurrentProjectAgentState = async () => {
+    const confirmed = window.confirm(
+      `Clear saved AI conversations and checkpoints for “${activeProjectName}”? This cannot be undone.`
+    );
+    if (!confirmed) return;
+    setIsClearingAgentState(true);
+    setAgentStateMessage(null);
+    try {
+      const result = await agentHostService.clearProjectState(activeProjectId);
+      setAgentStateMessage({
+        status: "success",
+        message: `Cleared ${result.clearedRecords} saved record${result.clearedRecords === 1 ? "" : "s"}.`,
+      });
+    } catch (error: any) {
+      setAgentStateMessage({
+        status: "error",
+        message: error?.message || String(error),
+      });
+    } finally {
+      setIsClearingAgentState(false);
     }
   };
 
@@ -308,7 +406,13 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   aiBaseUrl={aiBaseUrl}
                   aiModel={aiModel}
                   aiApiKey={aiApiKey}
+                  hasAiProviderSecret={hasAiProviderSecret}
                   aiTimeoutMs={aiTimeoutMs}
+                  aiStreaming={aiStreaming}
+                  aiToolCalling={aiToolCalling}
+                  aiStructuredOutput={aiStructuredOutput}
+                  aiMaxInputTokens={aiMaxInputTokens}
+                  aiMaxOutputTokens={aiMaxOutputTokens}
                   aiInlineCompletionProtocol={aiInlineCompletionProtocol}
                   aiInlineCompletionModel={aiInlineCompletionModel}
                   settings={appSettings}
@@ -319,6 +423,12 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   isTestingAi={isTestingAi}
                   aiTestState={aiTestState}
                   onTest={handleTestAiProvider}
+                  onPersistSecret={() => void persistAiProviderSecret()}
+                  onRemoveSecret={() => void removeAiProviderSecret()}
+                  activeProjectName={activeProjectName}
+                  isClearingAgentState={isClearingAgentState}
+                  agentStateMessage={agentStateMessage}
+                  onClearAgentState={() => void clearCurrentProjectAgentState()}
                 />
               )}
             </div>
@@ -938,7 +1048,13 @@ function AiSettings({
   aiBaseUrl,
   aiModel,
   aiApiKey,
+  hasAiProviderSecret,
   aiTimeoutMs,
+  aiStreaming,
+  aiToolCalling,
+  aiStructuredOutput,
+  aiMaxInputTokens,
+  aiMaxOutputTokens,
   aiInlineCompletionProtocol,
   aiInlineCompletionModel,
   settings,
@@ -949,12 +1065,24 @@ function AiSettings({
   isTestingAi,
   aiTestState,
   onTest,
+  onPersistSecret,
+  onRemoveSecret,
+  activeProjectName,
+  isClearingAgentState,
+  agentStateMessage,
+  onClearAgentState,
 }: {
   aiEnabled: boolean;
   aiBaseUrl: string;
   aiModel: string;
   aiApiKey: string;
+  hasAiProviderSecret: boolean;
   aiTimeoutMs: number;
+  aiStreaming: boolean;
+  aiToolCalling: boolean;
+  aiStructuredOutput: boolean;
+  aiMaxInputTokens: number;
+  aiMaxOutputTokens: number;
   aiInlineCompletionProtocol: "chat-completions" | "text-completions-fim";
   aiInlineCompletionModel: string;
   settings: AppSettings;
@@ -965,6 +1093,11 @@ function AiSettings({
     model: string;
     apiKey: string;
     timeoutMs: number;
+    streaming: boolean;
+    toolCalling: boolean;
+    structuredOutput: boolean;
+    maxInputTokens: number;
+    maxOutputTokens: number;
     inlineCompletionProtocol: "chat-completions" | "text-completions-fim";
     inlineCompletionModel: string;
   }>) => void;
@@ -972,6 +1105,12 @@ function AiSettings({
   isTestingAi: boolean;
   aiTestState: { status: "success" | "error"; message: string } | null;
   onTest: () => void;
+  onPersistSecret: () => void;
+  onRemoveSecret: () => void;
+  activeProjectName: string;
+  isClearingAgentState: boolean;
+  agentStateMessage: { status: "success" | "error"; message: string } | null;
+  onClearAgentState: () => void;
 }) {
   const inlineCompletion = settings.editor.inlineCompletion;
   const updateInlineCompletion = (
@@ -991,7 +1130,7 @@ function AiSettings({
         label="Enable AI assistant"
         checked={aiEnabled}
         onChange={() => setAiEnabled(!aiEnabled)}
-        detail="Disabled mode keeps deterministic local planning."
+        detail="Disabled mode skips the AI runtime and keeps the database workbench available."
       />
       <p className="mb-3 max-w-[68ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
         Choose O2, Plan, Agent, or Chat from the assistant composer. Planning and
@@ -1012,12 +1151,22 @@ function AiSettings({
         />
       </SettingRow>
       <SettingRow label="API Key:">
-        <SettingsInput
-          type="password"
-          value={aiApiKey}
-          onChange={(value) => updateAiSettings({ apiKey: value })}
-          placeholder="sk-..."
-        />
+        <div className="flex items-center gap-2">
+          <SettingsInput
+            type="password"
+            value={aiApiKey}
+            onChange={(value) => updateAiSettings({ apiKey: value })}
+            onBlur={onPersistSecret}
+            placeholder={
+              hasAiProviderSecret
+                ? "Stored in system credential manager"
+                : "sk-..."
+            }
+          />
+          {hasAiProviderSecret && (
+            <SettingsButton onClick={onRemoveSecret}>Remove</SettingsButton>
+          )}
+        </div>
       </SettingRow>
       <SettingRow label="Timeout ms:">
         <NumberInput
@@ -1028,6 +1177,41 @@ function AiSettings({
           onChange={(timeoutMs) => updateAiSettings({ timeoutMs })}
         />
       </SettingRow>
+      <SettingRow label="Input tokens:">
+        <NumberInput
+          value={aiMaxInputTokens}
+          min={8_192}
+          max={2_000_000}
+          step={4_096}
+          onChange={(maxInputTokens) => updateAiSettings({ maxInputTokens })}
+        />
+      </SettingRow>
+      <SettingRow label="Output tokens:">
+        <NumberInput
+          value={aiMaxOutputTokens}
+          min={256}
+          max={128_000}
+          step={256}
+          onChange={(maxOutputTokens) => updateAiSettings({ maxOutputTokens })}
+        />
+      </SettingRow>
+      <CheckboxLabel
+        label="Model supports streaming"
+        checked={aiStreaming}
+        onChange={() => updateAiSettings({ streaming: !aiStreaming })}
+      />
+      <CheckboxLabel
+        label="Model supports tool calling"
+        checked={aiToolCalling}
+        onChange={() => updateAiSettings({ toolCalling: !aiToolCalling })}
+      />
+      <CheckboxLabel
+        label="Model supports structured output"
+        checked={aiStructuredOutput}
+        onChange={() =>
+          updateAiSettings({ structuredOutput: !aiStructuredOutput })
+        }
+      />
 
       <div className="mt-4 flex items-center gap-3">
         <SettingsButton onClick={onTest} disabled={!canTestAi || isTestingAi}>
@@ -1113,6 +1297,35 @@ function AiSettings({
         Automatic requests use a 4 second timeout and never include connection
         strings, API keys, query results, or database row data.
       </p>
+
+      <SettingsDivider title="Conversation Data" />
+      <p className="mb-3 max-w-[68ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
+        Encrypted conversations, checkpoints, and bounded artifacts for the
+        current project are retained for 7 days. Database credentials and raw
+        result sets are never stored in this history.
+      </p>
+      <div className="flex items-center gap-3">
+        <SettingsButton
+          onClick={onClearAgentState}
+          disabled={isClearingAgentState}
+        >
+          {isClearingAgentState
+            ? "Clearing..."
+            : `Clear data for ${activeProjectName}`}
+        </SettingsButton>
+        {agentStateMessage && (
+          <span
+            className={cn(
+              "text-[12px]",
+              agentStateMessage.status === "success"
+                ? "text-emerald-400"
+                : "text-[hsl(var(--destructive))]"
+            )}
+          >
+            {agentStateMessage.message}
+          </span>
+        )}
+      </div>
     </SettingsPanel>
   );
 }
@@ -1190,17 +1403,20 @@ function SettingsInput({
   onChange,
   placeholder,
   type = "text",
+  onBlur,
 }: {
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   type?: string;
+  onBlur?: () => void;
 }) {
   return (
     <input
       type={type}
       value={value}
       onChange={(event) => onChange(event.target.value)}
+      onBlur={onBlur}
       placeholder={placeholder}
       spellCheck={false}
       autoComplete="off"

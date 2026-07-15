@@ -1,6 +1,6 @@
 # OxideStudio 当前架构
 
-> 文档基线：2026-07-13。本文描述当前仓库已经存在的实现，不代表未来愿景。
+> 文档基线：2026-07-15。本文描述当前仓库已经存在的实现；仍在发布接线中的能力会明确标注。
 
 ## 1. 架构目标
 
@@ -22,7 +22,7 @@ flowchart LR
         Services["Tauri service adapters"]
         Monaco["Monaco + SQL LSP client"]
         Grid["Glide Data Grid"]
-        AIUI["Assistant / CLI / MCP adapters"]
+        AIUI["Assistant Turn UI"]
 
         App --> UI
         UI --> Stores
@@ -41,6 +41,8 @@ flowchart LR
         Config["App settings / connection config"]
         ProjectFiles["Project file boundary"]
         LSP["Bundled SQL LSP manager"]
+        Agent["AgentHostManager / model / policy"]
+        AgentStore["Encrypted agent store"]
 
         Commands --> Manager
         Manager --> Drivers
@@ -48,15 +50,22 @@ flowchart LR
         Commands --> Config
         Commands --> ProjectFiles
         Commands --> LSP
+        Commands --> Agent
+        Agent --> AgentStore
+    end
+
+    subgraph Sidecar["signed Node 22 sidecar"]
+        DeepAgents["deepagents@1.10.8\nChat / Plan / Agent"]
     end
 
     Services <--> |"Tauri invoke / serialized IPC"| Commands
     Monaco <--> |"Tauri events + LSP commands"| LSP
+    Agent <--> |"JSON-RPC 2.0 + Content-Length / stdio"| DeepAgents
     Drivers <--> DB["Database servers"]
-    Commands <--> Providers["Configured AI providers"]
+    Agent <--> Providers["Configured AI providers"]
 ```
 
-这里没有自定义 JSON-RPC 网关。前端通过 `@tauri-apps/api/core` 的 `invoke()` 调用 Rust 命令，命令在 `src-tauri/src/lib.rs` 的 `tauri::generate_handler!` 中显式注册；异步通知通过 Tauri event 传递。
+WebView 与 Rust 之间仍使用 `@tauri-apps/api/core` 的 `invoke()` 和 Tauri event；命令在 `src-tauri/src/lib.rs` 的 `tauri::generate_handler!` 中显式注册。只有 Rust 与 Deep Agents sidecar 之间使用自定义、版本化的 JSON-RPC 2.0 协议。WebView 没有 shell/spawn 权限，也不能直接访问 sidecar stdio。
 
 ## 3. 前端分层
 
@@ -81,7 +90,7 @@ flowchart LR
 | `useSettingsStore` | 外观、布局、快捷键、编辑器、Data Grid 设置 | Rust settings command |
 | `useHistoryStore` | 项目级查询执行日志、乐观删除与旧数据迁移 | MetaStore `query_history` + 内存 |
 | `useTaskStore` | 查询、元数据等后台任务状态 | 内存 |
-| `useAi*Store` | AI 配置、审计和工作流状态 | localStorage / 内存 |
+| `useAi*Store` | 非敏感 AI 配置、Turn view model 和审计状态 | localStorage / 内存；provider secret 在 OS credential manager |
 
 当前 Store 之间存在有意的领域协作，例如切换项目会清理连接与 schema 快照，执行 DDL 后会刷新元数据。新增跨 Store 行为时应放入可测试的领域函数，避免继续在组件事件中拼接多步副作用。
 
@@ -118,6 +127,7 @@ flowchart LR
 - `ConfigManager` 与 `CacheManager`：设置和遗留 JSON 缓存；
 - `ParserState`、查询取消状态、AI 取消状态；
 - 每个连接/语言会话的 LSP 状态。
+- `AgentHostManager`：无副作用装配的 sidecar supervisor、模型/工具代理、批准 lease 与加密 AgentStore。
 
 ### 4.2 Command 边界
 
@@ -161,6 +171,8 @@ SQLite 和 SQL Server 当前没有运行时 driver；Cargo 中的 `sqlx/sqlite` 
 - `query_history`：按项目隔离的有界执行日志，保存上下文、状态、耗时、行数和错误。
 
 `resources` 是 adjacency-list 结构，并为 parent、connection 和搜索组合建立索引。密码等连接敏感信息不得写入文档、测试快照或日志。
+
+Deep Agents 状态不写入上述 metadata resource。`AgentStore` 使用独立的 `agent-state.db`：`agent_threads`、`agent_checkpoints`、`agent_artifacts` 以及 LangGraph 专用的 `agent_graph_checkpoints`、`agent_graph_writes` 按项目隔离，值以 AES-256-GCM 加密，每条记录使用独立 nonce，AAD 绑定 project/thread/namespace/checkpoint/task/write index，默认保留七天。主密钥保存在 OS credential manager；keyring 不可用时退回仅当前进程可读的加密 session store，不把明文落盘。旧 `assistant_tasks` 只保留迁移期的安全任务摘要/receipt，不是新的 Deep Agents 可执行 checkpoint。
 
 ### 4.5 Project Files 安全边界
 
@@ -222,22 +234,30 @@ Schema baseline 不读取可变的 Explorer 展示树，而是调用 Rust `captu
 
 ### 5.6 AI 工具链
 
-应用内 Assistant、CLI 与 MCP 共用 `src/ai/tools` 的 registry、policy 和 audit。工具调用必须携带活动项目/连接上下文，并经过权限判定；后端只读执行仍会再次扫描 SQL，避免 AI 绕过 UI 审批。
+生产 Chat、Plan、Agent 统一由签名 Node 22 `deepagents@1.10.8` sidecar 编排。React 通过 `agent_start_turn`、`agent_resume_turn`、`agent_cancel_turn`、`agent_answer_clarification`、`agent_approve_action`、`agent_get_status` 和 `agent://event` 与 Rust 通信；旧 `AssistantRuntime` 只在显式 `VITE_ASSISTANT_LEGACY_RUNTIME=1` 的开发场景启用。完整边界见 [ADR-0012](decisions/0012-deep-agents-desktop-runtime-boundary.md)。
 
-当前 LangGraph 主要承担 `plan -> policy`。有界多轮工具循环已由 `AssistantRuntime.runToolLoop` 接管：Runtime 负责工具/输入签名去重、follow-up policy 归一化、精确 step-id 审批、默认四轮/十二次预算、失败停止与 AbortSignal，并通过 typed event 向 React 暴露步骤、结果、summary、plan extension 和 limit。Sidebar 只投影瞬时 UI 状态，但 controller 和生命周期仍在组件内，尚无 checkpoint/resume，因此不能把它描述为 durable agent 已完成。页面联动由 `src/ai/ui-actions` 提供独立 typed navigation layer：Assistant tool result 会生成带 provenance 的 attachment，registry 负责项目/context/revision/plan 校验，Database Explorer、Monaco 与 Explain Plan 只接收稳定语义 target。Runtime 边界见 [ADR-0010](decisions/0010-assistant-runtime-tool-loop.md)。
+Rust `AgentHostManager` 在 setup 时不启动进程，首次已配置 AI 请求才懒启动 sidecar。双方先通过 protocol/version/capability handshake，再使用 4 MiB 上限的 `Content-Length` JSON-RPC。request/thread/turn/context/deadline 贯穿 model、tool、checkpoint 和 artifact 回调；sidecar 缺失或崩溃只让 Assistant unavailable，不影响工作台首屏。
 
-Agent mode 的任务摘要写入独立 `assistant_tasks` 表，不复用需要数据库连接外键的 metadata resources。落盘 schema 只允许 plan step 的 id/title/tool/approval risk、completed status，以及 checkpoint v2 的批准工具 receipt（step/tool/status/timestamp），不包含 prompt、tool input/output、SQL、结果行或批准 token；前端按顺序写入，后端限制各类条目 100、64 KiB checkpoint 和每项目 100 条终态记录。批准工具必须先等待 `started` receipt 落盘，失败则不执行；进程退出、取消或项目切换后，终态 task 遗留的 started receipt 在 TaskStatusCenter 标记 `verify/uncertain`，不得自动重放。`task.reveal` 只携带 `projectId + taskId`，可从内存或 retained history 解析后打开精确任务详情。该层提供可回看的 durable summary 与 at-most-once recovery guard，不提供执行 resume 或 exactly-once 保证。见 [ADR-0011](decisions/0011-agent-task-summary-persistence.md)。
+`agent-contract` 把前端工具 manifest、provider capability、workspace identity 和 typed `AgentEvent` 固化为 Zod schema。Chat 不获得数据库或 subagent 工具；Plan 只接收只读工具；Agent 接收 Rust 过滤后的 manifest。同步 schema/query/verification subagent 默认只读且无文件系统。sidecar 禁用 FilesystemBackend、LocalShellBackend、shell 与通用子代理。
 
-Deep Agents 的采用受独立运行边界约束：`deepagents@1.10.2` 的单入口顶层依赖 Node filesystem/child-process/OS 模块，不能直接打入 Tauri WebView。当前进程内继续使用应用自有 Runtime 与 browser-compatible LangGraph planner；未来只能通过官方 browser-safe export 或独立签名、延迟启动且不可绕过 registry 的 sidecar/服务接入。见 [ADR-0012](decisions/0012-deep-agents-desktop-runtime-boundary.md)。
+模型 API key 存在 OS credential manager，由 Rust `ModelGateway` 完成 OpenAI-compatible complete/SSE streaming、取消、deadline、usage 与 tool call 归一化。sidecar 不接收 key。工具实际执行也回到 Rust；Rust重新校验 project/connection/config revision/context、canonical input digest、SQL risk 和一次性 approval lease。大结果成为有界 observation 与项目级 artifact reference，不能以 raw rows 穿过 IPC。
+
+上下文层使用真实 provider token profile、长问题切块/digest 和 Deep Agents summarization/offload。内部 summarization stream 不显示成最终回答；持久 `OxideCheckpointSaver` 通过 Rust RPC 保存 LangGraph checkpoint/pending writes，后续 Turn 只追加新 prompt，不重复注入全量历史。`ask_user` 与 approval 使用 LangGraph `interrupt()`，回答通过 `Command({ resume })` 恢复；sidecar 重启后可从加密 graph checkpoint 继续。approval lease 只存在 Rust/当前 sidecar 内存和单次 RPC 中，绝不写入 checkpoint；丢失 lease 时 mutation fail-closed。数据库 mutation receipt/exactly-once 与完整应用进程崩溃后的恢复 UX 仍不作完成承诺，任何不确定 mutation 都不得自动重放。
+
+Assistant view model 固定为“问题 → 紧凑过程 → 最终答案”。tool/todo/subagent 合并到当前 Turn 的默认折叠单行 disclosure，只有 coordinator final answer 是普通 Assistant 正文。宽面板且真实溢出时，minimap 每个完整问答只生成一个灰色 marker；过程不产生独立历史记录。页面联动继续由 `src/ai/ui-actions` 提供 stable target 和 stale-context 校验。
+
+外部 MCP/CLI 不经过 Deep Agents sidecar。Rust 原生 `oxide-agent mcp stdio` 与 tools list/inspect/call 首版只读，严格限定 MCP 2025-11-25、project grant、可选 connection grant 和结果上限，并作为 target-specific `externalBin` 随包发布。现存 TypeScript adapter 仅保留为迁移/契约资产；两条路径都不允许调用者通过 `_meta.approved`、`approved:true` 或 `--approve` 自我授权。
 
 编辑器修改采用两段式边界：只读 `editor.proposePatch` 工具根据当前 tab/selection 生成绑定 document revision 的 patch artifact；`editor.previewPatch` 只打开 before/after surface。只有用户点击 Apply，tab store 才再次核对整篇 revision 与 range 的原始文本并更新 Monaco 内容，预览本身不会写入或执行 SQL。单侧文本限制为 50,000 字符，binary preview 不进入文本 patch 链路。目标状态机、Deep Agents 分层与完整页面动作协议见 [AI Agent 产品与技术规格](AI_AGENT_PRODUCT_SPEC.md)，补丁决策见 [ADR-0009](decisions/0009-revision-bound-editor-patch.md)。
 
 ## 6. 测试与质量门
 
 - 前端：Vitest，覆盖 stores、服务适配、provider 注册、SQL 安全、工作台与文件生命周期。
+- Agent：`agent-contract` 契约测试与 `agent-host` framing/model/tool/runtime/checkpoint 测试；production bundle 还需执行真实 sidecar handshake 与故障隔离 smoke。
 - 后端：Rust unit/integration tests，覆盖 dialect、driver、命令、MetaStore、文件安全和 LSP。
 - 必跑门禁：`npm run build`、`npm test`、`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`。
 - 数据库驱动行为变化应补 live database 测试，但默认测试不得依赖本机数据库。
+- 发布按 macOS arm64、macOS x86_64、Windows x86_64、Linux x86_64 分架构生成 sidecar；macOS 不构建 universal 包。
 
 ## 7. 当前架构债务
 
@@ -246,6 +266,7 @@ Deep Agents 的采用受独立运行边界约束：`deepagents@1.10.2` 的单入
 3. `tauri::generate_handler!` 是手工总表，新增命令容易漏注册，应增加命令契约测试或代码生成。
 4. Search Everywhere 目前只索引内存中已知范围，还没有覆盖 MetaStore 的全项目对象索引。
 5. provider capability 同时存在前端默认值和后端运行时值，需要持续用契约测试防止漂移。
-6. Assistant 的循环语义已移入 Runtime，项目级 task summary 与 mutation pre-execution receipt 已持久化；剩余债务是把 AbortController/task state 从 Sidebar 生命周期移出，增加数据库级 idempotency、真正 checkpoint/resume 和不可重放的 approval pause token。Deep Agents 还需独立 host 协议，不能作为 WebView 依赖。页面 action 已有 stale-context 防护。
+6. Deep Agents host、协议、模型/tool proxy、加密 LangGraph checkpoint/pending writes 与 sidecar-restart interrupt resume 已落地；剩余债务是数据库级 idempotency/receipt、完整应用进程恢复 UX、完整 provider tool bridge、Context Vault range/search、长期 trace/eval 与四平台 production-bundle smoke。页面 action 已有 stale-context 防护，生产旧 runtime 只保留开发 feature flag。
+7. Rust 原生 `oxide-agent` 的只读 stdio/CLI 首版已接入 Cargo 和发布矩阵；后续若开放 mutation，必须先加入 GUI 签发的 60 秒单次 input-hash lease，不能复用调用者自报批准。
 
 DataGrip 对标差距、优先级和验收标准见 [datagrip-gap-analysis.md](datagrip-gap-analysis.md)。

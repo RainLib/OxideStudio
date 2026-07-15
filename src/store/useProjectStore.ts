@@ -5,11 +5,9 @@ import {
   readProjectConnections,
   useConnectionStore,
 } from "@/store/useConnectionStore";
+import { connectionDisplaySummaries } from "@/startup/dataSourceDisplayCache";
 import { useSchemaStore } from "@/store/useSchemaStore";
-import {
-  confirmDiscardAllTabChanges,
-  useTabStore,
-} from "@/store/useTabStore";
+import { confirmDiscardAllTabChanges, useTabStore } from "@/store/useTabStore";
 import { unstable_batchedUpdates } from "react-dom";
 import { useEditorGroupStore } from "@/store/useEditorGroupStore";
 
@@ -62,7 +60,7 @@ function disconnectPreviousProjectConnections(connectionIds: string[]) {
 function replaceProjectWorkspace(
   project: Project,
   connections: Awaited<ReturnType<typeof readProjectConnections>>,
-  updateProject: () => void
+  updateProject: () => void,
 ) {
   const previousConnectionIds = [
     ...useConnectionStore.getState().connectedConnectionIds,
@@ -75,6 +73,8 @@ function replaceProjectWorkspace(
     useTabStore.setState({ tabs: [], activeTabId: null, closedTabsStack: [] });
     useConnectionStore.setState({
       connections,
+      connectionDisplayCache: connectionDisplaySummaries(connections),
+      hasConnectionDisplayCache: true,
       activeConnectionId: initialConnectionId,
       connectedConnectionIds: [],
       isConnected: false,
@@ -197,14 +197,14 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (
       rootKey &&
       get().projects.some(
-        (project) => projectRootKey(project.root_path) === rootKey
+        (project) => projectRootKey(project.root_path) === rootKey,
       )
     ) {
       throw new Error("This directory is already linked to another project.");
     }
     if (!confirmDiscardAllTabChanges("switch to the new project")) {
       throw new Error(
-        "Project creation was cancelled to keep unsaved files open."
+        "Project creation was cancelled to keep unsaved files open.",
       );
     }
 
@@ -246,13 +246,15 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       isActiveProject &&
       !confirmDiscardAllTabChanges("delete the active project")
     ) {
-      throw new Error("Project deletion was cancelled to keep unsaved files open.");
+      throw new Error(
+        "Project deletion was cancelled to keep unsaved files open.",
+      );
     }
 
     await storeService.deleteProject(projectId);
 
     const remainingProjects = state.projects.filter(
-      (item) => item.id !== projectId
+      (item) => item.id !== projectId,
     );
     if (!isActiveProject) {
       set({ projects: remainingProjects });

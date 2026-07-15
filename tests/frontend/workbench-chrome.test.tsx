@@ -12,7 +12,10 @@ import {
 import { APP_EVENT_OPEN_COMMAND_PALETTE } from "@/lib/actions";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useTaskStore } from "@/store/useTaskStore";
-import { requestTaskReveal, useTaskNavigationStore } from "@/lib/taskNavigation";
+import {
+  requestTaskReveal,
+  useTaskNavigationStore,
+} from "@/lib/taskNavigation";
 
 const mocks = vi.hoisted(() => ({
   listAssistantTasks: vi.fn(async () => []),
@@ -45,6 +48,17 @@ describe("WorkbenchChrome", () => {
     container.remove();
   });
 
+  async function activateTaskStatusCenter() {
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Background Tasks"]',
+    );
+    expect(trigger).toBeTruthy();
+    await act(async () => {
+      trigger?.focus();
+      await Promise.resolve();
+    });
+  }
+
   it("shows project context until an editor tab is active", async () => {
     await act(async () => {
       root = createRoot(container);
@@ -53,7 +67,7 @@ describe("WorkbenchChrome", () => {
           isIntrospecting={false}
           secondaryPanelOpen={false}
           onToggleSecondaryPanel={vi.fn()}
-        />
+        />,
       );
     });
 
@@ -69,7 +83,7 @@ describe("WorkbenchChrome", () => {
           isIntrospecting={false}
           secondaryPanelOpen={false}
           onToggleSecondaryPanel={vi.fn()}
-        />
+        />,
       );
     });
 
@@ -96,7 +110,7 @@ describe("WorkbenchChrome", () => {
           onToggleDatabaseExplorer={onToggleDatabaseExplorer}
           onToggleAssistant={onToggleAssistant}
           onToggleFiles={onToggleFiles}
-        />
+        />,
       );
     });
 
@@ -191,7 +205,10 @@ describe("WorkbenchChrome", () => {
       await Promise.resolve();
     });
 
-    expect(mocks.listAssistantTasks).toHaveBeenCalledWith("project-a");
+    await activateTaskStatusCenter();
+    await vi.waitFor(() => {
+      expect(mocks.listAssistantTasks).toHaveBeenCalledWith("project-a");
+    });
     expect(useTaskStore.getState().tasks).toEqual([
       expect.objectContaining({ id: "agent:waiting", status: "waiting" }),
       expect.objectContaining({
@@ -260,6 +277,11 @@ describe("WorkbenchChrome", () => {
       await Promise.resolve();
     });
 
+    await activateTaskStatusCenter();
+    await vi.waitFor(() => {
+      expect(mocks.listAssistantTasks).toHaveBeenCalledWith("project-a");
+    });
+
     await act(async () => {
       requestTaskReveal({
         projectId: "project-a",
@@ -267,7 +289,11 @@ describe("WorkbenchChrome", () => {
       });
     });
 
-    expect(container.querySelector('[data-task-id="agent:details"]')).not.toBeNull();
+    await vi.waitFor(() => {
+      expect(
+        container.querySelector('[data-task-id="agent:details"]'),
+      ).not.toBeNull();
+    });
     expect(container.textContent).toContain("Recorded steps");
     expect(container.textContent).toContain("Inspect schema");
     expect(container.textContent).toContain("metadata.listObjects");
@@ -302,6 +328,8 @@ describe("WorkbenchChrome", () => {
     });
 
     expect(container.textContent).toContain("may have reached the target");
-    expect(container.textContent).toContain("will not be replayed automatically");
+    expect(container.textContent).toContain(
+      "will not be replayed automatically",
+    );
   });
 });

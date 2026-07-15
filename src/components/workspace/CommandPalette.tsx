@@ -10,10 +10,8 @@ import { useTabStore } from "@/store/useTabStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useProjectFilesStore } from "@/store/useProjectFilesStore";
-import {
-  APP_EVENT_OPEN_COMMAND_PALETTE,
-  workbenchActions,
-} from "@/lib/actions";
+import { workbenchActions } from "@/lib/actions";
+import { APP_EVENT_OPEN_COMMAND_PALETTE } from "@/lib/actionEvents";
 import { formatKeybinding } from "@/lib/keybindings";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import {
@@ -32,8 +30,12 @@ import {
 } from "@/lib/searchEverywhere";
 import { openProjectFileInEditor } from "@/lib/projectFileOpen";
 
-export function CommandPalette() {
-  const [open, setOpen] = useState(false);
+export function CommandPalette({
+  initiallyOpen = false,
+}: {
+  initiallyOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(initiallyOpen);
   const [commandError, setCommandError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const deferredSearchQuery = useDeferredValue(searchQuery);
@@ -46,18 +48,18 @@ export function CommandPalette() {
   const setCurrentSchema = useSchemaStore((state) => state.setCurrentSchema);
   const selectTable = useSchemaStore((state) => state.selectTable);
   const entriesByDirectory = useProjectFilesStore(
-    (state) => state.entriesByDirectory
+    (state) => state.entriesByDirectory,
   );
   const projectRootPath = useProjectFilesStore((state) => state.rootPath);
   const keymap = useSettingsStore((state) => state.settings.keymap);
   const actions = useMemo(() => workbenchActions(), []);
   const databaseObjects = useMemo(
     () => searchableDatabaseObjects(schemas, tables, currentSchema),
-    [currentSchema, schemas, tables]
+    [currentSchema, schemas, tables],
   );
   const projectFilePaths = useMemo(
     () => searchableProjectFilePaths(entriesByDirectory),
-    [entriesByDirectory]
+    [entriesByDirectory],
   );
   const visibleActions = useMemo(
     () =>
@@ -65,9 +67,9 @@ export function CommandPalette() {
         actions,
         deferredSearchQuery,
         (action) => `${action.title} ${action.group} ${action.id}`,
-        { limit: 30, emptyLimit: 12 }
+        { limit: 30, emptyLimit: 12 },
       ),
-    [actions, deferredSearchQuery]
+    [actions, deferredSearchQuery],
   );
   const visibleDatabaseObjects = useMemo(
     () =>
@@ -78,9 +80,9 @@ export function CommandPalette() {
           `${object.name} ${object.schema} ${
             object.kind === "relation" ? object.objectType || "table" : "schema"
           }`,
-        { limit: 40, emptyLimit: 12 }
+        { limit: 40, emptyLimit: 12 },
       ),
-    [databaseObjects, deferredSearchQuery]
+    [databaseObjects, deferredSearchQuery],
   );
   const visibleProjectFilePaths = useMemo(
     () =>
@@ -88,9 +90,9 @@ export function CommandPalette() {
         projectFilePaths,
         deferredSearchQuery,
         (relativePath) => relativePath,
-        { limit: 40, emptyLimit: 12 }
+        { limit: 40, emptyLimit: 12 },
       ),
-    [deferredSearchQuery, projectFilePaths]
+    [deferredSearchQuery, projectFilePaths],
   );
   const visibleTabs = useMemo(
     () =>
@@ -98,9 +100,9 @@ export function CommandPalette() {
         tabs,
         deferredSearchQuery,
         (tab) => `${tab.title} ${tab.type}`,
-        { limit: 40, emptyLimit: 12 }
+        { limit: 40, emptyLimit: 12 },
       ),
-    [deferredSearchQuery, tabs]
+    [deferredSearchQuery, tabs],
   );
   const visibleConnections = useMemo(
     () =>
@@ -108,9 +110,9 @@ export function CommandPalette() {
         connections,
         deferredSearchQuery,
         (connection) => `${connection.name} ${connection.driver}`,
-        { limit: 40, emptyLimit: 12 }
+        { limit: 40, emptyLimit: 12 },
       ),
-    [connections, deferredSearchQuery]
+    [connections, deferredSearchQuery],
   );
 
   useEffect(() => {
@@ -145,7 +147,7 @@ export function CommandPalette() {
           activeConnectionId,
           object.schema,
           object.name,
-          object.objectType
+          object.objectType,
         );
         await tabStore.loadTablePage(tabId, 0);
       }

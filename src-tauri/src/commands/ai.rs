@@ -1,4 +1,7 @@
-use crate::core::protocol::Response;
+use crate::core::{
+    protocol::Response,
+    provider_secret::{has_provider_secret, load_provider_secret, save_provider_secret},
+};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -132,6 +135,37 @@ pub struct AiProviderTestResult {
     pub model: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiProviderSecretRequest {
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
+#[tauri::command]
+pub async fn ai_set_provider_secret(
+    request: AiProviderSecretRequest,
+) -> Result<Response<bool>, String> {
+    match save_provider_secret(&request.base_url, request.api_key).await {
+        Ok(saved) => Ok(Response::ok(saved)),
+        Err(error) => Ok(Response::err(
+            "AI_PROVIDER_SECRET_ERROR",
+            &error.to_string(),
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn ai_has_provider_secret(base_url: String) -> Result<Response<bool>, String> {
+    match has_provider_secret(&base_url).await {
+        Ok(available) => Ok(Response::ok(available)),
+        Err(error) => Ok(Response::err(
+            "AI_PROVIDER_SECRET_ERROR",
+            &error.to_string(),
+        )),
+    }
+}
+
 #[tauri::command]
 pub async fn ai_chat_completion(
     request: AiChatCompletionRequest,
@@ -253,8 +287,9 @@ pub async fn ai_test_provider(
 }
 
 async fn send_chat_completion(
-    request: AiChatCompletionRequest,
+    mut request: AiChatCompletionRequest,
 ) -> Result<AiChatCompletionResult, String> {
+    hydrate_provider_secret(&mut request.config).await?;
     validate_config(&request.config)?;
     if request.messages.is_empty() {
         return Err("At least one model message is required".to_string());
@@ -310,8 +345,9 @@ async fn send_chat_completion(
 }
 
 async fn send_inline_completion(
-    request: AiInlineCompletionRequest,
+    mut request: AiInlineCompletionRequest,
 ) -> Result<AiInlineCompletionResult, String> {
+    hydrate_provider_secret(&mut request.config).await?;
     validate_config(&request.config)?;
     let timeout = Duration::from_millis(
         request
@@ -466,6 +502,20 @@ fn validate_config(config: &AiProviderConfig) -> Result<(), String> {
     if config.model.trim().is_empty() {
         return Err("AI model is required".to_string());
     }
+    Ok(())
+}
+
+async fn hydrate_provider_secret(config: &mut AiProviderConfig) -> Result<(), String> {
+    if config
+        .api_key
+        .as_deref()
+        .is_some_and(|secret| !secret.trim().is_empty())
+    {
+        return Ok(());
+    }
+    config.api_key = load_provider_secret(&config.base_url)
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 

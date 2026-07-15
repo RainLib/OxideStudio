@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { AiProviderConfig } from "@/services/tauri/ai.service";
 import type { AssistantMode } from "@/ai/assistant/modes";
+import { aiService } from "@/services/tauri/ai.service";
 
 export type AiProviderKind = "openai-compatible";
 export type AiPlannerKind = "model" | "langgraph" | "local";
@@ -18,6 +19,11 @@ export interface AiSettingsState {
   model: string;
   apiKey: string;
   timeoutMs: number;
+  streaming: boolean;
+  toolCalling: boolean;
+  structuredOutput: boolean;
+  maxInputTokens: number;
+  maxOutputTokens: number;
   inlineCompletionProtocol: InlineCompletionProtocol;
   inlineCompletionModel: string;
   setEnabled: (enabled: boolean) => void;
@@ -35,6 +41,11 @@ export type AiSettingsValues = Pick<
   | "model"
   | "apiKey"
   | "timeoutMs"
+  | "streaming"
+  | "toolCalling"
+  | "structuredOutput"
+  | "maxInputTokens"
+  | "maxOutputTokens"
   | "inlineCompletionProtocol"
   | "inlineCompletionModel"
 >;
@@ -53,6 +64,11 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       model: DEFAULT_AI_MODEL,
       apiKey: "",
       timeoutMs: 30_000,
+      streaming: true,
+      toolCalling: true,
+      structuredOutput: true,
+      maxInputTokens: 32_768,
+      maxOutputTokens: 4_096,
       inlineCompletionProtocol: "chat-completions",
       inlineCompletionModel: "",
       setEnabled: (enabled) => set({ enabled }),
@@ -82,11 +98,23 @@ export const useAiSettingsStore = create<AiSettingsState>()(
         assistantMode: state.assistantMode,
         baseUrl: state.baseUrl,
         model: state.model,
-        apiKey: state.apiKey,
         timeoutMs: state.timeoutMs,
+        streaming: state.streaming,
+        toolCalling: state.toolCalling,
+        structuredOutput: state.structuredOutput,
+        maxInputTokens: state.maxInputTokens,
+        maxOutputTokens: state.maxOutputTokens,
         inlineCompletionProtocol: state.inlineCompletionProtocol,
         inlineCompletionModel: state.inlineCompletionModel,
       }),
+      onRehydrateStorage: () => (state) => {
+        const legacySecret = state?.apiKey.trim();
+        if (!state || !legacySecret) return;
+        void aiService
+          .setProviderSecret(state.baseUrl, legacySecret)
+          .then(() => state.updateSettings({ apiKey: "" }))
+          .catch(() => undefined);
+      },
     }
   )
 );

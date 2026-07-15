@@ -1,7 +1,6 @@
 import type { AiToolRegistry } from "@/ai/tools/registry";
 import {
   DEFAULT_AI_TOOL_POLICY,
-  approveAiToolForPolicy,
 } from "@/ai/tools/policy";
 import { createAiToolManifest } from "@/ai/tools/manifest";
 import type { AiToolManifestEnvironment } from "@/ai/tools/manifest";
@@ -41,7 +40,6 @@ type ParsedCommand =
       kind: "call";
       toolName: string;
       input: unknown;
-      approved: boolean;
       contextOverrides: CliContextOverrides;
     };
 
@@ -113,14 +111,11 @@ export class CliToolAdapter {
             }).prepareTurnAsync(command.input)
           );
         case "call": {
-          const policy = command.approved
-            ? approveAiToolForPolicy(this.policy, command.toolName)
-            : this.policy;
           const result = await this.registry.executeWithPolicy(
             command.toolName,
             command.input,
             applyContextOverrides(this.createContext(), command.contextOverrides),
-            policy
+            this.policy
           );
           return okJson(result);
         }
@@ -197,13 +192,13 @@ export class CliToolAdapter {
     }
 
     let input: unknown = {};
-    let approved = false;
     const contextOverrides: CliContextOverrides = {};
     for (let index = 0; index < rest.length; index += 1) {
       const arg = rest[index];
       if (arg === "--approve") {
-        approved = true;
-        continue;
+        throw new Error(
+          "--approve is not a valid authorization. Mutations require a one-time approval lease issued by the running OxideStudio GUI.",
+        );
       }
       if (arg === "--json") {
         const value = rest[index + 1];
@@ -257,7 +252,7 @@ export class CliToolAdapter {
       throw new Error(`Unknown call argument: ${arg}`);
     }
 
-    return { kind: "call", toolName, input, approved, contextOverrides };
+    return { kind: "call", toolName, input, contextOverrides };
   }
 
   private async parsePlan(args: string[]): Promise<{
@@ -474,7 +469,7 @@ function helpText() {
     "  tools call <toolName> [--json '{...}']",
     "  tools call <toolName> [--json-file payload.json]",
     "  tools call <toolName> --active-driver redis --active-namespace 2 [--json '{...}']",
-    "  tools call <toolName> --approve [--json '{...}']",
+    "  Mutating tools require a one-time approval lease from the running GUI",
     "  mcp request --json '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}'",
     "  mcp stdio",
     "",

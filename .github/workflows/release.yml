@@ -14,6 +14,11 @@ on:
         description: "Optional notes shown by the desktop updater"
         required: false
         type: string
+      allow_unsigned_release:
+        description: "TEST ONLY: allow publishing unsigned macOS/Windows artifacts"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -39,10 +44,13 @@ jobs:
       windows_signing_enabled: ${{ steps.signing.outputs.windows_signing_enabled }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+          fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: "npm"
@@ -54,6 +62,14 @@ jobs:
         id: version
         shell: bash
         run: |
+          set -euo pipefail
+          TAG_SHA="$(git rev-list -n 1 "$RELEASE_TAG")"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          test -n "$TAG_SHA"
+          if [[ "$TAG_SHA" != "$HEAD_SHA" ]]; then
+            echo "Release checkout $HEAD_SHA does not match $RELEASE_TAG ($TAG_SHA)." >&2
+            exit 1
+          fi
           node - <<'NODE'
           const fs = require("node:fs");
           const packageVersion = require("./package.json").version;
@@ -94,11 +110,11 @@ jobs:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          ALLOW_UNSIGNED_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_unsigned_release && 'true' || 'false' }}
         run: |
           node - <<'NODE'
           const required = [
             "TAURI_SIGNING_PRIVATE_KEY",
-            "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
             "OXIDE_UPDATER_PUBLIC_KEY",
             "OXIDE_RELEASE_BASE_URL",
             "ALIYUN_OSS_ACCESS_KEY_ID",
@@ -129,47 +145,60 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - id: macos
-            name: macOS universal
-            platform: macos-latest
-            args: "--target universal-apple-darwin"
-          - id: linux
+          - id: macos-aarch64
+            name: macOS arm64
+            family: macos
+            platform: macos-15
+            target: aarch64-apple-darwin
+            mac_arch: arm64
+            args: "--target aarch64-apple-darwin"
+          - id: macos-x86_64
+            name: macOS x86_64
+            family: macos
+            platform: macos-15-intel
+            target: x86_64-apple-darwin
+            mac_arch: x86_64
+            args: "--target x86_64-apple-darwin"
+          - id: linux-x86_64
             name: Linux x86_64
+            family: linux
             platform: ubuntu-22.04
-            args: ""
-          - id: windows
+            target: x86_64-unknown-linux-gnu
+            args: "--target x86_64-unknown-linux-gnu"
+          - id: windows-x86_64
             name: Windows x86_64
+            family: windows
             platform: windows-latest
-            args: ""
+            target: x86_64-pc-windows-msvc
+            args: "--target x86_64-pc-windows-msvc"
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout repository and SQL LSP
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+          fetch-depth: 0
           submodules: recursive
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: "npm"
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Rust targets for universal macOS binary
-        if: matrix.id == 'macos'
-        run: |
-          rustup target add aarch64-apple-darwin
-          rustup target add x86_64-apple-darwin
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          key: ${{ matrix.target }}
 
       - name: Install Linux bundle dependencies
-        if: matrix.id == 'linux'
+        if: matrix.family == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
@@ -177,14 +206,61 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Package target-specific agent host
+        run: npm run agent-host:package -- --target ${{ matrix.target }}
+
+      - name: Build target-specific oxide-agent
+        run: node scripts/prepare-oxide-agent.mjs --target ${{ matrix.target }}
+
+      - name: Verify Unix agent host
+        if: matrix.family != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          AGENT_HOST="src-tauri/binaries/oxide-agent-host-${{ matrix.target }}"
+          OXIDE_AGENT="src-tauri/binaries/oxide-agent-${{ matrix.target }}"
+          test -f "$AGENT_HOST"
+          test -f "$OXIDE_AGENT"
+          chmod 0755 "$AGENT_HOST"
+          chmod 0755 "$OXIDE_AGENT"
+          if [[ "${{ matrix.family }}" == "macos" ]]; then
+            lipo "$AGENT_HOST" -verify_arch "${{ matrix.mac_arch }}"
+            lipo "$OXIDE_AGENT" -verify_arch "${{ matrix.mac_arch }}"
+          fi
+
+      - name: Verify Windows agent host
+        if: matrix.family == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $agentHost = "src-tauri\binaries\oxide-agent-host-${{ matrix.target }}.exe"
+          $oxideAgent = "src-tauri\binaries\oxide-agent-${{ matrix.target }}.exe"
+          if (-not (Test-Path $agentHost -PathType Leaf)) {
+            throw "Packaged agent host was not found: $agentHost"
+          }
+          if (-not (Test-Path $oxideAgent -PathType Leaf)) {
+            throw "Packaged oxide-agent was not found: $oxideAgent"
+          }
+
+      - name: Smoke target-specific agent runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXTENSION=""
+          if [[ "${{ matrix.family }}" == "windows" ]]; then EXTENSION=".exe"; fi
+          node scripts/smoke-agent-host.mjs \
+            --binary "src-tauri/binaries/oxide-agent-host-${{ matrix.target }}${EXTENSION}"
+          "src-tauri/binaries/oxide-agent-${{ matrix.target }}${EXTENSION}" tools list \
+            | node -e 'let s=""; process.stdin.on("data", c => s += c); process.stdin.on("end", () => { const tools=JSON.parse(s); if (tools.length !== 5 || tools.some(tool => !tool.readOnly || tool.destructive)) process.exit(1); });'
+
       - name: Configure Aliyun updater endpoint
         env:
           OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
-          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ matrix.id == 'windows' && secrets.WINDOWS_CERTIFICATE_THUMBPRINT || '' }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ matrix.family == 'windows' && secrets.WINDOWS_CERTIFICATE_THUMBPRINT || '' }}
         run: node scripts/write-tauri-release-config.mjs
 
       - name: Import Apple Developer ID certificate
-        if: matrix.id == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true'
+        if: matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -213,39 +289,51 @@ jobs:
           test -n "$APPLE_SIGNING_IDENTITY"
           echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
 
-      - name: Build universal macOS SQL LSP
-        if: matrix.id == 'macos'
+      - name: Build target-specific macOS SQL LSP
+        if: matrix.family == 'macos'
         shell: bash
         run: |
           set -euo pipefail
           cargo build --release \
             --manifest-path vendor/sql-lsp/Cargo.toml \
-            --target aarch64-apple-darwin
-          cargo build --release \
-            --manifest-path vendor/sql-lsp/Cargo.toml \
-            --target x86_64-apple-darwin
-          lipo -create \
-            vendor/sql-lsp/target/aarch64-apple-darwin/release/sql-lsp \
-            vendor/sql-lsp/target/x86_64-apple-darwin/release/sql-lsp \
-            -output src-tauri/binaries/sql-lsp
+            --target "${{ matrix.target }}"
+          cp \
+            "vendor/sql-lsp/target/${{ matrix.target }}/release/sql-lsp" \
+            src-tauri/binaries/sql-lsp
           chmod 0755 src-tauri/binaries/sql-lsp
-          lipo src-tauri/binaries/sql-lsp -verify_arch x86_64 arm64
+          lipo src-tauri/binaries/sql-lsp -verify_arch "${{ matrix.mac_arch }}"
 
-      - name: Sign universal macOS SQL LSP
-        if: matrix.id == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true'
+      - name: Sign target-specific macOS runtime binaries
+        if: matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
+          AGENT_HOST="src-tauri/binaries/oxide-agent-host-${{ matrix.target }}"
+          OXIDE_AGENT="src-tauri/binaries/oxide-agent-${{ matrix.target }}"
+          for BINARY in src-tauri/binaries/sql-lsp "$OXIDE_AGENT"; do
+            codesign \
+              --force \
+              --options runtime \
+              --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" \
+              "$BINARY"
+            codesign --verify --strict --verbose=2 "$BINARY"
+          done
           codesign \
             --force \
             --options runtime \
             --timestamp \
+            --entitlements src-tauri/entitlements/agent-host.plist \
             --sign "$APPLE_SIGNING_IDENTITY" \
-            src-tauri/binaries/sql-lsp
-          codesign --verify --strict --verbose=2 src-tauri/binaries/sql-lsp
+            "$AGENT_HOST"
+          codesign --verify --strict --verbose=2 "$AGENT_HOST"
+          ENTITLEMENTS_FILE="$RUNNER_TEMP/oxide-agent-host-entitlements.plist"
+          codesign -d --entitlements :- "$AGENT_HOST" > "$ENTITLEMENTS_FILE" 2>/dev/null
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.allow-jit' "$ENTITLEMENTS_FILE")" = "true"
+          node scripts/smoke-agent-host.mjs --binary "$AGENT_HOST"
 
       - name: Import Windows Authenticode certificate
-        if: matrix.id == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true'
+        if: matrix.family == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true'
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
@@ -287,22 +375,32 @@ jobs:
             -Encoding utf8 `
             -Append
 
-      - name: Build and sign Windows SQL LSP
-        if: matrix.id == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true'
+      - name: Build and sign Windows runtime binaries
+        if: matrix.family == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           node scripts/prepare-sql-lsp.mjs
           if ($LASTEXITCODE -ne 0) { throw "SQL LSP build failed." }
-          & $env:WINDOWS_SIGNTOOL sign `
-            /sha1 $env:WINDOWS_CERTIFICATE_THUMBPRINT `
-            /fd SHA256 `
-            /tr $env:WINDOWS_TIMESTAMP_URL `
-            /td SHA256 `
-            src-tauri\binaries\sql-lsp.exe
-          if ($LASTEXITCODE -ne 0) { throw "Signing sql-lsp.exe failed." }
-          & $env:WINDOWS_SIGNTOOL verify /pa /v src-tauri\binaries\sql-lsp.exe
-          if ($LASTEXITCODE -ne 0) { throw "Verifying sql-lsp.exe failed." }
+          $runtimeBinaries = @(
+            "src-tauri\binaries\sql-lsp.exe",
+            "src-tauri\binaries\oxide-agent-host-${{ matrix.target }}.exe",
+            "src-tauri\binaries\oxide-agent-${{ matrix.target }}.exe"
+          )
+          foreach ($binary in $runtimeBinaries) {
+            & $env:WINDOWS_SIGNTOOL sign `
+              /sha1 $env:WINDOWS_CERTIFICATE_THUMBPRINT `
+              /fd SHA256 `
+              /tr $env:WINDOWS_TIMESTAMP_URL `
+              /td SHA256 `
+              $binary
+            if ($LASTEXITCODE -ne 0) { throw "Signing $binary failed." }
+            & $env:WINDOWS_SIGNTOOL verify /pa /v $binary
+            if ($LASTEXITCODE -ne 0) { throw "Verifying $binary failed." }
+          }
+          node scripts/smoke-agent-host.mjs `
+            --binary "src-tauri\binaries\oxide-agent-host-${{ matrix.target }}.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Signed agent host smoke failed." }
 
       - name: Build Tauri bundles
         uses: tauri-apps/tauri-action@v1
@@ -310,15 +408,17 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
-          OXIDE_SKIP_SQL_LSP_PREPARE: ${{ (matrix.id == 'macos' || (matrix.id == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true')) && '1' || '' }}
-          APPLE_ID: ${{ matrix.id == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true' && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ matrix.id == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true' && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ matrix.id == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          OXIDE_SKIP_SQL_LSP_PREPARE: ${{ (matrix.family == 'macos' || (matrix.family == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true')) && '1' || '' }}
+          OXIDE_SKIP_AGENT_HOST_PACKAGE: "1"
+          OXIDE_SKIP_OXIDE_AGENT_PREPARE: "1"
+          APPLE_ID: ${{ matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true' && secrets.APPLE_TEAM_ID || '' }}
         with:
           args: ${{ matrix.args }} --config src-tauri/tauri.release.conf.json
 
       - name: Verify macOS Developer ID signature and notarization ticket
-        if: matrix.id == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true'
+        if: matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -326,13 +426,19 @@ jobs:
           DMG_PATH="$(find src-tauri/target -type f -path '*/release/bundle/dmg/*.dmg' -print -quit)"
           test -n "$APP_PATH"
           test -n "$DMG_PATH"
+          BUNDLED_AGENT_HOST="$APP_PATH/Contents/MacOS/oxide-agent-host"
+          test -x "$BUNDLED_AGENT_HOST"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
           codesign --verify --verbose=2 "$DMG_PATH"
+          BUNDLED_ENTITLEMENTS="$RUNNER_TEMP/bundled-agent-host-entitlements.plist"
+          codesign -d --entitlements :- "$BUNDLED_AGENT_HOST" > "$BUNDLED_ENTITLEMENTS" 2>/dev/null
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.allow-jit' "$BUNDLED_ENTITLEMENTS")" = "true"
+          node scripts/smoke-agent-host.mjs --binary "$BUNDLED_AGENT_HOST"
           xcrun stapler validate "$APP_PATH"
           spctl --assess --type execute --verbose=2 "$APP_PATH"
 
       - name: Verify Windows Authenticode signatures
-        if: matrix.id == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true'
+        if: matrix.family == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -356,6 +462,8 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           path: |
+            src-tauri/binaries/oxide-agent-${{ matrix.target }}
+            src-tauri/binaries/oxide-agent-${{ matrix.target }}.exe
             src-tauri/target/**/release/bundle/appimage/*.AppImage*
             src-tauri/target/**/release/bundle/deb/*.deb
             src-tauri/target/**/release/bundle/dmg/*.dmg
@@ -376,10 +484,13 @@ jobs:
       ALIYUN_OSS_PREFIX: ${{ secrets.ALIYUN_OSS_PREFIX }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+          fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
 
@@ -451,7 +562,7 @@ jobs:
           sudo install -m 0755 "$OSSUTIL_BIN" /usr/local/bin/ossutil
           ossutil version
 
-      - name: Upload immutable version and publish latest manifest
+      - name: Upload immutable version assets
         env:
           OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
@@ -463,6 +574,10 @@ jobs:
           PREFIX="${ALIYUN_OSS_PREFIX#/}"
           PREFIX="${PREFIX%/}"
           DESTINATION="oss://${ALIYUN_OSS_BUCKET}/${PREFIX}"
+          if ossutil stat "$DESTINATION/$RELEASE_TAG/release.json" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists in OSS; versioned assets are immutable." >&2
+            exit 1
+          fi
           while IFS= read -r -d '' FILE; do
             OBJECT_PATH="${FILE#release-output/$RELEASE_TAG/}"
             ossutil cp "$FILE" "$DESTINATION/$RELEASE_TAG/$OBJECT_PATH" \
@@ -470,6 +585,25 @@ jobs:
               --cache-control "public,max-age=31536000,immutable"
           done < <(find "release-output/$RELEASE_TAG" -type f -print0)
           ossutil stat "$DESTINATION/$RELEASE_TAG/release.json"
+
+      - name: Verify immutable version assets from the public endpoint
+        env:
+          OXIDE_VERIFY_VERSIONED_ASSETS: "1"
+          OXIDE_EXPECTED_RELEASE_INDEX: release-output/${{ needs.validate.outputs.tag }}/release.json
+        run: node scripts/verify-oss-release.mjs
+
+      - name: Publish latest manifest after immutable assets pass verification
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
+          OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PREFIX="${ALIYUN_OSS_PREFIX#/}"
+          PREFIX="${PREFIX%/}"
+          DESTINATION="oss://${ALIYUN_OSS_BUCKET}/${PREFIX}"
           ossutil cp release-output/latest.json "$DESTINATION/latest.json" \
             --force \
             --content-type "application/json; charset=utf-8" \

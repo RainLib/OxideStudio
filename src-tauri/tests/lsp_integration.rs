@@ -1497,7 +1497,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_case_then_uri,
         0,
         "SELECT CASE WHEN owner = 'app' THEN ".len() as u32,
-        &["NULL", "TRUE", "owner"],
+        &["NULL", "TRUE", "webhook.owner", "form.owner"],
     )
     .await?;
     assert_completion_at_excludes(
@@ -1505,7 +1505,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_case_then_uri,
         0,
         "SELECT CASE WHEN owner = 'app' THEN ".len() as u32,
-        &["FROM", "=", "!="],
+        &["FROM", "owner", "=", "!="],
     )
     .await?;
     assert_completion_at_contains(
@@ -1529,7 +1529,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_simple_case_uri,
         0,
         "SELECT CASE owner WHEN ".len() as u32,
-        &["NULL", "TRUE", "owner"],
+        &["NULL", "TRUE", "webhook.owner", "form.owner"],
     )
     .await?;
     assert_completion_at_excludes(
@@ -1537,7 +1537,7 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
         postgres_simple_case_uri,
         0,
         "SELECT CASE owner WHEN ".len() as u32,
-        &["FROM", "=", "!="],
+        &["FROM", "owner", "=", "!="],
     )
     .await?;
     assert_completion_at_contains(

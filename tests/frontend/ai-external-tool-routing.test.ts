@@ -71,7 +71,7 @@ function createDatabaseToolHarness() {
 }
 
 describe("external AI database tool routing", () => {
-  it("routes CLI metadata, query, and approved table mutation tools through injected adapters", async () => {
+  it("routes CLI reads and rejects caller self-approval for mutations", async () => {
     const { adapters, registry, createContext } = createDatabaseToolHarness();
     const cli = createCliToolAdapter({
       registry,
@@ -110,8 +110,8 @@ describe("external AI database tool routing", () => {
     expect(JSON.parse(query.stdout)).toEqual([
       expect.objectContaining({ row_count: 1, query: "SELECT * FROM users" }),
     ]);
-    expect(mutation.exitCode).toBe(0);
-    expect(JSON.parse(mutation.stdout)).toMatchObject({ inserted: 1 });
+    expect(mutation.exitCode).toBe(1);
+    expect(mutation.stderr).toContain("not a valid authorization");
 
     expect(adapters.listObjects).toHaveBeenCalledWith(
       { connectionId: null, namespace: "public" },
@@ -125,15 +125,7 @@ describe("external AI database tool routing", () => {
       },
       expect.objectContaining({ activeNamespace: "public" })
     );
-    expect(adapters.mutateTableRows).toHaveBeenCalledWith(
-      {
-        connectionId: null,
-        namespace: "public",
-        table: "users",
-        inserts: [{ id: 1 }],
-      },
-      expect.objectContaining({ activeDriver: "postgres" })
-    );
+    expect(adapters.mutateTableRows).not.toHaveBeenCalled();
   });
 
   it("routes MCP tool calls with context overrides through the same database adapters", async () => {

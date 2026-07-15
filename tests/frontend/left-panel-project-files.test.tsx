@@ -64,18 +64,19 @@ describe("secondary panel project files navigation", () => {
     expect(container.querySelector('[role="tablist"]')).toBeFalsy();
     expect(
       container
-        .querySelector('#secondary-panel-assistant')
-        ?.classList.contains("hidden")
+        .querySelector("#secondary-panel-assistant")
+        ?.classList.contains("hidden"),
     ).toBe(false);
-    expect(
-      container.querySelector('#secondary-panel-files')?.classList.contains("hidden")
-    ).toBe(true);
+    expect(container.querySelector("#secondary-panel-files")).toBeNull();
 
     await act(async () => {
       root?.render(<SecondaryPanel view="files" />);
     });
     expect(
-      container.querySelector('#secondary-panel-files')?.classList.contains("hidden")
+      container
+        .querySelector("#secondary-panel-files")
+        ?.classList.contains("hidden"),
     ).toBe(false);
+    expect(container.querySelector("#secondary-panel-assistant")).toBeNull();
   });
 });

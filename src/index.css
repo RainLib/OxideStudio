@@ -249,7 +249,7 @@
 
   .wb-tool-window {
     background: hsl(var(--wb-panel));
-    max-width: 32vw;
+    max-width: 50vw;
   }
 
   .wb-tool-header {
@@ -300,6 +300,15 @@
 
   .wb-panel-raised {
     background: hsl(var(--wb-panel-raised));
+  }
+
+  .wb-assistant-shell {
+    container-name: assistant-panel;
+    container-type: inline-size;
+  }
+
+  .wb-assistant-minimap {
+    display: none;
   }
 
   .wb-grid-surface {
@@ -488,6 +497,16 @@
 
   .wb-resizer-y:hover {
     background: hsl(var(--wb-accent) / 0.55);
+  }
+}
+
+@container assistant-panel (min-width: 500px) {
+  .wb-assistant-minimap {
+    display: block;
+  }
+
+  .wb-assistant-scroll-with-minimap {
+    padding-left: 30px;
   }
 }
 

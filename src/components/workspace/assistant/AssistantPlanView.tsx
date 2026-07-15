@@ -9,6 +9,8 @@ import type {
 import type { AiToolPermission, AiToolSummary } from "@/ai/tools/types";
 import {
   Check,
+  CheckCircle2,
+  ChevronRight,
   CircleAlert,
   Loader2,
   Play,
@@ -19,8 +21,8 @@ import {
 
 interface AssistantPlanViewProps {
   preparedTurn: AssistantPreparedTurn | null;
+  contextStaleMessage: string | null;
   executionEnabled: boolean;
-  runnableStepCount: number;
   safeStepCount: number;
   activeStepId: string | null;
   isRunning: boolean;
@@ -36,8 +38,8 @@ interface AssistantPlanViewProps {
 
 export function AssistantPlanView({
   preparedTurn,
+  contextStaleMessage,
   executionEnabled,
-  runnableStepCount,
   safeStepCount,
   activeStepId,
   isRunning,
@@ -51,68 +53,182 @@ export function AssistantPlanView({
   onRunStep,
 }: AssistantPlanViewProps) {
   if (!preparedTurn) return null;
+  const executableSteps = preparedTurn.suggestedPlan.filter(
+    (step) => step.toolName,
+  );
+  const completedSteps = executableSteps.filter(
+    (step) => toolResults[step.id]?.status === "success",
+  ).length;
+  const failedSteps = executableSteps.filter(
+    (step) =>
+      toolResults[step.id] && toolResults[step.id]?.status !== "success",
+  ).length;
+  const approvalSteps = executableSteps.filter(
+    (step) => step.requiresApproval && !toolResults[step.id],
+  ).length;
+  const stageLabel = processStageLabel({
+    contextStale: Boolean(contextStaleMessage),
+    executionEnabled,
+    isRunning,
+    totalSteps: executableSteps.length,
+    completedSteps,
+    failedSteps,
+    approvalSteps,
+  });
 
   return (
-    <section
-      className="mx-3 mb-3 border-y border-[hsl(var(--wb-border-subtle))]"
+    <details
+      className="group mx-3 mb-2 border-y border-[hsl(var(--wb-border-subtle))]"
       aria-label="Assistant plan"
     >
-      <div className="flex min-h-8 items-center gap-2 px-1.5 py-1">
-        <span className="text-[10px] font-semibold text-[hsl(var(--wb-text))]">
-          Plan
-        </span>
-        <span className="min-w-0 flex-1 truncate text-[10px] text-[hsl(var(--wb-text-muted))]">
-          {runnableStepCount > 0
-            ? `${runnableStepCount} tool ${runnableStepCount === 1 ? "step" : "steps"}`
-            : preparedTurn.intent}
-        </span>
-        {!executionEnabled && (
-          <span className="text-[9px] text-[hsl(var(--wb-text-muted))]">
-            Review only
+      <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 px-1.5 py-1 text-[10px] text-[hsl(var(--wb-text-muted))] marker:content-none hover:text-[hsl(var(--wb-text))] [&::-webkit-details-marker]:hidden">
+        <ChevronRight
+          size={11}
+          className="shrink-0 transition-transform duration-150 group-open:rotate-90"
+        />
+        <ProcessStatusIcon
+          isRunning={isRunning}
+          failedSteps={failedSteps}
+          completed={
+            executableSteps.length > 0 &&
+            completedSteps === executableSteps.length
+          }
+        />
+        <span className="min-w-0 flex-1 truncate">{stageLabel}</span>
+        {preparedTurn.warnings.length > 0 && (
+          <span className="shrink-0 rounded-[3px] bg-amber-500/10 px-1 text-[9px] text-amber-400">
+            {preparedTurn.warnings.length} warning
           </span>
         )}
-        {canRunSafe && (
-          <button
-            type="button"
-            className="wb-text-button h-6 px-1.5 text-[10px]"
-            onClick={onRunSafe}
-            title="Run all read-only steps"
-          >
-            <Play size={10} />
-            Run read-only{safeStepCount > 1 ? ` (${safeStepCount})` : ""}
-          </button>
-        )}
-      </div>
+      </summary>
 
-      {preparedTurn.warnings.length > 0 && (
-        <div className="border-t border-[hsl(var(--wb-border-subtle))] px-2 py-1.5 text-[10px] leading-4 text-amber-500">
-          {preparedTurn.warnings.join(" ")}
+      <div className="border-t border-[hsl(var(--wb-border-subtle))]">
+        <div className="flex min-h-7 items-center gap-2 px-2 py-1">
+          <span className="text-[9px] font-medium uppercase tracking-wide text-[hsl(var(--wb-text-muted))]">
+            {preparedTurn.intent}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-[9px] text-[hsl(var(--wb-text-muted))]">
+            {executableSteps.length} planned · {completedSteps} completed
+          </span>
+          {!executionEnabled && (
+            <span className="text-[9px] text-[hsl(var(--wb-text-muted))]">
+              Review only
+            </span>
+          )}
+          {canRunSafe && (
+            <button
+              type="button"
+              className="wb-text-button h-6 px-1.5 text-[10px]"
+              onClick={onRunSafe}
+              title="Run all read-only steps"
+            >
+              <Play size={10} />
+              Run read-only{safeStepCount > 1 ? ` (${safeStepCount})` : ""}
+            </button>
+          )}
         </div>
-      )}
 
-      <ol className="border-t border-[hsl(var(--wb-border-subtle))]">
-        {preparedTurn.suggestedPlan.map((step, index) => (
-          <AssistantPlanStepRow
-            key={step.id}
-            index={index}
-            step={step}
-            result={toolResults[step.id]}
-            summary={toolSummaries[step.id]}
-            tool={preparedTurn.availableTools.find(
-              (candidate) => candidate.name === step.toolName
-            )}
-            isApproved={approvedStepIds.has(step.id)}
-            isActive={activeStepId === step.id}
-            isRunning={isRunning}
-            executionEnabled={executionEnabled}
-            onApproveStep={onApproveStep}
-            onRevokeStepApproval={onRevokeStepApproval}
-            onRunStep={onRunStep}
-          />
-        ))}
-      </ol>
-    </section>
+        {contextStaleMessage && (
+          <div className="border-t border-[hsl(var(--wb-border-subtle))] bg-amber-500/8 px-2 py-1.5 text-[10px] leading-4 text-amber-400">
+            {contextStaleMessage}
+          </div>
+        )}
+
+        {preparedTurn.warnings.length > 0 && (
+          <div className="border-t border-[hsl(var(--wb-border-subtle))] px-2 py-1.5 text-[10px] leading-4 text-amber-500">
+            {preparedTurn.warnings.join(" ")}
+          </div>
+        )}
+
+        <ol className="border-t border-[hsl(var(--wb-border-subtle))]">
+          {preparedTurn.suggestedPlan.map((step, index) => (
+            <AssistantPlanStepRow
+              key={step.id}
+              index={index}
+              step={step}
+              result={toolResults[step.id]}
+              summary={toolSummaries[step.id]}
+              tool={preparedTurn.availableTools.find(
+                (candidate) => candidate.name === step.toolName,
+              )}
+              isApproved={approvedStepIds.has(step.id)}
+              isActive={activeStepId === step.id}
+              isRunning={isRunning}
+              executionEnabled={executionEnabled}
+              contextStale={Boolean(contextStaleMessage)}
+              onApproveStep={onApproveStep}
+              onRevokeStepApproval={onRevokeStepApproval}
+              onRunStep={onRunStep}
+            />
+          ))}
+        </ol>
+      </div>
+    </details>
   );
+}
+
+function ProcessStatusIcon({
+  isRunning,
+  failedSteps,
+  completed,
+}: {
+  isRunning: boolean;
+  failedSteps: number;
+  completed: boolean;
+}) {
+  if (isRunning) {
+    return (
+      <Loader2
+        size={11}
+        className="shrink-0 animate-spin text-[hsl(var(--wb-accent))]"
+      />
+    );
+  }
+  if (failedSteps > 0) {
+    return <CircleAlert size={11} className="shrink-0 text-amber-400" />;
+  }
+  if (completed) {
+    return <CheckCircle2 size={11} className="shrink-0 text-emerald-500" />;
+  }
+  return <ShieldCheck size={11} className="shrink-0 wb-muted" />;
+}
+
+function processStageLabel({
+  contextStale,
+  executionEnabled,
+  isRunning,
+  totalSteps,
+  completedSteps,
+  failedSteps,
+  approvalSteps,
+}: {
+  contextStale: boolean;
+  executionEnabled: boolean;
+  isRunning: boolean;
+  totalSteps: number;
+  completedSteps: number;
+  failedSteps: number;
+  approvalSteps: number;
+}) {
+  if (contextStale) return "Context changed · refresh required";
+  if (!executionEnabled) {
+    return `Plan ready · ${totalSteps} ${totalSteps === 1 ? "step" : "steps"}`;
+  }
+  if (isRunning) {
+    return `Running tools · ${completedSteps} of ${totalSteps} completed`;
+  }
+  if (failedSteps > 0) {
+    return `${failedSteps} ${failedSteps === 1 ? "step needs" : "steps need"} attention`;
+  }
+  if (approvalSteps > 0) {
+    return `${approvalSteps} ${approvalSteps === 1 ? "step needs" : "steps need"} approval`;
+  }
+  if (totalSteps > 0 && completedSteps === totalSteps) {
+    return `Ran ${totalSteps} ${totalSteps === 1 ? "tool step" : "tool steps"}`;
+  }
+  return totalSteps > 0
+    ? `Prepared ${totalSteps} ${totalSteps === 1 ? "tool step" : "tool steps"}`
+    : "No executable tool step";
 }
 
 function AssistantPlanStepRow({
@@ -125,6 +241,7 @@ function AssistantPlanStepRow({
   isActive,
   isRunning,
   executionEnabled,
+  contextStale,
   onApproveStep,
   onRevokeStepApproval,
   onRunStep,
@@ -138,6 +255,7 @@ function AssistantPlanStepRow({
   isActive: boolean;
   isRunning: boolean;
   executionEnabled: boolean;
+  contextStale: boolean;
   onApproveStep: (step: AssistantPlanStep) => void;
   onRevokeStepApproval: (step: AssistantPlanStep) => void;
   onRunStep: (step: AssistantPlanStep, approved?: boolean) => void;
@@ -169,7 +287,7 @@ function AssistantPlanStepRow({
             type="button"
             className="wb-icon-button h-6 w-6"
             onClick={() => onRunStep(step, false)}
-            disabled={isRunning}
+            disabled={isRunning || contextStale}
             title="Run step"
             aria-label={`Run ${step.title}`}
           >
@@ -203,7 +321,7 @@ function AssistantPlanStepRow({
                     variant="ghost"
                     size="sm"
                     className="h-6 rounded-[4px] px-2 text-[10px]"
-                    disabled={isRunning}
+                    disabled={isRunning || contextStale}
                     onClick={() => onRevokeStepApproval(step)}
                   >
                     <RotateCcw size={10} className="mr-1" />
@@ -213,7 +331,7 @@ function AssistantPlanStepRow({
                     variant="outline"
                     size="sm"
                     className="h-6 rounded-[4px] px-2 text-[10px]"
-                    disabled={isRunning || !canRun}
+                    disabled={isRunning || contextStale || !canRun}
                     onClick={() => onRunStep(step, true)}
                   >
                     <Play size={10} className="mr-1" />
@@ -225,7 +343,7 @@ function AssistantPlanStepRow({
                   variant="outline"
                   size="sm"
                   className="h-6 rounded-[4px] px-2 text-[10px] text-amber-500"
-                  disabled={isRunning}
+                  disabled={isRunning || contextStale}
                   onClick={() => onApproveStep(step)}
                 >
                   <ShieldCheck size={10} className="mr-1" />

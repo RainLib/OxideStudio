@@ -1,8 +1,9 @@
-import { APP_EVENT_OPEN_COMMAND_PALETTE } from "@/lib/actions";
+import { APP_EVENT_OPEN_COMMAND_PALETTE } from "@/lib/actionEvents";
 import type { WorkbenchSide } from "@/lib/appSettings";
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/store/useProjectStore";
 import {
+  Bell,
   ChevronRight,
   Database,
   FolderTree,
@@ -11,7 +12,13 @@ import {
   Sparkles,
   SquareTerminal,
 } from "lucide-react";
-import { TaskStatusCenter } from "./TaskStatusCenter";
+import { lazy, Suspense, useEffect, useState } from "react";
+
+const TaskStatusCenter = lazy(() =>
+  import("./TaskStatusCenter").then((module) => ({
+    default: module.TaskStatusCenter,
+  })),
+);
 
 interface WorkbenchTitleToolsProps {
   databaseExplorerOpen: boolean;
@@ -150,7 +157,7 @@ export function WorkbenchStatusBar({
             </span>
           </div>
         )}
-        <TaskStatusCenter />
+        <DeferredTaskStatusCenter />
         <div
           id="status-bar-slot"
           className="flex h-full min-w-0 items-center overflow-hidden"
@@ -159,7 +166,7 @@ export function WorkbenchStatusBar({
           type="button"
           className={cn(
             "flex h-full w-7 shrink-0 items-center justify-center text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
-            secondaryPanelOpen && "text-[hsl(var(--wb-accent))]"
+            secondaryPanelOpen && "text-[hsl(var(--wb-accent))]",
           )}
           onClick={onToggleSecondaryPanel}
           aria-pressed={secondaryPanelOpen}
@@ -169,5 +176,54 @@ export function WorkbenchStatusBar({
         </button>
       </div>
     </footer>
+  );
+}
+
+function DeferredTaskStatusCenter() {
+  const [enabled, setEnabled] = useState(false);
+
+  useEffect(() => {
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (
+        callback: IdleRequestCallback,
+        options?: IdleRequestOptions,
+      ) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    if (idleWindow.requestIdleCallback) {
+      const handle = idleWindow.requestIdleCallback(() => setEnabled(true), {
+        timeout: 1_000,
+      });
+      return () => idleWindow.cancelIdleCallback?.(handle);
+    }
+    const handle = window.setTimeout(() => setEnabled(true), 750);
+    return () => window.clearTimeout(handle);
+  }, []);
+
+  if (!enabled) {
+    return (
+      <button
+        type="button"
+        className="flex h-full w-7 items-center justify-center text-[hsl(var(--wb-text-muted))]"
+        title="Background Tasks"
+        aria-label="Background Tasks"
+        onPointerEnter={() => setEnabled(true)}
+        onFocus={() => setEnabled(true)}
+      >
+        <Bell size={12} />
+      </button>
+    );
+  }
+
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-full w-7 items-center justify-center text-[hsl(var(--wb-text-muted))]">
+          <Bell size={12} />
+        </div>
+      }
+    >
+      <TaskStatusCenter />
+    </Suspense>
   );
 }

@@ -15,7 +15,7 @@ export interface ThemeContextType {
  * 主题上下文
  */
 export const ThemeContext = createContext<ThemeContextType | undefined>(
-  undefined
+  undefined,
 );
 
 /**
@@ -49,6 +49,16 @@ function storeTheme(mode: ThemeMode): void {
   } catch (error) {
     console.warn("Failed to save theme to localStorage:", error);
   }
+}
+
+function resolveEffectiveTheme(mode: ThemeMode): "light" | "dark" {
+  if (mode !== "system") return mode;
+  if (typeof window !== "undefined" && window.matchMedia) {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  }
+  return "dark";
 }
 
 /**
@@ -89,19 +99,16 @@ export interface ThemeProviderProps {
 export function ThemeProvider({ children, defaultTheme }: ThemeProviderProps) {
   // Initialize state from storage or default
   const [mode, setMode] = useState<ThemeMode>(() => {
-    return (getStoredTheme() as ThemeMode) || defaultTheme || "system";
+    return defaultTheme || getStoredTheme();
   });
 
   // Calculate the effective theme (light or dark) based on mode and system preference
-  const [effectiveMode, setEffectiveMode] = useState<"light" | "dark">("dark");
+  const [effectiveMode, setEffectiveMode] = useState<"light" | "dark">(() =>
+    resolveEffectiveTheme(mode),
+  );
 
   const resolveSystemTheme = useCallback(() => {
-    if (typeof window !== "undefined" && window.matchMedia) {
-      return window.matchMedia("(prefers-color-scheme: dark)").matches
-        ? "dark"
-        : "light";
-    }
-    return "dark"; // Default fallback
+    return resolveEffectiveTheme("system");
   }, []);
 
   useEffect(() => {

@@ -1,4 +1,4 @@
-import { APP_EVENT_OPEN_COMMAND_PALETTE } from "@/lib/actions";
+import { APP_EVENT_OPEN_COMMAND_PALETTE } from "@/lib/actionEvents";
 import { requestProjectFilesPanel } from "@/lib/projectFilesNavigation";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";

@@ -70,6 +70,19 @@ export interface AiProviderTestResult {
   model: string;
 }
 
+export async function setProviderSecret(
+  baseUrl: string,
+  apiKey?: string,
+): Promise<boolean> {
+  return invokeWithInterceptors<boolean>("ai_set_provider_secret", {
+    request: { baseUrl, apiKey },
+  });
+}
+
+export async function hasProviderSecret(baseUrl: string): Promise<boolean> {
+  return invokeWithInterceptors<boolean>("ai_has_provider_secret", { baseUrl });
+}
+
 export async function chatCompletion(
   request: AiChatCompletionRequest,
   abortSignal?: AbortSignal
@@ -141,4 +154,6 @@ export const aiService = {
   inlineCompletion,
   cancelRequest,
   testProvider,
+  setProviderSecret,
+  hasProviderSecret,
 };

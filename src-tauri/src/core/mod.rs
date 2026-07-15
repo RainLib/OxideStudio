@@ -7,6 +7,7 @@ pub mod explain;
 pub mod manager;
 pub mod parser;
 pub mod protocol;
+pub mod provider_secret;
 pub mod redaction;
 pub mod schema_diff;
 pub mod ssh;

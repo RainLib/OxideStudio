@@ -13,6 +13,11 @@ import {
   defaultDatabasePort,
 } from "@/lib/databaseDialect";
 import { withTimeout } from "@/lib/withTimeout";
+import {
+  readConnectionDisplayCache,
+  writeConnectionDisplayCache,
+  type ConnectionDisplaySummary,
+} from "@/startup/dataSourceDisplayCache";
 
 const ACTIVE_PROJECT_KEY = "oxide-studio-active-project";
 const DEFAULT_PROJECT_ID = "sqls";
@@ -27,8 +32,12 @@ export interface ConnectionConfig extends SavedConnection {
   tags?: string[];
 }
 
+export type { ConnectionDisplaySummary } from "@/startup/dataSourceDisplayCache";
+
 interface ConnectionState {
   connections: ConnectionConfig[];
+  connectionDisplayCache: ConnectionDisplaySummary[];
+  hasConnectionDisplayCache: boolean;
   activeConnectionId: string | null;
   connectedConnectionIds: string[];
   isConnected: boolean;
@@ -78,6 +87,10 @@ interface PendingConnect {
 }
 
 const pendingConnects = new Map<string, PendingConnect>();
+let pendingConnectionLoad: {
+  projectId: string;
+  promise: Promise<void>;
+} | null = null;
 
 function activeProjectId() {
   try {
@@ -87,7 +100,9 @@ function activeProjectId() {
   }
 }
 
-function scopeConnectionToActiveProject<T extends ConnectionConfig>(config: T): T {
+function scopeConnectionToActiveProject<T extends ConnectionConfig>(
+  config: T,
+): T {
   return {
     ...config,
     projectId: config.projectId || activeProjectId(),
@@ -103,14 +118,23 @@ function connectionScopeKey(config: ConnectionConfig) {
 }
 
 export async function readProjectConnections(projectId: string) {
-  return (await connectionService.loadConnections(projectId)).map((connection) => ({
-    ...connection,
-    projectId: connection.projectId || projectId,
-  }));
+  const connections = (await connectionService.loadConnections(projectId)).map(
+    (connection) => ({
+      ...connection,
+      projectId: connection.projectId || projectId,
+    }),
+  );
+  writeConnectionDisplayCache(projectId, connections);
+  return connections;
 }
+
+const initialConnectionDisplayCache =
+  readConnectionDisplayCache(activeProjectId());
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connections: [],
+  connectionDisplayCache: initialConnectionDisplayCache ?? [],
+  hasConnectionDisplayCache: initialConnectionDisplayCache !== null,
   activeConnectionId: null,
   connectedConnectionIds: [],
   isConnected: false,
@@ -119,42 +143,64 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   selectedConnection: null,
 
   loadConnections: async () => {
-    set({ isLoading: true, loadError: null });
-    try {
-      const projectId = activeProjectId();
-      const connections = await withTimeout(
-        readProjectConnections(projectId),
-        CONNECTION_LOAD_TIMEOUT_MS,
-        "Loading saved data sources"
-      );
-      const activeConnectionId = get().activeConnectionId;
-      const activeConnectionExists = connections.some(
-        (connection) => connection.id === activeConnectionId
-      );
-      const connectedConnectionIds = get().connectedConnectionIds.filter((id) =>
-        connections.some((connection) => connection.id === id)
-      );
-
-      set({
-        connections,
-        activeConnectionId: activeConnectionExists ? activeConnectionId : null,
-        connectedConnectionIds,
-        isConnected: Boolean(
-          activeConnectionExists &&
-            activeConnectionId &&
-            connectedConnectionIds.includes(activeConnectionId)
-        ),
-        selectedConnection: null,
-        loadError: null,
-      });
-    } catch (e) {
-      console.error("Failed to load connections:", e);
-      set({
-        loadError: e instanceof Error ? e.message : String(e),
-      });
-    } finally {
-      set({ isLoading: false });
+    const projectId = activeProjectId();
+    if (pendingConnectionLoad?.projectId === projectId) {
+      return pendingConnectionLoad.promise;
     }
+
+    let promise!: Promise<void>;
+    promise = (async () => {
+      set({ isLoading: true, loadError: null });
+      try {
+        const connections = await withTimeout(
+          readProjectConnections(projectId),
+          CONNECTION_LOAD_TIMEOUT_MS,
+          "Loading saved data sources",
+        );
+        if (activeProjectId() !== projectId) return;
+
+        const activeConnectionId = get().activeConnectionId;
+        const activeConnectionExists = connections.some(
+          (connection) => connection.id === activeConnectionId,
+        );
+        const connectedConnectionIds = get().connectedConnectionIds.filter(
+          (id) => connections.some((connection) => connection.id === id),
+        );
+
+        set({
+          connections,
+          connectionDisplayCache: writeConnectionDisplayCache(
+            projectId,
+            connections,
+          ),
+          hasConnectionDisplayCache: true,
+          activeConnectionId: activeConnectionExists
+            ? activeConnectionId
+            : null,
+          connectedConnectionIds,
+          isConnected: Boolean(
+            activeConnectionExists &&
+            activeConnectionId &&
+            connectedConnectionIds.includes(activeConnectionId),
+          ),
+          selectedConnection: null,
+          loadError: null,
+        });
+      } catch (e) {
+        console.error("Failed to load connections:", e);
+        if (activeProjectId() === projectId) {
+          set({ loadError: e instanceof Error ? e.message : String(e) });
+        }
+      } finally {
+        if (pendingConnectionLoad?.promise === promise) {
+          pendingConnectionLoad = null;
+          set({ isLoading: false });
+        }
+      }
+    })();
+
+    pendingConnectionLoad = { projectId, promise };
+    return promise;
   },
 
   selectConnection: (id: string | null) => {
@@ -217,7 +263,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   saveConnection: async (config) => {
     const scopedConfig = scopeConnectionToActiveProject(config);
     const connections = get().connections;
-    const existingIndex = connections.findIndex((c) => c.id === scopedConfig.id);
+    const existingIndex = connections.findIndex(
+      (c) => c.id === scopedConfig.id,
+    );
 
     let updatedConnections;
     if (existingIndex >= 0) {
@@ -228,33 +276,50 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
 
     // Optimistic update
-    set({ connections: updatedConnections, selectedConnection: scopedConfig });
+    set({
+      connections: updatedConnections,
+      connectionDisplayCache: writeConnectionDisplayCache(
+        activeProjectId(),
+        updatedConnections,
+      ),
+      hasConnectionDisplayCache: true,
+      selectedConnection: scopedConfig,
+    });
 
     // Save to backend
-    await connectionService.saveConnections(updatedConnections, activeProjectId());
+    await connectionService.saveConnections(
+      updatedConnections,
+      activeProjectId(),
+    );
   },
 
   removeConnection: async (id) => {
     const state = get();
     const remainingConnections = state.connections.filter(
-      (connection) => connection.id !== id
+      (connection) => connection.id !== id,
     );
 
     if (remainingConnections.length === state.connections.length) return;
 
     const connectedConnectionIds = state.connectedConnectionIds.filter(
-      (connectionId) => connectionId !== id
+      (connectionId) => connectionId !== id,
     );
     const activeConnectionId =
       state.activeConnectionId === id
-        ? connectedConnectionIds[0] ?? null
+        ? (connectedConnectionIds[0] ?? null)
         : state.activeConnectionId;
     set({
       connections: remainingConnections,
+      connectionDisplayCache: writeConnectionDisplayCache(
+        activeProjectId(),
+        remainingConnections,
+      ),
+      hasConnectionDisplayCache: true,
       activeConnectionId,
       connectedConnectionIds,
       isConnected: Boolean(
-        activeConnectionId && connectedConnectionIds.includes(activeConnectionId)
+        activeConnectionId &&
+        connectedConnectionIds.includes(activeConnectionId),
       ),
       selectedConnection:
         state.selectedConnection?.id === id ? null : state.selectedConnection,
@@ -282,6 +347,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     } catch (error) {
       set({
         connections: state.connections,
+        connectionDisplayCache: writeConnectionDisplayCache(
+          activeProjectId(),
+          state.connections,
+        ),
+        hasConnectionDisplayCache: true,
         activeConnectionId: state.activeConnectionId,
         connectedConnectionIds: state.connectedConnectionIds,
         isConnected: state.isConnected,
@@ -302,7 +372,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       await connectionService.testConnection(
         config.driver,
         connectionUrlForConfig(config),
-        enabledSshTunnel(config)
+        enabledSshTunnel(config),
       );
       return null;
     } catch (e: any) {
@@ -338,7 +408,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           scopedConfig.id,
           scopedConfig.driver,
           connectionUrlForConfig(scopedConfig),
-          enabledSshTunnel(scopedConfig)
+          enabledSshTunnel(scopedConfig),
         );
 
         if (
@@ -351,7 +421,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             } catch (disconnectError) {
               console.warn(
                 "Failed to disconnect superseded backend connection:",
-                disconnectError
+                disconnectError,
               );
             }
           }
@@ -368,7 +438,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         set({
           activeConnectionId: scopedConfig.id,
           connectedConnectionIds: Array.from(
-            new Set([...get().connectedConnectionIds, scopedConfig.id])
+            new Set([...get().connectedConnectionIds, scopedConfig.id]),
           ),
           isConnected: true,
         });
@@ -455,7 +525,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
 
     const connectedConnectionIds = get().connectedConnectionIds.filter(
-      (id) => id !== connectionId
+      (id) => id !== connectionId,
     );
 
     const schemaStore = useSchemaStore.getState();
@@ -485,11 +555,11 @@ export type ConnectionReadiness =
  * cancellation instead of writing a stale error into the new workspace.
  */
 export async function ensureConnectionReady(
-  connectionId: string
+  connectionId: string,
 ): Promise<ConnectionReadiness> {
   const initialState = useConnectionStore.getState();
   const initialConnection = initialState.connections.find(
-    (connection) => connection.id === connectionId
+    (connection) => connection.id === connectionId,
   );
   if (!initialConnection) {
     return {
@@ -507,7 +577,7 @@ export async function ensureConnectionReady(
   const connectionError = await initialState.setActiveConnection(connectionId);
   const currentState = useConnectionStore.getState();
   const currentConnection = currentState.connections.find(
-    (connection) => connection.id === connectionId
+    (connection) => connection.id === connectionId,
   );
 
   if (

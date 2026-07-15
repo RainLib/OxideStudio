@@ -25,7 +25,9 @@ vi.mock("@/services/tauri", () => ({
   },
 }));
 
-function connection(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
+function connection(
+  overrides: Partial<ConnectionConfig> = {},
+): ConnectionConfig {
   return {
     id: "postgres-1",
     name: "Postgres",
@@ -72,6 +74,8 @@ describe("connection store", () => {
     vi.stubGlobal("localStorage", createStorageMock());
     useConnectionStore.setState({
       connections: [],
+      connectionDisplayCache: [],
+      hasConnectionDisplayCache: false,
       activeConnectionId: null,
       connectedConnectionIds: [],
       isConnected: false,
@@ -90,7 +94,7 @@ describe("connection store", () => {
     expect(mocks.testConnection).toHaveBeenCalledWith(
       "postgres",
       expect.stringContaining("localhost"),
-      undefined
+      undefined,
     );
     expect(mocks.connect).not.toHaveBeenCalled();
     expect(mocks.saveConnections).not.toHaveBeenCalled();
@@ -121,7 +125,7 @@ describe("connection store", () => {
       "postgres-1",
       "postgres",
       expect.stringContaining("localhost"),
-      undefined
+      undefined,
     );
     expect(useConnectionStore.getState().activeConnectionId).toBe("postgres-1");
     expect(useConnectionStore.getState().connectedConnectionIds).toEqual([
@@ -152,7 +156,7 @@ describe("connection store", () => {
         name: "MySQL",
         driver: "mysql",
         port: 3306,
-      })
+      }),
     );
 
     expect(error).toBeNull();
@@ -160,7 +164,7 @@ describe("connection store", () => {
       "mysql-1",
       "mysql",
       expect.stringContaining("localhost"),
-      undefined
+      undefined,
     );
     expect(mocks.disconnect).not.toHaveBeenCalled();
     expect(useConnectionStore.getState().activeConnectionId).toBe("mysql-1");
@@ -173,11 +177,15 @@ describe("connection store", () => {
 
   it("supplies driver default icons when creating or editing legacy connections", () => {
     useConnectionStore.setState({
-      connections: [connection({ id: "redis-1", driver: "redis", icon: undefined })],
+      connections: [
+        connection({ id: "redis-1", driver: "redis", icon: undefined }),
+      ],
     });
 
     useConnectionStore.getState().selectConnection("redis-1");
-    expect(useConnectionStore.getState().selectedConnection?.icon).toBe("KeyRound");
+    expect(useConnectionStore.getState().selectedConnection?.icon).toBe(
+      "KeyRound",
+    );
 
     const created = useConnectionStore.getState().createNewConnection();
     expect(created.icon).toBe("Database");
@@ -197,12 +205,14 @@ describe("connection store", () => {
       },
     });
 
-    await expect(useConnectionStore.getState().testConnection(config)).resolves.toBeNull();
+    await expect(
+      useConnectionStore.getState().testConnection(config),
+    ).resolves.toBeNull();
 
     expect(mocks.testConnection).toHaveBeenCalledWith(
       "postgres",
       "postgres://postgres:secret@db.internal:5432/app",
-      config.sshTunnel
+      config.sshTunnel,
     );
     expect(config.connectionUrl).toContain("db.internal");
     expect(config.connectionUrl).not.toContain("127.0.0.1");
@@ -288,7 +298,9 @@ describe("connection store", () => {
       isConnected: true,
     });
 
-    const switching = useConnectionStore.getState().setActiveConnection("redis-1");
+    const switching = useConnectionStore
+      .getState()
+      .setActiveConnection("redis-1");
     expect(useConnectionStore.getState()).toMatchObject({
       activeConnectionId: "redis-1",
       isConnected: false,
@@ -405,17 +417,48 @@ describe("connection store", () => {
     expect(useConnectionStore.getState().connections).toEqual([
       expect.objectContaining({ id: "postgres-1", projectId: "project-a" }),
     ]);
+    expect(useConnectionStore.getState().connectionDisplayCache).toEqual([
+      expect.objectContaining({
+        id: "postgres-1",
+        name: "Postgres",
+        driver: "postgres",
+      }),
+    ]);
+    expect(useConnectionStore.getState().hasConnectionDisplayCache).toBe(true);
+    const cachedPayload = vi
+      .mocked(localStorage.setItem)
+      .mock.calls.find(
+        ([key]) => key === "oxide-studio-data-sources:project-a",
+      )?.[1];
+    expect(cachedPayload).toContain('"name":"Postgres"');
+    expect(cachedPayload).not.toContain("secret");
 
     await useConnectionStore
       .getState()
-      .saveConnection(connection({ id: "mysql-1", driver: "mysql", port: 3306 }));
+      .saveConnection(
+        connection({ id: "mysql-1", driver: "mysql", port: 3306 }),
+      );
 
     expect(mocks.saveConnections).toHaveBeenCalledWith(
       expect.arrayContaining([
         expect.objectContaining({ id: "postgres-1", projectId: "project-a" }),
         expect.objectContaining({ id: "mysql-1", projectId: "project-a" }),
       ]),
-      "project-a"
+      "project-a",
+    );
+  });
+
+  it("treats a successfully loaded empty project as a usable display cache", async () => {
+    localStorage.setItem("oxide-studio-active-project", "empty-project");
+    mocks.loadConnections.mockResolvedValueOnce([]);
+
+    await useConnectionStore.getState().loadConnections();
+
+    expect(useConnectionStore.getState().connectionDisplayCache).toEqual([]);
+    expect(useConnectionStore.getState().hasConnectionDisplayCache).toBe(true);
+    expect(localStorage.setItem).toHaveBeenCalledWith(
+      "oxide-studio-data-sources:empty-project",
+      '{"version":1,"items":[]}',
     );
   });
 
@@ -465,7 +508,7 @@ describe("connection store", () => {
     expect(mocks.disconnect).toHaveBeenCalledWith(postgres.id);
     expect(mocks.deleteConnection).toHaveBeenCalledWith(
       postgres.id,
-      "project-a"
+      "project-a",
     );
     expect(useConnectionStore.getState()).toEqual(
       expect.objectContaining({
@@ -474,7 +517,7 @@ describe("connection store", () => {
         connectedConnectionIds: [mysql.id],
         isConnected: true,
         selectedConnection: null,
-      })
+      }),
     );
   });
 
@@ -490,7 +533,7 @@ describe("connection store", () => {
     });
 
     await expect(
-      useConnectionStore.getState().removeConnection(postgres.id)
+      useConnectionStore.getState().removeConnection(postgres.id),
     ).resolves.toBeUndefined();
 
     expect(mocks.deleteConnection).toHaveBeenCalledWith(postgres.id, "sqls");
@@ -501,7 +544,7 @@ describe("connection store", () => {
         connectedConnectionIds: [],
         isConnected: false,
         selectedConnection: null,
-      })
+      }),
     );
   });
 
@@ -536,7 +579,7 @@ describe("connection store", () => {
     });
 
     await expect(
-      useConnectionStore.getState().removeConnection(postgres.id)
+      useConnectionStore.getState().removeConnection(postgres.id),
     ).rejects.toThrow("delete failed");
     expect(useConnectionStore.getState().connections).toEqual([postgres]);
   });
@@ -557,7 +600,7 @@ describe("connection store", () => {
         name: "MySQL",
         driver: "mysql",
         port: 3306,
-      })
+      }),
     );
 
     mysqlConnect.resolve();

@@ -20,6 +20,7 @@ import {
   Search,
   X,
   GitCompareArrows,
+  AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,11 +42,6 @@ import {
   databaseObjectNavigationKey,
   useDatabaseNavigationStore,
 } from "@/lib/databaseNavigation";
-import { CreateDatabaseDialog } from "./CreateDatabaseDialog";
-import { RenameTableDialog } from "./RenameTableDialog";
-import { DdlViewerDialog } from "./DdlViewerDialog";
-import { EditColumnsDialog } from "./EditColumnsDialog";
-import { CreateViewDialog } from "./CreateViewDialog";
 import { useTableOperations } from "@/hooks/useTableOperations";
 import { databaseService, queryService, schemaService } from "@/services/tauri";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
@@ -78,6 +74,8 @@ import {
 import {
   type CSSProperties,
   type ReactNode,
+  lazy,
+  Suspense,
   useEffect,
   useMemo,
   useRef,
@@ -104,11 +102,8 @@ import {
   DatabaseExplorerHeader,
   DatabaseExplorerToolbar,
 } from "./DatabaseExplorerChrome";
-import { DataSourceDialog } from "./DataSourceDialog";
 import { DatabaseBrandIcon } from "@/components/icons/DatabaseBrandIcon";
 import { ConnectionGlyph } from "@/components/icons/ConnectionGlyph";
-import { RedisKeyDialog } from "./RedisKeyDialog";
-import { SchemaSnapshotDialog } from "./SchemaSnapshotDialog";
 import type { SchemaSnapshotIdentity } from "@/services/schemaSnapshotStore";
 import {
   PostgresDatabaseTree,
@@ -117,10 +112,7 @@ import {
 import { PostgresRemoteDatabaseContents } from "./PostgresRemoteDatabaseContents";
 import { PostgresDatabaseVisibilitySection } from "./PostgresDatabaseVisibilitySection";
 import { usePostgresDatabaseDiscovery } from "@/hooks/usePostgresDatabaseDiscovery";
-import {
-  buildRedisKeyTree,
-  type RedisKeyTreeNode,
-} from "@/lib/redisKey";
+import { buildRedisKeyTree, type RedisKeyTreeNode } from "@/lib/redisKey";
 import {
   Dialog,
   DialogContent,
@@ -129,6 +121,47 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+
+const DataSourceDialog = lazy(() =>
+  import("./DataSourceDialog").then((module) => ({
+    default: module.DataSourceDialog,
+  })),
+);
+const SchemaSnapshotDialog = lazy(() =>
+  import("./SchemaSnapshotDialog").then((module) => ({
+    default: module.SchemaSnapshotDialog,
+  })),
+);
+const CreateDatabaseDialog = lazy(() =>
+  import("./CreateDatabaseDialog").then((module) => ({
+    default: module.CreateDatabaseDialog,
+  })),
+);
+const RenameTableDialog = lazy(() =>
+  import("./RenameTableDialog").then((module) => ({
+    default: module.RenameTableDialog,
+  })),
+);
+const DdlViewerDialog = lazy(() =>
+  import("./DdlViewerDialog").then((module) => ({
+    default: module.DdlViewerDialog,
+  })),
+);
+const EditColumnsDialog = lazy(() =>
+  import("./EditColumnsDialog").then((module) => ({
+    default: module.EditColumnsDialog,
+  })),
+);
+const CreateViewDialog = lazy(() =>
+  import("./CreateViewDialog").then((module) => ({
+    default: module.CreateViewDialog,
+  })),
+);
+const RedisKeyDialog = lazy(() =>
+  import("./RedisKeyDialog").then((module) => ({
+    default: module.RedisKeyDialog,
+  })),
+);
 
 interface PostgresRemoteDatabaseState {
   connectionId: string | null;
@@ -162,13 +195,16 @@ const DRIVER_TREE_COLORS: Record<string, string> = {
   mongodb: "#5fb878",
 };
 
-function connectionTreeColor(driver: string | null | undefined, color?: string) {
+function connectionTreeColor(
+  driver: string | null | undefined,
+  color?: string,
+) {
   return color || DRIVER_TREE_COLORS[driver || ""] || "#75a7ff";
 }
 
 function connectionRegionStyle(
   color: string | undefined,
-  active: boolean
+  active: boolean,
 ): CSSProperties | undefined {
   if (!color) return undefined;
   return {
@@ -181,7 +217,7 @@ function connectionRegionStyle(
 function schemaTreeKey(
   connectionId: string,
   driver: string | null | undefined,
-  schema: string
+  schema: string,
 ) {
   return `${connectionId}:${driver || "unknown"}:${schema}`;
 }
@@ -190,7 +226,7 @@ function objectGroupKey(
   connectionId: string,
   driver: string | null | undefined,
   schema: string,
-  group: string
+  group: string,
 ) {
   return `${connectionId}:${driver || "unknown"}:${schema}:${group}`;
 }
@@ -235,29 +271,38 @@ function MetadataNodeBadge({ state }: { state?: MetadataNodeState }) {
 
 export function SchemaSidebar() {
   const activeConnectionId = useConnectionStore(
-    (state) => state.activeConnectionId
+    (state) => state.activeConnectionId,
   );
   const connections = useConnectionStore((state) => state.connections);
+  const connectionDisplayCache = useConnectionStore(
+    (state) => state.connectionDisplayCache,
+  );
+  const hasConnectionDisplayCache = useConnectionStore(
+    (state) => state.hasConnectionDisplayCache,
+  );
+  const connectionsLoading = useConnectionStore((state) => state.isLoading);
+  const connectionLoadError = useConnectionStore((state) => state.loadError);
+  const loadConnections = useConnectionStore((state) => state.loadConnections);
   const connectedConnectionIds = useConnectionStore(
-    (state) => state.connectedConnectionIds
+    (state) => state.connectedConnectionIds,
   );
   const setActiveConnection = useConnectionStore(
-    (state) => state.setActiveConnection
+    (state) => state.setActiveConnection,
   );
   const createNewConnection = useConnectionStore(
-    (state) => state.createNewConnection
+    (state) => state.createNewConnection,
   );
   const updateConnectionConfig = useConnectionStore(
-    (state) => state.updateConnectionConfig
+    (state) => state.updateConnectionConfig,
   );
   const selectConnection = useConnectionStore(
-    (state) => state.selectConnection
+    (state) => state.selectConnection,
   );
   const removeConnection = useConnectionStore(
-    (state) => state.removeConnection
+    (state) => state.removeConnection,
   );
   const setToolWindowVisible = useWorkbenchLayoutStore(
-    (store) => store.setToolWindowVisible
+    (store) => store.setToolWindowVisible,
   );
   const { activeProjectId } = useProjectStore();
   const {
@@ -302,7 +347,7 @@ export function SchemaSidebar() {
     string[]
   >([]);
   const [viewDialogMode, setViewDialogMode] = useState<"create" | "edit">(
-    "create"
+    "create",
   );
   const [viewDialogKind, setViewDialogKind] = useState<
     "view" | "materializedView"
@@ -312,22 +357,22 @@ export function SchemaSidebar() {
   const [isTablesHovered, setIsTablesHovered] = useState(false);
   const [schemaPickerOpen, setSchemaPickerOpen] = useState(false);
   const [schemaVisibilityKey, setSchemaVisibilityKey] = useState<string | null>(
-    null
+    null,
   );
   const [showAllSchemas, setShowAllSchemas] = useState(false);
   const [visibleSchemaNames, setVisibleSchemaNames] = useState<string[]>([]);
   const [expandedConnectionIds, setExpandedConnectionIds] = useState<string[]>(
-    []
+    [],
   );
   const [expandedSchemaKeys, setExpandedSchemaKeys] = useState<string[]>([]);
   const [expandedObjectGroupKeys, setExpandedObjectGroupKeys] = useState<
     string[]
   >([]);
   const databaseRevealRequest = useDatabaseNavigationStore(
-    (state) => state.revealRequest
+    (state) => state.revealRequest,
   );
   const clearDatabaseReveal = useDatabaseNavigationStore(
-    (state) => state.clearReveal
+    (state) => state.clearReveal,
   );
   const [postgresDatabaseRefreshVersion, setPostgresDatabaseRefreshVersion] =
     useState(0);
@@ -367,10 +412,10 @@ export function SchemaSidebar() {
   const [schemaSnapshotIdentity, setSchemaSnapshotIdentity] =
     useState<SchemaSnapshotIdentity | null>(null);
   const [capabilities, setCapabilities] = useState(() =>
-    defaultDatabaseCapabilities(DEFAULT_DATABASE_DRIVER)
+    defaultDatabaseCapabilities(DEFAULT_DATABASE_DRIVER),
   );
   const databaseExplorerSettings = useSettingsStore(
-    (store) => store.settings.databaseExplorer
+    (store) => store.settings.databaseExplorer,
   );
   const shouldAutoIntrospect =
     databaseExplorerSettings.refreshMode === "cache-first";
@@ -389,7 +434,7 @@ export function SchemaSidebar() {
 
   const activeConnection = connections.find((c) => c.id === activeConnectionId);
   const isActiveConnectionReady = Boolean(
-    activeConnectionId && connectedConnectionIds.includes(activeConnectionId)
+    activeConnectionId && connectedConnectionIds.includes(activeConnectionId),
   );
   const activeDriver = activeConnection?.driver || DEFAULT_DATABASE_DRIVER;
   const postgresDatabaseDiscovery = usePostgresDatabaseDiscovery({
@@ -409,19 +454,19 @@ export function SchemaSidebar() {
     activeCapabilities.supportsKeyValueBrowsing;
   const isActiveNamespaceExpanded = Boolean(
     activeConnectionId &&
-      currentSchema &&
-      (activeCapabilities.dataModel === "keyValue"
-        ? expandedObjectGroupKeys.includes(
-            objectGroupKey(
-              activeConnectionId,
-              activeDriver,
-              currentSchema,
-              "objects"
-            )
-          )
-        : expandedSchemaKeys.includes(
-            schemaTreeKey(activeConnectionId, activeDriver, currentSchema)
-          ))
+    currentSchema &&
+    (activeCapabilities.dataModel === "keyValue"
+      ? expandedObjectGroupKeys.includes(
+          objectGroupKey(
+            activeConnectionId,
+            activeDriver,
+            currentSchema,
+            "objects",
+          ),
+        )
+      : expandedSchemaKeys.includes(
+          schemaTreeKey(activeConnectionId, activeDriver, currentSchema),
+        )),
   );
   const collectionNamespace = currentSchema || "";
   const collectionNamespaceForTemplate = collectionNamespace || null;
@@ -455,11 +500,11 @@ export function SchemaSidebar() {
     return [
       activePostgresDatabase,
       ...discoveredDatabases.filter(
-        (database) => database !== activePostgresDatabase
+        (database) => database !== activePostgresDatabase,
       ),
     ].filter(
       (database, index, rows) =>
-        Boolean(database) && rows.indexOf(database) === index
+        Boolean(database) && rows.indexOf(database) === index,
     );
   }, [
     activeConnectionId,
@@ -473,20 +518,20 @@ export function SchemaSidebar() {
       : null;
   const visiblePostgresDatabaseSet = useMemo(
     () => new Set(visiblePostgresDatabaseNames),
-    [visiblePostgresDatabaseNames]
+    [visiblePostgresDatabaseNames],
   );
   const visiblePostgresDatabases = useMemo(
     () =>
       showAllPostgresDatabases
         ? postgresDatabaseRows
         : postgresDatabaseRows.filter((database) =>
-            visiblePostgresDatabaseSet.has(database)
+            visiblePostgresDatabaseSet.has(database),
           ),
     [
       postgresDatabaseRows,
       showAllPostgresDatabases,
       visiblePostgresDatabaseSet,
-    ]
+    ],
   );
   const postgresDatabaseCountLabel = showAllPostgresDatabases
     ? `${postgresDatabaseRows.length} db`
@@ -494,11 +539,11 @@ export function SchemaSidebar() {
   const preferredVisibleSchema =
     [currentSchema, defaultSchema, activeConnection?.database, schemas[0]].find(
       (schema): schema is string =>
-        Boolean(schema && (schemas.length === 0 || schemas.includes(schema)))
+        Boolean(schema && (schemas.length === 0 || schemas.includes(schema))),
     ) || null;
   const visibleSchemaSet = useMemo(
     () => new Set(visibleSchemaNames),
-    [visibleSchemaNames]
+    [visibleSchemaNames],
   );
   const schemaRows = useMemo(() => {
     if (schemas.length === 0) {
@@ -538,23 +583,28 @@ export function SchemaSidebar() {
     activeDriver === "postgres" || showAllSchemas || !shouldLimitVisibleSchemas
       ? String(schemas.length)
       : `${schemaRows.length} of ${schemas.length}`;
-  const metadataForConnection = (connectionId: string, driver?: string | null) => {
+  const metadataForConnection = (
+    connectionId: string,
+    driver?: string | null,
+  ) => {
     const isActiveConnection = connectionId === activeConnectionId;
     const snapshot =
-      connectionSnapshots[getConnectionMetadataSnapshotKey(connectionId, driver)];
+      connectionSnapshots[
+        getConnectionMetadataSnapshotKey(connectionId, driver)
+      ];
 
     return {
       isActiveConnection,
-      schemas: isActiveConnection ? schemas : snapshot?.schemas ?? [],
+      schemas: isActiveConnection ? schemas : (snapshot?.schemas ?? []),
       currentSchema: isActiveConnection
         ? currentSchema
-        : snapshot?.currentSchema ?? null,
+        : (snapshot?.currentSchema ?? null),
       defaultSchema: isActiveConnection
         ? defaultSchema
-        : snapshot?.defaultSchema ?? null,
+        : (snapshot?.defaultSchema ?? null),
       selectedTable: isActiveConnection
         ? selectedTable
-        : snapshot?.selectedTable ?? null,
+        : (snapshot?.selectedTable ?? null),
       isLoading: isActiveConnection ? isLoading : false,
       nodeState:
         metadataNodeStates[getConnectionMetadataNodeKey(connectionId, driver)],
@@ -571,7 +621,7 @@ export function SchemaSidebar() {
     "h-3.5 w-3.5 rounded-[3px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] data-[state=checked]:border-[hsl(var(--wb-accent))] data-[state=checked]:bg-[hsl(var(--wb-accent))] data-[state=checked]:text-[hsl(var(--wb-accent-foreground))]";
   const updateVisibleSchemas = (showAll: boolean, names: string[]) => {
     const normalizedNames = Array.from(new Set(names)).filter(
-      (schema) => schemas.length === 0 || schemas.includes(schema)
+      (schema) => schemas.length === 0 || schemas.includes(schema),
     );
     setShowAllSchemas(showAll);
     setVisibleSchemaNames(normalizedNames);
@@ -581,7 +631,7 @@ export function SchemaSidebar() {
     try {
       localStorage.setItem(
         schemaVisibilityStorageKey,
-        JSON.stringify({ all: showAll, schemas: normalizedNames })
+        JSON.stringify({ all: showAll, schemas: normalizedNames }),
       );
     } catch (error) {
       console.warn("Failed to persist visible schemas", error);
@@ -592,20 +642,24 @@ export function SchemaSidebar() {
     const nextChecked = checked === true;
     updateVisibleSchemas(
       nextChecked,
-      nextChecked ? schemas : preferredVisibleSchema ? [preferredVisibleSchema] : []
+      nextChecked
+        ? schemas
+        : preferredVisibleSchema
+          ? [preferredVisibleSchema]
+          : [],
     );
   };
 
   const handleToggleSchemaVisibility = (
     schema: string,
-    checked: boolean | "indeterminate"
+    checked: boolean | "indeterminate",
   ) => {
     const nextChecked = checked === true;
 
     if (showAllSchemas && !nextChecked) {
       updateVisibleSchemas(
         false,
-        schemas.filter((item) => item !== schema)
+        schemas.filter((item) => item !== schema),
       );
       return;
     }
@@ -618,12 +672,12 @@ export function SchemaSidebar() {
 
   const updateVisiblePostgresDatabases = (
     showAll: boolean,
-    names: string[]
+    names: string[],
   ) => {
     const normalizedNames = Array.from(new Set(names)).filter(
       (database) =>
         postgresDatabaseRows.length === 0 ||
-        postgresDatabaseRows.includes(database)
+        postgresDatabaseRows.includes(database),
     );
     setShowAllPostgresDatabases(showAll);
     setVisiblePostgresDatabaseNames(normalizedNames);
@@ -632,7 +686,7 @@ export function SchemaSidebar() {
     try {
       localStorage.setItem(
         postgresDatabaseVisibilityStorageKey,
-        JSON.stringify({ all: showAll, databases: normalizedNames })
+        JSON.stringify({ all: showAll, databases: normalizedNames }),
       );
     } catch (error) {
       console.warn("Failed to persist visible PostgreSQL databases", error);
@@ -640,24 +694,24 @@ export function SchemaSidebar() {
   };
 
   const handleToggleAllPostgresDatabases = (
-    checked: boolean | "indeterminate"
+    checked: boolean | "indeterminate",
   ) => {
     const nextChecked = checked === true;
     updateVisiblePostgresDatabases(
       nextChecked,
-      nextChecked ? postgresDatabaseRows : []
+      nextChecked ? postgresDatabaseRows : [],
     );
   };
 
   const handleTogglePostgresDatabaseVisibility = (
     database: string,
-    checked: boolean | "indeterminate"
+    checked: boolean | "indeterminate",
   ) => {
     const nextChecked = checked === true;
     if (showAllPostgresDatabases && !nextChecked) {
       updateVisiblePostgresDatabases(
         false,
-        postgresDatabaseRows.filter((item) => item !== database)
+        postgresDatabaseRows.filter((item) => item !== database),
       );
       return;
     }
@@ -702,7 +756,8 @@ export function SchemaSidebar() {
   };
 
   const handleEditViewClick = async (table: TableInfo) => {
-    if (!isViewObject(table.type) || isMaterializedViewObject(table.type)) return;
+    if (!isViewObject(table.type) || isMaterializedViewObject(table.type))
+      return;
     setActiveTable(table.name);
     setActiveTableType(table.type || null);
 
@@ -721,7 +776,7 @@ export function SchemaSidebar() {
   const handleTruncateClick = async (table: TableInfo) => {
     if (isReadOnlyRelationObject(table.type)) return;
     const confirmed = window.confirm(
-      `Empty all rows from "${table.name}"? This cannot be undone.`
+      `Empty all rows from "${table.name}"? This cannot be undone.`,
     );
     if (!confirmed) return;
     await truncateTable(table.name);
@@ -730,7 +785,7 @@ export function SchemaSidebar() {
   const handleDropClick = async (table: TableInfo) => {
     const label = relationObjectLabel(table.type).toLowerCase();
     const confirmed = window.confirm(
-      `Drop ${label} "${table.name}"? This will remove the ${label}.`
+      `Drop ${label} "${table.name}"? This will remove the ${label}.`,
     );
     if (!confirmed) return;
     await dropTable(table.name, table.type);
@@ -781,9 +836,7 @@ export function SchemaSidebar() {
     let showAll = true;
     let databases: string[] = [];
     try {
-      const saved = localStorage.getItem(
-        postgresDatabaseVisibilityStorageKey
-      );
+      const saved = localStorage.getItem(postgresDatabaseVisibilityStorageKey);
       if (saved) {
         const parsed = JSON.parse(saved) as {
           all?: unknown;
@@ -792,7 +845,7 @@ export function SchemaSidebar() {
         showAll = parsed.all !== false;
         databases = Array.isArray(parsed.databases)
           ? parsed.databases.filter(
-              (database): database is string => typeof database === "string"
+              (database): database is string => typeof database === "string",
             )
           : [];
       }
@@ -808,8 +861,7 @@ export function SchemaSidebar() {
   useEffect(() => {
     postgresRemoteContextVersion.current += 1;
     setPostgresRemoteDatabases({
-      connectionId:
-        activeDriver === "postgres" ? activeConnectionId : null,
+      connectionId: activeDriver === "postgres" ? activeConnectionId : null,
       schemas: {},
       tables: {},
     });
@@ -863,14 +915,14 @@ export function SchemaSidebar() {
             schemas?: unknown;
           };
           setShowAllSchemas(
-            shouldLimitVisibleSchemas ? parsed.all === true : true
+            shouldLimitVisibleSchemas ? parsed.all === true : true,
           );
           setVisibleSchemaNames(
             Array.isArray(parsed.schemas)
               ? parsed.schemas.filter(
-                  (schema): schema is string => typeof schema === "string"
+                  (schema): schema is string => typeof schema === "string",
                 )
-              : []
+              : [],
           );
           loaded = true;
         }
@@ -890,7 +942,7 @@ export function SchemaSidebar() {
             JSON.stringify({
               all: !shouldLimitVisibleSchemas,
               schemas: initialSchemas,
-            })
+            }),
           );
         } catch (error) {
           console.warn("Failed to persist initial visible schemas", error);
@@ -1001,7 +1053,7 @@ export function SchemaSidebar() {
         activeConnectionId,
         collectionNamespace,
         true,
-        filterText
+        filterText,
       );
     }, 250);
     return () => window.clearTimeout(timeout);
@@ -1040,21 +1092,20 @@ export function SchemaSidebar() {
   const schemaObjectsFor = (
     connectionId: string,
     driver: string | null | undefined,
-    schema: string
+    schema: string,
   ) => {
     const isActiveSchema =
       connectionId === activeConnectionId && schema === currentSchema;
-    const snapshot =
-      isActiveSchema
-        ? null
-        : objectSnapshots[
-            getSchemaObjectMetadataSnapshotKey(connectionId, driver, schema)
-          ];
+    const snapshot = isActiveSchema
+      ? null
+      : objectSnapshots[
+          getSchemaObjectMetadataSnapshotKey(connectionId, driver, schema)
+        ];
     const schemaTables = canBrowseTables
-      ? snapshot?.tables ?? (isActiveSchema ? tables : [])
+      ? (snapshot?.tables ?? (isActiveSchema ? tables : []))
       : [];
     const schemaCollections = canBrowseCollections
-      ? snapshot?.collections ?? (isActiveSchema ? collections : [])
+      ? (snapshot?.collections ?? (isActiveSchema ? collections : []))
       : [];
     const schemaFunctions =
       snapshot?.functions ?? (isActiveSchema ? functions : []);
@@ -1071,15 +1122,15 @@ export function SchemaSidebar() {
 
     return {
       tables: sortedTables.filter((table) =>
-        table.name.toLowerCase().includes(filterText.toLowerCase())
+        table.name.toLowerCase().includes(filterText.toLowerCase()),
       ),
       collections: [...schemaCollections]
         .sort((a, b) => a.name.localeCompare(b.name))
         .filter((collection) =>
-          collection.name.toLowerCase().includes(filterText.toLowerCase())
+          collection.name.toLowerCase().includes(filterText.toLowerCase()),
         ),
       functions: schemaFunctions.filter((routine) =>
-        routineMatchesFilter(routine, filterText)
+        routineMatchesFilter(routine, filterText),
       ),
       pinnedTables: schemaPinnedTables,
       hasSnapshot: Boolean(snapshot),
@@ -1090,7 +1141,7 @@ export function SchemaSidebar() {
     connectionId: string,
     database: string,
     currentDatabase: string,
-    normalizedFilter: string
+    normalizedFilter: string,
   ) => {
     if (!normalizedFilter) return true;
     if (database === currentDatabase) {
@@ -1103,7 +1154,7 @@ export function SchemaSidebar() {
               getSchemaObjectMetadataSnapshotKey(
                 connectionId,
                 "postgres",
-                schema
+                schema,
               )
             ];
         const schemaTables = isActiveSchema ? tables : snapshot?.tables || [];
@@ -1112,10 +1163,10 @@ export function SchemaSidebar() {
           : snapshot?.functions || [];
         return (
           schemaTables.some((table) =>
-            table.name.toLocaleLowerCase().includes(normalizedFilter)
+            table.name.toLocaleLowerCase().includes(normalizedFilter),
           ) ||
           schemaFunctions.some((routine) =>
-            routineMatchesFilter(routine, normalizedFilter)
+            routineMatchesFilter(routine, normalizedFilter),
           )
         );
       });
@@ -1124,22 +1175,22 @@ export function SchemaSidebar() {
     if (postgresRemoteDatabases.connectionId !== connectionId) return false;
     return (
       (postgresRemoteDatabases.schemas[database] || []).some((schema) =>
-        schema.toLocaleLowerCase().includes(normalizedFilter)
+        schema.toLocaleLowerCase().includes(normalizedFilter),
       ) ||
       Object.values(postgresRemoteDatabases.tables[database] || {}).some(
         (databaseTables) =>
           databaseTables.some((table) =>
-            table.name.toLocaleLowerCase().includes(normalizedFilter)
-          )
+            table.name.toLocaleLowerCase().includes(normalizedFilter),
+          ),
       )
     );
   };
 
   const findOrCreateTableTab = useTabStore(
-    (state) => state.findOrCreateTableTab
+    (state) => state.findOrCreateTableTab,
   );
   const findOrCreateObjectQueryTab = useTabStore(
-    (state) => state.findOrCreateObjectQueryTab
+    (state) => state.findOrCreateObjectQueryTab,
   );
   const loadTablePage = useTabStore((state) => state.loadTablePage);
   const createTableTab = useTabStore((state) => state.createTableTab);
@@ -1148,9 +1199,9 @@ export function SchemaSidebar() {
   const setTableMetadata = useTabStore((state) => state.setTableMetadata);
 
   const handleNewQueryConsole = () => {
-    const queryNumber = useTabStore
-      .getState()
-      .tabs.filter((tab) => tab.type === "query").length + 1;
+    const queryNumber =
+      useTabStore.getState().tabs.filter((tab) => tab.type === "query").length +
+      1;
     const connectionName = activeConnection?.name;
     createTab(
       "query",
@@ -1159,7 +1210,7 @@ export function SchemaSidebar() {
       {
         connectionId: activeConnectionId || undefined,
         schemaName: currentSchema || undefined,
-      }
+      },
     );
   };
 
@@ -1196,13 +1247,13 @@ export function SchemaSidebar() {
         console.warn("Failed to clear removed data source metadata:", error);
       }
       setExpandedConnectionIds((ids) =>
-        ids.filter((id) => id !== connectionId)
+        ids.filter((id) => id !== connectionId),
       );
       setExpandedSchemaKeys((keys) =>
-        keys.filter((key) => !key.startsWith(`${connectionId}:`))
+        keys.filter((key) => !key.startsWith(`${connectionId}:`)),
       );
       setExpandedObjectGroupKeys((keys) =>
-        keys.filter((key) => !key.startsWith(`${connectionId}:`))
+        keys.filter((key) => !key.startsWith(`${connectionId}:`)),
       );
       setPendingDataSourceRemoval(null);
     } catch (error) {
@@ -1226,7 +1277,7 @@ export function SchemaSidebar() {
     setExpandedConnectionIds((current) =>
       current.includes(activeConnectionId)
         ? current
-        : [...current, activeConnectionId]
+        : [...current, activeConnectionId],
     );
   };
 
@@ -1245,7 +1296,7 @@ export function SchemaSidebar() {
 
   const handleTableDoubleClick = async (
     table: TableInfo,
-    schemaName = currentSchema || ""
+    schemaName = currentSchema || "",
   ) => {
     if (!schemaName || !activeConnectionId) return;
 
@@ -1258,7 +1309,7 @@ export function SchemaSidebar() {
       activeConnectionId,
       schemaName,
       table.name,
-      table.type
+      table.type,
     );
 
     await loadTablePage(tabId, 0);
@@ -1268,7 +1319,7 @@ export function SchemaSidebar() {
     connectionId: string,
     databaseName: string,
     schemaName: string,
-    table: TableInfo
+    table: TableInfo,
   ) => {
     if (!connectionId || !databaseName || !schemaName) return;
 
@@ -1280,7 +1331,7 @@ export function SchemaSidebar() {
       schemaName,
       table.name,
       table.type,
-      databaseName
+      databaseName,
     );
 
     await loadTablePage(tabId, 0);
@@ -1294,21 +1345,21 @@ export function SchemaSidebar() {
     collectionPreviewQueryTemplateForCapabilities(
       activeCapabilities,
       collectionNamespaceForTemplate,
-      collection
+      collection,
     );
 
   const collectionDeleteSql = (collection: CollectionInfo) =>
     collectionDeleteQueryTemplateForCapabilities(
       activeCapabilities,
       collectionNamespaceForTemplate,
-      collection
+      collection,
     );
 
   const collectionCreateSql = (name: string) =>
     collectionCreateQueryTemplateForCapabilities(
       activeCapabilities,
       collectionNamespaceForTemplate,
-      name
+      name,
     );
 
   const refreshCollectionObjects = async () => {
@@ -1340,8 +1391,8 @@ export function SchemaSidebar() {
       collectionPreviewTabTitleForCapabilities(
         activeCapabilities,
         collection,
-        collectionNamespaceForTemplate
-      )
+        collectionNamespaceForTemplate,
+      ),
     );
     void runTabQuery(tabId, activeConnectionId, sql);
   };
@@ -1360,13 +1411,13 @@ export function SchemaSidebar() {
     const sql = collectionDeleteSql(collection);
     if (!sql) {
       window.alert(
-        `${activeCapabilities.displayName} ${collectionLabel.toLowerCase()} deletion is not supported.`
+        `${activeCapabilities.displayName} ${collectionLabel.toLowerCase()} deletion is not supported.`,
       );
       return;
     }
 
     const confirmed = window.confirm(
-      `Delete ${collectionLabel.toLowerCase()} "${collection.name}"? This cannot be undone.`
+      `Delete ${collectionLabel.toLowerCase()} "${collection.name}"? This cannot be undone.`,
     );
     if (!confirmed) return;
 
@@ -1396,17 +1447,22 @@ export function SchemaSidebar() {
     const sql = collectionCreateSql(name);
     if (!sql) {
       window.alert(
-        `${activeCapabilities.displayName} ${collectionLabel.toLowerCase()} creation is not supported.`
+        `${activeCapabilities.displayName} ${collectionLabel.toLowerCase()} creation is not supported.`,
       );
       return;
     }
 
-    const tabId = createTab("query", `Create ${collectionLabel}: ${name}`, sql, {
-      connectionId: activeConnectionId,
-      schemaName: collectionNamespace || undefined,
-      tableName: name,
-      objectType: collectionLabel.toLowerCase(),
-    });
+    const tabId = createTab(
+      "query",
+      `Create ${collectionLabel}: ${name}`,
+      sql,
+      {
+        connectionId: activeConnectionId,
+        schemaName: collectionNamespace || undefined,
+        tableName: name,
+        objectType: collectionLabel.toLowerCase(),
+      },
+    );
     void runCollectionMutation(tabId, sql);
   };
 
@@ -1416,7 +1472,7 @@ export function SchemaSidebar() {
     const existing = await queryService.executeQuery(
       activeConnectionId,
       `EXISTS ${JSON.stringify(normalizedName)}`,
-      collectionNamespace || undefined
+      collectionNamespace || undefined,
     );
     if (Number(existing[0]?.rows?.[0]?.[1] ?? 0) > 0) {
       throw new Error(`Key "${normalizedName}" already exists.`);
@@ -1424,7 +1480,7 @@ export function SchemaSidebar() {
     await queryService.executeQuery(
       activeConnectionId,
       command,
-      collectionNamespace || undefined
+      collectionNamespace || undefined,
     );
     await refreshCollectionObjects();
     selectTable(normalizedName);
@@ -1455,7 +1511,7 @@ export function SchemaSidebar() {
   const routineSignature = (routine: FunctionInfo) => {
     const parameters = (routine.parameters || [])
       .map((parameter) =>
-        [parameter.name, parameter.data_type].filter(Boolean).join(" ")
+        [parameter.name, parameter.data_type].filter(Boolean).join(" "),
       )
       .join(", ");
     return `${routine.name}(${parameters})`;
@@ -1471,7 +1527,11 @@ export function SchemaSidebar() {
   };
 
   const handleCreateView = () => {
-    if (activeConnectionId && currentSchema && activeCapabilities.supportsViews) {
+    if (
+      activeConnectionId &&
+      currentSchema &&
+      activeCapabilities.supportsViews
+    ) {
       setViewDialogMode("create");
       setViewDialogKind("view");
       setViewDialogInitialName("");
@@ -1498,7 +1558,7 @@ export function SchemaSidebar() {
   const handleCreateDatabase = () => {
     if (!activeCapabilities.supportsCreateDatabase) {
       setNamespaceError(
-        `${activeCapabilities.displayName} ${namespaceLabel} creation is not supported.`
+        `${activeCapabilities.displayName} ${namespaceLabel} creation is not supported.`,
       );
       return;
     }
@@ -1510,12 +1570,15 @@ export function SchemaSidebar() {
     if (!activeConnectionId || !targetSchema) return;
     if (!activeCapabilities.supportsRenameDatabase) {
       setNamespaceError(
-        `${activeCapabilities.displayName} ${namespaceLabel} rename is not supported safely.`
+        `${activeCapabilities.displayName} ${namespaceLabel} rename is not supported safely.`,
       );
       return;
     }
 
-    const nextName = window.prompt(`Rename ${namespaceLabel} to:`, targetSchema);
+    const nextName = window.prompt(
+      `Rename ${namespaceLabel} to:`,
+      targetSchema,
+    );
     if (nextName === null) return;
 
     const trimmedName = nextName.trim();
@@ -1527,7 +1590,7 @@ export function SchemaSidebar() {
         activeConnectionId,
         activeDriver,
         targetSchema,
-        trimmedName
+        trimmedName,
       );
       await loadSchemas(activeConnectionId, true);
       await setCurrentSchema(trimmedName);
@@ -1542,13 +1605,13 @@ export function SchemaSidebar() {
     if (!activeConnectionId || !targetSchema) return;
     if (!canMutateNamespaces) {
       setNamespaceError(
-        `${activeCapabilities.displayName} ${namespaceLabel} deletion is not supported.`
+        `${activeCapabilities.displayName} ${namespaceLabel} deletion is not supported.`,
       );
       return;
     }
 
     const confirmed = window.confirm(
-      `Drop ${namespaceLabel} "${targetSchema}" and all contained objects? This cannot be undone.`
+      `Drop ${namespaceLabel} "${targetSchema}" and all contained objects? This cannot be undone.`,
     );
     if (!confirmed) return;
 
@@ -1558,7 +1621,7 @@ export function SchemaSidebar() {
         activeConnectionId,
         activeDriver,
         targetSchema,
-        true
+        true,
       );
       await loadSchemas(activeConnectionId, true);
       bumpMetadataVersion();
@@ -1586,7 +1649,7 @@ export function SchemaSidebar() {
           activeConnectionId,
           collectionNamespace,
           true,
-          activeCapabilities.dataModel === "keyValue" ? filterText : undefined
+          activeCapabilities.dataModel === "keyValue" ? filterText : undefined,
         );
       }
     }
@@ -1620,43 +1683,43 @@ export function SchemaSidebar() {
         connectionId,
         schema,
         true,
-        activeCapabilities.dataModel === "keyValue" ? filterText : undefined
+        activeCapabilities.dataModel === "keyValue" ? filterText : undefined,
       );
     }
   };
 
   const handleForgetConnectionMetadata = async (
     connectionId: string,
-    connectionName: string
+    connectionName: string,
   ) => {
     const confirmed = window.confirm(
-      `Forget cached metadata for "${connectionName}"? The next refresh will introspect the data source again.`
+      `Forget cached metadata for "${connectionName}"? The next refresh will introspect the data source again.`,
     );
     if (!confirmed) return;
 
     await forgetConnectionMetadata(connectionId);
     setExpandedSchemaKeys((current) =>
-      current.filter((key) => !key.startsWith(`${connectionId}:`))
+      current.filter((key) => !key.startsWith(`${connectionId}:`)),
     );
     setExpandedObjectGroupKeys((current) =>
-      current.filter((key) => !key.startsWith(`${connectionId}:`))
+      current.filter((key) => !key.startsWith(`${connectionId}:`)),
     );
   };
 
   const handleForgetSchemaMetadata = async (
     connectionId: string,
     driver: string | null | undefined,
-    schema: string
+    schema: string,
   ) => {
     const confirmed = window.confirm(
-      `Forget cached object metadata for "${schema}"? The schema will stay listed, but tables and routines will be loaded again on refresh.`
+      `Forget cached object metadata for "${schema}"? The schema will stay listed, but tables and routines will be loaded again on refresh.`,
     );
     if (!confirmed) return;
 
     await forgetSchemaMetadata(connectionId, schema);
     const groupPrefix = objectGroupKey(connectionId, driver, schema, "");
     setExpandedObjectGroupKeys((current) =>
-      current.filter((key) => !key.startsWith(groupPrefix))
+      current.filter((key) => !key.startsWith(groupPrefix)),
     );
   };
 
@@ -1667,7 +1730,7 @@ export function SchemaSidebar() {
 
   const runForSchema = async (
     schema: string,
-    action: () => void | Promise<void>
+    action: () => void | Promise<void>,
   ) => {
     if (schema !== currentSchema) {
       await handleSchemaSelect(schema);
@@ -1681,7 +1744,7 @@ export function SchemaSidebar() {
 
     if (isExpanded && isConnected) {
       setExpandedConnectionIds((current) =>
-        current.filter((id) => id !== connectionId)
+        current.filter((id) => id !== connectionId),
       );
       return;
     }
@@ -1692,21 +1755,21 @@ export function SchemaSidebar() {
     setExpandedConnectionIds([connectionId]);
     if (!isConnected) {
       setConnectingConnectionIds((current) =>
-        current.includes(connectionId) ? current : [...current, connectionId]
+        current.includes(connectionId) ? current : [...current, connectionId],
       );
     }
     try {
       await setActiveConnection(connectionId);
     } finally {
       setConnectingConnectionIds((current) =>
-        current.filter((id) => id !== connectionId)
+        current.filter((id) => id !== connectionId),
       );
     }
   };
 
   const loadPostgresRemoteDatabase = async (
     connectionId: string,
-    database: string
+    database: string,
   ) => {
     const requestKey = `${connectionId}:${database}`;
     const requestId = postgresRemoteRequestCounter.current + 1;
@@ -1715,12 +1778,12 @@ export function SchemaSidebar() {
     postgresRemoteRequestIds.current[requestKey] = requestId;
     const databaseSchemas = await schemaService.getDatabaseSchemas(
       connectionId,
-      database
+      database,
     );
 
     const connectionState = useConnectionStore.getState();
     const connection = connectionState.connections.find(
-      (item) => item.id === connectionId
+      (item) => item.id === connectionId,
     );
     if (
       postgresRemoteRequestIds.current[requestKey] !== requestId ||
@@ -1738,8 +1801,7 @@ export function SchemaSidebar() {
         ...(current.connectionId === connectionId ? current.schemas : {}),
         [database]: Array.from(new Set(databaseSchemas)),
       },
-      tables:
-        current.connectionId === connectionId ? current.tables : {},
+      tables: current.connectionId === connectionId ? current.tables : {},
     }));
   };
 
@@ -1747,7 +1809,7 @@ export function SchemaSidebar() {
     connectionId: string,
     database: string,
     schema: string,
-    databaseTables: TableInfo[]
+    databaseTables: TableInfo[],
   ) => {
     if (useConnectionStore.getState().activeConnectionId !== connectionId) {
       return;
@@ -1770,7 +1832,7 @@ export function SchemaSidebar() {
   const handleSchemaRowClick = async (
     connectionId: string,
     schema: string,
-    isCurrentSchema: boolean
+    isCurrentSchema: boolean,
   ) => {
     const connection = connections.find((item) => item.id === connectionId);
     const driver = connection?.driver || activeDriver;
@@ -1779,7 +1841,7 @@ export function SchemaSidebar() {
 
     if (isExpanded) {
       setExpandedSchemaKeys((current) =>
-        current.filter((item) => item !== key)
+        current.filter((item) => item !== key),
       );
       return;
     }
@@ -1795,11 +1857,11 @@ export function SchemaSidebar() {
       await hydrateSchemaObjectsFromCache(connectionId, schema);
     }
     setExpandedSchemaKeys((current) =>
-      current.includes(key) ? current : [...current, key]
+      current.includes(key) ? current : [...current, key],
     );
     const objectsKey = objectGroupKey(connectionId, driver, schema, "objects");
     setExpandedObjectGroupKeys((current) =>
-      current.includes(objectsKey) ? current : [...current, objectsKey]
+      current.includes(objectsKey) ? current : [...current, objectsKey],
     );
   };
 
@@ -1807,7 +1869,9 @@ export function SchemaSidebar() {
     if (!databaseRevealRequest) return;
     const { id: requestId, target } = databaseRevealRequest;
     if (target.projectId !== activeProjectId) return;
-    const connection = connections.find((item) => item.id === target.connectionId);
+    const connection = connections.find(
+      (item) => item.id === target.connectionId,
+    );
     if (!connection) {
       clearDatabaseReveal(requestId);
       return;
@@ -1820,7 +1884,7 @@ export function SchemaSidebar() {
         if (connectionError || cancelled) return;
       }
       setExpandedConnectionIds((current) =>
-        current.includes(connection.id) ? current : [...current, connection.id]
+        current.includes(connection.id) ? current : [...current, connection.id],
       );
 
       const currentDatabase =
@@ -1844,19 +1908,19 @@ export function SchemaSidebar() {
       const schemaKey = schemaTreeKey(
         connection.id,
         connection.driver,
-        target.schemaName
+        target.schemaName,
       );
       const objectsKey = objectGroupKey(
         connection.id,
         connection.driver,
         target.schemaName,
-        "objects"
+        "objects",
       );
       setExpandedSchemaKeys((current) =>
-        current.includes(schemaKey) ? current : [...current, schemaKey]
+        current.includes(schemaKey) ? current : [...current, schemaKey],
       );
       setExpandedObjectGroupKeys((current) =>
-        current.includes(objectsKey) ? current : [...current, objectsKey]
+        current.includes(objectsKey) ? current : [...current, objectsKey],
       );
       selectTable(target.objectName);
       setFilterText("");
@@ -1868,7 +1932,7 @@ export function SchemaSidebar() {
             (connection.driver === "postgres" ? currentDatabase : undefined),
         });
         const element = document.querySelector<HTMLElement>(
-          `[data-database-object-key="${key}"]`
+          `[data-database-object-key="${key}"]`,
         );
         element?.scrollIntoView({ block: "nearest" });
         element?.focus();
@@ -1876,7 +1940,9 @@ export function SchemaSidebar() {
       });
     })().catch((error) => {
       if (!cancelled) {
-        setNamespaceError(error instanceof Error ? error.message : String(error));
+        setNamespaceError(
+          error instanceof Error ? error.message : String(error),
+        );
         clearDatabaseReveal(requestId);
       }
     });
@@ -1957,24 +2023,22 @@ export function SchemaSidebar() {
                 checkboxClassName={checkboxClass}
                 connectionColor={connectionTreeColor(activeDriver)}
                 onToggleAll={handleToggleAllPostgresDatabases}
-                onToggleDatabase={
-                  handleTogglePostgresDatabaseVisibility
-                }
+                onToggleDatabase={handleTogglePostgresDatabaseVisibility}
               />
             )}
             {!isPostgresPicker && (
               <>
-              <label className="flex h-6 cursor-default select-none items-center gap-2 px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))]">
-                <Checkbox
-                  className={checkboxClass}
-                  checked={showAllSchemas}
-                  onCheckedChange={handleToggleAllSchemas}
-                />
-                <span className="font-medium">All schemas</span>
-                <span className="ml-auto text-[10px] wb-muted">
-                  add pattern
-                </span>
-              </label>
+                <label className="flex h-6 cursor-default select-none items-center gap-2 px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))]">
+                  <Checkbox
+                    className={checkboxClass}
+                    checked={showAllSchemas}
+                    onCheckedChange={handleToggleAllSchemas}
+                  />
+                  <span className="font-medium">All schemas</span>
+                  <span className="ml-auto text-[10px] wb-muted">
+                    add pattern
+                  </span>
+                </label>
 
                 {defaultSchemaName && (
                   <label className="flex h-6 cursor-default select-none items-center gap-2 px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))]">
@@ -2110,12 +2174,12 @@ export function SchemaSidebar() {
     connectionId: string,
     driver: string | null | undefined,
     schema: string,
-    _connectionColor: string
+    _connectionColor: string,
   ) => {
     const isCurrentSchema =
       connectionId === activeConnectionId && schema === currentSchema;
     const objectConnection = connections.find(
-      (connection) => connection.id === connectionId
+      (connection) => connection.id === connectionId,
     );
     const navigationDatabaseName =
       objectConnection?.driver === "postgres"
@@ -2123,10 +2187,10 @@ export function SchemaSidebar() {
         : undefined;
     const schemaObjects = schemaObjectsFor(connectionId, driver, schema);
     const tableRelations = schemaObjects.tables.filter(
-      (table) => !isViewObject(table.type)
+      (table) => !isViewObject(table.type),
     );
     const virtualViews = schemaObjects.tables.filter((table) =>
-      isViewObject(table.type)
+      isViewObject(table.type),
     );
     const schemaObjectCount = canBrowseTables
       ? tableRelations.length
@@ -2145,7 +2209,9 @@ export function SchemaSidebar() {
     const groupKey = objectGroupKey(connectionId, driver, schema, "objects");
     const isObjectGroupExpanded = expandedObjectGroupKeys.includes(groupKey);
     const schemaNodeState =
-      metadataNodeStates[getSchemaMetadataNodeKey(connectionId, driver, schema)];
+      metadataNodeStates[
+        getSchemaMetadataNodeKey(connectionId, driver, schema)
+      ];
     const isSchemaObjectsLoading =
       schemaNodeState?.status === "loading" ||
       (isCurrentSchema && isLoading && schemaObjects.tables.length === 0);
@@ -2154,20 +2220,20 @@ export function SchemaSidebar() {
       connectionId,
       driver,
       schema,
-      "server-objects"
+      "server-objects",
     );
     const virtualViewsKey = objectGroupKey(
       connectionId,
       driver,
       schema,
-      "virtual-views"
+      "virtual-views",
     );
 
     const toggleObjectGroup = (key: string) => {
       setExpandedObjectGroupKeys((current) =>
         current.includes(key)
           ? current.filter((item) => item !== key)
-          : [...current, key]
+          : [...current, key],
       );
     };
 
@@ -2208,40 +2274,41 @@ export function SchemaSidebar() {
               Server Objects
             </span>
           </button>
-          {isExpanded && (isCurrentSchema &&
-          isFunctionsLoading &&
-          schemaObjects.functions.length === 0 ? (
-            <div className="pl-7 text-[11px] italic wb-muted">
-              Loading routines...
-            </div>
-          ) : schemaObjects.functions.length === 0 ? (
-            <div className="pl-7 text-[11px] italic wb-muted">
-              {filterText
-                ? `No routines match "${filterText}"`
-                : "No routines found"}
-            </div>
-          ) : (
-            schemaObjects.functions.map((routine, index) => {
-              const signature = routineSignature(routine);
-              const returnType = routine.return_type || "unknown";
+          {isExpanded &&
+            (isCurrentSchema &&
+            isFunctionsLoading &&
+            schemaObjects.functions.length === 0 ? (
+              <div className="pl-7 text-[11px] italic wb-muted">
+                Loading routines...
+              </div>
+            ) : schemaObjects.functions.length === 0 ? (
+              <div className="pl-7 text-[11px] italic wb-muted">
+                {filterText
+                  ? `No routines match "${filterText}"`
+                  : "No routines found"}
+              </div>
+            ) : (
+              schemaObjects.functions.map((routine, index) => {
+                const signature = routineSignature(routine);
+                const returnType = routine.return_type || "unknown";
 
-              return (
-                <div
-                  key={`${routine.name}:${signature}:${index}`}
-                  className="group ml-4 flex h-6 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
-                  title={`${signature} -> ${returnType}`}
-                >
-                  <Code2 size={12} className="shrink-0 opacity-70" />
-                  <span className="min-w-0 flex-1 truncate">
-                    {highlightMatch(routine.name, filterText)}
-                  </span>
-                  <span className="shrink-0 text-[9px] uppercase opacity-50">
-                    {routineKindLabel(routine)}
-                  </span>
-                </div>
-              );
-            })
-          ))}
+                return (
+                  <div
+                    key={`${routine.name}:${signature}:${index}`}
+                    className="group ml-4 flex h-6 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                    title={`${signature} -> ${returnType}`}
+                  >
+                    <Code2 size={12} className="shrink-0 opacity-70" />
+                    <span className="min-w-0 flex-1 truncate">
+                      {highlightMatch(routine.name, filterText)}
+                    </span>
+                    <span className="shrink-0 text-[9px] uppercase opacity-50">
+                      {routineKindLabel(routine)}
+                    </span>
+                  </div>
+                );
+              })
+            ))}
         </div>
       );
     };
@@ -2270,7 +2337,9 @@ export function SchemaSidebar() {
           </button>
           {isExpanded &&
             (virtualViews.length === 0 ? (
-              <div className="pl-7 text-[11px] italic wb-muted">No views found</div>
+              <div className="pl-7 text-[11px] italic wb-muted">
+                No views found
+              </div>
             ) : (
               virtualViews.map((view) => {
                 const isSelectedView =
@@ -2290,25 +2359,30 @@ export function SchemaSidebar() {
                           "group ml-4 flex h-6 cursor-pointer items-center gap-2 rounded-[3px] px-2 text-[11px]",
                           isSelectedView
                             ? "wb-tree-row-selected"
-                            : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                            : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
                         )}
                         onClick={() =>
                           void runForSchema(schema, () =>
-                            handleTableSelect(view.name)
+                            handleTableSelect(view.name),
                           )
                         }
                         onDoubleClick={() =>
                           void handleTableDoubleClick(view, schema)
                         }
                       >
-                        <TableProperties size={12} className="shrink-0 opacity-75" />
+                        <TableProperties
+                          size={12}
+                          className="shrink-0 opacity-75"
+                        />
                         <span className="truncate">{view.name}</span>
                       </div>
                     </ContextMenuTrigger>
                     <ContextMenuContent className={menuContentClass}>
                       <ContextMenuItem
                         className={menuItemClass}
-                        onClick={() => void handleTableDoubleClick(view, schema)}
+                        onClick={() =>
+                          void handleTableDoubleClick(view, schema)
+                        }
                       >
                         Open Data
                       </ContextMenuItem>
@@ -2338,7 +2412,7 @@ export function SchemaSidebar() {
     const renderCollectionItem = (
       collection: CollectionInfo,
       label = collection.name,
-      depth = 0
+      depth = 0,
     ) => {
       const canDeleteCollection = Boolean(collectionDeleteSql(collection));
       const isSelectedCollection =
@@ -2359,17 +2433,17 @@ export function SchemaSidebar() {
                 "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] py-1 pr-2 text-[11px] transition-colors",
                 isSelectedCollection
                   ? "wb-tree-row-selected"
-                  : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]"
+                  : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]",
               )}
               style={{ paddingLeft: `${8 + depth * 14}px` }}
               onClick={() =>
                 void runForSchema(schema, () =>
-                  handleCollectionSelect(collection.name)
+                  handleCollectionSelect(collection.name),
                 )
               }
               onDoubleClick={() =>
                 void runForSchema(schema, () =>
-                  handleCollectionDoubleClick(collection)
+                  handleCollectionDoubleClick(collection),
                 )
               }
               title={collection.name}
@@ -2378,7 +2452,7 @@ export function SchemaSidebar() {
                 size={12}
                 className={cn(
                   "shrink-0 text-red-400/80",
-                  isSelectedCollection && "opacity-100"
+                  isSelectedCollection && "opacity-100",
                 )}
               />
               <span className="min-w-0 flex-1 truncate">
@@ -2395,7 +2469,7 @@ export function SchemaSidebar() {
             <ContextMenuItem
               onClick={() =>
                 void runForSchema(schema, () =>
-                  handleCollectionDoubleClick(collection)
+                  handleCollectionDoubleClick(collection),
                 )
               }
             >
@@ -2405,7 +2479,7 @@ export function SchemaSidebar() {
             <ContextMenuItem
               onClick={() =>
                 void runForSchema(schema, () =>
-                  handleCopyCollectionPreview(collection)
+                  handleCopyCollectionPreview(collection),
                 )
               }
             >
@@ -2416,7 +2490,7 @@ export function SchemaSidebar() {
             <ContextMenuItem
               onClick={() =>
                 void runForSchema(schema, () =>
-                  handleDeleteCollectionClick(collection)
+                  handleDeleteCollectionClick(collection),
                 )
               }
               disabled={!canDeleteCollection}
@@ -2432,7 +2506,7 @@ export function SchemaSidebar() {
 
     const renderRedisKeyNodes = (
       nodes: RedisKeyTreeNode<CollectionInfo>[],
-      depth = 0
+      depth = 0,
     ): ReactNode =>
       nodes.map((node) => {
         if (node.children.length === 0 && node.key) {
@@ -2443,7 +2517,7 @@ export function SchemaSidebar() {
           connectionId,
           driver,
           schema,
-          `redis:${node.path}`
+          `redis:${node.path}`,
         );
         const isExpanded = expandedObjectGroupKeys.includes(key);
         return (
@@ -2470,8 +2544,7 @@ export function SchemaSidebar() {
             </button>
             {isExpanded && (
               <div>
-                {node.key &&
-                  renderCollectionItem(node.key, "(key)", depth + 1)}
+                {node.key && renderCollectionItem(node.key, "(key)", depth + 1)}
                 {renderRedisKeyNodes(node.children, depth + 1)}
               </div>
             )}
@@ -2492,7 +2565,7 @@ export function SchemaSidebar() {
             setExpandedObjectGroupKeys((current) =>
               current.includes(groupKey)
                 ? current.filter((item) => item !== groupKey)
-                : [...current, groupKey]
+                : [...current, groupKey],
             );
           }}
         >
@@ -2529,33 +2602,32 @@ export function SchemaSidebar() {
 
         {isObjectGroupExpanded && (
           <>
-            {activeCapabilities.dataModel === "keyValue" &&
-              isCurrentSchema && (
-                <div className="relative mx-1 mb-1 mt-0.5">
-                  <Search
-                    size={12}
-                    className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 wb-muted"
-                  />
-                  <input
-                    value={filterText}
-                    onChange={(event) => setFilterText(event.target.value)}
-                    placeholder="Filter Redis keys"
-                    aria-label="Filter Redis keys"
-                    spellCheck={false}
-                    className="h-7 w-full rounded-[3px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-surface))] pl-7 pr-7 text-[11px] text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
-                  />
-                  {filterText && (
-                    <button
-                      type="button"
-                      onClick={() => setFilterText("")}
-                      aria-label="Clear Redis key filter"
-                      className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 wb-muted hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]"
-                    >
-                      <X size={11} />
-                    </button>
-                  )}
-                </div>
-              )}
+            {activeCapabilities.dataModel === "keyValue" && isCurrentSchema && (
+              <div className="relative mx-1 mb-1 mt-0.5">
+                <Search
+                  size={12}
+                  className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 wb-muted"
+                />
+                <input
+                  value={filterText}
+                  onChange={(event) => setFilterText(event.target.value)}
+                  placeholder="Filter Redis keys"
+                  aria-label="Filter Redis keys"
+                  spellCheck={false}
+                  className="h-7 w-full rounded-[3px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-surface))] pl-7 pr-7 text-[11px] text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
+                />
+                {filterText && (
+                  <button
+                    type="button"
+                    onClick={() => setFilterText("")}
+                    aria-label="Clear Redis key filter"
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 wb-muted hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]"
+                  >
+                    <X size={11} />
+                  </button>
+                )}
+              </div>
+            )}
             {!hasSchemaObjectContext ? (
               <div className="px-2 py-1.5 text-[11px] italic wb-muted">
                 Select a {namespaceLabel} to view objects
@@ -2585,10 +2657,10 @@ export function SchemaSidebar() {
                 <div className="space-y-0.5">
                   {activeCapabilities.dataModel === "keyValue"
                     ? renderRedisKeyNodes(
-                        buildRedisKeyTree(schemaObjects.collections)
+                        buildRedisKeyTree(schemaObjects.collections),
                       )
                     : schemaObjects.collections.map((collection) =>
-                        renderCollectionItem(collection)
+                        renderCollectionItem(collection),
                       )}
                   {renderLoadMoreKeys()}
                 </div>
@@ -2611,14 +2683,14 @@ export function SchemaSidebar() {
               <div className="space-y-0.5">
                 {tableRelations.map((table) => {
                   const isPinned = schemaObjects.pinnedTables.includes(
-                    table.name
+                    table.name,
                   );
                   const isView = isViewObject(table.type);
                   const isMaterializedView = isMaterializedViewObject(
-                    table.type
+                    table.type,
                   );
                   const isReadOnlyRelation = isReadOnlyRelationObject(
-                    table.type
+                    table.type,
                   );
                   const isSelectedTable =
                     isCurrentSchema && selectedTable === table.name;
@@ -2629,29 +2701,31 @@ export function SchemaSidebar() {
                       onOpenChange={(open) => {
                         if (open) {
                           void runForSchema(schema, () =>
-                            handleTableSelect(table.name)
+                            handleTableSelect(table.name),
                           );
                         }
                       }}
                     >
                       <ContextMenuTrigger asChild>
                         <div
-                          data-database-object-key={databaseObjectNavigationKey({
-                            connectionId,
-                            databaseName: navigationDatabaseName,
-                            schemaName: schema,
-                            objectName: table.name,
-                          })}
+                          data-database-object-key={databaseObjectNavigationKey(
+                            {
+                              connectionId,
+                              databaseName: navigationDatabaseName,
+                              schemaName: schema,
+                              objectName: table.name,
+                            },
+                          )}
                           tabIndex={-1}
                           className={cn(
                             "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] px-2 py-1 text-[11px] transition-colors",
                             isSelectedTable
                               ? "wb-tree-row-selected"
-                              : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]"
+                              : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]",
                           )}
                           onClick={() =>
                             void runForSchema(schema, () =>
-                              handleTableSelect(table.name)
+                              handleTableSelect(table.name),
                             )
                           }
                           onDoubleClick={() =>
@@ -2664,13 +2738,13 @@ export function SchemaSidebar() {
                             className={cn(
                               "shrink-0 opacity-70",
                               isSelectedTable && "opacity-100",
-                              isPinned && "text-primary opacity-100"
+                              isPinned && "text-primary opacity-100",
                             )}
                           />
                           <span
                             className={cn(
                               "min-w-0 flex-1 truncate",
-                              isPinned && "font-bold text-foreground"
+                              isPinned && "font-bold text-foreground",
                             )}
                           >
                             {table.name}
@@ -2683,12 +2757,12 @@ export function SchemaSidebar() {
                                 "h-4 w-4 shrink-0 transition-all duration-200",
                                 isPinned
                                   ? "text-primary opacity-100"
-                                  : "text-muted-foreground opacity-0 group-hover:opacity-60 hover:opacity-100"
+                                  : "text-muted-foreground opacity-0 group-hover:opacity-60 hover:opacity-100",
                               )}
                               onClick={(event) => {
                                 event.stopPropagation();
                                 void runForSchema(schema, () =>
-                                  togglePinTable(table.name)
+                                  togglePinTable(table.name),
                                 );
                               }}
                               title={isPinned ? "Unpin Table" : "Pin Table"}
@@ -2703,307 +2777,320 @@ export function SchemaSidebar() {
                         </div>
                       </ContextMenuTrigger>
                       <ContextMenuContent className={menuContentClass}>
-                  <ContextMenuSub>
-                    <ContextMenuSubTrigger className={menuSubClass}>
-                      <Plus className="mr-2 h-3.5 w-3.5" />
-                      New
-                    </ContextMenuSubTrigger>
-                    <ContextMenuSubContent className={menuContentClass}>
+                        <ContextMenuSub>
+                          <ContextMenuSubTrigger className={menuSubClass}>
+                            <Plus className="mr-2 h-3.5 w-3.5" />
+                            New
+                          </ContextMenuSubTrigger>
+                          <ContextMenuSubContent className={menuContentClass}>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void runForSchema(schema, () => {
+                                  if (activeConnectionId) {
+                                    createTableTab(activeConnectionId, schema);
+                                  }
+                                })
+                              }
+                              disabled={!activeConnectionId || !canBrowseTables}
+                            >
+                              Table
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void runForSchema(schema, handleCreateView)
+                              }
+                              disabled={!activeCapabilities.supportsViews}
+                            >
+                              View
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void runForSchema(
+                                  schema,
+                                  handleCreateMaterializedView,
+                                )
+                              }
+                              disabled={
+                                !activeCapabilities.supportsMaterializedViews
+                              }
+                            >
+                              Materialized View
+                            </ContextMenuItem>
+                          </ContextMenuSubContent>
+                        </ContextMenuSub>
+
+                        <ContextMenuSub>
+                          <ContextMenuSubTrigger className={menuSubClass}>
+                            Copy/Paste
+                          </ContextMenuSubTrigger>
+                          <ContextMenuSubContent className={menuContentClass}>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() => void copyText(table.name)}
+                            >
+                              Copy Name
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
+                                  handleCopyTableDdl(table),
+                                )
+                              }
+                            >
+                              Copy DDL
+                            </ContextMenuItem>
+                          </ContextMenuSubContent>
+                        </ContextMenuSub>
+
                         <ContextMenuItem
                           className={menuItemClass}
                           onClick={() =>
-                            void runForSchema(schema, () => {
-                              if (activeConnectionId) {
-                                createTableTab(activeConnectionId, schema);
+                            void runForSchema(schema, async () => {
+                              if (!activeConnectionId) return;
+                              if (canBrowseTables) {
+                                await loadTables(
+                                  activeConnectionId,
+                                  schema,
+                                  true,
+                                );
+                                if (activeCapabilities.supportsFunctions) {
+                                  await loadFunctions(
+                                    activeConnectionId,
+                                    schema,
+                                    true,
+                                  );
+                                }
+                              }
+                              if (canBrowseCollections) {
+                                await loadCollections(
+                                  activeConnectionId,
+                                  schema,
+                                  true,
+                                );
+                              }
+                              const metadata = await loadTableMetadata({
+                                connectionId: activeConnectionId,
+                                driver: activeDriver,
+                                schema,
+                                table: table.name,
+                                includeIndexes:
+                                  activeCapabilities.supportsTableIndexes,
+                                includeConstraints:
+                                  activeCapabilities.supportsTableConstraints,
+                                force: true,
+                              });
+                              for (const tab of useTabStore.getState().tabs) {
+                                if (
+                                  tab.type === "table" &&
+                                  tab.connectionId === activeConnectionId &&
+                                  tab.schemaName === schema &&
+                                  tab.tableName === table.name
+                                ) {
+                                  setTableMetadata(tab.id, metadata);
+                                }
                               }
                             })
                           }
-                          disabled={!activeConnectionId || !canBrowseTables}
+                          disabled={isLoading}
                         >
-                          Table
+                          <RefreshCw className="mr-2 h-3.5 w-3.5" />
+                          Refresh
+                          <ContextMenuShortcut>⌘R</ContextMenuShortcut>
                         </ContextMenuItem>
                         <ContextMenuItem
                           className={menuItemClass}
                           onClick={() =>
-                            void runForSchema(schema, handleCreateView)
+                            void runForSchema(schema, () =>
+                              handleRenameClick(table),
+                            )
                           }
-                          disabled={!activeCapabilities.supportsViews}
                         >
-                          View
+                          Rename...
+                          <ContextMenuShortcut>⇧F6</ContextMenuShortcut>
                         </ContextMenuItem>
-                        <ContextMenuItem
-                          className={menuItemClass}
-                          onClick={() =>
-                            void runForSchema(
-                              schema,
-                              handleCreateMaterializedView
-                            )
-                          }
-                          disabled={
-                            !activeCapabilities.supportsMaterializedViews
-                          }
-                        >
-                        Materialized View
-                      </ContextMenuItem>
-                    </ContextMenuSubContent>
-                  </ContextMenuSub>
+                        <ContextMenuSeparator className={menuSeparatorClass} />
 
-                  <ContextMenuSub>
-                    <ContextMenuSubTrigger className={menuSubClass}>
-                      Copy/Paste
-                    </ContextMenuSubTrigger>
-                    <ContextMenuSubContent className={menuContentClass}>
-                      <ContextMenuItem
-                        className={menuItemClass}
-                        onClick={() => void copyText(table.name)}
-                      >
-                        Copy Name
-                      </ContextMenuItem>
                         <ContextMenuItem
                           className={menuItemClass}
                           onClick={() =>
                             void runForSchema(schema, () =>
-                              handleCopyTableDdl(table)
+                              handleDdlClick(table),
                             )
                           }
                         >
-                          Copy DDL
+                          Quick Documentation
+                          <ContextMenuShortcut>F1</ContextMenuShortcut>
                         </ContextMenuItem>
-                    </ContextMenuSubContent>
-                  </ContextMenuSub>
+                        <ContextMenuSub>
+                          <ContextMenuSubTrigger className={menuSubClass}>
+                            Navigation
+                          </ContextMenuSubTrigger>
+                          <ContextMenuSubContent className={menuContentClass}>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void handleTableDoubleClick(table, schema)
+                              }
+                            >
+                              Open Data
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
+                                  handleDdlClick(table),
+                                )
+                              }
+                            >
+                              Go to DDL
+                            </ContextMenuItem>
+                          </ContextMenuSubContent>
+                        </ContextMenuSub>
+                        <ContextMenuSeparator className={menuSeparatorClass} />
 
-                    <ContextMenuItem
-                      className={menuItemClass}
-                      onClick={() =>
-                        void runForSchema(schema, async () => {
-                          if (!activeConnectionId) return;
-                          if (canBrowseTables) {
-                            await loadTables(activeConnectionId, schema, true);
-                            if (activeCapabilities.supportsFunctions) {
-                              await loadFunctions(
-                                activeConnectionId,
-                                schema,
-                                true
-                              );
-                            }
-                          }
-                          if (canBrowseCollections) {
-                            await loadCollections(activeConnectionId, schema, true);
-                          }
-                          const metadata = await loadTableMetadata({
-                            connectionId: activeConnectionId,
-                            driver: activeDriver,
-                            schema,
-                            table: table.name,
-                            includeIndexes:
-                              activeCapabilities.supportsTableIndexes,
-                            includeConstraints:
-                              activeCapabilities.supportsTableConstraints,
-                            force: true,
-                          });
-                          for (const tab of useTabStore.getState().tabs) {
-                            if (
-                              tab.type === "table" &&
-                              tab.connectionId === activeConnectionId &&
-                              tab.schemaName === schema &&
-                              tab.tableName === table.name
-                            ) {
-                              setTableMetadata(tab.id, metadata);
-                            }
-                          }
-                        })
-                      }
-                      disabled={isLoading}
-                    >
-                    <RefreshCw className="mr-2 h-3.5 w-3.5" />
-                    Refresh
-                    <ContextMenuShortcut>⌘R</ContextMenuShortcut>
-                  </ContextMenuItem>
-                    <ContextMenuItem
-                      className={menuItemClass}
-                      onClick={() =>
-                        void runForSchema(schema, () => handleRenameClick(table))
-                      }
-                    >
-                    Rename...
-                    <ContextMenuShortcut>⇧F6</ContextMenuShortcut>
-                  </ContextMenuItem>
-                  <ContextMenuSeparator className={menuSeparatorClass} />
+                        <ContextMenuSub>
+                          <ContextMenuSubTrigger className={menuSubClass}>
+                            SQL Scripts
+                          </ContextMenuSubTrigger>
+                          <ContextMenuSubContent className={menuContentClass}>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
+                                  handleDdlClick(table),
+                                )
+                              }
+                            >
+                              Show DDL
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
+                                  handleCopyTableDdl(table),
+                                )
+                              }
+                            >
+                              Copy DDL
+                            </ContextMenuItem>
+                          </ContextMenuSubContent>
+                        </ContextMenuSub>
 
-                    <ContextMenuItem
-                      className={menuItemClass}
-                      onClick={() =>
-                        void runForSchema(schema, () => handleDdlClick(table))
-                      }
-                    >
-                    Quick Documentation
-                    <ContextMenuShortcut>F1</ContextMenuShortcut>
-                  </ContextMenuItem>
-                  <ContextMenuSub>
-                    <ContextMenuSubTrigger className={menuSubClass}>
-                      Navigation
-                    </ContextMenuSubTrigger>
-                    <ContextMenuSubContent className={menuContentClass}>
-                        <ContextMenuItem
-                          className={menuItemClass}
-                          onClick={() =>
-                            void handleTableDoubleClick(table, schema)
-                          }
-                        >
-                        Open Data
-                      </ContextMenuItem>
-                        <ContextMenuItem
-                          className={menuItemClass}
-                          onClick={() =>
-                            void runForSchema(schema, () =>
-                              handleDdlClick(table)
-                            )
-                          }
-                        >
-                        Go to DDL
-                      </ContextMenuItem>
-                    </ContextMenuSubContent>
-                  </ContextMenuSub>
-                  <ContextMenuSeparator className={menuSeparatorClass} />
+                        <ContextMenuSub>
+                          <ContextMenuSubTrigger className={menuSubClass}>
+                            Tools
+                          </ContextMenuSubTrigger>
+                          <ContextMenuSubContent className={menuContentClass}>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
+                                  togglePinTable(table.name),
+                                )
+                              }
+                            >
+                              {isPinned ? "Unpin" : "Pin"}
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
+                                  handleEditColumnsClick(table),
+                                )
+                              }
+                              disabled={isReadOnlyRelation}
+                            >
+                              Edit Columns
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
+                                  handleTruncateClick(table),
+                                )
+                              }
+                              disabled={isReadOnlyRelation}
+                            >
+                              Empty Table
+                            </ContextMenuItem>
+                            {isView && !isMaterializedView && (
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    handleEditViewClick(table),
+                                  )
+                                }
+                              >
+                                Edit View
+                              </ContextMenuItem>
+                            )}
+                            {isMaterializedView && (
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    handleRefreshMaterializedViewClick(table),
+                                  )
+                                }
+                              >
+                                Refresh Materialized View
+                              </ContextMenuItem>
+                            )}
+                          </ContextMenuSubContent>
+                        </ContextMenuSub>
 
-                  <ContextMenuSub>
-                    <ContextMenuSubTrigger className={menuSubClass}>
-                      SQL Scripts
-                    </ContextMenuSubTrigger>
-                    <ContextMenuSubContent className={menuContentClass}>
+                        <ContextMenuSub>
+                          <ContextMenuSubTrigger className={menuSubClass}>
+                            Import/Export
+                          </ContextMenuSubTrigger>
+                          <ContextMenuSubContent className={menuContentClass}>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
+                                  exportTableData(table.name, "csv"),
+                                )
+                              }
+                            >
+                              <Download className="mr-2 h-3.5 w-3.5" />
+                              Export CSV
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
+                                  exportTableData(table.name, "json"),
+                                )
+                              }
+                            >
+                              <Download className="mr-2 h-3.5 w-3.5" />
+                              Export JSON
+                            </ContextMenuItem>
+                          </ContextMenuSubContent>
+                        </ContextMenuSub>
+                        <ContextMenuSeparator className={menuSeparatorClass} />
                         <ContextMenuItem
-                          className={menuItemClass}
                           onClick={() =>
                             void runForSchema(schema, () =>
-                              handleDdlClick(table)
+                              handleDropClick(table),
                             )
                           }
+                          className={cn(menuItemClass, "text-destructive")}
                         >
-                        Show DDL
-                      </ContextMenuItem>
-                        <ContextMenuItem
-                          className={menuItemClass}
-                          onClick={() =>
-                            void runForSchema(schema, () =>
-                              handleCopyTableDdl(table)
-                            )
-                          }
-                        >
-                        Copy DDL
-                      </ContextMenuItem>
-                    </ContextMenuSubContent>
-                  </ContextMenuSub>
-
-                  <ContextMenuSub>
-                    <ContextMenuSubTrigger className={menuSubClass}>
-                      Tools
-                    </ContextMenuSubTrigger>
-                    <ContextMenuSubContent className={menuContentClass}>
-                        <ContextMenuItem
-                          className={menuItemClass}
-                          onClick={() =>
-                            void runForSchema(schema, () =>
-                              togglePinTable(table.name)
-                            )
-                          }
-                        >
-                        {isPinned ? "Unpin" : "Pin"}
-                      </ContextMenuItem>
-                        <ContextMenuItem
-                          className={menuItemClass}
-                          onClick={() =>
-                            void runForSchema(schema, () =>
-                              handleEditColumnsClick(table)
-                            )
-                          }
-                          disabled={isReadOnlyRelation}
-                        >
-                        Edit Columns
-                      </ContextMenuItem>
-                        <ContextMenuItem
-                          className={menuItemClass}
-                          onClick={() =>
-                            void runForSchema(schema, () =>
-                              handleTruncateClick(table)
-                            )
-                          }
-                          disabled={isReadOnlyRelation}
-                        >
-                        Empty Table
-                      </ContextMenuItem>
-                      {isView && !isMaterializedView && (
-                        <ContextMenuItem
-                            className={menuItemClass}
-                            onClick={() =>
-                              void runForSchema(schema, () =>
-                                handleEditViewClick(table)
-                              )
-                            }
-                          >
-                          Edit View
+                          <Trash2 className="mr-2 h-3.5 w-3.5" />
+                          Drop {relationObjectLabel(table.type)}...
                         </ContextMenuItem>
-                      )}
-                      {isMaterializedView && (
-                        <ContextMenuItem
-                            className={menuItemClass}
-                            onClick={() =>
-                              void runForSchema(schema, () =>
-                                handleRefreshMaterializedViewClick(table)
-                              )
-                            }
-                          >
-                          Refresh Materialized View
-                        </ContextMenuItem>
-                      )}
-                    </ContextMenuSubContent>
-                  </ContextMenuSub>
-
-                  <ContextMenuSub>
-                    <ContextMenuSubTrigger className={menuSubClass}>
-                      Import/Export
-                    </ContextMenuSubTrigger>
-                    <ContextMenuSubContent className={menuContentClass}>
-                        <ContextMenuItem
-                          className={menuItemClass}
-                          onClick={() =>
-                            void runForSchema(schema, () =>
-                              exportTableData(table.name, "csv")
-                            )
-                          }
-                        >
-                        <Download className="mr-2 h-3.5 w-3.5" />
-                        Export CSV
-                      </ContextMenuItem>
-                        <ContextMenuItem
-                          className={menuItemClass}
-                          onClick={() =>
-                            void runForSchema(schema, () =>
-                              exportTableData(table.name, "json")
-                            )
-                          }
-                        >
-                        <Download className="mr-2 h-3.5 w-3.5" />
-                        Export JSON
-                      </ContextMenuItem>
-                    </ContextMenuSubContent>
-                  </ContextMenuSub>
-                  <ContextMenuSeparator className={menuSeparatorClass} />
-                    <ContextMenuItem
-                      onClick={() =>
-                        void runForSchema(schema, () => handleDropClick(table))
-                      }
-                      className={cn(menuItemClass, "text-destructive")}
-                    >
-                    <Trash2 className="mr-2 h-3.5 w-3.5" />
-                    Drop {relationObjectLabel(table.type)}...
-                  </ContextMenuItem>
-                </ContextMenuContent>
-              </ContextMenu>
-            );
-          })}
-        </div>
-      )}
-
+                      </ContextMenuContent>
+                    </ContextMenu>
+                  );
+                })}
+              </div>
+            )}
           </>
         )}
         {renderServerObjects()}
@@ -3030,7 +3117,7 @@ export function SchemaSidebar() {
           canCreateNamespace={activeCapabilities.supportsCreateDatabase}
           canCreateTable={Boolean(currentSchema && canBrowseTables)}
           canCreateView={Boolean(
-            currentSchema && activeCapabilities.supportsViews
+            currentSchema && activeCapabilities.supportsViews,
           )}
           isFilterVisible={isFilterVisible}
           onNewQueryConsole={handleNewQueryConsole}
@@ -3076,7 +3163,93 @@ export function SchemaSidebar() {
 
       <div className="min-h-0 flex-1 overflow-auto px-1 py-1 custom-scrollbar">
         <div className="space-y-0">
-          {connections.length === 0 ? (
+          {connections.length === 0 && connectionDisplayCache.length > 0 ? (
+            <div className="space-y-0">
+              {connectionDisplayCache.map((connection) => (
+                <div
+                  key={connection.id}
+                  className="flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-[11px] text-[hsl(var(--wb-text-muted))]"
+                  aria-label={connection.name}
+                >
+                  <ChevronRight size={13} className="shrink-0 wb-muted" />
+                  <ConnectionGlyph
+                    driver={connection.driver}
+                    icon={connection.icon}
+                    size={14}
+                    className="shrink-0"
+                    style={{
+                      color: connectionTreeColor(
+                        connection.driver,
+                        connection.color,
+                      ),
+                    }}
+                  />
+                  <span className="truncate font-medium">
+                    {connection.name}
+                  </span>
+                </div>
+              ))}
+              {connectionLoadError && (
+                <div
+                  className="mt-1 flex items-start gap-1.5 px-2 py-1.5 text-[10px] text-amber-500"
+                  role="status"
+                >
+                  <AlertTriangle size={11} className="mt-0.5 shrink-0" />
+                  <span
+                    className="min-w-0 flex-1 truncate"
+                    title={connectionLoadError}
+                  >
+                    Showing cached data sources; refresh failed.
+                  </span>
+                  <button
+                    type="button"
+                    className="shrink-0 underline underline-offset-2"
+                    onClick={() => void loadConnections()}
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : connections.length === 0 &&
+            connectionsLoading &&
+            !hasConnectionDisplayCache ? (
+            <div
+              className="flex items-center gap-2 px-3 py-2.5 text-[11px] wb-muted"
+              role="status"
+              aria-label="Loading data sources"
+            >
+              <RefreshCw size={11} className="shrink-0 animate-spin" />
+              <span>Loading data sources…</span>
+            </div>
+          ) : connections.length === 0 && connectionLoadError ? (
+            <div
+              className="flex items-start gap-2 px-3 py-3 text-[11px] text-amber-500"
+              role="alert"
+            >
+              <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <div>
+                  {hasConnectionDisplayCache
+                    ? "No cached data sources; refresh failed."
+                    : "Could not load data sources."}
+                </div>
+                <div
+                  className="mt-0.5 truncate text-[10px] wb-muted"
+                  title={connectionLoadError}
+                >
+                  {connectionLoadError}
+                </div>
+                <button
+                  type="button"
+                  className="mt-1.5 text-[10px] underline underline-offset-2"
+                  onClick={() => void loadConnections()}
+                >
+                  Retry
+                </button>
+              </div>
+            </div>
+          ) : connections.length === 0 ? (
             <div className="flex flex-col items-center px-4 py-8 text-center">
               <DatabaseBrandIcon
                 driver={DEFAULT_DATABASE_DRIVER}
@@ -3102,21 +3275,22 @@ export function SchemaSidebar() {
             connections.map((connection) => {
               const connectionColor = connectionTreeColor(
                 connection.driver,
-                connection.color
+                connection.color,
               );
               const isActive = connection.id === activeConnectionId;
               const isConnecting = connectingConnectionIds.includes(
-                connection.id
+                connection.id,
               );
               const connectionMetadata = metadataForConnection(
                 connection.id,
-                connection.driver
+                connection.driver,
               );
               const connectionSchemas = isActive
                 ? schemaRows
                 : connectionMetadata.schemas;
-              const isConnectionExpanded =
-                expandedConnectionIds.includes(connection.id);
+              const isConnectionExpanded = expandedConnectionIds.includes(
+                connection.id,
+              );
               const isFlatKeyValueTree =
                 defaultDatabaseCapabilities(connection.driver).dataModel ===
                 "keyValue";
@@ -3145,7 +3319,7 @@ export function SchemaSidebar() {
                       const schemaObjects = schemaObjectsFor(
                         connection.id,
                         connection.driver,
-                        schema
+                        schema,
                       );
                       return (
                         schemaObjects.tables.length > 0 ||
@@ -3156,80 +3330,89 @@ export function SchemaSidebar() {
                   : connectionSchemas;
 
               return (
-                  <div
-                    id={`database-connection-${connection.id}`}
-                    key={connection.id}
-                    className="rounded-[3px] border border-transparent transition-colors"
-                    style={connectionRegionStyle(connection.color, isActive)}
-                  >
+                <div
+                  id={`database-connection-${connection.id}`}
+                  key={connection.id}
+                  className="rounded-[3px] border border-transparent transition-colors"
+                  style={connectionRegionStyle(connection.color, isActive)}
+                >
                   <ContextMenu>
                     <ContextMenuTrigger asChild>
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    className={cn(
-                      "flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] transition-colors",
-	                      isActive
-	                        ? "wb-tree-row-selected"
-                        : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
-                    )}
-                    onClick={() =>
-                      void handleConnectionRowClick(connection.id)
-                    }
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        void handleConnectionRowClick(connection.id);
-                      }
-                    }}
-                  >
-                    {isConnectionExpanded ? (
-                      <ChevronDown size={13} className="shrink-0 wb-muted" />
-                    ) : (
-                      <ChevronRight size={13} className="shrink-0 wb-muted" />
-                    )}
-                    <ConnectionGlyph
-                      driver={connection.driver}
-                      icon={connection.icon}
-                      size={14}
-                      className="shrink-0"
-                      style={{ color: connectionColor }}
-                      title={`${databaseDriverProfile(connection.driver).capabilities.displayName} data source`}
-                    />
-                    <span className="truncate font-medium">
-                      {connection.name}
-                    </span>
-                    <MetadataNodeBadge state={connectionMetadata.nodeState} />
-                    {(isConnecting ||
-                      (isActive &&
-                        isFlatKeyValueTree &&
-                        (isLoading || isCollectionsLoading))) && (
-                      <RefreshCw
-                        size={11}
-                        className="ml-auto shrink-0 animate-spin wb-muted"
-                        aria-label={
-                          isConnecting
-                            ? "Connecting to Redis"
-                            : "Loading Redis keys"
-                        }
-                      />
-                    )}
-                    {isActive && activeCapabilities.dataModel === "keyValue" ? (
-                      <span
+                      <div
+                        role="button"
+                        tabIndex={0}
                         className={cn(
-                          "rounded-[3px] bg-[hsl(var(--wb-panel-raised))] px-1 text-[9px] wb-muted",
-                          !isConnecting &&
-                            !isLoading &&
-                            !isCollectionsLoading &&
-                            "ml-auto"
+                          "flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] transition-colors",
+                          isActive
+                            ? "wb-tree-row-selected"
+                            : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
                         )}
+                        onClick={() =>
+                          void handleConnectionRowClick(connection.id)
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            void handleConnectionRowClick(connection.id);
+                          }
+                        }}
                       >
-                        db {currentSchema || connection.database || "0"}
-                      </span>
-                    ) : isActive ? (
-                      renderSchemaVisibilityPicker()
-                    ) : null}
-                  </div>
+                        {isConnectionExpanded ? (
+                          <ChevronDown
+                            size={13}
+                            className="shrink-0 wb-muted"
+                          />
+                        ) : (
+                          <ChevronRight
+                            size={13}
+                            className="shrink-0 wb-muted"
+                          />
+                        )}
+                        <ConnectionGlyph
+                          driver={connection.driver}
+                          icon={connection.icon}
+                          size={14}
+                          className="shrink-0"
+                          style={{ color: connectionColor }}
+                          title={`${databaseDriverProfile(connection.driver).capabilities.displayName} data source`}
+                        />
+                        <span className="truncate font-medium">
+                          {connection.name}
+                        </span>
+                        <MetadataNodeBadge
+                          state={connectionMetadata.nodeState}
+                        />
+                        {(isConnecting ||
+                          (isActive &&
+                            isFlatKeyValueTree &&
+                            (isLoading || isCollectionsLoading))) && (
+                          <RefreshCw
+                            size={11}
+                            className="ml-auto shrink-0 animate-spin wb-muted"
+                            aria-label={
+                              isConnecting
+                                ? "Connecting to Redis"
+                                : "Loading Redis keys"
+                            }
+                          />
+                        )}
+                        {isActive &&
+                        activeCapabilities.dataModel === "keyValue" ? (
+                          <span
+                            className={cn(
+                              "rounded-[3px] bg-[hsl(var(--wb-panel-raised))] px-1 text-[9px] wb-muted",
+                              !isConnecting &&
+                                !isLoading &&
+                                !isCollectionsLoading &&
+                                "ml-auto",
+                            )}
+                          >
+                            db {currentSchema || connection.database || "0"}
+                          </span>
+                        ) : isActive ? (
+                          renderSchemaVisibilityPicker()
+                        ) : null}
+                      </div>
                     </ContextMenuTrigger>
                     <ContextMenuContent className={menuContentClass}>
                       <ContextMenuSub>
@@ -3241,14 +3424,18 @@ export function SchemaSidebar() {
                           <ContextMenuItem
                             className={menuItemClass}
                             onClick={handleCreateDatabase}
-                            disabled={!activeCapabilities.supportsCreateDatabase}
+                            disabled={
+                              !activeCapabilities.supportsCreateDatabase
+                            }
                           >
                             {namespaceLabel}
                           </ContextMenuItem>
                           <ContextMenuItem
                             className={menuItemClass}
                             onClick={handleCreateTable}
-                            disabled={!isActive || !currentSchema || !canBrowseTables}
+                            disabled={
+                              !isActive || !currentSchema || !canBrowseTables
+                            }
                           >
                             Table
                           </ContextMenuItem>
@@ -3260,7 +3447,7 @@ export function SchemaSidebar() {
                                   void setActiveConnection(connection.id).then(
                                     (error) => {
                                       if (!error) setIsCreateRedisKeyOpen(true);
-                                    }
+                                    },
                                   );
                                   return;
                                 }
@@ -3297,7 +3484,7 @@ export function SchemaSidebar() {
                         onClick={() =>
                           void handleForgetConnectionMetadata(
                             connection.id,
-                            connection.name
+                            connection.name,
                           )
                         }
                       >
@@ -3335,7 +3522,7 @@ export function SchemaSidebar() {
                           connection.id,
                           connection.driver,
                           currentSchema,
-                          connectionColor
+                          connectionColor,
                         )
                       ) : (
                         <div className="flex items-center gap-1.5 px-1.5 py-1 text-[11px] italic wb-muted">
@@ -3353,19 +3540,14 @@ export function SchemaSidebar() {
                             ? postgresDatabaseRefreshVersion
                             : 0
                         }:${isActive ? "active" : "inactive"}`}
-                        enabled={
-                          isActive &&
-                          connection.driver === "postgres"
-                        }
+                        enabled={isActive && connection.driver === "postgres"}
                         databases={
                           postgresDatabaseDiscovery.connectionId ===
                           connection.id
                             ? postgresDatabaseDiscovery.databases
                             : []
                         }
-                        currentDatabase={
-                          connectedPostgresDatabase
-                        }
+                        currentDatabase={connectedPostgresDatabase}
                         status={
                           postgresDatabaseDiscovery.connectionId ===
                           connection.id
@@ -3397,7 +3579,7 @@ export function SchemaSidebar() {
                             connection.id,
                             database,
                             connectedPostgresDatabase,
-                            normalizedFilter
+                            normalizedFilter,
                           )
                         }
                         onLoadDatabase={
@@ -3407,19 +3589,18 @@ export function SchemaSidebar() {
                                   !useConnectionStore
                                     .getState()
                                     .connectedConnectionIds.includes(
-                                      connection.id
+                                      connection.id,
                                     )
                                 ) {
-                                  const connectionError = await setActiveConnection(
-                                    connection.id
-                                  );
+                                  const connectionError =
+                                    await setActiveConnection(connection.id);
                                   if (connectionError) {
                                     throw new Error(connectionError);
                                   }
                                 }
                                 await loadPostgresRemoteDatabase(
                                   connection.id,
-                                  database
+                                  database,
                                 );
                               }
                             : undefined
@@ -3441,7 +3622,7 @@ export function SchemaSidebar() {
                                 database
                                   .toLocaleLowerCase()
                                   .includes(
-                                    filterText.trim().toLocaleLowerCase()
+                                    filterText.trim().toLocaleLowerCase(),
                                   )
                                   ? ""
                                   : filterText
@@ -3451,7 +3632,7 @@ export function SchemaSidebar() {
                                   connection.id,
                                   database,
                                   schema,
-                                  databaseTables
+                                  databaseTables,
                                 )
                               }
                               onOpenSchemaSnapshots={(databaseName, schema) => {
@@ -3464,189 +3645,195 @@ export function SchemaSidebar() {
                                   schemaName: schema,
                                 });
                               }}
-                              onOpenTable={(
-                                databaseName,
-                                schema,
-                                table
-                              ) =>
+                              onOpenTable={(databaseName, schema, table) =>
                                 handlePostgresRemoteTableOpen(
                                   connection.id,
                                   databaseName,
                                   schema,
-                                  table
+                                  table,
                                 )
                               }
                             />
                           )
                         }
                       >
-                      {(connectionMetadata.isLoading ||
-                        connectionMetadata.nodeState?.status === "loading") &&
-                      connectionSchemas.length === 0 ? (
-                        <div className="px-1.5 py-1 text-[11px] italic wb-muted">
-                          Loading {namespaceLabelPlural}...
-                        </div>
-                      ) : renderedConnectionSchemas.length === 0 ? (
-                        <div className="px-1.5 py-1 text-[11px] italic wb-muted">
-                          {normalizedObjectFilter
-                            ? `No ${namespaceLabelPlural} match “${filterText.trim()}”`
-                            : `No ${namespaceLabelPlural} found`}
-                        </div>
-                      ) : (
-                        renderedConnectionSchemas.map((schema) => {
-                          const isCurrentSchema =
-                            isActive && schema === currentSchema;
-                          const schemaKey = schemaTreeKey(
-                            connection.id,
-                            connection.driver,
-                            schema
-                          );
-                          const isSchemaExpanded =
-                            expandedSchemaKeys.includes(schemaKey);
-                          const schemaNodeState =
-                            metadataNodeStates[
-                              getSchemaMetadataNodeKey(
-                                connection.id,
-                                connection.driver,
-                                schema
-                              )
-                            ];
+                        {(connectionMetadata.isLoading ||
+                          connectionMetadata.nodeState?.status === "loading") &&
+                        connectionSchemas.length === 0 ? (
+                          <div className="px-1.5 py-1 text-[11px] italic wb-muted">
+                            Loading {namespaceLabelPlural}...
+                          </div>
+                        ) : renderedConnectionSchemas.length === 0 ? (
+                          <div className="px-1.5 py-1 text-[11px] italic wb-muted">
+                            {normalizedObjectFilter
+                              ? `No ${namespaceLabelPlural} match “${filterText.trim()}”`
+                              : `No ${namespaceLabelPlural} found`}
+                          </div>
+                        ) : (
+                          renderedConnectionSchemas.map((schema) => {
+                            const isCurrentSchema =
+                              isActive && schema === currentSchema;
+                            const schemaKey = schemaTreeKey(
+                              connection.id,
+                              connection.driver,
+                              schema,
+                            );
+                            const isSchemaExpanded =
+                              expandedSchemaKeys.includes(schemaKey);
+                            const schemaNodeState =
+                              metadataNodeStates[
+                                getSchemaMetadataNodeKey(
+                                  connection.id,
+                                  connection.driver,
+                                  schema,
+                                )
+                              ];
 
-                          return (
-                            <div key={schema} className="min-w-0">
-                              <ContextMenu>
-                                <ContextMenuTrigger asChild>
-                                  <button
-                                    type="button"
-                                    className={cn(
-                                      "flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] transition-colors",
-                                      isCurrentSchema
-                                        ? "font-medium text-[hsl(var(--wb-text))]"
-                                        : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
-                                    )}
-                                    onClick={() => {
-                                      void handleSchemaRowClick(
-                                        connection.id,
-                                        schema,
+                            return (
+                              <div key={schema} className="min-w-0">
+                                <ContextMenu>
+                                  <ContextMenuTrigger asChild>
+                                    <button
+                                      type="button"
+                                      className={cn(
+                                        "flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] transition-colors",
                                         isCurrentSchema
-                                      ).catch((error) => {
-                                        console.warn(
-                                          "Failed to toggle schema",
-                                          error
-                                        );
-                                      });
-                                    }}
+                                          ? "font-medium text-[hsl(var(--wb-text))]"
+                                          : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
+                                      )}
+                                      onClick={() => {
+                                        void handleSchemaRowClick(
+                                          connection.id,
+                                          schema,
+                                          isCurrentSchema,
+                                        ).catch((error) => {
+                                          console.warn(
+                                            "Failed to toggle schema",
+                                            error,
+                                          );
+                                        });
+                                      }}
+                                    >
+                                      {isSchemaExpanded ? (
+                                        <ChevronDown
+                                          size={12}
+                                          className="shrink-0 wb-muted"
+                                        />
+                                      ) : (
+                                        <ChevronRight
+                                          size={12}
+                                          className="shrink-0 wb-muted"
+                                        />
+                                      )}
+                                      <Network
+                                        size={12}
+                                        className="shrink-0"
+                                        style={{ color: connectionColor }}
+                                      />
+                                      <span className="truncate">{schema}</span>
+                                      <MetadataNodeBadge
+                                        state={schemaNodeState}
+                                      />
+                                    </button>
+                                  </ContextMenuTrigger>
+                                  <ContextMenuContent
+                                    className={menuContentClass}
                                   >
-                                    {isSchemaExpanded ? (
-                                      <ChevronDown
-                                        size={12}
-                                        className="shrink-0 wb-muted"
-                                      />
-                                    ) : (
-                                      <ChevronRight
-                                        size={12}
-                                        className="shrink-0 wb-muted"
-                                      />
-                                    )}
-                                    <Network
-                                      size={12}
-                                      className="shrink-0"
-                                      style={{ color: connectionColor }}
-                                    />
-                                    <span className="truncate">{schema}</span>
-                                    <MetadataNodeBadge
-                                      state={schemaNodeState}
-                                    />
-                                  </button>
-                                </ContextMenuTrigger>
-                                <ContextMenuContent className={menuContentClass}>
-                                  <ContextMenuSub>
-                                    <ContextMenuSubTrigger
-                                      className={menuSubClass}
-                                    >
-                                      <Plus className="mr-2 h-3.5 w-3.5" />
-                                      New
-                                    </ContextMenuSubTrigger>
-                                    <ContextMenuSubContent
-                                      className={menuContentClass}
-                                    >
-                                      <ContextMenuItem
-                                        className={menuItemClass}
-                                        onClick={() => {
-                                          if (activeConnectionId) {
-                                            createTableTab(
-                                              activeConnectionId,
-                                              schema
-                                            );
+                                    <ContextMenuSub>
+                                      <ContextMenuSubTrigger
+                                        className={menuSubClass}
+                                      >
+                                        <Plus className="mr-2 h-3.5 w-3.5" />
+                                        New
+                                      </ContextMenuSubTrigger>
+                                      <ContextMenuSubContent
+                                        className={menuContentClass}
+                                      >
+                                        <ContextMenuItem
+                                          className={menuItemClass}
+                                          onClick={() => {
+                                            if (activeConnectionId) {
+                                              createTableTab(
+                                                activeConnectionId,
+                                                schema,
+                                              );
+                                            }
+                                          }}
+                                          disabled={
+                                            !activeConnectionId ||
+                                            !canBrowseTables
                                           }
-                                        }}
-                                        disabled={
-                                          !activeConnectionId || !canBrowseTables
-                                        }
-                                      >
-                                        Table
-                                      </ContextMenuItem>
-                                      <ContextMenuItem
-                                        className={menuItemClass}
-                                        onClick={() =>
-                                          void runForSchema(
-                                            schema,
-                                            handleCreateView
-                                          )
-                                        }
-                                        disabled={
-                                          !activeCapabilities.supportsViews
-                                        }
-                                      >
-                                        View
-                                      </ContextMenuItem>
-                                    </ContextMenuSubContent>
-                                  </ContextMenuSub>
-                                  <ContextMenuItem
-                                    className={menuItemClass}
-                                    onClick={() => void copyText(schema)}
-                                  >
-                                    Copy Name
-                                  </ContextMenuItem>
-                                  <ContextMenuSeparator
-                                    className={menuSeparatorClass}
-                                  />
-                                  <ContextMenuItem
-                                    className={menuItemClass}
-                                    onClick={() =>
-                                      void handleRefreshSchema(
-                                        connection.id,
-                                        schema
-                                      )
-                                    }
-                                    disabled={isLoading || isCollectionsLoading}
-                                  >
-                                    <RefreshCw className="mr-2 h-3.5 w-3.5" />
-                                    Refresh Selected
-                                    <ContextMenuShortcut>⌘R</ContextMenuShortcut>
-                                  </ContextMenuItem>
-                                  <ContextMenuItem
-                                    className={menuItemClass}
-                                    onClick={() =>
-                                      void handleForgetSchemaMetadata(
-                                        connection.id,
-                                        connection.driver,
-                                        schema
-                                      )
-                                    }
-                                  >
-                                    Forget Cached Metadata
-                                  </ContextMenuItem>
-                                  <ContextMenuItem
-                                    className={menuItemClass}
-                                    disabled={!supportsTableWorkspace(
-                                      defaultDatabaseCapabilities(
-                                        connection.driver,
-                                      ),
-                                    )}
-                                    onClick={() => {
-                                      void setActiveConnection(connection.id).then(
-                                        (connectionError) => {
+                                        >
+                                          Table
+                                        </ContextMenuItem>
+                                        <ContextMenuItem
+                                          className={menuItemClass}
+                                          onClick={() =>
+                                            void runForSchema(
+                                              schema,
+                                              handleCreateView,
+                                            )
+                                          }
+                                          disabled={
+                                            !activeCapabilities.supportsViews
+                                          }
+                                        >
+                                          View
+                                        </ContextMenuItem>
+                                      </ContextMenuSubContent>
+                                    </ContextMenuSub>
+                                    <ContextMenuItem
+                                      className={menuItemClass}
+                                      onClick={() => void copyText(schema)}
+                                    >
+                                      Copy Name
+                                    </ContextMenuItem>
+                                    <ContextMenuSeparator
+                                      className={menuSeparatorClass}
+                                    />
+                                    <ContextMenuItem
+                                      className={menuItemClass}
+                                      onClick={() =>
+                                        void handleRefreshSchema(
+                                          connection.id,
+                                          schema,
+                                        )
+                                      }
+                                      disabled={
+                                        isLoading || isCollectionsLoading
+                                      }
+                                    >
+                                      <RefreshCw className="mr-2 h-3.5 w-3.5" />
+                                      Refresh Selected
+                                      <ContextMenuShortcut>
+                                        ⌘R
+                                      </ContextMenuShortcut>
+                                    </ContextMenuItem>
+                                    <ContextMenuItem
+                                      className={menuItemClass}
+                                      onClick={() =>
+                                        void handleForgetSchemaMetadata(
+                                          connection.id,
+                                          connection.driver,
+                                          schema,
+                                        )
+                                      }
+                                    >
+                                      Forget Cached Metadata
+                                    </ContextMenuItem>
+                                    <ContextMenuItem
+                                      className={menuItemClass}
+                                      disabled={
+                                        !supportsTableWorkspace(
+                                          defaultDatabaseCapabilities(
+                                            connection.driver,
+                                          ),
+                                        )
+                                      }
+                                      onClick={() => {
+                                        void setActiveConnection(
+                                          connection.id,
+                                        ).then((connectionError) => {
                                           if (connectionError) {
                                             setNamespaceError(connectionError);
                                             return;
@@ -3662,80 +3849,85 @@ export function SchemaSidebar() {
                                                 : undefined,
                                             schemaName: schema,
                                           });
-                                        },
-                                      );
-                                    }}
-                                  >
-                                    <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
-                                    Schema Snapshots / Diff...
-                                  </ContextMenuItem>
-                                  <ContextMenuItem
-                                    className={menuItemClass}
-                                    onClick={() =>
-                                      void handleRenameDatabase(schema)
-                                    }
-                                    disabled={
-                                      !activeCapabilities.supportsRenameDatabase
-                                    }
-                                  >
-                                    Rename...
-                                    <ContextMenuShortcut>⇧F6</ContextMenuShortcut>
-                                  </ContextMenuItem>
-                                  <ContextMenuSeparator
-                                    className={menuSeparatorClass}
-                                  />
-                                  <ContextMenuSub>
-                                    <ContextMenuSubTrigger
-                                      className={menuSubClass}
+                                        });
+                                      }}
                                     >
-                                      Introspection Level
-                                    </ContextMenuSubTrigger>
-                                    <ContextMenuSubContent
-                                      className={menuContentClass}
+                                      <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
+                                      Schema Snapshots / Diff...
+                                    </ContextMenuItem>
+                                    <ContextMenuItem
+                                      className={menuItemClass}
+                                      onClick={() =>
+                                        void handleRenameDatabase(schema)
+                                      }
+                                      disabled={
+                                        !activeCapabilities.supportsRenameDatabase
+                                      }
                                     >
-                                      <ContextMenuItem className={menuItemClass}>
-                                        Standard
-                                      </ContextMenuItem>
-                                      <ContextMenuItem
-                                        className={menuItemClass}
-                                        disabled
+                                      Rename...
+                                      <ContextMenuShortcut>
+                                        ⇧F6
+                                      </ContextMenuShortcut>
+                                    </ContextMenuItem>
+                                    <ContextMenuSeparator
+                                      className={menuSeparatorClass}
+                                    />
+                                    <ContextMenuSub>
+                                      <ContextMenuSubTrigger
+                                        className={menuSubClass}
                                       >
-                                        Full
-                                      </ContextMenuItem>
-                                    </ContextMenuSubContent>
-                                  </ContextMenuSub>
-                                  <ContextMenuItem
-                                    className={menuItemClass}
-                                    disabled
-                                  >
-                                    Diagnostics
-                                  </ContextMenuItem>
-                                  <ContextMenuSeparator
-                                    className={menuSeparatorClass}
-                                  />
-                                  <ContextMenuItem
-                                    className={cn(
-                                      menuItemClass,
-                                      "text-destructive"
-                                    )}
-                                    onClick={() => void handleDropDatabase(schema)}
-                                    disabled={!canMutateNamespaces}
-                                  >
-                                    Drop...
-                                  </ContextMenuItem>
-                                </ContextMenuContent>
-                              </ContextMenu>
-                              {isSchemaExpanded &&
-                                renderSchemaObjects(
-                                  connection.id,
-                                  connection.driver,
-                                  schema,
-                                  connectionColor
-                                )}
-                            </div>
-                          );
-                        })
-                      )}
+                                        Introspection Level
+                                      </ContextMenuSubTrigger>
+                                      <ContextMenuSubContent
+                                        className={menuContentClass}
+                                      >
+                                        <ContextMenuItem
+                                          className={menuItemClass}
+                                        >
+                                          Standard
+                                        </ContextMenuItem>
+                                        <ContextMenuItem
+                                          className={menuItemClass}
+                                          disabled
+                                        >
+                                          Full
+                                        </ContextMenuItem>
+                                      </ContextMenuSubContent>
+                                    </ContextMenuSub>
+                                    <ContextMenuItem
+                                      className={menuItemClass}
+                                      disabled
+                                    >
+                                      Diagnostics
+                                    </ContextMenuItem>
+                                    <ContextMenuSeparator
+                                      className={menuSeparatorClass}
+                                    />
+                                    <ContextMenuItem
+                                      className={cn(
+                                        menuItemClass,
+                                        "text-destructive",
+                                      )}
+                                      onClick={() =>
+                                        void handleDropDatabase(schema)
+                                      }
+                                      disabled={!canMutateNamespaces}
+                                    >
+                                      Drop...
+                                    </ContextMenuItem>
+                                  </ContextMenuContent>
+                                </ContextMenu>
+                                {isSchemaExpanded &&
+                                  renderSchemaObjects(
+                                    connection.id,
+                                    connection.driver,
+                                    schema,
+                                    connectionColor,
+                                  )}
+                              </div>
+                            );
+                          })
+                        )}
                       </PostgresDatabaseTree>
                     </div>
                   ) : null}
@@ -3751,15 +3943,18 @@ export function SchemaSidebar() {
         )}
       </div>
 
-      <DataSourceDialog
-        open={isDataSourceDialogOpen}
-        onOpenChange={setIsDataSourceDialogOpen}
-      />
-      <SchemaSnapshotDialog
-        open={schemaSnapshotIdentity !== null}
-        identity={schemaSnapshotIdentity}
-        onClose={() => setSchemaSnapshotIdentity(null)}
-      />
+      <Suspense fallback={null}>
+        {isDataSourceDialogOpen && (
+          <DataSourceDialog open onOpenChange={setIsDataSourceDialogOpen} />
+        )}
+        {schemaSnapshotIdentity !== null && (
+          <SchemaSnapshotDialog
+            open
+            identity={schemaSnapshotIdentity}
+            onClose={() => setSchemaSnapshotIdentity(null)}
+          />
+        )}
+      </Suspense>
       <Dialog
         open={Boolean(pendingDataSourceRemoval)}
         onOpenChange={(open) => {
@@ -3771,7 +3966,9 @@ export function SchemaSidebar() {
       >
         <DialogContent className="w-[420px] max-w-[calc(100vw-32px)] gap-4 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-5 text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.35)]">
           <DialogHeader>
-            <DialogTitle className="text-[15px]">Remove data source?</DialogTitle>
+            <DialogTitle className="text-[15px]">
+              Remove data source?
+            </DialogTitle>
             <DialogDescription className="text-[12px] leading-5 wb-muted">
               Remove <strong>{pendingDataSourceRemoval?.name}</strong> from
               OxideStudio. This deletes the saved connection configuration and
@@ -3803,79 +4000,95 @@ export function SchemaSidebar() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <CreateDatabaseDialog
-        isOpen={isCreateDbDialogOpen}
-        onClose={() => setIsCreateDbDialogOpen(false)}
-        activeConnectionId={activeConnectionId || ""}
-        onCreated={(schema) => {
-          if (!activeConnectionId) return;
-          if (activeDriver === "postgres") return;
-          const schemaKey = schemaTreeKey(
-            activeConnectionId,
-            activeDriver,
-            schema
-          );
-          const objectsKey = objectGroupKey(
-            activeConnectionId,
-            activeDriver,
-            schema,
-            "objects"
-          );
-          setExpandedConnectionIds((current) =>
-            current.includes(activeConnectionId)
-              ? current
-              : [...current, activeConnectionId]
-          );
-          setExpandedSchemaKeys((current) =>
-            current.includes(schemaKey) ? current : [...current, schemaKey]
-          );
-          setExpandedObjectGroupKeys((current) =>
-            current.includes(objectsKey) ? current : [...current, objectsKey]
-          );
-        }}
-      />
-      <RenameTableDialog
-        isOpen={renameDialogOpen}
-        onClose={() => setRenameDialogOpen(false)}
-        tableName={activeTable}
-        objectLabel={relationObjectLabel(activeTableType)}
-        onRename={(oldName, newName) =>
-          renameTable(oldName, newName, activeTableType)
-        }
-      />
-      <DdlViewerDialog
-        isOpen={ddlViewerOpen}
-        onClose={() => setDdlViewerOpen(false)}
-        tableName={activeTable}
-        ddl={ddlContent}
-      />
-      <EditColumnsDialog
-        isOpen={columnsDialogOpen}
-        onClose={() => setColumnsDialogOpen(false)}
-        connectionId={activeConnectionId || ""}
-        driver={activeDriver}
-        schema={currentSchema || ""}
-        tableName={activeTable}
-      />
-      <CreateViewDialog
-        isOpen={isCreateViewDialogOpen}
-        onClose={() => setIsCreateViewDialogOpen(false)}
-        connectionId={activeConnectionId || ""}
-        driver={activeDriver}
-        schema={currentSchema || ""}
-        mode={viewDialogMode}
-        viewKind={viewDialogKind}
-        initialViewName={viewDialogInitialName}
-        initialSelectSql={viewDialogInitialSql}
-      />
-      <RedisKeyDialog
-        open={isCreateRedisKeyOpen}
-        database={collectionNamespace || "0"}
-        onOpenChange={setIsCreateRedisKeyOpen}
-        onCreate={(draft, command) =>
-          handleCreateRedisKey(draft.name, command)
-        }
-      />
+      <Suspense fallback={null}>
+        {isCreateDbDialogOpen && (
+          <CreateDatabaseDialog
+            isOpen
+            onClose={() => setIsCreateDbDialogOpen(false)}
+            activeConnectionId={activeConnectionId || ""}
+            onCreated={(schema) => {
+              if (!activeConnectionId) return;
+              if (activeDriver === "postgres") return;
+              const schemaKey = schemaTreeKey(
+                activeConnectionId,
+                activeDriver,
+                schema,
+              );
+              const objectsKey = objectGroupKey(
+                activeConnectionId,
+                activeDriver,
+                schema,
+                "objects",
+              );
+              setExpandedConnectionIds((current) =>
+                current.includes(activeConnectionId)
+                  ? current
+                  : [...current, activeConnectionId],
+              );
+              setExpandedSchemaKeys((current) =>
+                current.includes(schemaKey) ? current : [...current, schemaKey],
+              );
+              setExpandedObjectGroupKeys((current) =>
+                current.includes(objectsKey)
+                  ? current
+                  : [...current, objectsKey],
+              );
+            }}
+          />
+        )}
+        {renameDialogOpen && (
+          <RenameTableDialog
+            isOpen
+            onClose={() => setRenameDialogOpen(false)}
+            tableName={activeTable}
+            objectLabel={relationObjectLabel(activeTableType)}
+            onRename={(oldName, newName) =>
+              renameTable(oldName, newName, activeTableType)
+            }
+          />
+        )}
+        {ddlViewerOpen && (
+          <DdlViewerDialog
+            isOpen
+            onClose={() => setDdlViewerOpen(false)}
+            tableName={activeTable}
+            ddl={ddlContent}
+          />
+        )}
+        {columnsDialogOpen && (
+          <EditColumnsDialog
+            isOpen
+            onClose={() => setColumnsDialogOpen(false)}
+            connectionId={activeConnectionId || ""}
+            driver={activeDriver}
+            schema={currentSchema || ""}
+            tableName={activeTable}
+          />
+        )}
+        {isCreateViewDialogOpen && (
+          <CreateViewDialog
+            isOpen
+            onClose={() => setIsCreateViewDialogOpen(false)}
+            connectionId={activeConnectionId || ""}
+            driver={activeDriver}
+            schema={currentSchema || ""}
+            mode={viewDialogMode}
+            viewKind={viewDialogKind}
+            initialViewName={viewDialogInitialName}
+            initialSelectSql={viewDialogInitialSql}
+          />
+        )}
+        {isCreateRedisKeyOpen && (
+          <RedisKeyDialog
+            open
+            database={collectionNamespace || "0"}
+            onOpenChange={setIsCreateRedisKeyOpen}
+            onCreate={(draft, command) =>
+              handleCreateRedisKey(draft.name, command)
+            }
+          />
+        )}
+      </Suspense>
     </div>
   );
 }

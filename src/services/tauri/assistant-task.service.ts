@@ -1,4 +1,5 @@
 import { invokeRawCommand } from "./client";
+import type { WorkspaceContextBinding } from "@/ai/workspaceContext";
 
 export type AssistantTaskStatus =
   | "running"
@@ -30,8 +31,9 @@ export interface AssistantTaskExecutionReceiptRecord {
 }
 
 export interface AssistantTaskCheckpointRecord {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   mode: "agent";
+  context?: WorkspaceContextBinding;
   plan: AssistantTaskPlanStepRecord[];
   completedSteps: AssistantTaskCompletedStepRecord[];
   executionReceipts?: AssistantTaskExecutionReceiptRecord[];

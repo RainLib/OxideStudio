@@ -194,7 +194,7 @@ export class McpProtocolAdapter {
         : params && "input" in params
           ? params.input
           : {};
-    const options = approvalOptions(params);
+    const options = toolCallOptions(params);
     return this.adapter.callTool(name, toolInput, {
       ...options,
       abortSignal,
@@ -215,18 +215,12 @@ export function createMcpProtocolAdapter(options?: McpProtocolAdapterOptions) {
   return new McpProtocolAdapter(options);
 }
 
-function approvalOptions(
+function toolCallOptions(
   params: Record<string, unknown> | undefined
 ): McpToolCallOptions {
   const meta = params?._meta;
   const metadata = isObject(meta) ? meta : {};
-  return {
-    approved:
-      params?.approved === true ||
-      metadata["oxide/approved"] === true ||
-      metadata.approved === true,
-    contextOverrides: contextOverrides(params, metadata),
-  };
+  return { contextOverrides: contextOverrides(params, metadata) };
 }
 
 function contextOverrides(

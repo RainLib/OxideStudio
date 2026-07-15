@@ -1,18 +1,20 @@
 import { describe, expect, it } from "vitest";
-import {
-  DEFAULT_APP_SETTINGS,
-  normalizeAppSettings,
-} from "@/lib/appSettings";
-import {
-  moveSideToolWindow,
-  toolWindowAtSide,
-} from "@/lib/workbenchLayout";
+import { DEFAULT_APP_SETTINGS, normalizeAppSettings } from "@/lib/appSettings";
+import { moveSideToolWindow, toolWindowAtSide } from "@/lib/workbenchLayout";
 
 describe("app settings workbench layout", () => {
   it("keeps UI, editor, and data grid typography aligned by default", () => {
     expect(DEFAULT_APP_SETTINGS.appearance.uiFontSize).toBe(12);
     expect(DEFAULT_APP_SETTINGS.editor.fontSize).toBe(12);
     expect(DEFAULT_APP_SETTINGS.dataGrid.fontSize).toBe(12);
+  });
+
+  it("opens only Database Explorer in the default workspace", () => {
+    expect(DEFAULT_APP_SETTINGS.workbench.layout.visibility).toEqual({
+      databaseExplorer: true,
+      assistant: false,
+      results: false,
+    });
   });
 
   it("normalizes typography and data grid zoom bounds", () => {
@@ -122,7 +124,7 @@ describe("app settings workbench layout", () => {
     expect(settings.workbench.toolWindows.assistant.side).toBe("left");
     expect(settings.workbench.toolWindows.results.side).toBe("bottom");
     expect(toolWindowAtSide(settings.workbench.toolWindows, "left")).toBe(
-      "assistant"
+      "assistant",
     );
   });
 
@@ -130,13 +132,13 @@ describe("app settings workbench layout", () => {
     const moved = moveSideToolWindow(
       DEFAULT_APP_SETTINGS.workbench,
       "databaseExplorer",
-      "right"
+      "right",
     );
 
     expect(moved.toolWindows.databaseExplorer.side).toBe("right");
     expect(moved.toolWindows.assistant.side).toBe("left");
-    expect(DEFAULT_APP_SETTINGS.workbench.toolWindows.databaseExplorer.side).toBe(
-      "left"
-    );
+    expect(
+      DEFAULT_APP_SETTINGS.workbench.toolWindows.databaseExplorer.side,
+    ).toBe("left");
   });
 });

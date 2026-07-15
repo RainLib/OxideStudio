@@ -20,7 +20,43 @@ const ASSET_PATTERNS = [
   /\.rpm$/i,
   /(?:-|_)setup\.exe(?:\.sig)?$/i,
   /\.msi(?:\.sig)?$/i,
+  /oxide-agent-(?:aarch64-apple-darwin|x86_64-apple-darwin|x86_64-unknown-linux-gnu|x86_64-pc-windows-msvc)(?:\.exe)?$/i,
 ];
+
+const RELEASE_TARGETS = [
+  {
+    key: "darwin-aarch64",
+    artifactDirectory: "tauri-bundle-macos-aarch64",
+    platform: "macos",
+    updaterPattern: /\.app\.tar\.gz$/i,
+    cliPattern: /oxide-agent-aarch64-apple-darwin$/i,
+  },
+  {
+    key: "darwin-x86_64",
+    artifactDirectory: "tauri-bundle-macos-x86_64",
+    platform: "macos",
+    updaterPattern: /\.app\.tar\.gz$/i,
+    cliPattern: /oxide-agent-x86_64-apple-darwin$/i,
+  },
+  {
+    key: "linux-x86_64",
+    artifactDirectory: "tauri-bundle-linux-x86_64",
+    platform: "linux",
+    updaterPattern: /\.appimage$/i,
+    cliPattern: /oxide-agent-x86_64-unknown-linux-gnu$/i,
+  },
+  {
+    key: "windows-x86_64",
+    artifactDirectory: "tauri-bundle-windows-x86_64",
+    platform: "windows",
+    updaterPattern: /(?:-|_)setup\.exe$/i,
+    cliPattern: /oxide-agent-x86_64-pc-windows-msvc\.exe$/i,
+  },
+];
+
+const TARGET_BY_ARTIFACT_DIRECTORY = new Map(
+  RELEASE_TARGETS.map((target) => [target.artifactDirectory, target])
+);
 
 async function walkFiles(root) {
   const entries = await readdir(root, { withFileTypes: true });
@@ -36,31 +72,9 @@ async function walkFiles(root) {
   return files;
 }
 
-function releasePlatform(file) {
-  const normalized = file.split(sep).join("/").toLowerCase();
-  if (
-    normalized.includes("tauri-bundle-macos") ||
-    normalized.includes("/macos/") ||
-    normalized.includes("/dmg/")
-  ) {
-    return "macos";
-  }
-  if (
-    normalized.includes("tauri-bundle-linux") ||
-    normalized.includes("/appimage/") ||
-    normalized.includes("/deb/") ||
-    normalized.includes("/rpm/")
-  ) {
-    return "linux";
-  }
-  if (
-    normalized.includes("tauri-bundle-windows") ||
-    normalized.includes("/nsis/") ||
-    normalized.includes("/msi/")
-  ) {
-    return "windows";
-  }
-  return null;
+function releaseTarget(inputPath, file) {
+  const [artifactDirectory] = relative(inputPath, file).split(sep);
+  return TARGET_BY_ARTIFACT_DIRECTORY.get(artifactDirectory);
 }
 
 function isReleaseAsset(file) {
@@ -72,21 +86,27 @@ async function sha256(file) {
   return createHash("sha256").update(contents).digest("hex");
 }
 
-function assetUrl(baseUrl, tag, platform, name) {
-  return `${baseUrl}/${tag}/${platform}/${encodeURIComponent(name)}`;
+function assetUrl(baseUrl, tag, target, name) {
+  return `${baseUrl}/${tag}/${target}/${encodeURIComponent(name)}`;
 }
 
-function selectUpdaterArtifact(platform, files) {
-  if (platform === "macos") {
-    return files.find((file) => /\.app\.tar\.gz$/i.test(file));
+function selectUpdaterArtifact(target, files) {
+  const matches = files.filter((file) => target.updaterPattern.test(file));
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected exactly one updater artifact for ${target.key}, found ${matches.length}.`
+    );
   }
-  if (platform === "linux") {
-    return files.find((file) => /\.appimage$/i.test(file));
+  return matches[0];
+}
+
+function requireCliArtifact(target, files) {
+  const matches = files.filter((file) => target.cliPattern.test(file));
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected exactly one standalone oxide-agent CLI for ${target.key}, found ${matches.length}.`
+    );
   }
-  return (
-    files.find((file) => /(?:-|_)setup\.exe$/i.test(file)) ||
-    files.find((file) => /\.exe$/i.test(file))
-  );
 }
 
 function requireSemver(version) {
@@ -118,38 +138,50 @@ export async function packageOssRelease({
   await mkdir(versionPath, { recursive: true });
 
   const discovered = (await walkFiles(inputPath)).filter(isReleaseAsset);
-  const sourceFiles = { macos: [], linux: [], windows: [] };
+  const sourceFiles = new Map(
+    RELEASE_TARGETS.map((target) => [target.key, []])
+  );
   for (const file of discovered) {
-    const platform = releasePlatform(file);
-    if (platform) sourceFiles[platform].push(file);
+    const target = releaseTarget(inputPath, file);
+    if (!target) {
+      throw new Error(
+        `Release asset is not under a recognized target artifact directory: ${relative(inputPath, file)}`
+      );
+    }
+    sourceFiles.get(target.key).push(file);
   }
 
   const copiedFiles = [];
   const updaterPlatforms = {};
-  for (const platform of ["macos", "linux", "windows"]) {
-    const files = sourceFiles[platform];
+  for (const target of RELEASE_TARGETS) {
+    const files = sourceFiles.get(target.key).sort();
     if (files.length === 0) {
-      throw new Error(`No ${platform} release assets found under ${inputPath}.`);
+      throw new Error(
+        `No release assets found for ${target.key} under ${inputPath}.`
+      );
     }
 
-    const platformPath = join(versionPath, platform);
-    await mkdir(platformPath, { recursive: true });
+    const targetPath = join(versionPath, target.key);
+    await mkdir(targetPath, { recursive: true });
     const copiedNames = new Set();
     for (const source of files) {
       const name = basename(source);
       if (copiedNames.has(name)) {
-        throw new Error(`Duplicate ${platform} release asset: ${name}`);
+        throw new Error(`Duplicate ${target.key} release asset: ${name}`);
       }
       copiedNames.add(name);
-      const destination = join(platformPath, name);
+      const destination = join(targetPath, name);
       await copyFile(source, destination);
-      copiedFiles.push({ platform, name, path: destination });
+      copiedFiles.push({
+        target: target.key,
+        platform: target.platform,
+        name,
+        path: destination,
+      });
     }
 
-    const updaterSource = selectUpdaterArtifact(platform, files);
-    if (!updaterSource) {
-      throw new Error(`No updater artifact found for ${platform}.`);
-    }
+    const updaterSource = selectUpdaterArtifact(target, files);
+    requireCliArtifact(target, files);
     const signatureSource = `${updaterSource}.sig`;
     if (!files.includes(signatureSource)) {
       throw new Error(
@@ -162,34 +194,38 @@ export async function packageOssRelease({
     }
 
     const updaterName = basename(updaterSource);
-    const update = {
+    updaterPlatforms[target.key] = {
       signature,
-      url: assetUrl(normalizedBaseUrl, tag, platform, updaterName),
+      url: assetUrl(normalizedBaseUrl, tag, target.key, updaterName),
     };
-    if (platform === "macos") {
-      updaterPlatforms["darwin-aarch64"] = update;
-      updaterPlatforms["darwin-x86_64"] = update;
-    } else if (platform === "linux") {
-      updaterPlatforms["linux-x86_64"] = update;
-    } else {
-      updaterPlatforms["windows-x86_64"] = update;
-    }
+  }
+
+  const darwinArm64 = updaterPlatforms["darwin-aarch64"];
+  const darwinX86_64 = updaterPlatforms["darwin-x86_64"];
+  if (darwinArm64.url === darwinX86_64.url) {
+    throw new Error("macOS updater URLs must be different for each architecture.");
+  }
+  if (darwinArm64.signature === darwinX86_64.signature) {
+    throw new Error(
+      "macOS updater signatures must be different for each architecture."
+    );
   }
 
   const fileMetadata = [];
   for (const file of copiedFiles) {
     const details = await stat(file.path);
     fileMetadata.push({
+      target: file.target,
       platform: file.platform,
       name: file.name,
       size: details.size,
       sha256: await sha256(file.path),
-      url: assetUrl(normalizedBaseUrl, tag, file.platform, file.name),
+      url: assetUrl(normalizedBaseUrl, tag, file.target, file.name),
     });
   }
   fileMetadata.sort((left, right) =>
-    `${left.platform}/${left.name}`.localeCompare(
-      `${right.platform}/${right.name}`
+    `${left.target}/${left.name}`.localeCompare(
+      `${right.target}/${right.name}`
     )
   );
 
@@ -206,7 +242,7 @@ export async function packageOssRelease({
     files: fileMetadata,
   };
   const checksums = fileMetadata
-    .map((file) => `${file.sha256}  ${file.platform}/${file.name}`)
+    .map((file) => `${file.sha256}  ${file.target}/${file.name}`)
     .join("\n");
 
   await writeFile(

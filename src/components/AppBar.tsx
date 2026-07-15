@@ -1,5 +1,12 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
-import { WindowControls } from "./WindowControls";
+import {
+  lazy,
+  Suspense,
+  type FormEvent,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import {
   Check,
   ChevronDown,
@@ -16,9 +23,6 @@ import {
   AppWindow,
   type LucideIcon,
 } from "lucide-react";
-import { open } from "@tauri-apps/plugin-dialog";
-import { SettingsDialog } from "@/components/settings/SettingsDialog";
-import { UpdateDialog } from "@/components/update/UpdateDialog";
 import { useAppUpdatePolling } from "@/hooks/useAppUpdatePolling";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useUpdateStore } from "@/store/useUpdateStore";
@@ -36,8 +40,24 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { APP_EVENT_OPEN_SETTINGS, findWorkbenchAction } from "@/lib/actions";
+import { APP_EVENT_OPEN_SETTINGS } from "@/lib/actionEvents";
 import type { Project } from "@/services/tauri/store.service";
+
+const SettingsDialog = lazy(() =>
+  import("@/components/settings/SettingsDialog").then((module) => ({
+    default: module.SettingsDialog,
+  })),
+);
+const UpdateDialog = lazy(() =>
+  import("@/components/update/UpdateDialog").then((module) => ({
+    default: module.UpdateDialog,
+  })),
+);
+const WindowControls = lazy(() =>
+  import("./WindowControls").then((module) => ({
+    default: module.WindowControls,
+  })),
+);
 
 function projectNameFromRootPath(rootPath: string) {
   const trimmed = rootPath.trim();
@@ -60,6 +80,13 @@ function projectRootKey(rootPath?: string | null) {
       ? trimmed
       : trimmed.replace(/[\\/]+$/, "");
   return normalized.replace(/\\/g, "/").toLowerCase();
+}
+
+async function runWorkbenchAction(
+  actionId: "window.new" | "settings.openJson",
+) {
+  const { findWorkbenchAction } = await import("@/lib/actions");
+  await findWorkbenchAction(actionId)?.run();
 }
 
 interface AppBarProps {
@@ -91,7 +118,7 @@ export function AppBar({ center, right }: AppBarProps) {
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
   const [projectDeleteError, setProjectDeleteError] = useState<string | null>(
-    null
+    null,
   );
   const [isDeletingProject, setIsDeletingProject] = useState(false);
   const {
@@ -119,7 +146,8 @@ export function AppBar({ center, right }: AppBarProps) {
   useEffect(() => {
     const openSettings = () => setShowSettings(true);
     window.addEventListener(APP_EVENT_OPEN_SETTINGS, openSettings);
-    return () => window.removeEventListener(APP_EVENT_OPEN_SETTINGS, openSettings);
+    return () =>
+      window.removeEventListener(APP_EVENT_OPEN_SETTINGS, openSettings);
   }, []);
 
   const inferredProjectName = projectRootPath
@@ -131,17 +159,17 @@ export function AppBar({ center, right }: AppBarProps) {
       projects.some(
         (project) =>
           project.name.trim().toLowerCase() ===
-          normalizedProjectName.toLowerCase()
+          normalizedProjectName.toLowerCase(),
       ),
-    [normalizedProjectName, projects]
+    [normalizedProjectName, projects],
   );
   const projectPathExists = useMemo(() => {
     const selectedRootKey = projectRootKey(projectRootPath);
     return Boolean(
       selectedRootKey &&
-        projects.some(
-          (project) => projectRootKey(project.root_path) === selectedRootKey
-        )
+      projects.some(
+        (project) => projectRootKey(project.root_path) === selectedRootKey,
+      ),
     );
   }, [projectRootPath, projects]);
 
@@ -156,6 +184,7 @@ export function AppBar({ center, right }: AppBarProps) {
   const chooseProjectDirectory = async () => {
     setProjectError(null);
     try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({
         directory: true,
         multiple: false,
@@ -168,7 +197,7 @@ export function AppBar({ center, right }: AppBarProps) {
       setProjectError(
         error instanceof Error
           ? error.message
-          : "Failed to choose a project directory."
+          : "Failed to choose a project directory.",
       );
     }
   };
@@ -233,7 +262,7 @@ export function AppBar({ center, right }: AppBarProps) {
       setProjectRootPath("");
     } catch (error) {
       setProjectError(
-        error instanceof Error ? error.message : "Failed to create project."
+        error instanceof Error ? error.message : "Failed to create project.",
       );
     } finally {
       setIsCreatingProject(false);
@@ -250,7 +279,7 @@ export function AppBar({ center, right }: AppBarProps) {
       setProjectToDelete(null);
     } catch (error) {
       setProjectDeleteError(
-        error instanceof Error ? error.message : "Failed to delete project."
+        error instanceof Error ? error.message : "Failed to delete project.",
       );
     } finally {
       setIsDeletingProject(false);
@@ -259,8 +288,16 @@ export function AppBar({ center, right }: AppBarProps) {
 
   return (
     <div className="wb-titlebar flex items-center relative">
-      <SettingsDialog open={showSettings} onOpenChange={setShowSettings} />
-      <UpdateDialog open={updateDialogOpen} onOpenChange={setUpdateDialogOpen} />
+      {showSettings && (
+        <Suspense fallback={null}>
+          <SettingsDialog open onOpenChange={setShowSettings} />
+        </Suspense>
+      )}
+      {updateDialogOpen && (
+        <Suspense fallback={null}>
+          <UpdateDialog open onOpenChange={setUpdateDialogOpen} />
+        </Suspense>
+      )}
       <div
         data-tauri-drag-region
         className={`flex h-full items-center shrink-0 ${isMacOS ? "w-20" : "w-3"}`}
@@ -388,19 +425,19 @@ export function AppBar({ center, right }: AppBarProps) {
       </div>
 
       <div className="h-full flex items-center gap-1 shrink-0 ml-auto pr-1">
-        {right && (
-          <div className="flex items-center gap-1 pr-1">
-            {right}
-          </div>
-        )}
+        {right && <div className="flex items-center gap-1 pr-1">{right}</div>}
         <div className="flex items-center gap-0.5 pl-0.5">
           <Popover open={settingsMenuOpen} onOpenChange={setSettingsMenuOpen}>
             <PopoverTrigger asChild>
               <button
                 type="button"
                 className="wb-icon-button relative"
-                title={showUpdateBadge ? "Settings · Update available" : "Settings"}
-                aria-label={showUpdateBadge ? "Settings, update available" : "Settings"}
+                title={
+                  showUpdateBadge ? "Settings · Update available" : "Settings"
+                }
+                aria-label={
+                  showUpdateBadge ? "Settings, update available" : "Settings"
+                }
               >
                 <Settings size={14} />
                 {showUpdateBadge && (
@@ -422,7 +459,7 @@ export function AppBar({ center, right }: AppBarProps) {
                 shortcut={isMacOS ? "⌘⇧N" : "Ctrl+Shift+N"}
                 onClick={() => {
                   setSettingsMenuOpen(false);
-                  void findWorkbenchAction("window.new")?.run();
+                  void runWorkbenchAction("window.new");
                 }}
               />
               <div className="my-1 h-px bg-[hsl(var(--wb-border-subtle))]" />
@@ -455,13 +492,17 @@ export function AppBar({ center, right }: AppBarProps) {
                 label="Open settings.json"
                 onClick={() => {
                   setSettingsMenuOpen(false);
-                  void findWorkbenchAction("settings.openJson")?.run();
+                  void runWorkbenchAction("settings.openJson");
                 }}
               />
             </PopoverContent>
           </Popover>
         </div>
-        {!isMacOS && <WindowControls />}
+        {!isMacOS && (
+          <Suspense fallback={<div className="h-full w-[132px]" />}>
+            <WindowControls />
+          </Suspense>
+        )}
       </div>
 
       <Dialog open={projectDialogOpen} onOpenChange={setProjectDialogOpen}>
@@ -565,7 +606,8 @@ export function AppBar({ center, right }: AppBarProps) {
                   </span>
                 ) : (
                   <span className="text-[hsl(var(--wb-text-muted))]">
-                    The selected folder is only linked; existing files are not modified.
+                    The selected folder is only linked; existing files are not
+                    modified.
                   </span>
                 )}
               </div>
@@ -685,7 +727,9 @@ function SettingsMenuItem({
       onClick={onClick}
     >
       <span className="flex w-4 shrink-0 justify-center text-[hsl(var(--wb-text-muted))]">
-        {Icon ? <Icon size={14} className={iconSpinning ? "animate-spin" : ""} /> : null}
+        {Icon ? (
+          <Icon size={14} className={iconSpinning ? "animate-spin" : ""} />
+        ) : null}
       </span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {badge && (

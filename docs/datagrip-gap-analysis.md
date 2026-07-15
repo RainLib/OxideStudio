@@ -37,7 +37,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 2. **变更闭环**：schema diff/migration review 与 preflight 已形成第一条闭环；自动 apply/verify、data compare、VCS/DDL data source 仍缺失。
 3. **数据工作闭环**：Value Editor 已有类型感知主路径，但外键导航、聚合视图、多视图模式和导入映射不足。
 4. **诊断闭环**：Explain Plan 与结构化错误已有主路径，但 vendor error、会话/锁/运行监控仍不足。
-5. **智能协作闭环**：AI 已有工具、审批、对象/结果/错误/plan/patch attachment、稳定页面跳转和 revision-bound Patch Preview/Apply，但持久任务、vendor error 结构化诊断和 plan-grounded 自动优化仍待完成；LSP 的 catalog 隔离与同名列 P0 排序已经关闭，高级派生表/临时对象语义仍不足。
+5. **智能协作闭环**：Chat/Plan/Agent 已统一进入独立 TypeScript Deep Agents host，并具备 Rust 模型/工具/审批边界、加密 LangGraph checkpoint/pending writes、跨 sidecar 重启 interrupt resume、只读子代理、澄清和 Codex 式过程 UI；仍缺完整 vendor error 诊断、plan-grounded 自动优化、完整应用进程恢复 UX 和全部 provider tool bridge。LSP 的 catalog 隔离与同名列 P0 排序已经关闭，高级派生表/临时对象语义仍不足。
 
 按日常数据库开发主路径估算，当前完成度约为 **55%–65%**；按 DataGrip 全功能面估算约为 **35%–45%**。这是工程规划区间，不是营销评分。
 
@@ -84,7 +84,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 
 | DataGrip 基线 | OxideStudio 状态 | 当前证据与差距 | 优先级 |
 | --- | --- | --- | --- |
-| CSV 导入 | 部分具备 | 有入口与基础实现；缺少 delimiter/encoding/quote/header 预览和列映射 | P0 |
+| CSV 导入 | 已具备/部分 | 已有编码/delimiter/header/空值策略预览、逐列映射、类型预检和 PostgreSQL/MySQL 原子 batch；32 MiB/10 万行以上仍需 Rust native streaming | P1 |
 | 多格式导出 | 部分具备 | CSV、JSON 已有；缺少 SQL insert、Markdown、XML、Excel、自定义 extractor | P1 |
 | schema/object DDL 导出 | 部分具备 | 支持对象 DDL 查看/复制；缺少选择集、依赖顺序和批量导出 | P1 |
 | pg_dump / mysqldump | 缺失 | 没有原生工具发现、参数配置、进度和恢复流程 | P1/P2 |
@@ -125,23 +125,25 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | DataGrip 基线 | OxideStudio 状态 | 当前证据与差距 | 优先级 |
 | --- | --- | --- | --- |
 | 查询取消、事务 | 已具备/部分 | PostgreSQL/MySQL 有 tracked cancellation 和命名事务；session 可视化、锁与 idle transaction 提示不足 | P0 |
-| 后台任务与进度 | 部分具备 | TaskStatusCenter 已有 project-scoped Agent history、精确 task reveal、安全步骤详情；仍缺完整执行日志、retry/resume 和通用任务详情 | P1 |
+| 后台任务与进度 | 部分具备 | Assistant task 已移出 Sidebar 生命周期，由 Rust/sidecar 运行并可用 typed event 重建 Turn；LangGraph interrupt 可跨 sidecar 重启恢复，TaskStatusCenter 仍有 project-scoped history。缺完整应用进程恢复、通用执行日志与跨任务搜索 | P1 |
 | 结构化错误 | 已具备/部分 | connection/query/schema/table/project-file 已统一稳定 code、category、safe context、retryable；vendor SQLSTATE/position/object 仍待驱动层补齐 | P0 |
 | destructive safety | 已具备/部分 | SQL 分类、确认、参数化 mutation、AI policy 和 read-only backend gate 已有；权限模型与审计导出不足 | P0/P1 |
-| AI 辅助 | 部分具备/有差异化基础 | 共享工具 registry、MCP/CLI、审批、审计和不覆盖用户输入的 Patch Preview/Apply 是优势；但 schema citation、完整 SQL 错误修复、查询优化和 plan explanation 尚未形成对应用户闭环 | P0/P1 |
+| AI 辅助 | 部分具备/有差异化基础 | Deep Agents sidecar、Rust 安全边界、统一三模式、加密 checkpoint、Codex 式 Turn UI 和不覆盖用户输入的 Patch Preview/Apply 是优势；但 schema citation、完整 SQL 错误修复、查询优化和 plan explanation 尚未形成对应用户闭环 | P0/P1 |
 
 ### 3.9 AI Agent 与 IDE 交互
 
 | DataGrip / 专业 Agent 基线 | OxideStudio 状态 | 当前证据与差距 | 优先级 |
 | --- | --- | --- | --- |
-| Schema/object/selection/UI attachment | 已具备/部分 | tool result 已生成带 provenance 的对象、文件、结果、tab、selection、diagnostic、Explain Plan、Schema Diff 与 patch attachment；task artifact 尚未完成 | P1 |
+| Schema/object/selection/UI attachment | 已具备 | tool result 已生成带 provenance 的对象、文件、结果、tab、selection、diagnostic、Explain Plan、Schema Diff 与 patch attachment；`task.reveal` 可从内存或 retained history 打开精确安全摘要 | 持续覆盖新增 artifact |
 | Text-to-SQL 与 dialect grounding | 部分具备 | 有模型 planner、inline completion、dialect context 和 revision-bound Patch Preview/Apply；缺 metadata citation 与执行前 parse/LSP/EXPLAIN 验证闭环 | P0 |
 | Explain/Fix SQL error | 部分具备 | LSP diagnostic 已可点击 Jump 到精确 range，通用 patch 可安全预览/应用；vendor error 尚未统一为 SQLSTATE/position/object，自动 Fix → Validate 仍缺失 | P0 |
 | Query optimization / plan explanation | 部分具备 | `query.explain` 只生成 estimate plan，模型可读取真实规范化计划；尚缺热点规则、索引/schema citation、优化前后 plan 对比与验证闭环 | P1 |
 | IDE 页面跳转和联动 | 已具备 | typed `UiActionRegistry` 已覆盖 project/file/tab/panel/connection/object/editor/result/plan/schema diff/patch/task/settings，含 stable target 与 stale-context | 持续覆盖新增 artifact |
-| 多轮 durable agent | 部分具备 | Runtime 已拥有有界 loop/policy/去重/取消；task summary 可恢复并精确 reveal；批准写先落安全 receipt，崩溃窗口标记 uncertain/verify。仍缺 executable checkpoint/resume、持久 thread、数据库级 idempotency 和 subagent；Deep Agents 当前 Node-only 包需独立 host | P1 |
-| 工具安全与多数据模型 | 已具备/优势 | registry、capability、approval、MCP/CLI 以及 Mongo/Redis/ES 结构化 mutation 已形成独立方向 | — |
-| AI 数据治理 | 部分具备 | credential 隔离、上下文截断和有界结果已有；缺发送内容预览、项目级 retention 和 attachment 敏感级别 | P0/P1 |
+| 多轮 durable agent | 已具备/需加固 | Node 22 `deepagents@1.10.8` 独立 host 负责三模式 loop；Rust 保存七天 AES-GCM thread/artifact/graph checkpoint/writes，提供 cancel、持久 interrupt、跨 sidecar resume、批准和只读 subagent。完整应用进程恢复、数据库 idempotency 与长期恢复评测仍缺 | P0/P1 硬化 |
+| 工具安全与多数据模型 | 已具备/首批 bridge | Rust 校验 manifest、项目/连接/context、SQL risk、canonical input digest 与一次性 lease；Mongo/Redis/ES 工具定义是差异化基础，但 sidecar provider-specific bridge 需逐项完成 | P0/P1 |
+| AI 数据治理 | 已具备/部分 | provider secret 在 OS keyring；项目级 thread/checkpoint/artifact 以 AES-GCM 保存七天；长上下文可摘要/offload。仍缺 attachment 敏感级别、字段 masking、完整 Context Preview 和企业 policy | 基础治理已完成；细粒度治理 P1 |
+| Agent 对话可读性 | 已具备 | 每个 Turn 是问题→默认收起的单行过程→最终回答；tool/subagent 不单列消息，宽面板溢出时每个问答一个灰色 minimap marker，支持 hover/键盘/reduced motion | 持续补 thread search |
+| 外部 Agent 接口 | 已具备/只读首版 | Rust 原生 `oxide-agent` 提供五个项目级只读 stdio/CLI 工具；严格 MCP 2025-11-25、connection grant、结果上限，调用者自报批准无效 | 持续四平台发布 smoke；外部写能力后置 |
 
 完整状态机、工具契约、页面动作、批准绑定、Deep Agents 分层方案和 LSP 排序规则见 [AI Agent 产品与技术规格](AI_AGENT_PRODUCT_SPEC.md)。
 
@@ -158,8 +160,13 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | DG-P0-05 | Driver 与文档一致性 | 增加 SQLite driver，或从发布文档移除未实现支持；能力列表由 runtime registry 生成 | 已完成：SQLite/SQL Server 明确为规划项；后端 capability list 驱动连接 UI、Explorer 与 AI，失败仅降级不阻塞启动 |
 | DG-P0-06 | 结构化错误协议 | connection/query/schema/table/file command 返回稳定 code、message、context、retryable；UI 不再解析字符串前缀 | 已完成 |
 | DG-P0-07 | CSV Import Mapping | 导入前预览、编码/delimiter/header、列映射、类型错误摘要和事务性提交 | 已完成：支持 BOM/UTF-8/UTF-16/GB18030、delimiter 自动识别、表头/位置映射、类型预检和 PostgreSQL/MySQL 原子 batch；32 MiB/10 万行以上明确转入 native streaming P1 |
-| DG-P0-08 | LSP catalog scope 与候选排序 | `(connection, database, schema)` 严格隔离；显式 qualifier/当前 statement/DML target/active table 排序；同名列以 alias/table 区分；同 source 去重；覆盖跨 PostgreSQL database 回归 | 已完成 |
+| DG-P0-08 | LSP catalog scope 与候选排序 | `(connection, database, schema)` 严格隔离；显式 qualifier/当前 statement/DML target/active table 排序；同名列以 alias/table 区分；同 source 去重；覆盖跨 PostgreSQL database 回归 | 已完成：bundled binary 与 submodule revision 同步，集成测试锁定无 FROM 歧义列为 `table.column`、有 statement target 时当前表列优先 |
 | DG-P0-09 | AI attachment 与页面动作 | 对象、错误、结果、执行计划引用可点击并准确跳转；stable target、stale context 和同名对象有测试；导航不与数据库 mutation 混为一个动作 | 已完成：对象/文件/结果/LSP error/plan/schema diff/patch 均有精确跳转或 artifact surface 与 stale target 测试；patch 仅由用户 Apply |
+| DG-P0-10 | AI 发送上下文预览 | 发送前显示 provider、database identity、token/截断、tool manifest 和 post-tool 范围；关闭项必须从真实请求删除 | 部分完成：sidecar 接收 redacted/bounded workspace 并使用真实 token profile；完整实际 token、offload/省略来源和 artifact range/search 仍需加固 |
+| DG-P0-11 | AI 对话过程与长文导航 | 一个 Turn 固定为问题→折叠过程→最终答案；宽面板 minimap 每个完整问答一个灰色 marker，中间 tool/subagent 不单列 | 已完成：过程为紧凑 disclosure；minimap 仅在真实溢出时显示，支持 hover、键盘和 reduced motion |
+| DG-P0-12 | AI context snapshot/version | tool/approval 绑定 project/connection/config/context/thread/turn 与 input digest；变化后旧批准失效，持久层不保存 secret/无界结果 | 已完成/需压力测试：Rust 每次执行重验并消费一次性 lease；AES-GCM graph checkpoint 按项目保存七天，支持 sidecar-restart interrupt resume；完整应用进程恢复仍需验证 |
+| DG-P0-13 | Deep Agents 生产 runtime | Chat/Plan/Agent 统一使用独立签名 sidecar；无 provider/sidecar 失败不阻塞主界面；生产不静默 fallback | 已完成：Node 22 + `deepagents@1.10.8`、版本化 Content-Length JSON-RPC、Rust supervisor；四平台实际安装包 smoke 仍是发布门禁 |
+| DG-P0-14 | 外部 MCP/CLI 安全边界 | Rust 原生 stdio/CLI 首版只读；调用者不能自报 approval，缺少目标二进制时打包 fail closed | 已完成：Cargo、target-specific externalBin、四平台构建签名均已接线；project/connection grant、只读事务、超时和结果上限由 Rust 强制执行 |
 
 ### P1：形成 schema 工程能力
 
@@ -203,4 +210,8 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 7. **DG-P0-07 CSV Import Mapping** 已完成：文件选择与写库解耦，用户先配置编码、delimiter、header、空值策略和逐列映射；提交前按目标列类型汇总错误，确认后复用后端原子 batch，任一数据库错误会回滚全部行。内存路径限制为 32 MiB/10 万行，超限文件不会尝试全量载入；后续以 native streaming importer 扩展。
 8. **DG-P1-01 Schema snapshot/diff MVP** 已完成：快照使用稳定 catalog identity 与 fingerprint，抓取采用六路有界并发且不保存部分结果；差异在独立 artifact 展示 safe/review/destructive rail，PostgreSQL 使用 ROLLBACK guard，MySQL 标注 auto-commit，AI attachment 可回到精确 change。安全边界见 [ADR-0005](decisions/0005-schema-snapshot-diff.md)。
 9. **DG-P1-01 Migration DAG / preflight** 已完成支持对象的第二阶段：外键拆为独立依赖 change，changed index/constraint 拆为 drop/recreate，拓扑排序输出 phase/order/dependsOn；无法完整重建时阻断当前 change 及其依赖，另生成只读 preflight surface。边界见 [ADR-0006](decisions/0006-migration-dependency-preflight.md)。
-10. 下一步为完整 source/dependency capture、server dry-run/apply journal/post-verify，以及 AI plan explanation/优化前后验证；不能把当前 review-only artifact 描述为自动 migration 已完成。
+10. **DG-P0-11 AI 对话过程与长文导航** 已完成：过程 stage 属于当前 Turn 且默认收起，最终回答与 raw tool structure 分离；minimap 以完整问答为灰色 anchor，中间工具不进入检索记录。
+11. **DG-P0-12 / DG-P0-13 Agent 安全 runtime** 已完成主结构：Deep Agents sidecar、Rust 模型/工具/policy、项目级 AES-GCM graph checkpoint/writes、持久 interrupt/跨 sidecar resume、只读 subagent、澄清/批准和故障隔离已接入。接下来必须完成完整应用进程恢复、mutation receipt/idempotency、100+ Turn、冷启动/内存与四平台 production bundle smoke，不能把 durable checkpoint 写成 exactly-once。
+12. **DG-P0-10 Context Preview** 继续加固实际 token、摘要/offload 数量、省略来源和 artifact range/search；provider secret 已从 localStorage 移至 OS credential manager。
+13. **DG-P0-14 Rust `oxide-agent`** 已完成只读 stdio/CLI、Cargo 与发布接线；继续把四平台真实安装包 smoke 作为发布门禁。HTTP/OIDC、UI tools 和外部 mutation 不进入首版。
+14. 数据库主线下一步仍是完整 source/dependency capture、server dry-run/apply journal/post-verify，以及 AI plan explanation/优化前后验证；不能把当前 review-only artifact 描述为自动 migration 已完成。

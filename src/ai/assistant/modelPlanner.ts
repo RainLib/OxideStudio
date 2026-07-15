@@ -243,15 +243,13 @@ function modelPlannerTurn(turn: AssistantTurnInput): AssistantTurnInput {
   };
 }
 
-const MODEL_CONTEXT_TEXT_LIMIT = 8_000;
-const MODEL_CONTEXT_TRUNCATION_SUFFIX = "\n...[truncated]";
-const MODEL_RESULT_TOTAL_LIMIT = 32_000;
-const MODEL_RESULT_ITEM_LIMIT = 8_000;
-const MODEL_RESULT_COUNT_LIMIT = 24;
+export const MODEL_CONTEXT_TEXT_LIMIT = 8_000;
+export const MODEL_RESULT_TOTAL_LIMIT = 32_000;
+export const MODEL_RESULT_ITEM_LIMIT = 8_000;
+export const MODEL_RESULT_COUNT_LIMIT = 24;
 
 function boundedRequiredModelText(text: string) {
-  if (text.length <= MODEL_CONTEXT_TEXT_LIMIT) return text;
-  return `${text.slice(0, MODEL_CONTEXT_TEXT_LIMIT)}${MODEL_CONTEXT_TRUNCATION_SUFFIX}`;
+  return boundedAssistantText(text, MODEL_CONTEXT_TEXT_LIMIT) || "";
 }
 
 function boundedOptionalModelText(text: string | undefined) {

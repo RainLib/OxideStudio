@@ -10,6 +10,19 @@ import {
   useEditorGroupStore,
   type EditorSplitDirection,
 } from "@/store/useEditorGroupStore";
+import {
+  APP_EVENT_FORMAT_SQL,
+  APP_EVENT_INLINE_COMPLETION_ACCEPT,
+  APP_EVENT_INLINE_COMPLETION_ACCEPT_NEXT_WORD,
+  APP_EVENT_INLINE_COMPLETION_HIDE,
+  APP_EVENT_INLINE_COMPLETION_TRIGGER,
+  APP_EVENT_OPEN_COMMAND_PALETTE,
+  APP_EVENT_OPEN_SETTINGS,
+  APP_EVENT_RUN_CURRENT,
+  APP_EVENT_RUN_QUERY,
+} from "@/lib/actionEvents";
+
+export * from "@/lib/actionEvents";
 
 export type WorkbenchActionId =
   | "commandPalette.open"
@@ -59,20 +72,6 @@ function splitActiveEditor(direction: EditorSplitDirection) {
   if (!activeTabId || activeTab?.type !== "query") return;
   useEditorGroupStore.getState().split(direction, activeTabId);
 }
-
-export const APP_EVENT_RUN_QUERY = "oxide:run-query";
-export const APP_EVENT_RUN_CURRENT = "oxide:run-current";
-export const APP_EVENT_FORMAT_SQL = "oxide:format-sql";
-export const APP_EVENT_SAVE_FILE = "oxide:save-file";
-export const APP_EVENT_OPEN_COMMAND_PALETTE = "oxide:open-command-palette";
-export const APP_EVENT_OPEN_SETTINGS = "oxide:open-settings";
-export const APP_EVENT_INLINE_COMPLETION_TRIGGER =
-  "oxide:inline-completion-trigger";
-export const APP_EVENT_INLINE_COMPLETION_ACCEPT =
-  "oxide:inline-completion-accept";
-export const APP_EVENT_INLINE_COMPLETION_ACCEPT_NEXT_WORD =
-  "oxide:inline-completion-accept-next-word";
-export const APP_EVENT_INLINE_COMPLETION_HIDE = "oxide:inline-completion-hide";
 
 export function workbenchActions(): WorkbenchAction[] {
   return [
@@ -158,12 +157,14 @@ export function workbenchActions(): WorkbenchAction[] {
         await saveProjectFileTab();
       },
     },
-    ...([
-      ["editor.splitLeft", "Split Editor Left", "left"],
-      ["editor.splitRight", "Split Editor Right", "right"],
-      ["editor.splitUp", "Split Editor Up", "up"],
-      ["editor.splitDown", "Split Editor Down", "down"],
-    ] as const).map(([id, title, direction]) => ({
+    ...(
+      [
+        ["editor.splitLeft", "Split Editor Left", "left"],
+        ["editor.splitRight", "Split Editor Right", "right"],
+        ["editor.splitUp", "Split Editor Up", "up"],
+        ["editor.splitDown", "Split Editor Down", "down"],
+      ] as const
+    ).map(([id, title, direction]) => ({
       id,
       title,
       group: "Editor" as const,
@@ -181,7 +182,8 @@ export function workbenchActions(): WorkbenchAction[] {
       id: "workbench.toggleDatabaseExplorer",
       title: "Toggle Database Explorer",
       group: "Workbench",
-      run: () => useWorkbenchLayoutStore.getState().toggleToolWindow("databaseExplorer"),
+      run: () =>
+        useWorkbenchLayoutStore.getState().toggleToolWindow("databaseExplorer"),
     },
     {
       id: "workbench.openProjectFiles",
@@ -196,7 +198,9 @@ export function workbenchActions(): WorkbenchAction[] {
       title: "Trigger Inline Completion",
       group: "Editor",
       run: () => {
-        window.dispatchEvent(new CustomEvent(APP_EVENT_INLINE_COMPLETION_TRIGGER));
+        window.dispatchEvent(
+          new CustomEvent(APP_EVENT_INLINE_COMPLETION_TRIGGER),
+        );
       },
     },
     {
@@ -204,7 +208,9 @@ export function workbenchActions(): WorkbenchAction[] {
       title: "Accept Inline Completion",
       group: "Editor",
       run: () => {
-        window.dispatchEvent(new CustomEvent(APP_EVENT_INLINE_COMPLETION_ACCEPT));
+        window.dispatchEvent(
+          new CustomEvent(APP_EVENT_INLINE_COMPLETION_ACCEPT),
+        );
       },
     },
     {
@@ -213,7 +219,7 @@ export function workbenchActions(): WorkbenchAction[] {
       group: "Editor",
       run: () => {
         window.dispatchEvent(
-          new CustomEvent(APP_EVENT_INLINE_COMPLETION_ACCEPT_NEXT_WORD)
+          new CustomEvent(APP_EVENT_INLINE_COMPLETION_ACCEPT_NEXT_WORD),
         );
       },
     },
@@ -229,7 +235,8 @@ export function workbenchActions(): WorkbenchAction[] {
       id: "workbench.toggleAssistant",
       title: "Toggle Secondary Panel",
       group: "Workbench",
-      run: () => useWorkbenchLayoutStore.getState().toggleToolWindow("assistant"),
+      run: () =>
+        useWorkbenchLayoutStore.getState().toggleToolWindow("assistant"),
     },
     {
       id: "workbench.toggleResults",
@@ -241,61 +248,73 @@ export function workbenchActions(): WorkbenchAction[] {
       id: "workbench.focusEditor",
       title: "Focus Editor",
       group: "Workbench",
-      run: () => useWorkbenchLayoutStore.getState().setActiveToolWindow("editor"),
+      run: () =>
+        useWorkbenchLayoutStore.getState().setActiveToolWindow("editor"),
     },
     {
       id: "workbench.focusDatabaseExplorer",
       title: "Focus Database Explorer",
       group: "Workbench",
-      run: () => useWorkbenchLayoutStore.getState().setActiveToolWindow("databaseExplorer"),
+      run: () =>
+        useWorkbenchLayoutStore
+          .getState()
+          .setActiveToolWindow("databaseExplorer"),
     },
     {
       id: "workbench.focusAssistant",
       title: "Focus Secondary Panel",
       group: "Workbench",
-      run: () => useWorkbenchLayoutStore.getState().setActiveToolWindow("assistant"),
+      run: () =>
+        useWorkbenchLayoutStore.getState().setActiveToolWindow("assistant"),
     },
     {
       id: "workbench.focusResults",
       title: "Focus Results",
       group: "Workbench",
-      run: () => useWorkbenchLayoutStore.getState().setActiveToolWindow("results"),
+      run: () =>
+        useWorkbenchLayoutStore.getState().setActiveToolWindow("results"),
     },
     {
       id: "workbench.moveActiveToolWindowLeft",
       title: "Move Active Tool Window Left",
       group: "Workbench",
-      run: () => useWorkbenchLayoutStore.getState().moveActiveToolWindow("left"),
+      run: () =>
+        useWorkbenchLayoutStore.getState().moveActiveToolWindow("left"),
     },
     {
       id: "workbench.moveActiveToolWindowRight",
       title: "Move Active Tool Window Right",
       group: "Workbench",
-      run: () => useWorkbenchLayoutStore.getState().moveActiveToolWindow("right"),
+      run: () =>
+        useWorkbenchLayoutStore.getState().moveActiveToolWindow("right"),
     },
     {
       id: "workbench.resizeActiveToolWindowLeft",
       title: "Resize Active Tool Window Left",
       group: "Workbench",
-      run: () => useWorkbenchLayoutStore.getState().resizeActiveToolWindow("left"),
+      run: () =>
+        useWorkbenchLayoutStore.getState().resizeActiveToolWindow("left"),
     },
     {
       id: "workbench.resizeActiveToolWindowRight",
       title: "Resize Active Tool Window Right",
       group: "Workbench",
-      run: () => useWorkbenchLayoutStore.getState().resizeActiveToolWindow("right"),
+      run: () =>
+        useWorkbenchLayoutStore.getState().resizeActiveToolWindow("right"),
     },
     {
       id: "workbench.resizeActiveToolWindowUp",
       title: "Resize Active Tool Window Up",
       group: "Workbench",
-      run: () => useWorkbenchLayoutStore.getState().resizeActiveToolWindow("up"),
+      run: () =>
+        useWorkbenchLayoutStore.getState().resizeActiveToolWindow("up"),
     },
     {
       id: "workbench.resizeActiveToolWindowDown",
       title: "Resize Active Tool Window Down",
       group: "Workbench",
-      run: () => useWorkbenchLayoutStore.getState().resizeActiveToolWindow("down"),
+      run: () =>
+        useWorkbenchLayoutStore.getState().resizeActiveToolWindow("down"),
     },
   ];
 }

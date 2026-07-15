@@ -58,9 +58,12 @@ export type UiActionContextSnapshot = {
   projectId: string;
   contextVersion: number;
   activeConnectionId: string | null;
+  activeDriver: string | null;
+  activeDatabaseName: string | null;
   activeNamespace: string | null;
   activeTabId: string | null;
   documentRevision: string | null;
+  selectionRevision: string | null;
 };
 
 export type UiActionContextReference = Pick<

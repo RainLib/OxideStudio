@@ -17,9 +17,7 @@ export type InlineCompletionSettings = {
 };
 
 export type WorkbenchToolWindowId =
-  | "databaseExplorer"
-  | "assistant"
-  | "results";
+  "databaseExplorer" | "assistant" | "results";
 
 export type WorkbenchSide = "left" | "right";
 
@@ -94,8 +92,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     layout: {
       visibility: {
         databaseExplorer: true,
-        assistant: true,
-        results: true,
+        assistant: false,
+        results: false,
       },
       leftWidth: 400,
       rightWidth: 360,
@@ -193,7 +191,7 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         ["appearance", "uiFontSize"],
         defaults.appearance.uiFontSize,
         10,
-        20
+        20,
       ),
     },
     workbench: {
@@ -205,8 +203,8 @@ export function normalizeAppSettings(value: unknown): AppSettings {
             boolAt(
               raw,
               ["workbench", "layout", "leftVisible"],
-              defaults.workbench.layout.visibility.databaseExplorer
-            )
+              defaults.workbench.layout.visibility.databaseExplorer,
+            ),
           ),
           assistant: boolAt(
             raw,
@@ -214,8 +212,8 @@ export function normalizeAppSettings(value: unknown): AppSettings {
             boolAt(
               raw,
               ["workbench", "layout", "rightVisible"],
-              defaults.workbench.layout.visibility.assistant
-            )
+              defaults.workbench.layout.visibility.assistant,
+            ),
           ),
           results: boolAt(
             raw,
@@ -223,102 +221,200 @@ export function normalizeAppSettings(value: unknown): AppSettings {
             boolAt(
               raw,
               ["workbench", "layout", "bottomVisible"],
-              defaults.workbench.layout.visibility.results
-            )
+              defaults.workbench.layout.visibility.results,
+            ),
           ),
         },
-        leftWidth: numberAt(raw, ["workbench", "layout", "leftWidth"], defaults.workbench.layout.leftWidth, 240, 760),
-        rightWidth: numberAt(raw, ["workbench", "layout", "rightWidth"], defaults.workbench.layout.rightWidth, 260, 640),
-        bottomHeight: numberAt(raw, ["workbench", "layout", "bottomHeight"], defaults.workbench.layout.bottomHeight, 140, 720),
-        activeToolWindow: enumAt(raw, ["workbench", "layout", "activeToolWindow"], ["databaseExplorer", "assistant", "results", "editor"], defaults.workbench.layout.activeToolWindow),
+        leftWidth: numberAt(
+          raw,
+          ["workbench", "layout", "leftWidth"],
+          defaults.workbench.layout.leftWidth,
+          240,
+          760,
+        ),
+        rightWidth: numberAt(
+          raw,
+          ["workbench", "layout", "rightWidth"],
+          defaults.workbench.layout.rightWidth,
+          260,
+          640,
+        ),
+        bottomHeight: numberAt(
+          raw,
+          ["workbench", "layout", "bottomHeight"],
+          defaults.workbench.layout.bottomHeight,
+          140,
+          720,
+        ),
+        activeToolWindow: enumAt(
+          raw,
+          ["workbench", "layout", "activeToolWindow"],
+          ["databaseExplorer", "assistant", "results", "editor"],
+          defaults.workbench.layout.activeToolWindow,
+        ),
       },
       toolWindows,
     },
     keymap: normalizeKeymap(recordAt(raw, ["keymap"]), defaults.keymap),
     editor: {
-      fontSize: numberAt(raw, ["editor", "fontSize"], defaults.editor.fontSize, 10, 24),
-      tabSize: numberAt(raw, ["editor", "tabSize"], defaults.editor.tabSize, 2, 8),
-      wordWrap: enumAt(raw, ["editor", "wordWrap"], ["off", "on", "wordWrapColumn", "bounded"], defaults.editor.wordWrap),
+      fontSize: numberAt(
+        raw,
+        ["editor", "fontSize"],
+        defaults.editor.fontSize,
+        10,
+        24,
+      ),
+      tabSize: numberAt(
+        raw,
+        ["editor", "tabSize"],
+        defaults.editor.tabSize,
+        2,
+        8,
+      ),
+      wordWrap: enumAt(
+        raw,
+        ["editor", "wordWrap"],
+        ["off", "on", "wordWrapColumn", "bounded"],
+        defaults.editor.wordWrap,
+      ),
       minimap: boolAt(raw, ["editor", "minimap"], defaults.editor.minimap),
-      confirmDestructiveSql: boolAt(raw, ["editor", "confirmDestructiveSql"], defaults.editor.confirmDestructiveSql),
+      confirmDestructiveSql: boolAt(
+        raw,
+        ["editor", "confirmDestructiveSql"],
+        defaults.editor.confirmDestructiveSql,
+      ),
       inlineCompletion: {
         enabled: boolAt(
           raw,
           ["editor", "inlineCompletion", "enabled"],
-          defaults.editor.inlineCompletion.enabled
+          defaults.editor.inlineCompletion.enabled,
         ),
         automaticSuggestions: boolAt(
           raw,
           ["editor", "inlineCompletion", "automaticSuggestions"],
-          defaults.editor.inlineCompletion.automaticSuggestions
+          defaults.editor.inlineCompletion.automaticSuggestions,
         ),
         includeSchemaMetadata: boolAt(
           raw,
           ["editor", "inlineCompletion", "includeSchemaMetadata"],
-          defaults.editor.inlineCompletion.includeSchemaMetadata
+          defaults.editor.inlineCompletion.includeSchemaMetadata,
         ),
         includeProjectContext: boolAt(
           raw,
           ["editor", "inlineCompletion", "includeProjectContext"],
-          defaults.editor.inlineCompletion.includeProjectContext
+          defaults.editor.inlineCompletion.includeProjectContext,
         ),
       },
       keybindingMode: enumAt(
         raw,
         ["editor", "keybindingMode"],
         ["standard", "vim"],
-        defaults.editor.keybindingMode
+        defaults.editor.keybindingMode,
       ),
       vim: {
         leader: stringAt(
           raw,
           ["editor", "vim", "leader"],
           defaults.editor.vim.leader,
-          16
+          16,
         ),
         relativeLineNumbers: boolAt(
           raw,
           ["editor", "vim", "relativeLineNumbers"],
-          defaults.editor.vim.relativeLineNumbers
+          defaults.editor.vim.relativeLineNumbers,
         ),
         mappings: vimMappingsAt(raw, ["editor", "vim", "mappings"]),
       },
     },
     dataGrid: {
-      fontSize: numberAt(raw, ["dataGrid", "fontSize"], defaults.dataGrid.fontSize, 10, 20),
-      rowHeight: numberAt(raw, ["dataGrid", "rowHeight"], defaults.dataGrid.rowHeight, 22, 48),
-      zoomPercent: numberAt(raw, ["dataGrid", "zoomPercent"], defaults.dataGrid.zoomPercent, 70, 160),
-      pageSize: numberAt(raw, ["dataGrid", "pageSize"], defaults.dataGrid.pageSize, 50, 5000),
-      readOnlyByDefault: boolAt(raw, ["dataGrid", "readOnlyByDefault"], defaults.dataGrid.readOnlyByDefault),
-      copyIncludeHeaders: boolAt(raw, ["dataGrid", "copyIncludeHeaders"], defaults.dataGrid.copyIncludeHeaders),
-      showTypeIcons: boolAt(raw, ["dataGrid", "showTypeIcons"], defaults.dataGrid.showTypeIcons),
+      fontSize: numberAt(
+        raw,
+        ["dataGrid", "fontSize"],
+        defaults.dataGrid.fontSize,
+        10,
+        20,
+      ),
+      rowHeight: numberAt(
+        raw,
+        ["dataGrid", "rowHeight"],
+        defaults.dataGrid.rowHeight,
+        22,
+        48,
+      ),
+      zoomPercent: numberAt(
+        raw,
+        ["dataGrid", "zoomPercent"],
+        defaults.dataGrid.zoomPercent,
+        70,
+        160,
+      ),
+      pageSize: numberAt(
+        raw,
+        ["dataGrid", "pageSize"],
+        defaults.dataGrid.pageSize,
+        50,
+        5000,
+      ),
+      readOnlyByDefault: boolAt(
+        raw,
+        ["dataGrid", "readOnlyByDefault"],
+        defaults.dataGrid.readOnlyByDefault,
+      ),
+      copyIncludeHeaders: boolAt(
+        raw,
+        ["dataGrid", "copyIncludeHeaders"],
+        defaults.dataGrid.copyIncludeHeaders,
+      ),
+      showTypeIcons: boolAt(
+        raw,
+        ["dataGrid", "showTypeIcons"],
+        defaults.dataGrid.showTypeIcons,
+      ),
     },
     databaseExplorer: {
-      refreshMode: enumAt(raw, ["databaseExplorer", "refreshMode"], ["manual", "cache-first"], defaults.databaseExplorer.refreshMode),
-      showOnlySelectedSchemas: boolAt(raw, ["databaseExplorer", "showOnlySelectedSchemas"], defaults.databaseExplorer.showOnlySelectedSchemas),
-      showCacheBadges: boolAt(raw, ["databaseExplorer", "showCacheBadges"], defaults.databaseExplorer.showCacheBadges),
+      refreshMode: enumAt(
+        raw,
+        ["databaseExplorer", "refreshMode"],
+        ["manual", "cache-first"],
+        defaults.databaseExplorer.refreshMode,
+      ),
+      showOnlySelectedSchemas: boolAt(
+        raw,
+        ["databaseExplorer", "showOnlySelectedSchemas"],
+        defaults.databaseExplorer.showOnlySelectedSchemas,
+      ),
+      showCacheBadges: boolAt(
+        raw,
+        ["databaseExplorer", "showCacheBadges"],
+        defaults.databaseExplorer.showCacheBadges,
+      ),
     },
     ai: {
-      plannerKind: enumAt(raw, ["ai", "plannerKind"], ["model", "langgraph", "local"], defaults.ai.plannerKind),
+      plannerKind: enumAt(
+        raw,
+        ["ai", "plannerKind"],
+        ["model", "langgraph", "local"],
+        defaults.ai.plannerKind,
+      ),
     },
   };
 }
 
 function normalizedToolWindows(
   raw: Record<string, unknown>,
-  defaults: AppSettings
+  defaults: AppSettings,
 ): WorkbenchToolWindows {
   const databaseExplorerSide = enumAt(
     raw,
     ["workbench", "toolWindows", "databaseExplorer", "side"],
     ["left", "right"],
-    defaults.workbench.toolWindows.databaseExplorer.side
+    defaults.workbench.toolWindows.databaseExplorer.side,
   );
   const requestedAssistantSide = enumAt(
     raw,
     ["workbench", "toolWindows", "assistant", "side"],
     ["left", "right"],
-    defaults.workbench.toolWindows.assistant.side
+    defaults.workbench.toolWindows.assistant.side,
   );
   const assistantSide =
     requestedAssistantSide === databaseExplorerSide
@@ -330,7 +426,7 @@ function normalizedToolWindows(
       enabled: boolAt(
         raw,
         ["workbench", "toolWindows", "databaseExplorer", "enabled"],
-        defaults.workbench.toolWindows.databaseExplorer.enabled
+        defaults.workbench.toolWindows.databaseExplorer.enabled,
       ),
       side: databaseExplorerSide,
     },
@@ -338,7 +434,7 @@ function normalizedToolWindows(
       enabled: boolAt(
         raw,
         ["workbench", "toolWindows", "assistant", "enabled"],
-        defaults.workbench.toolWindows.assistant.enabled
+        defaults.workbench.toolWindows.assistant.enabled,
       ),
       side: assistantSide,
     },
@@ -346,7 +442,7 @@ function normalizedToolWindows(
       enabled: boolAt(
         raw,
         ["workbench", "toolWindows", "results", "enabled"],
-        defaults.workbench.toolWindows.results.enabled
+        defaults.workbench.toolWindows.results.enabled,
       ),
       side: "bottom",
     },
@@ -359,13 +455,14 @@ function oppositeSide(side: WorkbenchSide): WorkbenchSide {
 
 function normalizeKeymap(
   raw: Record<string, unknown>,
-  defaults: Record<string, string[]>
+  defaults: Record<string, string[]>,
 ) {
   const keymap: Record<string, string[]> = { ...defaults };
   Object.entries(raw).forEach(([actionId, value]) => {
     if (Array.isArray(value)) {
       keymap[actionId] = value.filter(
-        (item): item is string => typeof item === "string" && item.trim() !== ""
+        (item): item is string =>
+          typeof item === "string" && item.trim() !== "",
       );
     } else if (typeof value === "string" && value.trim()) {
       keymap[actionId] = [value.trim()];
@@ -388,7 +485,11 @@ function recordAt(value: Record<string, unknown>, path: string[]) {
   return isRecord(record) ? record : {};
 }
 
-function boolAt(value: Record<string, unknown>, path: string[], fallback: boolean) {
+function boolAt(
+  value: Record<string, unknown>,
+  path: string[],
+  fallback: boolean,
+) {
   const item = getAt(value, path);
   return typeof item === "boolean" ? item : fallback;
 }
@@ -398,7 +499,7 @@ function numberAt(
   path: string[],
   fallback: number,
   min: number,
-  max: number
+  max: number,
 ) {
   const item = getAt(value, path);
   if (typeof item !== "number" || !Number.isFinite(item)) return fallback;
@@ -409,7 +510,7 @@ function stringAt(
   value: Record<string, unknown>,
   path: string[],
   fallback: string,
-  maxLength: number
+  maxLength: number,
 ) {
   const item = getAt(value, path);
   if (typeof item !== "string") return fallback;
@@ -419,7 +520,7 @@ function stringAt(
 
 function vimMappingsAt(
   value: Record<string, unknown>,
-  path: string[]
+  path: string[],
 ): VimCustomMapping[] {
   const mappings = getAt(value, path);
   if (!Array.isArray(mappings)) return [];
@@ -456,7 +557,7 @@ function enumAt<T extends string>(
   value: Record<string, unknown>,
   path: string[],
   options: readonly T[],
-  fallback: T
+  fallback: T,
 ) {
   const item = getAt(value, path);
   return typeof item === "string" && options.includes(item as T)

@@ -43,6 +43,21 @@ test("accepts an acyclic React startup bundle", async () => {
   }
 });
 
+test("accepts a deferred React bootstrap outside the startup graph", async () => {
+  const root = await bundleFixture({
+    "index.js": 'requestAnimationFrame(() => import("./bootstrap.js"));',
+    "bootstrap.js": 'import "./react.js"; ReactDOM.createRoot(root);',
+    "react.js": "export const ReactDOM = {};",
+  });
+  try {
+    const result = await execFileAsync(process.execPath, [verifier, root]);
+    assert.match(result.stdout, /1 startup module/);
+    assert.match(result.stdout, /no static import cycles/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("rejects circular imports in the startup bundle", async () => {
   const root = await bundleFixture({
     "index.js": 'import "./vendor.js"; ReactDOM.createRoot(root);',

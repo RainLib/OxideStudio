@@ -11,6 +11,12 @@ import { moveSideToolWindow } from "@/lib/workbenchLayout";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
 
+const settingsMocks = vi.hoisted(() => ({
+  getAppSettings: vi.fn(),
+  saveAppSettings: vi.fn().mockResolvedValue(undefined),
+  resetAppSettings: vi.fn(),
+}));
+
 vi.mock("@/theme/useTheme", () => ({
   useTheme: () => ({
     mode: "dark",
@@ -21,7 +27,9 @@ vi.mock("@/theme/useTheme", () => ({
 }));
 
 vi.mock("@/components/workspace/SchemaSidebar", () => ({
-  SchemaSidebar: () => <div data-testid="schema-sidebar">Database Explorer</div>,
+  SchemaSidebar: () => (
+    <div data-testid="schema-sidebar">Database Explorer</div>
+  ),
 }));
 
 vi.mock("@/components/workspace/QueryEditor", () => ({
@@ -53,19 +61,19 @@ vi.mock("@/components/workspace/CommandPalette", () => ({
 }));
 
 vi.mock("@/components/workspace/AssistantSidebar", () => ({
-  AssistantSidebar: () => <aside data-testid="assistant-sidebar">Assistant Panel</aside>,
+  AssistantSidebar: () => (
+    <aside data-testid="assistant-sidebar">Assistant Panel</aside>
+  ),
 }));
 
 vi.mock("@/services/tauri/settings.service", () => ({
-  settingsService: {
-    getAppSettings: vi.fn(),
-    saveAppSettings: vi.fn().mockResolvedValue(undefined),
-    resetAppSettings: vi.fn(),
-  },
+  settingsService: settingsMocks,
 }));
 
 vi.mock("@/components/workspace/ProjectFilesSidebar", () => ({
-  ProjectFilesSidebar: () => <aside data-testid="project-files-sidebar">Project Files</aside>,
+  ProjectFilesSidebar: () => (
+    <aside data-testid="project-files-sidebar">Project Files</aside>
+  ),
 }));
 
 const initialTabState = useTabStore.getState();
@@ -85,6 +93,9 @@ describe("database workspace entry", () => {
       closedTabsStack: [],
     });
     useSettingsStore.setState({ settings: DEFAULT_APP_SETTINGS });
+    settingsMocks.getAppSettings.mockImplementation(
+      async () => useSettingsStore.getState().settings,
+    );
   });
 
   afterEach(() => {
@@ -105,15 +116,19 @@ describe("database workspace entry", () => {
           isDrawerOpen
           sidebarWidth={280}
           onDragStart={vi.fn()}
-        />
+        />,
       );
     });
 
-    expect(container.querySelector("[data-testid='schema-sidebar']")).toBeTruthy();
+    expect(
+      container.querySelector("[data-testid='schema-sidebar']"),
+    ).toBeTruthy();
     const buttonTitles = Array.from(container.querySelectorAll("button"))
       .map((button) => button.getAttribute("title") || "")
       .filter(Boolean);
-    expect(buttonTitles.some((title) => /assistant|ai/i.test(title))).toBe(false);
+    expect(buttonTitles.some((title) => /assistant|ai/i.test(title))).toBe(
+      false,
+    );
   });
 
   it("opens directly into an empty database workspace", async () => {
@@ -122,35 +137,43 @@ describe("database workspace entry", () => {
       root.render(<WorkspacePage />);
     });
 
-    expect(container.querySelector("[data-testid='schema-sidebar']")).toBeTruthy();
-    expect(container.querySelector("[data-testid='query-shortcuts']")).toBeTruthy();
+    expect(
+      container.querySelector("[data-testid='schema-sidebar']"),
+    ).toBeTruthy();
+    expect(
+      container.querySelector("[data-testid='query-shortcuts']"),
+    ).toBeTruthy();
     expect(container.querySelector("[data-testid='tab-bar']")).toBeFalsy();
-    expect(container.querySelector("[data-testid='assistant-sidebar']")).toBeTruthy();
+    expect(
+      container.querySelector("[data-testid='assistant-sidebar']"),
+    ).toBeNull();
+    expect(
+      container.querySelector("[data-testid='project-files-sidebar']"),
+    ).toBeNull();
     expect(
       Array.from(container.querySelectorAll("button")).some(
-        (button) => button.getAttribute("title") === "Toggle AI Assistant (right)"
-      )
+        (button) =>
+          button.getAttribute("title") === "Toggle AI Assistant (right)",
+      ),
     ).toBe(true);
     expect(
       Array.from(container.querySelectorAll("button")).some(
-        (button) => button.getAttribute("title") === "Toggle Project Files (right)"
-      )
+        (button) =>
+          button.getAttribute("title") === "Toggle Project Files (right)",
+      ),
     ).toBe(true);
 
     const filesButton = Array.from(container.querySelectorAll("button")).find(
-      (button) => button.getAttribute("title") === "Toggle Project Files (right)"
+      (button) =>
+        button.getAttribute("title") === "Toggle Project Files (right)",
     );
     await act(async () => filesButton?.click());
     expect(
       container
         .querySelector("#secondary-panel-files")
-        ?.classList.contains("hidden")
+        ?.classList.contains("hidden"),
     ).toBe(false);
-    expect(
-      container
-        .querySelector("#secondary-panel-assistant")
-        ?.classList.contains("hidden")
-    ).toBe(true);
+    expect(container.querySelector("#secondary-panel-assistant")).toBeNull();
   });
 
   it("renders side tool windows in their configured dock positions", async () => {
@@ -160,7 +183,7 @@ describe("database workspace entry", () => {
         workbench: moveSideToolWindow(
           DEFAULT_APP_SETTINGS.workbench,
           "databaseExplorer",
-          "right"
+          "right",
         ),
       },
     });
@@ -169,6 +192,13 @@ describe("database workspace entry", () => {
       root = createRoot(container);
       root.render(<WorkspacePage />);
     });
+
+    const assistantButton = Array.from(
+      container.querySelectorAll("button"),
+    ).find(
+      (button) => button.getAttribute("title") === "Toggle AI Assistant (left)",
+    );
+    await act(async () => assistantButton?.click());
 
     const explorerDock = container
       .querySelector("[data-testid='schema-sidebar']")

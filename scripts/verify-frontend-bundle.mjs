@@ -6,7 +6,8 @@ const indexPath = resolve(outputDirectory, "index.html");
 
 function staticImports(source) {
   const imports = new Set();
-  const fromPattern = /\b(?:import|export)(?!\s*\()[^"'`;]*?\bfrom\s*["']([^"']+)["']/g;
+  const fromPattern =
+    /\b(?:import|export)(?!\s*\()[^"'`;]*?\bfrom\s*["']([^"']+)["']/g;
   const sideEffectPattern = /\bimport\s*["']([^"']+)["']/g;
 
   for (const pattern of [fromPattern, sideEffectPattern]) {
@@ -16,6 +17,12 @@ function staticImports(source) {
   }
 
   return [...imports];
+}
+
+function dynamicImports(source) {
+  return [...source.matchAll(/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g)].map(
+    (match) => match[1],
+  );
 }
 
 function resolveAsset(importer, specifier) {
@@ -50,6 +57,30 @@ async function buildStaticGraph(entryPath) {
   }
 
   return graph;
+}
+
+async function findReactBootstrap(entryPath) {
+  const pending = [entryPath];
+  const visited = new Set();
+
+  while (pending.length > 0) {
+    const modulePath = pending.pop();
+    if (!modulePath || visited.has(modulePath)) continue;
+    visited.add(modulePath);
+
+    const source = await readFile(modulePath, "utf8");
+    if (source.includes(".createRoot(")) return modulePath;
+
+    const dependencies = [...staticImports(source), ...dynamicImports(source)]
+      .map((specifier) => resolveAsset(modulePath, specifier))
+      .filter((dependency) => dependency?.endsWith(".js"));
+    for (const dependency of dependencies) {
+      await access(dependency);
+      pending.push(dependency);
+    }
+  }
+
+  return undefined;
 }
 
 function findCycle(graph) {
@@ -90,7 +121,9 @@ const entryMatch = indexSource.match(
   /<script\b(?=[^>]*\btype=["']module["'])[^>]*\bsrc=["']([^"']+)["'][^>]*>/i,
 );
 if (!entryMatch) {
-  throw new Error("Production index.html does not contain a module entry script.");
+  throw new Error(
+    "Production index.html does not contain a module entry script.",
+  );
 }
 
 const entryPath = resolveAsset(indexPath, entryMatch[1]);
@@ -98,9 +131,11 @@ if (!entryPath) {
   throw new Error(`Unsupported frontend entry path: ${entryMatch[1]}`);
 }
 
-const entrySource = await readFile(entryPath, "utf8");
-if (!entrySource.includes(".createRoot(")) {
-  throw new Error("Production entry does not contain the React createRoot bootstrap.");
+const reactBootstrap = await findReactBootstrap(entryPath);
+if (!reactBootstrap) {
+  throw new Error(
+    "Production entry cannot reach the React createRoot bootstrap through local imports.",
+  );
 }
 
 const graph = await buildStaticGraph(entryPath);
@@ -109,7 +144,9 @@ if (cycle) {
   const formattedCycle = cycle
     .map((modulePath) => relative(outputDirectory, modulePath))
     .join(" -> ");
-  throw new Error(`Circular static imports in startup bundle: ${formattedCycle}`);
+  throw new Error(
+    `Circular static imports in startup bundle: ${formattedCycle}`,
+  );
 }
 
 console.log(

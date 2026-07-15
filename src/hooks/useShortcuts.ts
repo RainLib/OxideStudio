@@ -1,5 +1,4 @@
 import { useEffect } from "react";
-import { findWorkbenchAction } from "@/lib/actions";
 import { keybindingMatchesEvent } from "@/lib/keybindings";
 import { useSettingsStore } from "@/store/useSettingsStore";
 
@@ -7,7 +6,7 @@ export function useShortcuts() {
   const keymap = useSettingsStore((state) => state.settings.keymap);
 
   useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
+    const handleKeyDown = async (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
       const target = event.target as HTMLElement | null;
       const isTextInput =
@@ -16,7 +15,9 @@ export function useShortcuts() {
         target?.isContentEditable;
 
       for (const [actionId, bindings] of Object.entries(keymap)) {
-        if (!bindings.some((binding) => keybindingMatchesEvent(binding, event))) {
+        if (
+          !bindings.some((binding) => keybindingMatchesEvent(binding, event))
+        ) {
           continue;
         }
         if (
@@ -37,9 +38,10 @@ export function useShortcuts() {
           return;
         }
 
+        event.preventDefault();
+        const { findWorkbenchAction } = await import("@/lib/actions");
         const action = findWorkbenchAction(actionId);
         if (!action) return;
-        event.preventDefault();
         void action.run();
         return;
       }

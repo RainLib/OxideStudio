@@ -16,26 +16,32 @@ type SettingsState = {
   resetSettings: () => Promise<void>;
 };
 
+let pendingSettingsLoad: Promise<void> | null = null;
+
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   settings: DEFAULT_APP_SETTINGS,
   isLoading: false,
   error: null,
 
   loadSettings: async () => {
-    set({ isLoading: true, error: null });
-    try {
-      const raw = await settingsService.getAppSettings();
-      set({
-        settings: normalizeAppSettings(raw),
-        isLoading: false,
-        error: null,
-      });
-    } catch (error: any) {
-      set({
-        isLoading: false,
-        error: error?.message || String(error),
-      });
-    }
+    if (pendingSettingsLoad) return pendingSettingsLoad;
+    let promise!: Promise<void>;
+    promise = (async () => {
+      set({ isLoading: true, error: null });
+      try {
+        const raw = await settingsService.getAppSettings();
+        set({ settings: normalizeAppSettings(raw), error: null });
+      } catch (error: any) {
+        set({ error: error?.message || String(error) });
+      } finally {
+        if (pendingSettingsLoad === promise) {
+          pendingSettingsLoad = null;
+          set({ isLoading: false });
+        }
+      }
+    })();
+    pendingSettingsLoad = promise;
+    return promise;
   },
 
   updateSettings: async (updates) => {
@@ -71,7 +77,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 }));
 
-function deepMerge<T extends Record<string, any>>(base: T, patch: Partial<T>): T {
+function deepMerge<T extends Record<string, any>>(
+  base: T,
+  patch: Partial<T>,
+): T {
   const next: Record<string, any> = { ...base };
 
   Object.entries(patch).forEach(([key, value]) => {

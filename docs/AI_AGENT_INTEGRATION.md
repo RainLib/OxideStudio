@@ -1,237 +1,230 @@
 # AI Agent Integration Design
 
-> Detailed product capabilities, page interaction protocol, safety state machine,
-> DataGrip comparison, and LSP relevance requirements are defined in
-> [AI_AGENT_PRODUCT_SPEC.md](AI_AGENT_PRODUCT_SPEC.md). This document describes
-> the integration boundary and current implementation.
+> 当前基线：2026-07-15。产品能力、页面动作、安全状态机、DataGrip 对比和
+> LSP 相关性要求见 [AI_AGENT_PRODUCT_SPEC.md](AI_AGENT_PRODUCT_SPEC.md)。运行时边界的
+> 决策依据见 [ADR-0012](decisions/0012-deep-agents-desktop-runtime-boundary.md)。
 
-## Goal
+## 1. 目标与边界
 
-OxideStudio should expose database, metadata, LSP, and workspace actions to an AI assistant without coupling the assistant to UI components or a single database type. The core design should support the in-app assistant first, then reuse the same capability surface for MCP and CLI adapters.
+OxideStudio 需要让 Chat、Plan、Agent 使用同一套上下文、模型、工具和持久化语义，同时不把数据库凭据、driver handle、文件系统或进程权限交给模型运行时。
 
-## Recommended Architecture
+核心原则：
 
-Use a TypeScript `AiToolRegistry` as the stable boundary for all AI-callable capabilities. The registry should describe every tool with a name, JSON schema, capability flags, permission level, timeout, result limits, and executor.
+- React 只投影 Turn、过程、澄清、批准和最终回答，不拥有 tool loop、重试或恢复语义。
+- TypeScript Deep Agents 负责编排、上下文治理、todo、只读子代理和中断。
+- Rust 是数据库、模型、凭据、工具策略、批准、持久化和 sidecar 生命周期的唯一可信边界。
+- 页面动作使用稳定语义 target，不允许模型操作 DOM selector。
+- 应用内助手不通过 MCP 反向调用自己；MCP/CLI 只服务外部客户端。
+
+## 2. 当前生产架构
 
 ```text
-Assistant UI / AssistantPlanner / LangGraph
-        |
-        v
-AiToolRegistry  ---->  Tauri service clients  ---->  Rust commands/drivers
-        |
-        +---- MCP adapter
-        |
-        +---- CLI adapter
+React turn UI
+   ↕ Tauri commands + events
+Rust AgentHostManager / model gateway / tool policy / encrypted store
+   ↕ JSON-RPC 2.0 + Content-Length framing over stdio
+signed Node 22 TypeScript sidecar
+   └─ deepagents@1.10.8 via deepagents/node
 ```
 
-This keeps the editor integration direct and state-aware while allowing external agents to call the same tools through MCP. The CLI should be an automation/debug adapter, not the primary editor integration path.
+生产环境的 Chat、Plan、Agent 已统一进入该 host。旧 `AssistantRuntime`、planner 和前端 MCP/CLI 代码仍作为迁移期兼容与契约测试资产存在，但生产 UI 不会静默降级到它们；开发时只有显式设置 `VITE_ASSISTANT_LEGACY_RUNTIME=1` 才启用旧 UI。
 
-Decision summary:
+不采用以下方案：
 
-- Editor assistant: call `AssistantRuntime` directly in TypeScript. This is the best editor integration because it preserves active tab, selection, connection id, schema state, approval UI, and LSP diagnostics without protocol round-trips.
-- External AI clients: expose MCP over the same `AiToolRegistry`. MCP is the best integration for other agents because it provides tool discovery, schemas, and safety annotations.
-- CLI: keep it as a smoke-test, scripting, and local automation adapter. A standalone CLI binary should inject its own registry/context instead of using browser/Tauri defaults.
-- LangGraph: keep it as the graph/runtime layer, not as the core capability layer. The graph should select and sequence registry tools; it should not call database services directly.
-- Deep Agents TypeScript: treat it as a future long-running Agent host, not a WebView dependency. The audited `deepagents@1.10.2` entry statically imports Node filesystem, process, OS, glob, and child-process modules. It requires a separately signed/lazy sidecar or service boundary, or an official browser-safe export; Chat, O2, Plan, and the current Agent fallback stay on the lower-latency application runtime. See [ADR-0012](decisions/0012-deep-agents-desktop-runtime-boundary.md).
-- Page interaction: use the separate typed `UiActionRegistry` for navigation, focus, object reveal, editor ranges, files, tabs, result selection, Explain Plan nodes, revision-bound patch previews, and durable task summaries. The shipped actions resolve stable targets and reject stale project/document/plan context. Do not let the model drive DOM selectors, and do not mix UI navigation with database mutation approval.
+- Python、PyTauri 或 Python sidecar；
+- 把 `deepagents/browser` 打入 WebView；
+- 给 WebView `shell:allow-spawn`、任意文件或进程权限；
+- 让 sidecar 持有 provider/database secret 或直接连接数据库。
 
-## Current Implementation
+## 3. 工程与协议
 
-- `src/ai/tools` defines the shared registry, metadata/query tools, result limits, audit hooks, and permission policy.
-- `src/ai/tools/families.ts` provides runtime `AiToolFamily` registration and merging, so database/provider packages can add tool families without editing the core registry.
-- `src/providers` exposes `registerDatabaseProvider` to bundle driver profiles, object preview behavior, and AI tool families behind one provider registration call.
-- `src/providers/providerLoader.ts` loads discovered provider modules deterministically, reports skipped/failed modules without stopping the rest, registers exported provider bundles, and can build loaders from package manifests through `discoverDatabaseProviderLoaders` / `loadDatabaseProviderPackages`.
-- `provider.list` exposes registered providers, full driver capability summaries, and recommended AI tool hints so planners, MCP clients, and CLI scripts can discover backend support before choosing tools.
-- `src/ai/tools/manifest.ts` exports a portable tool manifest with schemas, permissions, capabilities, and approval status for MCP, CLI, and planner hosts.
-- `src/ai/tools/nativeMutationBuilders.ts` builds the exact MongoDB, Redis, and Elasticsearch native mutation requests used by workspace AI tools, keeping MCP, CLI, and planner execution paths aligned.
-- `metadata.describeObject` returns relational structure metadata, sampled MongoDB collection fields and indexes, Elasticsearch mapping fields, and provider-neutral preview/delete request templates so planners can reason about objects without hard-coding driver syntax.
-- `query.explain` exposes only estimated PostgreSQL/MySQL plans to AI callers. Rust validates the original single read-only statement, generates the driver-specific EXPLAIN form, executes it in a read-only transaction, and returns a normalized tree plus raw plan. AI callers cannot request Analyze; the user-facing editor action requires an explicit confirmation because it executes the source query.
-- `src/lib/querySafety.ts` centralizes read/write/destructive classification for SQL, MongoDB, Redis, and Elasticsearch so planners and executors make the same safety decision. MongoDB JSON is intentionally strict: implicit find templates only allow known read fields, and destructive command names cannot pass through read-only gates.
-- `tests/frontend/ai-core-tools.test.ts` locks the core AI tool contract for provider hints, read/write/destructive safety routing, approval gates, and structured MongoDB, Redis, and Elasticsearch mutation adapters.
-- `tests/frontend/provider-loader.test.ts` covers dynamic provider module loading, package manifest discovery, failure isolation, and dynamically registered AI tool families.
-- `tests/frontend/workspace-ai-tools.test.ts` verifies that in-app AI tools route metadata, query, table mutation, and MongoDB/Redis/Elasticsearch structured mutation calls through the workspace Tauri service adapters.
-- `tests/frontend/ai-external-tool-routing.test.ts` verifies that CLI and MCP external-agent entrypoints execute metadata, read query, and approved table mutation tools through an injected database adapter instead of bypassing the shared registry.
-- `src/ai/assistant` exposes an `AssistantPlanner` contract, a deterministic fallback planner, a provider-neutral model planner, and approval-aware execution for AI-proposed tool calls.
-- `AssistantRuntime.runToolLoop` owns bounded multi-round execution independently of React: it emits typed step/result/summary/plan/limit events, recomputes policy for follow-ups, deduplicates repeated tool+input signatures, binds approval to an exact normalized step id, and observes the execution context's `AbortSignal`. The default budget is four summarized rounds and twelve tool attempts; caller overrides are hard-capped at eight rounds and twenty-four attempts.
-- Agent mode writes a project-scoped, strongly typed task summary to the MetaStore `assistant_tasks` table and mirrors it in `TaskStatusCenter`. The checkpoint contains only plan step identity/title/tool/risk and completed step status; its schema cannot contain prompts, tool inputs, SQL, approval tokens, tool outputs, or result rows. Writes are sequenced, terminal history is capped at 100 per project, and active tasks from another application session are recovered as `interrupted`.
-- Every Agent plan message includes a typed `task.reveal` attachment. The action resolves `projectId + taskId` from the in-memory task store or retained MetaStore history, then opens the status-bar Task Center at the exact safe summary. The detail surface shows bounded progress and step status only; cleared/missing tasks return `TARGET_NOT_FOUND` instead of opening an empty panel.
-- Before an approved write/destructive/external tool executes, `AssistantRuntime` awaits a checkpoint-v2 execution receipt containing only step id, tool name, state, and timestamps. If the receipt cannot be saved, the tool is not called. A terminal task left with a `started` receipt after process exit, cancellation, or project switching is shown as uncertain verification work and is never an automatic retry signal.
-- `src/ai/ui-actions` defines a UI-only action contract, context-version and document-revision checks, stable failure codes, workspace executors, and tool-result attachment generation. Assistant messages render object, file, result, tab, selection, LSP diagnostic, Explain Plan, Schema Diff, and editor patch references as typed actions; object reveal, open data, open DDL, plan-node reveal, patch preview, and patch Apply remain separate actions.
-- `editor.proposePatch` is a read-only artifact tool. The host captures the exact current `originalText`, one-based Monaco range, tab identity, and document revision; the model supplies only the proposed replacement and explanation. Clicking its attachment opens a bounded before/after panel but does not edit or execute SQL. Apply is a direct user gesture, revalidates both the whole-document revision and range contents in the tab store, and refuses stale or binary-preview tabs.
-- `src/lib/databaseNavigation.ts` and `src/lib/editorNavigation.ts` are semantic host navigation channels. Database targets carry project, connection, database, schema, object type, and object name; editor targets carry tab id and a one-based range. Components never accept model-generated DOM selectors.
-- `tests/frontend/ui-action-registry.test.ts`, `assistant-attachments.test.ts`, `assistant-conversation-attachments.test.tsx`, `workspace-ui-action-plan.test.ts`, `workspace-ui-action-patch.test.ts`, `editor-patch.test.ts`, and `editor-patch-preview-panel.test.tsx` cover stale project/revision/plan rejection, exact same-name object identity, diagnostic coordinate conversion, plan-node selection, revision-bound patch creation/apply, and primary/secondary attachment actions.
-- `src/ai/assistant/langGraphPlanner.ts` provides a dependency-light LangGraph bridge plus `createAssistantPlannerGraph` for composing planner nodes over shared context, metadata, warnings, and notes. A real LangGraph graph can still plug in by returning `AssistantPlannerResult` from the shared planner contract.
-- `src/ai/mcp` exposes registry tools in an MCP-compatible shape with tool annotations such as `readOnlyHint` and `destructiveHint`.
-- `src/ai/mcp/protocol.ts` adds a transport-neutral JSON-RPC handler for `initialize`, `tools/list`, `tools/call`, single-tool inspection, and the Oxide manifest extension; stdio or HTTP servers should wrap this instead of reimplementing tool routing.
-- `src/ai/cli` provides a dependency-light command adapter for `tools list`, `tools manifest`, `assistant plan`, and `tools call`.
-- The assistant panel is an editor entry point; real model/provider integration should call the runtime APIs rather than bypassing the registry.
+### 3.1 TypeScript 工作区
 
-## LangGraph Usage
+- `agent-contract/`：Zod 定义的共享协议、tool manifest、workspace、provider capability 和 event schema。
+- `agent-host/`：Deep Agents runtime、Rust 模型代理、动态工具代理、澄清/批准等待和 JSON-RPC peer。
+- `src/services/tauri/agent-host.service.ts`：WebView 仅可见的 Tauri command/event 适配。
+- `src/hooks/useAssistantAgentSession.ts`：把事件归并为稳定 Turn view model，不执行 agent 决策。
 
-Use TypeScript LangGraph as an optional implementation of `AssistantPlanner` for the in-app assistant orchestration. The editor should not call itself through MCP because editor state, connection metadata, tabs, and approval UI already live in the frontend. `createLangGraphAssistantPlanner({ invoke })` is the bridge point; the `invoke` function can run a compiled LangGraph graph and return the same `AssistantPlannerResult` used by the default and model planners. For simple in-process orchestration, `createAssistantPlannerGraph({ nodes })` runs ordered planner nodes with shared metadata and merges warnings/notes before returning the final plan.
+sidecar 固定 Node 22 与 `deepagents@1.10.8`。构建先经 esbuild，再由固定版本 `@yao-pkg/pkg` 生成目标平台自包含可执行文件。stdout 只承载协议帧；诊断写入经过脱敏的 stderr。
 
-The current official LangGraph integration is intentionally small: the compiled graph runs `plan -> policy`. The bounded multi-round tool loop has moved into `AssistantRuntime`, while React still creates the abort controller, mirrors transient state, and owns the component lifetime. This is a framework-neutral execution boundary, not a complete durable agent runtime. The target migration is:
+### 3.2 Rust 工作区
 
-1. Keep `AssistantRuntime`, `AssistantPlanner`, and `AiToolRegistry` as application-owned contracts.
-2. Define a versioned Agent-host protocol. Wrap registry tools for Deep Agents only inside a separately signed/lazy sidecar or service; the host receives tool schemas and returns proposals/events but never receives database credentials or bypasses `AiToolRegistry`.
-3. Keep iteration, policy normalization, cancellation checks, and observation events in `AssistantRuntime`; next add explicit approval pause tokens, verification nodes, and checkpoint serialization without moving policy into the UI.
-4. Extend the shipped project-scoped safe task-summary/receipt store into a resumable checkpoint: add runtime state/version, thread messages under an explicit retention policy, database-level idempotency where supported, and mandatory verification for uncertain external effects. Continue excluding raw result rows and never persist reusable approval tokens.
-5. Keep database mutation policy and backend read-only enforcement outside Deep Agents. Its built-in filesystem permissions do not govern custom database or MCP tools.
-6. Disable arbitrary code execution and unrestricted filesystem/network tools initially. Subagents are read-only and budgeted by default.
+- `src-tauri/src/agent/host.rs`：启动、握手、帧限制、deadline、cancel、健康状态、一次 transport restart、事件转发和 tool/model/checkpoint 请求处理。
+- `src-tauri/src/agent/model.rs`：OpenAI-compatible complete/stream 请求、usage/tool-call 归一化、超时、取消和响应大小限制。
+- `src-tauri/src/agent/store.rs`：项目级 thread/checkpoint/artifact 与 LangGraph checkpoint/pending writes 加密存储。
+- `src-tauri/src/agent/protocol.rs` 与 `src-tauri/src/commands/agent.rs`：Rust 侧契约和最小 Tauri command surface。
 
-Recommended graph nodes:
+`AgentHostManager` 在 Tauri setup 时只创建无副作用状态。没有配置 provider 时不启动 sidecar；首次 AI 请求时懒启动。sidecar 缺失、协议不兼容、签名/打包错误或崩溃只会让 Assistant 进入 unavailable，不得阻塞应用主界面和数据库工作台。
 
-- `classify_intent`: detect explain/query/debug/schema/edit/export tasks.
-- `collect_context`: gather active connection, selected text, schema, tab, and driver capabilities.
-- `plan_tools`: choose tools from `AiToolRegistry`.
-- `safety_review`: require user approval for writes, destructive operations, exports, and cross-database actions.
-- `execute_tools`: run bounded tool calls through Tauri services.
-- `summarize_result`: return concise answers with queries, row limits, and caveats.
+WebView 只能调用：
 
-The shipped default planner stays dependency-light and deterministic. It reads workspace, connection, and provider capability context before suggesting metadata, LSP, or query steps. When selected JSON plus the user message clearly identify a table, collection, key, or index, it can suggest structured mutation tools such as `table.insertRows`, `document.insertDocuments`, `key.setValue`, or `search.indexDocument`; approval policy still controls execution. A LangGraph planner can replace it by implementing `AssistantPlanner.plan`, returning the same `AssistantPlanStep[]`, and pausing before any step whose tool policy requires approval.
+- `agent_start_turn`
+- `agent_resume_turn`
+- `agent_cancel_turn`
+- `agent_answer_clarification`
+- `agent_approve_action`
+- `agent_get_status`
 
-For query execution requests, selected SQL is preferred. If there is no selection, the default planner can execute the active query tab SQL through the same guarded `query.runReadOnly`, `query.runMutation`, or `query.runDestructive` tools.
+### 3.3 JSON-RPC 契约
 
-Example LangGraph bridge:
+协议使用 JSON-RPC 2.0 与 LSP 风格 `Content-Length` framing，版本为 1，单帧上限 4 MiB。每个 Turn 相关请求都携带：
 
-```typescript
-const planner = createLangGraphAssistantPlanner({
-  invoke: async (input) => graph.invoke(input),
-});
-
-const runtime = createAssistantRuntime({ planner });
+```text
+requestId / threadId / turnId / contextVersion / deadline
 ```
 
-For model-provider integration without taking a LangGraph dependency, use `createModelAssistantPlanner({ invoke })`. The runtime sends the model a redacted and bounded workspace context plus the AI tool manifest; the model returns candidate tool steps; the planner validates tool names and marks write/destructive tools as requiring approval according to policy. Active tab SQL, selected text, and editor selection text are truncated before provider invocation so large scripts cannot dominate model requests. Use `createModelToolResultSummarizer(invoke)` to feed tool results back to the provider for a final answer or follow-up suggestions.
+host 到 sidecar 的主要方法为 initialize、openThread、start/resume/cancel turn、answerClarification 和 resolveApproval；sidecar 回调 Rust 的主要方法为 model complete/stream、tool invoke、graph checkpoint get/list/put/putWrites/deleteThread、兼容层 checkpoint load/save、artifact read 和 agent event。
 
-## Tool Categories
+握手校验协议版本、最大帧和必需 capability。未知可选字段向前兼容，缺少必需 capability 则拒绝启动该 runtime。
 
-Read-only tools:
+## 4. Deep Agents profiles
 
-- `connection.list`, `connection.capabilities`
-- `provider.list`
-- `metadata.listObjects`, `metadata.listCollections`, `metadata.describeObject`
-- `query.runReadOnly` with row/time limits and driver-aware syntax
-- `key.getValue`
-- `workspace.getActiveTab`
-- `workspace.getSelection`
-- `lsp.getCompletions`, `lsp.explainDiagnostics`
+### Chat
 
-Write tools behind explicit approvals:
+- 由 Deep Agents 管理历史、长问题预处理、上下文压缩、澄清和最终回答。
+- 不提供数据库、todo、mutation 或子代理工具。
+- 可以使用 `ask_user`。
 
-- `query.runMutation`
-- `query.runDestructive`
-- `database.createNamespace`
-- `database.dropNamespace`
-- `table.insertRows`
-- `table.updateRows`
-- `table.deleteRows`
-- `document.insertDocuments`
-- `document.updateDocuments`
-- `document.deleteDocuments`
-- `key.setValue`
-- `key.deleteKeys`
-- `search.indexDocument`
-- `search.updateDocument`
-- `search.deleteDocument`
+### Plan
 
-Future tool families:
+- 只接收 Rust manifest 中的只读 discovery、metadata、LSP、query review 和 estimated EXPLAIN 能力。
+- 可生成 todo，使用 `schema_analyst`、`query_reviewer` 只读子代理。
+- 不接收 write/destructive tool，因此不能依靠 prompt 误执行变更。
 
-- provider-loaded database-specific tool packs
+### Agent
 
-## MCP vs CLI
+- 接收 Rust 按项目、连接、provider capability 和 policy 过滤后的 manifest。
+- 无依赖的只读工作可有界并行，mutation 在 sidecar 内串行。
+- 可使用只读 `schema_analyst`、`query_reviewer`、`plan_verifier` 子代理；通用和异步子代理未启用。
+- write/destructive 调用必须经过 sidecar approval interrupt、UI 用户决定、Rust 一次性 lease 和调用时的 Rust 二次复核。
 
-MCP is the better external integration because it gives other AI clients a structured tool protocol with schemas, permissions, and discoverability. Implement MCP as an adapter over `AiToolRegistry`; do not duplicate tool logic in the MCP server.
+不支持 tool calling 的 provider 只能用于 Chat；Plan/Agent 返回明确的 capability error。
 
-The protocol adapter is transport-neutral:
+## 5. 模型与凭据
 
-```typescript
-const protocol = createMcpProtocolAdapter();
-await protocol.handleMessage({
-  jsonrpc: "2.0",
-  id: 1,
-  method: "tools/list",
-});
+sidecar 中的 `OxideChatModel` 是 LangChain model adapter，但不会持有 API key。它通过内部 RPC 请求 Rust `ModelGateway`：
+
+- Rust 从 OS credential manager 读取 provider secret；设置页和 Zustand/localStorage 不持久化明文 key。
+- Rust 校验 provider URL，执行 OpenAI-compatible SSE 或非流式请求。
+- sidecar 只得到 text delta、tool calls、usage、finish reason 和结构化错误。
+- provider descriptor 显式声明 streaming、tool calling、structured output、最大输入/输出 token。
+- cancel/deadline 从 UI 一直传播到 sidecar、Rust HTTP 和数据库路径。
+
+provider secret 与 agent store master key 使用不同的 service/account。macOS 使用 Keychain，Windows 使用 Credential Manager，Linux 使用 Secret Service/keyring backend。若 agent store 主密钥无法安全持久化，当前实现退回进程内加密 session store，而不是把明文写入 SQLite。
+
+## 6. 工具、连接和结果边界
+
+### 6.1 Tool manifest
+
+`src/ai/tools` 仍是应用能力定义的重要来源；`agent-contract` 提供可跨进程验证的 portable manifest。每个工具至少声明 name、description、JSON Schema、permissions、timeout 和 result limit。sidecar 动态生成 Deep Agents tools，真正执行统一回到 Rust。
+
+Rust 在执行时重新验证：
+
+- project、connection、database/schema/namespace；
+- connection config revision 与 `contextVersion`；
+- manifest tool name、permission 和 canonical input digest；
+- SQL/native request risk、result limit 和 deadline；
+- approval lease 的 thread/turn/call/tool/input hash/expiry，且 lease 只能消费一次。
+
+sidecar 不接收数据库密码、SSH secret、connection URL 或 driver handle。大结果只通过有界 observation 返回 schema、统计、采样和 artifact reference；完整结果留在 Rust 项目级 artifact store。
+
+### 6.2 自动连接
+
+Rust 按项目解析连接目标，优先级为：
+
+1. 工具显式 connection；
+2. 当前 tab 绑定连接；
+3. 当前活动连接；
+4. 项目内唯一保存连接；
+5. 多候选时请求用户选择。
+
+只读 metadata/query 可对活动或唯一保存连接进行懒连接。连接/session 必须绑定项目和 config revision，防止项目切换或乱序连接串库。只读幂等调用断线后至多重连重放一次；mutation 不自动重放。
+
+当前 Rust bridge 已覆盖连接发现、metadata、对象描述、只读查询/estimated EXPLAIN 等首批路径。更多 provider-specific tools 应逐个迁移并通过 Rust 契约测试；不能因为前端 registry 有定义就宣称 sidecar 已能执行。
+
+## 7. 上下文、澄清和持久化
+
+### 7.1 上下文治理
+
+Deep Agents 使用 provider 的真实 token profile，而不是固定 170k fallback。当前 runtime 包含：
+
+- 长问题按段落、SQL statement 和 Markdown 边界切块并生成 digest；
+- Deep Agents summarization/offload 事件；
+- LangGraph checkpoint/pending writes 以 typed blob 加密保存，兼容层摘要只保留有界消息；后续 Turn 只追加新 prompt，避免重复注入完整历史；
+- 过滤 `lcSource === "summarization"` 的流，不把内部 summary 当成最终回答；
+- tool observation 超限时存 artifact，IPC 只返回摘要和 reference。
+
+仍需继续加固：在 UI 中完整展示实际/估算 token 与所有省略来源、提供 artifact 全文按 range/search 读取，以及 100+ Turn 的质量基准。不能把自动摘要描述为不会丢失任何语义的形式保证。
+
+### 7.2 主动澄清
+
+所有 profile 都可调用 `ask_user`。单次支持 1–3 个问题、每题 2–3 个选项和自由输入；最多连续两轮。等待时不执行新工具，回答后在同一 Turn 内继续。连接多选和安全歧义也可由 Rust 确定性触发，不依赖模型猜测。
+
+澄清和批准已改为 LangGraph 原生 `interrupt()`，恢复使用同一 thread/turn 的 `Command({ resume })`。`OxideCheckpointSaver` 在每个 graph step 通过 Rust RPC 加密保存 checkpoint 与 pending writes，因此 sidecar 进程重启后仍可恢复等待中的 interrupt。完整应用进程重启后的 pending UI 重建仍属于发布前 hardening，不得把它与已验证的 sidecar-restart 恢复混为一谈。
+
+### 7.3 加密 checkpoint
+
+Rust 的 `agent_threads`、`agent_checkpoints`、`agent_artifacts`、`agent_graph_checkpoints`、`agent_graph_writes` 按项目存储：
+
+- AES-256-GCM；每条记录独立 96-bit nonce；
+- AAD 绑定 record kind、project、record id 和 version；
+- 主密钥仅在 OS credential manager；
+- 默认七天过期，在初始化和后续读写时清理；
+- thread/checkpoint/artifact 在 keyring 可用时写入独立 `agent-state.db` 密文。
+
+凭据、SSH secret、connection URL、可复用批准 token 和无界 raw rows 不得持久化。LangGraph typed blobs 由 sidecar serializer 生成，Rust 将其视为不透明密文 payload；AAD 绑定 project/thread/namespace/checkpoint/task/write index。批准 decision 可以进入 `Command({ resume })`，一次性 lease 只能作为 transient resume 参数存在于 Rust/sidecar 内存，sidecar 崩溃丢失 lease 后 mutation 必须 fail-closed。最终回答只在 Rust 接受本轮 checkpoint 后发出。
+
+该语义提供 turn-boundary durability，不等于数据库 exactly-once。任何不确定 mutation 必须进入 verify，绝不自动重放。
+
+旧 `assistant_tasks` 安全摘要/receipt 仍可用于迁移期 Task Center 历史，但不再是 Deep Agents 可执行 checkpoint；关系见 [ADR-0011](decisions/0011-agent-task-summary-persistence.md)。
+
+## 8. Codex 式 Turn UI
+
+一个 Turn 固定为：用户问题 → 执行过程 → coordinator 最终答案。
+
+- tool、todo、subagent 和 compaction 映射为当前 Turn 的 compact process disclosure，不创建独立聊天消息。
+- 成功过程默认收起；clarification、approval、failure、stale context 默认展开。
+- 最终 coordinator 输出才是 Assistant 正文；artifact、patch 和导航 action 位于正文下方。
+- minimap 以每个完整问答 Turn 生成一个中性灰 marker，中间 stage 不单独记录。
+- minimap 仅在宽面板且真实溢出时显示；支持 hover/focus、键盘和 reduced motion。
+- React reducer 根据 sidecar event 更新 view model，不在组件中实现 tool loop 或重试。
+
+`UiActionRegistry` 与 database tool registry 继续分离。对象、文件、tab、editor range、result、Explain Plan、Schema Diff 和 revision-bound patch 都使用 stable target；项目、文档或 artifact 版本过期时必须拒绝，不降级为 DOM 查找。
+
+## 9. 外部 MCP 与 CLI
+
+外部入口的目标是 Rust 原生 `oxide-agent`：
+
+```text
+oxide-agent mcp stdio --project <id> [--connection <id>]
+oxide-agent tools list
+oxide-agent tools inspect <name>
+oxide-agent tools call <name> --input @file
 ```
 
-Mutating calls still require an explicit approval signal, for example `_meta: { "oxide/approved": true }`; do not grant that automatically from an external host.
+首个发布范围为 stdio/CLI 与只读工具：连接摘要、metadata、只读查询、estimated EXPLAIN 和 headless LSP。HTTP/OIDC、UI/editor tool 和外部 mutation 不在首版范围。Rust-native binary 已使用固定版本 `rmcp`/`clap` 接入 Cargo，并作为 target-specific Tauri `externalBin` 构建、验证和随包签名。
 
-MCP callers that need workspace-like context can pass `_meta: { "oxide/context": { "activeConnectionId": "...", "activeDriver": "redis", "activeNamespace": "2" } }` on `tools/call`. The adapter merges those fields into the execution context before policy and tool execution.
+现存 TypeScript MCP/CLI adapter 继续承担契约测试和迁移参考，但不能接受调用者自报 `_meta.approved` 或 CLI `--approve`。调用者自批准始终无效。未来若开放外部写入，必须由运行中的 GUI 签发 60 秒、单次、绑定 tool input hash 与 project/connection grant 的 lease。
 
-MCP callers that already know a candidate tool name can inspect only that tool's schema and approval policy:
+## 10. 发布与验证
 
-```json
-{"jsonrpc":"2.0","id":1,"method":"oxide/tools/inspect","params":{"name":"provider.list"}}
-```
+发布矩阵：
 
-CLI is useful for local automation, tests, and scripting. It can share the same registry by running commands such as:
+- macOS arm64
+- macOS x86_64
+- Windows x86_64
+- Linux x86_64
 
-```bash
-npm run ai -- tools list
-npm run ai -- tools manifest
-npm run ai -- tools inspect provider.list
-npm run ai -- assistant plan --message "list tables in the active database"
-npm run ai -- assistant plan --message "run selected query" --selected-text-file selection.sql
-npm run ai -- tools call query.runReadOnly --json-file payload.json
-npm run ai -- tools call key.getValue --active-driver redis --active-namespace 2 --json '{"key":"session:1"}'
-npm run ai -- tools call key.setValue --approve --json '{"key":"demo","value":"ok"}'
-npm run ai -- mcp request --json '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-```
+macOS 不再生成 universal bundle。每个平台独立构建/测试 sidecar 与 SQL LSP，先签 helper binaries，再签 Tauri app/installer，并发布 architecture-specific Aliyun OSS updater artifact。
 
-The Makefile exposes the same entry points:
+最低门禁：
 
-```bash
-make ai-tools
-make ai-manifest
-make ai-inspect AI_TOOL=provider.list
-make ai-plan AI_MESSAGE="inspect this workspace"
-make ai-mcp-smoke
-make ai-mcp-stdio
-```
+- `npm run build`、frontend tests；
+- `agent-contract` schema/compatibility tests；
+- `agent-host` RPC/model/tool/runtime tests；
+- Rust unit/integration tests；
+- `cargo fmt --check`；
+- `cargo clippy --all-targets --all-features -- -D warnings`；
+- 真实 production bundle 的 handshake、Chat stream、clarification/approval、read-only tool、cancel 和退出 smoke。
 
-Use `tools inspect <toolName>` or MCP `oxide/tools/inspect` when an agent already has a candidate tool name and needs only that tool's schema, permission set, capabilities, and approval policy. Use `npm run ai -- mcp request` or `make ai-mcp-smoke` for local MCP JSON-RPC smoke tests or scripts that need to match an external MCP host exactly. Use `tools call` for simpler one-off automation.
-
-Current limitation: `scripts/oxide-ai.ts` runs in a headless Node process, so it does not have the in-app Tauri connection manager, active editor tab, selected schema, or approval UI. Its default adapter intentionally exposes provider and capability discovery only. Database query, metadata, LSP, and mutation tools are fully available through the in-app workspace adapter; a standalone MCP server that can query databases must inject its own connection/query adapter instead of relying on browser/Tauri state.
-
-The CLI/MCP manifest includes `environment.enabledToolFamilies` and `environment.disabledToolFamilies` with missing adapter names. Agents should use this to distinguish an unavailable headless adapter from an unsupported database capability before planning tool calls.
-
-For injected standalone adapters, both `assistant plan` and `tools call` accept `--active-connection-id`, `--active-driver`, and `--active-namespace` so external agents can pass the same context shape used by the in-app assistant before choosing or executing tools. `assistant plan` also accepts `--selected-text` or `--selected-text-file` so editor scripts can pass the active selection without embedding large SQL or JSON directly in the shell command.
-
-For the editor itself, prefer direct TypeScript orchestration over MCP. The editor already owns state, selection, tabs, connection ids, and approval UI; routing those through an external protocol would add latency and lose context. External MCP hosts should use tool annotations plus an explicit approval handoff before calling mutating tools.
-
-Recommended usage:
-
-- In-app assistant: `AssistantRuntime` with the default planner, then LangGraph/model planner when provider integration is ready.
-- External AI clients: MCP adapter over the same `AiToolRegistry`.
-- Local automation and tests: CLI adapter.
-
-## Safety Requirements
-
-- Never expose raw credentials or connection URLs to model context.
-- Default all result sets to bounded row, byte, and time limits.
-- Treat multi-statement SQL conservatively; read-only gates must reject any statement with write or destructive operations.
-- Treat driver-native requests conservatively. MongoDB command JSON should reject unknown fields instead of silently degrading to collection reads; Redis and Elasticsearch requests should be classified by native command or HTTP method/path before execution.
-- Require approval for mutations, exports, drops, and external network access.
-- Do not auto-approve writes in MCP or CLI adapters; external callers must pass an explicit approval signal such as CLI `--approve`.
-- Store an audit entry for request id, tool name, permissions, status, duration, and failure reason without persisting raw query text by default.
-- Prefer capability checks and `provider.list.aiToolHints` over driver name checks so new backends do not require broad rewrites.
-
-## Implementation Phases
-
-1. Add `src/ai/tools` with registry types, schemas, and read-only database tools. Done.
-2. Add an assistant panel backed by the registry executor. Done.
-3. Add MCP and CLI adapters over the same registry. Done.
-4. Add write tools with approval gates and audit logging. Done for query-level mutation/destructive tools, structured table row mutations, and structured document/key/search mutations.
-5. Add a planner layer that chooses tool calls, pauses for approval, and feeds results back into the model. Foundation done with `AssistantPlanner`, `createModelAssistantPlanner`, `createModelToolResultSummarizer`, `createLangGraphAssistantPlanner`, and `createAssistantPlannerGraph`; package-specific compiled LangGraph graphs can plug into the same bridge.
-6. Add provider/plugin hooks so new databases register tool families by capability, not by UI rewrites. Runtime provider registration is done with `registerDatabaseProvider`; dynamic module loading is done with `loadDatabaseProviders`; package manifest discovery/loading is done with `discoverDatabaseProviderLoaders` and `loadDatabaseProviderPackages`. Done.
-7. Add live integration coverage for MongoDB, Redis, Elasticsearch, MySQL, and PostgreSQL tool paths. Driver-level connection, metadata, query, and mutation coverage is available through `scripts/test-live-databases.sh`; backend-equivalent AI tool assertions now cover metadata, read, mutation, and destructive paths in `src-tauri/tests/live_database.rs`; CLI/MCP adapter-level AI tool routing is covered by `tests/frontend/ai-external-tool-routing.test.ts`; full in-app TypeScript/Tauri AI registry live E2E coverage is still pending.
-8. Add safety regression tests for SQL, MongoDB, Redis, and Elasticsearch request classification, and reject unknown MongoDB driver command fields before execution. Done.
-9. Extract and test native AI mutation request builders for MongoDB, Redis, and Elasticsearch. Done.
-10. Add core AI tool contract tests for provider hints, approval gates, safety routing, and structured MongoDB, Redis, and Elasticsearch mutation adapters. Done.
-11. Add workspace adapter tests for metadata, query, table mutation, and MongoDB/Redis/Elasticsearch structured mutation service routing. Done.
-12. Add CLI context overrides for direct tool calls so injected standalone adapters can execute tools with active connection, driver, and namespace context. Done.
-13. Add MCP `tools/call` context overrides via `_meta["oxide/context"]` or `params.context` so external agents can execute tools with active connection, driver, and namespace context. Done.
-14. Add CLI/MCP external-agent routing tests for injected database metadata, read query, and approved mutation adapters. Done.
-15. Add CLI/MCP manifest environment metadata so external agents can see enabled tool families and missing headless adapters before selecting tools. Done.
-16. Let the in-app default planner execute active query tab SQL when no editor selection is present, while still preferring selected SQL. Done.
-17. Bound model planner turn and workspace text context before provider invocation, covering selected text, active tab SQL, and editor selection text. Done.
+发布前剩余 hardening 需单独跟踪：crash 中断恢复、跨平台安装包 smoke、长期上下文质量、完整 provider tool bridge，以及 sidecar 内存/冷启动基准。

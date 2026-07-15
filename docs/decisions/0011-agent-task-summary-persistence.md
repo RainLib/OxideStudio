@@ -1,35 +1,65 @@
 # ADR-0011: Project-scoped, data-minimized Agent task summaries
 
-- Status: Accepted
+- Status: Accepted for legacy task-summary compatibility; executable runtime persistence amended by ADR-0012
 - Date: 2026-07-15
-- Scope: Agent task history, application-session recovery, retention, and privacy boundary
+- Scope: `assistant_tasks` history, safe task reveal, legacy execution receipts and migration
 
 ## Context
 
-`AssistantRuntime` owns the bounded tool loop, but the running controller and transient execution state still live in React. A process exit therefore loses the live task. Persisting the complete runtime object would be unsafe: tool inputs may contain SQL, mutation payloads or credentials; tool outputs may contain database rows; approval state must never become a reusable authorization token.
+Before the TypeScript Deep Agents host existed, the bounded tool loop lived in the application runtime and its live controller was tied to React. A process exit lost execution state. Persisting the complete runtime object would have been unsafe: prompts and tool inputs could contain SQL or mutation payloads, outputs could contain database rows, and approval state must never become reusable authorization.
 
-The existing metadata resource table is also the wrong ownership boundary because it requires a database connection. An Agent task belongs to a project even when it only inspects project files or fails before a connection is selected.
+The resulting `assistant_tasks` design intentionally solved a smaller problem: retain a safe, project-scoped Task Center summary and identify an uncertain mutation window. It did not claim to resume a graph.
 
-## Decision
+ADR-0012 subsequently moved production Chat, Plan and Agent orchestration to a signed Node 22 Deep Agents sidecar and introduced a separate Rust-owned encrypted thread/checkpoint/artifact store. This ADR remains authoritative only for the legacy summary schema and migration behavior.
 
-Store a dedicated, project-scoped task summary in `assistant_tasks`, keyed by `project_id + id`. The record contains request/session identity, lifecycle status, generic title/detail, progress, timestamps, and a versioned summary checkpoint.
+## Legacy summary decision
 
-The version 1 checkpoint is deliberately non-executable. Its schema permits only:
+Store a dedicated task summary in `assistant_tasks`, keyed by `project_id + id`. It contains request/session identity, lifecycle status, generic title/detail, progress, timestamps and a versioned, bounded summary.
 
-- plan step `id`, generic `title`, tool name, approval requirement and risk;
+Version 1 permits only:
+
+- plan step id, generic title, tool name, approval requirement and risk;
 - completed step identity, tool name and terminal status;
 - current step identity/title and bounded progress.
 
-Version 2 adds a bounded execution receipt for approved tools: step id, tool name, `started/succeeded/failed`, and timestamps. It still cannot represent prompts, conversation messages, tool inputs, SQL, mutation payloads, approval tokens, tool outputs, result rows, credentials, or arbitrary metadata. Frontend serialization tests assert this exclusion. The Rust boundary independently validates receipt-to-plan identity, field sizes, at most 100 plan/completed/receipt entries, and a maximum serialized checkpoint size of 64 KiB.
+Version 2 adds a bounded receipt for an approved tool: step id, tool name, `started/succeeded/failed` and timestamps. Version 3 additionally stores a data-minimized workspace binding: bounded project/connection/driver/database/namespace/tab identity, document and selection revision hashes, a session-local context version and a stable fingerprint.
 
-The Runtime awaits a durable `started` receipt before executing an approved tool. If persistence fails, execution is blocked. Normal step completion advances the receipt to `succeeded` or `failed`. A process crash, cancellation, or project switch after an external side effect but before the terminal receipt can leave `started`; any terminal task with that state presents the step as uncertain verification work and never treats it as safe to replay.
+All versions exclude prompts, conversation messages, editor/selection text, SQL, tool inputs, mutation payloads, approval tokens, tool outputs, result rows, credentials and arbitrary metadata. Rust validates receipt-to-plan identity, bounded fields, at most 100 plan/completed/receipt entries and a maximum 64 KiB checkpoint.
 
-Frontend writes for a task are sequenced so an older event cannot overwrite a newer lifecycle state. Task history is hydrated only for the active project; delayed hydration preserves an active same-project task created after the read began. Switching projects aborts the old controller, persists a cancelled summary, and clears conversation and approval state.
+If persistence of `started` fails, the legacy runtime blocks the approved tool. If a process exit occurs after an external effect but before the terminal receipt, the task shows `verify/uncertain`; the receipt is never an automatic replay instruction.
 
-Each application process has a random session id. When task history is read, `running` or `awaiting_approval` records from a different session are converted to `interrupted`; execution is not resumed. Clearing history removes terminal records only. The store retains all active records and at most 100 most-recent terminal records per project.
+Writes for one task are sequenced, history is scoped to the active project, and records left `running` or `awaiting_approval` by another application session become `interrupted`. The store retains active records and at most 100 recent terminal records per project. `task.reveal` resolves only the bounded safe summary.
+
+## Current Deep Agents persistence
+
+Production Deep Agents state does not extend or deserialize the `assistant_tasks` checkpoint. Rust stores it separately in:
+
+- `agent_threads`;
+- `agent_checkpoints`;
+- `agent_artifacts`.
+
+Those records are project-scoped AES-256-GCM ciphertext with a unique nonce and AAD bound to record kind, project, identifier and version. The master key lives in the OS credential manager and records expire after seven days. If the keyring cannot provide a persistent key, the runtime uses an encrypted in-memory session backend instead of writing plaintext.
+
+The sidecar uses `OxideCheckpointSaver` to persist LangGraph checkpoints and pending writes through the Rust host at graph-step boundaries, and still saves a bounded compatibility checkpoint before emitting a final answer. `ask_user` and approval pauses use LangGraph interrupts and resume with `Command`; a restarted sidecar can reload the encrypted graph state. Credentials, SSH secrets, reusable approval leases and unbounded raw rows remain excluded. Approval decisions may be checkpointed, but the one-time Rust lease is transient; losing it makes the mutation fail closed.
+
+The new store does not convert an old task summary into executable graph state. Migration may retain `assistant_tasks` for Task Center history, but it must never infer messages, tool inputs or authorization from it.
+
+## Recovery guarantees
+
+The currently implemented boundary guarantees:
+
+- encrypted project separation and seven-day expiry;
+- successful-Turn checkpoint durability;
+- no automatic replay of an uncertain mutation;
+- one-time Rust approval leases are not persisted as reusable authority.
+
+It does not yet claim:
+
+- crash-resumption of a clarification or approval that was waiting inside a dead sidecar;
+- a distributed exactly-once transaction between a database and local checkpoint store;
+- proof that an uncertain external mutation committed;
+- replay of legacy `assistant_tasks` as a Deep Agents thread.
 
 ## Consequences
 
-Task status and bounded plan history survive a restart without placing database content or reusable authorization on disk. The Task Status Center can distinguish waiting, interrupted, completed, failed and cancelled work.
-
-This is a durable summary with an at-most-once recovery guard, not a durable Agent runtime or a distributed exactly-once transaction. It cannot replay a tool, resume a graph, reveal the original conversation, or prove whether an uncertain external mutation committed. The shipped `task.reveal` surface can display only this safe summary and verification state. True checkpoint/resume still requires versioned runtime state, database-level idempotency where supported, non-replayable approval pause tokens, and an explicit thread-retention/encryption policy.
+Task Center history remains useful and privacy-bounded while the production agent gets a separate encrypted runtime store. Keeping the schemas separate avoids silently treating a display summary as executable or authorized state. It also creates an explicit cleanup task: once legacy runtime support is removed, retain only the user-visible summary fields still needed by Task Center and delete obsolete execution semantics through a versioned migration.

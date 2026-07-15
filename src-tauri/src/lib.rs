@@ -1,5 +1,6 @@
 /// OxideStudio - Tauri Application Entry Point
 /// 重构后的精简版本,使用模块化的 commands
+pub mod agent;
 pub mod commands;
 pub mod core;
 pub mod drivers;
@@ -59,6 +60,9 @@ pub fn run() {
             app.manage(ParserState(Mutex::new(SqlParser::new())));
             app.manage(QueryCancellationState::default());
             app.manage(commands::ai::AiCancellationState::default());
+            // AgentHostManager is side-effect free here. The sidecar, keyring,
+            // and encrypted store are initialized lazily by the first agent command.
+            app.manage(agent::AgentHostManager::new(app.handle()));
 
             // Platform-specific window configuration
             if let Some(window) = app.get_webview_window("main") {
@@ -88,6 +92,16 @@ pub fn run() {
             commands::ai::ai_inline_completion,
             commands::ai::cancel_ai_request,
             commands::ai::ai_test_provider,
+            commands::ai::ai_set_provider_secret,
+            commands::ai::ai_has_provider_secret,
+            // DeepAgents host commands
+            commands::agent::agent_start_turn,
+            commands::agent::agent_resume_turn,
+            commands::agent::agent_cancel_turn,
+            commands::agent::agent_answer_clarification,
+            commands::agent::agent_approve_action,
+            commands::agent::agent_get_status,
+            commands::agent::agent_clear_project_state,
             // Query commands
             commands::query::execute_query,
             commands::query::execute_read_only_query,

@@ -145,7 +145,7 @@ describe("AI MCP adapter", () => {
     });
   });
 
-  it("requires explicit approval for write tools", async () => {
+  it("rejects caller-provided approval metadata for write tools", async () => {
     const protocol = createMcpProtocolAdapter({
       registry: createTestRegistry(),
       createContext,
@@ -176,12 +176,7 @@ describe("AI MCP adapter", () => {
       isError: true,
     });
     expect(approved && "result" in approved ? approved.result : null).toMatchObject({
-      content: [
-        {
-          type: "text",
-          text: expect.stringContaining('"mode": "write"'),
-        },
-      ],
+      isError: true,
     });
   });
 
@@ -388,7 +383,7 @@ describe("AI MCP adapter", () => {
 });
 
 describe("AI CLI adapter", () => {
-  it("calls read tools and blocks write tools without --approve", async () => {
+  it("calls read tools and rejects self-approved writes", async () => {
     const cli = createCliToolAdapter({
       registry: createTestRegistry(),
       createContext,
@@ -422,8 +417,8 @@ describe("AI CLI adapter", () => {
     expect(JSON.parse(read.stdout)).toMatchObject({ mode: "read" });
     expect(blocked.exitCode).toBe(1);
     expect(blocked.stderr).toContain("requires explicit approval");
-    expect(approved.exitCode).toBe(0);
-    expect(JSON.parse(approved.stdout)).toMatchObject({ mode: "write" });
+    expect(approved.exitCode).toBe(1);
+    expect(approved.stderr).toContain("not a valid authorization");
   });
 
   it("passes MCP JSON-RPC requests through the CLI adapter", async () => {

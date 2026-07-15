@@ -10,9 +10,12 @@ function context(overrides: Partial<UiActionContextSnapshot> = {}) {
     projectId: "project-a",
     contextVersion: 1,
     activeConnectionId: "connection-a",
+    activeDriver: "postgres",
+    activeDatabaseName: "app",
     activeNamespace: "public",
     activeTabId: "tab-a",
     documentRevision: "revision-a",
+    selectionRevision: null,
     ...overrides,
   } satisfies UiActionContextSnapshot;
 }

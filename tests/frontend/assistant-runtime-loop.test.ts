@@ -60,6 +60,52 @@ function createLoopRuntime(
 }
 
 describe("AssistantRuntime tool loop", () => {
+  it("keeps tool outputs local when model sharing is disabled", async () => {
+    const summarize = vi.fn(async () => ({
+      message: "model saw private rows",
+      suggestedCalls: [
+        {
+          id: "follow-read",
+          toolName: "demo.read",
+          input: { value: "follow-up" },
+        },
+      ],
+    }));
+    const initialStep: AssistantPlanStep = {
+      id: "initial-read",
+      title: "Initial read",
+      toolName: "demo.read",
+      input: { value: "private-row" },
+      requiresApproval: false,
+    };
+    const { runtime, read } = createLoopRuntime(initialStep, summarize);
+    const turn = await runtime.prepareTurnAsync({ message: "Inspect values" });
+    const summaries: string[] = [];
+
+    const result = await runtime.runToolLoop({
+      turn,
+      summaryInput: { message: "Inspect values" },
+      steps: turn.suggestedPlan,
+      shareToolResultsWithModel: false,
+      onEvent: (event) => {
+        if (event.type === "roundSummarized") {
+          summaries.push(event.summary.message);
+        }
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      rounds: 1,
+      toolCalls: 1,
+      followUpSteps: [],
+    });
+    expect(read).toHaveBeenCalledOnce();
+    expect(summarize).not.toHaveBeenCalled();
+    expect(summaries).toEqual(["1 tool call succeeded"]);
+    expect(JSON.stringify(summaries)).not.toContain("private-row");
+  });
+
   it("owns safe follow-up execution, signature deduplication, and plan events", async () => {
     let summaryRound = 0;
     const summarize = vi.fn(async () => {
@@ -249,6 +295,46 @@ describe("AssistantRuntime tool loop", () => {
         error: expect.stringContaining("was not executed"),
       }),
     ]);
+  });
+
+  it("revalidates workspace context before every tool call", async () => {
+    const step: AssistantPlanStep = {
+      id: "read-context",
+      title: "Read current table",
+      toolName: "demo.read",
+      input: { value: "private" },
+      requiresApproval: false,
+    };
+    const { runtime, read } = createLoopRuntime(step);
+    const turn = await runtime.prepareTurnAsync({ message: "Inspect" });
+    const validateContext = vi.fn(() => {
+      throw new Error("The active database changed. Refresh the plan.");
+    });
+
+    const result = await runtime.runToolLoop({
+      turn,
+      summaryInput: { message: "Inspect" },
+      steps: turn.suggestedPlan,
+      beforeToolExecution: validateContext,
+    });
+
+    expect(validateContext).toHaveBeenCalledWith({
+      stepId: "read-context",
+      title: "Read current table",
+      toolName: "demo.read",
+      round: 1,
+      totalCalls: 0,
+    });
+    expect(read).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      status: "failed",
+      results: [
+        expect.objectContaining({
+          status: "error",
+          error: "The active database changed. Refresh the plan.",
+        }),
+      ],
+    });
   });
 
   it("returns a bounded limit state when safe follow-ups do not converge", async () => {

@@ -65,6 +65,8 @@ import {
   type EditorTextRange,
 } from "@/lib/editorPatch";
 import { documentTextRevision } from "@/lib/documentRevision";
+import { captureWorkspaceUiActionContext } from "@/ai/ui-actions/context";
+import { createWorkspaceContextBinding } from "@/ai/workspaceContext";
 
 export type WorkspaceAiToolRegistryOptions = {
   families?: AiToolFamily[];
@@ -81,7 +83,7 @@ export function createWorkspaceAiToolRegistry(
 }
 
 export function createWorkspaceAiToolContext(
-  requestId = createRequestId(),
+  requestId: string = createRequestId(),
 ): AiToolExecutionContext {
   const connectionState = useConnectionStore.getState();
   const schemaState = useSchemaStore.getState();
@@ -95,6 +97,9 @@ export function createWorkspaceAiToolContext(
 
   return {
     requestId,
+    workspaceContext: createWorkspaceContextBinding(
+      captureWorkspaceUiActionContext(),
+    ),
     activeConnectionId: connectionState.activeConnectionId,
     activeDriver: activeConnection?.driver ?? null,
     activeNamespace: schemaState.currentSchema,

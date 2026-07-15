@@ -55,7 +55,7 @@ import {
   APP_EVENT_INLINE_COMPLETION_ACCEPT_NEXT_WORD,
   APP_EVENT_INLINE_COMPLETION_HIDE,
   APP_EVENT_INLINE_COMPLETION_TRIGGER,
-} from "@/lib/actions";
+} from "@/lib/actionEvents";
 import { editorExecutionConfirmation } from "@/lib/sqlExecutionGate";
 import { StatusBarPortal } from "./StatusBarPortal";
 import { Image as ImageIcon, LockKeyhole, Save } from "lucide-react";

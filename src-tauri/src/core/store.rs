@@ -87,9 +87,27 @@ pub struct AssistantTaskExecutionReceipt {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct AssistantTaskContextBinding {
+    pub version: u32,
+    pub context_version: u32,
+    pub fingerprint: String,
+    pub project_id: String,
+    pub active_connection_id: Option<String>,
+    pub active_driver: Option<String>,
+    pub active_database_name: Option<String>,
+    pub active_namespace: Option<String>,
+    pub active_tab_id: Option<String>,
+    pub document_revision: Option<String>,
+    pub selection_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct AssistantTaskCheckpoint {
     pub version: u32,
     pub mode: String,
+    #[serde(default)]
+    pub context: Option<AssistantTaskContextBinding>,
     pub plan: Vec<AssistantTaskPlanStep>,
     pub completed_steps: Vec<AssistantTaskCompletedStep>,
     #[serde(default)]
@@ -1203,11 +1221,42 @@ fn validate_assistant_task(task: &AssistantTaskRecord) -> Result<()> {
     {
         anyhow::bail!("assistant task detail must not exceed 2,000 characters");
     }
-    if ![1, 2].contains(&task.checkpoint.version) || task.checkpoint.mode != "agent" {
+    if ![1, 2, 3].contains(&task.checkpoint.version) || task.checkpoint.mode != "agent" {
         anyhow::bail!("unsupported assistant task checkpoint");
     }
     if task.checkpoint.version == 1 && !task.checkpoint.execution_receipts.is_empty() {
         anyhow::bail!("assistant task execution receipts require checkpoint version 2");
+    }
+    if task.checkpoint.version == 3 && task.checkpoint.context.is_none()
+        || task.checkpoint.version < 3 && task.checkpoint.context.is_some()
+    {
+        anyhow::bail!("assistant task context requires checkpoint version 3");
+    }
+    if let Some(context) = &task.checkpoint.context {
+        let optional_field_too_long = [
+            context.active_connection_id.as_deref(),
+            context.active_database_name.as_deref(),
+            context.active_namespace.as_deref(),
+            context.active_tab_id.as_deref(),
+            context.document_revision.as_deref(),
+            context.selection_revision.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| value.chars().count() > 240);
+        if context.version != 1
+            || context.fingerprint.trim().is_empty()
+            || context.fingerprint.chars().count() > 80
+            || context.project_id != task.project_id
+            || context.project_id.chars().count() > 200
+            || context
+                .active_driver
+                .as_ref()
+                .is_some_and(|value| value.chars().count() > 80)
+            || optional_field_too_long
+        {
+            anyhow::bail!("assistant task context binding is invalid");
+        }
     }
     if task.checkpoint.plan.len() > 100
         || task.checkpoint.completed_steps.len() > 100
@@ -1582,6 +1631,7 @@ mod tests {
                 checkpoint: AssistantTaskCheckpoint {
                     version: 1,
                     mode: "agent".to_string(),
+                    context: None,
                     plan: vec![AssistantTaskPlanStep {
                         id: "inspect".to_string(),
                         title: "Inspect metadata".to_string(),
@@ -1678,6 +1728,7 @@ mod tests {
             checkpoint: AssistantTaskCheckpoint {
                 version: 1,
                 mode: "agent".to_string(),
+                context: None,
                 plan: vec![],
                 completed_steps: vec![],
                 execution_receipts: vec![],
@@ -1709,6 +1760,26 @@ mod tests {
         assert!(store.save_assistant_task(&task).await.is_err());
         task.checkpoint.version = 2;
         task.checkpoint.execution_receipts[0].tool_name = "query.other".to_string();
+        assert!(store.save_assistant_task(&task).await.is_err());
+
+        task.checkpoint.execution_receipts[0].tool_name = "query.runMutation".to_string();
+        task.checkpoint.version = 3;
+        task.checkpoint.context = Some(AssistantTaskContextBinding {
+            version: 1,
+            context_version: 7,
+            fingerprint: "ctx-example".to_string(),
+            project_id: "sqls".to_string(),
+            active_connection_id: Some("postgres-1".to_string()),
+            active_driver: Some("postgres".to_string()),
+            active_database_name: Some("app".to_string()),
+            active_namespace: Some("public".to_string()),
+            active_tab_id: Some("query-1".to_string()),
+            document_revision: Some("memory:document".to_string()),
+            selection_revision: None,
+        });
+        store.save_assistant_task(&task).await.unwrap();
+
+        task.checkpoint.context.as_mut().unwrap().project_id = "other".to_string();
         assert!(store.save_assistant_task(&task).await.is_err());
     }
 }

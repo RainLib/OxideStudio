@@ -14,6 +14,7 @@ import type {
 } from "@/services/tauri/types";
 import type { CompletionItem, Diagnostic } from "@/services/lsp/types";
 import type { EditorTextRange } from "@/lib/editorPatch";
+import type { WorkspaceContextBinding } from "@/ai/workspaceContext";
 
 export type AiToolPermission = "read" | "write" | "destructive" | "external";
 
@@ -64,6 +65,7 @@ export type AiToolAuditSink = (entry: AiToolAuditEntry) => Promise<void> | void;
 
 export type AiToolExecutionContext = {
   requestId: string;
+  workspaceContext?: WorkspaceContextBinding;
   activeConnectionId?: string | null;
   activeDriver?: DatabaseDriver | null;
   activeNamespace?: string | null;

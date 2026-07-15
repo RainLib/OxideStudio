@@ -15,6 +15,10 @@ export function createAssistantTaskRecord(input: {
   now?: number;
 }): AssistantTaskRecord {
   const now = input.now ?? Date.now();
+  const context = safeWorkspaceContext(
+    input.turn.context.workspaceContext,
+    input.projectId,
+  );
   return {
     id: `agent:${input.turn.requestId}`,
     projectId: input.projectId,
@@ -27,8 +31,9 @@ export function createAssistantTaskRecord(input: {
     currentToolName: null,
     progress: taskProgress(0, input.turn.suggestedPlan.length),
     checkpoint: {
-      version: 2,
+      version: context ? 3 : 2,
       mode: "agent",
+      ...(context ? { context } : {}),
       plan: input.turn.suggestedPlan.slice(0, 100).map(safePlanStep),
       completedSteps: [],
       executionReceipts: [],
@@ -194,7 +199,7 @@ export function startAssistantTaskExecutionReceipt(
     updatedAt: now,
     checkpoint: {
       ...task.checkpoint,
-      version: 2,
+      version: task.checkpoint.context ? 3 : 2,
       executionReceipts: [
         ...(task.checkpoint.executionReceipts ?? []),
         {
@@ -258,6 +263,33 @@ function safePlanStep(step: AssistantPreparedTurn["suggestedPlan"][number]) {
     toolName,
     requiresApproval: step.requiresApproval,
   };
+}
+
+function safeWorkspaceContext(
+  context: AssistantPreparedTurn["context"]["workspaceContext"],
+  projectId: string,
+) {
+  if (!context) return null;
+  if (context.projectId !== projectId) {
+    throw new Error("Assistant task context does not match the active project.");
+  }
+  return {
+    version: 1 as const,
+    contextVersion: context.contextVersion,
+    fingerprint: boundedText(context.fingerprint, 80),
+    projectId: boundedText(context.projectId, 200),
+    activeConnectionId: boundedNullableText(context.activeConnectionId, 200),
+    activeDriver: boundedNullableText(context.activeDriver, 80),
+    activeDatabaseName: boundedNullableText(context.activeDatabaseName, 200),
+    activeNamespace: boundedNullableText(context.activeNamespace, 200),
+    activeTabId: boundedNullableText(context.activeTabId, 200),
+    documentRevision: boundedNullableText(context.documentRevision, 200),
+    selectionRevision: boundedNullableText(context.selectionRevision, 240),
+  };
+}
+
+function boundedNullableText(value: string | null, maxLength: number) {
+  return value === null ? null : boundedText(value, maxLength);
 }
 
 function boundedText(value: string, limit: number) {

@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod ai;
 pub mod cache;
 /// Commands module
@@ -16,6 +17,7 @@ pub mod transaction;
 pub mod window;
 
 // Re-export all commands for easy access
+pub use agent::*;
 pub use ai::*;
 pub use cache::*;
 pub use connection::*;

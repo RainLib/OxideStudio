@@ -1,4 +1,4 @@
-import { APP_EVENT_OPEN_SETTINGS } from "@/lib/actions";
+import { APP_EVENT_OPEN_SETTINGS } from "@/lib/actionEvents";
 import { requestDatabaseObjectReveal } from "@/lib/databaseNavigation";
 import { requestEditorRangeReveal } from "@/lib/editorNavigation";
 import { findExplainPlanNode } from "@/lib/explainPlan";

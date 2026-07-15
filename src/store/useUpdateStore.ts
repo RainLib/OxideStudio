@@ -1,12 +1,5 @@
 import { create } from "zustand";
-import {
-  AppUpdateUnsupportedError,
-  checkForAppUpdate,
-  downloadAppUpdate,
-  getCurrentAppVersion,
-  installAppUpdateAndRestart,
-  type AppUpdateInfo,
-} from "@/services/appUpdateService";
+import type { AppUpdateInfo } from "@/services/appUpdateService";
 
 export type AppUpdateStatus =
   | "idle"
@@ -79,7 +72,9 @@ function describeUpdateError(error: unknown): string {
 }
 
 function isBusy(status: AppUpdateStatus) {
-  return status === "checking" || status === "downloading" || status === "installing";
+  return (
+    status === "checking" || status === "downloading" || status === "installing"
+  );
 }
 
 export const useUpdateStore = create<AppUpdateState>((set, get) => ({
@@ -106,6 +101,8 @@ export const useUpdateStore = create<AppUpdateState>((set, get) => ({
 
     set({ status: "checking", error: null });
     try {
+      const { checkForAppUpdate, getCurrentAppVersion } =
+        await import("@/services/appUpdateService");
       const currentVersion = await getCurrentAppVersion();
       const update = await checkForAppUpdate();
       const checkedAt = Date.now();
@@ -119,7 +116,12 @@ export const useUpdateStore = create<AppUpdateState>((set, get) => ({
         lastCheckedAt: checkedAt,
       });
     } catch (error) {
-      if (error instanceof AppUpdateUnsupportedError) {
+      if (
+        error instanceof Error &&
+        error.name === "AppUpdateUnsupportedError"
+      ) {
+        const { getCurrentAppVersion } =
+          await import("@/services/appUpdateService");
         const currentVersion = await getCurrentAppVersion();
         set({ currentVersion, status: "unsupported", error: null });
         return;
@@ -142,6 +144,7 @@ export const useUpdateStore = create<AppUpdateState>((set, get) => ({
       error: null,
     });
     try {
+      const { downloadAppUpdate } = await import("@/services/appUpdateService");
       await downloadAppUpdate(({ downloadedBytes, totalBytes }) => {
         set({ downloadedBytes, totalBytes });
       });
@@ -159,6 +162,8 @@ export const useUpdateStore = create<AppUpdateState>((set, get) => ({
 
     set({ status: "installing", error: null });
     try {
+      const { installAppUpdateAndRestart } =
+        await import("@/services/appUpdateService");
       await installAppUpdateAndRestart();
     } catch (error) {
       set({ status: "downloaded", error: describeUpdateError(error) });

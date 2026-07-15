@@ -260,12 +260,27 @@ export class AssistantRuntime {
         if (step.requiresApproval && !approvedStepIds.has(step.id)) {
           result = approvalRequiredResult(step);
         } else {
+          if (options.beforeToolExecution) {
+            try {
+              await options.beforeToolExecution({
+                stepId: step.id,
+                title: step.title,
+                toolName: step.toolName,
+                round,
+                totalCalls: toolCalls,
+              });
+            } catch (error) {
+              result = executionContextStaleResult(step, error);
+            }
+          }
           if (step.requiresApproval) {
-            if (!options.beforeApprovedToolExecution) {
+            const beforeApprovedExecution =
+              options.beforeApprovedToolExecution;
+            if (!result && !beforeApprovedExecution) {
               result = executionReceiptRequiredResult(step);
-            } else {
+            } else if (!result) {
               try {
-                await options.beforeApprovedToolExecution({
+                await beforeApprovedExecution!({
                   stepId: step.id,
                   title: step.title,
                   toolName: step.toolName,
@@ -322,11 +337,13 @@ export class AssistantRuntime {
         break;
       }
 
-      const summary = await this.summarizeToolResults(
-        options.summaryInput,
-        completedResults,
-        context,
-      );
+      const summary = options.shareToolResultsWithModel === false
+        ? summarizeResultsLocally(completedResults)
+        : await this.summarizeToolResults(
+            options.summaryInput,
+            completedResults,
+            context,
+          );
       if (context.abortSignal?.aborted) break;
 
       rounds = round;
@@ -575,6 +592,19 @@ function executionReceiptRequiredResult(
     status: "error",
     error:
       "Approved action was not executed because its safety receipt could not be saved.",
+  };
+}
+
+function executionContextStaleResult(
+  step: AssistantPlanStep,
+  error: unknown,
+): AssistantToolCallResult {
+  const reason = error instanceof Error ? error.message : String(error);
+  return {
+    id: step.id,
+    toolName: step.toolName || "unknown",
+    status: "error",
+    error: reason || "Assistant context changed before tool execution.",
   };
 }
 
