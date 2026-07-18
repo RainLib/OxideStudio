@@ -461,12 +461,85 @@ fn parse_mongodb_commands(input: &str) -> Result<Vec<MongoCommandInput>> {
     values
         .into_iter()
         .map(|value| {
+            let value = normalize_mongodb_command_shape(value)?;
             let command: MongoCommandInput =
                 serde_json::from_value(value).context("Invalid MongoDB command shape")?;
             command.validate()?;
             Ok(command)
         })
         .collect()
+}
+
+fn normalize_mongodb_command_shape(value: Value) -> Result<Value> {
+    let Value::Object(mut command) = value else {
+        return Err(anyhow!("MongoDB command must be a JSON object"));
+    };
+
+    if let Some(Value::String(collection)) = command.get("find").cloned() {
+        set_native_mongodb_collection(&mut command, &collection, "find")?;
+        let filter = command
+            .remove("filter")
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        if !filter.is_object() {
+            return Err(anyhow!("MongoDB find filter must be a JSON object"));
+        }
+        command.insert("find".to_string(), filter);
+    }
+
+    if let Some(Value::String(collection)) = command.get("aggregate").cloned() {
+        set_native_mongodb_collection(&mut command, &collection, "aggregate")?;
+        let pipeline = command
+            .remove("pipeline")
+            .ok_or_else(|| anyhow!("MongoDB aggregate pipeline is required"))?;
+        if !pipeline.is_array() {
+            return Err(anyhow!("MongoDB aggregate pipeline must be a JSON array"));
+        }
+        command.insert("aggregate".to_string(), pipeline);
+        if let Some(cursor) = command.remove("cursor") {
+            if !cursor.as_object().is_some_and(serde_json::Map::is_empty) {
+                return Err(anyhow!(
+                    "MongoDB aggregate cursor options are not supported"
+                ));
+            }
+        }
+    }
+
+    if let Some(Value::String(collection)) = command.remove("count") {
+        set_native_mongodb_collection(&mut command, &collection, "count")?;
+        let query = command
+            .remove("query")
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        if !query.is_object() {
+            return Err(anyhow!("MongoDB count query must be a JSON object"));
+        }
+        command.insert("countDocuments".to_string(), query);
+    }
+
+    Ok(Value::Object(command))
+}
+
+fn set_native_mongodb_collection(
+    command: &mut serde_json::Map<String, Value>,
+    collection: &str,
+    operation: &str,
+) -> Result<()> {
+    let collection = collection.trim();
+    if collection.is_empty() {
+        return Err(anyhow!("MongoDB {operation} collection is required"));
+    }
+    if let Some(existing) = command.get("collection") {
+        if existing.as_str().map(str::trim) != Some(collection) {
+            return Err(anyhow!(
+                "MongoDB {operation} collection conflicts with collection"
+            ));
+        }
+    } else {
+        command.insert(
+            "collection".to_string(),
+            Value::String(collection.to_string()),
+        );
+    }
+    Ok(())
 }
 
 fn build_find_command(collection: &str, input: &MongoCommandInput) -> Result<Document> {
@@ -855,6 +928,46 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_native_find_command() {
+        let command = parse_mongodb_commands(
+            r#"{"database":"app","find":"file","filter":{"active":true},"limit":10}"#,
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(command.database.as_deref(), Some("app"));
+        assert_eq!(command.collection.as_deref(), Some("file"));
+        assert_eq!(command.find, Some(serde_json::json!({"active": true})));
+        assert_eq!(command.limit, Some(10));
+    }
+
+    #[test]
+    fn normalizes_native_aggregate_and_count_commands() {
+        let commands = parse_mongodb_commands(
+            r#"[
+                {
+                    "aggregate":"file",
+                    "pipeline":[{"$match":{"active":true}}],
+                    "cursor":{}
+                },
+                {"count":"file","query":{"active":true}}
+            ]"#,
+        )
+        .unwrap();
+
+        assert_eq!(commands[0].collection.as_deref(), Some("file"));
+        assert_eq!(
+            commands[0].aggregate,
+            Some(vec![serde_json::json!({"$match": {"active": true}})])
+        );
+        assert_eq!(commands[1].collection.as_deref(), Some("file"));
+        assert_eq!(
+            commands[1].count_documents,
+            Some(serde_json::json!({"active": true}))
+        );
+    }
+
+    #[test]
     fn parses_multiple_json_commands() {
         let commands = parse_mongodb_commands(
             r#"[
@@ -880,6 +993,14 @@ mod tests {
             r#"{"collection":"users","updateOne":{"filter":{},"update":{},"unknown":true}}"#
         )
         .is_err());
+        assert!(parse_mongodb_commands(r#"{"find":"users","filter":[]}"#).is_err());
+        assert!(
+            parse_mongodb_commands(r#"{"collection":"admins","find":"users","filter":{}}"#)
+                .is_err()
+        );
+        assert!(
+            parse_mongodb_commands(r#"{"aggregate":"users","pipeline":{},"cursor":{}}"#).is_err()
+        );
     }
 
     #[test]

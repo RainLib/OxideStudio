@@ -126,7 +126,7 @@ describe("AI settings", () => {
     expect(mocks.testProvider).toHaveBeenCalledWith({
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-test",
-      apiKey: "test-key",
+      apiKey: undefined,
       timeoutMs: 30_000,
     });
     expect(mocks.setProviderSecret).toHaveBeenCalledWith(
@@ -136,5 +136,29 @@ describe("AI settings", () => {
     expect(document.body.textContent).toContain(
       "AI provider connection is available: gpt-test"
     );
+  });
+
+  it("does not test with a draft key when the local credential file save fails", async () => {
+    mocks.setProviderSecret.mockRejectedValueOnce(new Error("save failed"));
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <ThemeContext.Provider value={themeContext}>
+          <SettingsDialog open initialSection="ai" onOpenChange={vi.fn()} />
+        </ThemeContext.Provider>,
+      );
+      await flushAsyncWork();
+    });
+
+    await act(async () => {
+      buttonWithText(document, "Test Provider")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await flushAsyncWork();
+    });
+
+    expect(mocks.testProvider).not.toHaveBeenCalled();
+    expect(useAiSettingsStore.getState().apiKey).toBe("test-key");
+    expect(document.body.textContent).toContain("save failed");
   });
 });

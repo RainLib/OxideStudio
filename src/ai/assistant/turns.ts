@@ -25,6 +25,7 @@ export type AssistantProcessItemKind =
   | "planning"
   | "step"
   | "tool"
+  | "clarification"
   | "checkpoint"
   | "compaction"
   | "warning";
@@ -99,6 +100,7 @@ export type AssistantTurn = {
   draft: string;
   final?: AssistantFinalMessage | null;
   error?: string | null;
+  errorDetail?: string | null;
   createdAt: number;
   updatedAt: number;
   lastEventSequence?: number;
@@ -134,6 +136,7 @@ export function createAssistantTurn(
     draft: "",
     final: null,
     error: null,
+    errorDetail: null,
     createdAt: now,
     updatedAt: now,
   };

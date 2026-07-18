@@ -116,6 +116,7 @@ pub async fn connect_db(
             .map_err(|error| error.to_string())?;
 
         ping_driver_or_cleanup(db_driver.as_ref()).await?;
+        let server_version = db_driver.server_version().await;
 
         // Replace existing connection with the same ID and close the old driver.
         manager
@@ -123,10 +124,10 @@ pub async fn connect_db(
             .await
             .map_err(|e| format!("Failed to replace connection: {}", e))?;
 
-        Ok(format!(
-            "Connected to {} successfully",
-            capabilities.display_name
-        ))
+        let server_label = server_version
+            .map(|version| format!("{} {version}", capabilities.display_name))
+            .unwrap_or_else(|| capabilities.display_name.to_string());
+        Ok(format!("Connected to {server_label} successfully"))
     }
     .await;
 
@@ -166,15 +167,16 @@ pub async fn test_db_connection(
             .map_err(|error| error.to_string())?;
 
         ping_driver_or_cleanup(db_driver.as_ref()).await?;
+        let server_version = db_driver.server_version().await;
         db_driver
             .disconnect()
             .await
             .map_err(|e| format!("Connection cleanup failed: {}", e))?;
 
-        Ok(format!(
-            "{} connection is available",
-            capabilities.display_name
-        ))
+        let server_label = server_version
+            .map(|version| format!("{} {version}", capabilities.display_name))
+            .unwrap_or_else(|| capabilities.display_name.to_string());
+        Ok(format!("{server_label} connection is available"))
     }
     .await;
 

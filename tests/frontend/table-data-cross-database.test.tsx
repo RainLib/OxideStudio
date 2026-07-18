@@ -12,6 +12,14 @@ import { useTabStore } from "@/store/useTabStore";
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const mocks = vi.hoisted(() => ({
+  getDatabaseCapabilities: vi.fn(async () => ({
+    driver: "postgres",
+    dataModel: "relational",
+    supportsTableBrowsing: true,
+    supportsTableIndexes: true,
+    supportsTableConstraints: true,
+    supportsForeignKeys: true,
+  })),
   exportTableData: vi.fn(),
   mutateTableRows: vi.fn(),
   getDatabaseReferencingForeignKeys: vi.fn(async () => []),
@@ -41,13 +49,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/services/tauri", () => ({
   databaseService: {
-    getDatabaseCapabilities: vi.fn(async () => ({
-      driver: "postgres",
-      dataModel: "relational",
-      supportsTableIndexes: true,
-      supportsTableConstraints: true,
-      supportsForeignKeys: true,
-    })),
+    getDatabaseCapabilities: mocks.getDatabaseCapabilities,
   },
   queryService: {
     executeQuery: vi.fn(async () => []),
@@ -116,6 +118,14 @@ describe("cross-database table data view", () => {
     mocks.toolbarProps = null;
     mocks.gridProps = null;
     mocks.ddlProps = null;
+    mocks.getDatabaseCapabilities.mockReset().mockResolvedValue({
+      driver: "postgres",
+      dataModel: "relational",
+      supportsTableBrowsing: true,
+      supportsTableIndexes: true,
+      supportsTableConstraints: true,
+      supportsForeignKeys: true,
+    });
     useProjectStore.setState({ activeProjectId: "project-analytics" });
     useConnectionStore.setState({
       connections: [
@@ -301,5 +311,75 @@ describe("cross-database table data view", () => {
       false
     );
     expect(mocks.ddlProps?.ddl).toContain("CREATE TABLE");
+  });
+
+  it("renders MongoDB collections as read-only data instead of an editor", async () => {
+    mocks.getDatabaseCapabilities.mockResolvedValue({
+      driver: "mongodb",
+      dataModel: "document",
+      supportsTableBrowsing: false,
+      supportsTableIndexes: false,
+      supportsTableConstraints: false,
+      supportsForeignKeys: false,
+    });
+    useConnectionStore.setState({
+      connections: [
+        {
+          id: "mongo-1",
+          name: "MongoDB",
+          driver: "mongodb",
+          url: "mongodb://localhost/app",
+        },
+      ],
+      activeConnectionId: "mongo-1",
+      connectedConnectionIds: ["mongo-1"],
+    });
+    useTabStore.setState({
+      activeTabId: "mongo-users",
+      tabs: [
+        {
+          id: "mongo-users",
+          title: "Collection: users",
+          type: "table",
+          sql: '{"database":"app","collection":"users","find":{},"limit":100}',
+          connectionId: "mongo-1",
+          schemaName: "app",
+          tableName: "users",
+          objectType: "collection",
+          results: [
+            {
+              columns: [{ name: "_id", data_type: "objectId" }],
+              rows: [["507f1f77bcf86cd799439011"]],
+            },
+          ],
+          pendingEdits: new Map(),
+          newRowsCount: 0,
+          isExecuting: false,
+          error: null,
+          isPinned: false,
+        },
+      ],
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<TableDataView />);
+    });
+
+    await vi.waitFor(() =>
+      expect(mocks.toolbarProps).toMatchObject({
+        readOnly: true,
+        exportDisabled: true,
+      }),
+    );
+    expect(mocks.gridProps).toMatchObject({ readOnly: true });
+    expect(mocks.loadTableMetadata).not.toHaveBeenCalled();
+    expect(container.querySelector("[data-testid='grid-filter']")).toBeNull();
+    expect(
+      Array.from(container.querySelectorAll<HTMLButtonElement>("button")).some(
+        (button) => button.textContent?.trim() === "DDL",
+      ),
+    ).toBe(false);
+    expect(container.textContent).toContain("app.users");
   });
 });

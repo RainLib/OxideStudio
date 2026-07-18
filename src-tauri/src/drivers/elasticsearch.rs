@@ -4,16 +4,27 @@ use crate::core::{
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use reqwest::{Client, Method, Url};
+use percent_encoding::percent_decode_str;
+use reqwest::{Client, Method, StatusCode, Url};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 pub struct ElasticsearchDriver {
     base_url: Url,
     client: Client,
     auth: Option<(String, String)>,
+    server_info: Mutex<Option<ElasticsearchServerInfo>>,
+    mapping_types: Mutex<HashMap<String, String>>,
     active_index: Mutex<Option<String>>,
     connected: Mutex<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ElasticsearchServerInfo {
+    version: String,
+    major: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,12 +36,18 @@ struct ElasticsearchRequest {
 
 impl ElasticsearchDriver {
     pub fn new(url: &str) -> Result<Self> {
-        let mut base_url = Url::parse(url).context("Invalid Elasticsearch URL")?;
-        let auth = extract_basic_auth(&mut base_url);
+        let mut base_url = normalize_elasticsearch_base_url(url)?;
+        let auth = extract_basic_auth(&mut base_url)?;
         Ok(Self {
             base_url,
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .context("Failed to initialize Elasticsearch HTTP client")?,
             auth,
+            server_info: Mutex::new(None),
+            mapping_types: Mutex::new(HashMap::new()),
             active_index: Mutex::new(None),
             connected: Mutex::new(false),
         })
@@ -65,6 +82,7 @@ impl ElasticsearchDriver {
 
         for request in requests {
             let request = scope_search_request_to_index(request, active_index.as_deref());
+            let request = self.prepare_request_for_server(request).await?;
             let (status, body) = self.send_request(&request).await?;
             let normalized = normalize_elasticsearch_response(body);
             if let Some(result) = elasticsearch_table_result(&normalized) {
@@ -82,12 +100,69 @@ impl ElasticsearchDriver {
         self.send_request_unchecked(request).await
     }
 
+    async fn prepare_request_for_server(
+        &self,
+        mut request: ElasticsearchRequest,
+    ) -> Result<ElasticsearchRequest> {
+        let major = self
+            .server_info
+            .lock()
+            .await
+            .as_ref()
+            .map(|info| info.major);
+        if major != Some(6) || !is_typeless_document_path(&request.path) {
+            return Ok(request);
+        }
+
+        let Some(index) = request
+            .path
+            .trim_start_matches('/')
+            .split(['/', '?'])
+            .next()
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(request);
+        };
+        let mapping_type = self.resolve_elasticsearch_six_mapping_type(index).await?;
+        request.path = rewrite_elasticsearch_six_document_path(&request.path, &mapping_type);
+        Ok(request)
+    }
+
+    async fn resolve_elasticsearch_six_mapping_type(&self, index: &str) -> Result<String> {
+        if let Some(mapping_type) = self.mapping_types.lock().await.get(index).cloned() {
+            return Ok(mapping_type);
+        }
+
+        let request = ElasticsearchRequest {
+            method: Method::GET,
+            path: format!("/{index}/_mapping?ignore_unavailable=true"),
+            body: None,
+        };
+        let (_, body) = self.send_request_unchecked(&request).await?;
+        let mapping_types = elasticsearch_six_mapping_types(&body);
+        let mapping_type = match mapping_types.as_slice() {
+            [] => "_doc".to_string(),
+            [mapping_type] => mapping_type.clone(),
+            _ => {
+                return Err(anyhow!(
+                    "Elasticsearch 6 index has multiple mapping types; use an explicit typed request path"
+                ));
+            }
+        };
+        self.mapping_types
+            .lock()
+            .await
+            .insert(index.to_string(), mapping_type.clone());
+        Ok(mapping_type)
+    }
+
     async fn send_request_unchecked(&self, request: &ElasticsearchRequest) -> Result<(u16, Value)> {
         let url = self
             .base_url
             .join(request.path.trim_start_matches('/'))
             .with_context(|| format!("Invalid Elasticsearch request path: {}", request.path))?;
         let mut builder = self.client.request(request.method.clone(), url);
+        builder = builder.header("accept", "application/json");
         if let Some((username, password)) = &self.auth {
             builder = builder.basic_auth(username, Some(password));
         }
@@ -101,10 +176,15 @@ impl ElasticsearchDriver {
                 .body(body.to_string());
         }
 
-        let response = builder
-            .send()
-            .await
-            .context("Elasticsearch request failed")?;
+        let response = builder.send().await.map_err(|error| {
+            let endpoint = safe_endpoint_label(&self.base_url);
+            let hint = if self.base_url.scheme() == "http" {
+                " If this endpoint requires TLS, select an SSL mode so the connection uses HTTPS."
+            } else {
+                ""
+            };
+            anyhow!("Elasticsearch transport request to {endpoint} failed: {error}.{hint}")
+        })?;
         let status = response.status();
         let text = response
             .text()
@@ -117,11 +197,7 @@ impl ElasticsearchDriver {
         };
 
         if !status.is_success() {
-            return Err(anyhow!(
-                "Elasticsearch request failed with status {}: {}",
-                status.as_u16(),
-                body
-            ));
+            return Err(elasticsearch_response_error(status, &body));
         }
 
         Ok((status.as_u16(), body))
@@ -130,14 +206,26 @@ impl ElasticsearchDriver {
 
 #[async_trait]
 impl DatabaseDriver for ElasticsearchDriver {
+    async fn server_version(&self) -> Option<String> {
+        self.server_info
+            .lock()
+            .await
+            .as_ref()
+            .map(|info| info.version.clone())
+    }
+
     async fn connect(&mut self) -> Result<()> {
         *self.connected.lock().await = false;
+        *self.server_info.lock().await = None;
+        self.mapping_types.lock().await.clear();
         let request = ElasticsearchRequest {
             method: Method::GET,
             path: "/".to_string(),
             body: None,
         };
-        self.send_request_unchecked(&request).await?;
+        let (_, body) = self.send_request_unchecked(&request).await?;
+        let server_info = parse_elasticsearch_server_info(&body)?;
+        *self.server_info.lock().await = Some(server_info);
         *self.connected.lock().await = true;
         *self.active_index.lock().await = None;
         Ok(())
@@ -146,6 +234,8 @@ impl DatabaseDriver for ElasticsearchDriver {
     async fn disconnect(&self) -> Result<()> {
         *self.connected.lock().await = false;
         *self.active_index.lock().await = None;
+        *self.server_info.lock().await = None;
+        self.mapping_types.lock().await.clear();
         Ok(())
     }
 
@@ -197,7 +287,22 @@ impl DatabaseDriver for ElasticsearchDriver {
             body: None,
         };
         let (_, body) = self.send_request(&request).await?;
-        Ok(elasticsearch_mapping_to_columns(&body, index))
+        let major = self
+            .server_info
+            .lock()
+            .await
+            .as_ref()
+            .map(|info| info.major)
+            .unwrap_or(8);
+        if major == 6 {
+            if let [mapping_type] = elasticsearch_six_mapping_types(&body).as_slice() {
+                self.mapping_types
+                    .lock()
+                    .await
+                    .insert(index.to_string(), mapping_type.clone());
+            }
+        }
+        Ok(elasticsearch_mapping_to_columns(&body, index, major))
     }
 
     async fn set_current_schema(&self, schema: &str) -> Result<()> {
@@ -207,16 +312,142 @@ impl DatabaseDriver for ElasticsearchDriver {
     }
 }
 
-fn extract_basic_auth(url: &mut Url) -> Option<(String, String)> {
-    let username = url.username().to_string();
-    if username.is_empty() {
-        return None;
+fn normalize_elasticsearch_base_url(url: &str) -> Result<Url> {
+    let mut parsed = Url::parse(url).context("Invalid Elasticsearch URL")?;
+    let original_scheme = parsed.scheme().to_ascii_lowercase();
+    if !matches!(
+        original_scheme.as_str(),
+        "http" | "https" | "elasticsearch" | "elastic"
+    ) {
+        return Err(anyhow!("Elasticsearch URL must use http:// or https://"));
     }
 
-    let password = url.password().unwrap_or("").to_string();
+    let ssl_mode = parsed
+        .query_pairs()
+        .find(|(key, _)| key.eq_ignore_ascii_case("ssl") || key.eq_ignore_ascii_case("tls"))
+        .map(|(_, value)| value.into_owned().to_ascii_lowercase());
+    let secure = original_scheme == "https"
+        || ssl_mode
+            .as_deref()
+            .is_some_and(|mode| mode != "disable" && mode != "false");
+    let target_scheme = if secure { "https" } else { "http" };
+    if matches!(original_scheme.as_str(), "elasticsearch" | "elastic") {
+        let scheme_end = url
+            .find(':')
+            .ok_or_else(|| anyhow!("Invalid Elasticsearch URL scheme"))?;
+        parsed = Url::parse(&format!("{target_scheme}{}", &url[scheme_end..]))
+            .context("Invalid Elasticsearch URL")?;
+    } else {
+        parsed
+            .set_scheme(target_scheme)
+            .map_err(|_| anyhow!("Invalid Elasticsearch URL scheme"))?;
+    }
+
+    let retained_query = parsed
+        .query_pairs()
+        .filter(|(key, _)| !key.eq_ignore_ascii_case("ssl") && !key.eq_ignore_ascii_case("tls"))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    parsed.set_query(None);
+    if !retained_query.is_empty() {
+        parsed.query_pairs_mut().extend_pairs(retained_query);
+    }
+    Ok(parsed)
+}
+
+fn extract_basic_auth(url: &mut Url) -> Result<Option<(String, String)>> {
+    let has_credentials = !url.username().is_empty() || url.password().is_some();
+    if !has_credentials {
+        return Ok(None);
+    }
+    let username = percent_decode_str(url.username())
+        .decode_utf8()
+        .context("Elasticsearch username is not valid UTF-8")?
+        .into_owned();
+    let password = percent_decode_str(url.password().unwrap_or(""))
+        .decode_utf8()
+        .context("Elasticsearch password is not valid UTF-8")?
+        .into_owned();
     let _ = url.set_username("");
     let _ = url.set_password(None);
-    Some((username, password))
+    Ok(Some((username, password)))
+}
+
+fn safe_endpoint_label(url: &Url) -> String {
+    let host = url.host_str().unwrap_or("unknown-host");
+    match url.port_or_known_default() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
+}
+
+fn elasticsearch_response_error(status: StatusCode, body: &Value) -> anyhow::Error {
+    match status {
+        StatusCode::UNAUTHORIZED => anyhow!(
+            "Elasticsearch authentication failed (HTTP 401). Verify the username and password."
+        ),
+        StatusCode::FORBIDDEN => anyhow!(
+            "Elasticsearch authentication succeeded but this user is not authorized (HTTP 403)."
+        ),
+        _ => {
+            let reason = elasticsearch_error_reason(body).unwrap_or_else(|| {
+                status
+                    .canonical_reason()
+                    .unwrap_or("request failed")
+                    .to_string()
+            });
+            anyhow!(
+                "Elasticsearch request failed (HTTP {}): {}",
+                status.as_u16(),
+                truncate_error_reason(&reason)
+            )
+        }
+    }
+}
+
+fn elasticsearch_error_reason(body: &Value) -> Option<String> {
+    body.pointer("/error/root_cause/0/reason")
+        .and_then(Value::as_str)
+        .or_else(|| body.pointer("/error/reason").and_then(Value::as_str))
+        .or_else(|| body.get("error").and_then(Value::as_str))
+        .map(ToString::to_string)
+}
+
+fn truncate_error_reason(value: &str) -> String {
+    const MAX_CHARS: usize = 500;
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+fn parse_elasticsearch_server_info(body: &Value) -> Result<ElasticsearchServerInfo> {
+    let version = body
+        .pointer("/version/number")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow!("The endpoint responded, but did not return an Elasticsearch version")
+        })?;
+    let major = version
+        .split('.')
+        .next()
+        .and_then(|value| value.parse::<u8>().ok())
+        .ok_or_else(|| anyhow!("Invalid Elasticsearch version returned by server"))?;
+    if !matches!(major, 6..=8) {
+        return Err(anyhow!(
+            "Elasticsearch {version} is not supported; supported major versions are 6, 7, and 8"
+        ));
+    }
+
+    Ok(ElasticsearchServerInfo {
+        version: version.to_string(),
+        major,
+    })
 }
 
 fn parse_elasticsearch_requests(input: &str) -> Result<Vec<ElasticsearchRequest>> {
@@ -297,16 +528,23 @@ fn parse_request_line(line: &str) -> Result<Option<(Method, String, Option<Strin
 
     let mut split = rest.splitn(2, char::is_whitespace);
     let path = split.next().unwrap_or("").trim();
-    if !path.starts_with('/') {
-        return Err(anyhow!("Elasticsearch request path must start with '/'"));
+    if path.contains("://") {
+        return Err(anyhow!(
+            "Elasticsearch request path must be relative to the configured server"
+        ));
     }
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
     let inline_body = split
         .next()
         .map(str::trim)
         .filter(|body| !body.is_empty())
         .map(ToString::to_string);
 
-    Ok(Some((method, path.to_string(), inline_body)))
+    Ok(Some((method, path, inline_body)))
 }
 
 fn validate_elasticsearch_index_context(value: &str) -> Result<Option<String>> {
@@ -345,34 +583,148 @@ fn scope_search_request_to_index(
         return request;
     };
 
-    if request.path == "/_search" {
-        request.path = format!("/{}/_search", encode_elasticsearch_path_segment(index));
+    if matches!(request.path.as_str(), "/_search" | "/_eql/search") {
+        request.path = format!(
+            "/{}{}",
+            encode_elasticsearch_path_segment(index),
+            request.path
+        );
     }
 
     request
 }
 
+fn is_typeless_document_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    let segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    matches!(segments.as_slice(), [_, "_doc", ..] | [_, "_update", _])
+}
+
+fn rewrite_elasticsearch_six_document_path(path: &str, mapping_type: &str) -> String {
+    let (path, query) = path
+        .split_once('?')
+        .map(|(path, query)| (path, Some(query)))
+        .unwrap_or((path, None));
+    let segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    let mapping_type = encode_elasticsearch_path_segment(mapping_type);
+    let rewritten = match segments.as_slice() {
+        [index, "_doc"] => format!("/{index}/{mapping_type}"),
+        [index, "_doc", id] => format!("/{index}/{mapping_type}/{id}"),
+        [index, "_update", id] => format!("/{index}/{mapping_type}/{id}/_update"),
+        _ => return path.to_string(),
+    };
+    match query {
+        Some(query) => format!("{rewritten}?{query}"),
+        None => rewritten,
+    }
+}
+
+fn elasticsearch_six_mapping_types(value: &Value) -> Vec<String> {
+    let mut mapping_types = Vec::new();
+    let Some(indices) = value.as_object() else {
+        return mapping_types;
+    };
+    for index_mapping in indices.values() {
+        let Some(mappings) = index_mapping.get("mappings").and_then(Value::as_object) else {
+            continue;
+        };
+        for (mapping_type, mapping) in mappings {
+            if mapping_type == "_default_" || !mapping.is_object() {
+                continue;
+            }
+            if !mapping_types.contains(mapping_type) {
+                mapping_types.push(mapping_type.clone());
+            }
+        }
+    }
+    mapping_types
+}
+
 fn normalize_elasticsearch_response(value: Value) -> Value {
-    let Some(hits) = value
+    let Some(hits_container) = value.get("hits") else {
+        return value;
+    };
+    let direct_hits = hits_container
         .get("hits")
-        .and_then(|hits| hits.get("hits"))
-        .and_then(Value::as_array)
-    else {
+        .or_else(|| hits_container.get("events"))
+        .and_then(Value::as_array);
+    let hits = direct_hits
+        .map(|items| items.iter().collect::<Vec<_>>())
+        .or_else(|| {
+            hits_container
+                .get("sequences")
+                .and_then(Value::as_array)
+                .map(|sequences| {
+                    sequences
+                        .iter()
+                        .filter_map(|sequence| sequence.get("events").and_then(Value::as_array))
+                        .flat_map(|events| events.iter())
+                        .collect::<Vec<_>>()
+                })
+        });
+    let Some(hits) = hits else {
         return value;
     };
 
     Value::Array(
-        hits.iter()
+        hits.into_iter()
             .map(|hit| {
-                json!({
-                    "index": hit.get("_index").cloned().unwrap_or(Value::Null),
-                    "id": hit.get("_id").cloned().unwrap_or(Value::Null),
-                    "score": hit.get("_score").cloned().unwrap_or(Value::Null),
-                    "source": hit.get("_source").cloned().unwrap_or(Value::Null),
-                })
+                let mut document = serde_json::Map::new();
+                document.insert(
+                    "_index".to_string(),
+                    hit.get("_index").cloned().unwrap_or(Value::Null),
+                );
+                document.insert(
+                    "_id".to_string(),
+                    hit.get("_id").cloned().unwrap_or(Value::Null),
+                );
+                document.insert(
+                    "_score".to_string(),
+                    hit.get("_score").cloned().unwrap_or(Value::Null),
+                );
+                if let Some(source) = hit.get("_source") {
+                    flatten_elasticsearch_source("", source, &mut document);
+                }
+                Value::Object(document)
             })
             .collect(),
     )
+}
+
+fn flatten_elasticsearch_source(
+    prefix: &str,
+    value: &Value,
+    output: &mut serde_json::Map<String, Value>,
+) {
+    let Some(object) = value.as_object() else {
+        if !prefix.is_empty() {
+            output.insert(prefix.to_string(), value.clone());
+        }
+        return;
+    };
+
+    if object.is_empty() && !prefix.is_empty() {
+        output.insert(prefix.to_string(), value.clone());
+        return;
+    }
+
+    for (name, field_value) in object {
+        let source_name = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}.{name}")
+        };
+        let column_name = if matches!(source_name.as_str(), "_index" | "_id" | "_score") {
+            format!("_source.{source_name}")
+        } else {
+            source_name
+        };
+        if field_value.is_object() {
+            flatten_elasticsearch_source(&column_name, field_value, output);
+        } else {
+            output.insert(column_name, field_value.clone());
+        }
+    }
 }
 
 fn elasticsearch_request_result(
@@ -426,7 +778,7 @@ fn elasticsearch_table_result(value: &Value) -> Option<QueryResult> {
         }
     }
 
-    for preferred in ["index", "id", "score", "source"].iter().rev() {
+    for preferred in ["_index", "_id", "_score"].iter().rev() {
         if let Some(position) = column_names.iter().position(|name| name == preferred) {
             let value = column_names.remove(position);
             column_names.insert(0, value);
@@ -478,7 +830,7 @@ fn elasticsearch_indices_to_collections(value: Value) -> Vec<CollectionInfo> {
         .unwrap_or_default()
 }
 
-fn elasticsearch_mapping_to_columns(value: &Value, index: &str) -> Vec<ColumnInfo> {
+fn elasticsearch_mapping_to_columns(value: &Value, index: &str, major: u8) -> Vec<ColumnInfo> {
     let mut columns = vec![ColumnInfo {
         name: "_id".to_string(),
         data_type: "keyword".to_string(),
@@ -491,19 +843,30 @@ fn elasticsearch_mapping_to_columns(value: &Value, index: &str) -> Vec<ColumnInf
         comment: Some("Elasticsearch document id".to_string()),
     }];
 
-    let properties = value
+    let mappings = value
         .get(index)
         .or_else(|| {
             value
                 .as_object()
                 .and_then(|indices| indices.values().next())
         })
-        .and_then(|index_mapping| index_mapping.get("mappings"))
-        .and_then(|mappings| mappings.get("properties"))
-        .and_then(Value::as_object);
+        .and_then(|index_mapping| index_mapping.get("mappings"));
 
-    if let Some(properties) = properties {
+    if let Some(properties) = mappings
+        .and_then(|mappings| mappings.get("properties"))
+        .and_then(Value::as_object)
+    {
         collect_mapping_properties("", properties, &mut columns);
+    } else if major == 6 {
+        // Elasticsearch 6 keeps one mapping-type wrapper around `properties`.
+        // Elasticsearch 7/8 return `mappings.properties` directly.
+        if let Some(mapping_types) = mappings.and_then(Value::as_object) {
+            for mapping in mapping_types.values() {
+                if let Some(properties) = mapping.get("properties").and_then(Value::as_object) {
+                    collect_mapping_properties("", properties, &mut columns);
+                }
+            }
+        }
     }
 
     columns
@@ -526,17 +889,19 @@ fn collect_mapping_properties(
             .and_then(Value::as_bool)
             .unwrap_or(true);
 
-        columns.push(ColumnInfo {
-            name: name.clone(),
-            data_type,
-            is_nullable: true,
-            is_primary_key: false,
-            is_unique: false,
-            is_indexed,
-            is_auto_increment: false,
-            default_value: None,
-            comment: None,
-        });
+        if !columns.iter().any(|column| column.name == name) {
+            columns.push(ColumnInfo {
+                name: name.clone(),
+                data_type,
+                is_nullable: true,
+                is_primary_key: false,
+                is_unique: false,
+                is_indexed,
+                is_auto_increment: false,
+                default_value: None,
+                comment: None,
+            });
+        }
 
         if let Some(nested_properties) = mapping.get("properties").and_then(Value::as_object) {
             collect_mapping_properties(&name, nested_properties, columns);
@@ -581,6 +946,14 @@ mod tests {
 
         assert_eq!(scoped.path, "/user%20events/_search");
 
+        let eql = ElasticsearchRequest {
+            method: Method::POST,
+            path: "/_eql/search".to_string(),
+            body: Some(r#"{"query":"process where true"}"#.to_string()),
+        };
+        let eql = scope_search_request_to_index(eql, Some("events"));
+        assert_eq!(eql.path, "/events/_eql/search");
+
         let explicit = parse_elasticsearch_requests(
             r#"
             GET /users/_search
@@ -592,6 +965,22 @@ mod tests {
         let explicit = scope_search_request_to_index(explicit, Some("orders"));
 
         assert_eq!(explicit.path, "/users/_search");
+    }
+
+    #[test]
+    fn rewrites_typeless_document_paths_for_elasticsearch_six() {
+        assert_eq!(
+            rewrite_elasticsearch_six_document_path("/events/_doc/42", "event"),
+            "/events/event/42"
+        );
+        assert_eq!(
+            rewrite_elasticsearch_six_document_path("/events/_update/42?refresh=wait_for", "event",),
+            "/events/event/42/_update?refresh=wait_for"
+        );
+        assert_eq!(
+            rewrite_elasticsearch_six_document_path("/events/_doc", "event log"),
+            "/events/event%20log"
+        );
     }
 
     #[test]
@@ -642,7 +1031,7 @@ mod tests {
         let requests = parse_elasticsearch_requests(
             r#"
             GET /_cluster/health
-            POST /users/_search
+            POST users/_search
             {"query":{"term":{"active":true}}}
             "#,
         )
@@ -660,18 +1049,48 @@ mod tests {
     #[test]
     fn rejects_invalid_request_lines() {
         assert!(parse_elasticsearch_requests("GET").is_err());
-        assert!(parse_elasticsearch_requests("GET _search").is_err());
+        assert!(parse_elasticsearch_requests("GET https://other.test/_search").is_err());
         assert!(parse_elasticsearch_requests("not-json").is_err());
     }
 
     #[test]
     fn extracts_basic_auth_from_url() {
-        let mut url = Url::parse("http://elastic:secret@localhost:9200").unwrap();
+        let mut url = Url::parse("http://service%24account:p%40ss%3Aword@localhost:9200").unwrap();
         assert_eq!(
-            extract_basic_auth(&mut url),
-            Some(("elastic".to_string(), "secret".to_string()))
+            extract_basic_auth(&mut url).unwrap(),
+            Some(("service$account".to_string(), "p@ss:word".to_string()))
         );
         assert_eq!(url.as_str(), "http://localhost:9200/");
+    }
+
+    #[test]
+    fn normalizes_https_alias_and_removes_internal_ssl_parameter() {
+        let url = normalize_elasticsearch_base_url(
+            "elasticsearch://reader:encoded@search.example.test:9200?ssl=require&request_cache=true",
+        )
+        .unwrap();
+
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.query(), Some("request_cache=true"));
+    }
+
+    #[test]
+    fn detects_supported_server_versions() {
+        for (version, major) in [("6.8.23", 6), ("7.17.29", 7), ("8.19.4", 8)] {
+            let info = parse_elasticsearch_server_info(&json!({
+                "version": { "number": version }
+            }))
+            .unwrap();
+            assert_eq!(info.version, version);
+            assert_eq!(info.major, major);
+        }
+
+        assert!(parse_elasticsearch_server_info(&json!({
+            "version": { "number": "5.6.16" }
+        }))
+        .unwrap_err()
+        .to_string()
+        .contains("supported major versions are 6, 7, and 8"));
     }
 
     #[test]
@@ -687,10 +1106,37 @@ mod tests {
         assert_eq!(
             normalize_elasticsearch_response(value),
             json!([{
-                "index": "users",
-                "id": "1",
-                "score": 1.0,
-                "source": {"name": "Ada"}
+                "_index": "users",
+                "_id": "1",
+                "_score": 1.0,
+                "name": "Ada"
+            }])
+        );
+    }
+
+    #[test]
+    fn normalizes_eql_events_and_flattens_nested_source_fields() {
+        let value = json!({
+            "hits": {
+                "events": [{
+                    "_index": "events",
+                    "_id": "42",
+                    "_source": {
+                        "event": {"category": "process"},
+                        "tags": ["prod", "linux"]
+                    }
+                }]
+            }
+        });
+
+        assert_eq!(
+            normalize_elasticsearch_response(value),
+            json!([{
+                "_index": "events",
+                "_id": "42",
+                "_score": null,
+                "event.category": "process",
+                "tags": ["prod", "linux"]
             }])
         );
     }
@@ -713,11 +1159,11 @@ mod tests {
                 .iter()
                 .map(|column| column.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["index", "id", "score", "source"]
+            vec!["_index", "_id", "_score", "name"]
         );
         assert_eq!(result.rows.len(), 2);
         assert_eq!(result.rows[0][0], json!("users"));
-        assert_eq!(result.rows[1][3], json!({"name": "Grace"}));
+        assert_eq!(result.rows[1][3], json!("Grace"));
     }
 
     #[test]
@@ -753,6 +1199,7 @@ mod tests {
                 }
             }),
             "users",
+            8,
         );
 
         let id = columns.iter().find(|column| column.name == "_id").unwrap();
@@ -779,5 +1226,41 @@ mod tests {
             .unwrap();
         assert_eq!(bio.data_type, "text");
         assert!(!bio.is_indexed);
+    }
+
+    #[test]
+    fn maps_elasticsearch_six_typed_mappings_to_columns() {
+        let mapping = json!({
+            "events": {
+                "mappings": {
+                    "event": {
+                        "properties": {
+                            "kind": {"type": "keyword"},
+                            "created_at": {"type": "date"}
+                        }
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            elasticsearch_six_mapping_types(&mapping),
+            vec!["event".to_string()]
+        );
+        let columns = elasticsearch_mapping_to_columns(&mapping, "events", 6);
+
+        assert_eq!(
+            columns
+                .iter()
+                .find(|column| column.name == "kind")
+                .map(|column| column.data_type.as_str()),
+            Some("keyword")
+        );
+        assert_eq!(
+            columns
+                .iter()
+                .find(|column| column.name == "created_at")
+                .map(|column| column.data_type.as_str()),
+            Some("date")
+        );
     }
 }

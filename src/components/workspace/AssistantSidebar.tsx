@@ -17,7 +17,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AssistantHeader } from "./assistant/AssistantHeader";
 import { AssistantConversation } from "./assistant/AssistantConversation";
 import { AssistantPromptBox } from "./assistant/AssistantPromptBox";
+import type { AssistantModelStatus } from "./assistant/AssistantModelControl";
 import { AssistantConversationMinimap } from "./assistant/AssistantConversationMinimap";
+import { AssistantClarificationDock } from "./assistant/AssistantClarificationDock";
 import { createWorkspaceUiActionRegistry } from "@/ai/ui-actions";
 import type { UiActionRequest } from "@/ai/ui-actions/types";
 import { useProjectStore } from "@/store/useProjectStore";
@@ -26,6 +28,7 @@ import { useSchemaStore } from "@/store/useSchemaStore";
 import { cn } from "@/lib/utils";
 import { useAssistantAgentSession } from "@/hooks/useAssistantAgentSession";
 import { assistantConversationHistoryFromTurns } from "@/ai/assistant/turns";
+import { APP_EVENT_OPEN_SETTINGS } from "@/lib/actionEvents";
 
 export function AssistantSidebar() {
   return <AgentHostAssistantSidebar />;
@@ -75,8 +78,14 @@ function AgentHostAssistantSidebar() {
   const [message, setMessage] = useState("");
   const [contextSettings, setContextSettings] =
     useState<AssistantContextSettings>(DEFAULT_ASSISTANT_CONTEXT_SETTINGS);
+  const [dismissedAuthIssueId, setDismissedAuthIssueId] = useState<
+    string | null
+  >(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const autoFollowConversationRef = useRef(true);
+  const providerFingerprintRef = useRef(
+    `${aiEnabled}:${aiBaseUrl}:${aiModel}:${aiApiKey}`,
+  );
   const uiActionRegistry = useMemo(() => createWorkspaceUiActionRegistry(), []);
   const agentToolManifest = useMemo(
     () =>
@@ -99,10 +108,9 @@ function AgentHostAssistantSidebar() {
     return {
       baseUrl,
       model,
-      apiKey: aiApiKey.trim() || undefined,
       timeoutMs: aiTimeoutMs,
     };
-  }, [aiApiKey, aiBaseUrl, aiEnabled, aiModel, aiTimeoutMs]);
+  }, [aiBaseUrl, aiEnabled, aiModel, aiTimeoutMs]);
   const conversationHistory = useMemo(
     () => assistantConversationHistoryFromTurns(session.turns),
     [session.turns],
@@ -149,6 +157,41 @@ function AgentHostAssistantSidebar() {
         `${turn.id}:${turn.updatedAt}:${turn.status}:${turn.process.length}:${turn.final?.content.length || 0}`,
     )
     .join("|");
+  const latestTurnWithError = [...session.turns]
+    .reverse()
+    .find((turn) => Boolean(turn.error?.trim()));
+  const providerError = latestTurnWithError?.error || session.hostError;
+  const providerErrorSignal = [
+    latestTurnWithError?.error,
+    latestTurnWithError?.errorDetail,
+    session.hostError,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const authIssueId =
+    providerError && isAuthenticationError(providerErrorSignal)
+      ? `${latestTurnWithError?.id || "host"}:${latestTurnWithError?.updatedAt || providerError}`
+      : null;
+  const activeAuthIssueId =
+    authIssueId && authIssueId !== dismissedAuthIssueId ? authIssueId : null;
+  const resolvedMode = resolveAssistantMode(assistantMode, message);
+  const { modelStatus, submissionBlockReason } = resolveModelUiState({
+    enabled: aiEnabled,
+    baseUrl: aiBaseUrl,
+    model: aiModel,
+    resolvedMode,
+    toolCalling: aiToolCalling,
+    availability: session.availability,
+    hostCapabilities: session.hostStatus?.capabilities ?? null,
+    authenticationError: activeAuthIssueId ? providerError : null,
+  });
+
+  useEffect(() => {
+    const fingerprint = `${aiEnabled}:${aiBaseUrl}:${aiModel}:${aiApiKey}`;
+    if (providerFingerprintRef.current === fingerprint) return;
+    providerFingerprintRef.current = fingerprint;
+    if (authIssueId) setDismissedAuthIssueId(authIssueId);
+  }, [aiApiKey, aiBaseUrl, aiEnabled, aiModel, authIssueId]);
 
   useEffect(() => {
     const element = scrollContainerRef.current;
@@ -161,7 +204,7 @@ function AgentHostAssistantSidebar() {
 
   const handleSubmit = async () => {
     const prompt = message.trim();
-    if (!prompt || session.isBusy) return;
+    if (!prompt || session.isBusy || submissionBlockReason) return;
     const mode = resolveAssistantMode(assistantMode, prompt);
     const contextSettingsSnapshot = { ...contextSettings };
     const scopedContext = applyAssistantContextSettings(
@@ -225,11 +268,6 @@ function AgentHostAssistantSidebar() {
   const handleExecuteAttachment = async (request: UiActionRequest) => {
     return await uiActionRegistry.execute(request);
   };
-  const providerLabel = !modelConfig
-    ? "Provider required"
-    : session.availability === "unavailable"
-      ? "AI unavailable"
-      : modelConfig.model;
   const activeContextLabel = activeTab?.title || "No active editor";
   const pendingLabel = session.activeTurn
     ? agentTurnPendingLabel(session.activeTurn.status)
@@ -238,10 +276,6 @@ function AgentHostAssistantSidebar() {
   return (
     <div className="wb-assistant-shell flex h-full flex-col wb-panel">
       <AssistantHeader
-        providerLabel={providerLabel}
-        isConfigured={
-          session.availability === "available" && Boolean(modelConfig)
-        }
         isRunning={session.isBusy}
         onNewChat={() => {
           autoFollowConversationRef.current = true;
@@ -284,7 +318,6 @@ function AgentHostAssistantSidebar() {
             onUsePrompt={setMessage}
             onExecuteAttachment={handleExecuteAttachment}
             contextFingerprint={contextFingerprint}
-            onAnswerClarification={session.answerClarification}
             onDecideApproval={session.decideApproval}
             onCancelTurn={session.cancelTurn}
             onResumeTurn={session.resumeTurn}
@@ -297,6 +330,16 @@ function AgentHostAssistantSidebar() {
           contentVersion={turnsContentVersion}
         />
       </div>
+
+      <AssistantClarificationDock
+        turn={
+          session.activeTurn?.status === "awaiting_input"
+            ? session.activeTurn
+            : null
+        }
+        contextFingerprint={contextFingerprint}
+        onAnswer={session.answerClarification}
+      />
 
       <AssistantPromptBox
         message={message}
@@ -321,9 +364,154 @@ function AgentHostAssistantSidebar() {
           session.isBusy && session.activeTurn?.status !== "planning"
         }
         isCancelling={session.activeTurn?.status === "cancelling"}
+        model={aiModel}
+        modelEndpoint={aiBaseUrl}
+        modelStatus={modelStatus}
+        onModelChange={(model) => updateAiSettings({ model })}
+        onOpenAiSettings={() => {
+          window.dispatchEvent(
+            new CustomEvent(APP_EVENT_OPEN_SETTINGS, {
+              detail: { section: "ai" },
+            }),
+          );
+        }}
+        onRetryModel={() => {
+          if (authIssueId) setDismissedAuthIssueId(authIssueId);
+          void session.refreshStatus();
+        }}
+        submissionBlockReason={submissionBlockReason}
       />
     </div>
   );
+}
+
+function resolveModelUiState({
+  enabled,
+  baseUrl,
+  model,
+  resolvedMode,
+  toolCalling,
+  availability,
+  hostCapabilities,
+  authenticationError,
+}: {
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  resolvedMode: "chat" | "plan" | "agent";
+  toolCalling: boolean;
+  availability: "checking" | "available" | "unavailable";
+  hostCapabilities: string[] | null;
+  authenticationError: string | null;
+}): {
+  modelStatus: AssistantModelStatus;
+  submissionBlockReason: string | null;
+} {
+  const endpoint = endpointLabel(baseUrl);
+  if (!enabled || !baseUrl.trim() || !model.trim()) {
+    const detail = !enabled
+      ? "Configure an AI provider and enable it before sending a request."
+      : !baseUrl.trim()
+        ? "Add an OpenAI-compatible endpoint before sending a request."
+        : "Choose a model identifier before sending a request.";
+    return {
+      modelStatus: { kind: "missing", label: "AI setup required", detail },
+      submissionBlockReason: detail,
+    };
+  }
+
+  if (authenticationError) {
+    const detail =
+      "The provider rejected the credential. Update the API key in AI settings, then retry.";
+    return {
+      modelStatus: {
+        kind: "authentication-error",
+        label: "Authentication failed",
+        detail,
+      },
+      submissionBlockReason: detail,
+    };
+  }
+
+  if (resolvedMode !== "chat" && !toolCalling) {
+    const detail = `${resolvedMode === "plan" ? "Plan" : "Agent"} mode requires a model with tool calling. Switch to Chat or enable tool calling in AI settings.`;
+    return {
+      modelStatus: {
+        kind: "incompatible",
+        label: "Model capability required",
+        detail,
+      },
+      submissionBlockReason: detail,
+    };
+  }
+
+  if (
+    availability === "available" &&
+    hostCapabilities &&
+    hostCapabilities.length > 0 &&
+    !hostCapabilities.includes(resolvedMode)
+  ) {
+    const detail = `The AI runtime does not support ${resolvedMode === "chat" ? "Chat" : resolvedMode === "plan" ? "Plan" : "Agent"} mode.`;
+    return {
+      modelStatus: {
+        kind: "incompatible",
+        label: "Mode unavailable",
+        detail,
+      },
+      submissionBlockReason: detail,
+    };
+  }
+
+  if (availability === "checking") {
+    const detail = "Starting the AI runtime. You can keep typing while it starts.";
+    return {
+      modelStatus: { kind: "checking", label: "Starting AI runtime", detail },
+      submissionBlockReason: detail,
+    };
+  }
+
+  if (
+    availability === "available" &&
+    (!hostCapabilities || hostCapabilities.length === 0)
+  ) {
+    const detail = "Checking the AI runtime capabilities. You can keep typing.";
+    return {
+      modelStatus: { kind: "checking", label: "Checking AI runtime", detail },
+      submissionBlockReason: detail,
+    };
+  }
+
+  if (availability === "unavailable") {
+    const detail =
+      "The AI runtime is unavailable. The database workspace remains usable.";
+    return {
+      modelStatus: { kind: "unavailable", label: "AI unavailable", detail },
+      submissionBlockReason: `${detail} Retry the runtime or open AI settings.`,
+    };
+  }
+
+  return {
+    modelStatus: {
+      kind: "configured",
+      label: "Model configured",
+      detail: `Requests use ${endpoint}. Credentials are verified when a request is sent.`,
+    },
+    submissionBlockReason: null,
+  };
+}
+
+function isAuthenticationError(message: string) {
+  return /\b401\b|unauthori[sz]ed|authentication\s+failed|incorrect\s+(?:api[- ]?)?key|invalid\s+(?:api[- ]?)?key/iu.test(
+    message,
+  );
+}
+
+function endpointLabel(baseUrl: string) {
+  try {
+    return new URL(baseUrl).hostname || "the configured endpoint";
+  } catch {
+    return "the configured endpoint";
+  }
 }
 
 function createAgentTurnId() {

@@ -1,9 +1,9 @@
+use crate::core::private_file::create_private_file;
 use aes_gcm::{
     aead::{Aead, Payload},
     Aes256Gcm, KeyInit, Nonce,
 };
 use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use rand::{rngs::OsRng, RngCore};
 use serde_json::Value;
 use sqlx::{
@@ -16,12 +16,13 @@ use tokio::sync::{OnceCell, RwLock};
 use zeroize::{Zeroize, Zeroizing};
 
 const RETENTION_MILLIS: i64 = 7 * 24 * 60 * 60 * 1_000;
-const KEYRING_SERVICE: &str = "com.houshuai.oxide-studio.agent";
-const KEYRING_ACCOUNT: &str = "agent-store-master-key-v1";
+const AGENT_STORE_KEY_BYTES: usize = 32;
+const AGENT_STORE_KEY_FILE: &str = "agent-store-master-key-v2.secret";
 
 #[derive(Clone)]
 pub struct AgentStore {
     db_path: PathBuf,
+    key_path: PathBuf,
     backend: Arc<OnceCell<Arc<Backend>>>,
 }
 
@@ -122,15 +123,15 @@ struct EncryptedRecord {
 }
 
 impl AgentStore {
-    /// This constructor performs no keyring, filesystem, or database work.
+    /// This constructor performs no filesystem or database work.
     pub fn new(app: &AppHandle) -> Self {
-        let db_path = app
+        let config_dir = app
             .path()
             .app_config_dir()
-            .unwrap_or_else(|_| std::env::temp_dir().join("oxide-studio"))
-            .join("agent-state.db");
+            .unwrap_or_else(|_| std::env::temp_dir().join("oxide-studio"));
         Self {
-            db_path,
+            db_path: config_dir.join("agent-state-v2.db"),
+            key_path: config_dir.join("credentials").join(AGENT_STORE_KEY_FILE),
             backend: Arc::new(OnceCell::new()),
         }
     }
@@ -142,7 +143,7 @@ impl AgentStore {
         })
     }
 
-    /// Reports an already initialized backend without touching the keyring or disk.
+    /// Reports an already initialized backend without touching disk.
     pub fn initialized_storage_mode(&self) -> Option<&'static str> {
         self.backend.get().map(|backend| match backend.as_ref() {
             Backend::Persistent(_) => "encrypted-persistent",
@@ -633,9 +634,10 @@ impl AgentStore {
     async fn backend(&self) -> Result<&Arc<Backend>> {
         self.backend
             .get_or_try_init(|| async {
-                let key = tokio::task::spawn_blocking(resolve_persistent_key)
+                let key_path = self.key_path.clone();
+                let key = tokio::task::spawn_blocking(move || resolve_persistent_key(&key_path))
                     .await
-                    .context("agent keyring task failed")?;
+                    .context("agent key file task failed")?;
                 let backend = match key {
                     Some(key) => {
                         let parent = self
@@ -727,6 +729,7 @@ impl AgentStore {
         }))));
         Self {
             db_path,
+            key_path: PathBuf::from("unused"),
             backend: Arc::new(backend),
         }
     }
@@ -749,6 +752,7 @@ impl AgentStore {
         })));
         Ok(Self {
             db_path,
+            key_path: PathBuf::from("unused"),
             backend: Arc::new(backend),
         })
     }
@@ -901,32 +905,41 @@ fn validate_graph_write(write: &StoredGraphWrite) -> Result<()> {
     validate_graph_scope_value("graph write channel", &write.channel, false)
 }
 
-fn resolve_persistent_key() -> Option<[u8; 32]> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).ok()?;
-    match entry.get_password() {
-        Ok(mut encoded) => {
-            let decoded = BASE64.decode(encoded.as_bytes()).ok();
-            encoded.zeroize();
-            decoded.and_then(|mut bytes| {
-                if bytes.len() != 32 {
-                    bytes.zeroize();
-                    return None;
-                }
-                let mut key = [0u8; 32];
-                key.copy_from_slice(&bytes);
-                bytes.zeroize();
-                Some(key)
-            })
-        }
-        Err(keyring::Error::NoEntry) => {
-            let key = random_key();
-            let mut encoded = BASE64.encode(key);
-            let stored = entry.set_password(&encoded).is_ok();
-            encoded.zeroize();
-            stored.then_some(key)
-        }
-        Err(_) => None,
+fn resolve_persistent_key(path: &std::path::Path) -> Option<[u8; 32]> {
+    match load_local_key(path) {
+        Ok(Some(key)) => return Some(key),
+        Ok(None) => {}
+        Err(_) => return None,
     }
+
+    let mut candidate = random_key();
+    match create_private_file(path, &candidate) {
+        Ok(true) => Some(candidate),
+        Ok(false) => {
+            candidate.zeroize();
+            load_local_key(path).ok().flatten()
+        }
+        Err(_) => {
+            candidate.zeroize();
+            None
+        }
+    }
+}
+
+fn load_local_key(path: &std::path::Path) -> Result<Option<[u8; 32]>> {
+    let mut bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(anyhow!("failed to read agent key file: {error}")),
+    };
+    if bytes.len() != AGENT_STORE_KEY_BYTES {
+        bytes.zeroize();
+        return Err(anyhow!("agent key file has an invalid length"));
+    }
+    let mut key = [0u8; AGENT_STORE_KEY_BYTES];
+    key.copy_from_slice(&bytes);
+    bytes.zeroize();
+    Ok(Some(key))
 }
 
 fn random_key() -> [u8; 32] {
@@ -1453,6 +1466,25 @@ fn now_millis() -> i64 {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn local_agent_key_is_stable_and_private() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("credentials/agent-key.secret");
+        let first = resolve_persistent_key(&path).unwrap();
+        let second = resolve_persistent_key(&path).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(std::fs::read(&path).unwrap().len(), AGENT_STORE_KEY_BYTES);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
 
     #[tokio::test]
     async fn session_store_round_trips_authenticated_ciphertext() {

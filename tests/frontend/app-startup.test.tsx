@@ -3,6 +3,8 @@
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { StartupWorkbenchShell } from "@/App";
 import {
@@ -110,5 +112,36 @@ describe("application startup", () => {
     expect(received).toEqual(["new-query"]);
     expect(newQuery?.textContent).toContain("Opening…");
     unsubscribe();
+  });
+
+  it("keeps an inline startup action pending across the React shell handoff", async () => {
+    window.__oxideStartupIntents = ["project-files"];
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <StartupWorkbenchShell cachedDataSources={[]} hasDataSourceCache />,
+      );
+    });
+
+    const projectFiles = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Project Files"),
+    );
+    expect(projectFiles?.textContent).toContain("Opening…");
+    expect(
+      container
+        .querySelector(".wb-workspace-track")
+        ?.hasAttribute("aria-hidden"),
+    ).toBe(false);
+  });
+
+  it("does not turn a slow workspace transform into a false Reload error", () => {
+    const html = readFileSync(resolve(process.cwd(), "index.html"), "utf8");
+
+    expect(html).toContain("Still preparing the workspace…");
+    expect(html).toContain("oxide:react-shell-ready");
+    expect(html).not.toContain(
+      "OxideStudio did not finish starting. Reload the window to try again.",
+    );
   });
 });

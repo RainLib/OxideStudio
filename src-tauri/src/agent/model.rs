@@ -1,4 +1,7 @@
-use crate::agent::protocol::{AgentProviderConfig, AgentToolManifestEntry, ModelCompleteRequest};
+use crate::{
+    agent::protocol::{AgentProviderConfig, AgentToolManifestEntry, ModelCompleteRequest},
+    core::provider_secret::normalize_provider_secret,
+};
 use anyhow::{anyhow, Context, Result};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Map, Value};
@@ -69,7 +72,7 @@ impl ModelGateway {
         if let Some(api_key) = provider
             .api_key
             .as_deref()
-            .map(str::trim)
+            .map(normalize_provider_secret)
             .filter(|value| !value.is_empty())
         {
             builder = builder.header(AUTHORIZATION, format!("Bearer {api_key}"));
@@ -153,7 +156,7 @@ impl ModelGateway {
         if let Some(api_key) = provider
             .api_key
             .as_deref()
-            .map(str::trim)
+            .map(normalize_provider_secret)
             .filter(|value| !value.is_empty())
         {
             builder = builder.header(AUTHORIZATION, format!("Bearer {api_key}"));
@@ -499,16 +502,101 @@ fn normalize_message(message: &Value) -> Result<Value> {
     let mut normalized = Map::new();
     normalized.insert("role".to_string(), Value::String(role.to_string()));
     normalized.insert("content".to_string(), content);
-    for (source, target) in [
-        ("name", "name"),
-        ("toolCallId", "tool_call_id"),
-        ("toolCalls", "tool_calls"),
-    ] {
-        if let Some(value) = object.get(source) {
-            normalized.insert(target.to_string(), value.clone());
+
+    if let Some(name) = object
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        normalized.insert("name".to_string(), Value::String(name.to_string()));
+    }
+
+    if let Some(value) = object.get("toolCallId") {
+        let tool_call_id = value
+            .as_str()
+            .map(str::trim)
+            .filter(|tool_call_id| !tool_call_id.is_empty())
+            .ok_or_else(|| anyhow!("model toolCallId must be a non-empty string"))?;
+        if role != "tool" {
+            return Err(anyhow!("model toolCallId is only valid for tool messages"));
+        }
+        normalized.insert(
+            "tool_call_id".to_string(),
+            Value::String(tool_call_id.to_string()),
+        );
+    }
+
+    if let Some(value) = object.get("toolCalls") {
+        let tool_calls = value
+            .as_array()
+            .ok_or_else(|| anyhow!("model toolCalls must be an array"))?;
+        if !tool_calls.is_empty() {
+            if role != "assistant" {
+                return Err(anyhow!(
+                    "model toolCalls are only valid for assistant messages"
+                ));
+            }
+            if tool_calls.iter().any(|tool_call| !tool_call.is_object()) {
+                return Err(anyhow!("model toolCalls must contain objects"));
+            }
+            normalized.insert(
+                "tool_calls".to_string(),
+                Value::Array(
+                    tool_calls
+                        .iter()
+                        .map(normalize_openai_tool_call)
+                        .collect::<Result<Vec<_>>>()?,
+                ),
+            );
         }
     }
     Ok(Value::Object(normalized))
+}
+
+fn normalize_openai_tool_call(value: &Value) -> Result<Value> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("model tool call must be an object"))?;
+    let function = object.get("function").and_then(Value::as_object);
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            function
+                .and_then(|value| value.get("name"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("model tool call name is required"))?;
+    let raw_arguments = object
+        .get("args")
+        .or_else(|| function.and_then(|value| value.get("arguments")));
+    let arguments = match raw_arguments {
+        Some(Value::String(value)) => value.clone(),
+        Some(value) => {
+            serde_json::to_string(value).context("failed to serialize model tool call arguments")?
+        }
+        None => "{}".to_string(),
+    };
+
+    let mut normalized = json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": arguments,
+        }
+    });
+    if let Some(id) = object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        normalized["id"] = Value::String(id.to_string());
+    }
+    Ok(normalized)
 }
 
 fn openai_tool_definition(tool: &AgentToolManifestEntry) -> Value {
@@ -665,6 +753,45 @@ mod tests {
         let normalized = normalize_message(&value).unwrap();
         assert_eq!(normalized["tool_call_id"], "call-1");
         assert!(normalized.get("toolCallId").is_none());
+    }
+
+    #[test]
+    fn empty_assistant_tool_calls_are_omitted_for_openai_compatibility() {
+        let value = json!({
+            "role": "assistant",
+            "content": "Hello",
+            "toolCalls": []
+        });
+        let normalized = normalize_message(&value).unwrap();
+        assert_eq!(normalized["content"], "Hello");
+        assert!(normalized.get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn langchain_tool_calls_are_normalized_for_openai_compatibility() {
+        let value = json!({
+            "role": "assistant",
+            "content": "",
+            "toolCalls": [{
+                "id": "call-1",
+                "type": "tool_call",
+                "name": "connection_list",
+                "args": {"projectId": "project-1"}
+            }]
+        });
+        let normalized = normalize_message(&value).unwrap();
+
+        assert_eq!(
+            normalized["tool_calls"],
+            json!([{
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "connection_list",
+                    "arguments": "{\"projectId\":\"project-1\"}"
+                }
+            }])
+        );
     }
 
     #[test]

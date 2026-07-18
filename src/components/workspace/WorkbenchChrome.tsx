@@ -2,6 +2,7 @@ import { APP_EVENT_OPEN_COMMAND_PALETTE } from "@/lib/actionEvents";
 import type { WorkbenchSide } from "@/lib/appSettings";
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/store/useProjectStore";
+import { useStartupProgress } from "@/startup/startupProgress";
 import {
   Bell,
   ChevronRight,
@@ -111,6 +112,7 @@ export function WorkbenchStatusBar({
   onToggleSecondaryPanel,
 }: WorkbenchStatusBarProps) {
   const activeProjectName = useProjectStore((state) => state.activeProjectName);
+  const startupProgress = useStartupProgress();
   const hasEditorContext = Boolean(activeTabTitle);
 
   return (
@@ -149,14 +151,39 @@ export function WorkbenchStatusBar({
       </div>
 
       <div className="ml-auto flex h-full min-w-0 items-center overflow-hidden">
-        {isIntrospecting && (
+        {startupProgress.active ? (
+          <div
+            className="hidden h-full items-center gap-2 px-2 text-[11px] text-[hsl(var(--wb-text-muted))] sm:flex"
+            role="status"
+            aria-live="polite"
+          >
+            <span className="max-w-52 truncate whitespace-nowrap">
+              {startupProgress.label}
+            </span>
+            <span
+              className="wb-progress-track"
+              role="progressbar"
+              aria-label={startupProgress.label}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(startupProgress.progress * 100)}
+            >
+              <span
+                className="wb-progress-bar wb-progress-bar-determinate"
+                style={{
+                  transform: `scaleX(${startupProgress.progress})`,
+                }}
+              />
+            </span>
+          </div>
+        ) : isIntrospecting ? (
           <div className="hidden h-full items-center gap-2 px-2 text-[11px] text-[hsl(var(--wb-text-muted))] sm:flex">
             <span className="whitespace-nowrap">Introspecting metadata</span>
             <span className="wb-progress-track">
               <span className="wb-progress-bar" />
             </span>
           </div>
-        )}
+        ) : null}
         <DeferredTaskStatusCenter />
         <div
           id="status-bar-slot"

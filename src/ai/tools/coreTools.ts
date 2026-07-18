@@ -555,7 +555,8 @@ function describeObjectTool(adapters: AiToolAdapters): AiToolDefinition {
 function readOnlyQueryTool(adapters: AiToolAdapters): AiToolDefinition {
   return {
     name: "query.runReadOnly",
-    description: "Run a bounded read-only query or driver-native read request.",
+    description:
+      "Run a bounded read-only request. Use SELECT for SQL, MongoDB read-command JSON, Redis read commands, or Elasticsearch JSON/Kibana syntax such as POST index/_search followed by a DSL body.",
     inputSchema: {
       type: "object",
       properties: {
@@ -565,7 +566,8 @@ function readOnlyQueryTool(adapters: AiToolAdapters): AiToolDefinition {
         },
         query: {
           type: "string",
-          description: "Query or driver-native request body.",
+          description:
+            "SQL SELECT, MongoDB read-command JSON, Redis read command, or Elasticsearch JSON/Kibana-style read request.",
         },
         namespace: {
           type: "string",

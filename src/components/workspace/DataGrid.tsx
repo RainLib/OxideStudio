@@ -1678,7 +1678,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           {!result && (!overrideColumns || overrideColumns.length === 0) ? (
             !activeTab?.isExecuting && (
               <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
-                Run a query to see results
+                {activeTab?.type === "table"
+                  ? "No data loaded"
+                  : "Run a query to see results"}
               </div>
             )
           ) : (

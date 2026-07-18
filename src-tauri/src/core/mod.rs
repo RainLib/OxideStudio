@@ -6,6 +6,7 @@ pub mod error;
 pub mod explain;
 pub mod manager;
 pub mod parser;
+pub(crate) mod private_file;
 pub mod protocol;
 pub mod provider_secret;
 pub mod redaction;

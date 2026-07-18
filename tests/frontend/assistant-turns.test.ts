@@ -177,7 +177,10 @@ describe("assistant turn projection", () => {
     );
 
     expect(turn.status).toBe("paused");
-    expect(turn.error).toBe("The model timed out.");
+    expect(turn.error).toBe(
+      "The request took too long. You can resume it without starting over.",
+    );
+    expect(turn.errorDetail).toBe("MODEL_TIMEOUT: The model timed out.");
   });
 });
 

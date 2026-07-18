@@ -39,7 +39,9 @@ Rust remains authoritative for:
 
 The sidecar receives only a redacted workspace snapshot, model capability descriptor and portable tool manifest. It never receives database passwords, SSH secrets, connection URLs, driver handles, reusable approval tokens or a general process/filesystem capability. `FilesystemBackend`, `LocalShellBackend`, shell tools and LangSmith Sandbox are forbidden. Deep Agents filesystem tools are excluded and an explicit deny policy is retained as defence in depth.
 
-Provider API keys are stored in Keychain/Windows Credential Manager/Linux Secret Service, keyed by a hash of the normalized provider endpoint. They are not persisted in Zustand/localStorage, serialized into checkpoints or sent to the sidecar.
+Provider API keys are stored in an OxideStudio per-user credential file named by a hash of the normalized provider endpoint. The AES-GCM checkpoint master key uses a separate random credential file in the same user-private directory. The containing directory/files use `0700`/`0600` on Unix and inherit the current user-profile ACL on Windows. Settings reopens the provider file after saving, and both provider tests and Agent requests read only this source. Keys are not written to a project, Zustand/localStorage or checkpoints, are never sent to the sidecar, and runtime chat never accesses Keychain, Windows Credential Manager, or Linux Secret Service.
+
+The provider credential file is intentionally not described as encrypted at rest: its security boundary is the local OS user profile and file ACL. This avoids platform keychain availability/prompts changing provider behavior while keeping the file non-portable and out of shared project data. An enterprise keychain/policy mode would be a separate explicit option rather than a silent fallback with different runtime semantics.
 
 ## Protocol and lifecycle
 

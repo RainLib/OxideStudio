@@ -100,6 +100,11 @@ import {
   shouldRequestAiInlineCompletion,
   type InlineCompletionStatus,
 } from "@/lib/inlineCompletion";
+import {
+  elasticsearchRequestAtOffset,
+  ELASTICSEARCH_CONSOLE_LANGUAGE_ID,
+  registerElasticsearchConsoleLanguage,
+} from "@/lib/elasticsearchConsole";
 
 type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
@@ -109,7 +114,12 @@ type ParameterExecutionRequest = {
   sql: string;
   transactionId?: string;
 };
-const LSP_PROVIDER_LANGUAGES = ["sql", "json", "plaintext"] as const;
+const LSP_PROVIDER_LANGUAGES = [
+  "sql",
+  "json",
+  "plaintext",
+  ELASTICSEARCH_CONSOLE_LANGUAGE_ID,
+] as const;
 
 function isSupportedLspModelUri(uri: string) {
   const identity = extractLspDocumentIdentity(uri);
@@ -255,6 +265,7 @@ export function QueryEditor({
     tabs,
     activeTabId,
     updateTabSql,
+    setQueryLanguage,
     runTabQuery,
     runExplainPlan,
     cancelTabQuery,
@@ -376,8 +387,12 @@ export function QueryEditor({
     activeTab?.fileRelativePath && !isProjectFilePreview
       ? projectFileLanguage(activeTab.fileRelativePath, driver)
       : null;
+  const isElasticsearchEql =
+    driver === "elasticsearch" &&
+    activeTab?.queryLanguage === "elasticsearch-eql";
   const documentLanguageId =
-    activeProjectFileLanguage?.lspLanguageId || lspLanguageId(driver);
+    activeProjectFileLanguage?.lspLanguageId ||
+    (isElasticsearchEql ? "elasticsearch-eql" : lspLanguageId(driver));
   const documentUri = activeTab
     ? activeProjectFileLanguage && !activeProjectFileLanguage.usesDatabaseLsp
       ? projectFileModelUri(activeTab.id, activeProjectFileLanguage)
@@ -385,9 +400,14 @@ export function QueryEditor({
     : "";
   const editorLanguageId =
     activeProjectFileLanguage?.editorLanguageId ||
-    queryEditorLanguageId(driver);
+    (isElasticsearchEql
+      ? "plaintext"
+      : driver === "elasticsearch"
+        ? ELASTICSEARCH_CONSOLE_LANGUAGE_ID
+        : queryEditorLanguageId(driver));
   const canUseLsp =
     !isProjectFilePreview &&
+    !isElasticsearchEql &&
     supportsLspLanguageId(driver) &&
     (!activeProjectFileLanguage || activeProjectFileLanguage.usesDatabaseLsp);
   const canExecuteDocument =
@@ -1363,6 +1383,19 @@ export function QueryEditor({
       : model.getValue();
   };
 
+  const currentElasticsearchRequest = (editor: any, model: any) => {
+    if (
+      driver !== "elasticsearch" ||
+      activeTab?.queryLanguage === "elasticsearch-eql"
+    ) {
+      return null;
+    }
+
+    const position = editor.getPosition?.();
+    const cursorOffset = position ? model.getOffsetAt(position) : 0;
+    return elasticsearchRequestAtOffset(model.getValue(), cursorOffset)?.text;
+  };
+
   const handleRun = () => {
     if (canExecuteDocument && effectiveConnectionId && activeTab) {
       const sql = editorRef.current?.getModel()?.getValue() ?? activeTab.sql;
@@ -1413,11 +1446,29 @@ export function QueryEditor({
         transactionId,
       );
     } else {
-      // Otherwise run the full tab query
-      const sql = model.getValue();
-      if (requestParameterizedExecution(sql, transactionId)) return;
-      if (!confirmEditorExecution(sql)) return;
-      updateTabSql(activeTab.id, sql);
+      // Kibana Console runs the request under the cursor when no text is
+      // selected. Other query languages retain their full-tab behavior.
+      const currentRequest = currentElasticsearchRequest(
+        editorRef.current,
+        model,
+      );
+      if (currentRequest) {
+        if (requestParameterizedExecution(currentRequest, transactionId))
+          return;
+        if (!confirmEditorExecution(currentRequest)) return;
+        runTabQuery(
+          activeTab.id,
+          effectiveConnectionId,
+          currentRequest,
+          transactionId,
+        );
+        return;
+      }
+
+      const fullQuery = model.getValue();
+      if (requestParameterizedExecution(fullQuery, transactionId)) return;
+      if (!confirmEditorExecution(fullQuery)) return;
+      updateTabSql(activeTab.id, fullQuery);
       runTabQuery(
         activeTab.id,
         effectiveConnectionId,
@@ -1827,6 +1878,14 @@ export function QueryEditor({
           onSaveFile={() => void saveProjectFileTab(activeTab.id)}
           parameterCount={canExecuteDocument ? parameterCount : 0}
           onConfigureParameters={handleConfigureParameters}
+          queryLanguage={
+            driver === "elasticsearch"
+              ? activeTab.queryLanguage || "elasticsearch-dsl"
+              : undefined
+          }
+          onQueryLanguageChange={(queryLanguage) =>
+            setQueryLanguage(activeTab.id, queryLanguage)
+          }
         />
       )}
 
@@ -1938,6 +1997,7 @@ export function QueryEditor({
               monaco.editor.setTheme(mode === "light" ? "vs" : "oxide-dark");
             }}
             beforeMount={(monaco) => {
+              registerElasticsearchConsoleLanguage(monaco);
               // Optional: Define a custom theme that perfectly matches our app's background
               monaco.editor.defineTheme("oxide-dark", {
                 base: "vs-dark",

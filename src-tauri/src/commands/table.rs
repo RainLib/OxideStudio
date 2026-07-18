@@ -7,6 +7,7 @@ use crate::core::{
     },
     statement::{validate_sql_filter_expression, StatementScanDialect},
 };
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
@@ -3128,6 +3129,41 @@ pub async fn get_view_definition(
     }
 }
 
+async fn get_elasticsearch_index_mapping(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    index: &str,
+) -> Result<String, anyhow::Error> {
+    let index = index.trim();
+    if index.is_empty() {
+        return Err(anyhow::anyhow!("Elasticsearch index name is required"));
+    }
+    let encoded_index = utf8_percent_encode(index, NON_ALPHANUMERIC).to_string();
+    let results = manager
+        .query(
+            connection_id,
+            &format!("GET /{encoded_index}/_mapping"),
+            None,
+            None,
+            None,
+        )
+        .await?;
+    let result = results
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Elasticsearch returned no mapping result"))?;
+    let mapping_column = result
+        .columns
+        .iter()
+        .position(|column| column.name == "result")
+        .ok_or_else(|| anyhow::anyhow!("Elasticsearch mapping result is malformed"))?;
+    let mapping = result
+        .rows
+        .first()
+        .and_then(|row| row.get(mapping_column))
+        .ok_or_else(|| anyhow::anyhow!("Elasticsearch mapping response is empty"))?;
+    serde_json::to_string_pretty(mapping).map_err(Into::into)
+}
+
 #[tauri::command]
 pub async fn refresh_materialized_view(
     manager: State<'_, ConnectionManager>,
@@ -3190,6 +3226,14 @@ pub async fn get_table_ddl(
         "table": table,
     });
     let result: Result<String, String> = async {
+        if matches!(
+            driver.trim().to_ascii_lowercase().as_str(),
+            "elasticsearch" | "elastic"
+        ) {
+            return get_elasticsearch_index_mapping(&manager, &connection_id, &table)
+                .await
+                .map_err(|error| error.to_string());
+        }
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         let table_name = table.trim();
         if table_name.is_empty() {

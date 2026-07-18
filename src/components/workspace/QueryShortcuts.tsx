@@ -3,6 +3,7 @@ import { requestProjectFilesPanel } from "@/lib/projectFilesNavigation";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
+import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
 import { FileCode2, FolderTree, Search } from "lucide-react";
 
 const shortcutCardClass =
@@ -10,14 +11,40 @@ const shortcutCardClass =
 
 export function QueryShortcuts() {
   const activeConnectionId = useConnectionStore(
-    (state) => state.activeConnectionId
+    (state) => state.activeConnectionId,
+  );
+  const activeConnection = useConnectionStore((state) =>
+    state.connections.find(
+      (connection) => connection.id === state.activeConnectionId,
+    ),
   );
   const currentSchema = useSchemaStore((state) => state.currentSchema);
+  const capabilities = defaultDatabaseCapabilities(
+    activeConnection?.driver || "postgres",
+  );
+  const workspaceLabel =
+    capabilities.dataModel === "search"
+      ? "Elasticsearch"
+      : capabilities.dataModel === "document"
+        ? "MongoDB"
+        : capabilities.dataModel === "keyValue"
+          ? "Redis"
+          : "SQL";
+  const queryLabel =
+    capabilities.dataModel === "search"
+      ? "New Request"
+      : capabilities.dataModel === "keyValue"
+        ? "New Command"
+        : "New Query";
 
   const createQuery = () => {
-    useTabStore.getState().createTab("query", "New Query", "", {
+    useTabStore.getState().createTab("query", queryLabel, "", {
       connectionId: activeConnectionId || undefined,
       schemaName: currentSchema || undefined,
+      queryLanguage:
+        activeConnection?.driver === "elasticsearch"
+          ? "elasticsearch-dsl"
+          : undefined,
     });
   };
 
@@ -31,7 +58,7 @@ export function QueryShortcuts() {
         <div className="w-[420px] max-w-[calc(100vw-72px)] translate-y-[-14px]">
           <div className="mb-4 text-center">
             <div className="text-[14px] font-semibold text-[hsl(var(--wb-text))]">
-              Start working with SQL
+              Start working with {workspaceLabel}
             </div>
             <div className="mt-1 text-[11px] wb-muted">
               Open a console or keep queries as files in your project directory.
@@ -46,10 +73,16 @@ export function QueryShortcuts() {
               <FileCode2 size={17} className="text-sky-400" />
               <span>
                 <span className="block text-[11px] font-semibold text-[hsl(var(--wb-text))]">
-                  New Query
+                  {queryLabel}
                 </span>
                 <span className="mt-0.5 block text-[9px] leading-3.5 wb-muted">
-                  Open a SQL console
+                  {capabilities.dataModel === "search"
+                    ? "Open a Query DSL or EQL console"
+                    : capabilities.dataModel === "keyValue"
+                      ? "Open a Redis command console"
+                      : capabilities.dataModel === "document"
+                        ? "Open a MongoDB query console"
+                        : "Open a SQL console"}
                 </span>
               </span>
             </button>
@@ -73,7 +106,7 @@ export function QueryShortcuts() {
               className={shortcutCardClass}
               onClick={() =>
                 window.dispatchEvent(
-                  new CustomEvent(APP_EVENT_OPEN_COMMAND_PALETTE)
+                  new CustomEvent(APP_EVENT_OPEN_COMMAND_PALETTE),
                 )
               }
             >

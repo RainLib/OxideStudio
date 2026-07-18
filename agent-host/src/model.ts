@@ -383,12 +383,52 @@ function serializeMessage(message: BaseMessage): ModelRequest["messages"][number
     tool_call_id?: string;
     tool_calls?: Array<Record<string, unknown>>;
   };
-  return {
+  const serialized: ModelRequest["messages"][number] = {
     role,
     content: message.content,
-    name: value.name,
-    toolCallId: value.tool_call_id,
-    toolCalls: value.tool_calls,
+  };
+  if (typeof value.name === "string" && value.name.trim()) {
+    serialized.name = value.name;
+  }
+  if (role === "tool" && typeof value.tool_call_id === "string") {
+    const toolCallId = value.tool_call_id.trim();
+    if (toolCallId) serialized.toolCallId = toolCallId;
+  }
+  if (
+    role === "assistant" &&
+    Array.isArray(value.tool_calls) &&
+    value.tool_calls.length > 0
+  ) {
+    serialized.toolCalls = value.tool_calls.map(serializeToolCallForProvider);
+  }
+  return serialized;
+}
+
+function serializeToolCallForProvider(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  const functionValue = isRecord(value.function) ? value.function : undefined;
+  const name =
+    typeof value.name === "string"
+      ? value.name
+      : typeof functionValue?.name === "string"
+        ? functionValue.name
+        : "unknown_tool";
+  const rawArguments = value.args ?? functionValue?.arguments ?? {};
+  const argumentsValue =
+    typeof rawArguments === "string"
+      ? rawArguments
+      : JSON.stringify(rawArguments);
+
+  return {
+    ...(typeof value.id === "string" && value.id.trim()
+      ? { id: value.id.trim() }
+      : {}),
+    type: "function",
+    function: {
+      name,
+      arguments: argumentsValue,
+    },
   };
 }
 

@@ -147,6 +147,7 @@ describe("AssistantSidebar Agent Host path", () => {
     useProjectStore.setState(initialProjectState, true);
     useSchemaStore.setState(initialSchemaState, true);
     useTabStore.setState(initialTabState, true);
+    vi.useRealTimers();
     vi.unstubAllEnvs();
   });
 
@@ -157,6 +158,14 @@ describe("AssistantSidebar Agent Host path", () => {
       await flushAsyncWork();
     });
     expect(container.textContent).toContain("agent-model");
+    expect(container.querySelector("header")?.textContent).not.toContain(
+      "agent-model",
+    );
+    expect(
+      container.querySelector(
+        'button[aria-label^="Assistant model: agent-model"]',
+      ),
+    ).not.toBeNull();
 
     await submitPrompt(container, "Inspect the current database", "Run agent");
     expect(mocks.startTurn).toHaveBeenCalledTimes(1);
@@ -198,6 +207,11 @@ describe("AssistantSidebar Agent Host path", () => {
         },
       ],
     });
+    expect(
+      container.querySelector(
+        '[data-assistant-process-item="plan:step-1"]',
+      )?.classList.contains("wb-assistant-process-running"),
+    ).toBe(true);
     await emit({
       ...baseEvent(firstRequest.threadId, firstRequest.turnId, 2),
       type: "final.answer",
@@ -213,10 +227,15 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(container.textContent).toContain("Read schema metadata");
     expect(container.textContent).toContain("The users table has five columns.");
     expect(
-      container.querySelector<HTMLDetailsElement>(
-        'details[aria-label="Assistant process"]',
-      )?.open,
-    ).toBe(false);
+      container.querySelector<HTMLElement>(
+        '[aria-label="Assistant process"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      container.querySelector(
+        '[data-assistant-process-item="plan:step-1"]',
+      ),
+    ).not.toBeNull();
 
     await submitPrompt(container, "Now explain it", "Run agent");
     const secondRequest = mocks.startTurn.mock.calls[1]?.[0];
@@ -285,13 +304,84 @@ describe("AssistantSidebar Agent Host path", () => {
       ],
     });
 
+    const dock = container.querySelector<HTMLElement>(
+      "[data-assistant-clarification-dock]",
+    );
+    const conversation = container.querySelector<HTMLElement>(
+      '[aria-label="Assistant conversation"]',
+    );
+    expect(dock?.textContent).toContain("Which source should be on the left?");
+    expect(dock?.textContent).not.toContain(
+      "Which source should be on the right?",
+    );
+    expect(conversation?.textContent).not.toContain(
+      "Which source should be on the left?",
+    );
+    expect(dock?.nextElementSibling?.querySelector("textarea")).not.toBeNull();
+
     await clickButton(container, "Primary");
+    expect(dock?.textContent).not.toContain("Which source should be on the left?");
+    expect(dock?.textContent).toContain("Which source should be on the right?");
     expect(mocks.answerClarification).not.toHaveBeenCalled();
     await clickButton(container, "Archive");
+    expect(mocks.answerClarification).not.toHaveBeenCalled();
+
+    await clickButtonByAria(container, "Previous clarification question");
+    expect(dock?.textContent).toContain("Which source should be on the left?");
+    await clickButton(container, "Staging");
+    expect(dock?.textContent).toContain("Which source should be on the right?");
+    await clickButton(container, "Confirm answers");
+
     expect(mocks.answerClarification).toHaveBeenCalledWith(
       expect.objectContaining({
         clarificationId: "clarification-1",
-        answers: { left: "primary", right: "archive" },
+        answers: { left: "staging", right: "archive" },
+        contextVersion: request.contextVersion,
+      }),
+    );
+    expect(container.textContent).toContain("Confirmed 2 answers");
+    const confirmation = container.querySelector<HTMLDetailsElement>(
+      '[data-assistant-process-item="clarification:clarification-1"]',
+    );
+    expect(confirmation?.open).toBe(false);
+    await act(async () => {
+      confirmation?.querySelector("summary")?.click();
+    });
+    expect(confirmation?.textContent).toContain(
+      "Which source should be on the left?",
+    );
+    expect(confirmation?.textContent).toContain("Staging");
+  });
+
+  it("resumes a paused turn with its pinned workspace context", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await submitPrompt(container, "Inspect the selected database", "Run agent");
+    const request = mocks.startTurn.mock.calls[0]?.[0];
+
+    await emit({
+      ...baseEvent(request.threadId, request.turnId, 1),
+      type: "failure",
+      code: "provider_temporarily_unavailable",
+      message: "Temporary provider failure",
+      retryable: true,
+    });
+
+    await act(async () => {
+      useSchemaStore.setState({ currentSchema: "another_schema" });
+      await flushAsyncWork();
+    });
+    await clickButton(container, "Resume");
+
+    expect(mocks.resumeTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contextVersion: request.contextVersion,
+        workspace: expect.objectContaining({
+          fingerprint: request.workspace.fingerprint,
+        }),
       }),
     );
   });
@@ -308,6 +398,189 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(mocks.startTurn).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Configure an AI provider");
     expect(container.querySelector("textarea")).not.toBeNull();
+  });
+
+  it("manages the model from the composer and opens the AI settings section", async () => {
+    const settingsEvents: unknown[] = [];
+    const handleSettings = (event: Event) => {
+      settingsEvents.push((event as CustomEvent).detail);
+    };
+    window.addEventListener("oxide:open-settings", handleSettings);
+    try {
+      await act(async () => {
+        root = createRoot(container);
+        root.render(<AssistantSidebar />);
+        await flushAsyncWork();
+      });
+
+      await clickButtonByAria(container, "Assistant model: agent-model");
+      const modelInput = document.body.querySelector<HTMLInputElement>(
+        'input[placeholder="Model identifier"]',
+      );
+      expect(modelInput).not.toBeNull();
+      await setInputValue(modelInput!, "agent-model-v2");
+      await clickButton(document.body, "Apply");
+      expect(useAiSettingsStore.getState().model).toBe("agent-model-v2");
+      expect(container.querySelector("header")?.textContent).not.toContain(
+        "agent-model-v2",
+      );
+
+      await clickButtonByAria(container, "Assistant model: agent-model-v2");
+      await clickButton(document.body, "AI settings");
+      expect(settingsEvents).toEqual([{ section: "ai" }]);
+    } finally {
+      window.removeEventListener("oxide:open-settings", handleSettings);
+    }
+  });
+
+  it("blocks tool modes when the model cannot call tools but keeps Chat usable", async () => {
+    useAiSettingsStore.setState({ toolCalling: false, assistantMode: "agent" });
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    await submitPrompt(container, "Inspect the database", "Run agent");
+    expect(mocks.startTurn).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(
+      "Agent mode requires a model with tool calling",
+    );
+
+    await act(async () => {
+      useAiSettingsStore.getState().updateSettings({ assistantMode: "chat" });
+      await flushAsyncWork();
+    });
+    await submitPrompt(container, "Explain normalization", "Send");
+    expect(mocks.startTurn).toHaveBeenCalledTimes(1);
+    expect(mocks.startTurn.mock.calls[0]?.[0].profile).toBe("chat");
+  });
+
+  it("treats an empty capability list as a starting runtime instead of rejecting Plan", async () => {
+    useAiSettingsStore.setState({ assistantMode: "plan", toolCalling: true });
+    mocks.getStatus.mockResolvedValue({
+      protocolVersion: 1,
+      available: false,
+      state: "starting",
+      capabilities: [],
+      storageMode: "project",
+      binaryPath: "/tmp/oxide-agent-host",
+      lastError: null,
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    expect(
+      container.querySelector(
+        'button[aria-label*="Starting AI runtime"]',
+      ),
+    ).not.toBeNull();
+    expect(container.textContent).not.toContain(
+      "The AI runtime does not support Plan mode",
+    );
+  });
+
+  it("keeps polling a starting runtime until the sidecar becomes ready", async () => {
+    vi.useFakeTimers();
+    mocks.getStatus
+      .mockResolvedValueOnce({
+        protocolVersion: 1,
+        available: false,
+        state: "starting",
+        capabilities: [],
+        storageMode: "project",
+        binaryPath: "/tmp/oxide-agent-host",
+        lastError: null,
+      })
+      .mockResolvedValue({
+        protocolVersion: 1,
+        available: true,
+        state: "ready",
+        capabilities: ["chat", "plan", "agent"],
+        storageMode: "project",
+        binaryPath: "/tmp/oxide-agent-host",
+        lastError: null,
+      });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    expect(mocks.getStatus).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+      await flushAsyncWork();
+    });
+
+    expect(mocks.getStatus).toHaveBeenCalledTimes(2);
+    expect(
+      container.querySelector('button[aria-label*="Starting AI runtime"]'),
+    ).toBeNull();
+  });
+
+  it("does not reject Plan when a transitional host has not published capabilities", async () => {
+    useAiSettingsStore.setState({ assistantMode: "plan", toolCalling: true });
+    mocks.getStatus.mockResolvedValue({
+      protocolVersion: 1,
+      available: true,
+      state: "starting",
+      capabilities: [],
+      storageMode: "project",
+      binaryPath: "/tmp/oxide-agent-host",
+      lastError: null,
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await submitPrompt(container, "Explain the active SQL", "Create plan");
+
+    expect(mocks.startTurn).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(
+      "Checking the AI runtime capabilities",
+    );
+    expect(container.textContent).not.toContain(
+      "The AI runtime does not support Plan mode",
+    );
+  });
+
+  it("surfaces a 401 at the model control and allows an explicit retry", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await submitPrompt(container, "Inspect the database", "Run agent");
+    const request = mocks.startTurn.mock.calls[0]?.[0];
+
+    await emit({
+      ...baseEvent(request.threadId, request.turnId, 1),
+      type: "failure",
+      code: "provider_authentication_failed",
+      message: "401 Unauthorized: invalid API key",
+      retryable: false,
+    });
+
+    expect(
+      container.querySelector(
+        'button[aria-label*="Authentication failed"]',
+      ),
+    ).not.toBeNull();
+    await submitPrompt(container, "Try again", "Run agent");
+    expect(mocks.startTurn).toHaveBeenCalledTimes(1);
+
+    await clickButtonByAria(container, "Assistant model: agent-model");
+    await clickButton(document.body, "Retry");
+    await submitPrompt(container, "Try again", "Run agent");
+    expect(mocks.startTurn).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -346,6 +619,27 @@ async function clickButton(container: HTMLElement, label: string) {
     Array.from(container.querySelectorAll("button"))
       .find((button) => button.textContent?.trim() === label)
       ?.click();
+    await flushAsyncWork();
+  });
+}
+
+async function clickButtonByAria(container: HTMLElement, labelPrefix: string) {
+  await act(async () => {
+    container
+      .querySelector<HTMLButtonElement>(`button[aria-label^="${labelPrefix}"]`)
+      ?.click();
+    await flushAsyncWork();
+  });
+}
+
+async function setInputValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )?.set;
+  await act(async () => {
+    setter?.call(input, value);
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: value }));
     await flushAsyncWork();
   });
 }

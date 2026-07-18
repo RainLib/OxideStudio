@@ -104,13 +104,13 @@ host 到 sidecar 的主要方法为 initialize、openThread、start/resume/cance
 
 sidecar 中的 `OxideChatModel` 是 LangChain model adapter，但不会持有 API key。它通过内部 RPC 请求 Rust `ModelGateway`：
 
-- Rust 从 OS credential manager 读取 provider secret；设置页和 Zustand/localStorage 不持久化明文 key。
+- Rust 从应用用户配置目录的 credential file 读取 provider secret；设置页保存后会重新打开验证，Zustand/localStorage 和项目目录不持久化 key。
 - Rust 校验 provider URL，执行 OpenAI-compatible SSE 或非流式请求。
 - sidecar 只得到 text delta、tool calls、usage、finish reason 和结构化错误。
 - provider descriptor 显式声明 streaming、tool calling、structured output、最大输入/输出 token。
 - cancel/deadline 从 UI 一直传播到 sidecar、Rust HTTP 和数据库路径。
 
-provider secret 与 agent store master key 使用不同的 service/account。macOS 使用 Keychain，Windows 使用 Credential Manager，Linux 使用 Secret Service/keyring backend。若 agent store 主密钥无法安全持久化，当前实现退回进程内加密 session store，而不是把明文写入 SQLite。
+provider secret 与 agent store master key 均使用应用用户级 credential file：Provider 文件按 endpoint hash 命名，Agent Store 使用独立随机主密钥文件；Unix 权限为文件 `0600`/目录 `0700`，Windows 继承用户 profile ACL。两者都不会进入项目、前端存储或 sidecar 环境。若 agent store 主密钥文件不可用，当前实现退回进程内加密 session store，而不是把明文写入 SQLite；运行时不会访问 Keychain、Credential Manager 或 Secret Service。
 
 ## 6. 工具、连接和结果边界
 
@@ -170,7 +170,7 @@ Rust 的 `agent_threads`、`agent_checkpoints`、`agent_artifacts`、`agent_grap
 - AAD 绑定 record kind、project、record id 和 version；
 - 主密钥仅在 OS credential manager；
 - 默认七天过期，在初始化和后续读写时清理；
-- thread/checkpoint/artifact 在 keyring 可用时写入独立 `agent-state.db` 密文。
+- thread/checkpoint/artifact 使用本地私有主密钥写入独立 `agent-state-v2.db` 密文。
 
 凭据、SSH secret、connection URL、可复用批准 token 和无界 raw rows 不得持久化。LangGraph typed blobs 由 sidecar serializer 生成，Rust 将其视为不透明密文 payload；AAD 绑定 project/thread/namespace/checkpoint/task/write index。批准 decision 可以进入 `Command({ resume })`，一次性 lease 只能作为 transient resume 参数存在于 Rust/sidecar 内存，sidecar 崩溃丢失 lease 后 mutation 必须 fail-closed。最终回答只在 Rust 接受本轮 checkpoint 后发出。
 
@@ -205,6 +205,9 @@ oxide-agent tools call <name> --input @file
 首个发布范围为 stdio/CLI 与只读工具：连接摘要、metadata、只读查询、estimated EXPLAIN 和 headless LSP。HTTP/OIDC、UI/editor tool 和外部 mutation 不在首版范围。Rust-native binary 已使用固定版本 `rmcp`/`clap` 接入 Cargo，并作为 target-specific Tauri `externalBin` 构建、验证和随包签名。
 
 现存 TypeScript MCP/CLI adapter 继续承担契约测试和迁移参考，但不能接受调用者自报 `_meta.approved` 或 CLI `--approve`。调用者自批准始终无效。未来若开放外部写入，必须由运行中的 GUI 签发 60 秒、单次、绑定 tool input hash 与 project/connection grant 的 lease。
+
+客户端配置、项目/连接 ID 查询、完整命令示例和故障排查见
+[外部 AI 接入指南](EXTERNAL_AI_INTEGRATION.md)。
 
 ## 10. 发布与验证
 

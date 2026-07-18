@@ -32,7 +32,7 @@ function escapeRegExp(value: string) {
 
 export function normalizeConnectionUrlForDriver(
   driver: DatabaseDriver,
-  connectionUrl: string
+  connectionUrl: string,
 ) {
   let url = stripJdbcPrefix(connectionUrl.trim());
   const profileSslParamName = sslModeParamName(driver);
@@ -49,12 +49,48 @@ export function normalizeConnectionUrlForDriver(
     break;
   }
 
+  if (driver === "elasticsearch") {
+    const protocol = url.match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase();
+    const protocolPattern = protocol
+      ? new RegExp(`^${escapeRegExp(protocol)}:`, "i")
+      : null;
+    const httpUrl =
+      protocolPattern && protocol && !["http", "https"].includes(protocol)
+        ? url.replace(protocolPattern, "http:")
+        : url;
+
+    try {
+      const urlObject = new URL(httpUrl);
+      const sslMode = getQueryParam(
+        Object.fromEntries(urlObject.searchParams.entries()),
+        sslModeParamAliases(driver),
+      )?.toLowerCase();
+
+      if (protocol === "https" || (sslMode && sslMode !== "disable")) {
+        urlObject.protocol = "https:";
+      } else if (protocol !== "https") {
+        urlObject.protocol = "http:";
+      }
+      const sslAliases = sslModeParamAliases(driver).map((alias) =>
+        alias.toLowerCase(),
+      );
+      for (const key of Array.from(urlObject.searchParams.keys())) {
+        if (sslAliases.includes(key.toLowerCase())) {
+          urlObject.searchParams.delete(key);
+        }
+      }
+      return urlObject.toString();
+    } catch {
+      return url;
+    }
+  }
+
   return url;
 }
 
 function getQueryParam(
   queryParams: Record<string, string>,
-  names: readonly string[]
+  names: readonly string[],
 ) {
   for (const name of names) {
     const value = queryParams[name];
@@ -62,7 +98,7 @@ function getQueryParam(
 
     const lowerName = name.toLowerCase();
     const matchedKey = Object.keys(queryParams).find(
-      (key) => key.toLowerCase() === lowerName
+      (key) => key.toLowerCase() === lowerName,
     );
     if (matchedKey) return queryParams[matchedKey];
   }
@@ -76,7 +112,10 @@ function getQueryParam(
  * @param url - Connection URL (e.g., postgres://user:pass@host:5432/db?sslmode=require)
  * @returns Parsed connection parameters
  */
-export function parseConnectionUrl(url: string): ParsedConnectionUrl | null {
+export function parseConnectionUrl(
+  url: string,
+  preferredDriver?: DatabaseDriver,
+): ParsedConnectionUrl | null {
   if (!url || !url.trim()) {
     return null;
   }
@@ -84,16 +123,26 @@ export function parseConnectionUrl(url: string): ParsedConnectionUrl | null {
   try {
     const input = stripJdbcPrefix(url.trim());
     const rawProtocol = input.match(/^([a-z][a-z0-9+.-]*):/i)?.[1] || "";
-    const driver = normalizeDatabaseDriverName(rawProtocol);
+    const isHttpProtocol = ["http", "https"].includes(
+      rawProtocol.toLowerCase(),
+    );
+    const driver = isHttpProtocol
+      ? preferredDriver === undefined || preferredDriver === "elasticsearch"
+        ? "elasticsearch"
+        : null
+      : normalizeDatabaseDriverName(rawProtocol);
     if (!driver) {
       return null;
     }
     const protocolPattern = new RegExp(`^${escapeRegExp(rawProtocol)}:`, "i");
     const urlObj = new URL(
-      input.replace(protocolPattern, `${connectionUrlScheme(driver)}:`)
+      isHttpProtocol
+        ? input
+        : input.replace(protocolPattern, `${connectionUrlScheme(driver)}:`),
     );
 
-    // URL.username and URL.password are automatically decoded
+    // WHATWG URL preserves percent escapes in user info, so decode exactly
+    // once before displaying the values or rebuilding the connection URL.
     const user = urlObj.username
       ? decodeURIComponent(urlObj.username)
       : undefined;
@@ -114,7 +163,15 @@ export function parseConnectionUrl(url: string): ParsedConnectionUrl | null {
       queryParams[key] = value;
     });
 
-    const sslMode = getQueryParam(queryParams, sslModeParamAliases(driver));
+    const configuredSslMode = getQueryParam(
+      queryParams,
+      sslModeParamAliases(driver),
+    );
+    const sslMode =
+      driver === "elasticsearch"
+        ? configuredSslMode ||
+          (urlObj.protocol.toLowerCase() === "https:" ? "require" : "disable")
+        : configuredSslMode;
 
     return {
       driver,
@@ -126,8 +183,10 @@ export function parseConnectionUrl(url: string): ParsedConnectionUrl | null {
       sslMode,
       queryParams,
     };
-  } catch (error) {
-    console.error("Failed to parse connection URL:", error);
+  } catch {
+    // Connection URLs can contain credentials. Never echo parser errors that
+    // may embed the original URL into renderer logs.
+    console.error("Failed to parse connection URL");
     return null;
   }
 }
@@ -165,7 +224,10 @@ export function buildConnectionUrl(config: {
   const encodedPassword = encodeURIComponent(password);
 
   // Build base URL
-  let url = `${connectionUrlScheme(driver)}://`;
+  const secureElasticsearch =
+    driver === "elasticsearch" && sslMode && sslMode !== "disable";
+  const scheme = secureElasticsearch ? "https" : connectionUrlScheme(driver);
+  let url = `${scheme}://`;
 
   if (encodedUser || encodedPassword) {
     url += `${encodedUser}:${encodedPassword}@`;
@@ -181,7 +243,7 @@ export function buildConnectionUrl(config: {
   }
 
   // Add SSL mode if specified
-  if (sslMode && sslMode !== "disable") {
+  if (driver !== "elasticsearch" && sslMode && sslMode !== "disable") {
     url += `?${sslModeParamName(driver)}=${sslMode.toLowerCase()}`;
   }
 

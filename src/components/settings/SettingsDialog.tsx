@@ -1,4 +1,11 @@
-import { useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   Dialog,
   DialogContent,
@@ -38,9 +45,10 @@ import {
 interface SettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  initialSection?: SettingsSection;
 }
 
-type SettingsSection =
+export type SettingsSection =
   | "appearance"
   | "workbench"
   | "keymap"
@@ -110,7 +118,11 @@ const sectionMeta: Record<SettingsSection, { group: string; title: string }> = {
   ai: { group: "Tools", title: "AI Assistant" },
 };
 
-export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
+export function SettingsDialog({
+  open,
+  onOpenChange,
+  initialSection,
+}: SettingsDialogProps) {
   const themeContext = useContext(ThemeContext);
   const appSettings = useSettingsStore((state) => state.settings);
   const settingsError = useSettingsStore((state) => state.error);
@@ -156,7 +168,9 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     message: string;
   } | null>(null);
   const [isTestingAi, setIsTestingAi] = useState(false);
+  const [isSavingAiSecret, setIsSavingAiSecret] = useState(false);
   const [hasAiProviderSecret, setHasAiProviderSecret] = useState(false);
+  const aiSecretSaveRef = useRef<Promise<boolean> | null>(null);
   const [isClearingAgentState, setIsClearingAgentState] = useState(false);
   const [agentStateMessage, setAgentStateMessage] = useState<{
     status: "success" | "error";
@@ -182,6 +196,12 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       active = false;
     };
   }, [aiBaseUrl, open]);
+
+  useEffect(() => {
+    if (open && initialSection) {
+      setActiveSection(initialSection);
+    }
+  }, [initialSection, open]);
 
   const visibleTree = useMemo(() => {
     const filter = filterText.trim().toLowerCase();
@@ -211,21 +231,62 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     void updateSettings(updates);
   };
 
+  const persistAiProviderSecret = (): Promise<boolean> => {
+    if (aiSecretSaveRef.current) return aiSecretSaveRef.current;
+    const secret = aiApiKey.trim();
+    const baseUrl = aiBaseUrl.trim();
+    if (!secret) return Promise.resolve(hasAiProviderSecret);
+    if (!baseUrl) {
+      setAiTestState({
+        status: "error",
+        message: "Enter the provider base URL before saving the API key.",
+      });
+      return Promise.resolve(false);
+    }
+
+    setIsSavingAiSecret(true);
+    const operation = aiService
+      .setProviderSecret(baseUrl, secret)
+      .then((saved) => {
+        if (!saved) {
+          throw new Error("The local credential file did not retain the API key.");
+        }
+        updateAiSettings({ apiKey: "" });
+        setHasAiProviderSecret(true);
+        setAiTestState({
+          status: "success",
+          message: "API key saved and verified in the local credential file.",
+        });
+        return true;
+      })
+      .catch((error: any) => {
+        setAiTestState({
+          status: "error",
+          message: error?.message || String(error),
+        });
+        return false;
+      })
+      .finally(() => {
+        setIsSavingAiSecret(false);
+        aiSecretSaveRef.current = null;
+      });
+    aiSecretSaveRef.current = operation;
+    return operation;
+  };
+
   const handleTestAiProvider = async () => {
     setAiTestState(null);
     setIsTestingAi(true);
     try {
+      if (aiApiKey.trim() && !(await persistAiProviderSecret())) return;
       const result = await aiService.testProvider({
         baseUrl: aiBaseUrl.trim(),
         model: aiModel.trim(),
-        apiKey: aiApiKey.trim() || undefined,
+        // Test the persisted credential path used by the Agent Host. Passing
+        // the draft directly would hide a failed credential-file save.
+        apiKey: undefined,
         timeoutMs: aiTimeoutMs,
       });
-      if (aiApiKey.trim()) {
-        await aiService.setProviderSecret(aiBaseUrl.trim(), aiApiKey.trim());
-        updateAiSettings({ apiKey: "" });
-        setHasAiProviderSecret(true);
-      }
       setAiTestState({
         status: "success",
         message: `${result.message}: ${result.model}`,
@@ -237,21 +298,6 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       });
     } finally {
       setIsTestingAi(false);
-    }
-  };
-
-  const persistAiProviderSecret = async () => {
-    const secret = aiApiKey.trim();
-    if (!secret || !aiBaseUrl.trim()) return;
-    try {
-      await aiService.setProviderSecret(aiBaseUrl.trim(), secret);
-      updateAiSettings({ apiKey: "" });
-      setHasAiProviderSecret(true);
-    } catch (error: any) {
-      setAiTestState({
-        status: "error",
-        message: error?.message || String(error),
-      });
     }
   };
 
@@ -292,8 +338,18 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     }
   };
 
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (nextOpen || !aiApiKey.trim()) {
+      onOpenChange(nextOpen);
+      return;
+    }
+    void persistAiProviderSecret().then((saved) => {
+      if (saved) onOpenChange(false);
+    });
+  };
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="top-[14px] flex h-[calc(100vh-28px)] max-h-none w-[1040px] max-w-[calc(100vw-28px)] translate-y-0 flex-col gap-0 overflow-hidden rounded-[8px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] p-0 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_12px_36px_rgba(0,0,0,0.4)] data-[state=closed]:slide-out-to-top-0 data-[state=open]:slide-in-from-top-0">
         <DialogHeader className="relative flex h-10 shrink-0 items-center justify-center border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-frame))] px-4 py-0">
           <DialogTitle className="text-[12px] font-semibold tracking-normal text-[hsl(var(--wb-text-muted))]">
@@ -421,6 +477,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   updateAiSettings={updateAiSettings}
                   canTestAi={canTestAi}
                   isTestingAi={isTestingAi}
+                  isSavingAiSecret={isSavingAiSecret}
                   aiTestState={aiTestState}
                   onTest={handleTestAiProvider}
                   onPersistSecret={() => void persistAiProviderSecret()}
@@ -436,9 +493,9 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
         </div>
 
         <DialogFooter className="flex-row justify-end gap-3 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 py-2 sm:space-x-0">
-          <SettingsButton onClick={() => onOpenChange(false)}>Cancel</SettingsButton>
+          <SettingsButton onClick={() => handleOpenChange(false)}>Cancel</SettingsButton>
           <SettingsButton disabled>Apply</SettingsButton>
-          <SettingsButton intent="primary" onClick={() => onOpenChange(false)}>
+          <SettingsButton intent="primary" onClick={() => handleOpenChange(false)}>
             OK
           </SettingsButton>
         </DialogFooter>
@@ -1063,6 +1120,7 @@ function AiSettings({
   updateAiSettings,
   canTestAi,
   isTestingAi,
+  isSavingAiSecret,
   aiTestState,
   onTest,
   onPersistSecret,
@@ -1103,6 +1161,7 @@ function AiSettings({
   }>) => void;
   canTestAi: boolean;
   isTestingAi: boolean;
+  isSavingAiSecret: boolean;
   aiTestState: { status: "success" | "error"; message: string } | null;
   onTest: () => void;
   onPersistSecret: () => void;
@@ -1137,11 +1196,16 @@ function AiSettings({
         tool orchestration are selected automatically for the active mode.
       </p>
       <SettingRow label="Base URL:">
-        <SettingsInput
-          value={aiBaseUrl}
-          onChange={(value) => updateAiSettings({ baseUrl: value })}
-          placeholder="https://api.openai.com/v1"
-        />
+        <div>
+          <SettingsInput
+            value={aiBaseUrl}
+            onChange={(value) => updateAiSettings({ baseUrl: value })}
+            placeholder="https://api.openai.com/v1"
+          />
+          <p className="mt-1 text-[11px] text-[hsl(var(--wb-text-muted))]">
+            Include the API version path required by your provider, usually /v1.
+          </p>
+        </div>
       </SettingRow>
       <SettingRow label="Model:">
         <SettingsInput
@@ -1159,15 +1223,25 @@ function AiSettings({
             onBlur={onPersistSecret}
             placeholder={
               hasAiProviderSecret
-                ? "Stored in system credential manager"
+                ? "Stored in local credential file"
                 : "sk-..."
             }
           />
+          {aiApiKey.trim() && (
+            <SettingsButton onClick={onPersistSecret} disabled={isSavingAiSecret}>
+              {isSavingAiSecret ? "Saving..." : "Save"}
+            </SettingsButton>
+          )}
           {hasAiProviderSecret && (
             <SettingsButton onClick={onRemoveSecret}>Remove</SettingsButton>
           )}
         </div>
       </SettingRow>
+      <p className="-mt-1 mb-3 ml-[148px] max-w-[68ch] text-[11px] leading-5 text-[hsl(var(--wb-text-muted))]">
+        Stored only in OxideStudio's per-user configuration directory, never in
+        the project or browser storage. The credential file is restricted to the
+        current OS user.
+      </p>
       <SettingRow label="Timeout ms:">
         <NumberInput
           value={aiTimeoutMs}

@@ -113,7 +113,9 @@ impl std::fmt::Debug for AgentProviderConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentToolResultLimit {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_rows: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<usize>,
 }
 
@@ -125,7 +127,9 @@ pub struct AgentToolManifestEntry {
     pub input_schema: Value,
     #[serde(default)]
     pub permissions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result_limit: Option<AgentToolResultLimit>,
 }
 
@@ -657,11 +661,22 @@ mod tests {
                 fingerprint: "fingerprint".to_string(),
                 summary: HashMap::new(),
             },
-            tools: vec![],
+            tools: vec![AgentToolManifestEntry {
+                name: "metadata.listObjects".to_string(),
+                description: "List objects".to_string(),
+                input_schema: json!({"type":"object"}),
+                permissions: vec!["read".to_string()],
+                timeout_ms: None,
+                result_limit: None,
+            }],
             resume_checkpoint: None,
         };
-        let serialized = request.sidecar_params().to_string();
+        let params = request.sidecar_params();
+        let serialized = params.to_string();
         assert!(!serialized.contains("super-secret"));
         assert!(!serialized.contains("baseUrl"));
+        let tool = params["tools"][0].as_object().unwrap();
+        assert!(!tool.contains_key("timeoutMs"));
+        assert!(!tool.contains_key("resultLimit"));
     }
 }

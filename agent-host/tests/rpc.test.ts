@@ -1,5 +1,6 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import {
   AgentProtocolError,
   ContentLengthDecoder,
@@ -77,6 +78,49 @@ describe("JsonRpcPeer", () => {
     await expect(request).rejects.toMatchObject({ name: "AbortError" });
     await new Promise((resolve) => setTimeout(resolve, 60));
     expect(cancelledId).toMatch(/^sidecar-/u);
+
+    left.close();
+    right.close();
+    leftToRight.end();
+    rightToLeft.end();
+    await Promise.allSettled([leftRun, rightRun]);
+  });
+
+  it("returns actionable handler and validation errors instead of masking them", async () => {
+    const leftToRight = new PassThrough();
+    const rightToLeft = new PassThrough();
+    const left = new JsonRpcPeer(rightToLeft, leftToRight);
+    const right = new JsonRpcPeer(leftToRight, rightToLeft);
+    right.register("provider", () => {
+      throw new Error("AI provider returned HTTP 401");
+    });
+    right.register("validate", (params) =>
+      z.object({ model: z.string().min(1) }).parse(params),
+    );
+    right.register("structured", () => {
+      throw new AgentProtocolError("CONNECTION_REQUIRED", "Choose a connection", {
+        kind: "connection_selection_required",
+        candidates: [{ id: "es-1", name: "Elasticsearch", driver: "elasticsearch" }],
+      });
+    });
+    const leftRun = left.run();
+    const rightRun = right.run();
+
+    await expect(left.call("provider", {})).rejects.toThrow(
+      "AI provider returned HTTP 401",
+    );
+    await expect(left.call("validate", { model: "" })).rejects.toThrow(
+      "model",
+    );
+    await expect(left.call("structured", {})).rejects.toMatchObject({
+      code: "RPC_-32001",
+      data: {
+        kind: "connection_selection_required",
+        candidates: [
+          { id: "es-1", name: "Elasticsearch", driver: "elasticsearch" },
+        ],
+      },
+    });
 
     left.close();
     right.close();

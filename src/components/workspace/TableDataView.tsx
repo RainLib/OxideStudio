@@ -1,8 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  confirmDiscardTableChanges,
-  useTabStore,
-} from "@/store/useTabStore";
+import { confirmDiscardTableChanges, useTabStore } from "@/store/useTabStore";
 import {
   ensureConnectionReady,
   useConnectionStore,
@@ -12,10 +9,7 @@ import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTaskStore } from "@/store/useTaskStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { databaseService, schemaService, tableService } from "@/services/tauri";
-import {
-  loadTableDdl,
-  loadTableMetadata,
-} from "@/services/tableMetadataCache";
+import { loadTableDdl, loadTableMetadata } from "@/services/tableMetadataCache";
 import type {
   ColumnInfo,
   ConstraintInfo,
@@ -68,6 +62,7 @@ export function TableDataView() {
     setVisualFilters,
     setSqlFilter,
     loadTablePage,
+    runTabQuery,
     addNewRow,
     commitEdits,
     cancelEdits,
@@ -77,7 +72,7 @@ export function TableDataView() {
   const { activeConnectionId, connections } = useConnectionStore();
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const bumpMetadataVersion = useSchemaStore(
-    (state) => state.bumpMetadataVersion
+    (state) => state.bumpMetadataVersion,
   );
   const { startTask, updateTask, finishTask, failTask } = useTaskStore();
   const dataGridSettings = useSettingsStore((state) => state.settings.dataGrid);
@@ -87,13 +82,20 @@ export function TableDataView() {
   const activeConnection = connections.find((c) => c.id === tabConnectionId);
   const driver = activeConnection?.driver || DEFAULT_DATABASE_DRIVER;
   const [capabilities, setCapabilities] = useState<DatabaseCapabilities>(() =>
-    defaultDatabaseCapabilities(driver)
+    defaultDatabaseCapabilities(driver),
   );
   const activeCapabilities =
-    capabilities.driver === driver ? capabilities : defaultDatabaseCapabilities(driver);
+    capabilities.driver === driver
+      ? capabilities
+      : defaultDatabaseCapabilities(driver);
+  const isNativeObjectPreview =
+    activeCapabilities.dataModel === "document" ||
+    activeCapabilities.dataModel === "keyValue" ||
+    activeCapabilities.dataModel === "search";
+  const isSearchObjectPreview = activeCapabilities.dataModel === "search";
   const isCrossDatabasePreview = Boolean(activeTab?.databaseName);
   const isReadOnlyRelation = isReadOnlyRelationObject(activeTab?.objectType);
-  const isTableReadOnly = isReadOnlyRelation;
+  const isTableReadOnly = isReadOnlyRelation || isNativeObjectPreview;
   const canManageIndexes =
     !isCrossDatabasePreview &&
     activeCapabilities.supportsTableIndexes &&
@@ -108,7 +110,7 @@ export function TableDataView() {
   const [metadataColumns, setMetadataColumns] = useState<ColumnInfo[]>([]);
   const [tableIndexes, setTableIndexes] = useState<IndexInfo[]>([]);
   const [tableConstraints, setTableConstraints] = useState<ConstraintInfo[]>(
-    []
+    [],
   );
   const [referencingForeignKeys, setReferencingForeignKeys] = useState<
     ForeignKeyReferenceInfo[]
@@ -127,10 +129,10 @@ export function TableDataView() {
   const [csvImportFile, setCsvImportFile] = useState<File | null>(null);
   const [isCsvImportSubmitting, setIsCsvImportSubmitting] = useState(false);
   const [isEditingEnabled, setIsEditingEnabled] = useState(
-    !dataGridSettings.readOnlyByDefault
+    !dataGridSettings.readOnlyByDefault,
   );
   const [gridZoomPercent, setGridZoomPercent] = useState(
-    dataGridSettings.zoomPercent
+    dataGridSettings.zoomPercent,
   );
   const [gridSelectionSummary, setGridSelectionSummary] =
     useState<DataGridSelectionSummary>({ selectedRowCount: 0 });
@@ -140,10 +142,7 @@ export function TableDataView() {
 
   useEffect(() => {
     setIsEditingEnabled(!dataGridSettings.readOnlyByDefault);
-  }, [
-    activeTab?.id,
-    dataGridSettings.readOnlyByDefault,
-  ]);
+  }, [activeTab?.id, dataGridSettings.readOnlyByDefault]);
 
   useEffect(() => {
     setGridZoomPercent(dataGridSettings.zoomPercent);
@@ -170,108 +169,115 @@ export function TableDataView() {
     };
   }, [driver]);
 
-  const refreshStructure = useCallback(async (force = false) => {
-    if (
-      activeTab?.type !== "table" ||
-      !tabConnectionId ||
-      !activeTab.schemaName ||
-      !activeTab.tableName
-    ) {
-      return;
-    }
-
-    const requestId = structureRequestRef.current + 1;
-    structureRequestRef.current = requestId;
-    const tabId = activeTab.id;
-    setIsMetadataLoading(true);
-    setMetadataError(null);
-    setMetadataColumns([]);
-    setFallbackColumns([]);
-    setTableIndexes([]);
-    setTableConstraints([]);
-    setReferencingForeignKeys([]);
-
-    try {
-      const readiness = await ensureConnectionReady(tabConnectionId);
-      if (structureRequestRef.current !== requestId) return;
-      if (readiness.status === "cancelled") return;
-      if (readiness.status === "error") {
-        throw new Error(readiness.message);
+  const refreshStructure = useCallback(
+    async (force = false) => {
+      if (
+        activeTab?.type !== "table" ||
+        (isNativeObjectPreview && !isSearchObjectPreview) ||
+        !tabConnectionId ||
+        !activeTab.schemaName ||
+        !activeTab.tableName
+      ) {
+        return;
       }
 
-      const reverseForeignKeys = activeCapabilities.supportsForeignKeys
-        ? activeTab.databaseName
-          ? schemaService.getDatabaseReferencingForeignKeys(
-              tabConnectionId,
-              activeTab.databaseName,
-              activeTab.schemaName,
-              activeTab.tableName
-            )
-          : schemaService.getReferencingForeignKeys(
-              tabConnectionId,
-              activeTab.schemaName,
-              activeTab.tableName
-            )
-        : Promise.resolve([]);
-      const [metadata, incomingForeignKeys] = await Promise.all([
-        loadTableMetadata({
-          projectId: activeProjectId,
-          connectionId: tabConnectionId,
-          driver,
-          databaseName: activeTab.databaseName,
-          schema: activeTab.schemaName,
-          table: activeTab.tableName,
-          includeIndexes: activeCapabilities.supportsTableIndexes,
-          includeConstraints: activeCapabilities.supportsTableConstraints,
-          force,
-        }),
-        reverseForeignKeys.catch((error) => {
-          console.warn("Failed to load reverse foreign keys:", error);
-          return [];
-        }),
-      ]);
-      setTableMetadata(tabId, metadata);
-      if (structureRequestRef.current !== requestId) return;
+      const requestId = structureRequestRef.current + 1;
+      structureRequestRef.current = requestId;
+      const tabId = activeTab.id;
+      setIsMetadataLoading(true);
+      setMetadataError(null);
+      setMetadataColumns([]);
+      setFallbackColumns([]);
+      setTableIndexes([]);
+      setTableConstraints([]);
+      setReferencingForeignKeys([]);
 
-      setMetadataColumns(metadata.columns);
-      setFallbackColumns(
-        metadata.columns.map((column) => ({
-          name: column.name,
-          type: column.data_type,
-        }))
-      );
-      setTableIndexes(metadata.indexes);
-      setTableConstraints(metadata.constraints);
-      setReferencingForeignKeys(incomingForeignKeys);
-      if (metadata.ddl) setTableDdl(metadata.ddl);
-    } catch (err: any) {
-      if (structureRequestRef.current !== requestId) return;
-      setMetadataError(err?.message || String(err));
-      console.error("Failed to fetch table metadata:", err);
-    } finally {
-      if (structureRequestRef.current === requestId) {
-        setIsMetadataLoading(false);
+      try {
+        const readiness = await ensureConnectionReady(tabConnectionId);
+        if (structureRequestRef.current !== requestId) return;
+        if (readiness.status === "cancelled") return;
+        if (readiness.status === "error") {
+          throw new Error(readiness.message);
+        }
+
+        const reverseForeignKeys = activeCapabilities.supportsForeignKeys
+          ? activeTab.databaseName
+            ? schemaService.getDatabaseReferencingForeignKeys(
+                tabConnectionId,
+                activeTab.databaseName,
+                activeTab.schemaName,
+                activeTab.tableName,
+              )
+            : schemaService.getReferencingForeignKeys(
+                tabConnectionId,
+                activeTab.schemaName,
+                activeTab.tableName,
+              )
+          : Promise.resolve([]);
+        const [metadata, incomingForeignKeys] = await Promise.all([
+          loadTableMetadata({
+            projectId: activeProjectId,
+            connectionId: tabConnectionId,
+            driver,
+            databaseName: activeTab.databaseName,
+            schema: activeTab.schemaName,
+            table: activeTab.tableName,
+            includeIndexes: activeCapabilities.supportsTableIndexes,
+            includeConstraints: activeCapabilities.supportsTableConstraints,
+            force,
+          }),
+          reverseForeignKeys.catch((error) => {
+            console.warn("Failed to load reverse foreign keys:", error);
+            return [];
+          }),
+        ]);
+        setTableMetadata(tabId, metadata);
+        if (structureRequestRef.current !== requestId) return;
+
+        setMetadataColumns(metadata.columns);
+        setFallbackColumns(
+          metadata.columns.map((column) => ({
+            name: column.name,
+            type: column.data_type,
+          })),
+        );
+        setTableIndexes(metadata.indexes);
+        setTableConstraints(metadata.constraints);
+        setReferencingForeignKeys(incomingForeignKeys);
+        if (metadata.ddl) setTableDdl(metadata.ddl);
+      } catch (err: any) {
+        if (structureRequestRef.current !== requestId) return;
+        setMetadataError(err?.message || String(err));
+        console.error("Failed to fetch table metadata:", err);
+      } finally {
+        if (structureRequestRef.current === requestId) {
+          setIsMetadataLoading(false);
+        }
       }
-    }
-  }, [
-    activeTab?.id,
-    activeTab?.type,
-    activeTab?.databaseName,
-    activeTab?.schemaName,
-    activeTab?.tableName,
-    activeCapabilities.supportsTableConstraints,
-    activeCapabilities.supportsTableIndexes,
-    activeCapabilities.supportsForeignKeys,
-    activeProjectId,
-    driver,
-    setTableMetadata,
-    tabConnectionId,
-  ]);
+    },
+    [
+      activeTab?.id,
+      activeTab?.type,
+      activeTab?.databaseName,
+      activeTab?.schemaName,
+      activeTab?.tableName,
+      activeCapabilities.supportsTableConstraints,
+      activeCapabilities.supportsTableIndexes,
+      activeCapabilities.supportsForeignKeys,
+      activeProjectId,
+      driver,
+      isNativeObjectPreview,
+      isSearchObjectPreview,
+      setTableMetadata,
+      tabConnectionId,
+    ],
+  );
 
   const refreshDdl = useCallback(
     async (force = false) => {
       if (
         activeTab?.type !== "table" ||
+        (isNativeObjectPreview && !isSearchObjectPreview) ||
         !tabConnectionId ||
         !activeTab.schemaName ||
         !activeTab.tableName
@@ -294,7 +300,7 @@ export function TableDataView() {
             table: activeTab.tableName,
           },
           activeTab.objectType,
-          force
+          force,
         );
         if (ddlRequestRef.current === requestId) setTableDdl(ddl);
       } catch (error) {
@@ -312,8 +318,10 @@ export function TableDataView() {
       activeTab?.tableName,
       activeTab?.type,
       driver,
+      isNativeObjectPreview,
+      isSearchObjectPreview,
       tabConnectionId,
-    ]
+    ],
   );
 
   useEffect(() => {
@@ -344,9 +352,19 @@ export function TableDataView() {
       activeTab.tableName &&
       activeTab.schemaName
     ) {
-      void loadTablePage(activeTab.id, 0);
+      if (isNativeObjectPreview && activeTab.sql.trim()) {
+        void runTabQuery(activeTab.id, tabConnectionId, activeTab.sql);
+      } else {
+        void loadTablePage(activeTab.id, 0);
+      }
     }
-  }, [activeTab, loadTablePage, tabConnectionId]);
+  }, [
+    activeTab,
+    isNativeObjectPreview,
+    loadTablePage,
+    runTabQuery,
+    tabConnectionId,
+  ]);
 
   // Fetch structure metadata for empty headers, save logic, and table inspection.
   useEffect(() => {
@@ -356,16 +374,17 @@ export function TableDataView() {
   if (!activeTab || activeTab.type !== "table") return null;
 
   const result = activeTab?.results?.[0];
-  const csvImportColumns: ColumnInfo[] = metadataColumns.length > 0
-    ? metadataColumns
-    : activeTab.tableColumns?.length
-      ? activeTab.tableColumns
-      : (result?.columns || []).map((column) => ({
-          name: column.name,
-          data_type: column.data_type,
-          is_nullable: true,
-          is_primary_key: false,
-        }));
+  const csvImportColumns: ColumnInfo[] =
+    metadataColumns.length > 0
+      ? metadataColumns
+      : activeTab.tableColumns?.length
+        ? activeTab.tableColumns
+        : (result?.columns || []).map((column) => ({
+            name: column.name,
+            data_type: column.data_type,
+            is_nullable: true,
+            is_primary_key: false,
+          }));
 
   // Get columns from result or fallback
   const columns =
@@ -396,7 +415,7 @@ export function TableDataView() {
 
     const activeVisualFilters = visualFilters.filter(
       (filter) =>
-        filter.column && filter.operator && filter.value.trim().length > 0
+        filter.column && filter.operator && filter.value.trim().length > 0,
     );
 
     void loadTablePage(
@@ -404,7 +423,7 @@ export function TableDataView() {
       0,
       null,
       activeVisualFilters.length > 0 ? activeVisualFilters : null,
-      { discardAction: "apply the filter" }
+      { discardAction: "apply the filter" },
     );
   };
 
@@ -433,7 +452,7 @@ export function TableDataView() {
     key: string,
     label: string,
     value: string,
-    detail?: string | null
+    detail?: string | null,
   ) => (
     <div
       key={key}
@@ -448,6 +467,12 @@ export function TableDataView() {
   );
 
   const handleRefresh = () => {
+    if (isNativeObjectPreview) {
+      if (tabConnectionId && activeTab.sql.trim()) {
+        void runTabQuery(activeTab.id, tabConnectionId, activeTab.sql);
+      }
+      return;
+    }
     void loadTablePage(activeTab.id, page, undefined, undefined, {
       discardAction: "refresh the table",
     });
@@ -491,7 +516,8 @@ export function TableDataView() {
       !activeTab.tableName ||
       !activeTab.schemaName ||
       activeTab.isExecuting ||
-      isCrossDatabasePreview
+      isCrossDatabasePreview ||
+      isNativeObjectPreview
     ) {
       return;
     }
@@ -519,11 +545,11 @@ export function TableDataView() {
         format,
         activeTab.tableFilterSql || undefined,
         activeTab.tableFilters || undefined,
-        sort
+        sort,
       );
       finishTask(
         taskId,
-        `${exported.rowsExported.toLocaleString()} rows to ${format.toUpperCase()}`
+        `${exported.rowsExported.toLocaleString()} rows to ${format.toUpperCase()}`,
       );
       await revealItemInDir(exported.filePath);
     } catch (error) {
@@ -532,9 +558,7 @@ export function TableDataView() {
     }
   };
 
-  const handleImportCsvRows = async (
-    rows: Array<Record<string, unknown>>
-  ) => {
+  const handleImportCsvRows = async (rows: Array<Record<string, unknown>>) => {
     if (
       !tabConnectionId ||
       !activeTab.tableName ||
@@ -565,7 +589,7 @@ export function TableDataView() {
           rows,
           [],
           [],
-          activeTab.databaseName
+          activeTab.databaseName,
         );
       } else {
         await tableService.mutateTableRows(
@@ -573,7 +597,7 @@ export function TableDataView() {
           driver,
           activeTab.schemaName,
           activeTab.tableName,
-          rows
+          rows,
         );
       }
     } catch (error) {
@@ -589,14 +613,14 @@ export function TableDataView() {
     if (
       !confirmDiscardTableChanges(
         activeTab.id,
-        "refresh the table after importing CSV rows"
+        "refresh the table after importing CSV rows",
       )
     ) {
       const message =
         "Rows were imported. Existing unsaved table changes were preserved; submit or revert them before refreshing.";
       useTabStore.setState((state) => ({
         tabs: state.tabs.map((tab) =>
-          tab.id === activeTab.id ? { ...tab, error: message } : tab
+          tab.id === activeTab.id ? { ...tab, error: message } : tab,
         ),
       }));
       updateTask(taskId, {
@@ -613,7 +637,7 @@ export function TableDataView() {
         page,
         undefined,
         undefined,
-        { discardDraftsConfirmed: true }
+        { discardDraftsConfirmed: true },
       );
     } catch (error) {
       refreshFailure = error instanceof Error ? error.message : String(error);
@@ -629,7 +653,7 @@ export function TableDataView() {
       }`;
       useTabStore.setState((state) => ({
         tabs: state.tabs.map((tab) =>
-          tab.id === activeTab.id ? { ...tab, error: message } : tab
+          tab.id === activeTab.id ? { ...tab, error: message } : tab,
         ),
       }));
       updateTask(taskId, {
@@ -641,7 +665,7 @@ export function TableDataView() {
   const handleCreateIndex = async (
     indexName: string,
     columns: string[],
-    unique: boolean
+    unique: boolean,
   ) => {
     if (
       !tabConnectionId ||
@@ -663,7 +687,7 @@ export function TableDataView() {
         activeTab.tableName,
         indexName,
         columns,
-        unique
+        unique,
       );
       setIsIndexDialogOpen(false);
       await refreshStructure(true);
@@ -687,7 +711,7 @@ export function TableDataView() {
     }
 
     const confirmed = window.confirm(
-      `Drop index "${index.name}" from "${activeTab.tableName}"?`
+      `Drop index "${index.name}" from "${activeTab.tableName}"?`,
     );
     if (!confirmed) return;
 
@@ -698,7 +722,7 @@ export function TableDataView() {
         driver,
         activeTab.schemaName,
         activeTab.tableName,
-        index.name
+        index.name,
       );
       await refreshStructure(true);
       bumpMetadataVersion();
@@ -732,7 +756,7 @@ export function TableDataView() {
         activeTab.schemaName,
         activeTab.tableName,
         index.name,
-        trimmedName
+        trimmedName,
       );
       await refreshStructure(true);
       bumpMetadataVersion();
@@ -743,7 +767,7 @@ export function TableDataView() {
 
   const handleCreateUniqueConstraint = async (
     constraintName: string,
-    columns: string[]
+    columns: string[],
   ) => {
     if (
       !tabConnectionId ||
@@ -765,7 +789,7 @@ export function TableDataView() {
         activeTab.schemaName,
         activeTab.tableName,
         constraintName,
-        columns
+        columns,
       );
       setIsConstraintDialogOpen(false);
       await refreshStructure(true);
@@ -779,7 +803,7 @@ export function TableDataView() {
 
   const handleCreatePrimaryKey = async (
     constraintName: string,
-    columns: string[]
+    columns: string[],
   ) => {
     if (
       !tabConnectionId ||
@@ -801,7 +825,7 @@ export function TableDataView() {
         activeTab.schemaName,
         activeTab.tableName,
         constraintName,
-        columns
+        columns,
       );
       setIsConstraintDialogOpen(false);
       await refreshStructure(true);
@@ -815,7 +839,7 @@ export function TableDataView() {
 
   const handleCreateCheckConstraint = async (
     constraintName: string,
-    expression: string
+    expression: string,
   ) => {
     if (
       !tabConnectionId ||
@@ -836,7 +860,7 @@ export function TableDataView() {
         activeTab.schemaName,
         activeTab.tableName,
         constraintName,
-        expression
+        expression,
       );
       setIsConstraintDialogOpen(false);
       await refreshStructure(true);
@@ -880,7 +904,7 @@ export function TableDataView() {
         request.referencedTable,
         request.referencedColumns,
         request.onDelete,
-        request.onUpdate
+        request.onUpdate,
       );
       setIsConstraintDialogOpen(false);
       await refreshStructure(true);
@@ -903,7 +927,7 @@ export function TableDataView() {
     }
 
     const confirmed = window.confirm(
-      `Drop constraint "${constraint.name}" from "${activeTab.tableName}"?`
+      `Drop constraint "${constraint.name}" from "${activeTab.tableName}"?`,
     );
     if (!confirmed) return;
 
@@ -914,7 +938,7 @@ export function TableDataView() {
         driver,
         activeTab.schemaName,
         activeTab.tableName,
-        constraint.name
+        constraint.name,
       );
       await refreshStructure(true);
       bumpMetadataVersion();
@@ -943,7 +967,7 @@ export function TableDataView() {
         if (!event.metaKey && !event.ctrlKey) return;
         event.preventDefault();
         setGridZoomPercent((value) =>
-          stepGridZoom(value, event.deltaY < 0 ? 1 : -1)
+          stepGridZoom(value, event.deltaY < 0 ? 1 : -1),
         );
       }}
     >
@@ -974,7 +998,7 @@ export function TableDataView() {
       <TableDataToolbar
         isExecuting={activeTab.isExecuting}
         readOnly={isTableReadOnly}
-        exportDisabled={isCrossDatabasePreview}
+        exportDisabled={isCrossDatabasePreview || isNativeObjectPreview}
         editingEnabled={isEditingEnabled}
         hasEdits={hasEdits}
         editedCellCount={activeTab.pendingEdits?.size || 0}
@@ -995,19 +1019,31 @@ export function TableDataView() {
       />
 
       {/* Query Builder Filter Row */}
-      {!showStructure && !showDdl && (result || fallbackColumns.length > 0) && (
-        <GridFilterRow
-          columns={columns}
-          mode={filterMode}
-          visualFilters={visualFilters}
-          sqlFilter={sqlFilter}
-          onModeChange={(mode) => setFilterMode(activeTab.id, mode)}
-          onVisualFiltersChange={(filters) =>
-            setVisualFilters(activeTab.id, filters)
-          }
-          onSqlFilterChange={(sql) => setSqlFilter(activeTab.id, sql)}
-          onSearch={handleSearch}
-        />
+      {!isNativeObjectPreview &&
+        !showStructure &&
+        !showDdl &&
+        (result || fallbackColumns.length > 0) && (
+          <GridFilterRow
+            columns={columns}
+            mode={filterMode}
+            visualFilters={visualFilters}
+            sqlFilter={sqlFilter}
+            onModeChange={(mode) => setFilterMode(activeTab.id, mode)}
+            onVisualFiltersChange={(filters) =>
+              setVisualFilters(activeTab.id, filters)
+            }
+            onSqlFilterChange={(sql) => setSqlFilter(activeTab.id, sql)}
+            onSearch={handleSearch}
+          />
+        )}
+
+      {activeTab.error && (
+        <div
+          role="alert"
+          className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--destructive)/0.08)] px-3 py-1.5 text-[11px] text-[hsl(var(--destructive))]"
+        >
+          {activeTab.error}
+        </div>
       )}
 
       <div className="flex h-7 shrink-0 items-center border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-1.5">
@@ -1017,7 +1053,7 @@ export function TableDataView() {
             "inline-flex h-6 items-center gap-1.5 rounded-[3px] px-2 text-[10px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]",
             !showStructure && !showDdl
               ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
-              : "wb-muted hover:text-[hsl(var(--wb-text))]"
+              : "wb-muted hover:text-[hsl(var(--wb-text))]",
           )}
           onClick={() => {
             setShowDdl(false);
@@ -1027,38 +1063,40 @@ export function TableDataView() {
           <TableProperties size={12} />
           Data
         </button>
-        <button
-          type="button"
-          className={cn(
-            "inline-flex h-6 items-center gap-1.5 rounded-[3px] px-2 text-[10px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]",
-            showDdl
-              ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
-              : "wb-muted hover:text-[hsl(var(--wb-text))]"
-          )}
-          onClick={() => {
-            setShowDdl(true);
-            setShowStructure(false);
-          }}
-        >
-          <Code2 size={12} />
-          DDL
-        </button>
+        {(!isNativeObjectPreview || isSearchObjectPreview) && (
+          <button
+            type="button"
+            className={cn(
+              "inline-flex h-6 items-center gap-1.5 rounded-[3px] px-2 text-[10px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]",
+              showDdl
+                ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+                : "wb-muted hover:text-[hsl(var(--wb-text))]",
+            )}
+            onClick={() => {
+              setShowDdl(true);
+              setShowStructure(false);
+            }}
+          >
+            <Code2 size={12} />
+            {isSearchObjectPreview ? "Mapping" : "DDL"}
+          </button>
+        )}
         <span className="ml-auto min-w-0 truncate px-2 text-[10px] wb-muted">
           {[activeTab.databaseName, activeTab.schemaName, activeTab.tableName]
             .filter(Boolean)
             .join(".")}
         </span>
       </div>
-        {showStructure && metadataError && (
-          <div className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] px-3 py-1 text-xs text-destructive">
-            {metadataError}
-          </div>
-        )}
-        {showStructure && isMetadataLoading && !metadataError && (
-          <div className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] px-3 py-1 text-xs text-[hsl(var(--wb-text-muted))]">
-            Loading structure...
-          </div>
-        )}
+      {showStructure && metadataError && (
+        <div className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] px-3 py-1 text-xs text-destructive">
+          {metadataError}
+        </div>
+      )}
+      {showStructure && isMetadataLoading && !metadataError && (
+        <div className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] px-3 py-1 text-xs text-[hsl(var(--wb-text-muted))]">
+          Loading structure...
+        </div>
+      )}
 
       {showDdl && (
         <TableDdlView
@@ -1066,6 +1104,7 @@ export function TableDataView() {
           isLoading={isDdlLoading}
           error={ddlError}
           onRefresh={() => void refreshDdl(true)}
+          kind={isSearchObjectPreview ? "mapping" : "ddl"}
         />
       )}
 
@@ -1088,8 +1127,8 @@ export function TableDataView() {
                     column.is_nullable ? "nullable" : "not null",
                   ]
                     .filter(Boolean)
-                    .join(", ")
-                )
+                    .join(", "),
+                ),
               )
             )}
           </div>
@@ -1106,8 +1145,8 @@ export function TableDataView() {
                   isCrossDatabasePreview
                     ? "Index changes are unavailable for a table opened from another database"
                     : activeCapabilities.supportsTableIndexes
-                    ? "Create index"
-                    : "Indexes are not supported by this driver"
+                      ? "Create index"
+                      : "Indexes are not supported by this driver"
                 }
               >
                 <Plus size={12} />
@@ -1144,8 +1183,8 @@ export function TableDataView() {
                       !canManageIndexes
                         ? "Index changes are not available for this object"
                         : index.is_primary
-                        ? "Primary indexes are managed through constraints"
-                        : "Rename index"
+                          ? "Primary indexes are managed through constraints"
+                          : "Rename index"
                     }
                   >
                     <Pencil size={12} />
@@ -1160,8 +1199,8 @@ export function TableDataView() {
                       !canManageIndexes
                         ? "Index changes are not available for this object"
                         : index.is_primary
-                        ? "Primary indexes are managed through constraints"
-                        : "Drop index"
+                          ? "Primary indexes are managed through constraints"
+                          : "Drop index"
                     }
                   >
                     <Trash2 size={12} />
@@ -1183,8 +1222,8 @@ export function TableDataView() {
                   isCrossDatabasePreview
                     ? "Constraint changes are unavailable for a table opened from another database"
                     : activeCapabilities.supportsTableConstraints
-                    ? "Create constraint"
-                    : "Constraints are not supported by this driver"
+                      ? "Create constraint"
+                      : "Constraints are not supported by this driver"
                 }
               >
                 <Plus size={12} />
@@ -1199,7 +1238,7 @@ export function TableDataView() {
                   `${constraint.referenced_schema || ""}${
                     constraint.referenced_schema ? "." : ""
                   }${constraint.referenced_table}(${formatColumnList(
-                    constraint.referenced_columns
+                    constraint.referenced_columns,
                   )})`;
                 const isPrimary =
                   constraint.constraint_type.toUpperCase() === "PRIMARY KEY";
@@ -1229,8 +1268,8 @@ export function TableDataView() {
                         !canManageConstraints
                           ? "Constraint changes are not available for this object"
                           : isPrimary
-                          ? "Drop primary key"
-                          : "Drop constraint"
+                            ? "Drop primary key"
+                            : "Drop constraint"
                       }
                     >
                       <Trash2 size={12} />
@@ -1245,60 +1284,60 @@ export function TableDataView() {
 
       {/* Main Grid View */}
       {!showStructure && !showDdl && (
-      <div className="relative min-h-0 flex-1 wb-grid-surface">
-        <DataGrid
-          ref={dataGridRef}
-          overrideColumns={fallbackColumns}
-          readOnly={isGridReadOnly || activeTab.isExecuting}
-          zoomPercent={gridZoomPercent}
-          onSelectionSummaryChange={setGridSelectionSummary}
-          tableConstraints={tableConstraints}
-          referencingForeignKeys={referencingForeignKeys}
-        />
-        <div className="absolute bottom-3 left-1/2 z-40 flex h-8 -translate-x-1/2 items-center gap-0.5 rounded-[6px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised)/0.94)] px-1 shadow-[0_8px_22px_rgba(0,0,0,0.26)] backdrop-blur-sm">
-          <button
-            type="button"
-            className="wb-icon-button"
-            disabled={!canPrevious}
-            onClick={handleFirst}
-            title="First page"
-          >
-            <ChevronsLeft size={13} />
-          </button>
-          <button
-            type="button"
-            className="wb-icon-button"
-            disabled={!canPrevious}
-            onClick={handlePrevious}
-            title="Previous page"
-          >
-            <ChevronLeft size={13} />
-          </button>
-          <span className="min-w-[112px] px-2 text-center text-[10px] tabular-nums text-[hsl(var(--wb-text-muted))]">
-            {totalRows == null
-              ? `${visibleRows.toLocaleString()} rows`
-              : `${startRow.toLocaleString()}-${endRow.toLocaleString()} of ${totalRows.toLocaleString()}`}
-          </span>
-          <button
-            type="button"
-            className="wb-icon-button"
-            disabled={!canNext}
-            onClick={handleNext}
-            title="Next page"
-          >
-            <ChevronRight size={13} />
-          </button>
-          <button
-            type="button"
-            className="wb-icon-button"
-            disabled={!canLast}
-            onClick={handleLast}
-            title="Last page"
-          >
-            <ChevronsRight size={13} />
-          </button>
+        <div className="relative min-h-0 flex-1 wb-grid-surface">
+          <DataGrid
+            ref={dataGridRef}
+            overrideColumns={fallbackColumns}
+            readOnly={isGridReadOnly || activeTab.isExecuting}
+            zoomPercent={gridZoomPercent}
+            onSelectionSummaryChange={setGridSelectionSummary}
+            tableConstraints={tableConstraints}
+            referencingForeignKeys={referencingForeignKeys}
+          />
+          <div className="absolute bottom-3 left-1/2 z-40 flex h-8 -translate-x-1/2 items-center gap-0.5 rounded-[6px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised)/0.94)] px-1 shadow-[0_8px_22px_rgba(0,0,0,0.26)] backdrop-blur-sm">
+            <button
+              type="button"
+              className="wb-icon-button"
+              disabled={!canPrevious}
+              onClick={handleFirst}
+              title="First page"
+            >
+              <ChevronsLeft size={13} />
+            </button>
+            <button
+              type="button"
+              className="wb-icon-button"
+              disabled={!canPrevious}
+              onClick={handlePrevious}
+              title="Previous page"
+            >
+              <ChevronLeft size={13} />
+            </button>
+            <span className="min-w-[112px] px-2 text-center text-[10px] tabular-nums text-[hsl(var(--wb-text-muted))]">
+              {totalRows == null
+                ? `${visibleRows.toLocaleString()} rows`
+                : `${startRow.toLocaleString()}-${endRow.toLocaleString()} of ${totalRows.toLocaleString()}`}
+            </span>
+            <button
+              type="button"
+              className="wb-icon-button"
+              disabled={!canNext}
+              onClick={handleNext}
+              title="Next page"
+            >
+              <ChevronRight size={13} />
+            </button>
+            <button
+              type="button"
+              className="wb-icon-button"
+              disabled={!canLast}
+              onClick={handleLast}
+              title="Last page"
+            >
+              <ChevronsRight size={13} />
+            </button>
+          </div>
         </div>
-      </div>
       )}
       <CreateIndexDialog
         isOpen={isIndexDialogOpen}

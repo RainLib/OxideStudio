@@ -123,6 +123,30 @@ async function refreshMetadataAfterQuery(
 }
 
 export type TabType = "query" | "table" | "create_table" | "schema_diff";
+export type QueryLanguage = "elasticsearch-dsl" | "elasticsearch-eql";
+
+const ELASTICSEARCH_REQUEST_LINE =
+  /^(GET|POST|PUT|PATCH|DELETE|HEAD)\s+\/?\S+/i;
+
+export function queryTextForLanguage(
+  query: string,
+  driver: string,
+  language?: QueryLanguage,
+) {
+  const trimmed = query.trim();
+  if (
+    !["elasticsearch", "elastic"].includes(driver.trim().toLowerCase()) ||
+    language !== "elasticsearch-eql" ||
+    ELASTICSEARCH_REQUEST_LINE.test(trimmed)
+  ) {
+    return query;
+  }
+
+  const body = trimmed.startsWith("{")
+    ? trimmed
+    : JSON.stringify({ query: trimmed }, null, 2);
+  return `POST /_eql/search\n${body}`;
+}
 
 export interface EditorSelectionState {
   text: string;
@@ -155,6 +179,7 @@ export interface TabData {
   tableName?: string;
   schemaName?: string;
   objectType?: string | null;
+  queryLanguage?: QueryLanguage;
   filters?: any[];
   results: QueryResult[] | null;
   explainPlan?: ExplainPlan | null;
@@ -553,6 +578,7 @@ interface TabState {
         | "tableName"
         | "schemaName"
         | "objectType"
+        | "queryLanguage"
         | "filters"
         | "fileProjectId"
         | "fileRootPath"
@@ -576,6 +602,14 @@ interface TabState {
     objectName: string,
     objectType: string | null | undefined,
     initialSql: string,
+    title?: string,
+  ) => string;
+  findOrCreateObjectDataTab: (
+    connectionId: string,
+    schemaName: string | null | undefined,
+    objectName: string,
+    objectType: string | null | undefined,
+    previewCommand: string,
     title?: string,
   ) => string;
   createTableTab: (connectionId: string, schemaName: string) => string;
@@ -631,6 +665,7 @@ interface TabState {
   setActiveTab: (id: string) => void;
   reopenTab: () => void;
   updateTabSql: (id: string, sql: string) => void;
+  setQueryLanguage: (id: string, language: QueryLanguage) => void;
   setEditorSelection: (
     id: string,
     selection: EditorSelectionState | null,
@@ -841,6 +876,50 @@ export const useTabStore = create<TabState>((set, get) => ({
     }
 
     return get().createTab("query", title, initialSql, {
+      connectionId,
+      schemaName: normalizedSchema,
+      tableName: objectName,
+      objectType: normalizedObjectType,
+    });
+  },
+
+  findOrCreateObjectDataTab: (
+    connectionId: string,
+    schemaName: string | null | undefined,
+    objectName: string,
+    objectType: string | null | undefined,
+    previewCommand: string,
+    title = objectName,
+  ) => {
+    const normalizedSchema = schemaName || "";
+    const normalizedObjectType = objectType || null;
+    const existingTab = get().tabs.find(
+      (tab) =>
+        tab.type === "table" &&
+        tab.connectionId === connectionId &&
+        (tab.schemaName || "") === normalizedSchema &&
+        tab.tableName === objectName,
+    );
+
+    if (existingTab) {
+      set((state) => ({
+        activeTabId: existingTab.id,
+        tabs: state.tabs.map((tab) =>
+          tab.id === existingTab.id
+            ? {
+                ...tab,
+                title,
+                sql: previewCommand,
+                schemaName: normalizedSchema,
+                objectType: normalizedObjectType,
+              }
+            : tab,
+        ),
+      }));
+      return existingTab.id;
+    }
+
+    return get().createTab("table", title, previewCommand, {
       connectionId,
       schemaName: normalizedSchema,
       tableName: objectName,
@@ -1285,6 +1364,14 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
   },
 
+  setQueryLanguage: (id, queryLanguage) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === id ? { ...tab, queryLanguage } : tab,
+      ),
+    }));
+  },
+
   setEditorSelection: (id: string, selection: EditorSelectionState | null) => {
     set((state) => ({
       tabs: state.tabs.map((t) =>
@@ -1311,8 +1398,7 @@ export const useTabStore = create<TabState>((set, get) => ({
   dismissEditorPatch: (tabId, patchId) => {
     set((state) => ({
       tabs: state.tabs.map((tab) =>
-        tab.id === tabId &&
-        (!patchId || tab.editorPatchPreview?.id === patchId)
+        tab.id === tabId && (!patchId || tab.editorPatchPreview?.id === patchId)
           ? { ...tab, editorPatchPreview: null }
           : tab,
       ),
@@ -1321,11 +1407,20 @@ export const useTabStore = create<TabState>((set, get) => ({
 
   applyEditorPatchPreview: (tabId, patchId) => {
     const tab = get().tabs.find((candidate) => candidate.id === tabId);
-    if (!tab || !tab.editorPatchPreview || tab.editorPatchPreview.id !== patchId) {
-      return { status: "notFound", message: "Patch preview is no longer available." };
+    if (
+      !tab ||
+      !tab.editorPatchPreview ||
+      tab.editorPatchPreview.id !== patchId
+    ) {
+      return {
+        status: "notFound",
+        message: "Patch preview is no longer available.",
+      };
     }
     const patch = tab.editorPatchPreview;
-    if (documentTextRevision(tab.fileRevision, tab.sql) !== patch.expectedRevision) {
+    if (
+      documentTextRevision(tab.fileRevision, tab.sql) !== patch.expectedRevision
+    ) {
       return {
         status: "stale",
         message: "The editor document changed after this patch was proposed.",
@@ -1407,13 +1502,25 @@ export const useTabStore = create<TabState>((set, get) => ({
     const tab = get().tabs.find((t) => t.id === id);
     if (!tab) return;
 
-    const sqlToRun = sqlOverride || tab.sql;
-    if (!sqlToRun.trim()) return;
+    const editorQuery = sqlOverride || tab.sql;
+    if (!editorQuery.trim()) return;
     const startedAt = Date.now();
     const { currentSchema } = useSchemaStore.getState();
     const connection = useConnectionStore
       .getState()
       .connections.find((item) => item.id === connectionId);
+    const sqlToRun = queryTextForLanguage(
+      editorQuery,
+      connection?.driver || DEFAULT_DATABASE_DRIVER,
+      tab.queryLanguage,
+    );
+    const isNativeObjectDataLoad =
+      tab.type === "table" &&
+      !supportsTableWorkspace(
+        defaultDatabaseCapabilities(
+          connection?.driver || DEFAULT_DATABASE_DRIVER,
+        ),
+      );
     const schemaContext = querySchemaContextForTab(
       tab,
       currentSchema,
@@ -1437,8 +1544,16 @@ export const useTabStore = create<TabState>((set, get) => ({
     const taskStore = useTaskStore.getState();
     const taskId = taskStore.startTask({
       kind: "query",
-      title: `Run ${tab.title}`,
-      detail: "Executing SQL",
+      title: `${isNativeObjectDataLoad ? "Load" : "Run"} ${tab.title}`,
+      detail: isNativeObjectDataLoad
+        ? "Fetching object data"
+        : connection?.driver === "elasticsearch"
+          ? `Executing ${tab.queryLanguage === "elasticsearch-eql" ? "EQL" : "Query DSL"}`
+          : defaultDatabaseCapabilities(
+                connection?.driver || DEFAULT_DATABASE_DRIVER,
+              ).supportsSqlQuery
+            ? "Executing SQL"
+            : "Executing query",
     });
 
     // Update state to executing

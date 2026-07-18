@@ -1,13 +1,19 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { ThemeProvider } from "@/theme";
 import {
   readStartupConnectionDisplayCache,
   type ConnectionDisplaySummary,
 } from "@/startup/dataSourceDisplayCache";
 import {
+  peekStartupIntent,
   requestStartupIntent,
   type StartupIntent,
 } from "@/startup/startupIntents";
+import {
+  markReactShellReady,
+  markWorkspaceModuleReady,
+  useStartupProgress,
+} from "@/startup/startupProgress";
 
 const STARTUP_DRIVER_COLORS: Record<string, string> = {
   postgres: "#5b8dd6",
@@ -17,30 +23,54 @@ const STARTUP_DRIVER_COLORS: Record<string, string> = {
   mongodb: "#5fb878",
 };
 
-const workspacePagePromise = import("@/pages/workspace");
 const WorkspacePage = lazy(() =>
-  workspacePagePromise.then((module) => ({
-    default: module.WorkspacePage,
-  })),
+  import("@/pages/workspace").then((module) => {
+    markWorkspaceModuleReady();
+    return {
+      default: module.WorkspacePage,
+    };
+  }),
 );
 
 function App() {
   const cachedDataSources = readStartupConnectionDisplayCache();
+  const [workspaceEnabled, setWorkspaceEnabled] = useState(false);
+
+  useEffect(() => {
+    markReactShellReady();
+    window.dispatchEvent(new Event("oxide:react-shell-ready"));
+
+    // Commit the lightweight, interactive shell before requesting the large
+    // workspace module. This keeps title-bar dragging and startup actions
+    // responsive even when Vite or the production WebView needs extra time to
+    // parse the workspace chunk.
+    const frame = window.requestAnimationFrame(() => {
+      setWorkspaceEnabled(true);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
 
   return (
     <ThemeProvider>
-      <Suspense
-        fallback={
-          <StartupWorkbenchShell
-            cachedDataSources={cachedDataSources ?? []}
-            hasDataSourceCache={cachedDataSources !== null}
-          />
-        }
-      >
-        <div className="h-screen w-screen overflow-hidden bg-background text-foreground">
-          <WorkspacePage />
-        </div>
-      </Suspense>
+      {workspaceEnabled ? (
+        <Suspense
+          fallback={
+            <StartupWorkbenchShell
+              cachedDataSources={cachedDataSources ?? []}
+              hasDataSourceCache={cachedDataSources !== null}
+            />
+          }
+        >
+          <div className="h-screen w-screen overflow-hidden bg-background text-foreground">
+            <WorkspacePage />
+          </div>
+        </Suspense>
+      ) : (
+        <StartupWorkbenchShell
+          cachedDataSources={cachedDataSources ?? []}
+          hasDataSourceCache={cachedDataSources !== null}
+        />
+      )}
     </ThemeProvider>
   );
 }
@@ -53,8 +83,9 @@ export function StartupWorkbenchShell({
   hasDataSourceCache: boolean;
 }) {
   const [pendingIntent, setPendingIntent] = useState<StartupIntent | null>(
-    null,
+    () => peekStartupIntent(),
   );
+  const startupProgress = useStartupProgress();
   const requestIntent = (intent: StartupIntent) => {
     setPendingIntent(intent);
     requestStartupIntent(intent);
@@ -72,8 +103,8 @@ export function StartupWorkbenchShell({
           aria-hidden="true"
         />
       </div>
-      <div className="wb-workspace-track" aria-hidden="true">
-        <div className="wb-tool-window w-[280px] max-w-[36vw] rounded-[6px]">
+      <div className="wb-workspace-track">
+        <div className="wb-tool-window w-[400px] max-w-[36vw] rounded-[6px]">
           <div className="wb-tool-header border-b border-[hsl(var(--wb-border-subtle))]">
             Database Explorer
           </div>
@@ -145,7 +176,28 @@ export function StartupWorkbenchShell({
           </div>
         </div>
       </div>
-      <div className="h-[22px] shrink-0 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-status))]" />
+      <div
+        className="flex h-[22px] shrink-0 items-center justify-end gap-2 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-status))] px-2 text-[10px] text-[hsl(var(--wb-text-muted))]"
+        role="status"
+        aria-live="polite"
+      >
+        <span className="whitespace-nowrap">{startupProgress.label}</span>
+        <span
+          className="wb-progress-track"
+          role="progressbar"
+          aria-label={startupProgress.label}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(startupProgress.progress * 100)}
+        >
+          <span
+            className="wb-progress-bar wb-progress-bar-determinate"
+            style={{
+              transform: `scaleX(${startupProgress.progress})`,
+            }}
+          />
+        </span>
+      </div>
     </div>
   );
 }

@@ -21,6 +21,10 @@ import type {
   AssistantContextSettings,
 } from "@/ai/assistant/contextPreview";
 import {
+  AssistantModelControl,
+  type AssistantModelStatus,
+} from "./AssistantModelControl";
+import {
   Bot,
   Check,
   ChevronDown,
@@ -58,6 +62,13 @@ interface AssistantPromptBoxProps {
   isSubmitting: boolean;
   isToolRunning: boolean;
   isCancelling: boolean;
+  model: string;
+  modelEndpoint: string;
+  modelStatus: AssistantModelStatus;
+  onModelChange: (model: string) => void;
+  onOpenAiSettings: () => void;
+  onRetryModel: () => void;
+  submissionBlockReason: string | null;
 }
 
 const MODE_ICONS: Record<AssistantMode, LucideIcon> = {
@@ -84,10 +95,21 @@ export function AssistantPromptBox({
   isSubmitting,
   isToolRunning,
   isCancelling,
+  model,
+  modelEndpoint,
+  modelStatus,
+  onModelChange,
+  onOpenAiSettings,
+  onRetryModel,
+  submissionBlockReason,
 }: AssistantPromptBoxProps) {
   const currentMode = assistantModeOption(mode);
   const CurrentModeIcon = MODE_ICONS[mode];
-  const canSubmit = Boolean(message.trim()) && !isSubmitting && !isToolRunning;
+  const canSubmit =
+    Boolean(message.trim()) &&
+    !isSubmitting &&
+    !isToolRunning &&
+    !submissionBlockReason;
   const submitLabel = mode === "plan" ? "Create plan" : mode === "agent" ? "Run agent" : "Send";
   const contextLocked = isSubmitting || isToolRunning;
   const updateContextSetting = (
@@ -326,30 +348,57 @@ export function AssistantPromptBox({
             </Popover>
           </div>
 
-          {isSubmitting || isToolRunning ? (
-            <button
-              type="button"
-              className="inline-flex h-7 items-center gap-1 rounded-[5px] bg-destructive px-2 text-[10px] font-medium text-destructive-foreground disabled:opacity-50"
-              onClick={onStop}
-              disabled={isCancelling}
-              title="Stop active assistant tool"
-            >
-              <Square size={10} className="fill-current" />
-              {isCancelling ? "Stopping" : "Stop"}
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="wb-primary-button h-7 w-7 justify-center px-0"
-              onClick={onSubmit}
-              disabled={!canSubmit}
-              title={submitLabel}
-              aria-label={submitLabel}
-            >
-              <SendHorizontal size={12} />
-            </button>
-          )}
+          <div className="flex min-w-0 items-center gap-0.5">
+            <AssistantModelControl
+              model={model}
+              endpoint={modelEndpoint}
+              status={modelStatus}
+              disabled={isSubmitting || isToolRunning}
+              onModelChange={onModelChange}
+              onOpenSettings={onOpenAiSettings}
+              onRetry={onRetryModel}
+            />
+
+            {isSubmitting || isToolRunning ? (
+              <button
+                type="button"
+                className="inline-flex h-7 items-center gap-1 rounded-[5px] bg-destructive px-2 text-[10px] font-medium text-destructive-foreground disabled:opacity-50"
+                onClick={onStop}
+                disabled={isCancelling}
+                title="Stop active assistant tool"
+              >
+                <Square size={10} className="fill-current" />
+                {isCancelling ? "Stopping" : "Stop"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="wb-primary-button h-7 w-7 justify-center px-0"
+                onClick={onSubmit}
+                disabled={!canSubmit}
+                title={submissionBlockReason || submitLabel}
+                aria-label={submitLabel}
+                aria-describedby={
+                  submissionBlockReason && message.trim()
+                    ? "assistant-submit-block-reason"
+                    : undefined
+                }
+              >
+                <SendHorizontal size={12} />
+              </button>
+            )}
+          </div>
         </div>
+
+        {submissionBlockReason && message.trim() && !contextLocked && (
+          <div
+            id="assistant-submit-block-reason"
+            role="status"
+            className="border-t border-[hsl(var(--wb-border-subtle))] px-2.5 py-1.5 text-[9px] leading-4 text-amber-400"
+          >
+            {submissionBlockReason}
+          </div>
+        )}
       </div>
     </div>
   );

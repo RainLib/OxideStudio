@@ -45,7 +45,7 @@ Assistant UI / Inline AI / Error Fix / Explain Plan
 - **Deep Agents 运行于独立签名 Node 22 sidecar**。不采用 Python，也不把 browser export 放进 WebView；关闭 Sidebar、切换视图或 WebView reload 不应决定任务生命周期。
 - **Rust 是安全和资源边界**。它掌握 provider secret、模型 HTTP、数据库 session、工具执行、SQL risk、审批 lease、artifact 和 checkpoint；sidecar 只接收 redacted workspace、provider capability 与 portable tool manifest。
 - **`AiToolRegistry`/`agent-contract` 是能力契约，Rust policy 是最终裁决者**。sidecar 不能直接调用 driver，也不能把 Deep Agents permission 当作数据库授权。
-- **模型调用经过 Rust gateway**。API key 存于 OS credential manager，不进入 Zustand/localStorage、sidecar 或 checkpoint；模型 streaming/tool calls/usage 通过内部协议返回。
+- **模型调用经过 Rust gateway**。API key 存于应用的用户级 credential file，不进入项目、Zustand/localStorage、sidecar 或 checkpoint；保存后重新读取验证，模型 streaming/tool calls/usage 通过内部协议返回。Agent checkpoint 主密钥仍使用 OS credential manager。
 - **项目级持久化已经落地**。thread、artifact 及 LangGraph checkpoint/pending writes 使用 AES-256-GCM 和七天 retention；sidecar 重启可通过 `interrupt()`/`Command({ resume })` 恢复等待状态，但完整应用进程恢复 UX 与数据库 exactly-once 仍需单独保证。
 - **MCP 只用于外部客户端**。应用内页面交互走 typed action bus；Rust 原生 `oxide-agent` 已接入首版 stdio/CLI 与五个只读工具，并随四平台安装包发布。
 
@@ -284,10 +284,10 @@ type UiAction = {
 - Chat、Plan、Agent 生产入口已统一为 Node 22 `deepagents@1.10.8` sidecar；React 通过六个 Tauri command 和 `agent://event` 投影状态。旧 `AssistantRuntime` 只允许显式开发 feature flag。
 - `agent-contract` 与 Rust protocol 使用版本 1、4 MiB frame、`Content-Length` JSON-RPC；所有 Turn 请求绑定 request/thread/turn/context/deadline，必需 capability 不匹配时拒绝 runtime。
 - Rust `AgentHostManager` 在 Tauri setup 阶段不启动子进程；未配置 provider 跳过启动，首次 AI 请求懒启动。sidecar 缺失或失败只让 Assistant unavailable，不阻塞主界面。
-- provider secret 已移出 Zustand/localStorage，存入 OS credential manager；sidecar 只通过 Rust `ModelGateway` 获得 streaming delta、tool call、usage 和结构化失败。
+- provider secret 已移出 Zustand/localStorage，存入 endpoint-hash 命名的用户级 credential file；设置测试和 Agent 请求读取同一来源，sidecar 只通过 Rust `ModelGateway` 获得 streaming delta、tool call、usage 和结构化失败。
 - Chat 无数据库或子代理工具；Plan 只读；Agent 使用 Rust 过滤的 manifest。同步 `schema_analyst`、`query_reviewer`、`plan_verifier` 子代理默认只读、无文件系统。
 - `ask_user` 与 approval 使用 LangGraph `interrupt()` 暂停，回答使用 `Command({ resume })`；write/destructive 调用绑定 canonical input digest 和一次性 Rust lease。sidecar 重启后可恢复 interrupt，但 lease 不持久化，缺失时 mutation fail-closed。
-- Rust 已建立项目级 `agent_threads`、`agent_checkpoints`、`agent_artifacts`、`agent_graph_checkpoints`、`agent_graph_writes`，使用 AES-256-GCM、独立 nonce/AAD、OS keyring 主密钥和七天过期。最终答案在 checkpoint 保存后发出；不确定 mutation 不自动重放。
+- Rust 已建立项目级 `agent_threads`、`agent_checkpoints`、`agent_artifacts`、`agent_graph_checkpoints`、`agent_graph_writes`，使用 AES-256-GCM、独立 nonce/AAD、用户私有 credential file 主密钥和七天过期。最终答案在 checkpoint 保存后发出；不确定 mutation 不自动重放。
 - Deep Agents 使用真实 provider token profile并过滤 summarization stream；长问题可切块/digest，tool 大结果以 bounded observation + artifact reference 返回。Context Preview 的完整 token/省略来源和 100+ Turn 质量仍需加固。
 - 对话固定为“问题 → 默认收起的单行过程 → 最终答案”；tool/todo/subagent 不成为独立聊天消息。minimap 每个完整问答一个灰色 marker，只在宽面板且溢出时展示，支持键盘和 reduced motion。
 - Rust 原生 `oxide-agent` 的首版限定 stdio/CLI 和只读能力，严格接受 MCP 2025-11-25，以不可扩大的 project/connection grant 运行，并作为 target-specific external binary 随包发布。Rust 与现有 TypeScript 契约层都拒绝 `_meta.approved`、`approved:true` 或 `--approve` 自我授权。
@@ -408,7 +408,7 @@ DataGrip 当前 AI 基线包含 schema-aware chat、自然语言生成 SQL、SQL
 | 长任务代理 | 以 IDE AI 工作流为主 | 独立 Deep Agents host、加密 LangGraph checkpoint/writes、跨 sidecar interrupt resume、同步只读 subagent、澄清/批准和 cancel 已落地；完整应用进程恢复、长期评测与数据库 idempotency 仍需加固 | P0/P1 硬化 |
 | 多数据模型 | 重点是 SQL/database IDE | 已覆盖 Mongo/Redis/ES 的结构化工具方向 | Oxide 的差异化优势 |
 | 外部生态 | JetBrains 生态 | Rust `oxide-agent` 首版只读 stdio/CLI 已接入；调用者自批准已删除，project/connection grant 后端强制执行 | 持续发布 smoke；写能力后置 |
-| 数据隐私 | 默认不把原始数据库数据提供给 AI | provider secret 使用 OS keyring；thread/checkpoint/artifact 项目级 AES-GCM 保存七天；仍缺 attachment 敏感分级、字段级 masking 和企业 policy | 基础治理已完成；细粒度治理 P1 |
+| 数据隐私 | 默认不把原始数据库数据提供给 AI | provider secret 与 Agent Store 主密钥分别使用应用用户级 credential file；thread/checkpoint/artifact 项目级 AES-GCM 保存七天；运行时不访问系统 Keychain；仍缺 attachment 敏感分级、字段级 masking 和企业 policy | 基础治理已完成；细粒度治理 P1 |
 
 AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV Import Mapping、双向复合外键 row navigation、precision-safe Aggregate View，以及 schema diff 的 snapshot + dependency-ordered review/preflight 已完成；migration apply/verify、diagram、data compare、semantic refactor/find usages、native streaming import、session/lock 等仍需按 [DataGrip 能力差距](datagrip-gap-analysis.md) 路线推进。
 

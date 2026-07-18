@@ -241,7 +241,7 @@ impl DatabaseDriver for RedisDriver {
     async fn get_schemas(&self) -> Result<Vec<String>> {
         let mut connection = self.connection().await?;
         let active_database = self.active_database.lock().await.clone();
-        Ok(redis_non_empty_database_labels(&mut connection, &active_database).await)
+        Ok(redis_database_labels(&mut connection, &active_database).await)
     }
 
     async fn get_collections(&self, namespace: &str) -> Result<Vec<CollectionInfo>> {
@@ -449,7 +449,23 @@ fn parse_redis_keyspace_databases(info: &str, active_database: &str) -> Vec<Stri
     indexes.into_iter().map(|index| index.to_string()).collect()
 }
 
-async fn redis_non_empty_database_labels(
+fn configured_redis_database_labels(
+    database_count: Option<usize>,
+    discovered: Vec<String>,
+    active_database: &str,
+) -> Vec<String> {
+    let Some(database_count) = database_count.filter(|count| (1..=1_024).contains(count)) else {
+        return discovered;
+    };
+
+    let mut indexes = (0..database_count).collect::<BTreeSet<_>>();
+    if let Ok(active_index) = active_database.trim().parse::<usize>() {
+        indexes.insert(active_index);
+    }
+    indexes.into_iter().map(|index| index.to_string()).collect()
+}
+
+async fn redis_database_labels(
     connection: &mut ConnectionManager,
     active_database: &str,
 ) -> Vec<String> {
@@ -458,7 +474,25 @@ async fn redis_non_empty_database_labels(
         .query_async::<String>(connection)
         .await
         .unwrap_or_default();
-    parse_redis_keyspace_databases(&info, active_database)
+    let discovered = parse_redis_keyspace_databases(&info, active_database);
+
+    // Standalone Redis normally exposes the logical DB count through CONFIG.
+    // Managed/cluster deployments may deny CONFIG; in that case retain the
+    // non-empty INFO keyspace list plus the explicitly selected DB.
+    let database_count = redis::cmd("CONFIG")
+        .arg("GET")
+        .arg("databases")
+        .query_async::<Vec<String>>(connection)
+        .await
+        .ok()
+        .and_then(|values| {
+            values
+                .iter()
+                .rev()
+                .find_map(|value| value.trim().parse::<usize>().ok())
+        });
+
+    configured_redis_database_labels(database_count, discovered, active_database)
 }
 
 fn split_redis_commands(input: &str) -> Result<Vec<Vec<String>>> {
@@ -739,6 +773,19 @@ mod tests {
         assert_eq!(
             parse_redis_keyspace_databases("# Keyspace\r\n", "0"),
             vec!["0".to_string()]
+        );
+        assert_eq!(
+            configured_redis_database_labels(Some(4), vec!["0".to_string(), "3".to_string()], "2",),
+            vec![
+                "0".to_string(),
+                "1".to_string(),
+                "2".to_string(),
+                "3".to_string(),
+            ]
+        );
+        assert_eq!(
+            configured_redis_database_labels(None, vec!["0".to_string(), "3".to_string()], "0",),
+            vec!["0".to_string(), "3".to_string()]
         );
     }
 

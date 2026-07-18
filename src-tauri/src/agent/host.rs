@@ -174,6 +174,7 @@ struct ActiveTurn {
     project_id: String,
     checkpoint_thread_id: String,
     context_version: String,
+    prompt: String,
     tab_connection_id: Option<String>,
     tab_namespace: Option<String>,
     connection_id: Option<String>,
@@ -252,7 +253,7 @@ impl std::fmt::Display for HostCallError {
 impl std::error::Error for HostCallError {}
 
 impl AgentHostManager {
-    /// Construction is intentionally side-effect free: no process, filesystem, DB, or keyring I/O.
+    /// Construction is intentionally side-effect free: no process, filesystem, or DB I/O.
     pub fn new(app: &AppHandle) -> Self {
         Self {
             inner: Arc::new(AgentHostInner {
@@ -352,11 +353,15 @@ impl AgentHostInner {
             .as_deref()
             .is_none_or(|secret| secret.trim().is_empty())
         {
-            // Credential-manager failure is fail-open for keyless/local providers.
-            // The secret, when present, remains in Rust memory and is never sent
-            // to the DeepAgents process or persisted with the thread.
-            if let Ok(Some(secret)) = load_provider_secret(&provider.base_url).await {
-                provider.api_key = Some(secret);
+            // A missing entry is valid for keyless/local providers. Credential
+            // manager failures are not: silently turning them into an anonymous
+            // HTTP request produces a misleading provider 401.
+            match load_provider_secret(&self.app, &provider.base_url).await {
+                Ok(Some(secret)) => provider.api_key = Some(secret),
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(error.context("failed to load the AI provider credential"));
+                }
             }
         }
 
@@ -561,7 +566,9 @@ impl AgentHostInner {
             .or_else(|| find_agent_launch(&self.app).map(|launch| launch.display_path));
         AgentHostStatus {
             state: lifecycle.state.label().to_string(),
-            available: lifecycle.state == LifecycleState::Ready || discovered.is_some(),
+            // A discoverable binary is not an available runtime. Only publish
+            // availability after the protocol/capability handshake completes.
+            available: lifecycle.state == LifecycleState::Ready,
             protocol_version: AGENT_HOST_PROTOCOL_VERSION,
             capabilities: lifecycle.capabilities,
             binary_path: discovered.map(|path| path.to_string_lossy().into_owned()),
@@ -1378,9 +1385,10 @@ impl AgentHostInner {
             });
         }
 
-        // Stable priority: explicit tool input, active tab/workspace context,
-        // then the only project-scoped candidate. Ambiguity is recoverable and
-        // must be resolved by the model asking the user.
+        // Stable priority: explicit tool input, a unique connection named or
+        // typed in the user's prompt, active tab/workspace context, then the
+        // only project-scoped candidate. Remaining ambiguity is returned as
+        // structured data so the sidecar can ask inline and retry safely.
         let explicit_id = input
             .get("connectionId")
             .and_then(Value::as_str)
@@ -1396,8 +1404,11 @@ impl AgentHostInner {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        let prompt_connection = resolve_prompt_connection(&connections, &turn.prompt);
         let selected = if let Some(id) = explicit_id {
             connections.iter().find(|connection| connection.id == id)
+        } else if let Some(connection) = prompt_connection {
+            Some(connection)
         } else if let Some(id) = tab_id {
             connections.iter().find(|connection| connection.id == id)
         } else if let Some(id) = context_id {
@@ -1727,17 +1738,22 @@ impl AgentHostInner {
             .agent_connections
             .statement_scan_dialect(&target.id)
             .await
-            .map_err(|error| SidecarRequestError::tool(error.to_string()))?
-            .ok_or_else(|| {
-                SidecarRequestError::tool("query.runReadOnly is only available for SQL drivers")
-            })?;
-        validate_read_only_sql(&query, dialect).map_err(SidecarRequestError::tool)?;
-        let kind = database_kind_for_dialect(dialect);
-        let script = read_only_transaction_script(kind, &query);
-        let mut results = self
-            .execute_bounded_query(turn, request, &target, script)
-            .await?;
-        strip_transaction_results(&mut results);
+            .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+        let mut results = if let Some(dialect) = dialect {
+            validate_read_only_sql(&query, dialect).map_err(SidecarRequestError::tool)?;
+            let kind = database_kind_for_dialect(dialect);
+            let script = read_only_transaction_script(kind, &query);
+            let mut results = self
+                .execute_bounded_query(turn, request, &target, script)
+                .await?;
+            strip_transaction_results(&mut results);
+            results
+        } else {
+            validate_native_read_only_query(&target.driver, &query)
+                .map_err(SidecarRequestError::tool)?;
+            self.execute_bounded_query(turn, request, &target, query)
+                .await?
+        };
         let requested_limit = request
             .input
             .get("limit")
@@ -1800,7 +1816,11 @@ impl AgentHostInner {
         );
         let timeout = tool_deadline_duration(turn, &request.tool_name, request.metadata.deadline)?;
         let execute = async {
-            if let Some(database) = target.database.as_deref() {
+            if let Some(database) = target
+                .database
+                .as_deref()
+                .filter(|_| is_explicit_database_scope_driver(&target.driver))
+            {
                 self.agent_connections
                     .query_database_with_context(
                         &target.id,
@@ -2432,6 +2452,7 @@ impl ActiveTurn {
             project_id: request.project_id.clone(),
             checkpoint_thread_id: expected_graph_thread_id(request),
             context_version: request.metadata.context_version.clone(),
+            prompt: request.prompt.clone(),
             tab_connection_id: request
                 .workspace
                 .summary
@@ -2830,6 +2851,72 @@ fn required_input_text(
     Ok(value.to_string())
 }
 
+fn resolve_prompt_connection<'a>(
+    connections: &'a [StoreSavedConnection],
+    prompt: &str,
+) -> Option<&'a StoreSavedConnection> {
+    let normalized_prompt = prompt.to_lowercase();
+    let name_matches = connections
+        .iter()
+        .filter(|connection| {
+            let name = connection.name.trim().to_lowercase();
+            name.chars().count() >= 3 && normalized_prompt.contains(&name)
+        })
+        .collect::<Vec<_>>();
+    let hinted_drivers = [
+        ("elasticsearch", ["elasticsearch", "elastic", "es", "", ""]),
+        ("mongodb", ["mongodb", "mongo", "", "", ""]),
+        ("postgres", ["postgresql", "postgres", "pgsql", "pg", ""]),
+        ("mysql", ["mysql", "", "", "", ""]),
+        ("redis", ["redis", "", "", "", ""]),
+    ]
+    .into_iter()
+    .filter_map(|(driver, aliases)| {
+        aliases
+            .iter()
+            .filter(|alias| !alias.is_empty())
+            .any(|alias| contains_ascii_bounded_alias(&normalized_prompt, alias))
+            .then_some(driver)
+    })
+    .collect::<Vec<_>>();
+    if hinted_drivers.len() > 1 {
+        return None;
+    }
+    let Some(driver) = hinted_drivers.first() else {
+        return match name_matches.as_slice() {
+            [connection] => Some(*connection),
+            _ => None,
+        };
+    };
+    let driver_matches = connections
+        .iter()
+        .filter(|connection| connection.driver.eq_ignore_ascii_case(driver))
+        .collect::<Vec<_>>();
+    if let [connection] = name_matches.as_slice() {
+        if connection.driver.eq_ignore_ascii_case(driver) {
+            return Some(*connection);
+        }
+    }
+    match driver_matches.as_slice() {
+        [connection] => Some(*connection),
+        _ => None,
+    }
+}
+
+fn contains_ascii_bounded_alias(value: &str, alias: &str) -> bool {
+    value.match_indices(alias).any(|(start, matched)| {
+        let before = value[..start].chars().next_back();
+        let end = start + matched.len();
+        let after = value[end..].chars().next();
+        !before.is_some_and(is_ascii_identifier_character)
+            && !after.is_some_and(is_ascii_identifier_character)
+    })
+}
+
+fn is_ascii_identifier_character(value: char) -> bool {
+    value.is_ascii_alphanumeric() || value == '_'
+}
+
 fn database_kind_for_dialect(dialect: StatementScanDialect) -> DatabaseKind {
     match dialect {
         StatementScanDialect::Postgres => DatabaseKind::Postgres,
@@ -2843,6 +2930,341 @@ fn read_only_transaction_script(kind: DatabaseKind, sql: &str) -> String {
         DatabaseKind::Mysql => "START TRANSACTION READ ONLY;",
     };
     format!("{begin}\n{}\n;\nROLLBACK;", sql.trim())
+}
+
+fn is_explicit_database_scope_driver(driver: &str) -> bool {
+    matches!(
+        driver.trim().to_ascii_lowercase().as_str(),
+        "postgres" | "postgresql" | "pgsql" | "psql"
+    )
+}
+
+fn validate_native_read_only_query(driver: &str, query: &str) -> std::result::Result<(), String> {
+    let driver = driver.trim().to_ascii_lowercase();
+    match driver.as_str() {
+        "elasticsearch" | "elastic" | "es" => validate_elasticsearch_read_only_query(query),
+        "mongodb" | "mongo" => validate_mongodb_read_only_query(query),
+        "redis" => validate_redis_read_only_query(query),
+        _ => Err(format!(
+            "query.runReadOnly is unsupported for driver {}",
+            bounded_text(&driver, 80)
+        )),
+    }
+}
+
+fn validate_elasticsearch_read_only_query(query: &str) -> std::result::Result<(), String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err("Elasticsearch read request is empty".to_string());
+    }
+    if query.starts_with('{') || query.starts_with('[') {
+        let value: Value = serde_json::from_str(query)
+            .map_err(|_| "Elasticsearch search body must be valid JSON".to_string())?;
+        if value.is_object() || value.is_array() {
+            return Ok(());
+        }
+        return Err("Elasticsearch search body must be a JSON object or array".to_string());
+    }
+
+    let mut request_count = 0usize;
+    for line in query.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let method = parts.next().unwrap_or_default().to_ascii_uppercase();
+        if !matches!(
+            method.as_str(),
+            "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE"
+        ) {
+            if request_count == 0 {
+                return Err(
+                    "Elasticsearch read request must start with a Kibana-style request line"
+                        .to_string(),
+                );
+            }
+            continue;
+        }
+        let path = parts
+            .next()
+            .ok_or_else(|| "Elasticsearch request path is required".to_string())?;
+        if path.contains("://") {
+            return Err("Elasticsearch request path must be relative".to_string());
+        }
+        request_count += 1;
+        if request_count > 20 {
+            return Err("Elasticsearch read request exceeds 20 operations".to_string());
+        }
+        match method.as_str() {
+            "GET" | "HEAD" => {}
+            "POST" if is_elasticsearch_read_only_post_path(path) => {}
+            _ => {
+                return Err(format!(
+                    "Elasticsearch {method} {path} is not allowed by query.runReadOnly"
+                ));
+            }
+        }
+    }
+    if request_count == 0 {
+        return Err("Elasticsearch read request contains no operations".to_string());
+    }
+    Ok(())
+}
+
+fn is_elasticsearch_read_only_post_path(path: &str) -> bool {
+    let path = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(path)
+        .trim_start_matches('/')
+        .to_ascii_lowercase();
+    matches!(
+        path.as_str(),
+        "_search"
+            | "_msearch"
+            | "_count"
+            | "_sql"
+            | "_eql/search"
+            | "_async_search"
+            | "_search/scroll"
+    ) || path.ends_with("/_search")
+        || path.ends_with("/_msearch")
+        || path.ends_with("/_count")
+        || path.ends_with("/_eql/search")
+        || path.ends_with("/_async_search")
+}
+
+fn validate_mongodb_read_only_query(query: &str) -> std::result::Result<(), String> {
+    let value: Value = serde_json::from_str(query.trim())
+        .map_err(|_| "MongoDB read request must be valid JSON".to_string())?;
+    let commands = value
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(&value));
+    if commands.is_empty() || commands.len() > 20 {
+        return Err("MongoDB read request must contain 1 to 20 commands".to_string());
+    }
+    if commands.iter().all(is_mongodb_read_only_command) {
+        Ok(())
+    } else {
+        Err("MongoDB request is not a supported read-only command".to_string())
+    }
+}
+
+fn is_mongodb_read_only_command(value: &Value) -> bool {
+    let Some(command) = value.as_object() else {
+        return false;
+    };
+    let operations = command
+        .keys()
+        .filter(|key| {
+            matches!(
+                key.to_ascii_lowercase().as_str(),
+                "find"
+                    | "aggregate"
+                    | "count"
+                    | "countdocuments"
+                    | "insertone"
+                    | "insertmany"
+                    | "updateone"
+                    | "updatemany"
+                    | "deleteone"
+                    | "deletemany"
+                    | "command"
+            )
+        })
+        .collect::<Vec<_>>();
+    if operations.len() > 1 {
+        return false;
+    }
+    match operations
+        .first()
+        .map(|operation| operation.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("find") => {
+            let find = command.get("find");
+            let has_collection = command
+                .get("collection")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty());
+            let has_native_collection = find
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty());
+            let filter_is_valid = command.get("filter").is_none_or(Value::is_object);
+            (find.is_some_and(Value::is_object) && has_collection || has_native_collection)
+                && filter_is_valid
+        }
+        Some("count") => {
+            command
+                .get("count")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+                && command.get("query").is_none_or(Value::is_object)
+        }
+        Some("countdocuments") => {
+            command
+                .get("collection")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+                && command.get("countDocuments").is_some_and(Value::is_object)
+        }
+        Some("aggregate") => {
+            let aggregate = command.get("aggregate");
+            let shorthand = aggregate.is_some_and(Value::is_array)
+                && command
+                    .get("collection")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty());
+            let native = aggregate
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+                && command.get("pipeline").is_some_and(Value::is_array);
+            (shorthand || native)
+                && !mongodb_pipeline_has_write_stage(if native {
+                    command.get("pipeline")
+                } else {
+                    aggregate
+                })
+        }
+        Some("command") => command
+            .get("command")
+            .and_then(Value::as_object)
+            .and_then(|body| {
+                body.keys()
+                    .next()
+                    .map(|name| (name.to_ascii_lowercase(), body))
+            })
+            .is_some_and(|(name, body)| {
+                if name == "aggregate" {
+                    return !mongodb_pipeline_has_write_stage(body.get("pipeline"));
+                }
+                matches!(
+                    name.as_str(),
+                    "buildinfo"
+                        | "collstats"
+                        | "count"
+                        | "dbstats"
+                        | "distinct"
+                        | "explain"
+                        | "find"
+                        | "hello"
+                        | "ismaster"
+                        | "listcollections"
+                        | "listdatabases"
+                        | "listindexes"
+                        | "ping"
+                        | "serverstatus"
+                )
+            }),
+        Some(_) => false,
+        None => {
+            command.get("collection").and_then(Value::as_str).is_some()
+                && command.keys().all(|key| {
+                    matches!(
+                        key.to_ascii_lowercase().as_str(),
+                        "collection" | "database" | "limit" | "skip" | "sort" | "projection"
+                    )
+                })
+        }
+    }
+}
+
+fn mongodb_pipeline_has_write_stage(value: Option<&Value>) -> bool {
+    value.and_then(Value::as_array).is_none_or(|pipeline| {
+        pipeline.iter().any(|stage| {
+            stage.as_object().is_some_and(|stage| {
+                stage
+                    .keys()
+                    .any(|key| matches!(key.to_ascii_lowercase().as_str(), "$out" | "$merge"))
+            })
+        })
+    })
+}
+
+fn validate_redis_read_only_query(query: &str) -> std::result::Result<(), String> {
+    let commands = query
+        .split(['\n', '\r', ';'])
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<Vec<_>>();
+    if commands.is_empty() || commands.len() > 50 {
+        return Err("Redis read request must contain 1 to 50 commands".to_string());
+    }
+    if commands.iter().all(|command| {
+        let mut tokens = command.split_whitespace();
+        let name = tokens.next().unwrap_or_default().to_ascii_uppercase();
+        let subcommand = tokens.next().unwrap_or_default().to_ascii_uppercase();
+        matches!(
+            name.as_str(),
+            "COMMAND"
+                | "DBSIZE"
+                | "EXISTS"
+                | "FT.INFO"
+                | "FT.SEARCH"
+                | "GET"
+                | "GETRANGE"
+                | "HGET"
+                | "HGETALL"
+                | "HEXISTS"
+                | "HKEYS"
+                | "HLEN"
+                | "HMGET"
+                | "HSCAN"
+                | "HSTRLEN"
+                | "HVALS"
+                | "INFO"
+                | "JSON.GET"
+                | "JSON.MGET"
+                | "LINDEX"
+                | "LLEN"
+                | "LRANGE"
+                | "MGET"
+                | "PING"
+                | "PTTL"
+                | "SCAN"
+                | "SCARD"
+                | "SISMEMBER"
+                | "SMEMBERS"
+                | "SRANDMEMBER"
+                | "SSCAN"
+                | "STRLEN"
+                | "TTL"
+                | "TYPE"
+                | "XINFO"
+                | "XLEN"
+                | "XRANGE"
+                | "XREAD"
+                | "XREVRANGE"
+                | "ZCARD"
+                | "ZCOUNT"
+                | "ZLEXCOUNT"
+                | "ZRANGE"
+                | "ZRANGEBYLEX"
+                | "ZRANGEBYSCORE"
+                | "ZRANK"
+                | "ZREVRANGE"
+                | "ZREVRANGEBYLEX"
+                | "ZREVRANGEBYSCORE"
+                | "ZREVRANK"
+                | "ZSCAN"
+                | "ZSCORE"
+        ) || matches!(
+            (name.as_str(), subcommand.as_str()),
+            ("ACL", "CAT" | "GETUSER" | "LIST")
+                | ("CLIENT", "ID" | "INFO" | "LIST")
+                | ("CONFIG", "GET" | "HELP")
+                | ("FUNCTION", "LIST" | "STATS")
+                | ("MEMORY", "STATS" | "USAGE")
+                | ("SCRIPT", "EXISTS" | "HELP")
+                | ("SLOWLOG", "GET" | "LEN")
+        )
+    }) {
+        Ok(())
+    } else {
+        Err("Redis request contains a command that is not read-only".to_string())
+    }
 }
 
 fn strip_transaction_results(results: &mut Vec<QueryResult>) {
@@ -3204,6 +3626,18 @@ fn sanitize_log_line(line: &str) -> String {
 mod tests {
     use super::*;
 
+    fn stored_connection(id: &str, name: &str, driver: &str) -> StoreSavedConnection {
+        StoreSavedConnection {
+            id: id.to_string(),
+            project_id: "project".to_string(),
+            name: name.to_string(),
+            driver: driver.to_string(),
+            config: json!({}),
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
     #[test]
     fn canonical_digest_is_stable_across_object_key_order() {
         let first = json!({"b":2,"a":{"z":1,"x":0}});
@@ -3223,6 +3657,113 @@ mod tests {
             input_digest(&fixture),
             "2d2372dac0fb37d70eedcaf38ba9a540481b2684d280a7ab2aefbd01911d2de9"
         );
+    }
+
+    #[test]
+    fn prompt_selects_a_unique_connection_by_driver_alias_or_name() {
+        let connections = vec![
+            stored_connection("es-1", "New Elasticsearch Connection", "elasticsearch"),
+            stored_connection("mongo-1", "New MongoDB Connection", "mongodb"),
+            stored_connection("mysql-1", "Pkulaw-test", "mysql"),
+        ];
+
+        assert_eq!(
+            resolve_prompt_connection(&connections, "查看我 es 中有哪些表")
+                .map(|connection| connection.id.as_str()),
+            Some("es-1")
+        );
+        assert_eq!(
+            resolve_prompt_connection(&connections, "查看我MongoDB中的集合")
+                .map(|connection| connection.id.as_str()),
+            Some("mongo-1")
+        );
+        assert_eq!(
+            resolve_prompt_connection(&connections, "查询 Pkulaw-test")
+                .map(|connection| connection.id.as_str()),
+            Some("mysql-1")
+        );
+    }
+
+    #[test]
+    fn prompt_does_not_guess_when_a_driver_has_multiple_connections() {
+        let connections = vec![
+            stored_connection("es-1", "Elasticsearch One", "elasticsearch"),
+            stored_connection("es-2", "Elasticsearch Two", "elasticsearch"),
+            stored_connection("mysql-1", "MySQL", "mysql"),
+        ];
+
+        assert!(resolve_prompt_connection(&connections, "查看 ES 中的索引").is_none());
+        assert!(resolve_prompt_connection(&connections, "比较 ES 和 MySQL").is_none());
+        assert!(resolve_prompt_connection(&connections, "有哪些数据库").is_none());
+    }
+
+    #[test]
+    fn native_read_only_gate_accepts_elasticsearch_search_syntax() {
+        for query in [
+            r#"{"query":{"match_all":{}},"size":5}"#,
+            "POST articles/_search\n{\"query\":{\"match\":{\"title\":\"rust\"}}}",
+            "POST /articles/_count\n{\"query\":{\"term\":{\"published\":true}}}",
+            "GET /articles/_mapping",
+        ] {
+            assert!(
+                validate_native_read_only_query("elasticsearch", query).is_ok(),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_read_only_gate_rejects_elasticsearch_mutations() {
+        for query in [
+            "DELETE /articles/_doc/1",
+            "PUT /articles/_doc/1\n{\"title\":\"changed\"}",
+            "POST /_bulk\n{\"delete\":{\"_index\":\"articles\",\"_id\":\"1\"}}",
+            "POST /articles/_delete_by_query\n{\"query\":{\"match_all\":{}}}",
+        ] {
+            assert!(
+                validate_native_read_only_query("elasticsearch", query).is_err(),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_read_only_gate_preserves_mongodb_and_redis_safety() {
+        assert!(validate_native_read_only_query(
+            "mongodb",
+            r#"{"collection":"users","find":{"active":true},"limit":5}"#
+        )
+        .is_ok());
+        assert!(validate_native_read_only_query(
+            "mongodb",
+            r#"{"find":"users","filter":{"active":true},"limit":5}"#
+        )
+        .is_ok());
+        assert!(validate_native_read_only_query(
+            "mongodb",
+            r#"{"aggregate":"users","pipeline":[{"$match":{"active":true}}],"cursor":{}}"#
+        )
+        .is_ok());
+        assert!(validate_native_read_only_query(
+            "mongodb",
+            r#"{"count":"users","query":{"active":true}}"#
+        )
+        .is_ok());
+        assert!(validate_native_read_only_query(
+            "mongodb",
+            r#"{"collection":"users","aggregate":[{"$match":{"active":true}},{"$out":"copy"}]}"#
+        )
+        .is_err());
+        assert!(validate_native_read_only_query(
+            "mongodb",
+            r#"{"aggregate":"users","pipeline":[{"$match":{"active":true}},{"$merge":"copy"}],"cursor":{}}"#
+        )
+        .is_err());
+        assert!(
+            validate_native_read_only_query("mongodb", r#"{"find":"users","filter":[]}"#).is_err()
+        );
+        assert!(validate_native_read_only_query("redis", "GET user:1\nTTL user:1").is_ok());
+        assert!(validate_native_read_only_query("redis", "DEL user:1").is_err());
     }
 
     #[test]

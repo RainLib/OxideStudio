@@ -9,6 +9,7 @@ interface TableDdlViewProps {
   isLoading: boolean;
   error: string | null;
   onRefresh: () => void;
+  kind?: "ddl" | "mapping";
 }
 
 const ddlEditorOptions = {
@@ -41,6 +42,7 @@ export function TableDdlView({
   isLoading,
   error,
   onRefresh,
+  kind = "ddl",
 }: TableDdlViewProps) {
   const { mode } = useTheme();
   const [copied, setCopied] = useState(false);
@@ -60,15 +62,17 @@ export function TableDdlView({
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[hsl(var(--wb-editor))]">
       <div className="flex h-7 shrink-0 items-center border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-2">
-        <span className="text-[10px] wb-muted">Generated DDL · read-only</span>
+        <span className="text-[10px] wb-muted">
+          {kind === "mapping" ? "Index Mapping" : "Generated DDL"} · read-only
+        </span>
         <div className="ml-auto flex items-center gap-0.5">
           <button
             type="button"
             className="wb-icon-button"
             onClick={() => void copyDdl()}
             disabled={!ddl || isLoading}
-            title="Copy DDL"
-            aria-label="Copy DDL"
+            title={kind === "mapping" ? "Copy Mapping" : "Copy DDL"}
+            aria-label={kind === "mapping" ? "Copy Mapping" : "Copy DDL"}
           >
             {copied ? <Check size={12} /> : <Copy size={12} />}
           </button>
@@ -77,8 +81,8 @@ export function TableDdlView({
             className="wb-icon-button"
             onClick={onRefresh}
             disabled={isLoading}
-            title="Refresh DDL"
-            aria-label="Refresh DDL"
+            title={kind === "mapping" ? "Refresh Mapping" : "Refresh DDL"}
+            aria-label={kind === "mapping" ? "Refresh Mapping" : "Refresh DDL"}
           >
             <RefreshCw
               size={12}
@@ -94,7 +98,11 @@ export function TableDdlView({
             {error}
           </div>
         ) : !ddl && isLoading ? (
-          <div className="space-y-2 px-12 py-8" role="status" aria-label="Loading DDL">
+          <div
+            className="space-y-2 px-12 py-8"
+            role="status"
+            aria-label="Loading DDL"
+          >
             {[72, 54, 84, 62, 46].map((width, index) => (
               <div
                 key={index}
@@ -106,8 +114,13 @@ export function TableDdlView({
         ) : (
           <Editor
             height="100%"
-            language="sql"
-            value={ddl || "-- DDL is not available for this object."}
+            language={kind === "mapping" ? "json" : "sql"}
+            value={
+              ddl ||
+              (kind === "mapping"
+                ? "{}"
+                : "-- DDL is not available for this object.")
+            }
             theme={mode === "light" ? "vs" : "oxide-dark"}
             beforeMount={(monaco) => {
               monaco.editor.defineTheme("oxide-dark", {

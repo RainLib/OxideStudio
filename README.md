@@ -168,6 +168,10 @@ OxideStudio/
 完整的当前架构、DataGrip 对标矩阵和优先路线图见
 [`docs/README.md`](docs/README.md)。
 
+外部 AI 可以在不启动 OxideStudio 界面的情况下，通过独立 Rust `oxide-agent`
+使用项目级只读 MCP/CLI 工具。配置方式和安全边界见
+[`docs/EXTERNAL_AI_INTEGRATION.md`](docs/EXTERNAL_AI_INTEGRATION.md)。
+
 ---
 
 ## 🤝 贡献与支持

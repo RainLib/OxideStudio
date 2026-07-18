@@ -90,7 +90,7 @@ WebView 与 Rust 之间仍使用 `@tauri-apps/api/core` 的 `invoke()` 和 Tauri
 | `useSettingsStore` | 外观、布局、快捷键、编辑器、Data Grid 设置 | Rust settings command |
 | `useHistoryStore` | 项目级查询执行日志、乐观删除与旧数据迁移 | MetaStore `query_history` + 内存 |
 | `useTaskStore` | 查询、元数据等后台任务状态 | 内存 |
-| `useAi*Store` | 非敏感 AI 配置、Turn view model 和审计状态 | localStorage / 内存；provider secret 在 OS credential manager |
+| `useAi*Store` | 非敏感 AI 配置、Turn view model 和审计状态 | localStorage / 内存；provider secret 在应用的用户级 credential file |
 
 当前 Store 之间存在有意的领域协作，例如切换项目会清理连接与 schema 快照，执行 DDL 后会刷新元数据。新增跨 Store 行为时应放入可测试的领域函数，避免继续在组件事件中拼接多步副作用。
 
@@ -159,6 +159,8 @@ SQL 拼接、标识符引用、只读判断、修订冲突和路径穿越防护�
 - Redis
 - Elasticsearch
 
+非关系型对象仍通过同一 capability 边界进入工作区，但不伪装成 SQL：MongoDB collection、Redis key 与 Elasticsearch index 打开只读、有界的原生数据预览。Redis Explorer 保留 `db N` namespace 层；Elasticsearch 连接时探测 6/7/8 主版本，6.x 使用 typed mapping/document path，7/8 使用 typeless API。完整的服务端分页、过滤和编辑能力仍需各数据模型独立实现。
+
 SQLite 和 SQL Server 当前没有运行时 driver；Cargo 中的 `sqlx/sqlite` feature 只服务本地 `MetaStore`，不代表可连接 SQLite 数据源。任何面向用户或 AI 的支持列表都以后端 `list_database_capabilities` 为权威来源，前端 profile 只提供显示/连接表单信息和离线降级。
 
 ### 4.4 本地持久化
@@ -172,7 +174,7 @@ SQLite 和 SQL Server 当前没有运行时 driver；Cargo 中的 `sqlx/sqlite` 
 
 `resources` 是 adjacency-list 结构，并为 parent、connection 和搜索组合建立索引。密码等连接敏感信息不得写入文档、测试快照或日志。
 
-Deep Agents 状态不写入上述 metadata resource。`AgentStore` 使用独立的 `agent-state.db`：`agent_threads`、`agent_checkpoints`、`agent_artifacts` 以及 LangGraph 专用的 `agent_graph_checkpoints`、`agent_graph_writes` 按项目隔离，值以 AES-256-GCM 加密，每条记录使用独立 nonce，AAD 绑定 project/thread/namespace/checkpoint/task/write index，默认保留七天。主密钥保存在 OS credential manager；keyring 不可用时退回仅当前进程可读的加密 session store，不把明文落盘。旧 `assistant_tasks` 只保留迁移期的安全任务摘要/receipt，不是新的 Deep Agents 可执行 checkpoint。
+Deep Agents 状态不写入上述 metadata resource。`AgentStore` 使用独立的 `agent-state-v2.db`：`agent_threads`、`agent_checkpoints`、`agent_artifacts` 以及 LangGraph 专用的 `agent_graph_checkpoints`、`agent_graph_writes` 按项目隔离，值以 AES-256-GCM 加密，每条记录使用独立 nonce，AAD 绑定 project/thread/namespace/checkpoint/task/write index，默认保留七天。主密钥保存在 OxideStudio 用户私有 credential file（Unix 文件 `0600`/目录 `0700`，Windows 用户 profile ACL），运行时不访问 OS credential manager；密钥文件不可用时退回仅当前进程可读的加密 session store，不把明文落盘。旧 `assistant_tasks` 只保留迁移期的安全任务摘要/receipt，不是新的 Deep Agents 可执行 checkpoint。
 
 ### 4.5 Project Files 安全边界
 
@@ -240,7 +242,7 @@ Rust `AgentHostManager` 在 setup 时不启动进程，首次已配置 AI 请求
 
 `agent-contract` 把前端工具 manifest、provider capability、workspace identity 和 typed `AgentEvent` 固化为 Zod schema。Chat 不获得数据库或 subagent 工具；Plan 只接收只读工具；Agent 接收 Rust 过滤后的 manifest。同步 schema/query/verification subagent 默认只读且无文件系统。sidecar 禁用 FilesystemBackend、LocalShellBackend、shell 与通用子代理。
 
-模型 API key 存在 OS credential manager，由 Rust `ModelGateway` 完成 OpenAI-compatible complete/SSE streaming、取消、deadline、usage 与 tool call 归一化。sidecar 不接收 key。工具实际执行也回到 Rust；Rust重新校验 project/connection/config revision/context、canonical input digest、SQL risk 和一次性 approval lease。大结果成为有界 observation 与项目级 artifact reference，不能以 raw rows 穿过 IPC。
+模型 API key 存在 OxideStudio 用户配置目录的独立 credential file；文件名仅含 normalized endpoint 的 hash，不进入项目、Zustand/localStorage、checkpoint 或 sidecar。Unix 使用 `0700` 目录与 `0600` 文件，Windows 继承当前用户 profile ACL；设置页保存后重新打开文件验证，测试请求与 Agent `ModelGateway` 只走同一文件路径。Rust 完成 OpenAI-compatible complete/SSE streaming、取消、deadline、usage 与 tool call 归一化。工具实际执行也回到 Rust；Rust重新校验 project/connection/config revision/context、canonical input digest、SQL risk 和一次性 approval lease。大结果成为有界 observation 与项目级 artifact reference，不能以 raw rows 穿过 IPC。Agent checkpoint 的 AES-GCM 主密钥仍独立保存在 OS credential manager。
 
 上下文层使用真实 provider token profile、长问题切块/digest 和 Deep Agents summarization/offload。内部 summarization stream 不显示成最终回答；持久 `OxideCheckpointSaver` 通过 Rust RPC 保存 LangGraph checkpoint/pending writes，后续 Turn 只追加新 prompt，不重复注入全量历史。`ask_user` 与 approval 使用 LangGraph `interrupt()`，回答通过 `Command({ resume })` 恢复；sidecar 重启后可从加密 graph checkpoint 继续。approval lease 只存在 Rust/当前 sidecar 内存和单次 RPC 中，绝不写入 checkpoint；丢失 lease 时 mutation fail-closed。数据库 mutation receipt/exactly-once 与完整应用进程崩溃后的恢复 UX 仍不作完成承诺，任何不确定 mutation 都不得自动重放。
 

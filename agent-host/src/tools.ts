@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   SIDECAR_METHODS,
   boundedObservationSchema,
+  clarificationOptionSchema,
   clarificationQuestionSchema,
   type AgentToolManifestEntry,
   type AnswerClarificationParams,
@@ -14,6 +15,19 @@ import {
   type ToolInvokeRequest,
 } from "@oxide/agent-contract";
 import type { TurnExecution } from "./runtime.js";
+import { AgentProtocolError } from "./rpc.js";
+
+const askUserQuestionInputSchema = clarificationQuestionSchema
+  .omit({
+    allowFreeText: true,
+    options: true,
+  })
+  .extend({
+    // The model-facing boundary is intentionally wider than the UI contract.
+    // Some OpenAI-compatible models occasionally ignore maxItems=3. The host
+    // normalizes those calls instead of failing the entire turn.
+    options: z.array(clarificationOptionSchema).min(2).max(8),
+  });
 
 export function createProxyTools(execution: TurnExecution) {
   return execution.params.tools
@@ -41,11 +55,65 @@ export function createAskUserTool(execution: TurnExecution) {
     description:
       "Pause this turn and ask the user only when a material goal, scope, success criterion, connection, or safety constraint is ambiguous.",
     schema: z.object({
-      questions: z.array(clarificationQuestionSchema).min(1).max(3),
+      // Whether free text is allowed is an OxideStudio UI policy, not a model
+      // choice. Unknown legacy values are stripped by Zod and normalized below.
+      questions: z.array(askUserQuestionInputSchema).min(1).max(6),
     }),
     func: async ({ questions }, _runManager, config) =>
-      askUser(execution, questions, toolInvocationId(config)),
+      askUser(
+        execution,
+        normalizeClarificationQuestions(questions),
+        toolInvocationId(config),
+      ),
   });
+}
+
+function normalizeClarificationQuestions(
+  questions: Array<z.infer<typeof askUserQuestionInputSchema>>,
+): ClarificationQuestion[] {
+  return questions.slice(0, 3).map((question) => {
+    const uniqueOptions = question.options.filter(
+      (option, index, options) =>
+        options.findIndex((candidate) => candidate.id === option.id) === index,
+    );
+    const withoutRedundantFreeText = uniqueOptions.filter(
+      (option) => !isRedundantFreeTextOption(option.id, option.label),
+    );
+    const candidates =
+      withoutRedundantFreeText.length >= 2
+        ? withoutRedundantFreeText
+        : uniqueOptions;
+
+    return clarificationQuestionSchema.parse({
+      ...question,
+      options: candidates.slice(0, 3),
+      allowFreeText: true,
+    });
+  });
+}
+
+function isRedundantFreeTextOption(id: string, label: string): boolean {
+  const normalizedId = id.trim().toLowerCase().replaceAll("-", "_");
+  if (
+    [
+      "other",
+      "others",
+      "custom",
+      "free_text",
+      "freetext",
+      "manual_input",
+    ].includes(normalizedId)
+  ) {
+    return true;
+  }
+
+  const normalizedLabel = label.trim().toLowerCase();
+  return (
+    /^(?:其他|其它|自定义|手动输入)(?:$|[\s（(：:])/u.test(normalizedLabel) ||
+    /^(?:other|others|something else|none of the above)(?:$|\b|\s|\()/u.test(
+      normalizedLabel,
+    )
+  );
 }
 
 async function invokeProxyTool(
@@ -149,6 +217,62 @@ async function invokeProxyTool(
     });
     return serializeObservation(observation);
   } catch (error) {
+    const selection = connectionSelection(error);
+    if (
+      selection &&
+      manifest.permissions.every((permission) => permission === "read")
+    ) {
+      const resolution = await askUser(
+        execution,
+        [
+          {
+            id: "connectionId",
+            prompt: "Which database connection should I use?",
+            options: selection.candidates.slice(0, 3).map((candidate) => ({
+              id: candidate.id,
+              label: candidate.name,
+              description: candidate.driver,
+            })),
+            allowFreeText: true,
+          },
+        ],
+        `${invocationId ?? callId}:connection-selection`,
+      );
+      const selectedConnectionId = selectedConnectionFromResolution(
+        resolution,
+        selection.candidates,
+      );
+      const resolvedInput = {
+        ...(isRecord(input) ? input : {}),
+        connectionId: selectedConnectionId,
+      };
+      const resolvedDigest = canonicalInputDigest(resolvedInput);
+      const resolvedRequest: ToolInvokeRequest = {
+        ...execution.metadataFor(`tool:${callId}:connection`),
+        callId,
+        toolName: manifest.name,
+        input: resolvedInput,
+        inputDigest: resolvedDigest,
+      };
+      const raw = await execution.withReadOnlyLimit(() =>
+        execution.peer.call<unknown>(
+          SIDECAR_METHODS.toolInvoke,
+          resolvedRequest,
+          execution.remainingMs(),
+        ),
+      );
+      const observation = boundedObservationSchema.parse(raw);
+      await execution.emit({
+        type: "tool.finished",
+        callId,
+        toolName: manifest.name,
+        label,
+        success: true,
+        detail: observation.summary,
+      });
+      return serializeObservation(observation);
+    }
+
     await execution.emit({
       type: "tool.finished",
       callId,
@@ -159,6 +283,77 @@ async function invokeProxyTool(
     });
     throw error;
   }
+}
+
+type ConnectionCandidate = {
+  id: string;
+  name: string;
+  driver: string;
+};
+
+function connectionSelection(
+  error: unknown,
+): { candidates: ConnectionCandidate[] } | null {
+  if (!(error instanceof AgentProtocolError) || !isRecord(error.data)) {
+    return null;
+  }
+  if (
+    error.data.kind !== "connection_selection_required" ||
+    !Array.isArray(error.data.candidates)
+  ) {
+    return null;
+  }
+  const candidates = error.data.candidates.flatMap((candidate) => {
+    if (
+      !isRecord(candidate) ||
+      typeof candidate.id !== "string" ||
+      !candidate.id.trim() ||
+      typeof candidate.name !== "string" ||
+      !candidate.name.trim() ||
+      typeof candidate.driver !== "string" ||
+      !candidate.driver.trim()
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: candidate.id.trim(),
+        name: candidate.name.trim(),
+        driver: candidate.driver.trim(),
+      },
+    ];
+  });
+  return candidates.length >= 2 ? { candidates } : null;
+}
+
+function selectedConnectionFromResolution(
+  resolution: string,
+  candidates: ConnectionCandidate[],
+): string {
+  let answer = "";
+  try {
+    const parsed = JSON.parse(resolution) as unknown;
+    if (isRecord(parsed) && isRecord(parsed.answers)) {
+      const value = parsed.answers.connectionId;
+      if (typeof value === "string") answer = value.trim();
+    }
+  } catch {
+    // askUser always returns JSON; the explicit error below is safer than
+    // guessing if a stale checkpoint contains a malformed value.
+  }
+  const normalized = answer.toLowerCase();
+  const matches = candidates.filter(
+    (candidate) =>
+      candidate.id === answer ||
+      candidate.name.toLowerCase() === normalized ||
+      candidate.driver.toLowerCase() === normalized,
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      "The selected database connection is invalid or ambiguous. Choose one listed connection.",
+    );
+  }
+  return matches[0]!.id;
 }
 
 async function askUser(

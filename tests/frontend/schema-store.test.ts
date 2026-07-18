@@ -153,6 +153,177 @@ describe("schema store", () => {
     });
   });
 
+  it("revalidates an empty cached MongoDB collection snapshot", async () => {
+    useConnectionStore.setState({
+      connections: [
+        {
+          id: "mongo-1",
+          name: "MongoDB",
+          driver: "mongodb",
+          url: "mongodb://localhost:27017/app",
+          database: "app",
+        },
+      ],
+      activeConnectionId: "mongo-1",
+      connectedConnectionIds: ["mongo-1"],
+      isConnected: true,
+    });
+    useSchemaStore.setState({
+      currentSchema: "app",
+      collections: [],
+      collectionLoadingKey: null,
+      isCollectionsLoading: false,
+      lastLoadedObjectKey: "sqls:mongo-1:mongodb:app:collections",
+    });
+    mocks.getResources.mockResolvedValueOnce([
+      {
+        id: "mongo-1:mongodb:app:COLLECTION_CACHE",
+        connection_id: "mongo-1",
+        parent_id: "mongo-1:mongodb:app",
+        kind: "COLLECTION_CACHE",
+        name: "COLLECTION_CACHE",
+        metadata: { driver: "mongodb" },
+        last_updated: Date.now(),
+      },
+    ]);
+    mocks.getCollections.mockResolvedValueOnce([
+      {
+        name: "messages",
+        namespace: "app",
+        type: "collection",
+        documentCount: 12,
+      },
+    ]);
+
+    await useSchemaStore
+      .getState()
+      .loadCollections("mongo-1", "app", false, "", true);
+
+    expect(mocks.getCollections).toHaveBeenCalledWith("mongo-1", "app");
+    expect(useSchemaStore.getState()).toMatchObject({
+      collections: [expect.objectContaining({ name: "messages" })],
+      collectionLoadingKey: null,
+      isCollectionsLoading: false,
+    });
+  });
+
+  it("keeps cached MongoDB collections when background revalidation fails", async () => {
+    useConnectionStore.setState({
+      connections: [
+        {
+          id: "mongo-1",
+          name: "MongoDB",
+          driver: "mongodb",
+          url: "mongodb://localhost:27017/app",
+          database: "app",
+        },
+      ],
+      activeConnectionId: "mongo-1",
+      connectedConnectionIds: ["mongo-1"],
+      isConnected: true,
+    });
+    useSchemaStore.setState({
+      currentSchema: "app",
+      collections: [],
+      collectionLoadingKey: null,
+      isCollectionsLoading: false,
+      lastLoadedObjectKey: null,
+    });
+    mocks.getResources.mockResolvedValueOnce([
+      {
+        id: "mongo-1:mongodb:app:events",
+        connection_id: "mongo-1",
+        parent_id: "mongo-1:mongodb:app",
+        kind: "COLLECTION",
+        name: "events",
+        metadata: {
+          driver: "mongodb",
+          namespace: "app",
+          type: "collection",
+        },
+        last_updated: Date.now(),
+      },
+      {
+        id: "mongo-1:mongodb:app:COLLECTION_CACHE",
+        connection_id: "mongo-1",
+        parent_id: "mongo-1:mongodb:app",
+        kind: "COLLECTION_CACHE",
+        name: "COLLECTION_CACHE",
+        metadata: { driver: "mongodb" },
+        last_updated: Date.now(),
+      },
+    ]);
+    mocks.getCollections.mockRejectedValueOnce(new Error("offline"));
+
+    await useSchemaStore
+      .getState()
+      .loadCollections("mongo-1", "app", false, "", true);
+
+    expect(useSchemaStore.getState()).toMatchObject({
+      collections: [expect.objectContaining({ name: "events" })],
+      collectionLoadingKey: null,
+      isCollectionsLoading: false,
+    });
+  });
+
+  it("revalidates cached Elasticsearch indices in the background", async () => {
+    useConnectionStore.setState({
+      connections: [
+        {
+          id: "elastic-1",
+          name: "Elasticsearch",
+          driver: "elasticsearch",
+          url: "http://localhost:9200",
+          database: "default",
+        },
+      ],
+      activeConnectionId: "elastic-1",
+      connectedConnectionIds: ["elastic-1"],
+      isConnected: true,
+    });
+    useSchemaStore.setState({
+      currentSchema: "default",
+      collections: [],
+      collectionLoadingKey: null,
+      isCollectionsLoading: false,
+      lastLoadedObjectKey: "sqls:elastic-1:elasticsearch:default:collections",
+    });
+    mocks.getResources.mockResolvedValueOnce([
+      {
+        id: "elastic-1:elasticsearch:default:COLLECTION_CACHE",
+        connection_id: "elastic-1",
+        parent_id: "elastic-1:elasticsearch:default",
+        kind: "COLLECTION_CACHE",
+        name: "COLLECTION_CACHE",
+        metadata: { driver: "elasticsearch" },
+        last_updated: Date.now(),
+      },
+    ]);
+    mocks.getCollections.mockResolvedValueOnce([
+      {
+        name: "events-2026",
+        namespace: "default",
+        type: "index",
+        documentCount: 42,
+      },
+    ]);
+
+    await useSchemaStore
+      .getState()
+      .loadCollections("elastic-1", "default", false, "", true);
+
+    expect(useSchemaStore.getState().collections).toEqual([
+      expect.objectContaining({ name: "events-2026", type: "index" }),
+    ]);
+    expect(mocks.replaceResources).toHaveBeenCalledWith(
+      "elastic-1",
+      "elastic-1:elasticsearch:default",
+      "COLLECTION",
+      expect.any(Array),
+      "sqls",
+    );
+  });
+
   it("loads Redis keys in bounded cursor pages", async () => {
     useConnectionStore.setState({
       connections: [
@@ -200,14 +371,13 @@ describe("schema store", () => {
           metadata: expect.objectContaining({ total: 2, loadedCount: 1 }),
         }),
       ],
-      "sqls"
+      "sqls",
     );
     await useSchemaStore.getState().loadMoreCollections("redis-1", "0");
 
-    expect(useSchemaStore.getState().collections.map((item) => item.name)).toEqual([
-      "key:1",
-      "key:2",
-    ]);
+    expect(
+      useSchemaStore.getState().collections.map((item) => item.name),
+    ).toEqual(["key:1", "key:2"]);
     expect(useSchemaStore.getState().collectionNextCursor).toBeNull();
     expect(mocks.getCollectionsPage).toHaveBeenNthCalledWith(
       2,
@@ -215,7 +385,7 @@ describe("schema store", () => {
       "0",
       "42",
       100,
-      null
+      null,
     );
   });
 
@@ -239,15 +409,17 @@ describe("schema store", () => {
       collectionLoadingKey: null,
       isCollectionsLoading: false,
     });
-    let resolvePage: ((page: {
-      items: Array<{ name: string; namespace: string; type: string }>;
-      nextCursor: null;
-      total: number;
-    }) => void) | undefined;
+    let resolvePage:
+      | ((page: {
+          items: Array<{ name: string; namespace: string; type: string }>;
+          nextCursor: null;
+          total: number;
+        }) => void)
+      | undefined;
     mocks.getCollectionsPage.mockReturnValueOnce(
       new Promise((resolve) => {
         resolvePage = resolve;
-      })
+      }),
     );
 
     const first = useSchemaStore
@@ -309,7 +481,7 @@ describe("schema store", () => {
       "0",
       null,
       100,
-      "user:42"
+      "user:42",
     );
     expect(useSchemaStore.getState()).toMatchObject({
       collectionFilter: "user:42",
@@ -325,12 +497,11 @@ describe("schema store", () => {
       "0",
       "filtered-next",
       100,
-      "user:42"
-    );
-    expect(useSchemaStore.getState().collections.map((item) => item.name)).toEqual([
       "user:42",
-      "user:43",
-    ]);
+    );
+    expect(
+      useSchemaStore.getState().collections.map((item) => item.name),
+    ).toEqual(["user:42", "user:43"]);
   });
 
   it("ignores stale Redis key pages after the filter changes", async () => {
@@ -364,7 +535,7 @@ describe("schema store", () => {
       .mockReturnValueOnce(
         new Promise((resolve) => {
           resolveStalePage = resolve;
-        })
+        }),
       )
       .mockResolvedValueOnce({
         items: [{ name: "new:1", namespace: "0", type: "string" }],
@@ -390,9 +561,9 @@ describe("schema store", () => {
       isCollectionsLoading: false,
       collectionLoadingKey: null,
     });
-    expect(useSchemaStore.getState().collections.map((item) => item.name)).toEqual([
-      "new:1",
-    ]);
+    expect(
+      useSchemaStore.getState().collections.map((item) => item.name),
+    ).toEqual(["new:1"]);
   });
 
   it("caps retained Redis keys after loading more pages", async () => {
@@ -473,19 +644,19 @@ describe("schema store", () => {
     });
 
     expect(useSchemaStore.getState().restoreConnectionSnapshot("redis-1")).toBe(
-      true
+      true,
     );
     expect(useSchemaStore.getState().collections).toHaveLength(500);
     expect(useSchemaStore.getState().collections[0]?.name).toBe("key:9500");
     expect(useSchemaStore.getState().lastLoadedObjectKey).toBe(
-      "sqls:redis-1:redis:0:collections"
+      "sqls:redis-1:redis:0:collections",
     );
 
     useSchemaStore.setState({ collections: legacyKeys });
     useSchemaStore.getState().snapshotActiveMetadata();
     expect(
       useSchemaStore.getState().connectionSnapshots["sqls:redis-1:redis"]
-        ?.collections
+        ?.collections,
     ).toHaveLength(500);
 
     mocks.getResources.mockResolvedValueOnce([
@@ -507,7 +678,7 @@ describe("schema store", () => {
     await useSchemaStore.getState().loadSchemas("redis-1");
     expect(
       useSchemaStore.getState().connectionSnapshots["sqls:redis-1:redis"]
-        ?.collections
+        ?.collections,
     ).toHaveLength(500);
   });
 
@@ -544,9 +715,7 @@ describe("schema store", () => {
     ]);
 
     await expect(
-      useSchemaStore
-        .getState()
-        .hydrateConnectionMetadataFromCache("redis-1")
+      useSchemaStore.getState().hydrateConnectionMetadataFromCache("redis-1"),
     ).resolves.toBe(true);
 
     expect(useSchemaStore.getState()).toMatchObject({
@@ -591,15 +760,13 @@ describe("schema store", () => {
     mocks.getResources.mockClear();
 
     await expect(
-      useSchemaStore
-        .getState()
-        .hydrateSchemaObjectsFromCache("redis-1", "0")
+      useSchemaStore.getState().hydrateSchemaObjectsFromCache("redis-1", "0"),
     ).resolves.toBe(false);
 
     expect(mocks.getResources).not.toHaveBeenCalled();
     expect(useSchemaStore.getState().collections).toEqual([]);
     expect(
-      useSchemaStore.getState().objectSnapshots["sqls:redis-1:redis:0"]
+      useSchemaStore.getState().objectSnapshots["sqls:redis-1:redis:0"],
     ).toBeUndefined();
   });
 
@@ -618,11 +785,46 @@ describe("schema store", () => {
     });
   });
 
+  it("selects a namespace before cached children finish hydrating", async () => {
+    const cacheRead = createDeferred<never[]>();
+    mocks.getResources.mockReturnValueOnce(cacheRead.promise);
+
+    const switching = useSchemaStore.getState().setCurrentSchema("audit");
+
+    expect(useSchemaStore.getState()).toMatchObject({
+      currentSchema: "audit",
+      selectedTable: null,
+      tables: [],
+    });
+    expect(mocks.setCurrentSchema).not.toHaveBeenCalled();
+
+    cacheRead.resolve([]);
+    await switching;
+    expect(mocks.setCurrentSchema).toHaveBeenCalledWith("conn-1", "audit");
+  });
+
+  it("ignores a stale namespace cache read after a newer selection", async () => {
+    const auditCacheRead = createDeferred<never[]>();
+    mocks.getResources
+      .mockReturnValueOnce(auditCacheRead.promise)
+      .mockResolvedValueOnce([]);
+
+    const selectAudit = useSchemaStore.getState().setCurrentSchema("audit");
+    const selectPublic = useSchemaStore.getState().setCurrentSchema("public");
+    await selectPublic;
+    auditCacheRead.resolve([]);
+    await selectAudit;
+
+    expect(useSchemaStore.getState().currentSchema).toBe("public");
+    expect(mocks.setCurrentSchema).toHaveBeenCalledTimes(1);
+    expect(mocks.setCurrentSchema).toHaveBeenCalledWith("conn-1", "public");
+  });
+
   it("rolls back schema state when backend activation fails", async () => {
     mocks.setCurrentSchema.mockRejectedValueOnce(new Error("schema missing"));
 
     await expect(
-      useSchemaStore.getState().setCurrentSchema("missing")
+      useSchemaStore.getState().setCurrentSchema("missing"),
     ).rejects.toThrow("schema missing");
 
     expect(useSchemaStore.getState()).toMatchObject({
@@ -631,19 +833,24 @@ describe("schema store", () => {
       isCollectionsLoading: true,
       isFunctionsLoading: true,
     });
-    expect(useSchemaStore.getState().tables.map((table) => table.name)).toEqual([
-      "users",
-    ]);
+    expect(useSchemaStore.getState().tables.map((table) => table.name)).toEqual(
+      ["users"],
+    );
     expect(
-      useSchemaStore.getState().collections.map((collection) => collection.name)
+      useSchemaStore
+        .getState()
+        .collections.map((collection) => collection.name),
     ).toEqual(["events"]);
     expect(
-      useSchemaStore.getState().functions.map((func) => func.name)
+      useSchemaStore.getState().functions.map((func) => func.name),
     ).toEqual(["calculate_score"]);
   });
 
   it("updates local schema state without backend activation when disconnected", async () => {
-    useConnectionStore.setState({ activeConnectionId: null, isConnected: false });
+    useConnectionStore.setState({
+      activeConnectionId: null,
+      isConnected: false,
+    });
 
     await useSchemaStore.getState().setCurrentSchema("audit");
 
@@ -657,7 +864,7 @@ describe("schema store", () => {
     expect(mocks.setCurrentSchema).toHaveBeenCalledWith("conn-1", "audit");
     expect(localStorageMock.setItem).toHaveBeenCalledWith(
       "oxide-studio-default-schema:sqls:conn-1:postgres",
-      "audit"
+      "audit",
     );
     expect(useSchemaStore.getState()).toMatchObject({
       currentSchema: "audit",
@@ -673,7 +880,7 @@ describe("schema store", () => {
     mocks.setCurrentSchema.mockRejectedValueOnce(new Error("schema missing"));
 
     await expect(
-      useSchemaStore.getState().setDefaultSchema("missing")
+      useSchemaStore.getState().setDefaultSchema("missing"),
     ).rejects.toThrow("schema missing");
 
     expect(localStorageMock.setItem).not.toHaveBeenCalled();
@@ -745,16 +952,17 @@ describe("schema store", () => {
       currentSchema: "audit",
       isLoading: false,
     });
-    expect(useSchemaStore.getState().connectionSnapshots["sqls:conn-1:postgres"])
-      .toMatchObject({
-        schemas: ["audit"],
-        currentSchema: "audit",
-        lastLoadedConnectionId: "sqls:conn-1:postgres",
-      });
+    expect(
+      useSchemaStore.getState().connectionSnapshots["sqls:conn-1:postgres"],
+    ).toMatchObject({
+      schemas: ["audit"],
+      currentSchema: "audit",
+      lastLoadedConnectionId: "sqls:conn-1:postgres",
+    });
     expect(
       useSchemaStore.getState().metadataNodeStates[
         getConnectionMetadataNodeKey("conn-1", "postgres")
-      ]
+      ],
     ).toMatchObject({
       status: "ready",
       source: "cache",
@@ -790,7 +998,7 @@ describe("schema store", () => {
 
     expect(hydrated).toBe(true);
     expect(useConnectionStore.getState().connectedConnectionIds).toContain(
-      "conn-1"
+      "conn-1",
     );
     expect(useSchemaStore.getState()).toMatchObject({
       schemas: ["audit"],
@@ -832,13 +1040,13 @@ describe("schema store", () => {
 
     const loading = useSchemaStore.getState().loadSchemas("conn-1", true);
     await vi.waitFor(() =>
-      expect(mocks.setCurrentSchema).toHaveBeenCalledWith("conn-1", "audit")
+      expect(mocks.setCurrentSchema).toHaveBeenCalledWith("conn-1", "audit"),
     );
 
     expect(mocks.getResources).toHaveBeenCalledWith(
       "conn-1",
       undefined,
-      "sqls"
+      "sqls",
     );
     expect(mocks.refreshSchemas).not.toHaveBeenCalled();
     expect(useSchemaStore.getState()).toMatchObject({
@@ -881,7 +1089,7 @@ describe("schema store", () => {
     expect(
       useSchemaStore.getState().metadataNodeStates[
         getConnectionMetadataNodeKey("conn-1", "postgres")
-      ]
+      ],
     ).toMatchObject({
       status: "stale",
       source: "cache",
@@ -901,7 +1109,11 @@ describe("schema store", () => {
         last_updated: Date.now(),
       },
     ]);
-    mocks.refreshSchemas.mockResolvedValueOnce(["public", "audit", "reporting"]);
+    mocks.refreshSchemas.mockResolvedValueOnce([
+      "public",
+      "audit",
+      "reporting",
+    ]);
 
     await useSchemaStore.getState().loadSchemas("conn-1", true);
 
@@ -915,19 +1127,16 @@ describe("schema store", () => {
     expect(mocks.getResources).toHaveBeenCalledWith(
       "conn-1",
       undefined,
-      "sqls"
+      "sqls",
     );
     expect(mocks.replaceResources).toHaveBeenCalledWith(
       "conn-1",
       undefined,
       "DATABASE",
       expect.any(Array),
-      "sqls"
+      "sqls",
     );
-    expect(mocks.saveResources).toHaveBeenCalledWith(
-      expect.any(Array),
-      "sqls"
-    );
+    expect(mocks.saveResources).toHaveBeenCalledWith(expect.any(Array), "sqls");
   });
 
   it("coalesces concurrent schema refreshes for one project connection", async () => {
@@ -969,9 +1178,7 @@ describe("schema store", () => {
     mocks.refreshSchemas.mockResolvedValueOnce(["fresh"]);
 
     const cachedLoad = useSchemaStore.getState().loadSchemas("conn-1");
-    const forcedLoad = useSchemaStore
-      .getState()
-      .loadSchemas("conn-1", true);
+    const forcedLoad = useSchemaStore.getState().loadSchemas("conn-1", true);
 
     expect(mocks.getResources).toHaveBeenCalledOnce();
     expect(mocks.refreshSchemas).not.toHaveBeenCalled();
@@ -986,7 +1193,7 @@ describe("schema store", () => {
   it("hydrates schema objects from MetaStore when switching schemas", async () => {
     localStorageMock.setItem(
       "oxide-studio-pinned-tables:sqls:conn-1:postgres:audit",
-      JSON.stringify(["audit_log"])
+      JSON.stringify(["audit_log"]),
     );
     mocks.getResources.mockResolvedValueOnce([
       {
@@ -1022,11 +1229,12 @@ describe("schema store", () => {
       pinnedTables: ["audit_log"],
       lastLoadedObjectKey: "sqls:conn-1:postgres:audit:tables",
     });
-    expect(useSchemaStore.getState().tables.map((table) => table.name)).toEqual([
-      "audit_log",
-    ]);
+    expect(useSchemaStore.getState().tables.map((table) => table.name)).toEqual(
+      ["audit_log"],
+    );
     expect(
-      useSchemaStore.getState().objectSnapshots["sqls:conn-1:postgres:audit"].tables
+      useSchemaStore.getState().objectSnapshots["sqls:conn-1:postgres:audit"]
+        .tables,
     ).toHaveLength(1);
   });
 
@@ -1053,7 +1261,7 @@ describe("schema store", () => {
           name: "audit_log",
         }),
       ]),
-      "sqls"
+      "sqls",
     );
     expect(mocks.saveResources).toHaveBeenCalledWith(
       [
@@ -1062,7 +1270,7 @@ describe("schema store", () => {
           parent_id: "conn-1:postgres:public",
         }),
       ],
-      "sqls"
+      "sqls",
     );
   });
 
@@ -1134,9 +1342,7 @@ describe("schema store", () => {
       },
     ]);
 
-    const cachedLoad = useSchemaStore
-      .getState()
-      .loadTables("conn-1", "public");
+    const cachedLoad = useSchemaStore.getState().loadTables("conn-1", "public");
     const forcedLoad = useSchemaStore
       .getState()
       .loadTables("conn-1", "public", true);
@@ -1148,9 +1354,9 @@ describe("schema store", () => {
 
     expect(mocks.getResources).toHaveBeenCalledTimes(2);
     expect(mocks.refreshTables).toHaveBeenCalledOnce();
-    expect(useSchemaStore.getState().tables.map((table) => table.name)).toEqual([
-      "fresh_users",
-    ]);
+    expect(useSchemaStore.getState().tables.map((table) => table.name)).toEqual(
+      ["fresh_users"],
+    );
   });
 
   it("keeps cached tables visible during a forced background refresh", async () => {
@@ -1194,14 +1400,14 @@ describe("schema store", () => {
       .loadTables("conn-1", "public", true);
     await vi.waitFor(() => expect(mocks.refreshTables).toHaveBeenCalled());
 
-    expect(useSchemaStore.getState().tables.map((table) => table.name)).toEqual([
-      "users",
-    ]);
+    expect(useSchemaStore.getState().tables.map((table) => table.name)).toEqual(
+      ["users"],
+    );
     expect(useSchemaStore.getState().isLoading).toBe(false);
     expect(
       useSchemaStore.getState().metadataNodeStates[
         getSchemaMetadataNodeKey("conn-1", "postgres", "public")
-      ]
+      ],
     ).toMatchObject({
       status: "ready",
       source: "cache",
@@ -1248,14 +1454,14 @@ describe("schema store", () => {
 
     await useSchemaStore.getState().loadTables("conn-1", "public", true);
 
-    expect(useSchemaStore.getState().tables.map((table) => table.name)).toEqual([
-      "users",
-    ]);
+    expect(useSchemaStore.getState().tables.map((table) => table.name)).toEqual(
+      ["users"],
+    );
     expect(useSchemaStore.getState().isLoading).toBe(false);
     expect(
       useSchemaStore.getState().metadataNodeStates[
         getSchemaMetadataNodeKey("conn-1", "postgres", "public")
-      ]
+      ],
     ).toMatchObject({
       status: "stale",
       source: "cache",
@@ -1369,19 +1575,19 @@ describe("schema store", () => {
       1,
       "conn-1",
       "conn-1:postgres:public",
-      "sqls"
+      "sqls",
     );
     expect(mocks.getResources).toHaveBeenNthCalledWith(
       2,
       "conn-1",
       "conn-1:postgres:public",
-      "sqls"
+      "sqls",
     );
     expect(mocks.getResources).toHaveBeenNthCalledWith(
       3,
       "conn-1",
       "conn-1:postgres:public",
-      "sqls"
+      "sqls",
     );
 
     localStorageMock.setItem("oxide-studio-active-project", "other");
@@ -1432,9 +1638,7 @@ describe("schema store", () => {
     });
     useSchemaStore.setState({
       currentSchema: "0",
-      collections: [
-        { name: "existing", namespace: "0", type: "string" },
-      ],
+      collections: [{ name: "existing", namespace: "0", type: "string" }],
       collectionNextCursor: "next",
       collectionFilter: "",
       collectionLoadingKey: null,
@@ -1565,7 +1769,7 @@ describe("schema store", () => {
 
     expect(mocks.deleteResources).toHaveBeenCalledWith(
       "conn-1",
-      "conn-1:postgres:public"
+      "conn-1:postgres:public",
     );
     expect(useSchemaStore.getState()).toMatchObject({
       schemas: ["public", "audit"],
@@ -1602,8 +1806,8 @@ describe("schema store", () => {
       selectedTable: "audit_log",
       lastLoadedObjectKey: "sqls:conn-1:postgres:audit:tables",
     });
-    expect(useSchemaStore.getState().tables.map((table) => table.name)).toEqual([
-      "audit_log",
-    ]);
+    expect(useSchemaStore.getState().tables.map((table) => table.name)).toEqual(
+      ["audit_log"],
+    );
   });
 });

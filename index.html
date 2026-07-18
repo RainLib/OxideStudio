@@ -135,8 +135,8 @@
         }
 
         .startup-panel {
-          width: min(280px, 36vw);
-          flex: 0 0 min(280px, 36vw);
+          width: min(400px, 36vw);
+          flex: 0 0 min(400px, 36vw);
         }
 
         .startup-editor {
@@ -300,6 +300,38 @@
           font-size: 11px;
         }
 
+        .startup-progress-group {
+          display: flex;
+          min-width: 0;
+          align-items: center;
+          gap: 8px;
+        }
+
+        .startup-progress-label {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .startup-progress-track {
+          position: relative;
+          display: block;
+          width: 96px;
+          height: 4px;
+          flex: 0 0 96px;
+          overflow: hidden;
+          border-radius: 999px;
+          background: var(--startup-placeholder);
+        }
+
+        .startup-progress-value {
+          position: absolute;
+          inset: 0;
+          width: 12%;
+          border-radius: inherit;
+          background: #ea580c;
+        }
+
         .startup-data-spinner {
           width: 8px;
           height: 8px;
@@ -333,6 +365,10 @@
         #app-loader.has-error .loader-error,
         #app-loader.has-error .loader-retry {
           display: block;
+        }
+
+        #app-loader.has-error .startup-progress-group {
+          display: none;
         }
 
         @keyframes startup-spin {
@@ -415,6 +451,19 @@
           </main>
         </div>
         <div class="startup-status" role="status" aria-live="polite">
+          <div class="startup-progress-group">
+            <span class="startup-progress-label">Opening workspace…</span>
+            <span
+              class="startup-progress-track"
+              role="progressbar"
+              aria-label="Opening workspace"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="12"
+            >
+              <span class="startup-progress-value"></span>
+            </span>
+          </div>
           <span id="loader-error" class="loader-error"></span>
           <button id="loader-retry" class="loader-retry" type="button">
             Reload
@@ -440,7 +489,6 @@
     <div id="portal"></div>
     <script>
       (() => {
-        let startupError;
         window.__oxideStartupIntents = window.__oxideStartupIntents || [];
 
         document.querySelectorAll("[data-startup-intent]").forEach((button) => {
@@ -511,40 +559,28 @@
           // The backend remains canonical when the optional display cache is absent.
         }
 
-        const describeError = (error) => {
-          if (error instanceof Error) return `${error.name}: ${error.message}`;
-          if (typeof error === "string") return error;
-          try {
-            return JSON.stringify(error);
-          } catch {
-            return String(error);
-          }
-        };
-
-        window.addEventListener("error", (event) => {
-          if (event.target === window)
-            startupError = describeError(event.error ?? event.message);
-        });
-        window.addEventListener("unhandledrejection", (event) => {
-          startupError = describeError(event.reason);
-        });
-
         document
           .getElementById("loader-retry")
           ?.addEventListener("click", () => window.location.reload());
 
-        window.setTimeout(() => {
+        const slowStartupTimer = window.setTimeout(() => {
           const loader = document.getElementById("app-loader");
           if (!loader) return;
 
-          loader.classList.add("has-error");
-          const error = document.getElementById("loader-error");
-          if (error) {
-            error.textContent = startupError
-              ? `OxideStudio failed to start: ${startupError}`
-              : "OxideStudio did not finish starting. Reload the window to try again.";
-          }
+          // Slow module transforms are not startup failures. Keep the shell
+          // usable and reserve the Reload action for a real bootstrap error,
+          // which src/main.tsx reports explicitly.
+          const label = loader.querySelector(".startup-progress-label");
+          if (label) label.textContent = "Still preparing the workspace…";
+          const progress = loader.querySelector(".startup-progress-track");
+          progress?.setAttribute("aria-label", "Still preparing the workspace");
         }, 15000);
+
+        window.addEventListener(
+          "oxide:react-shell-ready",
+          () => window.clearTimeout(slowStartupTimer),
+          { once: true },
+        );
       })();
     </script>
     <script type="module" src="/src/main.tsx"></script>

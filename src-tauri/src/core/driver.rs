@@ -17,6 +17,12 @@ pub trait DatabaseDriver: Send + Sync {
         None
     }
 
+    /// Human-readable server version discovered during connection setup.
+    /// Drivers that do not negotiate a version can keep the default.
+    async fn server_version(&self) -> Option<String> {
+        None
+    }
+
     /// Establish connection to the database
     async fn connect(&mut self) -> Result<()>;
 

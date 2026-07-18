@@ -2,6 +2,8 @@ import { cn } from "@/lib/utils";
 import {
   ArrowUpRight,
   CheckCircle2,
+  ChevronRight,
+  CircleAlert,
   Loader2,
   Sparkles,
 } from "lucide-react";
@@ -34,13 +36,6 @@ interface AssistantConversationProps {
   onExecuteAttachment: (request: UiActionRequest) => Promise<UiActionResult>;
   renderProcess?: (entry: AssistantConversationEntry) => ReactNode;
   contextFingerprint?: string;
-  onAnswerClarification?: (
-    turnId: string,
-    clarificationId: string,
-    questionId: string,
-    answer: string,
-    contextFingerprint: string,
-  ) => Promise<void>;
   onDecideApproval?: (
     turnId: string,
     approvalId: string,
@@ -69,7 +64,6 @@ export function AssistantConversation({
   onExecuteAttachment,
   renderProcess,
   contextFingerprint = "",
-  onAnswerClarification = async () => undefined,
   onDecideApproval = async () => undefined,
   onCancelTurn = async () => undefined,
   onResumeTurn = async () => undefined,
@@ -81,7 +75,6 @@ export function AssistantConversation({
         onUsePrompt={onUsePrompt}
         onExecuteAttachment={onExecuteAttachment}
         contextFingerprint={contextFingerprint}
-        onAnswerClarification={onAnswerClarification}
         onDecideApproval={onDecideApproval}
         onCancelTurn={onCancelTurn}
         onResumeTurn={onResumeTurn}
@@ -180,7 +173,6 @@ function TurnConversation({
   onUsePrompt,
   onExecuteAttachment,
   contextFingerprint,
-  onAnswerClarification,
   onDecideApproval,
   onCancelTurn,
   onResumeTurn,
@@ -189,9 +181,6 @@ function TurnConversation({
   onUsePrompt: (prompt: string) => void;
   onExecuteAttachment: (request: UiActionRequest) => Promise<UiActionResult>;
   contextFingerprint: string;
-  onAnswerClarification: NonNullable<
-    AssistantConversationProps["onAnswerClarification"]
-  >;
   onDecideApproval: NonNullable<
     AssistantConversationProps["onDecideApproval"]
   >;
@@ -222,27 +211,10 @@ function TurnConversation({
           <AssistantTurnProcess
             turn={turn}
             contextFingerprint={contextFingerprint}
-            onAnswerClarification={onAnswerClarification}
             onDecideApproval={onDecideApproval}
             onCancel={onCancelTurn}
             onResume={onResumeTurn}
           />
-
-          {turn.clarifications
-            .filter((clarification) => clarification.answer)
-            .map((clarification) => (
-              <div
-                key={`${clarification.clarificationId}:${clarification.questionId}:answer`}
-                className="space-y-1 border-l border-[hsl(var(--wb-border-subtle))] pl-2 text-[10px] leading-4"
-              >
-                <div className="text-[hsl(var(--wb-text-muted))]">
-                  {clarification.question}
-                </div>
-                <div className="text-[hsl(var(--wb-text))]">
-                  {clarification.answer}
-                </div>
-              </div>
-            ))}
 
           {(turn.final?.content || turn.draft) && (
             <div className="flex max-w-full items-start gap-2 text-[11px] leading-[1.6] text-[hsl(var(--wb-text))]">
@@ -265,9 +237,25 @@ function TurnConversation({
           )}
 
           {turn.error && (
-            <div className="flex items-start gap-2 text-[10px] leading-4 text-[hsl(var(--destructive))]">
-              <Sparkles size={11} className="mt-0.5 shrink-0" />
-              <span>{turn.error}</span>
+            <div className="flex items-start gap-2 text-[10px] leading-4 text-amber-300">
+              <CircleAlert size={11} className="mt-0.5 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <p>{turn.error}</p>
+                {turn.errorDetail && (
+                  <details className="group mt-1 text-[9px] text-[hsl(var(--wb-text-muted))]">
+                    <summary className="flex cursor-pointer list-none items-center gap-1 marker:content-none hover:text-[hsl(var(--wb-text))] [&::-webkit-details-marker]:hidden">
+                      <ChevronRight
+                        size={10}
+                        className="transition-transform duration-150 group-open:rotate-90"
+                      />
+                      Technical details
+                    </summary>
+                    <pre className="mt-1 whitespace-pre-wrap break-words rounded-[3px] bg-black/15 px-2 py-1.5 font-mono leading-4">
+                      {turn.errorDetail}
+                    </pre>
+                  </details>
+                )}
+              </div>
             </div>
           )}
         </article>

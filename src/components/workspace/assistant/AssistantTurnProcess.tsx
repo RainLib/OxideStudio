@@ -2,7 +2,6 @@ import {
   assistantTurnCanCancel,
   assistantTurnCanResume,
   type AssistantApproval,
-  type AssistantClarification,
   type AssistantProcessItem,
   type AssistantTurn,
 } from "@/ai/assistant/turns";
@@ -19,18 +18,11 @@ import {
   ShieldAlert,
   X,
 } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useState } from "react";
 
 type AssistantTurnProcessProps = {
   turn: AssistantTurn;
   contextFingerprint: string;
-  onAnswerClarification: (
-    turnId: string,
-    clarificationId: string,
-    questionId: string,
-    answer: string,
-    contextFingerprint: string,
-  ) => Promise<void>;
   onDecideApproval: (
     turnId: string,
     approvalId: string,
@@ -44,7 +36,6 @@ type AssistantTurnProcessProps = {
 export function AssistantTurnProcess({
   turn,
   contextFingerprint,
-  onAnswerClarification,
   onDecideApproval,
   onCancel,
   onResume,
@@ -60,92 +51,67 @@ export function AssistantTurnProcess({
       "paused",
       "cancelling",
     ].includes(turn.status);
-  const pendingClarifications = turn.clarifications.filter(
-    (clarification) => !clarification.answer,
-  );
   const pendingApprovals = turn.approvals.filter(
     (approval) => !approval.decision,
   );
+  const showStandaloneStatus =
+    turn.process.length === 0 ||
+    [
+      "awaiting_input",
+      "awaiting_approval",
+      "paused",
+      "cancelling",
+      "failed",
+      "cancelled",
+    ].includes(turn.status);
 
   return (
     <div className="space-y-2" data-assistant-turn-process={turn.id}>
       {showProcess && (
-        <details
-          className="group border-y border-[hsl(var(--wb-border-subtle))]"
+        <section
+          className="divide-y divide-[hsl(var(--wb-border-subtle))] border-y border-[hsl(var(--wb-border-subtle))]"
           aria-label="Assistant process"
         >
-          <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 px-1.5 py-1 text-[10px] text-[hsl(var(--wb-text-muted))] marker:content-none hover:text-[hsl(var(--wb-text))] [&::-webkit-details-marker]:hidden">
-            <ChevronRight
-              size={11}
-              className="shrink-0 transition-transform duration-150 group-open:rotate-90"
-            />
-            <TurnStatusIcon turn={turn} />
-            <span className="min-w-0 flex-1 truncate">
-              {turnProcessLabel(turn)}
-            </span>
-            {turn.process.length > 0 && (
-              <span className="shrink-0 text-[9px] tabular-nums opacity-70">
-                {turn.process.length}
+          {turn.process.map((item) => (
+            <ProcessItem key={item.id} item={item} />
+          ))}
+
+          {showStandaloneStatus && (
+            <div
+              className={cn(
+                "flex min-h-8 items-center gap-2 px-1.5 py-1 text-[10px] text-[hsl(var(--wb-text-muted))]",
+                ["planning", "running", "cancelling"].includes(turn.status) &&
+                  "wb-assistant-process-running",
+              )}
+            >
+              <TurnStatusIcon turn={turn} />
+              <span className="min-w-0 flex-1 truncate">
+                {turnProcessLabel(turn)}
               </span>
-            )}
-          </summary>
-
-          <div className="border-t border-[hsl(var(--wb-border-subtle))]">
-            {turn.process.length > 0 ? (
-              <ol className="divide-y divide-[hsl(var(--wb-border-subtle))]">
-                {turn.process.map((item) => (
-                  <ProcessItem key={item.id} item={item} />
-                ))}
-              </ol>
-            ) : (
-              <div className="px-2 py-2 text-[10px] text-[hsl(var(--wb-text-muted))]">
-                Waiting for Agent Host activity.
-              </div>
-            )}
-
-            {(assistantTurnCanCancel(turn) || assistantTurnCanResume(turn)) && (
-              <div className="flex justify-end gap-1 border-t border-[hsl(var(--wb-border-subtle))] px-1.5 py-1.5">
-                {assistantTurnCanResume(turn) && (
-                  <button
-                    type="button"
-                    className="wb-text-button h-6 px-1.5 text-[10px]"
-                    onClick={() => void onResume(turn.id, contextFingerprint)}
-                  >
-                    <Play size={10} />
-                    Resume
-                  </button>
-                )}
-                {assistantTurnCanCancel(turn) && (
-                  <button
-                    type="button"
-                    className="wb-text-button h-6 px-1.5 text-[10px] text-[hsl(var(--wb-text-muted))]"
-                    onClick={() => void onCancel(turn.id)}
-                  >
-                    <CircleStop size={10} />
-                    Cancel
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        </details>
+              {assistantTurnCanResume(turn) && (
+                <button
+                  type="button"
+                  className="wb-text-button h-6 px-1.5 text-[10px]"
+                  onClick={() => void onResume(turn.id, contextFingerprint)}
+                >
+                  <Play size={10} />
+                  Resume
+                </button>
+              )}
+              {assistantTurnCanCancel(turn) && (
+                <button
+                  type="button"
+                  className="wb-text-button h-6 px-1.5 text-[10px] text-[hsl(var(--wb-text-muted))]"
+                  onClick={() => void onCancel(turn.id)}
+                >
+                  <CircleStop size={10} />
+                  Cancel
+                </button>
+              )}
+            </div>
+          )}
+        </section>
       )}
-
-      {pendingClarifications.map((clarification) => (
-        <ClarificationPrompt
-          key={`${clarification.clarificationId}:${clarification.questionId}`}
-          clarification={clarification}
-          onAnswer={(answer) =>
-            onAnswerClarification(
-              turn.id,
-              clarification.clarificationId,
-              clarification.questionId,
-              answer,
-              contextFingerprint,
-            )
-          }
-        />
-      ))}
 
       {pendingApprovals.map((approval) => (
         <ApprovalPrompt
@@ -166,102 +132,53 @@ export function AssistantTurnProcess({
 }
 
 function ProcessItem({ item }: { item: AssistantProcessItem }) {
-  return (
-    <li className="flex min-w-0 items-start gap-2 px-2 py-1.5 text-[10px] leading-4">
+  const detail = [item.toolName, item.detail].filter(Boolean).join(" · ");
+  const row = (
+    <>
       <ProcessStatusIcon status={item.status} />
-      <div className="min-w-0 flex-1">
-        <div className="text-[hsl(var(--wb-text))]">{item.title}</div>
-        {(item.toolName || item.detail) && (
-          <div className="mt-0.5 break-words text-[9px] text-[hsl(var(--wb-text-muted))]">
-            {[item.toolName, item.detail].filter(Boolean).join(" · ")}
-          </div>
-        )}
-      </div>
-    </li>
+      <span className="min-w-0 flex-1 truncate text-[hsl(var(--wb-text))]">
+        {item.title}
+      </span>
+    </>
   );
-}
 
-function ClarificationPrompt({
-  clarification,
-  onAnswer,
-}: {
-  clarification: AssistantClarification;
-  onAnswer: (answer: string) => Promise<void>;
-}) {
-  const [answer, setAnswer] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const submit = async (value: string) => {
-    const normalized = value.trim();
-    if (!normalized || isSubmitting) return;
-    setIsSubmitting(true);
-    try {
-      await onAnswer(normalized);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-  const handleSubmit = (event: FormEvent) => {
-    event.preventDefault();
-    void submit(answer);
-  };
+  if (detail) {
+    return (
+      <details
+        className="group"
+        data-assistant-process-item={item.id}
+        data-process-status={item.status}
+      >
+        <summary
+          className={cn(
+            "flex min-h-8 cursor-pointer list-none items-center gap-2 px-1.5 py-1 text-[10px] marker:content-none hover:bg-[hsl(var(--wb-hover)/0.45)] [&::-webkit-details-marker]:hidden",
+            item.status === "running" && "wb-assistant-process-running",
+          )}
+        >
+          {row}
+          <ChevronRight
+            size={11}
+            className="shrink-0 text-[hsl(var(--wb-text-muted))] transition-transform duration-150 group-open:rotate-90"
+          />
+        </summary>
+        <div className="whitespace-pre-wrap break-words pb-2 pl-[27px] pr-2 text-[9px] leading-4 text-[hsl(var(--wb-text-muted))]">
+          {detail}
+        </div>
+      </details>
+    );
+  }
 
   return (
-    <section className="border-y border-[hsl(var(--wb-border-subtle))] px-2 py-2">
-      <div className="flex items-start gap-2">
-        <HelpCircle
-          size={12}
-          className="mt-0.5 shrink-0 text-[hsl(var(--wb-accent))]"
-        />
-        <div className="min-w-0 flex-1">
-          <div className="text-[11px] leading-4 text-[hsl(var(--wb-text))]">
-            {clarification.question}
-          </div>
-          {clarification.context && (
-            <div className="mt-0.5 text-[9px] leading-4 text-[hsl(var(--wb-text-muted))]">
-              {clarification.context}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {clarification.options.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1 pl-5">
-          {clarification.options.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              className="wb-text-button min-h-6 border border-[hsl(var(--wb-border-subtle))] px-2 text-[10px]"
-              title={option.description ?? undefined}
-              disabled={isSubmitting}
-              onClick={() => void submit(option.value || option.label)}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
+    <div
+      className={cn(
+        "flex min-h-8 min-w-0 items-center gap-2 px-1.5 py-1 text-[10px]",
+        item.status === "running" && "wb-assistant-process-running",
       )}
-
-      {clarification.allowFreeText && (
-        <form className="mt-2 flex gap-1 pl-5" onSubmit={handleSubmit}>
-          <input
-            value={answer}
-            onChange={(event) => setAnswer(event.target.value)}
-            className="h-7 min-w-0 flex-1 rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 text-[10px] text-[hsl(var(--wb-text))] outline-none focus:border-[hsl(var(--wb-accent))]"
-            placeholder="Answer the agent"
-            aria-label="Clarification answer"
-            disabled={isSubmitting}
-          />
-          <button
-            type="submit"
-            className="wb-primary-button h-7 px-2 text-[10px]"
-            disabled={!answer.trim() || isSubmitting}
-          >
-            Answer
-          </button>
-        </form>
-      )}
-    </section>
+      data-assistant-process-item={item.id}
+      data-process-status={item.status}
+    >
+      {row}
+    </div>
   );
 }
 

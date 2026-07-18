@@ -38,22 +38,23 @@ interface SchemaState {
   loadTables: (
     connectionId: string,
     schema: string,
-    force?: boolean
+    force?: boolean,
   ) => Promise<void>;
   loadCollections: (
     connectionId: string,
     namespace: string,
     force?: boolean,
-    filter?: string
+    filter?: string,
+    revalidateCached?: boolean,
   ) => Promise<void>;
   loadMoreCollections: (
     connectionId: string,
-    namespace: string
+    namespace: string,
   ) => Promise<void>;
   loadFunctions: (
     connectionId: string,
     schema: string,
-    force?: boolean
+    force?: boolean,
   ) => Promise<void>;
   bumpMetadataVersion: () => void;
   togglePinTable: (tableName: string) => void;
@@ -62,16 +63,18 @@ interface SchemaState {
   selectTable: (table: string | null) => void;
   snapshotActiveMetadata: () => void;
   restoreConnectionSnapshot: (connectionId: string) => boolean;
-  hydrateConnectionMetadataFromCache: (connectionId: string) => Promise<boolean>;
+  hydrateConnectionMetadataFromCache: (
+    connectionId: string,
+  ) => Promise<boolean>;
   hydrateSchemaObjectsFromCache: (
     connectionId: string,
-    schema: string
+    schema: string,
   ) => Promise<boolean>;
   forgetConnectionMetadata: (connectionId: string) => Promise<void>;
   forgetSchemaMetadata: (connectionId: string, schema: string) => Promise<void>;
   setMetadataNodeState: (
     key: string,
-    state: Partial<MetadataNodeState> & Pick<MetadataNodeState, "status">
+    state: Partial<MetadataNodeState> & Pick<MetadataNodeState, "status">,
   ) => void;
   markMetadataNodeStale: (key: string, message?: string) => void;
   clearMetadataNodeState: (key: string) => void;
@@ -80,11 +83,7 @@ interface SchemaState {
 }
 
 export type MetadataNodeStatus =
-  | "idle"
-  | "loading"
-  | "ready"
-  | "stale"
-  | "error";
+  "idle" | "loading" | "ready" | "stale" | "error";
 
 export interface MetadataNodeState {
   status: MetadataNodeStatus;
@@ -125,6 +124,7 @@ const DEFAULT_PROJECT_ID = "sqls";
 const getActiveProjectId = () =>
   readStorageItem(ACTIVE_PROJECT_KEY) || DEFAULT_PROJECT_ID;
 let metadataGeneration = 0;
+let namespaceSelectionGeneration = 0;
 
 interface MetadataLoadFlight {
   force: boolean;
@@ -141,7 +141,7 @@ interface MetadataRequestContext {
 }
 
 const captureMetadataRequest = (
-  connectionId: string
+  connectionId: string,
 ): MetadataRequestContext => ({
   connectionId,
   generation: metadataGeneration,
@@ -155,17 +155,20 @@ const isMetadataRequestCurrent = (request: MetadataRequestContext) =>
 const metadataRequestKey = (
   request: MetadataRequestContext,
   ...parts: string[]
-) => [request.generation, request.projectId, request.connectionId, ...parts].join(":");
+) =>
+  [request.generation, request.projectId, request.connectionId, ...parts].join(
+    ":",
+  );
 const projectScopedKey = (...parts: Array<string | null | undefined>) =>
   [getActiveProjectId(), ...parts.map((part) => part || "unknown")].join(":");
 const getDefaultSchemaKey = (
   connId: string,
-  driver: string | null | undefined
+  driver: string | null | undefined,
 ) => `oxide-studio-default-schema:${projectScopedKey(connId, driver)}`;
 const getPinnedTablesKey = (
   connId: string,
   schema: string,
-  driver: string | null | undefined
+  driver: string | null | undefined,
 ) => `oxide-studio-pinned-tables:${projectScopedKey(connId, driver, schema)}`;
 const getConnectionDriver = (connectionId: string) =>
   useConnectionStore
@@ -175,37 +178,35 @@ const getConnectionDriver = (connectionId: string) =>
 const getSchemaResourceId = (
   connectionId: string,
   schema: string,
-  driver: string | null | undefined
+  driver: string | null | undefined,
 ) => `${connectionId}:${driver || "unknown"}:${schema}`;
 const getConnectionSnapshotKey = (
   connectionId: string,
-  driver: string | null | undefined
+  driver: string | null | undefined,
 ) => projectScopedKey(connectionId, driver);
 const getObjectSnapshotKey = (
   connectionId: string,
   driver: string | null | undefined,
-  schema: string
+  schema: string,
 ) => projectScopedKey(connectionId, driver, schema);
-const getLoadKey = (
-  connectionId: string,
-  driver: string | null | undefined
-) => projectScopedKey(connectionId, driver);
+const getLoadKey = (connectionId: string, driver: string | null | undefined) =>
+  projectScopedKey(connectionId, driver);
 const getObjectLoadKey = (
   connectionId: string,
   driver: string | null | undefined,
   schema: string,
-  kind: string
+  kind: string,
 ) => projectScopedKey(connectionId, driver, schema, kind);
 export const getConnectionMetadataSnapshotKey = getConnectionSnapshotKey;
 export const getSchemaObjectMetadataSnapshotKey = getObjectSnapshotKey;
 export const getConnectionMetadataNodeKey = (
   connectionId: string,
-  driver: string | null | undefined
+  driver: string | null | undefined,
 ) => `connection:${getLoadKey(connectionId, driver)}`;
 export const getSchemaMetadataNodeKey = (
   connectionId: string,
   driver: string | null | undefined,
-  schema: string
+  schema: string,
 ) => `schema:${getObjectLoadKey(connectionId, driver, schema, "tables")}`;
 const SCHEMA_CACHE_KIND = "DATABASE_CACHE";
 const TABLE_CACHE_KIND = "TABLE_CACHE";
@@ -216,36 +217,36 @@ export const REDIS_KEY_PAGE_SIZE = 100;
 export const MAX_REDIS_KEYS_IN_MEMORY = 500;
 const resourceMatchesDriver = (
   resource: Resource,
-  driver: string | null | undefined
+  driver: string | null | undefined,
 ) => Boolean(driver && resource.metadata?.driver === driver);
 const redisTotalFromResources = (
   resources: Resource[],
   namespace: string | null,
-  driver: string | null | undefined
+  driver: string | null | undefined,
 ) => {
   if (driver !== "redis" || !namespace) return null;
   const total = resources.find(
     (resource) =>
       resource.kind === REDIS_KEY_COUNT_CACHE_KIND &&
       resourceMatchesDriver(resource, driver) &&
-      resource.name === namespace
+      resource.name === namespace,
   )?.metadata?.total;
   return typeof total === "number" ? total : null;
 };
 const hasCacheMarker = (
   resources: Resource[],
   kind: string,
-  driver: string | null | undefined
+  driver: string | null | undefined,
 ) =>
   resources.some(
     (resource) =>
-      resource.kind === kind && resourceMatchesDriver(resource, driver)
+      resource.kind === kind && resourceMatchesDriver(resource, driver),
   );
 const createCacheMarker = (
   connectionId: string,
   parentId: string | undefined,
   kind: string,
-  driver: string | null | undefined
+  driver: string | null | undefined,
 ): Resource => ({
   id: `${connectionId}:${driver || "unknown"}:${parentId || "root"}:${kind}`,
   connection_id: connectionId,
@@ -258,12 +259,12 @@ const createCacheMarker = (
 const resourcesToTables = (
   resources: Resource[],
   schema: string,
-  driver: string | null | undefined
+  driver: string | null | undefined,
 ): TableInfo[] =>
   resources
     .filter(
       (resource) =>
-        resource.kind === "TABLE" && resourceMatchesDriver(resource, driver)
+        resource.kind === "TABLE" && resourceMatchesDriver(resource, driver),
     )
     .map((resource) => ({
       name: resource.name,
@@ -274,13 +275,13 @@ const resourcesToTables = (
 const resourcesToCollections = (
   resources: Resource[],
   namespace: string,
-  driver: string | null | undefined
+  driver: string | null | undefined,
 ): CollectionInfo[] =>
   resources
     .filter(
       (resource) =>
         resource.kind === "COLLECTION" &&
-        resourceMatchesDriver(resource, driver)
+        resourceMatchesDriver(resource, driver),
     )
     .map((resource) => ({
       name: resource.name,
@@ -299,12 +300,12 @@ const resourcesToCollections = (
     }));
 const resourcesToFunctions = (
   resources: Resource[],
-  driver: string | null | undefined
+  driver: string | null | undefined,
 ): FunctionInfo[] =>
   resources
     .filter(
       (resource) =>
-        resource.kind === "FUNCTION" && resourceMatchesDriver(resource, driver)
+        resource.kind === "FUNCTION" && resourceMatchesDriver(resource, driver),
     )
     .map((resource) => ({
       name: resource.name,
@@ -326,7 +327,7 @@ const resourcesToFunctions = (
     }));
 const getSavedDefaultSchema = (
   connectionId: string,
-  driver: string | null | undefined
+  driver: string | null | undefined,
 ) =>
   readStorageItem(getDefaultSchemaKey(connectionId, driver)) ||
   (getActiveProjectId() === DEFAULT_PROJECT_ID
@@ -335,7 +336,9 @@ const getSavedDefaultSchema = (
 
 function readStorageItem(key: string) {
   try {
-    return typeof localStorage === "undefined" ? null : localStorage.getItem(key);
+    return typeof localStorage === "undefined"
+      ? null
+      : localStorage.getItem(key);
   } catch (error) {
     console.warn("Store: Failed to read localStorage", error);
     return null;
@@ -355,11 +358,11 @@ function writeStorageItem(key: string, value: string) {
 const readPinnedTables = (
   connectionId: string,
   schema: string,
-  driver: string | null | undefined
+  driver: string | null | undefined,
 ) => {
   try {
     const parsedPins = JSON.parse(
-      readStorageItem(getPinnedTablesKey(connectionId, schema, driver)) || "[]"
+      readStorageItem(getPinnedTablesKey(connectionId, schema, driver)) || "[]",
     );
     return Array.isArray(parsedPins)
       ? parsedPins.filter((value): value is string => typeof value === "string")
@@ -370,7 +373,10 @@ const readPinnedTables = (
   }
 };
 
-async function activateBackendSchema(connectionId: string, schema: string | null) {
+async function activateBackendSchema(
+  connectionId: string,
+  schema: string | null,
+) {
   if (!schema) return true;
 
   try {
@@ -464,6 +470,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
 
   reset: () => {
     metadataGeneration += 1;
+    namespaceSelectionGeneration += 1;
     set({
       schemas: [],
       tables: [],
@@ -501,7 +508,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     const snapshotLastLoadedObjectKey = state.lastLoadedObjectKey;
     const connectionKey = getConnectionSnapshotKey(
       activeConnectionId,
-      activeDriver
+      activeDriver,
     );
     const nextConnectionSnapshots = {
       ...state.connectionSnapshots,
@@ -528,7 +535,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       const objectKey = getObjectSnapshotKey(
         activeConnectionId,
         activeDriver,
-        state.currentSchema
+        state.currentSchema,
       );
       nextObjectSnapshots = {
         ...state.objectSnapshots,
@@ -601,36 +608,40 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       const cachedResources = await storeService.getResources(
         connectionId,
         undefined,
-        request.projectId
+        request.projectId,
       );
       if (!isMetadataRequestCurrent(request)) return false;
       const cachedSchemas = cachedResources
         .filter(
           (resource) =>
             resource.kind === "DATABASE" &&
-            resourceMatchesDriver(resource, activeDriver)
+            resourceMatchesDriver(resource, activeDriver),
         )
         .map((resource) => resource.name);
       const hasCachedSchemaGroup = hasCacheMarker(
         cachedResources,
         SCHEMA_CACHE_KIND,
-        activeDriver
+        activeDriver,
       );
 
       if (cachedSchemas.length === 0 && !hasCachedSchemaGroup) {
         return false;
       }
 
-      const schemaToSelect = selectPreferredNamespace(activeDriver, cachedSchemas, [
-        configDefault,
-        savedDefault,
-      ]);
+      const schemaToSelect = selectPreferredNamespace(
+        activeDriver,
+        cachedSchemas,
+        [configDefault, savedDefault],
+      );
       const cachedRedisTotal = redisTotalFromResources(
         cachedResources,
         schemaToSelect,
-        activeDriver
+        activeDriver,
       );
-      const connectionKey = getConnectionSnapshotKey(connectionId, activeDriver);
+      const connectionKey = getConnectionSnapshotKey(
+        connectionId,
+        activeDriver,
+      );
       const loadKey = getLoadKey(connectionId, activeDriver);
       const nodeKey = getConnectionMetadataNodeKey(connectionId, activeDriver);
       set((state) => ({
@@ -671,12 +682,18 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       }
       return true;
     } catch (error) {
-      console.warn("Store: Failed to hydrate connection metadata from cache", error);
+      console.warn(
+        "Store: Failed to hydrate connection metadata from cache",
+        error,
+      );
       return false;
     }
   },
 
-  hydrateSchemaObjectsFromCache: async (connectionId: string, schema: string) => {
+  hydrateSchemaObjectsFromCache: async (
+    connectionId: string,
+    schema: string,
+  ) => {
     if (!connectionId || !schema) return false;
     const request = captureMetadataRequest(connectionId);
     if (!isMetadataRequestCurrent(request)) return false;
@@ -686,7 +703,11 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       // Redis keys are cursor data, not durable metadata. Reading a legacy
       // SQLite child set here can deserialize every cached key on connection
       // expansion, defeating the bounded SCAN path.
-      const objectKey = getObjectSnapshotKey(connectionId, activeDriver, schema);
+      const objectKey = getObjectSnapshotKey(
+        connectionId,
+        activeDriver,
+        schema,
+      );
       set((state) => {
         const objectSnapshots = { ...state.objectSnapshots };
         delete objectSnapshots[objectKey];
@@ -712,45 +733,49 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     const schemaResourceId = getSchemaResourceId(
       connectionId,
       schema,
-      activeDriver
+      activeDriver,
     );
-    const nodeKey = getSchemaMetadataNodeKey(connectionId, activeDriver, schema);
+    const nodeKey = getSchemaMetadataNodeKey(
+      connectionId,
+      activeDriver,
+      schema,
+    );
 
     try {
       const cachedResources = await storeService.getResources(
         connectionId,
         schemaResourceId,
-        request.projectId
+        request.projectId,
       );
       if (!isMetadataRequestCurrent(request)) return false;
       const cachedTables = resourcesToTables(
         cachedResources,
         schema,
-        activeDriver
+        activeDriver,
       );
       const cachedCollections = resourcesToCollections(
         cachedResources,
         schema,
-        activeDriver
+        activeDriver,
       );
       const cachedFunctions = resourcesToFunctions(
         cachedResources,
-        activeDriver
+        activeDriver,
       );
       const hasCachedTableGroup = hasCacheMarker(
         cachedResources,
         TABLE_CACHE_KIND,
-        activeDriver
+        activeDriver,
       );
       const hasCachedCollectionGroup = hasCacheMarker(
         cachedResources,
         COLLECTION_CACHE_KIND,
-        activeDriver
+        activeDriver,
       );
       const hasCachedFunctionGroup = hasCacheMarker(
         cachedResources,
         FUNCTION_CACHE_KIND,
-        activeDriver
+        activeDriver,
       );
       const hasAnyCachedObject =
         cachedTables.length > 0 ||
@@ -770,12 +795,21 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       }
 
       const savedPins = readPinnedTables(connectionId, schema, activeDriver);
-      const objectKey = getObjectSnapshotKey(connectionId, activeDriver, schema);
+      const objectKey = getObjectSnapshotKey(
+        connectionId,
+        activeDriver,
+        schema,
+      );
       const objectLoadKey =
         cachedTables.length > 0 || hasCachedTableGroup
           ? getObjectLoadKey(connectionId, activeDriver, schema, "tables")
           : cachedCollections.length > 0 || hasCachedCollectionGroup
-            ? getObjectLoadKey(connectionId, activeDriver, schema, "collections")
+            ? getObjectLoadKey(
+                connectionId,
+                activeDriver,
+                schema,
+                "collections",
+              )
             : getObjectLoadKey(connectionId, activeDriver, schema, "functions");
 
       set((state) => {
@@ -838,7 +872,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     set((state) => {
       const connectionSnapshotKey = getConnectionSnapshotKey(
         connectionId,
-        activeDriver
+        activeDriver,
       );
       const snapshotPrefix = projectScopedKey(connectionId, activeDriver);
       const nodeConnectionPrefix = `connection:${snapshotPrefix}`;
@@ -892,21 +926,29 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     const schemaResourceId = getSchemaResourceId(
       connectionId,
       schema,
-      activeDriver
+      activeDriver,
     );
     const schemaResources = await storeService
       .getResources(connectionId, schemaResourceId)
       .catch(() => []);
     await Promise.all(
       schemaResources.map((resource) =>
-        storeService.deleteResources(connectionId, resource.id)
-      )
+        storeService.deleteResources(connectionId, resource.id),
+      ),
     );
     await storeService.deleteResources(connectionId, schemaResourceId);
 
     set((state) => {
-      const objectKey = getObjectSnapshotKey(connectionId, activeDriver, schema);
-      const nodeKey = getSchemaMetadataNodeKey(connectionId, activeDriver, schema);
+      const objectKey = getObjectSnapshotKey(
+        connectionId,
+        activeDriver,
+        schema,
+      );
+      const nodeKey = getSchemaMetadataNodeKey(
+        connectionId,
+        activeDriver,
+        schema,
+      );
       const nextObjectSnapshots = { ...state.objectSnapshots };
       const nextNodeStates = { ...state.metadataNodeStates };
       delete nextObjectSnapshots[objectKey];
@@ -944,11 +986,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     const pendingLoad = schemaLoadsInFlight.get(requestKey);
     if (pendingLoad) {
       await pendingLoad.promise;
-      if (
-        force &&
-        !pendingLoad.force &&
-        isMetadataRequestCurrent(request)
-      ) {
+      if (force && !pendingLoad.force && isMetadataRequestCurrent(request)) {
         await get().loadSchemas(connectionId, true);
       }
       return;
@@ -964,284 +1002,293 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     schemaLoadsInFlight.set(requestKey, loadFlight);
 
     try {
-    const { lastLoadedConnectionId, isLoading } = get();
-    const connections = useConnectionStore.getState().connections;
-    const activeConn = connections.find((c) => c.id === connectionId);
-    const activeDriver = activeConn?.driver || null;
-    const configDefault = activeConn?.database;
-    const savedDefault = getSavedDefaultSchema(connectionId, activeDriver);
-    const loadKey = getLoadKey(connectionId, activeDriver);
-    const nodeKey = getConnectionMetadataNodeKey(connectionId, activeDriver);
+      const { lastLoadedConnectionId, isLoading } = get();
+      const connections = useConnectionStore.getState().connections;
+      const activeConn = connections.find((c) => c.id === connectionId);
+      const activeDriver = activeConn?.driver || null;
+      const configDefault = activeConn?.database;
+      const savedDefault = getSavedDefaultSchema(connectionId, activeDriver);
+      const loadKey = getLoadKey(connectionId, activeDriver);
+      const nodeKey = getConnectionMetadataNodeKey(connectionId, activeDriver);
 
-    // Prevent duplicate calls if we're already loading or if the connection hasn't changed (unless forced)
-    if (
-      (isLoading && lastLoadedConnectionId === loadKey) ||
-      (lastLoadedConnectionId === loadKey && !force)
-    ) {
-      console.log("Store: loadSchemas skipped (redundant)");
-      return;
-    }
-
-    console.log(
-      "Store: loadSchemas called (MetaStore aware) for:",
-      connectionId
-    );
-    set({
-      lastLoadedConnectionId: loadKey,
-    });
-
-    let hasCachedSchemaSnapshot = false;
-
-    // 1. Try MetaStore Cache First (SQLite)
-    try {
-      // Fetch DB resources (parent_id = null)
-      const cachedResources = await storeService.getResources(
-        connectionId,
-        undefined,
-        request.projectId
-      );
-      if (!isMetadataRequestCurrent(request)) return;
-      const cachedSchemas = cachedResources
-        .filter(
-          (resource) =>
-            resource.kind === "DATABASE" &&
-            resourceMatchesDriver(resource, activeDriver)
-        )
-        .map((r) => r.name);
-
+      // Prevent duplicate calls if we're already loading or if the connection hasn't changed (unless forced)
       if (
-        (cachedSchemas && cachedSchemas.length > 0) ||
-        hasCacheMarker(cachedResources, SCHEMA_CACHE_KIND, activeDriver)
+        (isLoading && lastLoadedConnectionId === loadKey) ||
+        (lastLoadedConnectionId === loadKey && !force)
       ) {
-        hasCachedSchemaSnapshot = true;
-        console.log(
-          "Store: Loaded schemas from MetaStore",
-          cachedSchemas.length
-        );
-        const currentSchema = get().currentSchema;
-        const schemaToSelect = selectPreferredNamespace(activeDriver, cachedSchemas, [
-          currentSchema,
-          configDefault,
-          savedDefault,
-        ]);
-        set({
-          schemas: cachedSchemas,
-          currentSchema: schemaToSelect,
-          defaultSchema: savedDefault,
-          ...(activeDriver === "redis"
-            ? {
-                collectionTotal:
-                  redisTotalFromResources(
-                    cachedResources,
-                    schemaToSelect,
-                    activeDriver
-                  ) ?? get().collectionTotal,
-              }
-            : {}),
-          // Cached metadata is usable immediately. A forced remote refresh is
-          // represented by the node state and must not block cached children.
-          isLoading: false,
-        });
-        get().setMetadataNodeState(nodeKey, {
-          status: "ready",
-          source: "cache",
-          message: `${cachedSchemas.length.toLocaleString()} ${cachedSchemas.length === 1 ? "schema" : "schemas"} from cache`,
-        });
-        set((state) => ({
-          connectionSnapshots: {
-            ...state.connectionSnapshots,
-            [getConnectionSnapshotKey(connectionId, activeDriver)]: {
-              schemas: cachedSchemas,
-              tables: state.tables,
-              collections:
-                activeDriver === "redis"
-                  ? state.collections.slice(-MAX_REDIS_KEYS_IN_MEMORY)
-                  : state.collections,
-              collectionNextCursor: state.collectionNextCursor,
-              collectionTotal: state.collectionTotal,
-              collectionFilter: state.collectionFilter,
-              functions: state.functions,
-              pinnedTables: state.pinnedTables,
-              currentSchema: schemaToSelect,
-              defaultSchema: savedDefault,
-              selectedTable: state.selectedTable,
-              lastLoadedConnectionId: loadKey,
-              lastLoadedObjectKey: state.lastLoadedObjectKey,
-              metadataVersion: state.metadataVersion,
-            },
-          },
-        }));
-
-        const schemaActivated = await activateBackendSchema(
-          connectionId,
-          schemaToSelect
-        );
-        if (!isMetadataRequestCurrent(request)) return;
-        if (!schemaActivated && !force) {
-          throw new Error("Cached schema could not be activated on backend");
-        }
-
-        // If we found data, we rely on user to trigger explicit refresh if needed
-        // OR we could background refresh. User requirement: "Update only when triggered".
-        // So we STOP here if cache hit.
-        if (!force) return;
-      }
-    } catch (e) {
-      if (!isMetadataRequestCurrent(request)) return;
-      console.warn("Store: MetaStore cache miss or error", e);
-    }
-
-    // 2. Refresh from Driver & Update MetaStore (Only if cache miss or forced)
-    if (!isMetadataRequestCurrent(request)) return;
-    set({ isLoading: !hasCachedSchemaSnapshot });
-    get().setMetadataNodeState(nodeKey, {
-      status: hasCachedSchemaSnapshot ? "ready" : "loading",
-      source: hasCachedSchemaSnapshot ? "cache" : "remote",
-      message: hasCachedSchemaSnapshot
-        ? "Refreshing schemas in background"
-        : "Refreshing schemas",
-    });
-    console.log("Store: Refreshing schemas from Driver...");
-    const taskStore = useTaskStore.getState();
-    const taskId = taskStore.startTask({
-      kind: "introspection",
-      title: `Refresh ${activeConn?.name || "data source"}`,
-      detail: "Schemas",
-    });
-    try {
-      const schemas = await schemaService.refreshSchemas(connectionId);
-      if (!isMetadataRequestCurrent(request)) {
-        taskStore.cancelTask(taskId, "Metadata context changed");
+        console.log("Store: loadSchemas skipped (redundant)");
         return;
       }
-      console.log("Store: loadSchemas Refresh result:", schemas);
 
-      if (schemas) {
-        // Optimistically update UI first
-        const currentSchema = get().currentSchema;
-        const schemaToSelect = selectPreferredNamespace(activeDriver, schemas, [
-          currentSchema,
-          configDefault,
-          savedDefault,
-        ]);
-        await activateBackendSchema(connectionId, schemaToSelect);
+      console.log(
+        "Store: loadSchemas called (MetaStore aware) for:",
+        connectionId,
+      );
+      set({
+        lastLoadedConnectionId: loadKey,
+      });
+
+      let hasCachedSchemaSnapshot = false;
+
+      // 1. Try MetaStore Cache First (SQLite)
+      try {
+        // Fetch DB resources (parent_id = null)
+        const cachedResources = await storeService.getResources(
+          connectionId,
+          undefined,
+          request.projectId,
+        );
+        if (!isMetadataRequestCurrent(request)) return;
+        const cachedSchemas = cachedResources
+          .filter(
+            (resource) =>
+              resource.kind === "DATABASE" &&
+              resourceMatchesDriver(resource, activeDriver),
+          )
+          .map((r) => r.name);
+
+        if (
+          (cachedSchemas && cachedSchemas.length > 0) ||
+          hasCacheMarker(cachedResources, SCHEMA_CACHE_KIND, activeDriver)
+        ) {
+          hasCachedSchemaSnapshot = true;
+          console.log(
+            "Store: Loaded schemas from MetaStore",
+            cachedSchemas.length,
+          );
+          const currentSchema = get().currentSchema;
+          const schemaToSelect = selectPreferredNamespace(
+            activeDriver,
+            cachedSchemas,
+            [currentSchema, configDefault, savedDefault],
+          );
+          set({
+            schemas: cachedSchemas,
+            currentSchema: schemaToSelect,
+            defaultSchema: savedDefault,
+            ...(activeDriver === "redis"
+              ? {
+                  collectionTotal:
+                    redisTotalFromResources(
+                      cachedResources,
+                      schemaToSelect,
+                      activeDriver,
+                    ) ?? get().collectionTotal,
+                }
+              : {}),
+            // Cached metadata is usable immediately. A forced remote refresh is
+            // represented by the node state and must not block cached children.
+            isLoading: false,
+          });
+          get().setMetadataNodeState(nodeKey, {
+            status: "ready",
+            source: "cache",
+            message: `${cachedSchemas.length.toLocaleString()} ${cachedSchemas.length === 1 ? "schema" : "schemas"} from cache`,
+          });
+          set((state) => ({
+            connectionSnapshots: {
+              ...state.connectionSnapshots,
+              [getConnectionSnapshotKey(connectionId, activeDriver)]: {
+                schemas: cachedSchemas,
+                tables: state.tables,
+                collections:
+                  activeDriver === "redis"
+                    ? state.collections.slice(-MAX_REDIS_KEYS_IN_MEMORY)
+                    : state.collections,
+                collectionNextCursor: state.collectionNextCursor,
+                collectionTotal: state.collectionTotal,
+                collectionFilter: state.collectionFilter,
+                functions: state.functions,
+                pinnedTables: state.pinnedTables,
+                currentSchema: schemaToSelect,
+                defaultSchema: savedDefault,
+                selectedTable: state.selectedTable,
+                lastLoadedConnectionId: loadKey,
+                lastLoadedObjectKey: state.lastLoadedObjectKey,
+                metadataVersion: state.metadataVersion,
+              },
+            },
+          }));
+
+          const schemaActivated = await activateBackendSchema(
+            connectionId,
+            schemaToSelect,
+          );
+          if (!isMetadataRequestCurrent(request)) return;
+          if (!schemaActivated && !force) {
+            throw new Error("Cached schema could not be activated on backend");
+          }
+
+          // If we found data, we rely on user to trigger explicit refresh if needed
+          // OR we could background refresh. User requirement: "Update only when triggered".
+          // So we STOP here if cache hit.
+          if (!force) return;
+        }
+      } catch (e) {
+        if (!isMetadataRequestCurrent(request)) return;
+        console.warn("Store: MetaStore cache miss or error", e);
+      }
+
+      // 2. Refresh from Driver & Update MetaStore (Only if cache miss or forced)
+      if (!isMetadataRequestCurrent(request)) return;
+      set({ isLoading: !hasCachedSchemaSnapshot });
+      get().setMetadataNodeState(nodeKey, {
+        status: hasCachedSchemaSnapshot ? "ready" : "loading",
+        source: hasCachedSchemaSnapshot ? "cache" : "remote",
+        message: hasCachedSchemaSnapshot
+          ? "Refreshing schemas in background"
+          : "Refreshing schemas",
+      });
+      console.log("Store: Refreshing schemas from Driver...");
+      const taskStore = useTaskStore.getState();
+      const taskId = taskStore.startTask({
+        kind: "introspection",
+        title: `Refresh ${activeConn?.name || "data source"}`,
+        detail: "Schemas",
+      });
+      try {
+        const schemas = await schemaService.refreshSchemas(connectionId);
         if (!isMetadataRequestCurrent(request)) {
           taskStore.cancelTask(taskId, "Metadata context changed");
           return;
         }
+        console.log("Store: loadSchemas Refresh result:", schemas);
 
-        set({
-          schemas: schemas,
-          currentSchema: schemaToSelect || null,
-          defaultSchema: savedDefault,
-          isLoading: false,
-          selectedTable: null,
-          collections:
-            activeDriver === "redis" && schemaToSelect === currentSchema
-              ? get().collections.slice(-MAX_REDIS_KEYS_IN_MEMORY)
-              : [],
-          tables: currentSchema && schemas.includes(currentSchema) ? get().tables : [],
-        });
-        set((state) => ({
-          connectionSnapshots: {
-            ...state.connectionSnapshots,
-            [getConnectionSnapshotKey(connectionId, activeDriver)]: {
-              schemas,
-              tables: state.tables,
-              collections:
-                activeDriver === "redis"
-                  ? state.collections.slice(-MAX_REDIS_KEYS_IN_MEMORY)
-                  : state.collections,
-              collectionNextCursor: state.collectionNextCursor,
-              collectionTotal: state.collectionTotal,
-              collectionFilter: state.collectionFilter,
-              functions: state.functions,
-              pinnedTables: state.pinnedTables,
-              currentSchema: schemaToSelect || null,
-              defaultSchema: savedDefault,
-              selectedTable: state.selectedTable,
-              lastLoadedConnectionId: loadKey,
-              lastLoadedObjectKey: state.lastLoadedObjectKey,
-              metadataVersion: state.metadataVersion,
-            },
-          },
-        }));
-        get().setMetadataNodeState(nodeKey, {
-          status: "ready",
-          source: "remote",
-          message: `${schemas.length.toLocaleString()} ${schemas.length === 1 ? "schema" : "schemas"}`,
-        });
-
-        // Save to MetaStore in background
-        const newResources: Resource[] = schemas.map((name) => ({
-          id: getSchemaResourceId(connectionId, name, activeDriver),
-          connection_id: connectionId,
-          kind: "DATABASE",
-          name: name,
-          metadata: { driver: activeDriver },
-          last_updated: Date.now(),
-        }));
-
-        try {
-          if (!isMetadataRequestCurrent(request)) {
-            taskStore.cancelTask(taskId, "Metadata context changed");
-            return;
-          }
-          await storeService.replaceResources(
-            connectionId,
-            undefined,
-            "DATABASE",
-            newResources,
-            request.projectId
+        if (schemas) {
+          // Optimistically update UI first
+          const currentSchema = get().currentSchema;
+          const schemaToSelect = selectPreferredNamespace(
+            activeDriver,
+            schemas,
+            [currentSchema, configDefault, savedDefault],
           );
+          await activateBackendSchema(connectionId, schemaToSelect);
           if (!isMetadataRequestCurrent(request)) {
             taskStore.cancelTask(taskId, "Metadata context changed");
             return;
           }
-          await storeService.saveResources([
-            createCacheMarker(
+
+          set({
+            schemas: schemas,
+            currentSchema: schemaToSelect || null,
+            defaultSchema: savedDefault,
+            isLoading: false,
+            selectedTable: null,
+            collections:
+              activeDriver === "redis" && schemaToSelect === currentSchema
+                ? get().collections.slice(-MAX_REDIS_KEYS_IN_MEMORY)
+                : [],
+            tables:
+              currentSchema && schemas.includes(currentSchema)
+                ? get().tables
+                : [],
+          });
+          set((state) => ({
+            connectionSnapshots: {
+              ...state.connectionSnapshots,
+              [getConnectionSnapshotKey(connectionId, activeDriver)]: {
+                schemas,
+                tables: state.tables,
+                collections:
+                  activeDriver === "redis"
+                    ? state.collections.slice(-MAX_REDIS_KEYS_IN_MEMORY)
+                    : state.collections,
+                collectionNextCursor: state.collectionNextCursor,
+                collectionTotal: state.collectionTotal,
+                collectionFilter: state.collectionFilter,
+                functions: state.functions,
+                pinnedTables: state.pinnedTables,
+                currentSchema: schemaToSelect || null,
+                defaultSchema: savedDefault,
+                selectedTable: state.selectedTable,
+                lastLoadedConnectionId: loadKey,
+                lastLoadedObjectKey: state.lastLoadedObjectKey,
+                metadataVersion: state.metadataVersion,
+              },
+            },
+          }));
+          get().setMetadataNodeState(nodeKey, {
+            status: "ready",
+            source: "remote",
+            message: `${schemas.length.toLocaleString()} ${schemas.length === 1 ? "schema" : "schemas"}`,
+          });
+
+          // Save to MetaStore in background
+          const newResources: Resource[] = schemas.map((name) => ({
+            id: getSchemaResourceId(connectionId, name, activeDriver),
+            connection_id: connectionId,
+            kind: "DATABASE",
+            name: name,
+            metadata: { driver: activeDriver },
+            last_updated: Date.now(),
+          }));
+
+          try {
+            if (!isMetadataRequestCurrent(request)) {
+              taskStore.cancelTask(taskId, "Metadata context changed");
+              return;
+            }
+            await storeService.replaceResources(
               connectionId,
               undefined,
-              SCHEMA_CACHE_KIND,
-              activeDriver
-            ),
-          ], request.projectId);
-          if (!isMetadataRequestCurrent(request)) {
-            taskStore.cancelTask(taskId, "Metadata context changed");
-            return;
+              "DATABASE",
+              newResources,
+              request.projectId,
+            );
+            if (!isMetadataRequestCurrent(request)) {
+              taskStore.cancelTask(taskId, "Metadata context changed");
+              return;
+            }
+            await storeService.saveResources(
+              [
+                createCacheMarker(
+                  connectionId,
+                  undefined,
+                  SCHEMA_CACHE_KIND,
+                  activeDriver,
+                ),
+              ],
+              request.projectId,
+            );
+            if (!isMetadataRequestCurrent(request)) {
+              taskStore.cancelTask(taskId, "Metadata context changed");
+              return;
+            }
+          } catch (err) {
+            console.warn("Store: Failed to cache schemas to MetaStore", err);
           }
-        } catch (err) {
-          console.warn("Store: Failed to cache schemas to MetaStore", err);
         }
+        if (!isMetadataRequestCurrent(request)) {
+          taskStore.cancelTask(taskId, "Metadata context changed");
+          return;
+        }
+        taskStore.finishTask(
+          taskId,
+          `${schemas.length.toLocaleString()} schemas`,
+        );
+      } catch (e) {
+        if (!isMetadataRequestCurrent(request)) {
+          taskStore.cancelTask(taskId, "Metadata context changed");
+          return;
+        }
+        const errorMessage = e instanceof Error ? e.message : String(e);
+        taskStore.failTask(taskId, errorMessage);
+        const hasCachedSchemas =
+          hasCachedSchemaSnapshot || get().schemas.length > 0;
+        get().setMetadataNodeState(nodeKey, {
+          status: hasCachedSchemas ? "stale" : "error",
+          source: hasCachedSchemas ? "cache" : "remote",
+          message: hasCachedSchemas
+            ? `Refresh failed; showing cached schemas. ${errorMessage}`
+            : errorMessage,
+        });
+        console.warn("Store: loadSchemas refresh failed", e);
+        // A failed background refresh never hides or clears usable cache.
+        set((state) => ({
+          isLoading: false,
+          ...(state.schemas.length === 0 ? { schemas: [] } : {}),
+        }));
       }
-      if (!isMetadataRequestCurrent(request)) {
-        taskStore.cancelTask(taskId, "Metadata context changed");
-        return;
-      }
-      taskStore.finishTask(taskId, `${schemas.length.toLocaleString()} schemas`);
-    } catch (e) {
-      if (!isMetadataRequestCurrent(request)) {
-        taskStore.cancelTask(taskId, "Metadata context changed");
-        return;
-      }
-      const errorMessage = e instanceof Error ? e.message : String(e);
-      taskStore.failTask(taskId, errorMessage);
-      const hasCachedSchemas =
-        hasCachedSchemaSnapshot || get().schemas.length > 0;
-      get().setMetadataNodeState(nodeKey, {
-        status: hasCachedSchemas ? "stale" : "error",
-        source: hasCachedSchemas ? "cache" : "remote",
-        message: hasCachedSchemas
-          ? `Refresh failed; showing cached schemas. ${errorMessage}`
-          : errorMessage,
-      });
-      console.warn("Store: loadSchemas refresh failed", e);
-      // A failed background refresh never hides or clears usable cache.
-      set((state) => ({
-        isLoading: false,
-        ...(state.schemas.length === 0 ? { schemas: [] } : {}),
-      }));
-    }
     } finally {
       if (schemaLoadsInFlight.get(requestKey) === loadFlight) {
         schemaLoadsInFlight.delete(requestKey);
@@ -1278,88 +1325,163 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     tableLoadsInFlight.set(requestKey, loadFlight);
 
     try {
-    console.log("Store: loadTables called (MetaStore aware)", {
-      connectionId,
-      schema,
-      force,
-    });
-    const activeDriver = getConnectionDriver(connectionId);
-    const nodeKey = getSchemaMetadataNodeKey(connectionId, activeDriver, schema);
-    const objectLoadKey = getObjectLoadKey(
-      connectionId,
-      activeDriver,
-      schema,
-      "tables"
-    );
-    const { lastLoadedObjectKey, currentSchema } = get();
-    if (
-      !force &&
-      lastLoadedObjectKey === objectLoadKey &&
-      currentSchema === schema
-    ) {
-      console.log("Store: loadTables skipped (cached in state)");
-      return;
-    }
-
-    // Load pinned tables for this context
-    const pinKey = getPinnedTablesKey(connectionId, schema, activeDriver);
-    const savedPins = JSON.parse(readStorageItem(pinKey) || "[]");
-    set({ pinnedTables: savedPins });
-
-    // Parent ID for tables is scoped by connection + driver + schema.
-    const schemaResourceId = getSchemaResourceId(
-      connectionId,
-      schema,
-      activeDriver
-    );
-
-    let hasCachedTableSnapshot = false;
-
-    // 1. Try MetaStore Cache First
-    try {
-      const cachedResources = await storeService.getResources(
+      console.log("Store: loadTables called (MetaStore aware)", {
         connectionId,
-        schemaResourceId,
-        request.projectId
+        schema,
+        force,
+      });
+      const activeDriver = getConnectionDriver(connectionId);
+      const nodeKey = getSchemaMetadataNodeKey(
+        connectionId,
+        activeDriver,
+        schema,
       );
-      if (!isMetadataRequestCurrent(request)) return;
+      const objectLoadKey = getObjectLoadKey(
+        connectionId,
+        activeDriver,
+        schema,
+        "tables",
+      );
+      const { lastLoadedObjectKey, currentSchema } = get();
+      if (
+        !force &&
+        lastLoadedObjectKey === objectLoadKey &&
+        currentSchema === schema
+      ) {
+        console.log("Store: loadTables skipped (cached in state)");
+        return;
+      }
 
-      const hasCachedTableGroup = hasCacheMarker(
-        cachedResources,
-        TABLE_CACHE_KIND,
-        activeDriver
+      // Load pinned tables for this context
+      const pinKey = getPinnedTablesKey(connectionId, schema, activeDriver);
+      const savedPins = JSON.parse(readStorageItem(pinKey) || "[]");
+      set({ pinnedTables: savedPins });
+
+      // Parent ID for tables is scoped by connection + driver + schema.
+      const schemaResourceId = getSchemaResourceId(
+        connectionId,
+        schema,
+        activeDriver,
       );
 
-      if (cachedResources.length > 0 || hasCachedTableGroup) {
-        const cachedTables = resourcesToTables(
+      let hasCachedTableSnapshot = false;
+
+      // 1. Try MetaStore Cache First
+      try {
+        const cachedResources = await storeService.getResources(
+          connectionId,
+          schemaResourceId,
+          request.projectId,
+        );
+        if (!isMetadataRequestCurrent(request)) return;
+
+        const hasCachedTableGroup = hasCacheMarker(
           cachedResources,
-          schema,
-          activeDriver
+          TABLE_CACHE_KIND,
+          activeDriver,
         );
 
-        if (cachedTables.length === 0 && !hasCachedTableGroup) {
-          throw new Error("Table cache is stale for active driver");
-        }
+        if (cachedResources.length > 0 || hasCachedTableGroup) {
+          const cachedTables = resourcesToTables(
+            cachedResources,
+            schema,
+            activeDriver,
+          );
 
-        hasCachedTableSnapshot = true;
-        console.log("Store: Loaded tables from MetaStore", cachedTables.length);
-        get().setMetadataNodeState(nodeKey, {
-          status: "ready",
-          source: "cache",
-          message: `${cachedTables.length.toLocaleString()} ${cachedTables.length === 1 ? "table" : "tables"} from cache`,
-        });
+          if (cachedTables.length === 0 && !hasCachedTableGroup) {
+            throw new Error("Table cache is stale for active driver");
+          }
+
+          hasCachedTableSnapshot = true;
+          console.log(
+            "Store: Loaded tables from MetaStore",
+            cachedTables.length,
+          );
+          get().setMetadataNodeState(nodeKey, {
+            status: "ready",
+            source: "cache",
+            message: `${cachedTables.length.toLocaleString()} ${cachedTables.length === 1 ? "table" : "tables"} from cache`,
+          });
+          set((state) => {
+            const objectKey = getObjectSnapshotKey(
+              connectionId,
+              activeDriver,
+              schema,
+            );
+            const existingSnapshot = state.objectSnapshots[objectKey];
+
+            return {
+              tables: cachedTables,
+              isLoading: false,
+              lastLoadedObjectKey: objectLoadKey,
+              objectSnapshots: {
+                ...state.objectSnapshots,
+                [objectKey]: {
+                  tables: cachedTables,
+                  collections:
+                    existingSnapshot?.collections ??
+                    (state.currentSchema === schema ? state.collections : []),
+                  functions:
+                    existingSnapshot?.functions ??
+                    (state.currentSchema === schema ? state.functions : []),
+                  pinnedTables: savedPins,
+                  selectedTable:
+                    existingSnapshot?.selectedTable ??
+                    (state.currentSchema === schema
+                      ? state.selectedTable
+                      : null),
+                  lastLoadedObjectKey: objectLoadKey,
+                },
+              },
+            };
+          });
+          if (!force) return;
+        }
+      } catch (e) {
+        if (!isMetadataRequestCurrent(request)) return;
+        console.warn("Store: Table MetaStore miss or error", e);
+      }
+
+      // 2. Refresh from Driver & Update MetaStore
+      if (!isMetadataRequestCurrent(request)) return;
+      const hasUsableTables = hasCachedTableSnapshot || get().tables.length > 0;
+      set({ isLoading: !hasUsableTables });
+      get().setMetadataNodeState(nodeKey, {
+        status: hasUsableTables ? "ready" : "loading",
+        source: hasUsableTables ? "cache" : "remote",
+        message: hasUsableTables
+          ? `Refreshing ${schema} in background`
+          : `Refreshing ${schema}`,
+      });
+      const taskStore = useTaskStore.getState();
+      const taskId = taskStore.startTask({
+        kind: "introspection",
+        title: `Refresh ${schema}`,
+        detail: "Tables",
+      });
+      try {
+        const tables = await schemaService.refreshTables(connectionId, schema);
+        if (!isMetadataRequestCurrent(request)) {
+          taskStore.cancelTask(taskId, "Metadata context changed");
+          return;
+        }
         set((state) => {
-          const objectKey = getObjectSnapshotKey(connectionId, activeDriver, schema);
+          const objectKey = getObjectSnapshotKey(
+            connectionId,
+            activeDriver,
+            schema,
+          );
           const existingSnapshot = state.objectSnapshots[objectKey];
 
           return {
-            tables: cachedTables,
+            tables: tables,
             isLoading: false,
             lastLoadedObjectKey: objectLoadKey,
+            metadataVersion: state.metadataVersion + 1,
             objectSnapshots: {
               ...state.objectSnapshots,
               [objectKey]: {
-                tables: cachedTables,
+                tables,
                 collections:
                   existingSnapshot?.collections ??
                   (state.currentSchema === schema ? state.collections : []),
@@ -1375,143 +1497,87 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
             },
           };
         });
-        if (!force) return;
-      }
-    } catch (e) {
-      if (!isMetadataRequestCurrent(request)) return;
-      console.warn("Store: Table MetaStore miss or error", e);
-    }
+        get().setMetadataNodeState(nodeKey, {
+          status: "ready",
+          source: "remote",
+          message: `${tables.length.toLocaleString()} ${tables.length === 1 ? "table" : "tables"}`,
+        });
 
-    // 2. Refresh from Driver & Update MetaStore
-    if (!isMetadataRequestCurrent(request)) return;
-    const hasUsableTables =
-      hasCachedTableSnapshot || get().tables.length > 0;
-    set({ isLoading: !hasUsableTables });
-    get().setMetadataNodeState(nodeKey, {
-      status: hasUsableTables ? "ready" : "loading",
-      source: hasUsableTables ? "cache" : "remote",
-      message: hasUsableTables
-        ? `Refreshing ${schema} in background`
-        : `Refreshing ${schema}`,
-    });
-    const taskStore = useTaskStore.getState();
-    const taskId = taskStore.startTask({
-      kind: "introspection",
-      title: `Refresh ${schema}`,
-      detail: "Tables",
-    });
-    try {
-      const tables = await schemaService.refreshTables(connectionId, schema);
-      if (!isMetadataRequestCurrent(request)) {
-        taskStore.cancelTask(taskId, "Metadata context changed");
-        return;
-      }
-      set((state) => {
-        const objectKey = getObjectSnapshotKey(connectionId, activeDriver, schema);
-        const existingSnapshot = state.objectSnapshots[objectKey];
+        // Save to MetaStore in background
+        const newResources: Resource[] = tables.map((t) => ({
+          id: `${schemaResourceId}:${t.name}`,
+          connection_id: connectionId,
+          parent_id: schemaResourceId,
+          kind: "TABLE",
+          name: t.name,
+          metadata: { driver: activeDriver, type: t.type, comment: t.comment },
+          last_updated: Date.now(),
+        }));
 
-        return {
-          tables: tables,
+        try {
+          if (!isMetadataRequestCurrent(request)) {
+            taskStore.cancelTask(taskId, "Metadata context changed");
+            return;
+          }
+          await storeService.replaceResources(
+            connectionId,
+            schemaResourceId,
+            "TABLE",
+            newResources,
+            request.projectId,
+          );
+          if (!isMetadataRequestCurrent(request)) {
+            taskStore.cancelTask(taskId, "Metadata context changed");
+            return;
+          }
+          await storeService.saveResources(
+            [
+              createCacheMarker(
+                connectionId,
+                schemaResourceId,
+                TABLE_CACHE_KIND,
+                activeDriver,
+              ),
+            ],
+            request.projectId,
+          );
+          if (!isMetadataRequestCurrent(request)) {
+            taskStore.cancelTask(taskId, "Metadata context changed");
+            return;
+          }
+        } catch (err) {
+          console.warn("Store: Failed to cache tables to MetaStore", err);
+        }
+        if (!isMetadataRequestCurrent(request)) {
+          taskStore.cancelTask(taskId, "Metadata context changed");
+          return;
+        }
+        taskStore.finishTask(
+          taskId,
+          `${tables.length.toLocaleString()} tables`,
+        );
+      } catch (e) {
+        if (!isMetadataRequestCurrent(request)) {
+          taskStore.cancelTask(taskId, "Metadata context changed");
+          return;
+        }
+        const errorMessage = e instanceof Error ? e.message : String(e);
+        taskStore.failTask(taskId, errorMessage);
+        const hasCachedTables =
+          hasCachedTableSnapshot || get().tables.length > 0;
+        get().setMetadataNodeState(nodeKey, {
+          status: hasCachedTables ? "stale" : "error",
+          source: hasCachedTables ? "cache" : "remote",
+          message: hasCachedTables
+            ? `Refresh failed; showing cached tables. ${errorMessage}`
+            : errorMessage,
+        });
+        console.warn("Store: loadTables refresh failed", e);
+        set((state) => ({
           isLoading: false,
-          lastLoadedObjectKey: objectLoadKey,
-          metadataVersion: state.metadataVersion + 1,
-          objectSnapshots: {
-            ...state.objectSnapshots,
-            [objectKey]: {
-              tables,
-              collections:
-                existingSnapshot?.collections ??
-                (state.currentSchema === schema ? state.collections : []),
-              functions:
-                existingSnapshot?.functions ??
-                (state.currentSchema === schema ? state.functions : []),
-              pinnedTables: savedPins,
-              selectedTable:
-                existingSnapshot?.selectedTable ??
-                (state.currentSchema === schema ? state.selectedTable : null),
-              lastLoadedObjectKey: objectLoadKey,
-            },
-          },
-        };
-      });
-      get().setMetadataNodeState(nodeKey, {
-        status: "ready",
-        source: "remote",
-        message: `${tables.length.toLocaleString()} ${tables.length === 1 ? "table" : "tables"}`,
-      });
-
-      // Save to MetaStore in background
-      const newResources: Resource[] = tables.map((t) => ({
-        id: `${schemaResourceId}:${t.name}`,
-        connection_id: connectionId,
-        parent_id: schemaResourceId,
-        kind: "TABLE",
-        name: t.name,
-        metadata: { driver: activeDriver, type: t.type, comment: t.comment },
-        last_updated: Date.now(),
-      }));
-
-      try {
-        if (!isMetadataRequestCurrent(request)) {
-          taskStore.cancelTask(taskId, "Metadata context changed");
-          return;
-        }
-        await storeService.replaceResources(
-          connectionId,
-          schemaResourceId,
-          "TABLE",
-          newResources,
-          request.projectId
-        );
-        if (!isMetadataRequestCurrent(request)) {
-          taskStore.cancelTask(taskId, "Metadata context changed");
-          return;
-        }
-        await storeService.saveResources(
-          [
-            createCacheMarker(
-              connectionId,
-              schemaResourceId,
-              TABLE_CACHE_KIND,
-              activeDriver
-            ),
-          ],
-          request.projectId
-        );
-        if (!isMetadataRequestCurrent(request)) {
-          taskStore.cancelTask(taskId, "Metadata context changed");
-          return;
-        }
-      } catch (err) {
-        console.warn("Store: Failed to cache tables to MetaStore", err);
+          ...(state.tables.length === 0 ? { tables: [] } : {}),
+        }));
       }
-      if (!isMetadataRequestCurrent(request)) {
-        taskStore.cancelTask(taskId, "Metadata context changed");
-        return;
-      }
-      taskStore.finishTask(taskId, `${tables.length.toLocaleString()} tables`);
-    } catch (e) {
-      if (!isMetadataRequestCurrent(request)) {
-        taskStore.cancelTask(taskId, "Metadata context changed");
-        return;
-      }
-      const errorMessage = e instanceof Error ? e.message : String(e);
-      taskStore.failTask(taskId, errorMessage);
-      const hasCachedTables =
-        hasCachedTableSnapshot || get().tables.length > 0;
-      get().setMetadataNodeState(nodeKey, {
-        status: hasCachedTables ? "stale" : "error",
-        source: hasCachedTables ? "cache" : "remote",
-        message: hasCachedTables
-          ? `Refresh failed; showing cached tables. ${errorMessage}`
-          : errorMessage,
-      });
-      console.warn("Store: loadTables refresh failed", e);
-      set((state) => ({
-        isLoading: false,
-        ...(state.tables.length === 0 ? { tables: [] } : {}),
-      }));
-    }
     } finally {
       if (tableLoadsInFlight.get(requestKey) === loadFlight) {
         tableLoadsInFlight.delete(requestKey);
@@ -1520,7 +1586,11 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     }
   },
 
-  loadFunctions: async (connectionId: string, schema: string, force = false) => {
+  loadFunctions: async (
+    connectionId: string,
+    schema: string,
+    force = false,
+  ) => {
     if (!connectionId || !schema) {
       set({ functions: [], isFunctionsLoading: false });
       return;
@@ -1533,7 +1603,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       connectionId,
       activeDriver,
       schema,
-      "functions"
+      "functions",
     );
     const { lastLoadedObjectKey, currentSchema } = get();
     if (
@@ -1548,29 +1618,26 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     const schemaResourceId = getSchemaResourceId(
       connectionId,
       schema,
-      activeDriver
+      activeDriver,
     );
 
     try {
       const cachedResources = await storeService.getResources(
         connectionId,
         schemaResourceId,
-        request.projectId
+        request.projectId,
       );
       if (!isMetadataRequestCurrent(request)) return;
       const hasCachedFunctionGroup = hasCacheMarker(
         cachedResources,
         FUNCTION_CACHE_KIND,
-        activeDriver
+        activeDriver,
       );
 
-      if (
-        !force &&
-        (cachedResources.length > 0 || hasCachedFunctionGroup)
-      ) {
+      if (!force && (cachedResources.length > 0 || hasCachedFunctionGroup)) {
         const cachedFunctions = resourcesToFunctions(
           cachedResources,
-          activeDriver
+          activeDriver,
         );
 
         if (cachedFunctions.length === 0 && !hasCachedFunctionGroup) {
@@ -1583,7 +1650,11 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
         }
 
         set((state) => {
-          const objectKey = getObjectSnapshotKey(connectionId, activeDriver, schema);
+          const objectKey = getObjectSnapshotKey(
+            connectionId,
+            activeDriver,
+            schema,
+          );
           const existingSnapshot = state.objectSnapshots[objectKey];
 
           return {
@@ -1627,7 +1698,11 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
         return;
       }
       set((state) => {
-        const objectKey = getObjectSnapshotKey(connectionId, activeDriver, schema);
+        const objectKey = getObjectSnapshotKey(
+          connectionId,
+          activeDriver,
+          schema,
+        );
         const existingSnapshot = state.objectSnapshots[objectKey];
 
         return {
@@ -1679,7 +1754,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
           schemaResourceId,
           "FUNCTION",
           newResources,
-          request.projectId
+          request.projectId,
         );
         if (!isMetadataRequestCurrent(request)) return;
         await storeService.saveResources(
@@ -1688,10 +1763,10 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
               connectionId,
               schemaResourceId,
               FUNCTION_CACHE_KIND,
-              activeDriver
+              activeDriver,
             ),
           ],
-          request.projectId
+          request.projectId,
         );
       } catch (err) {
         if (!isMetadataRequestCurrent(request)) return;
@@ -1712,32 +1787,34 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     connectionId: string,
     namespace: string,
     force = false,
-    filter = ""
+    filter = "",
+    revalidateCached = false,
   ) => {
     if (!connectionId) {
-      set({ collections: [], isCollectionsLoading: false });
+      set({
+        collections: [],
+        collectionLoadingKey: null,
+        isCollectionsLoading: false,
+      });
       return;
     }
     const request = captureMetadataRequest(connectionId);
     if (!isMetadataRequestCurrent(request)) return;
 
     const activeDriver = getConnectionDriver(connectionId);
-    const normalizedFilter =
-      activeDriver === "redis" ? filter.trim() : "";
+    const normalizedFilter = activeDriver === "redis" ? filter.trim() : "";
     const objectLoadKey = getObjectLoadKey(
       connectionId,
       activeDriver,
       namespace || "",
       activeDriver === "redis"
         ? `collections:${normalizedFilter}`
-        : "collections"
+        : "collections",
     );
-    const {
-      lastLoadedObjectKey,
-      currentSchema: activeNamespace,
-    } = get();
+    const { lastLoadedObjectKey, currentSchema: activeNamespace } = get();
     if (
       !force &&
+      !revalidateCached &&
       lastLoadedObjectKey === objectLoadKey &&
       (activeNamespace || "") === namespace
     ) {
@@ -1747,19 +1824,14 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     const schemaResourceId = getSchemaResourceId(
       connectionId,
       namespace || "",
-      activeDriver
+      activeDriver,
     );
-    if (
-      activeDriver === "redis" &&
-      get().collectionLoadingKey === objectLoadKey
-    ) {
+    if (get().collectionLoadingKey === objectLoadKey) {
       return;
     }
     set({
       isCollectionsLoading: true,
-      ...(activeDriver === "redis"
-        ? { collectionLoadingKey: objectLoadKey }
-        : {}),
+      collectionLoadingKey: objectLoadKey,
     });
 
     if (activeDriver === "redis") {
@@ -1769,7 +1841,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
           namespace || "",
           null,
           REDIS_KEY_PAGE_SIZE,
-          normalizedFilter || null
+          normalizedFilter || null,
         );
         if (!isMetadataRequestCurrent(request)) return;
         const currentSchema = get().currentSchema;
@@ -1780,7 +1852,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
           set((state) =>
             state.collectionLoadingKey === objectLoadKey
               ? { isCollectionsLoading: false, collectionLoadingKey: null }
-              : {}
+              : {},
           );
           return;
         }
@@ -1810,7 +1882,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
                   last_updated: Date.now(),
                 },
               ],
-              request.projectId
+              request.projectId,
             );
           } catch (cacheError) {
             console.warn("Store: Failed to cache Redis key count", cacheError);
@@ -1829,7 +1901,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
                 collectionFilter: normalizedFilter,
                 isCollectionsLoading: false,
               }
-            : {}
+            : {},
         );
       }
       return;
@@ -1839,24 +1911,21 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       const cachedResources = await storeService.getResources(
         connectionId,
         schemaResourceId,
-        request.projectId
+        request.projectId,
       );
       if (!isMetadataRequestCurrent(request)) return;
 
       const hasCachedCollectionGroup = hasCacheMarker(
         cachedResources,
         COLLECTION_CACHE_KIND,
-        activeDriver
+        activeDriver,
       );
 
-      if (
-        !force &&
-        (cachedResources.length > 0 || hasCachedCollectionGroup)
-      ) {
+      if (!force && (cachedResources.length > 0 || hasCachedCollectionGroup)) {
         const cachedCollections = resourcesToCollections(
           cachedResources,
           namespace,
-          activeDriver
+          activeDriver,
         );
 
         if (cachedCollections.length === 0 && !hasCachedCollectionGroup) {
@@ -1875,24 +1944,29 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
           const objectKey = getObjectSnapshotKey(
             connectionId,
             activeDriver,
-            namespace || ""
+            namespace || "",
           );
           const existingSnapshot = state.objectSnapshots[objectKey];
 
           return {
             collections: cachedCollections,
-            isCollectionsLoading: false,
+            isCollectionsLoading: revalidateCached,
+            collectionLoadingKey: revalidateCached ? objectLoadKey : null,
             lastLoadedObjectKey: objectLoadKey,
             objectSnapshots: {
               ...state.objectSnapshots,
               [objectKey]: {
                 tables:
                   existingSnapshot?.tables ??
-                  ((state.currentSchema || "") === namespace ? state.tables : []),
+                  ((state.currentSchema || "") === namespace
+                    ? state.tables
+                    : []),
                 collections: cachedCollections,
                 functions:
                   existingSnapshot?.functions ??
-                  ((state.currentSchema || "") === namespace ? state.functions : []),
+                  ((state.currentSchema || "") === namespace
+                    ? state.functions
+                    : []),
                 pinnedTables:
                   existingSnapshot?.pinnedTables ??
                   ((state.currentSchema || "") === namespace
@@ -1908,7 +1982,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
             },
           };
         });
-        return;
+        if (!revalidateCached) return;
       }
     } catch (e) {
       if (!isMetadataRequestCurrent(request)) return;
@@ -1919,23 +1993,28 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     try {
       const collections = await schemaService.getCollections(
         connectionId,
-        namespace || ""
+        namespace || "",
       );
       const currentSchema = get().currentSchema;
-      if (!isMetadataRequestCurrent(request) || currentSchema !== namespace) {
+      if (
+        !isMetadataRequestCurrent(request) ||
+        currentSchema !== namespace ||
+        get().collectionLoadingKey !== objectLoadKey
+      ) {
         return;
       }
       set((state) => {
         const objectKey = getObjectSnapshotKey(
           connectionId,
           activeDriver,
-          namespace || ""
+          namespace || "",
         );
         const existingSnapshot = state.objectSnapshots[objectKey];
 
         return {
           collections,
           isCollectionsLoading: false,
+          collectionLoadingKey: null,
           lastLoadedObjectKey: objectLoadKey,
           metadataVersion: state.metadataVersion + 1,
           objectSnapshots: {
@@ -1947,7 +2026,9 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
               collections,
               functions:
                 existingSnapshot?.functions ??
-                ((state.currentSchema || "") === namespace ? state.functions : []),
+                ((state.currentSchema || "") === namespace
+                  ? state.functions
+                  : []),
               pinnedTables:
                 existingSnapshot?.pinnedTables ??
                 ((state.currentSchema || "") === namespace
@@ -1986,7 +2067,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
           schemaResourceId,
           "COLLECTION",
           newResources,
-          request.projectId
+          request.projectId,
         );
         if (!isMetadataRequestCurrent(request)) return;
         await storeService.saveResources(
@@ -1995,10 +2076,10 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
               connectionId,
               schemaResourceId,
               COLLECTION_CACHE_KIND,
-              activeDriver
+              activeDriver,
             ),
           ],
-          request.projectId
+          request.projectId,
         );
       } catch (err) {
         if (!isMetadataRequestCurrent(request)) return;
@@ -2011,18 +2092,21 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       if (currentSchema !== namespace) {
         return;
       }
-      set({ collections: [], isCollectionsLoading: false });
+      // A failed background revalidation must not discard a usable cached
+      // collection list. The next expansion or explicit refresh can retry.
+      set((state) =>
+        state.collectionLoadingKey === objectLoadKey
+          ? { collectionLoadingKey: null, isCollectionsLoading: false }
+          : {},
+      );
     }
   },
 
   loadMoreCollections: async (connectionId: string, namespace: string) => {
     const request = captureMetadataRequest(connectionId);
     if (!isMetadataRequestCurrent(request)) return;
-    const {
-      collectionNextCursor,
-      collectionFilter,
-      isCollectionsLoading,
-    } = get();
+    const { collectionNextCursor, collectionFilter, isCollectionsLoading } =
+      get();
     if (!collectionNextCursor || isCollectionsLoading) return;
     const activeDriver = getConnectionDriver(connectionId);
     if (activeDriver !== "redis") return;
@@ -2034,7 +2118,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
         namespace || "",
         collectionNextCursor,
         REDIS_KEY_PAGE_SIZE,
-        collectionFilter || null
+        collectionFilter || null,
       );
       if (!isMetadataRequestCurrent(request)) return;
       if (
@@ -2046,9 +2130,11 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       }
       set((state) => {
         const byName = new Map(
-          state.collections.map((collection) => [collection.name, collection])
+          state.collections.map((collection) => [collection.name, collection]),
         );
-        page.items.forEach((collection) => byName.set(collection.name, collection));
+        page.items.forEach((collection) =>
+          byName.set(collection.name, collection),
+        );
         const collections = Array.from(byName.values());
         return {
           collections:
@@ -2080,7 +2166,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     const pinKey = getPinnedTablesKey(
       activeConnectionId,
       currentSchema,
-      activeDriver
+      activeDriver,
     );
     const isPinned = pinnedTables.includes(tableName);
     const newPinned = isPinned
@@ -2092,11 +2178,18 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
   },
 
   setCurrentSchema: async (schema: string) => {
+    const selectionGeneration = ++namespaceSelectionGeneration;
+    const selectionIsCurrent = () =>
+      selectionGeneration === namespaceSelectionGeneration;
     const { activeConnectionId } = useConnectionStore.getState();
     const request = activeConnectionId
       ? captureMetadataRequest(activeConnectionId)
       : null;
-    if (request && !isMetadataRequestCurrent(request)) return;
+    if (
+      (request && !isMetadataRequestCurrent(request)) ||
+      !selectionIsCurrent()
+    )
+      return;
     const activeDriver = activeConnectionId
       ? getConnectionDriver(activeConnectionId)
       : null;
@@ -2119,14 +2212,13 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       const previousObjectKey = getObjectSnapshotKey(
         activeConnectionId,
         activeDriver,
-        currentState.currentSchema
+        currentState.currentSchema,
       );
       nextObjectSnapshots = {
         ...nextObjectSnapshots,
         [previousObjectKey]: {
           tables: currentState.tables,
-          collections:
-            activeDriver === "redis" ? [] : currentState.collections,
+          collections: activeDriver === "redis" ? [] : currentState.collections,
           functions: currentState.functions,
           pinnedTables: currentState.pinnedTables,
           selectedTable: currentState.selectedTable,
@@ -2137,10 +2229,30 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
 
     let targetObjectSnapshot =
       activeDriver !== "redis" && activeConnectionId && schema
-        ? nextObjectSnapshots[
+        ? (nextObjectSnapshots[
             getObjectSnapshotKey(activeConnectionId, activeDriver, schema)
-          ] ?? null
+          ] ?? null)
         : null;
+
+    // Switch the visible namespace before waiting for SQLite cache hydration
+    // or the backend USE/SELECT call. Explorer rows must acknowledge the click
+    // immediately; cached or remote children can arrive afterwards.
+    set({
+      currentSchema: schema,
+      selectedTable: targetObjectSnapshot?.selectedTable ?? null,
+      tables: targetObjectSnapshot?.tables ?? [],
+      collections: targetObjectSnapshot?.collections ?? [],
+      collectionNextCursor: null,
+      collectionTotal: null,
+      collectionLoadingKey: null,
+      collectionFilter: "",
+      functions: targetObjectSnapshot?.functions ?? [],
+      pinnedTables: targetObjectSnapshot?.pinnedTables ?? [],
+      lastLoadedObjectKey: targetObjectSnapshot?.lastLoadedObjectKey ?? null,
+      isCollectionsLoading: false,
+      isFunctionsLoading: false,
+      objectSnapshots: nextObjectSnapshots,
+    });
 
     if (
       activeConnectionId &&
@@ -2152,18 +2264,22 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
         const schemaResourceId = getSchemaResourceId(
           activeConnectionId,
           schema,
-          activeDriver
+          activeDriver,
         );
         const cachedResources = await storeService.getResources(
           activeConnectionId,
           schemaResourceId,
-          request?.projectId
+          request?.projectId,
         );
-        if (request && !isMetadataRequestCurrent(request)) return;
+        if (
+          (request && !isMetadataRequestCurrent(request)) ||
+          !selectionIsCurrent()
+        )
+          return;
         const cachedTables = resourcesToTables(
           cachedResources,
           schema,
-          activeDriver
+          activeDriver,
         );
         const cachedCollections =
           activeDriver === "redis"
@@ -2171,24 +2287,20 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
             : resourcesToCollections(cachedResources, schema, activeDriver);
         const cachedFunctions = resourcesToFunctions(
           cachedResources,
-          activeDriver
+          activeDriver,
         );
         const hasCachedTableGroup = hasCacheMarker(
           cachedResources,
           TABLE_CACHE_KIND,
-          activeDriver
+          activeDriver,
         );
         const hasCachedCollectionGroup =
           activeDriver !== "redis" &&
-          hasCacheMarker(
-            cachedResources,
-            COLLECTION_CACHE_KIND,
-            activeDriver
-          );
+          hasCacheMarker(cachedResources, COLLECTION_CACHE_KIND, activeDriver);
         const hasCachedFunctionGroup = hasCacheMarker(
           cachedResources,
           FUNCTION_CACHE_KIND,
-          activeDriver
+          activeDriver,
         );
         const hasAnyCachedObject =
           cachedTables.length > 0 ||
@@ -2202,34 +2314,41 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
           const pinKey = getPinnedTablesKey(
             activeConnectionId,
             schema,
-            activeDriver
+            activeDriver,
           );
           const parsedPins = JSON.parse(readStorageItem(pinKey) || "[]");
           const savedPins = Array.isArray(parsedPins)
-            ? parsedPins.filter((value): value is string => typeof value === "string")
+            ? parsedPins.filter(
+                (value): value is string => typeof value === "string",
+              )
             : [];
           const lastLoadedObjectKey =
             cachedTables.length > 0 || hasCachedTableGroup
-              ? getObjectLoadKey(activeConnectionId, activeDriver, schema, "tables")
+              ? getObjectLoadKey(
+                  activeConnectionId,
+                  activeDriver,
+                  schema,
+                  "tables",
+                )
               : cachedCollections.length > 0 || hasCachedCollectionGroup
                 ? getObjectLoadKey(
                     activeConnectionId,
                     activeDriver,
                     schema,
-                    "collections"
+                    "collections",
                   )
                 : cachedFunctions.length > 0 || hasCachedFunctionGroup
                   ? getObjectLoadKey(
                       activeConnectionId,
                       activeDriver,
                       schema,
-                      "functions"
+                      "functions",
                     )
                   : currentState.lastLoadedObjectKey;
           const objectKey = getObjectSnapshotKey(
             activeConnectionId,
             activeDriver,
-            schema
+            schema,
           );
 
           targetObjectSnapshot = {
@@ -2246,12 +2365,23 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
           };
         }
       } catch (error) {
-        if (request && !isMetadataRequestCurrent(request)) return;
-        console.warn("Store: Failed to hydrate schema objects from MetaStore", error);
+        if (
+          (request && !isMetadataRequestCurrent(request)) ||
+          !selectionIsCurrent()
+        )
+          return;
+        console.warn(
+          "Store: Failed to hydrate schema objects from MetaStore",
+          error,
+        );
       }
     }
 
-    if (request && !isMetadataRequestCurrent(request)) return;
+    if (
+      (request && !isMetadataRequestCurrent(request)) ||
+      !selectionIsCurrent()
+    )
+      return;
     set({
       currentSchema: schema,
       selectedTable: targetObjectSnapshot?.selectedTable ?? null,
@@ -2263,9 +2393,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       collectionFilter: "",
       functions: targetObjectSnapshot?.functions ?? [],
       pinnedTables: targetObjectSnapshot?.pinnedTables ?? [],
-      lastLoadedObjectKey:
-        targetObjectSnapshot?.lastLoadedObjectKey ??
-        currentState.lastLoadedObjectKey,
+      lastLoadedObjectKey: targetObjectSnapshot?.lastLoadedObjectKey ?? null,
       isCollectionsLoading: false,
       isFunctionsLoading: false,
       objectSnapshots: nextObjectSnapshots,
@@ -2274,9 +2402,33 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     if (activeConnectionId && schema) {
       try {
         await schemaService.setCurrentSchema(activeConnectionId, schema);
-        if (request && !isMetadataRequestCurrent(request)) return;
+        if (
+          (request && !isMetadataRequestCurrent(request)) ||
+          !selectionIsCurrent()
+        ) {
+          const latestSchema = get().currentSchema;
+          if (
+            latestSchema &&
+            useConnectionStore.getState().activeConnectionId ===
+              activeConnectionId
+          ) {
+            await schemaService
+              .setCurrentSchema(activeConnectionId, latestSchema)
+              .catch((error) =>
+                console.warn(
+                  "Store: Failed to restore the latest backend schema",
+                  error,
+                ),
+              );
+          }
+          return;
+        }
       } catch (error) {
-        if (request && !isMetadataRequestCurrent(request)) return;
+        if (
+          (request && !isMetadataRequestCurrent(request)) ||
+          !selectionIsCurrent()
+        )
+          return;
         set(previous);
         throw error;
       }
@@ -2289,8 +2441,11 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     if (activeConnectionId) {
       await get().setCurrentSchema(schema);
       writeStorageItem(
-        getDefaultSchemaKey(activeConnectionId, getConnectionDriver(activeConnectionId)),
-        schema
+        getDefaultSchemaKey(
+          activeConnectionId,
+          getConnectionDriver(activeConnectionId),
+        ),
+        schema,
       );
     } else {
       set({ currentSchema: schema });

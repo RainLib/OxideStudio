@@ -1,13 +1,15 @@
 use crate::core::{
     protocol::Response,
-    provider_secret::{has_provider_secret, load_provider_secret, save_provider_secret},
+    provider_secret::{
+        has_provider_secret, load_provider_secret, normalize_provider_secret, save_provider_secret,
+    },
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::sync::{watch, Mutex};
 
 const MAX_EARLY_CANCELLATIONS: usize = 256;
@@ -144,9 +146,10 @@ pub struct AiProviderSecretRequest {
 
 #[tauri::command]
 pub async fn ai_set_provider_secret(
+    app: AppHandle,
     request: AiProviderSecretRequest,
 ) -> Result<Response<bool>, String> {
-    match save_provider_secret(&request.base_url, request.api_key).await {
+    match save_provider_secret(&app, &request.base_url, request.api_key).await {
         Ok(saved) => Ok(Response::ok(saved)),
         Err(error) => Ok(Response::err(
             "AI_PROVIDER_SECRET_ERROR",
@@ -156,8 +159,11 @@ pub async fn ai_set_provider_secret(
 }
 
 #[tauri::command]
-pub async fn ai_has_provider_secret(base_url: String) -> Result<Response<bool>, String> {
-    match has_provider_secret(&base_url).await {
+pub async fn ai_has_provider_secret(
+    app: AppHandle,
+    base_url: String,
+) -> Result<Response<bool>, String> {
+    match has_provider_secret(&app, &base_url).await {
         Ok(available) => Ok(Response::ok(available)),
         Err(error) => Ok(Response::err(
             "AI_PROVIDER_SECRET_ERROR",
@@ -168,6 +174,7 @@ pub async fn ai_has_provider_secret(base_url: String) -> Result<Response<bool>, 
 
 #[tauri::command]
 pub async fn ai_chat_completion(
+    app: AppHandle,
     request: AiChatCompletionRequest,
     cancellation: State<'_, AiCancellationState>,
 ) -> Result<Response<AiChatCompletionResult>, String> {
@@ -188,11 +195,11 @@ pub async fn ai_chat_completion(
 
     let result = if let Some(cancel_rx) = cancel_rx.as_mut() {
         tokio::select! {
-            result = send_chat_completion(request) => result,
+            result = send_chat_completion(&app, request) => result,
             _ = cancel_rx.changed() => Err("AI request cancelled".to_string()),
         }
     } else {
-        send_chat_completion(request).await
+        send_chat_completion(&app, request).await
     };
 
     if let Some(request_id) = request_id.as_deref() {
@@ -225,6 +232,7 @@ pub async fn cancel_ai_request(
 
 #[tauri::command]
 pub async fn ai_inline_completion(
+    app: AppHandle,
     request: AiInlineCompletionRequest,
     cancellation: State<'_, AiCancellationState>,
 ) -> Result<Response<AiInlineCompletionResult>, String> {
@@ -241,7 +249,7 @@ pub async fn ai_inline_completion(
     };
 
     let result = tokio::select! {
-        result = send_inline_completion(request) => result,
+        result = send_inline_completion(&app, request) => result,
         _ = cancel_rx.changed() => Err("AI request cancelled".to_string()),
     };
     cancellation.finish(&request_id).await;
@@ -257,6 +265,7 @@ pub async fn ai_inline_completion(
 
 #[tauri::command]
 pub async fn ai_test_provider(
+    app: AppHandle,
     config: AiProviderConfig,
 ) -> Result<Response<AiProviderTestResult>, String> {
     let model = config.model.trim().to_string();
@@ -277,7 +286,7 @@ pub async fn ai_test_provider(
         max_tokens: Some(16),
     };
 
-    match send_chat_completion(request).await {
+    match send_chat_completion(&app, request).await {
         Ok(_) => Ok(Response::ok(AiProviderTestResult {
             message: "AI provider connection is available".to_string(),
             model,
@@ -287,9 +296,10 @@ pub async fn ai_test_provider(
 }
 
 async fn send_chat_completion(
+    app: &AppHandle,
     mut request: AiChatCompletionRequest,
 ) -> Result<AiChatCompletionResult, String> {
-    hydrate_provider_secret(&mut request.config).await?;
+    hydrate_provider_secret(app, &mut request.config).await?;
     validate_config(&request.config)?;
     if request.messages.is_empty() {
         return Err("At least one model message is required".to_string());
@@ -313,7 +323,12 @@ async fn send_chat_completion(
             "stream": false
         }));
 
-    if let Some(api_key) = request.config.api_key.as_deref().map(str::trim) {
+    if let Some(api_key) = request
+        .config
+        .api_key
+        .as_deref()
+        .map(normalize_provider_secret)
+    {
         if !api_key.is_empty() {
             builder = builder.header(AUTHORIZATION, format!("Bearer {api_key}"));
         }
@@ -345,9 +360,10 @@ async fn send_chat_completion(
 }
 
 async fn send_inline_completion(
+    app: &AppHandle,
     mut request: AiInlineCompletionRequest,
 ) -> Result<AiInlineCompletionResult, String> {
-    hydrate_provider_secret(&mut request.config).await?;
+    hydrate_provider_secret(app, &mut request.config).await?;
     validate_config(&request.config)?;
     let timeout = Duration::from_millis(
         request
@@ -419,7 +435,12 @@ async fn send_inline_completion(
         .post(url)
         .header(CONTENT_TYPE, "application/json")
         .json(&payload);
-    if let Some(api_key) = request.config.api_key.as_deref().map(str::trim) {
+    if let Some(api_key) = request
+        .config
+        .api_key
+        .as_deref()
+        .map(normalize_provider_secret)
+    {
         if !api_key.is_empty() {
             builder = builder.header(AUTHORIZATION, format!("Bearer {api_key}"));
         }
@@ -505,7 +526,10 @@ fn validate_config(config: &AiProviderConfig) -> Result<(), String> {
     Ok(())
 }
 
-async fn hydrate_provider_secret(config: &mut AiProviderConfig) -> Result<(), String> {
+async fn hydrate_provider_secret(
+    app: &AppHandle,
+    config: &mut AiProviderConfig,
+) -> Result<(), String> {
     if config
         .api_key
         .as_deref()
@@ -513,7 +537,7 @@ async fn hydrate_provider_secret(config: &mut AiProviderConfig) -> Result<(), St
     {
         return Ok(());
     }
-    config.api_key = load_provider_secret(&config.base_url)
+    config.api_key = load_provider_secret(app, &config.base_url)
         .await
         .map_err(|error| error.to_string())?;
     Ok(())

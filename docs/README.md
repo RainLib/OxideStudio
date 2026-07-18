@@ -16,6 +16,7 @@
 - [ADR-0012：Deep Agents 桌面运行边界](decisions/0012-deep-agents-desktop-runtime-boundary.md)：Node-only 发布物审计、WebView 禁止直接打包、sidecar/服务协议与降级路径。
 - [AI Agent 产品与技术规格](AI_AGENT_PRODUCT_SPEC.md)：完整能力矩阵、状态机、页面动作协议、安全模型、Deep Agents 分层方案和 LSP 相关性规则。
 - [AI / Agent 集成](AI_AGENT_INTEGRATION.md)：应用内 Assistant、CLI、MCP、工具策略与审计。
+- [外部 AI 接入指南](EXTERNAL_AI_INTEGRATION.md)：通过 Rust `oxide-agent` 使用 MCP/CLI、固定项目与连接授权、调用五个只读工具。
 - [LSP 集成](LSP_INTEGRATION.md)：SQL LSP 生命周期、文档同步和协议边界。
 - [样式系统](STYLE_GUIDE.md)：CVA 变体、tokens 和组件约定。
 - [应用更新](UPDATES.md)：签名更新、发布配置和验证流程。

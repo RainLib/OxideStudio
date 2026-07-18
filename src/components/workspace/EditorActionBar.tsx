@@ -32,6 +32,7 @@ import {
   WandSparkles,
 } from "lucide-react";
 import { useState } from "react";
+import type { QueryLanguage } from "@/store/useTabStore";
 import { SchemaSelector } from "./SchemaSelector";
 import { TransactionControl } from "./TransactionControl";
 import { QueryHistoryPanel } from "./QueryHistoryPanel";
@@ -74,6 +75,8 @@ interface EditorActionBarProps {
   onSaveFile: () => void;
   parameterCount: number;
   onConfigureParameters: () => void;
+  queryLanguage?: QueryLanguage;
+  onQueryLanguageChange?: (language: QueryLanguage) => void;
 }
 
 const dialogClass =
@@ -120,10 +123,19 @@ export function EditorActionBar({
   onSaveFile,
   parameterCount,
   onConfigureParameters,
+  queryLanguage,
+  onQueryLanguageChange,
 }: EditorActionBarProps) {
   const [isSaveOpen, setIsSaveOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
+  const isElasticsearchDsl = queryLanguage === "elasticsearch-dsl";
+  const currentExecutionLabel = isElasticsearchDsl
+    ? "Run Selected / Current Request"
+    : "Run Current Statement";
+  const consoleExecutionLabel = isElasticsearchDsl
+    ? "Run All Requests"
+    : "Run Console";
 
   const handleSave = () => {
     const normalizedName = saveName.trim();
@@ -149,7 +161,7 @@ export function EditorActionBar({
               ? "Stop Query"
               : parameterCount > 0
                 ? `Set ${parameterCount} SQL ${parameterCount === 1 ? "parameter" : "parameters"} and run`
-                : "Run Current Statement (⌘⇧Enter)"
+                : `${currentExecutionLabel} (⌘⇧Enter)`
           }
         >
           {isExecuting ? (
@@ -172,12 +184,12 @@ export function EditorActionBar({
           <DropdownMenuContent align="start" className={menuClass}>
             <DropdownMenuItem className={menuItemClass} onClick={onRunCurrent}>
               <Play size={13} className="mr-2 text-emerald-400" />
-              Run Current Statement
+              {currentExecutionLabel}
               <span className="ml-auto text-[10px] wb-muted">⌘⇧↵</span>
             </DropdownMenuItem>
             <DropdownMenuItem className={menuItemClass} onClick={onRun}>
               <FileCode2 size={13} className="mr-2" />
-              Run Console
+              {consoleExecutionLabel}
               <span className="ml-auto text-[10px] wb-muted">⌘↵</span>
             </DropdownMenuItem>
             {supportsExplainPlan && (
@@ -276,6 +288,36 @@ export function EditorActionBar({
       </div>
 
       <div className="wb-editor-secondary-actions flex min-w-0 shrink-0 items-center gap-0.5">
+        {queryLanguage && onQueryLanguageChange && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                className="wb-text-button h-6 gap-1 px-1.5 text-[10px]"
+                title="Elasticsearch query language"
+              >
+                {queryLanguage === "elasticsearch-eql" ? "EQL" : "Query DSL"}
+                <ChevronDown size={10} />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className={menuClass}>
+              <DropdownMenuItem
+                className={menuItemClass}
+                onClick={() => onQueryLanguageChange("elasticsearch-dsl")}
+              >
+                Query DSL
+                <span className="ml-auto text-[9px] wb-muted">JSON / REST</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className={menuItemClass}
+                onClick={() => onQueryLanguageChange("elasticsearch-eql")}
+              >
+                EQL
+                <span className="ml-auto text-[9px] wb-muted">ES 7.9+</span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         {isProjectFile && (
           <button
             type="button"

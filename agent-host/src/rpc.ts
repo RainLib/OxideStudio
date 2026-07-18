@@ -1,4 +1,5 @@
 import type { Readable, Writable } from "node:stream";
+import { ZodError } from "zod";
 import {
   AGENT_HOST_MAX_FRAME_BYTES,
   jsonRpcNotificationSchema,
@@ -84,7 +85,11 @@ export function encodeContentLengthFrame(value: unknown): Buffer {
 }
 
 export class AgentProtocolError extends Error {
-  constructor(public readonly code: string, message = code) {
+  constructor(
+    public readonly code: string,
+    message = code,
+    public readonly data?: unknown,
+  ) {
     super(message);
     this.name = "AgentProtocolError";
   }
@@ -256,6 +261,7 @@ export class JsonRpcPeer {
         new AgentProtocolError(
           `RPC_${response.error.code}`,
           response.error.message,
+          response.error.data,
         ),
       );
     } else {
@@ -279,12 +285,28 @@ export class JsonRpcPeer {
     } catch (error) {
       const protocolError =
         error instanceof AgentProtocolError ? error : undefined;
+      const validationError = error instanceof ZodError ? error : undefined;
       await this.write({
         jsonrpc: "2.0",
         id: request.id,
         error: {
-          code: protocolError ? -32001 : -32603,
-          message: protocolError?.code ?? "Internal error",
+          code: protocolError ? -32001 : validationError ? -32602 : -32603,
+          message:
+            protocolError?.message ??
+            (validationError
+              ? validationError.issues
+                  .slice(0, 8)
+                  .map(
+                    (issue) =>
+                      `${issue.path.join(".") || "params"}: ${issue.message}`,
+                  )
+                  .join("; ")
+              : error instanceof Error
+                ? error.message.slice(0, 1_000)
+                : "Agent request failed"),
+          ...(protocolError?.data === undefined
+            ? {}
+            : { data: protocolError.data }),
         },
       });
     }

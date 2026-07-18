@@ -275,6 +275,38 @@ describe("table editing store", () => {
     ).toMatchObject({ title: "users · archive", databaseName: "archive" });
   });
 
+  it("opens native database objects as reusable data tabs", () => {
+    useTabStore.setState({ tabs: [], activeTabId: null });
+
+    const firstTab = useTabStore.getState().findOrCreateObjectDataTab(
+      "mongo-1",
+      "app",
+      "users",
+      "collection",
+      '{"database":"app","collection":"users","find":{},"limit":100}',
+      "Collection: users",
+    );
+    const reusedTab = useTabStore.getState().findOrCreateObjectDataTab(
+      "mongo-1",
+      "app",
+      "users",
+      "collection",
+      '{"database":"app","collection":"users","find":{"active":true},"limit":100}',
+      "Collection: users",
+    );
+
+    expect(reusedTab).toBe(firstTab);
+    expect(useTabStore.getState().tabs).toHaveLength(1);
+    expect(useTabStore.getState().tabs[0]).toMatchObject({
+      type: "table",
+      connectionId: "mongo-1",
+      schemaName: "app",
+      tableName: "users",
+      objectType: "collection",
+      sql: expect.stringContaining('"active":true'),
+    });
+  });
+
   it("passes an explicit PostgreSQL database when loading a table page", async () => {
     useTabStore.setState({
       tabs: [

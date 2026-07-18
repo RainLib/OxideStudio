@@ -1023,7 +1023,16 @@ export function SchemaSidebar() {
       canBrowseCollections &&
       activeCapabilities.dataModel !== "keyValue"
     ) {
-      loadCollections(activeConnectionId, collectionNamespace);
+      // Show the cached collection snapshot immediately, then refresh it in
+      // the background so a previously empty MongoDB cache cannot become
+      // permanently stale until the user clicks Refresh.
+      void loadCollections(
+        activeConnectionId,
+        collectionNamespace,
+        false,
+        "",
+        true,
+      );
     }
   }, [
     activeConnectionId,
@@ -1189,8 +1198,8 @@ export function SchemaSidebar() {
   const findOrCreateTableTab = useTabStore(
     (state) => state.findOrCreateTableTab,
   );
-  const findOrCreateObjectQueryTab = useTabStore(
-    (state) => state.findOrCreateObjectQueryTab,
+  const findOrCreateObjectDataTab = useTabStore(
+    (state) => state.findOrCreateObjectDataTab,
   );
   const loadTablePage = useTabStore((state) => state.loadTablePage);
   const createTableTab = useTabStore((state) => state.createTableTab);
@@ -1381,20 +1390,20 @@ export function SchemaSidebar() {
   const handleCollectionDoubleClick = (collection: CollectionInfo) => {
     if (!activeConnectionId) return;
 
-    const sql = collectionPreviewSql(collection);
-    const tabId = findOrCreateObjectQueryTab(
+    const previewCommand = collectionPreviewSql(collection);
+    const tabId = findOrCreateObjectDataTab(
       activeConnectionId,
       collectionNamespace,
       collection.name,
       collection.type,
-      sql,
+      previewCommand,
       collectionPreviewTabTitleForCapabilities(
         activeCapabilities,
         collection,
         collectionNamespaceForTemplate,
       ),
     );
-    void runTabQuery(tabId, activeConnectionId, sql);
+    void runTabQuery(tabId, activeConnectionId, previewCommand);
   };
 
   const handleCopyCollectionPreview = async (collection: CollectionInfo) => {
@@ -1836,6 +1845,8 @@ export function SchemaSidebar() {
   ) => {
     const connection = connections.find((item) => item.id === connectionId);
     const driver = connection?.driver || activeDriver;
+    const isKeyValueNamespace =
+      defaultDatabaseCapabilities(driver).dataModel === "keyValue";
     const key = schemaTreeKey(connectionId, driver, schema);
     const isExpanded = expandedSchemaKeys.includes(key);
 
@@ -1846,23 +1857,45 @@ export function SchemaSidebar() {
       return;
     }
 
-    if (connectionId !== activeConnectionId) {
-      await setActiveConnection(connectionId);
-    }
-
-    if (connectionId !== activeConnectionId || !isCurrentSchema) {
-      await handleSchemaSelect(schema);
-    }
-    if (!shouldAutoIntrospect) {
-      await hydrateSchemaObjectsFromCache(connectionId, schema);
-    }
+    // Acknowledge expansion before any connection, cache, or backend schema
+    // work. Non-default namespaces used to look unclickable while these awaits
+    // were still pending, whereas the already-selected default opened at once.
     setExpandedSchemaKeys((current) =>
-      current.includes(key) ? current : [...current, key],
+      isKeyValueNamespace
+        ? [key]
+        : current.includes(key)
+          ? current
+          : [...current, key],
     );
     const objectsKey = objectGroupKey(connectionId, driver, schema, "objects");
     setExpandedObjectGroupKeys((current) =>
-      current.includes(objectsKey) ? current : [...current, objectsKey],
+      isKeyValueNamespace
+        ? [objectsKey]
+        : current.includes(objectsKey)
+          ? current
+          : [...current, objectsKey],
     );
+
+    try {
+      if (connectionId !== activeConnectionId) {
+        const connectionError = await setActiveConnection(connectionId);
+        if (connectionError) throw new Error(connectionError);
+      }
+
+      if (connectionId !== activeConnectionId || !isCurrentSchema) {
+        await handleSchemaSelect(schema);
+      }
+      if (!shouldAutoIntrospect) {
+        await hydrateSchemaObjectsFromCache(connectionId, schema);
+      }
+      setNamespaceError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setNamespaceError(
+        `Could not open ${namespaceLabel} "${schema}": ${message}`,
+      );
+      throw error;
+    }
   };
 
   useEffect(() => {
@@ -2034,7 +2067,9 @@ export function SchemaSidebar() {
                     checked={showAllSchemas}
                     onCheckedChange={handleToggleAllSchemas}
                   />
-                  <span className="font-medium">All schemas</span>
+                  <span className="font-medium">
+                    All {namespaceLabelPlural}
+                  </span>
                   <span className="ml-auto text-[10px] wb-muted">
                     add pattern
                   </span>
@@ -2050,7 +2085,7 @@ export function SchemaSidebar() {
                       }
                     />
                     <span className="min-w-0 flex-1 truncate">
-                      Default schema{" "}
+                      Default {namespaceLabel}{" "}
                       <span className="wb-muted">({defaultSchemaName})</span>
                     </span>
                   </label>
@@ -2473,8 +2508,8 @@ export function SchemaSidebar() {
                 )
               }
             >
-              <Code2 className="mr-2 h-3.5 w-3.5" />
-              Open Preview
+              <TableProperties className="mr-2 h-3.5 w-3.5" />
+              Open Data
             </ContextMenuItem>
             <ContextMenuItem
               onClick={() =>
@@ -3396,22 +3431,7 @@ export function SchemaSidebar() {
                             }
                           />
                         )}
-                        {isActive &&
-                        activeCapabilities.dataModel === "keyValue" ? (
-                          <span
-                            className={cn(
-                              "rounded-[3px] bg-[hsl(var(--wb-panel-raised))] px-1 text-[9px] wb-muted",
-                              !isConnecting &&
-                                !isLoading &&
-                                !isCollectionsLoading &&
-                                "ml-auto",
-                            )}
-                          >
-                            db {currentSchema || connection.database || "0"}
-                          </span>
-                        ) : isActive ? (
-                          renderSchemaVisibilityPicker()
-                        ) : null}
+                        {isActive ? renderSchemaVisibilityPicker() : null}
                       </div>
                     </ContextMenuTrigger>
                     <ContextMenuContent className={menuContentClass}>
@@ -3515,23 +3535,7 @@ export function SchemaSidebar() {
                     </ContextMenuContent>
                   </ContextMenu>
 
-                  {isConnectionExpanded && isFlatKeyValueTree ? (
-                    <div className="ml-[11px] border-l border-[hsl(var(--wb-border-subtle))] pb-1 pl-2 pr-1">
-                      {isActive && currentSchema ? (
-                        renderSchemaObjects(
-                          connection.id,
-                          connection.driver,
-                          currentSchema,
-                          connectionColor,
-                        )
-                      ) : (
-                        <div className="flex items-center gap-1.5 px-1.5 py-1 text-[11px] italic wb-muted">
-                          <RefreshCw size={11} className="animate-spin" />
-                          Connecting and loading Redis metadata...
-                        </div>
-                      )}
-                    </div>
-                  ) : isConnectionExpanded ? (
+                  {isConnectionExpanded ? (
                     <div className="ml-[11px] border-l border-[hsl(var(--wb-border-subtle))] pb-1 pl-2 pr-1">
                       <PostgresDatabaseTree
                         connectionId={connection.id}
@@ -3695,10 +3699,11 @@ export function SchemaSidebar() {
                                   <ContextMenuTrigger asChild>
                                     <button
                                       type="button"
+                                      aria-expanded={isSchemaExpanded}
                                       className={cn(
                                         "flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] transition-colors",
                                         isCurrentSchema
-                                          ? "font-medium text-[hsl(var(--wb-text))]"
+                                          ? "wb-tree-row-selected font-medium text-[hsl(var(--wb-text))]"
                                           : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
                                       )}
                                       onClick={() => {
@@ -3725,12 +3730,24 @@ export function SchemaSidebar() {
                                           className="shrink-0 wb-muted"
                                         />
                                       )}
-                                      <Network
-                                        size={12}
-                                        className="shrink-0"
-                                        style={{ color: connectionColor }}
-                                      />
-                                      <span className="truncate">{schema}</span>
+                                      {isFlatKeyValueTree ? (
+                                        <Database
+                                          size={12}
+                                          className="shrink-0"
+                                          style={{ color: connectionColor }}
+                                        />
+                                      ) : (
+                                        <Network
+                                          size={12}
+                                          className="shrink-0"
+                                          style={{ color: connectionColor }}
+                                        />
+                                      )}
+                                      <span className="truncate">
+                                        {isFlatKeyValueTree
+                                          ? `db ${schema}`
+                                          : schema}
+                                      </span>
                                       <MetadataNodeBadge
                                         state={schemaNodeState}
                                       />

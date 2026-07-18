@@ -10,6 +10,7 @@ import {
   type AssistantTurnStatus,
 } from "@/ai/assistant/turns";
 import type { AssistantMode } from "@/ai/assistant/modes";
+import { presentAssistantError } from "@/ai/assistant/errorPresentation";
 import {
   agentHostService,
   isAgentHostUnavailableError,
@@ -29,6 +30,7 @@ const AI_PROVIDER_REQUIRED_MESSAGE =
   "Configure an AI provider in Settings > AI Assistant before starting this request.";
 const DEFAULT_TURN_TIMEOUT_MS = 30 * 60 * 1_000;
 const MAX_TURN_TIMEOUT_MS = 2 * 60 * 60 * 1_000;
+const AGENT_STATUS_POLL_DELAY_MS = 300;
 
 export type AssistantAgentStartTurnRequest = Omit<
   AgentStartTurnRequest,
@@ -51,8 +53,7 @@ export type AssistantAgentSession = {
   answerClarification: (
     turnId: string,
     clarificationId: string,
-    questionId: string,
-    answer: string,
+    answers: Record<string, string>,
     contextFingerprint: string,
   ) => Promise<void>;
   decideApproval: (
@@ -105,18 +106,27 @@ export function useAssistantAgentSession(
   const handleCommandError = useCallback(
     (error: unknown, turnId?: string, resumable = false) => {
       const unavailable = isAgentHostUnavailableError(error);
-      const message = unavailable
-        ? AGENT_UNAVAILABLE_MESSAGE
-        : errorMessage(error);
+      const rawMessage = errorMessage(error);
+      const presentation = unavailable
+        ? {
+            message: AGENT_UNAVAILABLE_MESSAGE,
+            detail:
+              rawMessage === AGENT_UNAVAILABLE_MESSAGE ? null : rawMessage,
+          }
+        : presentAssistantError({
+            message: rawMessage,
+            retryable: resumable,
+          });
       if (unavailable) {
         setAvailability("unavailable");
-        setHostError(message);
+        setHostError(presentation.message);
       }
       if (turnId) {
         updateTurn(turnId, (turn) => ({
           ...turn,
           status: resumable ? "paused" : "failed",
-          error: message,
+          error: presentation.message,
+          errorDetail: presentation.detail,
           updatedAt: Date.now(),
         }));
       }
@@ -128,12 +138,20 @@ export function useAssistantAgentSession(
     try {
       const configured = providerConfiguredRef.current;
       const status = await agentHostService.getStatus(configured);
+      const checking =
+        configured &&
+        !status.available &&
+        (status.state === "starting" || status.state === "stopped");
       setHostStatus(status);
       setAvailability(
-        configured && status.available ? "available" : "unavailable",
+        checking
+          ? "checking"
+          : configured && status.available
+            ? "available"
+            : "unavailable",
       );
       setHostError(
-        !configured || status.state === "skipped"
+        !configured || status.state === "skipped" || checking
           ? null
           : status.available
           ? null
@@ -210,6 +228,25 @@ export function useAssistantAgentSession(
     void refreshStatus();
   }, [providerConfigured, refreshStatus]);
 
+  useEffect(() => {
+    if (!providerConfigured || availability !== "checking") return;
+
+    let disposed = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      await refreshStatus();
+      if (!disposed) {
+        timer = window.setTimeout(poll, AGENT_STATUS_POLL_DELAY_MS);
+      }
+    };
+
+    timer = window.setTimeout(poll, AGENT_STATUS_POLL_DELAY_MS);
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [availability, providerConfigured, refreshStatus]);
+
   const startTurn = useCallback(
     async (request: AssistantAgentStartTurnRequest) => {
       const { requestedMode, contextVersion, deadline, provider, ...payload } =
@@ -234,6 +271,7 @@ export function useAssistantAgentSession(
           ...current,
           status: "failed",
           error: AI_PROVIDER_REQUIRED_MESSAGE,
+          errorDetail: null,
           updatedAt: Date.now(),
         }));
         return;
@@ -272,50 +310,37 @@ export function useAssistantAgentSession(
     async (
       turnId: string,
       clarificationId: string,
-      questionId: string,
-      answer: string,
-      contextFingerprint: string,
+      answers: Record<string, string>,
+      _contextFingerprint: string,
     ) => {
       const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
-      const normalizedAnswer = answer.trim();
-      if (!turn?.threadId || !normalizedAnswer) return;
+      const source = resumeRequestsRef.current.get(turnId);
+      if (!turn?.threadId || !source) return;
 
       const group = turn.clarifications.filter(
         (clarification) => clarification.clarificationId === clarificationId,
       );
-      if (!group.some((clarification) => clarification.questionId === questionId)) {
-        return;
-      }
-      const answeredGroup = group.map((clarification) =>
-        clarification.questionId === questionId
-          ? { ...clarification, answer: normalizedAnswer }
-          : clarification,
-      );
-      const allAnswered = answeredGroup.every((clarification) =>
-        Boolean(clarification.answer?.trim()),
-      );
-
-      if (!allAnswered) {
-        updateTurn(turnId, (current) => ({
-          ...current,
-          clarifications: current.clarifications.map((clarification) =>
-            clarification.clarificationId === clarificationId &&
-            clarification.questionId === questionId
-              ? {
-                  ...clarification,
-                  answer: normalizedAnswer,
-                  answeredAt: Date.now(),
-                }
-              : clarification,
-          ),
-          updatedAt: Date.now(),
-        }));
+      const answeredGroup = group.map((clarification) => {
+        const answer = answers[clarification.questionId]?.trim();
+        return answer ? { ...clarification, answer } : clarification;
+      });
+      if (
+        answeredGroup.length === 0 ||
+        answeredGroup.some((clarification) => !clarification.answer?.trim())
+      ) {
         return;
       }
 
       try {
         const acknowledgement = await agentHostService.answerClarification({
-          ...requestMetadata(turn, contextFingerprint),
+          // A human answer resumes the same pinned workspace snapshot. Using
+          // the latest UI fingerprint here makes a harmless selection or tab
+          // refresh look like a cross-context resume to the Rust safety gate.
+          ...requestMetadata(
+            turn,
+            source.contextVersion,
+            source.provider.timeoutMs,
+          ),
           clarificationId,
           answers: Object.fromEntries(
             answeredGroup.map((clarification) => [
@@ -331,6 +356,25 @@ export function useAssistantAgentSession(
           ...current,
           status: "running",
           error: null,
+          errorDetail: null,
+          process: upsertAssistantProcessItem(current.process, {
+            id: `clarification:${clarificationId}`,
+            sequence: nextProcessSequence(current.process),
+            kind: "clarification",
+            title:
+              answeredGroup.length === 1
+                ? "Confirmed answer"
+                : `Confirmed ${answeredGroup.length} answers`,
+            detail: answeredGroup
+              .map(
+                (clarification) =>
+                  `${clarification.question}\n${clarificationAnswerLabel(clarification)}`,
+              )
+              .join("\n\n"),
+            status: "completed",
+            startedAt: Date.now(),
+            finishedAt: Date.now(),
+          }),
           clarifications: current.clarifications.map((clarification) => {
             const answered = answeredGroup.find(
               (candidate) =>
@@ -379,6 +423,7 @@ export function useAssistantAgentSession(
           ...current,
           status: "running",
           error: null,
+          errorDetail: null,
           approvals: current.approvals.map((candidate) =>
             candidate.approvalId === approvalId
               ? {
@@ -422,7 +467,7 @@ export function useAssistantAgentSession(
   );
 
   const resumeTurn = useCallback(
-    async (turnId: string, contextFingerprint: string) => {
+    async (turnId: string, _contextFingerprint: string) => {
       const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
       const source = resumeRequestsRef.current.get(turnId);
       if (!turn?.threadId || !source || turn.status !== "paused") return;
@@ -431,18 +476,19 @@ export function useAssistantAgentSession(
         ...source,
         requestId: createAgentId("request:resume"),
         threadId: turn.threadId,
-        contextVersion: contextFingerprint || source.contextVersion,
+        // Retry the persisted turn against the snapshot it was created with.
+        // Project changes cancel the turn separately, so adopting the latest
+        // fingerprint here only creates a false stale-context mismatch.
+        contextVersion: source.contextVersion,
         deadline: commandDeadline(source.provider.timeoutMs),
-        workspace: {
-          ...source.workspace,
-          fingerprint: contextFingerprint || source.workspace.fingerprint,
-        },
+        workspace: source.workspace,
       };
       resumeRequestsRef.current.set(turnId, request);
       updateTurn(turnId, (current) => ({
         ...current,
         status: "planning",
         error: null,
+        errorDetail: null,
         updatedAt: Date.now(),
       }));
       try {
@@ -645,18 +691,25 @@ export function reduceAgentHostEvent(
           createdAt: event.occurredAt,
         },
       };
-    case "failure":
+    case "failure": {
+      const presentation = presentAssistantError({
+        code: event.code,
+        message: event.message,
+        retryable: event.retryable,
+      });
       return {
         ...turn,
         ...common,
         status: event.retryable ? "paused" : "failed",
-        error: event.message,
+        error: presentation.message,
+        errorDetail: presentation.detail,
         process: finishRunningProcess(
           turn.process,
           "failed",
           event.occurredAt,
         ),
       };
+    }
   }
 }
 
@@ -699,10 +752,11 @@ function reduceTurnStatus(
     process,
     error:
       event.status === "failed"
-        ? event.label || turn.error || "Agent run failed."
+        ? turn.error || event.label || "The assistant could not complete this task."
         : event.status === "completed"
           ? null
           : turn.error,
+    errorDetail: event.status === "completed" ? null : turn.errorDetail,
   };
 }
 
@@ -822,6 +876,21 @@ function commandDeadline(timeoutMs?: number) {
     Math.max(timeoutMs ?? 0, 30_000) * 20,
   );
   return Date.now() + Math.min(turnBudget, MAX_TURN_TIMEOUT_MS);
+}
+
+function nextProcessSequence(process: readonly AssistantProcessItem[]) {
+  return process.reduce(
+    (sequence, item) => Math.max(sequence, item.sequence),
+    0,
+  ) + 1;
+}
+
+function clarificationAnswerLabel(clarification: AssistantClarification) {
+  const answer = clarification.answer?.trim() ?? "";
+  const option = clarification.options.find(
+    (candidate) => (candidate.value || candidate.label) === answer,
+  );
+  return option?.label ?? answer;
 }
 
 function createAgentId(prefix: string) {

@@ -24,8 +24,7 @@ describe("AssistantConversation turns", () => {
     container.remove();
   });
 
-  it("renders user, collapsed process, inline clarification and one final answer", async () => {
-    const onAnswerClarification = vi.fn(async () => undefined);
+  it("keeps pending and answered clarifications out of the conversation transcript", async () => {
     const turn: AssistantTurn = {
       ...createAssistantTurn({
         id: "turn-1",
@@ -56,6 +55,15 @@ describe("AssistantConversation turns", () => {
           question: "Which data source should I use?",
           options: [{ id: "warehouse", label: "Warehouse" }],
           allowFreeText: true,
+          answer: "Warehouse",
+          answeredAt: 3,
+        },
+        {
+          clarificationId: "clarification-2",
+          questionId: "region",
+          question: "Which region should I inspect?",
+          options: [{ id: "primary", label: "Primary region" }],
+          allowFreeText: true,
         },
       ],
       final: {
@@ -78,33 +86,20 @@ describe("AssistantConversation turns", () => {
             code: "OK" as const,
           }))}
           contextFingerprint="ctx-1"
-          onAnswerClarification={onAnswerClarification}
         />,
       );
     });
 
     expect(container.textContent).toContain("Inspect my database");
-    const process = container.querySelector<HTMLDetailsElement>(
-      'details[aria-label="Assistant process"]',
+    const process = container.querySelector<HTMLElement>(
+      '[aria-label="Assistant process"]',
     );
-    expect(process?.open).toBe(false);
-    expect(container.textContent).toContain("Which data source should I use?");
+    expect(process).not.toBeNull();
+    expect(container.textContent).not.toContain("Which data source should I use?");
+    expect(container.textContent).not.toContain("Which region should I inspect?");
+    expect(container.textContent).not.toContain("Warehouse");
     expect(container.textContent).toContain(
       "I will inspect the selected source after your answer.",
-    );
-
-    await act(async () => {
-      Array.from(container.querySelectorAll("button"))
-        .find((button) => button.textContent === "Warehouse")
-        ?.click();
-      await Promise.resolve();
-    });
-    expect(onAnswerClarification).toHaveBeenCalledWith(
-      "turn-1",
-      "clarification-1",
-      "data-source",
-      "Warehouse",
-      "ctx-1",
     );
   });
 
@@ -166,5 +161,45 @@ describe("AssistantConversation turns", () => {
       "approve",
       "ctx-1",
     );
+  });
+
+  it("shows an actionable error and keeps technical detail collapsed", async () => {
+    const turn: AssistantTurn = {
+      ...createAssistantTurn({
+        id: "turn-3",
+        requestId: "request-3",
+        projectId: "project-1",
+        requestedMode: "agent",
+        mode: "agent",
+        userMessage: "Read the latest MongoDB documents",
+        now: 1,
+      }),
+      status: "failed",
+      error:
+        "I couldn't translate that request into a valid read-only MongoDB query. Nothing was changed. Please retry the step.",
+      errorDetail: "TOOL_ERROR: Invalid MongoDB command shape",
+    };
+
+    await act(async () => {
+      root.render(
+        <AssistantConversation
+          turns={[turn]}
+          isResponding={false}
+          pendingLabel="Working"
+          onUsePrompt={vi.fn()}
+          onExecuteAttachment={vi.fn(async (request) => ({
+            actionId: request.id,
+            status: "success" as const,
+            code: "OK" as const,
+          }))}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Nothing was changed");
+    const details = container.querySelector<HTMLDetailsElement>("details");
+    expect(details?.open).toBe(false);
+    expect(details?.textContent).toContain("Technical details");
+    expect(details?.textContent).toContain("Invalid MongoDB command shape");
   });
 });

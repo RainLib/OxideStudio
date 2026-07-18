@@ -48,10 +48,10 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | DataGrip 基线 | OxideStudio 状态 | 当前证据与差距 | 优先级 |
 | --- | --- | --- | --- |
 | 多数据源、连接属性、SSH/SSL | 部分具备 | 已有项目隔离数据源、测试连接、SSH tunnel、SSL 参数；缺少更完整的 driver 属性、密码存储策略 UI 和连接诊断 | P0 |
-| 数据库对象树与 introspection scope | 部分具备 | 支持 database/schema/table/view/collection/key/routine，带 cache/remote 状态；对象类型、授权、trigger、sequence 等覆盖不足 | P0/P1 |
+| 数据库对象树与 introspection scope | 部分具备 | 支持 database/schema/table/view/collection/key/routine，带 cache/remote 状态；Redis 显示 `db N` namespace，非默认 namespace 采用可取消的异步 hydrate；对象类型、授权、trigger、sequence 等覆盖不足 | P0/P1 |
 | Explorer 快速过滤与 reveal | 部分具备 | 有 filter、展开/折叠、reveal active；缺少缩写匹配、多选和跨数据源统一索引 | P0 |
 | 对象创建、重命名、删除、DDL | 部分具备 | 表、列、索引、约束、view、database 已覆盖主要路径；不同 driver 的对象动作不齐 | P0/P1 |
-| 广泛数据库驱动 | 部分具备 | 运行时为 PostgreSQL、MySQL/MariaDB、MongoDB、Redis、Elasticsearch；SQLite、SQL Server 等尚无 driver | P0/P1 |
+| 广泛数据库驱动 | 部分具备 | 运行时为 PostgreSQL、MySQL/MariaDB、MongoDB、Redis、Elasticsearch；ES 自动探测并适配 6/7/8 typed/typeless API；SQLite、SQL Server 等尚无 driver | P0/P1 |
 | DDL data source / offline schema | 缺失 | 项目 SQL 文件可编辑，但不能作为可解析、可映射的离线 schema 数据源 | P1 |
 
 ### 3.2 SQL 编辑与 Query Console
@@ -74,7 +74,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | 服务端分页、排序、过滤 | 已具备/部分 | Table Tab 支持分页、filter、sort 和布局；多列排序历史与 query preview 细节不足 | P0 |
 | 行增删改、提交/回滚 | 已具备/部分 | 参数化 mutation、批量提交、草稿保护已存在；冲突展示和 generated key 反馈不足 | P0 |
 | Value Editor | 已具备/部分 | `Shift+Enter`/cell menu 打开独立大视图；text/JSON/date/binary/boolean/number 有类型校验，明确区分默认未加载、NULL、空串和值，修改复用 table draft/mutation gate；超大 LOB 的独立按需拉取仍待增强 | P1 |
-| Table / Tree / Text / Transpose | 缺失 | 当前以表格为主；文档数据库也缺少稳定的 tree/text 切换 | P1 |
+| Table / Tree / Text / Transpose | 部分具备 | Mongo collection、Redis key、ES index 已进入只读有界 Data Grid，不再打开 SQL editor；仍缺文档 tree/text 切换、原生服务端分页/过滤/编辑与 transpose | P1 |
 | 外键导航 | 已具备/部分 | PostgreSQL/MySQL 可从 FK cell 跳到 referenced row，也可从主键/唯一键 cell 查看 referencing rows；复合键原子映射、NULL 不误跳、保留 connection/database/schema scope。尚缺键盘快捷键、关系路径历史和图内联动 | P1 |
 | Aggregate View | 已具备/部分 | Table/Query grid 的 range/row/column 多选支持 cells/distinct/NULL/default 与类型感知 sum/avg/min/max；decimal/bigint 用定点精确累计，50k cell 有界采样且明确标记。尚缺自定义函数和 server-wide aggregate | P1 |
 | Data compare | 缺失 | 不能比较表或两个结果集并设置 tolerance | P1 |
@@ -141,7 +141,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | IDE 页面跳转和联动 | 已具备 | typed `UiActionRegistry` 已覆盖 project/file/tab/panel/connection/object/editor/result/plan/schema diff/patch/task/settings，含 stable target 与 stale-context | 持续覆盖新增 artifact |
 | 多轮 durable agent | 已具备/需加固 | Node 22 `deepagents@1.10.8` 独立 host 负责三模式 loop；Rust 保存七天 AES-GCM thread/artifact/graph checkpoint/writes，提供 cancel、持久 interrupt、跨 sidecar resume、批准和只读 subagent。完整应用进程恢复、数据库 idempotency 与长期恢复评测仍缺 | P0/P1 硬化 |
 | 工具安全与多数据模型 | 已具备/首批 bridge | Rust 校验 manifest、项目/连接/context、SQL risk、canonical input digest 与一次性 lease；Mongo/Redis/ES 工具定义是差异化基础，但 sidecar provider-specific bridge 需逐项完成 | P0/P1 |
-| AI 数据治理 | 已具备/部分 | provider secret 在 OS keyring；项目级 thread/checkpoint/artifact 以 AES-GCM 保存七天；长上下文可摘要/offload。仍缺 attachment 敏感级别、字段 masking、完整 Context Preview 和企业 policy | 基础治理已完成；细粒度治理 P1 |
+| AI 数据治理 | 已具备/部分 | provider secret 与 Agent Store 主密钥分别位于应用用户级 credential file（不进项目/localStorage/sidecar，也不访问系统 Keychain）；项目级 thread/checkpoint/artifact 以 AES-GCM 保存七天；长上下文可摘要/offload。仍缺 attachment 敏感级别、字段 masking、完整 Context Preview 和企业 policy | 基础治理已完成；细粒度治理 P1 |
 | Agent 对话可读性 | 已具备 | 每个 Turn 是问题→默认收起的单行过程→最终回答；tool/subagent 不单列消息，宽面板溢出时每个问答一个灰色 minimap marker，支持 hover/键盘/reduced motion | 持续补 thread search |
 | 外部 Agent 接口 | 已具备/只读首版 | Rust 原生 `oxide-agent` 提供五个项目级只读 stdio/CLI 工具；严格 MCP 2025-11-25、connection grant、结果上限，调用者自报批准无效 | 持续四平台发布 smoke；外部写能力后置 |
 
@@ -212,6 +212,6 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 9. **DG-P1-01 Migration DAG / preflight** 已完成支持对象的第二阶段：外键拆为独立依赖 change，changed index/constraint 拆为 drop/recreate，拓扑排序输出 phase/order/dependsOn；无法完整重建时阻断当前 change 及其依赖，另生成只读 preflight surface。边界见 [ADR-0006](decisions/0006-migration-dependency-preflight.md)。
 10. **DG-P0-11 AI 对话过程与长文导航** 已完成：过程 stage 属于当前 Turn 且默认收起，最终回答与 raw tool structure 分离；minimap 以完整问答为灰色 anchor，中间工具不进入检索记录。
 11. **DG-P0-12 / DG-P0-13 Agent 安全 runtime** 已完成主结构：Deep Agents sidecar、Rust 模型/工具/policy、项目级 AES-GCM graph checkpoint/writes、持久 interrupt/跨 sidecar resume、只读 subagent、澄清/批准和故障隔离已接入。接下来必须完成完整应用进程恢复、mutation receipt/idempotency、100+ Turn、冷启动/内存与四平台 production bundle smoke，不能把 durable checkpoint 写成 exactly-once。
-12. **DG-P0-10 Context Preview** 继续加固实际 token、摘要/offload 数量、省略来源和 artifact range/search；provider secret 已从 localStorage 移至 OS credential manager。
+12. **DG-P0-10 Context Preview** 继续加固实际 token、摘要/offload 数量、省略来源和 artifact range/search；provider secret 已从 localStorage 移至用户级 credential file，并由设置测试与 Agent 共用同一读取链路。
 13. **DG-P0-14 Rust `oxide-agent`** 已完成只读 stdio/CLI、Cargo 与发布接线；继续把四平台真实安装包 smoke 作为发布门禁。HTTP/OIDC、UI tools 和外部 mutation 不进入首版。
 14. 数据库主线下一步仍是完整 source/dependency capture、server dry-run/apply journal/post-verify，以及 AI plan explanation/优化前后验证；不能把当前 review-only artifact 描述为自动 migration 已完成。

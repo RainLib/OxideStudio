@@ -38,7 +38,7 @@ Production Deep Agents state does not extend or deserialize the `assistant_tasks
 - `agent_checkpoints`;
 - `agent_artifacts`.
 
-Those records are project-scoped AES-256-GCM ciphertext with a unique nonce and AAD bound to record kind, project, identifier and version. The master key lives in the OS credential manager and records expire after seven days. If the keyring cannot provide a persistent key, the runtime uses an encrypted in-memory session backend instead of writing plaintext.
+Those records are project-scoped AES-256-GCM ciphertext with a unique nonce and AAD bound to record kind, project, identifier and version. The master key lives in an OxideStudio user-private credential file and records expire after seven days. The directory/file use `0700`/`0600` on Unix and inherit the user-profile ACL on Windows. If the file cannot provide a persistent key, the runtime uses an encrypted in-memory session backend instead of writing plaintext; runtime chat does not access the OS credential manager.
 
 The sidecar uses `OxideCheckpointSaver` to persist LangGraph checkpoints and pending writes through the Rust host at graph-step boundaries, and still saves a bounded compatibility checkpoint before emitting a final answer. `ask_user` and approval pauses use LangGraph interrupts and resume with `Command`; a restarted sidecar can reload the encrypted graph state. Credentials, SSH secrets, reusable approval leases and unbounded raw rows remain excluded. Approval decisions may be checkpointed, but the one-time Rust lease is transient; losing it makes the mutation fail closed.
 

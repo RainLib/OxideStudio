@@ -226,7 +226,7 @@ export function ConnectionForm({
   };
 
   const updateConnectionUrl = (value: string) => {
-    const parsed = parseConnectionUrl(value);
+    const parsed = parseConnectionUrl(value, selectedConnection.driver);
     updateConnectionConfig(
       parsed
         ? {
@@ -473,6 +473,12 @@ export function ConnectionForm({
                   </button>
                 )}
               </div>
+              {selectedConnection.driver === "elasticsearch" && (
+                <p className="col-start-2 text-[10px] wb-muted">
+                  Elasticsearch 6.x, 7.x, and 8.x are detected automatically.
+                  Choose an SSL mode to use HTTPS.
+                </p>
+              )}
             </div>
           )}
 

@@ -23,6 +23,14 @@ function enqueue(intent: StartupIntent) {
   if (!pendingIntents.includes(intent)) pendingIntents.push(intent);
 }
 
+export function peekStartupIntent(): StartupIntent | null {
+  const queuedIntent = pendingIntents[0];
+  if (queuedIntent) return queuedIntent;
+
+  const inlineIntent = window.__oxideStartupIntents?.find(isStartupIntent);
+  return inlineIntent ?? null;
+}
+
 export function requestStartupIntent(intent: StartupIntent) {
   if (listeners.size === 0) {
     enqueue(intent);

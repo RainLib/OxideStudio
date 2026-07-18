@@ -159,7 +159,10 @@ export const modelMessageSchema = z.object({
   content: z.union([z.string(), z.array(z.unknown())]),
   name: z.string().optional(),
   toolCallId: z.string().optional(),
-  toolCalls: z.array(z.record(z.string(), z.unknown())).optional(),
+  toolCalls: z
+    .array(z.record(z.string(), z.unknown()))
+    .min(1)
+    .optional(),
 });
 
 export const modelRequestSchema = requestMetadataSchema.extend({
@@ -336,19 +339,16 @@ export const resumeTurnParamsSchema = startTurnParamsSchema.extend({
 });
 export type ResumeTurnParams = z.infer<typeof resumeTurnParamsSchema>;
 
+export const clarificationOptionSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  description: z.string().optional(),
+});
+
 export const clarificationQuestionSchema = z.object({
   id: z.string().min(1),
   prompt: z.string().min(1),
-  options: z
-    .array(
-      z.object({
-        id: z.string().min(1),
-        label: z.string().min(1),
-        description: z.string().optional(),
-      }),
-    )
-    .min(2)
-    .max(3),
+  options: z.array(clarificationOptionSchema).min(2).max(3),
   allowFreeText: z.literal(true),
 });
 export type ClarificationQuestion = z.infer<

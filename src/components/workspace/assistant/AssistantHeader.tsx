@@ -1,16 +1,11 @@
-import { cn } from "@/lib/utils";
-import { Circle, Sparkles, SquarePen } from "lucide-react";
+import { Sparkles, SquarePen } from "lucide-react";
 
 interface AssistantHeaderProps {
-  providerLabel: string;
-  isConfigured: boolean;
   isRunning: boolean;
   onNewChat: () => void;
 }
 
 export function AssistantHeader({
-  providerLabel,
-  isConfigured,
   isRunning,
   onNewChat,
 }: AssistantHeaderProps) {
@@ -23,25 +18,6 @@ export function AssistantHeader({
         />
         <span className="truncate text-[11px] font-semibold text-[hsl(var(--wb-text))]">
           Assistant
-        </span>
-        <span
-          className="ml-1 flex min-w-0 items-center gap-1 text-[10px] text-[hsl(var(--wb-text-muted))]"
-          title={providerLabel}
-        >
-          <Circle
-            size={6}
-            className={cn(
-              "shrink-0 fill-current",
-              isRunning
-                ? "text-amber-400"
-                : isConfigured
-                  ? "text-emerald-400"
-                  : "text-[hsl(var(--wb-text-muted))]"
-            )}
-          />
-          <span className="truncate">
-            {isRunning ? "Working" : providerLabel}
-          </span>
         </span>
       </div>
 

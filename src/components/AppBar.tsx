@@ -42,6 +42,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { APP_EVENT_OPEN_SETTINGS } from "@/lib/actionEvents";
 import type { Project } from "@/services/tauri/store.service";
+import type { SettingsSection } from "@/components/settings/SettingsDialog";
 
 const SettingsDialog = lazy(() =>
   import("@/components/settings/SettingsDialog").then((module) => ({
@@ -108,6 +109,9 @@ interface AppBarProps {
 
 export function AppBar({ center, right }: AppBarProps) {
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsInitialSection, setSettingsInitialSection] = useState<
+    SettingsSection | undefined
+  >();
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
@@ -125,7 +129,6 @@ export function AppBar({ center, right }: AppBarProps) {
     projects,
     activeProjectId,
     activeProjectName,
-    loadProjects,
     setActiveProject,
     createProject,
     deleteProject,
@@ -140,15 +143,25 @@ export function AppBar({ center, right }: AppBarProps) {
     navigator.platform.toUpperCase().indexOf("MAC") >= 0;
 
   useEffect(() => {
-    void loadProjects();
-  }, [loadProjects]);
-
-  useEffect(() => {
-    const openSettings = () => setShowSettings(true);
+    const openSettings = (event: Event) => {
+      const requestedSection =
+        event instanceof CustomEvent &&
+        typeof event.detail?.section === "string" &&
+        isSettingsSection(event.detail.section)
+          ? event.detail.section
+          : undefined;
+      setSettingsInitialSection(requestedSection);
+      setShowSettings(true);
+    };
     window.addEventListener(APP_EVENT_OPEN_SETTINGS, openSettings);
     return () =>
       window.removeEventListener(APP_EVENT_OPEN_SETTINGS, openSettings);
   }, []);
+
+  const handleSettingsOpenChange = (open: boolean) => {
+    setShowSettings(open);
+    if (!open) setSettingsInitialSection(undefined);
+  };
 
   const inferredProjectName = projectRootPath
     ? projectNameFromRootPath(projectRootPath)
@@ -290,7 +303,11 @@ export function AppBar({ center, right }: AppBarProps) {
     <div className="wb-titlebar flex items-center relative">
       {showSettings && (
         <Suspense fallback={null}>
-          <SettingsDialog open onOpenChange={setShowSettings} />
+          <SettingsDialog
+            open
+            initialSection={settingsInitialSection}
+            onOpenChange={handleSettingsOpenChange}
+          />
         </Suspense>
       )}
       {updateDialogOpen && (
@@ -697,6 +714,18 @@ export function AppBar({ center, right }: AppBarProps) {
       </Dialog>
     </div>
   );
+}
+
+function isSettingsSection(value: string): value is SettingsSection {
+  return [
+    "appearance",
+    "workbench",
+    "keymap",
+    "editor",
+    "dataEditor",
+    "databaseExplorer",
+    "ai",
+  ].includes(value);
 }
 
 function SettingsMenuItem({

@@ -26,10 +26,11 @@ pub async fn connect_driver(driver: &str, url: &str) -> Result<Box<dyn DatabaseD
 
     if canonical_driver == "elasticsearch" {
         let mut driver = elasticsearch::ElasticsearchDriver::new(url)?;
-        driver
-            .connect()
-            .await
-            .context("Failed to connect to Elasticsearch")?;
+        if let Err(error) = driver.connect().await {
+            return Err(anyhow::anyhow!(
+                "Failed to connect to Elasticsearch: {error:#}"
+            ));
+        }
         return Ok(Box::new(driver));
     }
 

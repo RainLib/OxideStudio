@@ -60,8 +60,8 @@ pub fn run() {
             app.manage(ParserState(Mutex::new(SqlParser::new())));
             app.manage(QueryCancellationState::default());
             app.manage(commands::ai::AiCancellationState::default());
-            // AgentHostManager is side-effect free here. The sidecar, keyring,
-            // and encrypted store are initialized lazily by the first agent command.
+            // AgentHostManager is side-effect free here. The sidecar and
+            // encrypted local store are initialized lazily by the first agent command.
             app.manage(agent::AgentHostManager::new(app.handle()));
 
             // Platform-specific window configuration

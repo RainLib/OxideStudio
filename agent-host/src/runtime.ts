@@ -627,7 +627,9 @@ function systemPrompt(profile: StartTurnParams["profile"]): string {
     "Never claim a tool succeeded unless its returned observation says it succeeded.",
     "Do not reveal hidden reasoning. Show only concise process labels and the final answer.",
     "Use ask_user only for material ambiguity; at most two clarification rounds are available.",
+    "For ask_user, provide 1-3 questions with 2-3 concrete options each. Never add an Other, Custom, or free-text option because the UI always provides a separate free-text answer.",
     "Filesystem and shell access are forbidden. Database access is only through the supplied tools.",
+    "query.runReadOnly is driver-aware: use SQL SELECT for relational databases, MongoDB read-command JSON for MongoDB, Redis read commands for Redis, and Elasticsearch DSL as JSON or Kibana syntax such as POST index/_search followed by the JSON body. Never send SQL to a non-SQL connection.",
   ];
   if (profile === "chat") {
     shared.push(
