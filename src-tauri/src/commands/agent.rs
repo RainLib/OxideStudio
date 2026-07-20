@@ -1,8 +1,10 @@
 use crate::{
     agent::{
         AgentActionAccepted, AgentAnswerClarificationRequest, AgentApproveActionRequest,
-        AgentCancelTurnRequest, AgentHostManager, AgentHostStatus, AgentProjectStateCleared,
-        AgentTurnAccepted, AgentTurnRequest,
+        AgentArtifactExportRequest, AgentArtifactExportResult, AgentArtifactReadRequest,
+        AgentArtifactReadResult, AgentArtifactSearchRequest, AgentArtifactSearchResult,
+        AgentCancelTurnRequest, AgentContextMetrics, AgentHostManager, AgentHostStatus,
+        AgentProjectStateCleared, AgentTurnAccepted, AgentTurnRequest,
     },
     core::protocol::CommandError,
 };
@@ -73,6 +75,50 @@ pub async fn agent_get_status(
     provider_configured: Option<bool>,
 ) -> Result<AgentHostStatus, CommandError> {
     Ok(manager.status(provider_configured.unwrap_or(false)).await)
+}
+
+#[tauri::command]
+pub async fn agent_get_context_metrics(
+    manager: State<'_, AgentHostManager>,
+    project_id: String,
+) -> Result<AgentContextMetrics, CommandError> {
+    manager
+        .context_metrics(&project_id)
+        .await
+        .map_err(|error| agent_error("AGENT_CONTEXT_METRICS_FAILED", error))
+}
+
+#[tauri::command]
+pub async fn agent_read_artifact(
+    manager: State<'_, AgentHostManager>,
+    request: AgentArtifactReadRequest,
+) -> Result<AgentArtifactReadResult, CommandError> {
+    manager
+        .read_artifact(request)
+        .await
+        .map_err(|error| agent_error("AGENT_ARTIFACT_READ_FAILED", error))
+}
+
+#[tauri::command]
+pub async fn agent_search_artifact(
+    manager: State<'_, AgentHostManager>,
+    request: AgentArtifactSearchRequest,
+) -> Result<AgentArtifactSearchResult, CommandError> {
+    manager
+        .search_artifact(request)
+        .await
+        .map_err(|error| agent_error("AGENT_ARTIFACT_SEARCH_FAILED", error))
+}
+
+#[tauri::command]
+pub async fn agent_export_artifact(
+    manager: State<'_, AgentHostManager>,
+    request: AgentArtifactExportRequest,
+) -> Result<AgentArtifactExportResult, CommandError> {
+    manager
+        .export_artifact(request)
+        .await
+        .map_err(|error| agent_error("AGENT_ARTIFACT_EXPORT_FAILED", error))
 }
 
 #[tauri::command]

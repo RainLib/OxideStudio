@@ -231,6 +231,38 @@
     font-size: var(--wb-ui-font-size, 12px);
   }
 
+  .workbench-shell :where(.text-\[10px\]) {
+    font-size: var(--wb-ui-font-size-sm, 11px);
+  }
+
+  .workbench-shell :where(.text-\[9px\]) {
+    font-size: var(--wb-ui-font-size-xs, 10px);
+  }
+
+  .workbench-shell :where(.text-\[13px\]) {
+    font-size: var(--wb-ui-font-size-md, 13px);
+  }
+
+  .workbench-shell :where(.text-sm, .text-\[14px\]) {
+    font-size: var(--wb-ui-font-size-lg, 14px);
+  }
+
+  .settings-dialog {
+    font-size: var(--wb-ui-font-size, 12px);
+  }
+
+  .settings-dialog :where(.text-xs, .text-\[11px\], .text-\[12px\]) {
+    font-size: var(--wb-ui-font-size, 12px);
+  }
+
+  .settings-dialog :where(.text-\[10px\]) {
+    font-size: var(--wb-ui-font-size-sm, 11px);
+  }
+
+  .settings-dialog :where(.text-\[13px\]) {
+    font-size: var(--wb-ui-font-size-md, 13px);
+  }
+
   .wb-titlebar {
     @apply h-9 shrink-0 select-none;
     background: transparent;

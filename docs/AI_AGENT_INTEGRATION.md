@@ -183,6 +183,8 @@ Rust 的 `agent_threads`、`agent_checkpoints`、`agent_artifacts`、`agent_grap
 一个 Turn 固定为：用户问题 → 执行过程 → coordinator 最终答案。
 
 - tool、todo、subagent 和 compaction 映射为当前 Turn 的 compact process disclosure，不创建独立聊天消息。
+- 同一 Turn 无论产生多少 plan/tool/subagent 事件都只展示一个 process disclosure；运行时标题跟随当前动作并使用流动高亮，完成后生成动作摘要且默认收起，展开后才渲染完整步骤与结果。
+- coordinator 主动输出的公开进度说明会在下一次工具调用前转存为 `commentary` process item；这不是原始 chain-of-thought。展开 disclosure 可查看该说明以及最多约 2 KB 的有界工具输出预览，超限结果仍只通过加密 Artifact 按范围读取。
 - 成功过程默认收起；clarification、approval、failure、stale context 默认展开。
 - 最终 coordinator 输出才是 Assistant 正文；artifact、patch 和导航 action 位于正文下方。
 - minimap 以每个完整问答 Turn 生成一个中性灰 marker，中间 stage 不单独记录。
@@ -190,6 +192,32 @@ Rust 的 `agent_threads`、`agent_checkpoints`、`agent_artifacts`、`agent_grap
 - React reducer 根据 sidecar event 更新 view model，不在组件中实现 tool loop 或重试。
 
 `UiActionRegistry` 与 database tool registry 继续分离。对象、文件、tab、editor range、result、Explain Plan、Schema Diff 和 revision-bound patch 都使用 stable target；项目、文档或 artifact 版本过期时必须拒绝，不降级为 DOM 查找。
+
+发送前的 Context Preview 使用与 sidecar 长 prompt 路径一致的近似 token
+算法，按完整 prompt、编辑器、选择、历史和 tool manifest 显示模型输入预算占比；
+历史截断会显示省略消息/字符数，达到长 prompt 预压缩阈值时会提前说明
+range-preserving requirements digest。sidecar 的 `context.compacted` 事件会累计为本会话
+实际压缩次数、最后一次 retained token 和 offloaded artifact 数量；模型网关返回的
+usage 会由 `model.usage` 事件按 Turn 累计实际 input/output/total token。发送前估算与
+provider 实际 usage 分栏显示，不把近似值冒充真实 tokenizer 结果。
+
+Context Preview 会逐项标明 editor、selection、history 与 tool result 是用户关闭
+（`excluded`）还是因边界限制被裁剪（`bounded`），并显示可计算的省略消息数和字符数。
+模型 usage 与 compaction/offload 累计摘要使用项目级固定记录写入现有 AES-GCM Agent
+Store；应用重启后异步恢复，不阻塞工作区。Rust 随实时事件附带权威累计快照，前端按
+`updatedAt` 合并，避免启动读取和实时事件竞争造成重复计数。
+
+超过 IPC observation 上限的工具结果仍只保存为加密 artifact。Deep Agents 可使用
+`context_search_artifact` 做有界文本检索，再用 `context_read_artifact` 按 byte range
+读取 JSON 片段；Rust 强制校验活动 Turn、project、artifact id、UTF-8 边界、最大
+64 KiB range、最多 20 个匹配和最多 512 bytes 上下文。sidecar 不获得文件系统路径或
+宿主文件权限。
+
+当工具结果发生 offload 时，sidecar 会跨澄清/审批 resume 保留 `artifactRef`，并在
+`final.answer.artifacts` 中去重返回。聊天正文下方使用紧凑单行 disclosure 展示结果：
+用户展开后才按 16 KiB range 解密预览，可在加密 artifact 中搜索并跳转到匹配 byte
+range。`Export JSON` 必须由 Rust 打开原生保存对话框，选定路径后才解密写出；WebView
+不接收任意写文件能力，也不能用参数绕过保存对话框。
 
 ## 9. 外部 MCP 与 CLI
 

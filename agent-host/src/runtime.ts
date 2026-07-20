@@ -30,6 +30,7 @@ import { OxideChatModel } from "./model.js";
 import { AgentProtocolError, type JsonRpcPeer } from "./rpc.js";
 import {
   createAskUserTool,
+  createContextArtifactTools,
   createProxyTools,
 } from "./tools.js";
 
@@ -62,6 +63,12 @@ type EventPayload = AgentEvent extends infer Event
     : never
   : never;
 
+type ModelUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+};
+
 export class TurnExecution {
   readonly controller = new AbortController();
   clarificationCount = 0;
@@ -71,7 +78,10 @@ export class TurnExecution {
   private mutationQueue = Promise.resolve();
   private readonly readOnlyWaiters: Array<() => void> = [];
   private readonly approvalLeases = new Map<string, string>();
+  private readonly modelUsageByMessage = new Map<string, ModelUsage>();
+  private readonly artifactReferences = new Set<string>();
   private resumeConsumed = false;
+  private modelUsageEmitted = false;
   private activeReadOnlyCalls = 0;
   task: Promise<void> | null = null;
 
@@ -80,7 +90,11 @@ export class TurnExecution {
     readonly params: StartTurnParams,
     readonly resume: ResumeInterrupt | null = null,
     transientApprovalLease?: { approvalId: string; lease: string } | null,
+    initialArtifactReferences: readonly string[] = [],
   ) {
+    for (const artifactRef of initialArtifactReferences) {
+      this.recordArtifactReference(artifactRef);
+    }
     if (transientApprovalLease) {
       this.approvalLeases.set(
         transientApprovalLease.approvalId,
@@ -120,6 +134,49 @@ export class TurnExecution {
       occurredAt: Date.now(),
     } as AgentEvent;
     await this.peer.notify(SIDECAR_METHODS.event, event);
+  }
+
+  observeModelUsage(
+    message: Record<string, unknown>,
+    metadata: Record<string, unknown>,
+  ): void {
+    const usage = modelUsage(message);
+    if (!usage) return;
+    const key = [
+      metadata.langgraph_checkpoint_ns,
+      metadata.langgraph_node,
+      metadata.langgraph_step,
+      messageIdentifier(message),
+    ]
+      .map((value) => String(value ?? ""))
+      .join("\u0000");
+    this.modelUsageByMessage.set(key, usage);
+  }
+
+  async emitModelUsage(): Promise<void> {
+    if (this.modelUsageEmitted || this.modelUsageByMessage.size === 0) return;
+    const usage = [...this.modelUsageByMessage.values()].reduce(
+      (total, current) => ({
+        inputTokens: total.inputTokens + current.inputTokens,
+        outputTokens: total.outputTokens + current.outputTokens,
+        totalTokens: total.totalTokens + current.totalTokens,
+      }),
+      { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    );
+    this.modelUsageEmitted = true;
+    await this.emit({
+      type: "model.usage",
+      calls: this.modelUsageByMessage.size,
+      ...usage,
+    });
+  }
+
+  recordArtifactReference(artifactRef: string | null): void {
+    if (artifactRef) this.artifactReferences.add(artifactRef);
+  }
+
+  artifacts(): string[] {
+    return [...this.artifactReferences];
   }
 
   markSuspended(value: ResumeInterrupt, event: EventPayload | null): void {
@@ -185,7 +242,10 @@ export class AgentRuntime {
   private initialized = false;
   private readonly turns = new Map<string, TurnExecution>();
   private readonly threads = new Map<string, { projectId: string }>();
-  private readonly suspendedTurns = new Map<string, StartTurnParams>();
+  private readonly suspendedTurns = new Map<
+    string,
+    { params: StartTurnParams; artifacts: string[] }
+  >();
 
   constructor(private readonly peer: JsonRpcPeer) {
     peer.register(HOST_METHODS.initialize, (params) => this.initialize(params));
@@ -242,14 +302,14 @@ export class AgentRuntime {
   private startTurn(params: unknown): { accepted: true } {
     this.assertInitialized();
     const request = startTurnParamsSchema.parse(params);
-    return this.startExecution(request, null, null);
+    return this.startExecution(request, null, null, []);
   }
 
   private resumeTurn(params: unknown): { accepted: true; resumed: true } {
     this.assertInitialized();
     const parsed = resumeTurnParamsSchema.safeParse(params);
     if (!parsed.success) {
-      this.startExecution(startTurnParamsSchema.parse(params), null, null);
+      this.startExecution(startTurnParamsSchema.parse(params), null, null, []);
       return { accepted: true, resumed: true };
     }
     const request = parsed.data;
@@ -257,6 +317,7 @@ export class AgentRuntime {
       request,
       request.resume,
       request.transientApprovalLease,
+      [],
     );
     return { accepted: true, resumed: true };
   }
@@ -268,6 +329,7 @@ export class AgentRuntime {
       | { approvalId: string; lease: string }
       | null
       | undefined,
+    initialArtifactReferences: readonly string[],
   ): { accepted: true } {
     if (request.workspace.projectId !== request.projectId) {
       throw new AgentProtocolError("WORKSPACE_PROJECT_MISMATCH");
@@ -292,6 +354,7 @@ export class AgentRuntime {
       request,
       resume,
       transientApprovalLease,
+      initialArtifactReferences,
     );
     this.suspendedTurns.delete(key);
     this.turns.set(key, execution);
@@ -316,13 +379,14 @@ export class AgentRuntime {
     const suspended = this.suspendedTurns.get(key);
     if (!suspended) return { resumed: false };
     this.startExecution(
-      withResumeMetadata(suspended, request),
+      withResumeMetadata(suspended.params, request),
       {
         kind: "clarification",
         clarificationId: request.clarificationId,
         answers: request.answers,
       },
       null,
+      suspended.artifacts,
     );
     return { resumed: true };
   }
@@ -333,7 +397,7 @@ export class AgentRuntime {
     const suspended = this.suspendedTurns.get(key);
     if (!suspended) return { resumed: false };
     this.startExecution(
-      withResumeMetadata(suspended, request),
+      withResumeMetadata(suspended.params, request),
       {
         kind: "approval",
         approvalId: request.approvalId,
@@ -342,6 +406,7 @@ export class AgentRuntime {
       request.lease
         ? { approvalId: request.approvalId, lease: request.lease }
         : null,
+      suspended.artifacts,
     );
     return { resumed: true };
   }
@@ -377,6 +442,7 @@ export class AgentRuntime {
       );
       const proxyTools = createProxyTools(execution);
       const askUser = createAskUserTool(execution);
+      const contextArtifactTools = createContextArtifactTools(execution);
       const readOnlyTools = proxyTools.filter((tool) => {
         const manifest = execution.params.tools.find(
           (candidate) => candidate.name === tool.name,
@@ -392,7 +458,7 @@ export class AgentRuntime {
       const agent = createDeepAgent({
         name: `oxide-${execution.params.profile}`,
         model,
-        tools: [...proxyTools, askUser],
+        tools: [...proxyTools, ...contextArtifactTools, askUser],
         systemPrompt: systemPrompt(execution.params.profile),
         backend: new StateBackend(),
         checkpointer,
@@ -439,7 +505,14 @@ export class AgentRuntime {
         }
         if (decoded.mode !== "messages") continue;
         const messageFrame = decodeMessageFrame(decoded.value);
-        if (!messageFrame || !isCoordinatorMessage(messageFrame.metadata)) {
+        if (!messageFrame) {
+          continue;
+        }
+        execution.observeModelUsage(
+          messageFrame.message,
+          messageFrame.metadata,
+        );
+        if (!isCoordinatorMessage(messageFrame.metadata)) {
           continue;
         }
         const messageId = messageIdentifier(messageFrame.message);
@@ -476,9 +549,13 @@ export class AgentRuntime {
         }
       }
       if (execution.suspension) {
+        await execution.emitModelUsage();
         this.suspendedTurns.set(
           turnKey(execution.params.threadId, execution.params.turnId),
-          execution.params,
+          {
+            params: execution.params,
+            artifacts: execution.artifacts(),
+          },
         );
         if (execution.suspensionEvent) {
           await execution.emit(execution.suspensionEvent);
@@ -498,18 +575,23 @@ export class AgentRuntime {
       execution.throwIfCancelled();
       await emitTodoPlan(execution, result);
       await emitCompaction(execution, result);
+      await execution.emitModelUsage();
       const answer = finalAnswer(result);
+      for (const artifactRef of artifactReferencesInResult(result)) {
+        execution.recordArtifactReference(artifactRef);
+      }
       await saveCheckpoint(execution, result);
       await execution.emit({
         type: "final.answer",
         content: answer,
-        artifacts: [],
+        artifacts: execution.artifacts(),
       });
       await execution.emit({ type: "turn.status", status: "completed" });
       this.suspendedTurns.delete(
         turnKey(execution.params.threadId, execution.params.turnId),
       );
     } catch (error) {
+      await execution.emitModelUsage().catch(() => undefined);
       const cancelled = execution.controller.signal.aborted;
       if (cancelled) {
         await bestEffortEmit(execution, {
@@ -630,6 +712,7 @@ function systemPrompt(profile: StartTurnParams["profile"]): string {
     "For ask_user, provide 1-3 questions with 2-3 concrete options each. Never add an Other, Custom, or free-text option because the UI always provides a separate free-text answer.",
     "Filesystem and shell access are forbidden. Database access is only through the supplied tools.",
     "query.runReadOnly is driver-aware: use SQL SELECT for relational databases, MongoDB read-command JSON for MongoDB, Redis read commands for Redis, and Elasticsearch DSL as JSON or Kibana syntax such as POST index/_search followed by the JSON body. Never send SQL to a non-SQL connection.",
+    "When a tool observation contains artifactRef, use context_search_artifact to find relevant JSON ranges and context_read_artifact to read only those ranges. Do not guess omitted data.",
   ];
   if (profile === "chat") {
     shared.push(
@@ -682,6 +765,40 @@ function finalAnswer(result: unknown): string {
     }
   }
   throw new AgentProtocolError("FINAL_ANSWER_MISSING");
+}
+
+function artifactReferencesInResult(result: unknown): string[] {
+  const references = new Set<string>();
+  const pending: unknown[] = [result];
+  const visited = new Set<object>();
+  let inspected = 0;
+  while (pending.length > 0 && inspected < 20_000) {
+    inspected += 1;
+    const value = pending.pop();
+    if (typeof value === "string") {
+      for (const match of value.matchAll(
+        /"artifactRef"\s*:\s*"(tool-result-[A-Za-z0-9_-]{1,200})"/gu,
+      )) {
+        references.add(match[1]!);
+      }
+      continue;
+    }
+    if (!value || typeof value !== "object" || visited.has(value)) continue;
+    visited.add(value);
+    if (Array.isArray(value)) {
+      pending.push(...value);
+      continue;
+    }
+    const record = value as Record<string, unknown>;
+    if (
+      typeof record.artifactRef === "string" &&
+      /^tool-result-[A-Za-z0-9_-]{1,200}$/u.test(record.artifactRef)
+    ) {
+      references.add(record.artifactRef);
+    }
+    pending.push(...Object.values(record));
+  }
+  return [...references];
 }
 
 async function preparePromptForModel(
@@ -874,6 +991,40 @@ function messageIdentifier(message: Record<string, unknown>): string {
   return typeof message.id === "string" && message.id
     ? message.id
     : "coordinator-message";
+}
+
+export function modelUsage(
+  message: Record<string, unknown>,
+): ModelUsage | null {
+  if (!isRecord(message.usage_metadata)) return null;
+  const inputTokens = nonnegativeInteger(
+    message.usage_metadata.input_tokens ??
+      message.usage_metadata.inputTokens,
+  );
+  const outputTokens = nonnegativeInteger(
+    message.usage_metadata.output_tokens ??
+      message.usage_metadata.outputTokens,
+  );
+  const totalTokens = nonnegativeInteger(
+    message.usage_metadata.total_tokens ??
+      message.usage_metadata.totalTokens,
+  );
+  if (
+    inputTokens === null ||
+    outputTokens === null ||
+    totalTokens === null
+  ) {
+    return null;
+  }
+  return { inputTokens, outputTokens, totalTokens };
+}
+
+function nonnegativeInteger(value: unknown): number | null {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+    ? value
+    : null;
 }
 
 function messageHasToolCallChunk(message: Record<string, unknown>): boolean {

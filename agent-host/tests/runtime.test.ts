@@ -11,7 +11,12 @@ import {
   type StartTurnParams,
 } from "@oxide/agent-contract";
 import { AgentProtocolError, JsonRpcPeer } from "../src/rpc.js";
-import { AgentRuntime, splitPromptAtBoundaries } from "../src/runtime.js";
+import {
+  AgentRuntime,
+  modelUsage,
+  splitPromptAtBoundaries,
+} from "../src/runtime.js";
+import { toolObservationDetail } from "../src/tools.js";
 
 describe("long prompt segmentation", () => {
   it("preserves every character and does not split surrogate pairs", () => {
@@ -23,6 +28,63 @@ describe("long prompt segmentation", () => {
     for (let index = 1; index < chunks.length; index += 1) {
       expect(chunks[index]?.start).toBe(chunks[index - 1]?.end);
     }
+  });
+});
+
+describe("model usage projection", () => {
+  it("accepts complete provider usage and rejects partial metadata", () => {
+    expect(
+      modelUsage({
+        usage_metadata: {
+          input_tokens: 120,
+          output_tokens: 30,
+          total_tokens: 150,
+        },
+      }),
+    ).toEqual({
+      inputTokens: 120,
+      outputTokens: 30,
+      totalTokens: 150,
+    });
+    expect(
+      modelUsage({
+        usage_metadata: {
+          input_tokens: 120,
+          output_tokens: 30,
+        },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("tool observation presentation", () => {
+  it("keeps a bounded output preview and reports truncation metadata", () => {
+    const detail = toolObservationDetail({
+      summary: "query.runReadOnly returned a bounded result",
+      data: [{ id: 1, name: "Ada" }, { id: 2, name: "Lin" }],
+      rowCount: 2,
+      byteCount: 64,
+      truncated: false,
+      artifactRef: null,
+    });
+
+    expect(detail).toContain("2 rows · 64 bytes");
+    expect(detail).toContain("Output preview");
+    expect(detail).toContain('"name": "Ada"');
+  });
+
+  it("does not inline an offloaded artifact", () => {
+    const detail = toolObservationDetail({
+      summary: "metadata.listObjects result was offloaded",
+      rowCount: 500,
+      byteCount: 80_000,
+      truncated: true,
+      artifactRef: "tool-result-1",
+    });
+
+    expect(detail).toContain("500 rows · 80,000 bytes · truncated");
+    expect(detail).not.toContain("Output preview");
+    expect(detail.length).toBeLessThanOrEqual(2_400);
   });
 });
 
@@ -125,9 +187,20 @@ describe("AgentRuntime", () => {
       content: "Oxide runtime is ready.",
     });
     expect(boundToolNames).toContain("ask_user");
+    expect(boundToolNames).toContain("context_read_artifact");
+    expect(boundToolNames).toContain("context_search_artifact");
     expect(boundToolNames).not.toContain("metadata.listObjects");
     expect(boundToolNames).not.toContain("read_file");
     await turnCompleted;
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "model.usage",
+        calls: 1,
+        inputTokens: 12,
+        outputTokens: 5,
+        totalTokens: 17,
+      }),
+    );
     expect(events.at(-1)).toMatchObject({
       type: "turn.status",
       status: "completed",
@@ -471,10 +544,10 @@ describe("AgentRuntime", () => {
       }
       return {
         summary: "2 indexes",
-        data: [{ name: "events" }, { name: "users" }],
+        data: null,
         byteCount: 42,
-        truncated: false,
-        artifactRef: null,
+        truncated: true,
+        artifactRef: "tool-result-indexes",
       };
     });
     registerGraphCheckpointMock(host);
@@ -569,6 +642,7 @@ describe("AgentRuntime", () => {
     await expect(final).resolves.toMatchObject({
       type: "final.answer",
       content: "The Elasticsearch connection has two indexes.",
+      artifacts: ["tool-result-indexes"],
     });
     expect(selectedConnectionId).toBe("es-1");
     expect(modelCalls).toBe(2);

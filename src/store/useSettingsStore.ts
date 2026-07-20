@@ -2,7 +2,9 @@ import { create } from "zustand";
 import {
   DEFAULT_APP_SETTINGS,
   normalizeAppSettings,
+  readStartupAppearanceCache,
   type AppSettings,
+  writeStartupAppearanceCache,
 } from "@/lib/appSettings";
 import { settingsService } from "@/services/tauri/settings.service";
 
@@ -19,7 +21,10 @@ type SettingsState = {
 let pendingSettingsLoad: Promise<void> | null = null;
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
-  settings: DEFAULT_APP_SETTINGS,
+  settings: {
+    ...DEFAULT_APP_SETTINGS,
+    appearance: readStartupAppearanceCache(),
+  },
   isLoading: false,
   error: null,
 
@@ -30,7 +35,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       set({ isLoading: true, error: null });
       try {
         const raw = await settingsService.getAppSettings();
-        set({ settings: normalizeAppSettings(raw), error: null });
+        const settings = normalizeAppSettings(raw);
+        writeStartupAppearanceCache(settings.appearance);
+        set({ settings, error: null });
       } catch (error: any) {
         set({ error: error?.message || String(error) });
       } finally {
@@ -46,6 +53,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   updateSettings: async (updates) => {
     const next = normalizeAppSettings(deepMerge(get().settings, updates));
+    writeStartupAppearanceCache(next.appearance);
     set({ settings: next, error: null });
     try {
       await settingsService.saveAppSettings(next);
@@ -57,6 +65,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setSettings: async (settings) => {
     const next = normalizeAppSettings(settings);
+    writeStartupAppearanceCache(next.appearance);
     set({ settings: next, error: null });
     try {
       await settingsService.saveAppSettings(next);
@@ -69,6 +78,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   resetSettings: async () => {
     try {
       await settingsService.resetAppSettings();
+      writeStartupAppearanceCache(DEFAULT_APP_SETTINGS.appearance);
       set({ settings: DEFAULT_APP_SETTINGS, error: null });
     } catch (error: any) {
       set({ error: error?.message || String(error) });

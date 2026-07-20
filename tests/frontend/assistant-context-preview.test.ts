@@ -52,6 +52,25 @@ describe("assistant context preview", () => {
       selectedText: context.activeTab.selection.text,
       history,
       settings: DEFAULT_ASSISTANT_CONTEXT_SETTINGS,
+      maxInputTokens: 32_768,
+      toolManifest: [
+        {
+          name: "metadata.listObjects",
+          description: "List database objects",
+        },
+      ],
+      previousCompaction: {
+        count: 2,
+        lastInputTokens: 24_000,
+        lastRetainedTokens: 8_000,
+        offloadedArtifacts: 3,
+      },
+      previousModelUsage: {
+        calls: 4,
+        inputTokens: 12_000,
+        outputTokens: 2_000,
+        totalTokens: 14_000,
+      },
     });
 
     expect(preview).toMatchObject({
@@ -61,6 +80,19 @@ describe("assistant context preview", () => {
       databaseIdentity:
         "postgres · connection-safe-id · warehouse · analytics",
       sendsToolManifest: true,
+      toolManifestCount: 1,
+      previousCompaction: {
+        count: 2,
+        lastInputTokens: 24_000,
+        lastRetainedTokens: 8_000,
+        offloadedArtifacts: 3,
+      },
+      previousModelUsage: {
+        calls: 4,
+        inputTokens: 12_000,
+        outputTokens: 2_000,
+        totalTokens: 14_000,
+      },
       canShareToolResults: true,
       sendsToolResults: true,
     });
@@ -77,6 +109,33 @@ describe("assistant context preview", () => {
       CHAT_CONTEXT_LIMITS.historyCharacters,
     );
     expect(preview.history.truncated).toBe(true);
+    expect(preview.history.omittedMessages).toBeGreaterThan(0);
+    expect(preview.history.omittedCharacters).toBeGreaterThan(0);
+    expect(preview.history.estimatedTokens).toBeGreaterThan(0);
+    expect(preview.tokenBudget).toMatchObject({
+      maxInputTokens: 32_768,
+      promptCompactionLikely: false,
+    });
+    expect(preview.tokenBudget.estimatedInputTokens).toBeGreaterThan(
+      preview.prompt.estimatedTokens,
+    );
+    expect(preview.tokenBudget.toolManifestTokens).toBeGreaterThan(0);
+    expect(preview.omissions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "editor",
+          reason: "bounded",
+        }),
+        expect.objectContaining({
+          source: "selection",
+          reason: "bounded",
+        }),
+        expect.objectContaining({
+          source: "history",
+          reason: "bounded",
+        }),
+      ]),
+    );
     expect(preview.toolResultDetail).toContain(String(MODEL_RESULT_COUNT_LIMIT));
     expect(preview.toolResultDetail).toContain(
       MODEL_RESULT_TOTAL_LIMIT.toLocaleString(),
@@ -174,5 +233,50 @@ describe("assistant context preview", () => {
     expect(local.canShareToolResults).toBe(false);
     expect(unavailable.destination).toBe("unavailable");
     expect(unavailable.destinationLabel).toContain("nothing will be sent");
+  });
+
+  it("predicts the runtime long-prompt compaction threshold", () => {
+    const maxInputTokens = 10_000;
+    const preview = createAssistantContextPreview({
+      message: "P".repeat(24_000),
+      mode: "chat",
+      providerLabel: "test-model",
+      context: { ...context, activeTab: undefined },
+      selectedText: null,
+      history: [],
+      settings: DEFAULT_ASSISTANT_CONTEXT_SETTINGS,
+      maxInputTokens,
+    });
+
+    expect(preview.prompt).toMatchObject({
+      sentCharacters: 24_000,
+      estimatedTokens: 6_000,
+      truncated: false,
+    });
+    expect(preview.tokenBudget).toMatchObject({
+      maxInputTokens,
+      promptCompactionThresholdTokens: 5_500,
+      promptCompactionLikely: true,
+      pressure: "compaction-likely",
+    });
+  });
+
+  it("reports unknown model limits without presenting false precision", () => {
+    const preview = createAssistantContextPreview({
+      message: "hello",
+      mode: "chat",
+      providerLabel: "test-model",
+      context: { ...context, activeTab: undefined },
+      selectedText: null,
+      history: [],
+      settings: DEFAULT_ASSISTANT_CONTEXT_SETTINGS,
+      maxInputTokens: null,
+    });
+
+    expect(preview.tokenBudget).toMatchObject({
+      maxInputTokens: null,
+      utilizationPercent: null,
+      pressure: "unknown",
+    });
   });
 });

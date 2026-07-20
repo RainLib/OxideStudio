@@ -6,6 +6,8 @@ pub mod store;
 pub use host::AgentHostManager;
 pub use protocol::{
     AgentActionAccepted, AgentAnswerClarificationRequest, AgentApproveActionRequest,
-    AgentCancelTurnRequest, AgentHostStatus, AgentProjectStateCleared, AgentTurnAccepted,
-    AgentTurnRequest,
+    AgentArtifactExportRequest, AgentArtifactExportResult, AgentArtifactReadRequest,
+    AgentArtifactReadResult, AgentArtifactSearchRequest, AgentArtifactSearchResult,
+    AgentCancelTurnRequest, AgentContextMetrics, AgentHostStatus, AgentProjectStateCleared,
+    AgentTurnAccepted, AgentTurnRequest,
 };

@@ -116,12 +116,62 @@ export type AgentProjectStateCleared = {
   clearedRecords: number;
 };
 
+export type AgentContextMetrics = {
+  projectId: string;
+  compaction: {
+    count: number;
+    lastInputTokens: number;
+    lastRetainedTokens: number;
+    offloadedArtifacts: number;
+  } | null;
+  modelUsage: {
+    calls: number;
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  } | null;
+  updatedAt: number;
+};
+
+export type AgentArtifactReadResult = {
+  artifactId: string;
+  found: boolean;
+  offset: number;
+  nextOffset: number;
+  totalBytes: number;
+  eof: boolean;
+  content: string;
+};
+
+export type AgentArtifactSearchResult = {
+  artifactId: string;
+  query: string;
+  found: boolean;
+  totalBytes: number;
+  matchCount: number;
+  truncated: boolean;
+  matches: Array<{
+    offset: number;
+    length: number;
+    snippetOffset: number;
+    snippet: string;
+  }>;
+};
+
+export type AgentArtifactExportResult = {
+  artifactId: string;
+  exported: boolean;
+  filePath: string | null;
+  byteCount: number;
+};
+
 type AgentEventBase<TType extends string> = {
   threadId: string;
   turnId: string;
   sequence: number;
   occurredAt: number;
   type: TType;
+  projectMetrics?: AgentContextMetrics;
 };
 
 export type AgentClarificationQuestion = {
@@ -186,6 +236,12 @@ export type AgentHostEvent =
       retainedTokens: number;
       offloadedArtifacts: number;
     })
+  | (AgentEventBase<"model.usage"> & {
+      calls: number;
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+    })
   | (AgentEventBase<"answer.delta"> & {
       content: string;
       reset: boolean;
@@ -208,6 +264,51 @@ export const agentHostService = {
       await invokeRawCommand<AgentHostStatus>("agent_get_status", {
         providerConfigured,
       }),
+    );
+  },
+
+  getContextMetrics: async (
+    projectId: string,
+  ): Promise<AgentContextMetrics> => {
+    return await invokeRawCommand<AgentContextMetrics>(
+      "agent_get_context_metrics",
+      { projectId },
+    );
+  },
+
+  readArtifact: async (request: {
+    projectId: string;
+    artifactId: string;
+    offset?: number;
+    maxBytes?: number;
+  }): Promise<AgentArtifactReadResult> => {
+    return await invokeRawCommand<AgentArtifactReadResult>(
+      "agent_read_artifact",
+      { request },
+    );
+  },
+
+  searchArtifact: async (request: {
+    projectId: string;
+    artifactId: string;
+    query: string;
+    maxMatches?: number;
+    contextBytes?: number;
+  }): Promise<AgentArtifactSearchResult> => {
+    return await invokeRawCommand<AgentArtifactSearchResult>(
+      "agent_search_artifact",
+      { request },
+    );
+  },
+
+  exportArtifact: async (request: {
+    projectId: string;
+    artifactId: string;
+    suggestedFileName?: string | null;
+  }): Promise<AgentArtifactExportResult> => {
+    return await invokeRawCommand<AgentArtifactExportResult>(
+      "agent_export_artifact",
+      { request },
     );
   },
 
@@ -302,7 +403,13 @@ function isAgentHostEvent(value: unknown): value is AgentHostEvent {
     typeof event.type === "string" &&
     typeof event.sequence === "number" &&
     typeof event.occurredAt === "number";
-  if (!hasBase) return false;
+  if (
+    !hasBase ||
+    (event.projectMetrics !== undefined &&
+      !isAgentContextMetrics(event.projectMetrics))
+  ) {
+    return false;
+  }
 
   switch (event.type) {
     case "turn.status":
@@ -382,6 +489,14 @@ function isAgentHostEvent(value: unknown): value is AgentHostEvent {
         typeof event.retainedTokens === "number" &&
         typeof event.offloadedArtifacts === "number"
       );
+    case "model.usage":
+      return (
+        typeof event.calls === "number" &&
+        event.calls > 0 &&
+        typeof event.inputTokens === "number" &&
+        typeof event.outputTokens === "number" &&
+        typeof event.totalTokens === "number"
+      );
     case "answer.delta":
       return typeof event.content === "string" && typeof event.reset === "boolean";
     case "final.answer":
@@ -403,4 +518,26 @@ function isAgentHostEvent(value: unknown): value is AgentHostEvent {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isAgentContextMetrics(value: unknown): value is AgentContextMetrics {
+  if (!isRecord(value)) return false;
+  const compaction = value.compaction;
+  const modelUsage = value.modelUsage;
+  return (
+    typeof value.projectId === "string" &&
+    typeof value.updatedAt === "number" &&
+    (compaction === null ||
+      (isRecord(compaction) &&
+        typeof compaction.count === "number" &&
+        typeof compaction.lastInputTokens === "number" &&
+        typeof compaction.lastRetainedTokens === "number" &&
+        typeof compaction.offloadedArtifacts === "number")) &&
+    (modelUsage === null ||
+      (isRecord(modelUsage) &&
+        typeof modelUsage.calls === "number" &&
+        typeof modelUsage.inputTokens === "number" &&
+        typeof modelUsage.outputTokens === "number" &&
+        typeof modelUsage.totalTokens === "number"))
+  );
 }

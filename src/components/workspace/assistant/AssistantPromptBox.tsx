@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n";
 import type {
   AssistantContextPreview,
   AssistantContextSettings,
@@ -32,6 +33,7 @@ import {
   Database,
   FileText,
   History,
+  Gauge,
   KeyRound,
   Layers3,
   ListTree,
@@ -103,6 +105,7 @@ export function AssistantPromptBox({
   onRetryModel,
   submissionBlockReason,
 }: AssistantPromptBoxProps) {
+  const { t } = useI18n();
   const currentMode = assistantModeOption(mode);
   const CurrentModeIcon = MODE_ICONS[mode];
   const canSubmit =
@@ -110,7 +113,12 @@ export function AssistantPromptBox({
     !isSubmitting &&
     !isToolRunning &&
     !submissionBlockReason;
-  const submitLabel = mode === "plan" ? "Create plan" : mode === "agent" ? "Run agent" : "Send";
+  const submitLabel =
+    mode === "plan"
+      ? t("assistant.createPlan")
+      : mode === "agent"
+        ? t("assistant.runAgent")
+        : t("assistant.send");
   const contextLocked = isSubmitting || isToolRunning;
   const updateContextSetting = (
     key: keyof AssistantContextSettings,
@@ -133,9 +141,9 @@ export function AssistantPromptBox({
               if (canSubmit) onSubmit();
             }
           }}
-          placeholder="Ask about your database or describe a task"
+          placeholder={t("assistant.prompt")}
           className="min-h-[72px] w-full resize-none bg-transparent px-2.5 pb-1 pt-2.5 text-[11px] leading-5 text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))]"
-          aria-label="Assistant message"
+          aria-label={t("assistant.messageAria")}
         />
 
         <div className="flex items-center justify-between gap-2 px-1.5 pb-1.5">
@@ -204,8 +212,8 @@ export function AssistantPromptBox({
                 <button
                   type="button"
                   className="wb-icon-button relative h-6 w-6"
-                  title="Workspace context"
-                  aria-label="Preview and control assistant context"
+                  title={t("assistant.workspaceContext")}
+                  aria-label={t("assistant.workspaceContextAria")}
                 >
                   <Layers3 size={11} />
                   {contextPreview.selection.available &&
@@ -250,14 +258,54 @@ export function AssistantPromptBox({
                     label="Your prompt"
                     detail={characterDetail(contextPreview.prompt)}
                   />
+                  <ContextFact
+                    icon={Gauge}
+                    label="Estimated input"
+                    detail={tokenBudgetDetail(contextPreview)}
+                  />
                   {contextPreview.sendsToolManifest && (
                     <ContextFact
                       icon={Wrench}
                       label="Tool manifest"
-                      detail="Names, permissions and input schemas"
+                      detail={`${contextPreview.toolManifestCount} tools · ~${contextPreview.tokenBudget.toolManifestTokens.toLocaleString()} tokens · names, permissions and input schemas`}
+                    />
+                  )}
+                  {contextPreview.previousCompaction && (
+                    <ContextFact
+                      icon={Layers3}
+                      label="Project compaction · 7d"
+                      detail={compactionDetail(contextPreview)}
+                    />
+                  )}
+                  {contextPreview.previousModelUsage && (
+                    <ContextFact
+                      icon={Gauge}
+                      label="Provider usage · 7d"
+                      detail={modelUsageDetail(contextPreview)}
+                    />
+                  )}
+                  {contextPreview.omissions.length > 0 && (
+                    <ContextFact
+                      icon={ShieldCheck}
+                      label="Omitted sources"
+                      detail={omissionDetail(contextPreview)}
                     />
                   )}
                 </div>
+
+                {contextPreview.tokenBudget.pressure !== "comfortable" && (
+                  <div
+                    className={cn(
+                      "border-t border-[hsl(var(--wb-border-subtle))] px-3 py-2 text-[9px] leading-4",
+                      contextPreview.tokenBudget.pressure ===
+                        "compaction-likely"
+                        ? "text-amber-300"
+                        : "text-[hsl(var(--wb-text-muted))]",
+                    )}
+                  >
+                    {contextPressureDetail(contextPreview)}
+                  </div>
+                )}
 
                 <div className="border-y border-[hsl(var(--wb-border-subtle))] px-2 py-1.5">
                   <ContextToggle
@@ -497,7 +545,7 @@ function characterDetail(preview: AssistantContextPreview["prompt"]) {
     return `${preview.originalCharacters.toLocaleString()} characters · excluded`;
   }
   const suffix = preview.truncated ? " · truncated" : "";
-  return `${preview.sentCharacters.toLocaleString()} of ${preview.originalCharacters.toLocaleString()} characters${suffix}`;
+  return `${preview.sentCharacters.toLocaleString()} of ${preview.originalCharacters.toLocaleString()} characters · ~${preview.estimatedTokens.toLocaleString()} tokens${suffix}`;
 }
 
 function historyDetail(preview: AssistantContextPreview) {
@@ -506,5 +554,59 @@ function historyDetail(preview: AssistantContextPreview) {
   if (!history.included) {
     return `${history.availableMessages} messages · excluded`;
   }
-  return `${history.sentMessages} of ${history.availableMessages} messages · ${history.sentCharacters.toLocaleString()} characters${history.truncated ? " · truncated" : ""}`;
+  const omitted =
+    history.omittedMessages > 0 || history.omittedCharacters > 0
+      ? ` · omitted ${history.omittedMessages} messages / ${history.omittedCharacters.toLocaleString()} characters`
+      : "";
+  return `${history.sentMessages} of ${history.availableMessages} messages · ${history.sentCharacters.toLocaleString()} characters · ~${history.estimatedTokens.toLocaleString()} tokens${omitted}`;
+}
+
+function tokenBudgetDetail(preview: AssistantContextPreview) {
+  const budget = preview.tokenBudget;
+  const estimate = `~${budget.estimatedInputTokens.toLocaleString()} visible tokens`;
+  if (budget.maxInputTokens === null) return `${estimate} · model limit unknown`;
+  return `${estimate} of ${budget.maxInputTokens.toLocaleString()} · ${budget.utilizationPercent}%`;
+}
+
+function contextPressureDetail(preview: AssistantContextPreview) {
+  const budget = preview.tokenBudget;
+  if (budget.promptCompactionLikely) {
+    return `The prompt exceeds the runtime's ${budget.promptCompactionThresholdTokens?.toLocaleString()} token pre-compaction threshold. OxideStudio will preserve all source ranges in a requirements digest before the model runs.`;
+  }
+  if (budget.pressure === "compaction-likely") {
+    return "Visible context is near the model limit. The runtime may offload tool observations or summarize older history.";
+  }
+  if (budget.pressure === "approaching") {
+    return "Visible context is approaching the model limit. Runtime instructions and provider tokenization may increase the final count.";
+  }
+  return "Token count is an estimate; runtime instructions and provider tokenization are not included.";
+}
+
+function compactionDetail(preview: AssistantContextPreview) {
+  const stats = preview.previousCompaction;
+  if (!stats) return "No previous compaction";
+  return `${stats.count} event${stats.count === 1 ? "" : "s"} · last ${stats.lastInputTokens.toLocaleString()} → ${stats.lastRetainedTokens.toLocaleString()} tokens · ${stats.offloadedArtifacts} artifact${stats.offloadedArtifacts === 1 ? "" : "s"} offloaded`;
+}
+
+function modelUsageDetail(preview: AssistantContextPreview) {
+  const usage = preview.previousModelUsage;
+  if (!usage) return "No provider usage reported";
+  return `${usage.calls} call${usage.calls === 1 ? "" : "s"} · ${usage.inputTokens.toLocaleString()} input + ${usage.outputTokens.toLocaleString()} output = ${usage.totalTokens.toLocaleString()} actual tokens`;
+}
+
+function omissionDetail(preview: AssistantContextPreview) {
+  return preview.omissions
+    .map((omission) => {
+      const source = omission.source.replace("-", " ");
+      const amounts = [
+        omission.omittedMessages
+          ? `${omission.omittedMessages} messages`
+          : null,
+        omission.omittedCharacters
+          ? `${omission.omittedCharacters.toLocaleString()} characters`
+          : null,
+      ].filter(Boolean);
+      return `${source}: ${omission.reason}${amounts.length ? ` (${amounts.join(", ")})` : ""}`;
+    })
+    .join(" · ");
 }

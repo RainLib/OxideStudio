@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { ThemeProvider } from "@/theme";
+import { AppPreferencesProvider, useI18n } from "@/i18n";
 import {
   readStartupConnectionDisplayCache,
   type ConnectionDisplaySummary,
@@ -23,6 +24,12 @@ const STARTUP_DRIVER_COLORS: Record<string, string> = {
   mongodb: "#5fb878",
 };
 
+// Start fetching and transforming the workspace as soon as the App module is
+// evaluated. The second import reuses the browser module cache when React asks
+// lazy() for the component. This removes the previous App -> first effect ->
+// animation frame -> workspace request waterfall while Suspense still lets the
+// lightweight shell paint first.
+void import("@/pages/workspace");
 const WorkspacePage = lazy(() =>
   import("@/pages/workspace").then((module) => {
     markWorkspaceModuleReady();
@@ -34,25 +41,15 @@ const WorkspacePage = lazy(() =>
 
 function App() {
   const cachedDataSources = readStartupConnectionDisplayCache();
-  const [workspaceEnabled, setWorkspaceEnabled] = useState(false);
 
   useEffect(() => {
     markReactShellReady();
     window.dispatchEvent(new Event("oxide:react-shell-ready"));
-
-    // Commit the lightweight, interactive shell before requesting the large
-    // workspace module. This keeps title-bar dragging and startup actions
-    // responsive even when Vite or the production WebView needs extra time to
-    // parse the workspace chunk.
-    const frame = window.requestAnimationFrame(() => {
-      setWorkspaceEnabled(true);
-    });
-    return () => window.cancelAnimationFrame(frame);
   }, []);
 
   return (
     <ThemeProvider>
-      {workspaceEnabled ? (
+      <AppPreferencesProvider>
         <Suspense
           fallback={
             <StartupWorkbenchShell
@@ -65,12 +62,7 @@ function App() {
             <WorkspacePage />
           </div>
         </Suspense>
-      ) : (
-        <StartupWorkbenchShell
-          cachedDataSources={cachedDataSources ?? []}
-          hasDataSourceCache={cachedDataSources !== null}
-        />
-      )}
+      </AppPreferencesProvider>
     </ThemeProvider>
   );
 }
@@ -82,6 +74,7 @@ export function StartupWorkbenchShell({
   cachedDataSources: ConnectionDisplaySummary[];
   hasDataSourceCache: boolean;
 }) {
+  const { t } = useI18n();
   const [pendingIntent, setPendingIntent] = useState<StartupIntent | null>(
     () => peekStartupIntent(),
   );
@@ -94,7 +87,7 @@ export function StartupWorkbenchShell({
   return (
     <div
       className="workbench-shell flex flex-col"
-      aria-label="Starting OxideStudio"
+      aria-label={t("startup.ariaLabel")}
     >
       <div className="wb-titlebar relative flex h-9 shrink-0 items-center">
         <div
@@ -106,7 +99,7 @@ export function StartupWorkbenchShell({
       <div className="wb-workspace-track">
         <div className="wb-tool-window w-[400px] max-w-[36vw] rounded-[6px]">
           <div className="wb-tool-header border-b border-[hsl(var(--wb-border-subtle))]">
-            Database Explorer
+            {t("startup.databaseExplorer")}
           </div>
           <div className="h-[30px] border-b border-[hsl(var(--wb-border-subtle))]" />
           {cachedDataSources.length > 0 ? (
@@ -132,22 +125,22 @@ export function StartupWorkbenchShell({
             </div>
           ) : hasDataSourceCache ? (
             <div className="px-3 py-2.5 text-[11px] text-[hsl(var(--wb-text-muted))]">
-              No data sources
+              {t("startup.noDataSources")}
             </div>
           ) : (
             <div className="flex items-center gap-2 px-3 py-2.5 text-[11px] text-[hsl(var(--wb-text-muted))]">
               <span className="h-2 w-2 animate-spin rounded-full border border-current border-t-orange-500" />
-              <span>Loading data sources…</span>
+              <span>{t("startup.loadingDataSources")}</span>
             </div>
           )}
         </div>
         <div className="wb-work-surface flex min-w-0 flex-1 items-center justify-center rounded-[6px]">
           <div className="-translate-y-6 text-center">
             <div className="text-[14px] font-semibold text-[hsl(var(--wb-text))]">
-              Start working with SQL
+              {t("startup.title")}
             </div>
             <div className="mt-1 text-[11px] text-[hsl(var(--wb-text-muted))]">
-              Open a console or keep queries as files in your project directory.
+              {t("startup.description")}
             </div>
             <div className="mt-4 flex justify-center gap-2">
               {(

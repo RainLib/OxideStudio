@@ -4,17 +4,21 @@ use crate::{
         protocol::{
             read_json_frame, rpc_error, rpc_id_key, rpc_notification, rpc_request, rpc_success,
             write_json_frame, AgentActionAccepted, AgentAnswerClarificationRequest,
-            AgentApproveActionRequest, AgentCancelTurnRequest, AgentHostStatus,
-            AgentProjectStateCleared, AgentProviderConfig, AgentToolManifestEntry,
-            AgentTurnAccepted, AgentTurnRequest, ApprovalDecision, BoundedObservation,
-            CheckpointRequest, GraphCheckpointDeleteThreadRequest, GraphCheckpointGetRequest,
+            AgentApproveActionRequest, AgentArtifactExportRequest, AgentArtifactExportResult,
+            AgentArtifactReadRequest, AgentArtifactReadResult, AgentArtifactSearchMatch,
+            AgentArtifactSearchRequest, AgentArtifactSearchResult, AgentCancelTurnRequest,
+            AgentContextCompactionMetrics, AgentContextMetrics, AgentHostStatus,
+            AgentModelUsageMetrics, AgentProjectStateCleared, AgentProviderConfig,
+            AgentToolManifestEntry, AgentTurnAccepted, AgentTurnRequest, ApprovalDecision,
+            ArtifactReadRequest, ArtifactSearchRequest, BoundedObservation, CheckpointRequest,
+            GraphCheckpointDeleteThreadRequest, GraphCheckpointGetRequest,
             GraphCheckpointListRequest, GraphCheckpointPutRequest, GraphCheckpointPutWritesRequest,
             GraphTypedBlob, ModelCompleteRequest, ModelStreamRequest, RequestMetadata,
             ToolInvokeRequest, AGENT_HOST_EVENT_CHANNEL, AGENT_HOST_MAX_FRAME_BYTES,
             AGENT_HOST_PROTOCOL_VERSION, HOST_CANCEL_TURN_METHOD, HOST_INITIALIZE_METHOD,
             HOST_MODEL_CHUNK_METHOD, HOST_RESUME_TURN_METHOD, HOST_START_TURN_METHOD,
-            SIDECAR_ARTIFACT_READ_METHOD, SIDECAR_CHECKPOINT_LOAD_METHOD,
-            SIDECAR_CHECKPOINT_SAVE_METHOD, SIDECAR_EVENT_METHOD,
+            SIDECAR_ARTIFACT_READ_METHOD, SIDECAR_ARTIFACT_SEARCH_METHOD,
+            SIDECAR_CHECKPOINT_LOAD_METHOD, SIDECAR_CHECKPOINT_SAVE_METHOD, SIDECAR_EVENT_METHOD,
             SIDECAR_GRAPH_CHECKPOINT_DELETE_THREAD_METHOD, SIDECAR_GRAPH_CHECKPOINT_GET_METHOD,
             SIDECAR_GRAPH_CHECKPOINT_LIST_METHOD, SIDECAR_GRAPH_CHECKPOINT_PUT_METHOD,
             SIDECAR_GRAPH_CHECKPOINT_PUT_WRITES_METHOD, SIDECAR_MODEL_COMPLETE_METHOD,
@@ -54,6 +58,7 @@ use std::{
     time::Duration,
 };
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_dialog::DialogExt;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, ChildStdin, Command},
@@ -66,6 +71,10 @@ const MAX_TOOL_RESULT_BYTES: usize = 1024 * 1024;
 const MAX_TOOL_RESULT_ROWS: usize = 10_000;
 const APPROVAL_LEASE_BYTES: usize = 32;
 const MAX_HUMAN_RESUME_MILLIS: i64 = 2 * 60 * 60 * 1_000;
+const MAX_ARTIFACT_READ_BYTES: usize = 64 * 1024;
+const MAX_ARTIFACT_SEARCH_MATCHES: usize = 20;
+const MAX_ARTIFACT_SEARCH_CONTEXT_BYTES: usize = 512;
+const CONTEXT_METRICS_THREAD_ID: &str = "__oxide_context_metrics_v1__";
 
 const REQUIRED_CAPABILITIES: &[&str] = &[
     "chat",
@@ -104,6 +113,7 @@ struct AgentHostInner {
     agent_connections: ConnectionManager,
     connected_targets: RwLock<HashMap<String, ConnectedAgentTarget>>,
     connection_lock: Mutex<()>,
+    context_metrics_lock: Mutex<()>,
     cleanup_started: AtomicBool,
     next_request_id: AtomicU64,
     next_generation: AtomicU64,
@@ -220,6 +230,21 @@ struct ResolvedAgentConnection {
     namespace: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextMetricsUpdate {
+    Compaction {
+        input_tokens: u64,
+        retained_tokens: u64,
+        offloaded_artifacts: u64,
+    },
+    ModelUsage {
+        calls: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        total_tokens: u64,
+    },
+}
+
 #[derive(Debug)]
 enum HostCallError {
     Transport(String),
@@ -279,6 +304,7 @@ impl AgentHostManager {
                 agent_connections: ConnectionManager::new(),
                 connected_targets: RwLock::new(HashMap::new()),
                 connection_lock: Mutex::new(()),
+                context_metrics_lock: Mutex::new(()),
                 cleanup_started: AtomicBool::new(false),
                 next_request_id: AtomicU64::new(1),
                 next_generation: AtomicU64::new(1),
@@ -317,6 +343,31 @@ impl AgentHostManager {
 
     pub async fn clear_project_state(&self, project_id: &str) -> Result<AgentProjectStateCleared> {
         self.inner.clear_project_state(project_id).await
+    }
+
+    pub async fn context_metrics(&self, project_id: &str) -> Result<AgentContextMetrics> {
+        self.inner.load_context_metrics(project_id).await
+    }
+
+    pub async fn read_artifact(
+        &self,
+        request: AgentArtifactReadRequest,
+    ) -> Result<AgentArtifactReadResult> {
+        self.inner.read_artifact(request).await
+    }
+
+    pub async fn search_artifact(
+        &self,
+        request: AgentArtifactSearchRequest,
+    ) -> Result<AgentArtifactSearchResult> {
+        self.inner.search_artifact(request).await
+    }
+
+    pub async fn export_artifact(
+        &self,
+        request: AgentArtifactExportRequest,
+    ) -> Result<AgentArtifactExportResult> {
+        self.inner.export_artifact(request).await
     }
 
     pub async fn status(&self, provider_configured: bool) -> AgentHostStatus {
@@ -636,9 +687,7 @@ impl AgentHostInner {
     }
 
     async fn clear_project_state(&self, project_id: &str) -> Result<AgentProjectStateCleared> {
-        if project_id.trim().is_empty() || project_id.chars().count() > 240 {
-            return Err(anyhow!("projectId must contain 1 to 240 characters"));
-        }
+        validate_project_id(project_id)?;
         if self
             .turns
             .read()
@@ -655,6 +704,193 @@ impl AgentHostInner {
             project_id: project_id.to_string(),
             cleared_records,
         })
+    }
+
+    async fn load_context_metrics(&self, project_id: &str) -> Result<AgentContextMetrics> {
+        validate_project_id(project_id)?;
+        let _guard = self.context_metrics_lock.lock().await;
+        self.load_context_metrics_unlocked(project_id).await
+    }
+
+    async fn load_context_metrics_unlocked(&self, project_id: &str) -> Result<AgentContextMetrics> {
+        let Some(value) = self
+            .store
+            .load_thread(project_id, CONTEXT_METRICS_THREAD_ID)
+            .await?
+        else {
+            return Ok(AgentContextMetrics {
+                project_id: project_id.to_string(),
+                ..AgentContextMetrics::default()
+            });
+        };
+        let metrics: AgentContextMetrics = serde_json::from_value(value)
+            .context("persisted agent context metrics are malformed")?;
+        if metrics.project_id != project_id {
+            return Err(anyhow!(
+                "persisted agent context metrics do not match the requested project"
+            ));
+        }
+        Ok(metrics)
+    }
+
+    async fn record_context_metrics(
+        &self,
+        project_id: &str,
+        update: ContextMetricsUpdate,
+        occurred_at: i64,
+    ) -> Result<AgentContextMetrics> {
+        validate_project_id(project_id)?;
+        let _guard = self.context_metrics_lock.lock().await;
+        let mut metrics = self.load_context_metrics_unlocked(project_id).await?;
+        apply_context_metrics_update(&mut metrics, update, occurred_at);
+        self.store
+            .save_thread(
+                project_id,
+                CONTEXT_METRICS_THREAD_ID,
+                &serde_json::to_value(&metrics)?,
+            )
+            .await
+            .context("failed to persist encrypted agent context metrics")?;
+        Ok(metrics)
+    }
+
+    async fn read_artifact(
+        &self,
+        request: AgentArtifactReadRequest,
+    ) -> Result<AgentArtifactReadResult> {
+        validate_project_id(&request.project_id)?;
+        validate_artifact_id(&request.artifact_id).map_err(|error| anyhow!(error.message))?;
+        validate_artifact_read_bytes(request.max_bytes).map_err(|error| anyhow!(error.message))?;
+        let Some(content) = self
+            .load_artifact_text(&request.project_id, &request.artifact_id, true)
+            .await?
+        else {
+            return Ok(AgentArtifactReadResult {
+                artifact_id: request.artifact_id,
+                found: false,
+                offset: 0,
+                next_offset: 0,
+                total_bytes: 0,
+                eof: true,
+                content: String::new(),
+            });
+        };
+        let (offset, next_offset, content_range) =
+            artifact_text_range(&content, request.offset, request.max_bytes);
+        Ok(AgentArtifactReadResult {
+            artifact_id: request.artifact_id,
+            found: true,
+            offset,
+            next_offset,
+            total_bytes: content.len(),
+            eof: next_offset == content.len(),
+            content: content_range.to_string(),
+        })
+    }
+
+    async fn search_artifact(
+        &self,
+        request: AgentArtifactSearchRequest,
+    ) -> Result<AgentArtifactSearchResult> {
+        validate_project_id(&request.project_id)?;
+        validate_artifact_id(&request.artifact_id).map_err(|error| anyhow!(error.message))?;
+        validate_artifact_search(&request.query, request.max_matches, request.context_bytes)
+            .map_err(|error| anyhow!(error.message))?;
+        let query = request.query.trim().to_string();
+        let Some(content) = self
+            .load_artifact_text(&request.project_id, &request.artifact_id, true)
+            .await?
+        else {
+            return Ok(AgentArtifactSearchResult {
+                artifact_id: request.artifact_id,
+                query,
+                found: false,
+                total_bytes: 0,
+                match_count: 0,
+                truncated: false,
+                matches: Vec::new(),
+            });
+        };
+        let (matches, truncated) =
+            search_artifact_text(&content, &query, request.max_matches, request.context_bytes);
+        Ok(AgentArtifactSearchResult {
+            artifact_id: request.artifact_id,
+            query,
+            found: true,
+            total_bytes: content.len(),
+            match_count: matches.len(),
+            truncated,
+            matches,
+        })
+    }
+
+    async fn export_artifact(
+        &self,
+        request: AgentArtifactExportRequest,
+    ) -> Result<AgentArtifactExportResult> {
+        validate_project_id(&request.project_id)?;
+        validate_artifact_id(&request.artifact_id).map_err(|error| anyhow!(error.message))?;
+        let Some(mut content) = self
+            .load_artifact_text(&request.project_id, &request.artifact_id, true)
+            .await?
+        else {
+            return Err(anyhow!(
+                "This encrypted result is no longer available. Agent artifacts expire after 7 days."
+            ));
+        };
+        content.push('\n');
+        let suggested_file_name =
+            artifact_export_file_name(request.suggested_file_name.as_deref(), &request.artifact_id);
+        let (sender, receiver) = oneshot::channel();
+        self.app
+            .dialog()
+            .file()
+            .add_filter("JSON", &["json"])
+            .set_title("Export AI tool result")
+            .set_file_name(suggested_file_name)
+            .save_file(move |selection| {
+                let _ = sender.send(selection);
+            });
+        let Some(selection) = receiver
+            .await
+            .context("artifact export dialog closed unexpectedly")?
+        else {
+            return Ok(AgentArtifactExportResult {
+                artifact_id: request.artifact_id,
+                exported: false,
+                file_path: None,
+                byte_count: 0,
+            });
+        };
+        let path = selection
+            .into_path()
+            .map_err(|_| anyhow!("the selected export destination is not a local file"))?;
+        tokio::fs::write(&path, content.as_bytes())
+            .await
+            .with_context(|| format!("failed to export artifact to {}", path.display()))?;
+        Ok(AgentArtifactExportResult {
+            artifact_id: request.artifact_id,
+            exported: true,
+            file_path: Some(path.to_string_lossy().into_owned()),
+            byte_count: content.len(),
+        })
+    }
+
+    async fn load_artifact_text(
+        &self,
+        project_id: &str,
+        artifact_id: &str,
+        pretty: bool,
+    ) -> Result<Option<String>> {
+        let Some(artifact) = self.store.load_artifact(project_id, artifact_id).await? else {
+            return Ok(None);
+        };
+        let content = if pretty {
+            serde_json::to_string_pretty(&artifact)?
+        } else {
+            serde_json::to_string(&artifact)?
+        };
+        Ok(Some(content))
     }
 
     async fn validate_active(&self, metadata: &RequestMetadata) -> Result<ActiveTurn> {
@@ -1037,6 +1273,7 @@ impl AgentHostInner {
                 self.handle_graph_checkpoint_delete_thread(params).await
             }
             SIDECAR_ARTIFACT_READ_METHOD => self.handle_artifact_read(params).await,
+            SIDECAR_ARTIFACT_SEARCH_METHOD => self.handle_artifact_search(params).await,
             _ => Err(SidecarRequestError::method_not_found(method)),
         }
     }
@@ -2149,56 +2386,87 @@ impl AgentHostInner {
         &self,
         params: Value,
     ) -> std::result::Result<Value, SidecarRequestError> {
-        let metadata: RequestMetadata = serde_json::from_value(params.clone())
+        let request: ArtifactReadRequest = serde_json::from_value(params)
             .map_err(|error| SidecarRequestError::invalid_params(error.to_string()))?;
         let turn = self
-            .validate_active(&metadata)
+            .validate_active(&request.metadata)
             .await
             .map_err(SidecarRequestError::security)?;
-        let project_id = params
-            .get("projectId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| SidecarRequestError::invalid_params("projectId is required"))?;
-        let artifact_id = params
-            .get("artifactId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| SidecarRequestError::invalid_params("artifactId is required"))?;
-        if project_id != turn.project_id {
+        validate_artifact_id(&request.artifact_id)?;
+        validate_artifact_read_bytes(request.max_bytes)?;
+        if request.project_id != turn.project_id {
             return Err(SidecarRequestError::security(anyhow!(
                 "artifact project does not match the active turn"
             )));
         }
         let artifact = self
             .store
-            .load_artifact(project_id, artifact_id)
+            .load_artifact(&request.project_id, &request.artifact_id)
             .await
             .map_err(SidecarRequestError::storage)?;
         let Some(artifact) = artifact else {
-            return Ok(json!({"artifactId": artifact_id, "value": null}));
+            return Ok(json!({"artifactId": request.artifact_id, "value": null}));
         };
-        let bytes = serde_json::to_vec(&artifact).map_err(SidecarRequestError::from_json)?;
-        let offset = params
-            .get("offset")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            .min(bytes.len() as u64) as usize;
-        let max_bytes = params
-            .get("maxBytes")
-            .and_then(Value::as_u64)
-            .unwrap_or(512 * 1024)
-            .clamp(1, MAX_TOOL_RESULT_BYTES as u64) as usize;
-        if offset == 0 && bytes.len() <= max_bytes {
-            return Ok(json!({"artifactId": artifact_id, "value": artifact}));
+        let content = serde_json::to_string(&artifact).map_err(SidecarRequestError::from_json)?;
+        if request.offset == 0 && content.len() <= request.max_bytes {
+            return Ok(json!({"artifactId": request.artifact_id, "value": artifact}));
         }
-        let end = offset.saturating_add(max_bytes).min(bytes.len());
+        let (offset, end, content_range) =
+            artifact_text_range(&content, request.offset, request.max_bytes);
         Ok(json!({
-            "artifactId":artifact_id,
+            "artifactId":request.artifact_id,
             "encoding":"base64-json",
             "offset":offset,
             "nextOffset":end,
-            "totalBytes":bytes.len(),
-            "eof":end == bytes.len(),
-            "content":BASE64_URL.encode(&bytes[offset..end]),
+            "totalBytes":content.len(),
+            "eof":end == content.len(),
+            "content":BASE64_URL.encode(content_range.as_bytes()),
+        }))
+    }
+
+    async fn handle_artifact_search(
+        &self,
+        params: Value,
+    ) -> std::result::Result<Value, SidecarRequestError> {
+        let request: ArtifactSearchRequest = serde_json::from_value(params)
+            .map_err(|error| SidecarRequestError::invalid_params(error.to_string()))?;
+        let turn = self
+            .validate_active(&request.metadata)
+            .await
+            .map_err(SidecarRequestError::security)?;
+        validate_artifact_id(&request.artifact_id)?;
+        let query = request.query.trim();
+        validate_artifact_search(query, request.max_matches, request.context_bytes)?;
+        if request.project_id != turn.project_id {
+            return Err(SidecarRequestError::security(anyhow!(
+                "artifact project does not match the active turn"
+            )));
+        }
+        let artifact = self
+            .store
+            .load_artifact(&request.project_id, &request.artifact_id)
+            .await
+            .map_err(SidecarRequestError::storage)?;
+        let Some(artifact) = artifact else {
+            return Ok(json!({
+                "artifactId": request.artifact_id,
+                "query": query,
+                "totalBytes": 0,
+                "matchCount": 0,
+                "truncated": false,
+                "matches": [],
+            }));
+        };
+        let content = serde_json::to_string(&artifact).map_err(SidecarRequestError::from_json)?;
+        let (matches, truncated) =
+            search_artifact_text(&content, query, request.max_matches, request.context_bytes);
+        Ok(json!({
+            "artifactId": request.artifact_id,
+            "query": query,
+            "totalBytes": content.len(),
+            "matchCount": matches.len(),
+            "truncated": truncated,
+            "matches": matches,
         }))
     }
 
@@ -2229,12 +2497,11 @@ impl AgentHostInner {
         let Some(_sidecar_sequence) = object.get("sequence").and_then(Value::as_u64) else {
             return;
         };
-        if object
+        let occurred_at = object
             .get("occurredAt")
             .and_then(Value::as_i64)
-            .unwrap_or(0)
-            <= 0
-        {
+            .unwrap_or(0);
+        if occurred_at <= 0 {
             return;
         }
         let Some(event_type) = object
@@ -2247,6 +2514,7 @@ impl AgentHostInner {
         if !valid_agent_event_shape(&event_type, object) {
             return;
         }
+        let context_metrics_update = context_metrics_update(&event_type, object);
         let key = TurnKey { thread_id, turn_id };
         let active = self.turns.read().await.get(&key).cloned();
         let Some(active) = active else {
@@ -2313,6 +2581,25 @@ impl AgentHostInner {
                 );
             }
             _ => {}
+        }
+
+        if let Some(update) = context_metrics_update {
+            match self
+                .record_context_metrics(&active.project_id, update, occurred_at)
+                .await
+            {
+                Ok(metrics) => {
+                    if let Ok(value) = serde_json::to_value(metrics) {
+                        object.insert("projectMetrics".to_string(), value);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "failed to persist agent context metrics: {}",
+                        bounded_text(&error.to_string(), 512)
+                    );
+                }
+            }
         }
 
         let terminal = event_type == "turn.status"
@@ -3401,6 +3688,15 @@ fn valid_agent_event_shape(event_type: &str, object: &Map<String, Value>) -> boo
         "context.compacted" => ["inputTokens", "retainedTokens", "offloadedArtifacts"]
             .iter()
             .all(|key| object.get(*key).and_then(Value::as_u64).is_some()),
+        "model.usage" => {
+            object
+                .get("calls")
+                .and_then(Value::as_u64)
+                .is_some_and(|calls| calls > 0)
+                && ["inputTokens", "outputTokens", "totalTokens"]
+                    .iter()
+                    .all(|key| object.get(*key).and_then(Value::as_u64).is_some())
+        }
         "answer.delta" => {
             has_string_field(object, "content") && optional_bool_field(object, "reset")
         }
@@ -3414,6 +3710,72 @@ fn valid_agent_event_shape(event_type: &str, object: &Map<String, Value>) -> boo
         }
         _ => false,
     }
+}
+
+fn context_metrics_update(
+    event_type: &str,
+    object: &Map<String, Value>,
+) -> Option<ContextMetricsUpdate> {
+    match event_type {
+        "context.compacted" => Some(ContextMetricsUpdate::Compaction {
+            input_tokens: object.get("inputTokens")?.as_u64()?,
+            retained_tokens: object.get("retainedTokens")?.as_u64()?,
+            offloaded_artifacts: object.get("offloadedArtifacts")?.as_u64()?,
+        }),
+        "model.usage" => Some(ContextMetricsUpdate::ModelUsage {
+            calls: object.get("calls")?.as_u64()?,
+            input_tokens: object.get("inputTokens")?.as_u64()?,
+            output_tokens: object.get("outputTokens")?.as_u64()?,
+            total_tokens: object.get("totalTokens")?.as_u64()?,
+        }),
+        _ => None,
+    }
+}
+
+fn apply_context_metrics_update(
+    metrics: &mut AgentContextMetrics,
+    update: ContextMetricsUpdate,
+    occurred_at: i64,
+) {
+    match update {
+        ContextMetricsUpdate::Compaction {
+            input_tokens,
+            retained_tokens,
+            offloaded_artifacts,
+        } => {
+            let compaction = metrics
+                .compaction
+                .get_or_insert_with(AgentContextCompactionMetrics::default);
+            compaction.count = compaction.count.saturating_add(1);
+            compaction.last_input_tokens = input_tokens;
+            compaction.last_retained_tokens = retained_tokens;
+            compaction.offloaded_artifacts = compaction
+                .offloaded_artifacts
+                .saturating_add(offloaded_artifacts);
+        }
+        ContextMetricsUpdate::ModelUsage {
+            calls,
+            input_tokens,
+            output_tokens,
+            total_tokens,
+        } => {
+            let usage = metrics
+                .model_usage
+                .get_or_insert_with(AgentModelUsageMetrics::default);
+            usage.calls = usage.calls.saturating_add(calls);
+            usage.input_tokens = usage.input_tokens.saturating_add(input_tokens);
+            usage.output_tokens = usage.output_tokens.saturating_add(output_tokens);
+            usage.total_tokens = usage.total_tokens.saturating_add(total_tokens);
+        }
+    }
+    metrics.updated_at = metrics.updated_at.max(occurred_at);
+}
+
+fn validate_project_id(project_id: &str) -> Result<()> {
+    if project_id.trim().is_empty() || project_id.chars().count() > 240 {
+        return Err(anyhow!("projectId must contain 1 to 240 characters"));
+    }
+    Ok(())
 }
 
 fn valid_clarification_question(value: &Value) -> bool {
@@ -3565,6 +3927,152 @@ fn now_millis() -> i64 {
 
 fn bounded_text(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
+}
+
+fn validate_artifact_id(artifact_id: &str) -> std::result::Result<(), SidecarRequestError> {
+    if artifact_id.trim().is_empty()
+        || artifact_id.chars().count() > 240
+        || artifact_id.chars().any(char::is_control)
+    {
+        return Err(SidecarRequestError::invalid_params(
+            "artifactId must contain 1 to 240 non-control characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_artifact_read_bytes(max_bytes: usize) -> std::result::Result<(), SidecarRequestError> {
+    if max_bytes == 0 || max_bytes > MAX_ARTIFACT_READ_BYTES {
+        return Err(SidecarRequestError::invalid_params(
+            "artifact maxBytes must be between 1 and 65536",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_artifact_search(
+    query: &str,
+    max_matches: usize,
+    context_bytes: usize,
+) -> std::result::Result<(), SidecarRequestError> {
+    if query.trim().is_empty() || query.trim().chars().count() > 256 {
+        return Err(SidecarRequestError::invalid_params(
+            "artifact search query must contain 1 to 256 characters",
+        ));
+    }
+    if max_matches == 0 || max_matches > MAX_ARTIFACT_SEARCH_MATCHES {
+        return Err(SidecarRequestError::invalid_params(
+            "artifact maxMatches must be between 1 and 20",
+        ));
+    }
+    if !(16..=MAX_ARTIFACT_SEARCH_CONTEXT_BYTES).contains(&context_bytes) {
+        return Err(SidecarRequestError::invalid_params(
+            "artifact contextBytes must be between 16 and 512",
+        ));
+    }
+    Ok(())
+}
+
+fn artifact_text_range(
+    content: &str,
+    requested_offset: usize,
+    max_bytes: usize,
+) -> (usize, usize, &str) {
+    let offset = ceil_char_boundary(content, requested_offset.min(content.len()));
+    let requested_end = offset.saturating_add(max_bytes).min(content.len());
+    let mut end = floor_char_boundary(content, requested_end);
+    if end == offset && end < content.len() {
+        end = ceil_char_boundary(content, end.saturating_add(1));
+    }
+    (offset, end, &content[offset..end])
+}
+
+fn artifact_export_file_name(suggested: Option<&str>, artifact_id: &str) -> String {
+    let source = suggested
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(artifact_id);
+    let mut name = source
+        .trim()
+        .chars()
+        .take(100)
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    name = name.trim_matches(['.', '-', '_']).to_string();
+    if name.is_empty() {
+        name = "oxide-agent-result".to_string();
+    }
+    if !name.to_ascii_lowercase().ends_with(".json") {
+        name.push_str(".json");
+    }
+    name
+}
+
+fn search_artifact_text(
+    content: &str,
+    query: &str,
+    max_matches: usize,
+    context_bytes: usize,
+) -> (Vec<AgentArtifactSearchMatch>, bool) {
+    let case_insensitive = query.is_ascii();
+    let haystack = if case_insensitive {
+        content.to_ascii_lowercase()
+    } else {
+        content.to_string()
+    };
+    let needle = if case_insensitive {
+        query.to_ascii_lowercase()
+    } else {
+        query.to_string()
+    };
+    let mut matches = Vec::new();
+    let mut cursor = 0;
+    let mut truncated = false;
+    while cursor <= haystack.len() {
+        let Some(relative) = haystack[cursor..].find(&needle) else {
+            break;
+        };
+        let offset = cursor + relative;
+        if matches.len() >= max_matches {
+            truncated = true;
+            break;
+        }
+        let end = offset.saturating_add(needle.len()).min(content.len());
+        let snippet_start = floor_char_boundary(content, offset.saturating_sub(context_bytes));
+        let snippet_end = ceil_char_boundary(
+            content,
+            end.saturating_add(context_bytes).min(content.len()),
+        );
+        matches.push(AgentArtifactSearchMatch {
+            offset,
+            length: end.saturating_sub(offset),
+            snippet_offset: snippet_start,
+            snippet: content[snippet_start..snippet_end].to_string(),
+        });
+        cursor = end.max(cursor.saturating_add(1));
+    }
+    (matches, truncated)
+}
+
+fn floor_char_boundary(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_char_boundary(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while index < value.len() && !value.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 fn sidecar_resumed(response: &Value) -> bool {
@@ -3813,6 +4321,118 @@ mod tests {
             "unknown.event",
             valid.as_object().unwrap()
         ));
+    }
+
+    #[test]
+    fn model_usage_event_requires_positive_calls_and_nonnegative_tokens() {
+        let valid = json!({
+            "calls": 2,
+            "inputTokens": 1200,
+            "outputTokens": 300,
+            "totalTokens": 1500
+        });
+        assert!(valid_agent_event_shape(
+            "model.usage",
+            valid.as_object().unwrap()
+        ));
+        let zero_calls = json!({
+            "calls": 0,
+            "inputTokens": 1200,
+            "outputTokens": 300,
+            "totalTokens": 1500
+        });
+        assert!(!valid_agent_event_shape(
+            "model.usage",
+            zero_calls.as_object().unwrap()
+        ));
+    }
+
+    #[test]
+    fn context_metrics_accumulate_without_losing_the_latest_compaction() {
+        let mut metrics = AgentContextMetrics {
+            project_id: "project".to_string(),
+            ..AgentContextMetrics::default()
+        };
+        apply_context_metrics_update(
+            &mut metrics,
+            ContextMetricsUpdate::Compaction {
+                input_tokens: 2_000,
+                retained_tokens: 700,
+                offloaded_artifacts: 2,
+            },
+            100,
+        );
+        apply_context_metrics_update(
+            &mut metrics,
+            ContextMetricsUpdate::ModelUsage {
+                calls: 2,
+                input_tokens: 1_200,
+                output_tokens: 300,
+                total_tokens: 1_500,
+            },
+            101,
+        );
+        apply_context_metrics_update(
+            &mut metrics,
+            ContextMetricsUpdate::Compaction {
+                input_tokens: 3_000,
+                retained_tokens: 900,
+                offloaded_artifacts: 1,
+            },
+            102,
+        );
+
+        assert_eq!(
+            metrics.compaction,
+            Some(AgentContextCompactionMetrics {
+                count: 2,
+                last_input_tokens: 3_000,
+                last_retained_tokens: 900,
+                offloaded_artifacts: 3,
+            })
+        );
+        assert_eq!(
+            metrics.model_usage,
+            Some(AgentModelUsageMetrics {
+                calls: 2,
+                input_tokens: 1_200,
+                output_tokens: 300,
+                total_tokens: 1_500,
+            })
+        );
+        assert_eq!(metrics.updated_at, 102);
+    }
+
+    #[test]
+    fn artifact_search_is_bounded_and_keeps_utf8_snippets_valid() {
+        let content = r#"{"rows":[{"name":"Alpha 中文"},{"name":"alpha"},{"name":"ALPHA"}]}"#;
+        let (matches, truncated) = search_artifact_text(content, "alpha", 2, 16);
+        assert_eq!(matches.len(), 2);
+        assert!(truncated);
+        assert_eq!(matches[0].offset, 18);
+        assert!(matches.iter().all(|value| !value.snippet.is_empty()));
+
+        let (unicode_matches, unicode_truncated) = search_artifact_text(content, "中文", 8, 16);
+        assert_eq!(unicode_matches.len(), 1);
+        assert!(!unicode_truncated);
+        assert!(unicode_matches[0].snippet.contains("中文"));
+    }
+
+    #[test]
+    fn artifact_ranges_and_export_names_are_utf8_safe() {
+        let content = "{\n  \"name\": \"Alpha 中文\",\n  \"active\": true\n}";
+        let (offset, next_offset, range) = artifact_text_range(content, 17, 8);
+        assert!(content.is_char_boundary(offset));
+        assert!(content.is_char_boundary(next_offset));
+        assert_eq!(range, &content[offset..next_offset]);
+        assert_eq!(
+            artifact_export_file_name(Some("../../Results 2026"), "ignored"),
+            "Results-2026.json"
+        );
+        assert_eq!(
+            artifact_export_file_name(None, "tool-result-safe"),
+            "tool-result-safe.json"
+        );
     }
 
     #[test]

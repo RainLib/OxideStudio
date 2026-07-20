@@ -28,6 +28,7 @@ pub const SIDECAR_GRAPH_CHECKPOINT_PUT_METHOD: &str = "graph.checkpoint.put";
 pub const SIDECAR_GRAPH_CHECKPOINT_PUT_WRITES_METHOD: &str = "graph.checkpoint.putWrites";
 pub const SIDECAR_GRAPH_CHECKPOINT_DELETE_THREAD_METHOD: &str = "graph.checkpoint.deleteThread";
 pub const SIDECAR_ARTIFACT_READ_METHOD: &str = "artifact.read";
+pub const SIDECAR_ARTIFACT_SEARCH_METHOD: &str = "artifact.search";
 pub const SIDECAR_EVENT_METHOD: &str = "agent.event";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -285,6 +286,33 @@ pub struct AgentProjectStateCleared {
     pub cleared_records: u64,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextCompactionMetrics {
+    pub count: u64,
+    pub last_input_tokens: u64,
+    pub last_retained_tokens: u64,
+    pub offloaded_artifacts: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModelUsageMetrics {
+    pub calls: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextMetrics {
+    pub project_id: String,
+    pub compaction: Option<AgentContextCompactionMetrics>,
+    pub model_usage: Option<AgentModelUsageMetrics>,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentHostStatus {
@@ -439,6 +467,118 @@ pub struct BoundedObservation {
     pub byte_count: usize,
     pub truncated: bool,
     pub artifact_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactReadRequest {
+    #[serde(flatten)]
+    pub metadata: RequestMetadata,
+    pub project_id: String,
+    pub artifact_id: String,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_artifact_read_bytes")]
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactSearchRequest {
+    #[serde(flatten)]
+    pub metadata: RequestMetadata,
+    pub project_id: String,
+    pub artifact_id: String,
+    pub query: String,
+    #[serde(default = "default_artifact_search_matches")]
+    pub max_matches: usize,
+    #[serde(default = "default_artifact_search_context_bytes")]
+    pub context_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentArtifactReadRequest {
+    pub project_id: String,
+    pub artifact_id: String,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_artifact_read_bytes")]
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentArtifactReadResult {
+    pub artifact_id: String,
+    pub found: bool,
+    pub offset: usize,
+    pub next_offset: usize,
+    pub total_bytes: usize,
+    pub eof: bool,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentArtifactSearchRequest {
+    pub project_id: String,
+    pub artifact_id: String,
+    pub query: String,
+    #[serde(default = "default_artifact_search_matches")]
+    pub max_matches: usize,
+    #[serde(default = "default_artifact_search_context_bytes")]
+    pub context_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentArtifactSearchMatch {
+    pub offset: usize,
+    pub length: usize,
+    pub snippet_offset: usize,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentArtifactSearchResult {
+    pub artifact_id: String,
+    pub query: String,
+    pub found: bool,
+    pub total_bytes: usize,
+    pub match_count: usize,
+    pub truncated: bool,
+    pub matches: Vec<AgentArtifactSearchMatch>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentArtifactExportRequest {
+    pub project_id: String,
+    pub artifact_id: String,
+    pub suggested_file_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentArtifactExportResult {
+    pub artifact_id: String,
+    pub exported: bool,
+    pub file_path: Option<String>,
+    pub byte_count: usize,
+}
+
+fn default_artifact_read_bytes() -> usize {
+    32 * 1024
+}
+
+fn default_artifact_search_matches() -> usize {
+    8
+}
+
+fn default_artifact_search_context_bytes() -> usize {
+    120
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

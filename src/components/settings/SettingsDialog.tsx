@@ -20,6 +20,7 @@ import { useAiSettingsStore } from "@/store/useAiSettingsStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { ThemeContext } from "@/theme/ThemeProvider";
+import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { keymapConflicts, normalizeKeybinding } from "@/lib/keybindings";
 import {
@@ -27,7 +28,11 @@ import {
   type WorkbenchActionId,
   workbenchActions,
 } from "@/lib/actions";
-import type { AppSettings, WorkbenchSide } from "@/lib/appSettings";
+import type {
+  AppLocale,
+  AppSettings,
+  WorkbenchSide,
+} from "@/lib/appSettings";
 import { moveSideToolWindow } from "@/lib/workbenchLayout";
 import { parseVimMappings, serializeVimMappings } from "@/lib/vimMappings";
 import {
@@ -68,61 +73,117 @@ type SettingsTreeGroup = {
   }>;
 };
 
-const settingsTree: SettingsTreeGroup[] = [
+type Translate = ReturnType<typeof useI18n>["t"];
+
+function createSettingsTree(t: Translate): SettingsTreeGroup[] {
+  return [
   {
     id: "appearance-behavior",
-    label: "Appearance & Behavior",
+    label: t("settings.group.appearanceBehavior"),
     icon: Palette,
     children: [
-      { id: "appearance", label: "Appearance", section: "appearance" },
-      { id: "workbench", label: "Workbench", section: "workbench" },
-      { id: "keymap", label: "Keymap", section: "keymap" },
+      {
+        id: "appearance",
+        label: t("settings.section.appearance"),
+        section: "appearance",
+      },
+      {
+        id: "workbench",
+        label: t("settings.section.workbench"),
+        section: "workbench",
+      },
+      {
+        id: "keymap",
+        label: t("settings.section.keymap"),
+        section: "keymap",
+      },
     ],
   },
   {
     id: "editor",
-    label: "Editor",
+    label: t("settings.group.editor"),
     icon: TextCursorInput,
     children: [
-      { id: "editor", label: "Editor", section: "editor" },
-      { id: "dataEditor", label: "Data Editor and Viewer", section: "dataEditor" },
+      {
+        id: "editor",
+        label: t("settings.section.editor"),
+        section: "editor",
+      },
+      {
+        id: "dataEditor",
+        label: t("settings.section.dataEditor"),
+        section: "dataEditor",
+      },
     ],
   },
   {
     id: "database",
-    label: "Database",
+    label: t("settings.group.database"),
     icon: Database,
     children: [
       {
         id: "databaseExplorer",
-        label: "Database Explorer",
+        label: t("settings.section.databaseExplorer"),
         section: "databaseExplorer",
       },
     ],
   },
   {
     id: "tools",
-    label: "Tools",
+    label: t("settings.group.tools"),
     icon: Bot,
-    children: [{ id: "ai", label: "AI Assistant", section: "ai" }],
+    children: [
+      {
+        id: "ai",
+        label: t("settings.section.ai"),
+        section: "ai",
+      },
+    ],
   },
-];
+  ];
+}
 
-const sectionMeta: Record<SettingsSection, { group: string; title: string }> = {
-  appearance: { group: "Appearance & Behavior", title: "Appearance" },
-  workbench: { group: "Appearance & Behavior", title: "Workbench" },
-  keymap: { group: "Appearance & Behavior", title: "Keymap" },
-  editor: { group: "Editor", title: "Editor" },
-  dataEditor: { group: "Editor", title: "Data Editor and Viewer" },
-  databaseExplorer: { group: "Database", title: "Database Explorer" },
-  ai: { group: "Tools", title: "AI Assistant" },
-};
+function createSectionMeta(
+  t: Translate,
+): Record<SettingsSection, { group: string; title: string }> {
+  return {
+    appearance: {
+      group: t("settings.group.appearanceBehavior"),
+      title: t("settings.section.appearance"),
+    },
+    workbench: {
+      group: t("settings.group.appearanceBehavior"),
+      title: t("settings.section.workbench"),
+    },
+    keymap: {
+      group: t("settings.group.appearanceBehavior"),
+      title: t("settings.section.keymap"),
+    },
+    editor: {
+      group: t("settings.group.editor"),
+      title: t("settings.section.editor"),
+    },
+    dataEditor: {
+      group: t("settings.group.editor"),
+      title: t("settings.section.dataEditor"),
+    },
+    databaseExplorer: {
+      group: t("settings.group.database"),
+      title: t("settings.section.databaseExplorer"),
+    },
+    ai: {
+      group: t("settings.group.tools"),
+      title: t("settings.section.ai"),
+    },
+  };
+}
 
 export function SettingsDialog({
   open,
   onOpenChange,
   initialSection,
 }: SettingsDialogProps) {
+  const { t } = useI18n();
   const themeContext = useContext(ThemeContext);
   const appSettings = useSettingsStore((state) => state.settings);
   const settingsError = useSettingsStore((state) => state.error);
@@ -176,6 +237,8 @@ export function SettingsDialog({
     status: "success" | "error";
     message: string;
   } | null>(null);
+  const localizedSettingsTree = useMemo(() => createSettingsTree(t), [t]);
+  const localizedSectionMeta = useMemo(() => createSectionMeta(t), [t]);
 
   useEffect(() => {
     const baseUrl = aiBaseUrl.trim();
@@ -205,9 +268,9 @@ export function SettingsDialog({
 
   const visibleTree = useMemo(() => {
     const filter = filterText.trim().toLowerCase();
-    if (!filter) return settingsTree;
+    if (!filter) return localizedSettingsTree;
 
-    return settingsTree
+    return localizedSettingsTree
       .map((item) => {
         const itemMatches = item.label.toLowerCase().includes(filter);
         const children = item.children.filter((child) =>
@@ -220,11 +283,11 @@ export function SettingsDialog({
         };
       })
       .filter((item): item is SettingsTreeGroup => Boolean(item));
-  }, [filterText]);
+  }, [filterText, localizedSettingsTree]);
 
   if (!themeContext) return null;
   const { mode, setTheme } = themeContext;
-  const currentMeta = sectionMeta[activeSection];
+  const currentMeta = localizedSectionMeta[activeSection];
   const canTestAi = Boolean(aiBaseUrl.trim() && aiModel.trim());
 
   const updateAppSettings = (updates: Partial<AppSettings>) => {
@@ -350,13 +413,13 @@ export function SettingsDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="top-[14px] flex h-[calc(100vh-28px)] max-h-none w-[1040px] max-w-[calc(100vw-28px)] translate-y-0 flex-col gap-0 overflow-hidden rounded-[8px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] p-0 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_12px_36px_rgba(0,0,0,0.4)] data-[state=closed]:slide-out-to-top-0 data-[state=open]:slide-in-from-top-0">
+      <DialogContent className="settings-dialog top-[14px] flex h-[calc(100vh-28px)] max-h-none w-[1040px] max-w-[calc(100vw-28px)] translate-y-0 flex-col gap-0 overflow-hidden rounded-[8px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] p-0 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_12px_36px_rgba(0,0,0,0.4)] data-[state=closed]:slide-out-to-top-0 data-[state=open]:slide-in-from-top-0">
         <DialogHeader className="relative flex h-10 shrink-0 items-center justify-center border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-frame))] px-4 py-0">
           <DialogTitle className="text-[12px] font-semibold tracking-normal text-[hsl(var(--wb-text-muted))]">
-            Settings
+            {t("common.settings")}
           </DialogTitle>
           <DialogDescription className="sr-only">
-            Configure workbench layout, keymap, editor, database explorer, data grid, and AI assistant preferences.
+            {t("settings.description")}
           </DialogDescription>
         </DialogHeader>
 
@@ -369,7 +432,7 @@ export function SettingsDialog({
                   value={filterText}
                   onChange={(event) => setFilterText(event.target.value)}
                   className="h-full min-w-0 flex-1 bg-transparent text-[12px] text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))]"
-                  placeholder="Search"
+                  placeholder={t("common.search")}
                 />
               </div>
             </div>
@@ -403,12 +466,15 @@ export function SettingsDialog({
               </div>
               <div className="flex items-center gap-1 text-[hsl(var(--wb-text-muted))]">
                 <SettingsIconButton
-                  title="Open settings.json"
+                  title={t("common.openSettingsJson")}
                   onClick={() => void findWorkbenchAction("settings.openJson")?.run()}
                 >
                   <Braces size={14} />
                 </SettingsIconButton>
-                <SettingsIconButton title="Reset Settings" onClick={() => void resetSettings()}>
+                <SettingsIconButton
+                  title={t("common.reset")}
+                  onClick={() => void resetSettings()}
+                >
                   <Settings2 size={14} />
                 </SettingsIconButton>
               </div>
@@ -493,10 +559,12 @@ export function SettingsDialog({
         </div>
 
         <DialogFooter className="flex-row justify-end gap-3 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 py-2 sm:space-x-0">
-          <SettingsButton onClick={() => handleOpenChange(false)}>Cancel</SettingsButton>
-          <SettingsButton disabled>Apply</SettingsButton>
+          <SettingsButton onClick={() => handleOpenChange(false)}>
+            {t("common.cancel")}
+          </SettingsButton>
+          <SettingsButton disabled>{t("common.apply")}</SettingsButton>
           <SettingsButton intent="primary" onClick={() => handleOpenChange(false)}>
-            OK
+            {t("common.ok")}
           </SettingsButton>
         </DialogFooter>
       </DialogContent>
@@ -568,12 +636,13 @@ function AppearanceSettings({
   settings: AppSettings;
   onUpdate: (updates: Partial<AppSettings>) => void;
 }) {
+  const { t } = useI18n();
   const appearance = settings.appearance;
 
   return (
     <SettingsPanel>
-      <SettingsDivider title="Theme" first />
-      <SettingRow label="Theme:">
+      <SettingsDivider title={t("settings.appearance.theme")} first />
+      <SettingRow label={t("settings.appearance.themeLabel")}>
         <select
           value={mode}
           onChange={(event) =>
@@ -581,17 +650,17 @@ function AppearanceSettings({
           }
           className={selectClass}
         >
-          <option value="dark">Islands Dark</option>
-          <option value="light">Light</option>
-          <option value="system">Sync with OS</option>
+          <option value="dark">{t("settings.appearance.themeDark")}</option>
+          <option value="light">{t("settings.appearance.themeLight")}</option>
+          <option value="system">{t("settings.appearance.themeSystem")}</option>
         </select>
         <CheckboxLabel
-          label="Sync with OS"
+          label={t("settings.appearance.themeSystem")}
           checked={mode === "system"}
           onChange={() => setTheme(mode === "system" ? "dark" : "system")}
         />
       </SettingRow>
-      <SettingRow label="Editor scheme:">
+      <SettingRow label={t("settings.appearance.editorScheme")}>
         <select
           className={selectClass}
           value={mode === "light" ? "light" : "dark"}
@@ -599,12 +668,39 @@ function AppearanceSettings({
             setTheme(event.target.value === "light" ? "light" : "dark")
           }
         >
-          <option value="dark">Dark</option>
-          <option value="light">Light</option>
+          <option value="dark">{t("settings.appearance.dark")}</option>
+          <option value="light">{t("settings.appearance.light")}</option>
         </select>
       </SettingRow>
-      <SettingsDivider title="Interface" />
-      <SettingRow label="UI font size:">
+      <SettingsDivider title={t("settings.appearance.interface")} />
+      <SettingRow label={t("settings.appearance.language")}>
+        <select
+          className={selectClass}
+          value={appearance.locale}
+          onChange={(event) =>
+            onUpdate({
+              appearance: {
+                ...appearance,
+                locale: event.target.value as AppLocale,
+              },
+            })
+          }
+        >
+          <option value="system">
+            {t("settings.appearance.languageSystem")}
+          </option>
+          <option value="en-US">
+            {t("settings.appearance.languageEnglish")}
+          </option>
+          <option value="zh-CN">
+            {t("settings.appearance.languageChinese")}
+          </option>
+        </select>
+        <span className="settings-hint">
+          {t("settings.appearance.languageHint")}
+        </span>
+      </SettingRow>
+      <SettingRow label={t("settings.appearance.uiFontSize")}>
         <NumberInput
           value={appearance.uiFontSize}
           min={10}
@@ -613,8 +709,13 @@ function AppearanceSettings({
             onUpdate({ appearance: { ...appearance, uiFontSize } })
           }
         />
-        <span className="settings-hint">Database Explorer, tabs, toolbars, and AI</span>
+        <span className="settings-hint">
+          {t("settings.appearance.uiFontSizeHint")}
+        </span>
       </SettingRow>
+      <p className="-mt-1 mb-2 ml-[148px] text-[11px] text-[hsl(var(--wb-text-muted))]">
+        {t("settings.appearance.editorFontHint")}
+      </p>
     </SettingsPanel>
   );
 }

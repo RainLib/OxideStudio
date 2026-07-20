@@ -158,6 +158,17 @@ describe("Agent Host Tauri service", () => {
         type: "final.answer",
         content: "Done",
         artifacts: [],
+        projectMetrics: {
+          projectId: "project-1",
+          compaction: null,
+          modelUsage: {
+            calls: 1,
+            inputTokens: 20,
+            outputTokens: 5,
+            totalTokens: 25,
+          },
+          updatedAt: 100,
+        },
       },
     });
     callback?.({
@@ -178,17 +189,121 @@ describe("Agent Host Tauri service", () => {
   });
 
   it("clears encrypted state only for the requested project", async () => {
-    mocks.invokeRawCommand.mockResolvedValue({
-      projectId: "project-1",
-      clearedRecords: 7,
-    });
+    mocks.invokeRawCommand
+      .mockResolvedValueOnce({
+        projectId: "project-1",
+        compaction: {
+          count: 2,
+          lastInputTokens: 2_000,
+          lastRetainedTokens: 800,
+          offloadedArtifacts: 3,
+        },
+        modelUsage: null,
+        updatedAt: 100,
+      })
+      .mockResolvedValueOnce({
+        projectId: "project-1",
+        clearedRecords: 7,
+      });
 
+    await expect(
+      agentHostService.getContextMetrics("project-1"),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        projectId: "project-1",
+        compaction: expect.objectContaining({ count: 2 }),
+      }),
+    );
     await expect(
       agentHostService.clearProjectState("project-1"),
     ).resolves.toEqual({ projectId: "project-1", clearedRecords: 7 });
+    expect(mocks.invokeRawCommand).toHaveBeenNthCalledWith(
+      1,
+      "agent_get_context_metrics",
+      { projectId: "project-1" },
+    );
     expect(mocks.invokeRawCommand).toHaveBeenCalledWith(
       "agent_clear_project_state",
       { projectId: "project-1" },
     );
+  });
+
+  it("keeps artifact access project-scoped and uses explicit export commands", async () => {
+    mocks.invokeRawCommand
+      .mockResolvedValueOnce({
+        artifactId: "tool-result-1",
+        found: true,
+        offset: 0,
+        nextOffset: 12,
+        totalBytes: 12,
+        eof: true,
+        content: "{\"ok\":true}",
+      })
+      .mockResolvedValueOnce({
+        artifactId: "tool-result-1",
+        query: "ok",
+        found: true,
+        totalBytes: 12,
+        matchCount: 1,
+        truncated: false,
+        matches: [
+          { offset: 2, length: 2, snippetOffset: 0, snippet: "{\"ok\":true}" },
+        ],
+      })
+      .mockResolvedValueOnce({
+        artifactId: "tool-result-1",
+        exported: true,
+        filePath: "/tmp/result.json",
+        byteCount: 13,
+      });
+
+    await agentHostService.readArtifact({
+      projectId: "project-1",
+      artifactId: "tool-result-1",
+      maxBytes: 16_384,
+    });
+    await agentHostService.searchArtifact({
+      projectId: "project-1",
+      artifactId: "tool-result-1",
+      query: "ok",
+    });
+    await agentHostService.exportArtifact({
+      projectId: "project-1",
+      artifactId: "tool-result-1",
+      suggestedFileName: "result.json",
+    });
+
+    expect(mocks.invokeRawCommand.mock.calls).toEqual([
+      [
+        "agent_read_artifact",
+        {
+          request: {
+            projectId: "project-1",
+            artifactId: "tool-result-1",
+            maxBytes: 16_384,
+          },
+        },
+      ],
+      [
+        "agent_search_artifact",
+        {
+          request: {
+            projectId: "project-1",
+            artifactId: "tool-result-1",
+            query: "ok",
+          },
+        },
+      ],
+      [
+        "agent_export_artifact",
+        {
+          request: {
+            projectId: "project-1",
+            artifactId: "tool-result-1",
+            suggestedFileName: "result.json",
+          },
+        },
+      ],
+    ]);
   });
 });

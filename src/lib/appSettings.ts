@@ -21,6 +21,8 @@ export type WorkbenchToolWindowId =
 
 export type WorkbenchSide = "left" | "right";
 
+export type AppLocale = "system" | "en-US" | "zh-CN";
+
 export type WorkbenchToolWindows = {
   databaseExplorer: {
     enabled: boolean;
@@ -39,6 +41,7 @@ export type WorkbenchToolWindows = {
 export type AppSettings = {
   appearance: {
     uiFontSize: number;
+    locale: AppLocale;
   };
   workbench: {
     layout: {
@@ -87,6 +90,7 @@ export type AppSettings = {
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   appearance: {
     uiFontSize: 12,
+    locale: "system",
   },
   workbench: {
     layout: {
@@ -179,6 +183,36 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   },
 };
 
+const STARTUP_APPEARANCE_CACHE_KEY = "oxide-studio-appearance-cache-v1";
+
+export function readStartupAppearanceCache(): AppSettings["appearance"] {
+  if (typeof window === "undefined") {
+    return DEFAULT_APP_SETTINGS.appearance;
+  }
+  try {
+    const cached = window.localStorage.getItem(STARTUP_APPEARANCE_CACHE_KEY);
+    if (!cached) return DEFAULT_APP_SETTINGS.appearance;
+    return normalizeAppSettings({ appearance: JSON.parse(cached) }).appearance;
+  } catch {
+    return DEFAULT_APP_SETTINGS.appearance;
+  }
+}
+
+export function writeStartupAppearanceCache(
+  appearance: AppSettings["appearance"],
+): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      STARTUP_APPEARANCE_CACHE_KEY,
+      JSON.stringify(appearance),
+    );
+  } catch {
+    // This cache is an optional first-paint optimization. The persisted Tauri
+    // settings document remains the source of truth.
+  }
+}
+
 export function normalizeAppSettings(value: unknown): AppSettings {
   const raw = isRecord(value) ? value : {};
   const defaults = DEFAULT_APP_SETTINGS;
@@ -192,6 +226,12 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         defaults.appearance.uiFontSize,
         10,
         20,
+      ),
+      locale: enumAt(
+        raw,
+        ["appearance", "locale"],
+        ["system", "en-US", "zh-CN"],
+        defaults.appearance.locale,
       ),
     },
     workbench: {

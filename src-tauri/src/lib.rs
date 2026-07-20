@@ -101,6 +101,10 @@ pub fn run() {
             commands::agent::agent_answer_clarification,
             commands::agent::agent_approve_action,
             commands::agent::agent_get_status,
+            commands::agent::agent_get_context_metrics,
+            commands::agent::agent_read_artifact,
+            commands::agent::agent_search_artifact,
+            commands::agent::agent_export_artifact,
             commands::agent::agent_clear_project_state,
             // Query commands
             commands::query::execute_query,

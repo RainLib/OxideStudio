@@ -17,6 +17,7 @@ import { AssistantAttachmentList } from "./AssistantAttachmentList";
 import type { ReactNode } from "react";
 import type { AssistantTurn } from "@/ai/assistant/turns";
 import { AssistantTurnProcess } from "./AssistantTurnProcess";
+import { AssistantArtifactList } from "./AssistantArtifactList";
 
 export interface AssistantConversationEntry {
   id: string;
@@ -42,7 +43,6 @@ interface AssistantConversationProps {
     decision: "approve" | "reject",
     contextFingerprint: string,
   ) => Promise<void>;
-  onCancelTurn?: (turnId: string) => Promise<void>;
   onResumeTurn?: (
     turnId: string,
     contextFingerprint: string,
@@ -65,7 +65,6 @@ export function AssistantConversation({
   renderProcess,
   contextFingerprint = "",
   onDecideApproval = async () => undefined,
-  onCancelTurn = async () => undefined,
   onResumeTurn = async () => undefined,
 }: AssistantConversationProps) {
   if (turns) {
@@ -76,7 +75,6 @@ export function AssistantConversation({
         onExecuteAttachment={onExecuteAttachment}
         contextFingerprint={contextFingerprint}
         onDecideApproval={onDecideApproval}
-        onCancelTurn={onCancelTurn}
         onResumeTurn={onResumeTurn}
       />
     );
@@ -174,7 +172,6 @@ function TurnConversation({
   onExecuteAttachment,
   contextFingerprint,
   onDecideApproval,
-  onCancelTurn,
   onResumeTurn,
 }: {
   turns: AssistantTurn[];
@@ -184,7 +181,6 @@ function TurnConversation({
   onDecideApproval: NonNullable<
     AssistantConversationProps["onDecideApproval"]
   >;
-  onCancelTurn: NonNullable<AssistantConversationProps["onCancelTurn"]>;
   onResumeTurn: NonNullable<AssistantConversationProps["onResumeTurn"]>;
 }) {
   if (turns.length === 0) {
@@ -212,11 +208,12 @@ function TurnConversation({
             turn={turn}
             contextFingerprint={contextFingerprint}
             onDecideApproval={onDecideApproval}
-            onCancel={onCancelTurn}
             onResume={onResumeTurn}
           />
 
-          {(turn.final?.content || turn.draft) && (
+          {(turn.final?.content ||
+            turn.draft ||
+            (turn.final?.artifactRefs?.length ?? 0) > 0) && (
             <div className="flex max-w-full items-start gap-2 text-[11px] leading-[1.6] text-[hsl(var(--wb-text))]">
               <Sparkles
                 size={12}
@@ -227,10 +224,16 @@ function TurnConversation({
                   content={turn.final?.content || turn.draft}
                 />
                 {turn.final && (
-                  <AssistantAttachmentList
-                    attachments={turn.final.attachments}
-                    onExecute={onExecuteAttachment}
-                  />
+                  <>
+                    <AssistantAttachmentList
+                      attachments={turn.final.attachments}
+                      onExecute={onExecuteAttachment}
+                    />
+                    <AssistantArtifactList
+                      projectId={turn.projectId}
+                      artifactRefs={turn.final.artifactRefs ?? []}
+                    />
+                  </>
                 )}
               </div>
             </div>

@@ -116,28 +116,63 @@ describe("assistant turn projection", () => {
       "step",
       "compaction",
     ]);
+    expect(turn.contextCompaction).toEqual({
+      count: 1,
+      lastInputTokens: 1_800,
+      lastRetainedTokens: 600,
+      offloadedArtifacts: 2,
+    });
+    turn = reduceAgentHostEvent(
+      turn,
+      event("model.usage", 4, {
+        calls: 2,
+        inputTokens: 1_200,
+        outputTokens: 300,
+        totalTokens: 1_500,
+      }),
+    );
+    expect(turn.modelUsage).toEqual({
+      calls: 2,
+      inputTokens: 1_200,
+      outputTokens: 300,
+      totalTokens: 1_500,
+    });
     expect(turn.clarifications[0]?.question).toContain("data source");
 
     turn = reduceAgentHostEvent(
       turn,
-      event("answer.delta", 4, { content: "I found ", reset: true }),
+      event("answer.delta", 5, { content: "I found ", reset: true }),
     );
     turn = reduceAgentHostEvent(
       turn,
-      event("answer.delta", 5, { content: "12 tables", reset: false }),
+      event("answer.delta", 6, { content: "12 tables", reset: false }),
     );
     expect(turn.draft).toBe("I found 12 tables");
 
     turn = reduceAgentHostEvent(
       turn,
-      event("final.answer", 6, {
+      event("answer.delta", 7, { content: "", reset: true }),
+    );
+    expect(turn.draft).toBe("");
+    expect(turn.process.at(-1)).toEqual(
+      expect.objectContaining({
+        id: "commentary:7",
+        kind: "commentary",
+        title: "I found 12 tables",
+        status: "completed",
+      }),
+    );
+
+    turn = reduceAgentHostEvent(
+      turn,
+      event("final.answer", 8, {
         content: "I found 12 tables in Warehouse.",
         artifacts: [],
       }),
     );
     turn = reduceAgentHostEvent(
       turn,
-      event("turn.status", 7, { status: "completed" }),
+      event("turn.status", 9, { status: "completed" }),
     );
 
     expect(turn.status).toBe("completed");

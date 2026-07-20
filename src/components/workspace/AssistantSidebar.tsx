@@ -115,6 +115,50 @@ function AgentHostAssistantSidebar() {
     () => assistantConversationHistoryFromTurns(session.turns),
     [session.turns],
   );
+  const previousCompaction = useMemo(
+    () => {
+      if (session.contextMetrics?.compaction) {
+        return session.contextMetrics.compaction;
+      }
+      return session.turns.reduce<NonNullable<
+        (typeof session.turns)[number]["contextCompaction"]
+      > | null>((aggregate, turn) => {
+        const stats = turn.contextCompaction;
+        if (!stats) return aggregate;
+        return {
+          count: (aggregate?.count ?? 0) + stats.count,
+          lastInputTokens: stats.lastInputTokens,
+          lastRetainedTokens: stats.lastRetainedTokens,
+          offloadedArtifacts:
+            (aggregate?.offloadedArtifacts ?? 0) + stats.offloadedArtifacts,
+        };
+      }, null);
+    },
+    [session.contextMetrics?.compaction, session.turns],
+  );
+  const previousModelUsage = useMemo(
+    () => {
+      if (session.contextMetrics?.modelUsage) {
+        return session.contextMetrics.modelUsage;
+      }
+      return session.turns.reduce<NonNullable<
+        (typeof session.turns)[number]["modelUsage"]
+      > | null>((aggregate, turn) => {
+        const usage = turn.modelUsage;
+        if (!usage) return aggregate;
+        return {
+          calls: (aggregate?.calls ?? 0) + usage.calls,
+          inputTokens:
+            (aggregate?.inputTokens ?? 0) + usage.inputTokens,
+          outputTokens:
+            (aggregate?.outputTokens ?? 0) + usage.outputTokens,
+          totalTokens:
+            (aggregate?.totalTokens ?? 0) + usage.totalTokens,
+        };
+      }, null);
+    },
+    [session.contextMetrics?.modelUsage, session.turns],
+  );
   const previewContext = useMemo(
     () => createWorkspaceAiToolContext("assistant-agent-context-preview"),
     [
@@ -139,13 +183,21 @@ function AgentHostAssistantSidebar() {
         selectedText,
         history: conversationHistory,
         settings: contextSettings,
+        maxInputTokens: aiMaxInputTokens,
+        toolManifest: agentToolManifest,
+        previousCompaction,
+        previousModelUsage,
       }),
     [
+      agentToolManifest,
+      aiMaxInputTokens,
       assistantMode,
       contextProviderLabel,
       contextSettings,
       conversationHistory,
       message,
+      previousCompaction,
+      previousModelUsage,
       previewContext,
       selectedText,
     ],
@@ -319,7 +371,6 @@ function AgentHostAssistantSidebar() {
             onExecuteAttachment={handleExecuteAttachment}
             contextFingerprint={contextFingerprint}
             onDecideApproval={session.decideApproval}
-            onCancelTurn={session.cancelTurn}
             onResumeTurn={session.resumeTurn}
           />
         </div>
@@ -331,56 +382,58 @@ function AgentHostAssistantSidebar() {
         />
       </div>
 
-      <AssistantClarificationDock
-        turn={
-          session.activeTurn?.status === "awaiting_input"
-            ? session.activeTurn
-            : null
-        }
-        contextFingerprint={contextFingerprint}
-        onAnswer={session.answerClarification}
-      />
+      <div className="relative shrink-0">
+        <AssistantClarificationDock
+          turn={
+            session.activeTurn?.status === "awaiting_input"
+              ? session.activeTurn
+              : null
+          }
+          contextFingerprint={contextFingerprint}
+          onAnswer={session.answerClarification}
+        />
 
-      <AssistantPromptBox
-        message={message}
-        onMessageChange={setMessage}
-        onSubmit={handleSubmit}
-        onStop={() => {
-          if (session.activeTurn)
-            void session.cancelTurn(session.activeTurn.id);
-        }}
-        mode={assistantMode}
-        onModeChange={(mode) => {
-          if (!session.isBusy) updateAiSettings({ assistantMode: mode });
-        }}
-        activeContextLabel={activeContextLabel}
-        contextPreview={contextPreview}
-        contextSettings={contextSettings}
-        onContextSettingChange={(key, checked) =>
-          setContextSettings((current) => ({ ...current, [key]: checked }))
-        }
-        isSubmitting={session.activeTurn?.status === "planning"}
-        isToolRunning={
-          session.isBusy && session.activeTurn?.status !== "planning"
-        }
-        isCancelling={session.activeTurn?.status === "cancelling"}
-        model={aiModel}
-        modelEndpoint={aiBaseUrl}
-        modelStatus={modelStatus}
-        onModelChange={(model) => updateAiSettings({ model })}
-        onOpenAiSettings={() => {
-          window.dispatchEvent(
-            new CustomEvent(APP_EVENT_OPEN_SETTINGS, {
-              detail: { section: "ai" },
-            }),
-          );
-        }}
-        onRetryModel={() => {
-          if (authIssueId) setDismissedAuthIssueId(authIssueId);
-          void session.refreshStatus();
-        }}
-        submissionBlockReason={submissionBlockReason}
-      />
+        <AssistantPromptBox
+          message={message}
+          onMessageChange={setMessage}
+          onSubmit={handleSubmit}
+          onStop={() => {
+            if (session.activeTurn)
+              void session.cancelTurn(session.activeTurn.id);
+          }}
+          mode={assistantMode}
+          onModeChange={(mode) => {
+            if (!session.isBusy) updateAiSettings({ assistantMode: mode });
+          }}
+          activeContextLabel={activeContextLabel}
+          contextPreview={contextPreview}
+          contextSettings={contextSettings}
+          onContextSettingChange={(key, checked) =>
+            setContextSettings((current) => ({ ...current, [key]: checked }))
+          }
+          isSubmitting={session.activeTurn?.status === "planning"}
+          isToolRunning={
+            session.isBusy && session.activeTurn?.status !== "planning"
+          }
+          isCancelling={session.activeTurn?.status === "cancelling"}
+          model={aiModel}
+          modelEndpoint={aiBaseUrl}
+          modelStatus={modelStatus}
+          onModelChange={(model) => updateAiSettings({ model })}
+          onOpenAiSettings={() => {
+            window.dispatchEvent(
+              new CustomEvent(APP_EVENT_OPEN_SETTINGS, {
+                detail: { section: "ai" },
+              }),
+            );
+          }}
+          onRetryModel={() => {
+            if (authIssueId) setDismissedAuthIssueId(authIssueId);
+            void session.refreshStatus();
+          }}
+          submissionBlockReason={submissionBlockReason}
+        />
+      </div>
     </div>
   );
 }

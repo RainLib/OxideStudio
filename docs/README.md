@@ -19,6 +19,7 @@
 - [外部 AI 接入指南](EXTERNAL_AI_INTEGRATION.md)：通过 Rust `oxide-agent` 使用 MCP/CLI、固定项目与连接授权、调用五个只读工具。
 - [LSP 集成](LSP_INTEGRATION.md)：SQL LSP 生命周期、文档同步和协议边界。
 - [样式系统](STYLE_GUIDE.md)：CVA 变体、tokens 和组件约定。
+- [国际化与字体定制](INTERNATIONALIZATION.md)：语言持久化、全局 UI 字号和新增文案约定。
 - [应用更新](UPDATES.md)：签名更新、发布配置和验证流程。
 
 文档中的“已支持”必须能在当前源码和测试中找到证据。规划性内容应放在差距分析/路线图中，不应混入当前架构事实。

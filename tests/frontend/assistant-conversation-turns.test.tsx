@@ -163,6 +163,108 @@ describe("AssistantConversation turns", () => {
     );
   });
 
+  it("collapses all Agent activity into one Codex-style disclosure", async () => {
+    const turn: AssistantTurn = {
+      ...createAssistantTurn({
+        id: "turn-activity",
+        requestId: "request-activity",
+        projectId: "project-1",
+        requestedMode: "agent",
+        mode: "agent",
+        userMessage: "Inspect the selected schema",
+        now: 1,
+      }),
+      status: "completed",
+      process: [
+        {
+          id: "status:planning",
+          sequence: 1,
+          kind: "planning",
+          title: "Preparing the response",
+          status: "completed",
+          startedAt: 1,
+          finishedAt: 2,
+        },
+        {
+          id: "plan:read",
+          sequence: 2,
+          kind: "step",
+          title: "Read schema metadata",
+          status: "completed",
+          startedAt: 2,
+          finishedAt: 3,
+        },
+        {
+          id: "tool:query",
+          sequence: 3,
+          kind: "tool",
+          title: "Ran query analysis",
+          detail:
+            'query.runReadOnly · 10 rows · 640 bytes\nOutput preview\n[\n  { "id": 1 }\n]',
+          status: "completed",
+          startedAt: 3,
+          finishedAt: 4,
+        },
+        {
+          id: "compaction:4",
+          sequence: 4,
+          kind: "compaction",
+          title: "Compacted conversation context",
+          status: "completed",
+          startedAt: 4,
+          finishedAt: 5,
+        },
+      ],
+      final: {
+        content: "The schema contains twelve tables.",
+        attachments: [],
+        createdAt: 6,
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        <AssistantConversation
+          turns={[turn]}
+          isResponding={false}
+          pendingLabel="Working"
+          onUsePrompt={vi.fn()}
+          onExecuteAttachment={vi.fn(async (request) => ({
+            actionId: request.id,
+            status: "success" as const,
+            code: "OK" as const,
+          }))}
+        />,
+      );
+    });
+
+    const disclosure = container.querySelector<HTMLElement>(
+      '[data-assistant-process-disclosure="turn-activity"]',
+    );
+    expect(
+      container.querySelectorAll("[data-assistant-process-disclosure]"),
+    ).toHaveLength(1);
+    expect(disclosure?.textContent).toContain("Read schema metadata");
+    expect(disclosure?.textContent).toContain("Ran query analysis");
+    expect(disclosure?.textContent).toContain("1 more");
+    expect(disclosure?.textContent).not.toContain("Preparing the response");
+    expect(
+      disclosure?.querySelectorAll("[data-assistant-process-item]"),
+    ).toHaveLength(0);
+
+    await act(async () => {
+      disclosure?.querySelector<HTMLButtonElement>("button")?.click();
+    });
+
+    expect(
+      disclosure?.querySelectorAll("[data-assistant-process-item]"),
+    ).toHaveLength(4);
+    expect(disclosure?.textContent).toContain("query.runReadOnly · 10 rows");
+    expect(disclosure?.querySelector("pre")?.textContent).toContain(
+      '{ "id": 1 }',
+    );
+  });
+
   it("shows an actionable error and keeps technical detail collapsed", async () => {
     const turn: AssistantTurn = {
       ...createAssistantTurn({

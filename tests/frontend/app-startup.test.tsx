@@ -144,4 +144,19 @@ describe("application startup", () => {
       "OxideStudio did not finish starting. Reload the window to try again.",
     );
   });
+
+  it("starts the React entry and workspace request without a serial frame waterfall", () => {
+    const main = readFileSync(
+      resolve(process.cwd(), "src/main.tsx"),
+      "utf8",
+    );
+    const app = readFileSync(resolve(process.cwd(), "src/App.tsx"), "utf8");
+
+    expect(main).toContain('import App from "./App"');
+    expect(main).toContain('import { mountApp } from "./bootstrap"');
+    expect(main).not.toContain('import("./bootstrap")');
+    expect(app).toContain('void import("@/pages/workspace")');
+    expect(app).not.toContain("setWorkspaceEnabled");
+    expect(app).not.toContain("requestAnimationFrame");
+  });
 });

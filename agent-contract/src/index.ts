@@ -223,6 +223,56 @@ export const boundedObservationSchema = z.object({
 });
 export type BoundedObservation = z.infer<typeof boundedObservationSchema>;
 
+export const artifactReadRequestSchema = requestMetadataSchema.extend({
+  projectId: z.string().min(1),
+  artifactId: z.string().min(1).max(240),
+  offset: z.number().int().nonnegative().default(0),
+  maxBytes: z.number().int().positive().max(64 * 1024).default(32 * 1024),
+});
+export type ArtifactReadRequest = z.infer<typeof artifactReadRequestSchema>;
+
+export const artifactReadResultSchema = z.object({
+  artifactId: z.string().min(1),
+  value: z.unknown().optional(),
+  encoding: z.literal("base64-json").optional(),
+  offset: z.number().int().nonnegative().optional(),
+  nextOffset: z.number().int().nonnegative().optional(),
+  totalBytes: z.number().int().nonnegative().optional(),
+  eof: z.boolean().optional(),
+  content: z.string().optional(),
+});
+export type ArtifactReadResult = z.infer<typeof artifactReadResultSchema>;
+
+export const artifactSearchRequestSchema = requestMetadataSchema.extend({
+  projectId: z.string().min(1),
+  artifactId: z.string().min(1).max(240),
+  query: z.string().trim().min(1).max(256),
+  maxMatches: z.number().int().positive().max(20).default(8),
+  contextBytes: z.number().int().min(16).max(512).default(120),
+});
+export type ArtifactSearchRequest = z.infer<
+  typeof artifactSearchRequestSchema
+>;
+
+export const artifactSearchResultSchema = z.object({
+  artifactId: z.string().min(1),
+  query: z.string(),
+  totalBytes: z.number().int().nonnegative(),
+  matchCount: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+  matches: z.array(
+    z.object({
+      offset: z.number().int().nonnegative(),
+      length: z.number().int().nonnegative(),
+      snippetOffset: z.number().int().nonnegative(),
+      snippet: z.string(),
+    }),
+  ),
+});
+export type ArtifactSearchResult = z.infer<
+  typeof artifactSearchResultSchema
+>;
+
 export const checkpointRequestSchema = requestMetadataSchema.extend({
   projectId: z.string().min(1),
   checkpointVersion: z.number().int().positive(),
@@ -424,6 +474,13 @@ export const agentEventSchema = z.discriminatedUnion("type", [
     offloadedArtifacts: z.number().int().nonnegative(),
   }),
   eventBaseSchema.extend({
+    type: z.literal("model.usage"),
+    calls: z.number().int().positive(),
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    totalTokens: z.number().int().nonnegative(),
+  }),
+  eventBaseSchema.extend({
     type: z.literal("answer.delta"),
     content: z.string(),
     reset: z.boolean().default(false),
@@ -498,5 +555,6 @@ export const SIDECAR_METHODS = {
   graphCheckpointPutWrites: "graph.checkpoint.putWrites",
   graphCheckpointDeleteThread: "graph.checkpoint.deleteThread",
   artifactRead: "artifact.read",
+  artifactSearch: "artifact.search",
   event: "agent.event",
 } as const;

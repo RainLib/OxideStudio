@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   getStatus: vi.fn(),
+  getContextMetrics: vi.fn(),
   startTurn: vi.fn(),
   resumeTurn: vi.fn(),
   cancelTurn: vi.fn(),
@@ -19,6 +20,7 @@ vi.mock("@/services/tauri/agent-host.service", () => ({
   AGENT_HOST_PROTOCOL_VERSION: 1,
   agentHostService: {
     getStatus: mocks.getStatus,
+    getContextMetrics: mocks.getContextMetrics,
     startTurn: mocks.startTurn,
     resumeTurn: mocks.resumeTurn,
     cancelTurn: mocks.cancelTurn,
@@ -66,6 +68,12 @@ describe("AssistantSidebar Agent Host path", () => {
       storageMode: "project",
       binaryPath: "/tmp/oxide-agent-host",
       lastError: null,
+    });
+    mocks.getContextMetrics.mockResolvedValue({
+      projectId: "project-1",
+      compaction: null,
+      modelUsage: null,
+      updatedAt: 0,
     });
     mocks.startTurn.mockImplementation(async (request) => ({
       accepted: true,
@@ -207,11 +215,13 @@ describe("AssistantSidebar Agent Host path", () => {
         },
       ],
     });
+    const runningActivity = container.querySelector<HTMLElement>(
+      `[data-assistant-process-disclosure="${firstRequest.turnId}"]`,
+    );
+    expect(runningActivity?.textContent).toContain("Read schema metadata");
     expect(
-      container.querySelector(
-        '[data-assistant-process-item="plan:step-1"]',
-      )?.classList.contains("wb-assistant-process-running"),
-    ).toBe(true);
+      runningActivity?.querySelector(".wb-assistant-process-running"),
+    ).not.toBeNull();
     await emit({
       ...baseEvent(firstRequest.threadId, firstRequest.turnId, 2),
       type: "final.answer",
@@ -231,8 +241,17 @@ describe("AssistantSidebar Agent Host path", () => {
         '[aria-label="Assistant process"]',
       ),
     ).not.toBeNull();
+    const activityDisclosure = container.querySelector<HTMLElement>(
+      `[data-assistant-process-disclosure="${firstRequest.turnId}"]`,
+    );
     expect(
-      container.querySelector(
+      activityDisclosure?.querySelector("button")?.getAttribute("aria-expanded"),
+    ).toBe("false");
+    await act(async () => {
+      activityDisclosure?.querySelector("button")?.click();
+    });
+    expect(
+      activityDisclosure?.querySelector(
         '[data-assistant-process-item="plan:step-1"]',
       ),
     ).not.toBeNull();
@@ -281,7 +300,7 @@ describe("AssistantSidebar Agent Host path", () => {
       ...baseEvent(request.threadId, request.turnId, 1),
       type: "clarification",
       clarificationId: "clarification-1",
-      context: "The comparison scope is ambiguous.",
+      context: "Your answer will resume this same turn.",
       questions: [
         {
           id: "left",
@@ -304,7 +323,7 @@ describe("AssistantSidebar Agent Host path", () => {
       ],
     });
 
-    const dock = container.querySelector<HTMLElement>(
+    const dock = document.body.querySelector<HTMLElement>(
       "[data-assistant-clarification-dock]",
     );
     const conversation = container.querySelector<HTMLElement>(
@@ -317,20 +336,22 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(conversation?.textContent).not.toContain(
       "Which source should be on the left?",
     );
-    expect(dock?.nextElementSibling?.querySelector("textarea")).not.toBeNull();
+    expect(dock?.textContent).not.toContain(
+      "Your answer will resume this same turn.",
+    );
+    expect(container.querySelector("textarea")).not.toBeNull();
 
-    await clickButton(container, "Primary");
+    await clickButton(document.body, "Primary");
     expect(dock?.textContent).not.toContain("Which source should be on the left?");
     expect(dock?.textContent).toContain("Which source should be on the right?");
     expect(mocks.answerClarification).not.toHaveBeenCalled();
-    await clickButton(container, "Archive");
-    expect(mocks.answerClarification).not.toHaveBeenCalled();
 
-    await clickButtonByAria(container, "Previous clarification question");
+    await clickButtonByAria(document.body, "Previous clarification question");
     expect(dock?.textContent).toContain("Which source should be on the left?");
-    await clickButton(container, "Staging");
+    await clickButton(document.body, "Staging");
     expect(dock?.textContent).toContain("Which source should be on the right?");
-    await clickButton(container, "Confirm answers");
+    expect(document.body.textContent).not.toContain("Confirm answers");
+    await clickButton(document.body, "Archive");
 
     expect(mocks.answerClarification).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -340,13 +361,20 @@ describe("AssistantSidebar Agent Host path", () => {
       }),
     );
     expect(container.textContent).toContain("Confirmed 2 answers");
-    const confirmation = container.querySelector<HTMLDetailsElement>(
+    const confirmationActivity = container.querySelector<HTMLElement>(
+      `[data-assistant-process-disclosure="${request.turnId}"]`,
+    );
+    expect(
+      confirmationActivity?.querySelector("button")?.getAttribute(
+        "aria-expanded",
+      ),
+    ).toBe("false");
+    await act(async () => {
+      confirmationActivity?.querySelector("button")?.click();
+    });
+    const confirmation = confirmationActivity?.querySelector<HTMLElement>(
       '[data-assistant-process-item="clarification:clarification-1"]',
     );
-    expect(confirmation?.open).toBe(false);
-    await act(async () => {
-      confirmation?.querySelector("summary")?.click();
-    });
     expect(confirmation?.textContent).toContain(
       "Which source should be on the left?",
     );

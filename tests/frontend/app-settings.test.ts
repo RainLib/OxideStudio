@@ -5,6 +5,7 @@ import { moveSideToolWindow, toolWindowAtSide } from "@/lib/workbenchLayout";
 describe("app settings workbench layout", () => {
   it("keeps UI, editor, and data grid typography aligned by default", () => {
     expect(DEFAULT_APP_SETTINGS.appearance.uiFontSize).toBe(12);
+    expect(DEFAULT_APP_SETTINGS.appearance.locale).toBe("system");
     expect(DEFAULT_APP_SETTINGS.editor.fontSize).toBe(12);
     expect(DEFAULT_APP_SETTINGS.dataGrid.fontSize).toBe(12);
   });
@@ -19,16 +20,28 @@ describe("app settings workbench layout", () => {
 
   it("normalizes typography and data grid zoom bounds", () => {
     const settings = normalizeAppSettings({
-      appearance: { uiFontSize: 40 },
+      appearance: { uiFontSize: 40, locale: "unsupported" },
       editor: { fontSize: 4 },
       dataGrid: { fontSize: 30, rowHeight: 10, zoomPercent: 240 },
     });
 
     expect(settings.appearance.uiFontSize).toBe(20);
+    expect(settings.appearance.locale).toBe("system");
     expect(settings.editor.fontSize).toBe(10);
     expect(settings.dataGrid.fontSize).toBe(20);
     expect(settings.dataGrid.rowHeight).toBe(22);
     expect(settings.dataGrid.zoomPercent).toBe(160);
+  });
+
+  it("keeps supported explicit application locales", () => {
+    expect(
+      normalizeAppSettings({ appearance: { locale: "zh-CN" } }).appearance
+        .locale,
+    ).toBe("zh-CN");
+    expect(
+      normalizeAppSettings({ appearance: { locale: "en-US" } }).appearance
+        .locale,
+    ).toBe("en-US");
   });
 
   it("normalizes Vim editor settings and drops invalid mappings", () => {

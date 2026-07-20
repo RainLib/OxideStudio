@@ -27,6 +27,7 @@ import { cn } from "@/lib/utils";
 import type { DatabaseDriver } from "@/services/tauri";
 import { useEffect } from "react";
 import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
+import { useI18n } from "@/i18n";
 
 const menuContentClass =
   "min-w-[238px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_16px_40px_rgba(0,0,0,0.42)]";
@@ -50,15 +51,16 @@ export function DatabaseExplorerHeader({
   onRefresh,
   onHide,
 }: DatabaseExplorerHeaderProps) {
+  const { t } = useI18n();
   return (
     <header className="wb-tool-header gap-2">
-      <span className="truncate">Database Explorer</span>
+      <span className="truncate">{t("databaseExplorer.title")}</span>
       <div className="flex items-center gap-0.5">
         <button
           type="button"
           className="wb-icon-button h-5 w-5"
           onClick={onRevealActive}
-          title="Reveal Active Data Source"
+          title={t("databaseExplorer.revealActive")}
         >
           <LocateFixed size={12} />
         </button>
@@ -66,7 +68,7 @@ export function DatabaseExplorerHeader({
           type="button"
           className="wb-icon-button h-5 w-5"
           onClick={onExpandActive}
-          title="Expand Active Data Source"
+          title={t("databaseExplorer.expandActive")}
         >
           <ChevronDown size={13} />
         </button>
@@ -74,7 +76,7 @@ export function DatabaseExplorerHeader({
           type="button"
           className="wb-icon-button h-5 w-5"
           onClick={onCollapseAll}
-          title="Collapse All"
+          title={t("databaseExplorer.collapseAll")}
         >
           <ChevronUp size={13} />
         </button>
@@ -83,7 +85,7 @@ export function DatabaseExplorerHeader({
             <button
               type="button"
               className="wb-icon-button h-5 w-5"
-              title="Explorer Options"
+              title={t("databaseExplorer.options")}
             >
               <MoreVertical size={13} />
             </button>
@@ -98,11 +100,11 @@ export function DatabaseExplorerHeader({
                 size={13}
                 className={cn("mr-2", isLoading && "animate-spin")}
               />
-              Synchronize All
+              {t("databaseExplorer.synchronizeAll")}
             </DropdownMenuItem>
             <DropdownMenuItem className={menuItemClass} onClick={onCollapseAll}>
               <ChevronUp size={13} className="mr-2" />
-              Collapse All
+              {t("databaseExplorer.collapseAll")}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -110,7 +112,7 @@ export function DatabaseExplorerHeader({
           type="button"
           className="wb-icon-button h-5 w-5"
           onClick={onHide}
-          title="Hide Database Explorer"
+          title={t("databaseExplorer.hide")}
         >
           <Minus size={13} />
         </button>

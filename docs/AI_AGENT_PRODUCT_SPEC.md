@@ -420,7 +420,7 @@ AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV
 2. 发送内容预览、database catalog identity、可持久验证的 context snapshot/version 与旧批准失效已完成。
 3. LSP duplicate/ranking、跨 database catalog 隔离、随包 binary 与回归测试已完成；继续扩展派生表、临时表和 routine overload 语义。
 4. revision-bound Patch Preview/Apply 已完成；继续统一 vendor error 的 SQLSTATE/position/object，并把 Jump/Explain/Preview Fix/Validate 串为诊断闭环。
-5. sidecar 事件已成为 Turn view model 的来源，Sidebar 不再拥有 tool loop；继续完善 Context Preview 的 token/省略来源与更多 artifact action。
+5. sidecar 事件已成为 Turn view model 的来源，Sidebar 不再拥有 tool loop；Context Preview 已显示完整可见 payload 的 token 估算、模型预算占比、逐来源省略原因/数量和长 prompt 预压缩提示；provider 实际 token 与 compaction/offload 统计使用项目级加密摘要跨重启恢复；大 observation 支持模型侧有界 artifact search/range read，并在最终回答中提供按需预览、搜索定位和 Rust 原生保存对话框控制的 JSON 导出。
 
 完成定义：AI 回答中的对象/错误/结果可以准确跳转；旧上下文和旧批准不能作用于新项目/数据库；重复列补全不再不可区分。
 

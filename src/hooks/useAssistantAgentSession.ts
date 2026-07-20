@@ -15,6 +15,7 @@ import {
   agentHostService,
   isAgentHostUnavailableError,
   type AgentApprovalDecision,
+  type AgentContextMetrics,
   type AgentHostAvailability,
   type AgentHostEvent,
   type AgentHostStatus,
@@ -48,6 +49,7 @@ export type AssistantAgentSession = {
   availability: AgentHostAvailability;
   hostStatus: AgentHostStatus | null;
   hostError: string | null;
+  contextMetrics: AgentContextMetrics | null;
   isBusy: boolean;
   startTurn: (request: AssistantAgentStartTurnRequest) => Promise<void>;
   answerClarification: (
@@ -77,6 +79,8 @@ export function useAssistantAgentSession(
     useState<AgentHostAvailability>("checking");
   const [hostStatus, setHostStatus] = useState<AgentHostStatus | null>(null);
   const [hostError, setHostError] = useState<string | null>(null);
+  const [contextMetrics, setContextMetrics] =
+    useState<AgentContextMetrics | null>(null);
   const projectIdRef = useRef(projectId);
   const providerConfiguredRef = useRef(providerConfigured);
   const turnsRef = useRef<AssistantTurn[]>([]);
@@ -202,6 +206,12 @@ export function useAssistantAgentSession(
     void agentHostService
       .listen((event) => {
         if (disposed) return;
+        const eventMetrics = event.projectMetrics;
+        if (eventMetrics?.projectId === projectIdRef.current) {
+          setContextMetrics((current) =>
+            newerContextMetrics(current, eventMetrics),
+          );
+        }
         mutateTurns((current) =>
           current.map((turn) =>
             turn.id === event.turnId &&
@@ -227,6 +237,28 @@ export function useAssistantAgentSession(
   useEffect(() => {
     void refreshStatus();
   }, [providerConfigured, refreshStatus]);
+
+  useEffect(() => {
+    let disposed = false;
+    setContextMetrics(null);
+    if (!projectId.trim()) return;
+    void agentHostService
+      .getContextMetrics(projectId)
+      .then((metrics) => {
+        if (!disposed && metrics.projectId === projectId) {
+          setContextMetrics((current) =>
+            newerContextMetrics(current, metrics),
+          );
+        }
+      })
+      .catch(() => {
+        // Metrics are optional diagnostics. A storage/read failure must not
+        // block the workspace or make the Agent Host appear unavailable.
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [projectId]);
 
   useEffect(() => {
     if (!providerConfigured || availability !== "checking") return;
@@ -528,6 +560,7 @@ export function useAssistantAgentSession(
     availability,
     hostStatus,
     hostError,
+    contextMetrics,
     isBusy: Boolean(activeTurn),
     startTurn,
     answerClarification,
@@ -662,6 +695,14 @@ export function reduceAgentHostEvent(
       return {
         ...turn,
         ...common,
+        contextCompaction: {
+          count: (turn.contextCompaction?.count ?? 0) + 1,
+          lastInputTokens: event.inputTokens,
+          lastRetainedTokens: event.retainedTokens,
+          offloadedArtifacts:
+            (turn.contextCompaction?.offloadedArtifacts ?? 0) +
+            event.offloadedArtifacts,
+        },
         process: upsertAssistantProcessItem(
           turn.process,
           processItem(event, "compaction", {
@@ -672,13 +713,40 @@ export function reduceAgentHostEvent(
           }),
         ),
       };
-    case "answer.delta":
+    case "model.usage":
+      return {
+        ...turn,
+        ...common,
+        modelUsage: {
+          calls: (turn.modelUsage?.calls ?? 0) + event.calls,
+          inputTokens:
+            (turn.modelUsage?.inputTokens ?? 0) + event.inputTokens,
+          outputTokens:
+            (turn.modelUsage?.outputTokens ?? 0) + event.outputTokens,
+          totalTokens:
+            (turn.modelUsage?.totalTokens ?? 0) + event.totalTokens,
+        },
+      };
+    case "answer.delta": {
+      const visibleProgress = event.reset ? turn.draft.trim() : "";
       return {
         ...turn,
         ...common,
         status: "running",
         draft: event.reset ? event.content : `${turn.draft}${event.content}`,
+        process: visibleProgress
+          ? upsertAssistantProcessItem(
+              turn.process,
+              processItem(event, "commentary", {
+                id: `commentary:${event.sequence}`,
+                title: visibleProgressHeadline(visibleProgress),
+                detail: visibleProgressDetail(visibleProgress),
+                status: "completed",
+              }),
+            )
+          : turn.process,
       };
+    }
     case "final.answer":
       return {
         ...turn,
@@ -893,10 +961,44 @@ function clarificationAnswerLabel(clarification: AssistantClarification) {
   return option?.label ?? answer;
 }
 
+function visibleProgressHeadline(content: string) {
+  const normalized = content.replace(/\s+/gu, " ").trim();
+  if (normalized.length <= 120) return normalized;
+  return `${normalized.slice(0, 117).trimEnd()}...`;
+}
+
+function visibleProgressDetail(content: string) {
+  const normalized = content.trim();
+  const headline = visibleProgressHeadline(normalized);
+  if (normalized === headline) return null;
+  if (normalized.length <= 2_000) return normalized;
+  return `${normalized.slice(0, 1_997).trimEnd()}...`;
+}
+
 function createAgentId(prefix: string) {
   const suffix = globalThis.crypto?.randomUUID?.() ??
     `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   return `${prefix}:${suffix}`;
+}
+
+function newerContextMetrics(
+  current: AgentContextMetrics | null,
+  candidate: AgentContextMetrics,
+) {
+  if (!current || candidate.updatedAt > current.updatedAt) return candidate;
+  if (candidate.updatedAt < current.updatedAt) return current;
+  return contextMetricsScore(candidate) >= contextMetricsScore(current)
+    ? candidate
+    : current;
+}
+
+function contextMetricsScore(metrics: AgentContextMetrics) {
+  return (
+    (metrics.compaction?.count ?? 0) +
+    (metrics.compaction?.offloadedArtifacts ?? 0) +
+    (metrics.modelUsage?.calls ?? 0) +
+    (metrics.modelUsage?.totalTokens ?? 0)
+  );
 }
 
 function errorMessage(error: unknown) {

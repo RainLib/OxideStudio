@@ -23,6 +23,7 @@ export type AssistantProcessStatus =
 
 export type AssistantProcessItemKind =
   | "planning"
+  | "commentary"
   | "step"
   | "tool"
   | "clarification"
@@ -85,6 +86,20 @@ export type AssistantFinalMessage = {
   createdAt: number;
 };
 
+export type AssistantContextCompactionStats = {
+  count: number;
+  lastInputTokens: number;
+  lastRetainedTokens: number;
+  offloadedArtifacts: number;
+};
+
+export type AssistantModelUsageStats = {
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+};
+
 export type AssistantTurn = {
   id: string;
   requestId: string;
@@ -99,6 +114,8 @@ export type AssistantTurn = {
   approvals: AssistantApproval[];
   draft: string;
   final?: AssistantFinalMessage | null;
+  contextCompaction?: AssistantContextCompactionStats | null;
+  modelUsage?: AssistantModelUsageStats | null;
   error?: string | null;
   errorDetail?: string | null;
   createdAt: number;
@@ -135,6 +152,8 @@ export function createAssistantTurn(
     approvals: [],
     draft: "",
     final: null,
+    contextCompaction: null,
+    modelUsage: null,
     error: null,
     errorDetail: null,
     createdAt: now,

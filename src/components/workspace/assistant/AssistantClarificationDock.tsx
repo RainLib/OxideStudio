@@ -1,10 +1,15 @@
 import type { AssistantTurn } from "@/ai/assistant/turns";
+import {
+  Popover,
+  PopoverAnchor,
+  PopoverContent,
+} from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import {
-  Check,
   ChevronLeft,
   ChevronRight,
   HelpCircle,
+  Loader2,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 
@@ -59,29 +64,33 @@ export function AssistantClarificationDock({
     (option) => (option.value || option.label) === answer,
   );
   const freeTextAnswer = selectedOption ? "" : answer;
-  const allAnswered = questions.every((candidate) =>
-    Boolean(answers[candidate.questionId]?.trim()),
-  );
   const isLast = questionIndex === questions.length - 1;
 
-  const setCurrentAnswer = (value: string, advance = false) => {
-    setAnswers((current) => ({
-      ...current,
-      [question.questionId]: value,
-    }));
-    if (advance && !isLast) {
+  const answerCurrentQuestion = async (value: string) => {
+    const normalizedValue = value.trim();
+    if (!normalizedValue || isSubmitting) return;
+    const nextAnswers = {
+      ...answers,
+      [question.questionId]: normalizedValue,
+    };
+    setAnswers(nextAnswers);
+    if (!isLast) {
       setQuestionIndex((current) => Math.min(current + 1, questions.length - 1));
+      return;
     }
-  };
-
-  const submit = async () => {
-    if (!allAnswered || isSubmitting) return;
+    if (
+      !questions.every((candidate) =>
+        Boolean(nextAnswers[candidate.questionId]?.trim()),
+      )
+    ) {
+      return;
+    }
     setIsSubmitting(true);
     try {
       await onAnswer(
         turn.id,
         activeClarificationId,
-        answers,
+        nextAnswers,
         contextFingerprint,
       );
     } finally {
@@ -89,13 +98,31 @@ export function AssistantClarificationDock({
     }
   };
 
+  const setCurrentDraft = (value: string) => {
+    setAnswers((current) => ({
+      ...current,
+      [question.questionId]: value,
+    }));
+  };
+
   return (
-    <section
-      className="shrink-0 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] p-2"
-      aria-label="Agent clarification"
-      data-assistant-clarification-dock
-    >
-      <div className="rounded-[6px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))]">
+    <Popover open modal={false}>
+      <PopoverAnchor asChild>
+        <span
+          className="pointer-events-none absolute inset-x-2 top-0 h-px"
+          aria-hidden="true"
+        />
+      </PopoverAnchor>
+      <PopoverContent
+        side="top"
+        align="start"
+        sideOffset={6}
+        collisionPadding={8}
+        onOpenAutoFocus={(event) => event.preventDefault()}
+        className="z-50 w-[var(--radix-popover-trigger-width)] min-w-[240px] max-w-[calc(100vw-16px)] overflow-hidden rounded-[8px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_6px_14px_rgba(0,0,0,0.34)]"
+        aria-label="Agent clarification"
+        data-assistant-clarification-dock
+      >
         <div
           className="flex min-h-8 items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] px-2.5"
           role="status"
@@ -109,13 +136,48 @@ export function AssistantClarificationDock({
           <span className="min-w-0 flex-1 text-[10px] font-medium text-[hsl(var(--wb-text))]">
             Agent needs your input
           </span>
-          <span className="shrink-0 text-[9px] tabular-nums text-[hsl(var(--wb-text-muted))]">
-            {questionIndex + 1} / {questions.length}
-          </span>
+          {isSubmitting ? (
+            <Loader2
+              size={11}
+              className="shrink-0 animate-spin text-[hsl(var(--wb-accent))] motion-reduce:animate-none"
+              aria-label="Submitting answer"
+            />
+          ) : (
+            <>
+              <span className="shrink-0 text-[9px] tabular-nums text-[hsl(var(--wb-text-muted))]">
+                {questionIndex + 1} / {questions.length}
+              </span>
+              <div
+                className="flex items-center gap-0.5"
+                aria-label="Clarification question navigation"
+              >
+                <button
+                  type="button"
+                  className="wb-icon-button h-5 w-5"
+                  aria-label="Previous clarification question"
+                  title="Previous question"
+                  disabled={questionIndex === 0}
+                  onClick={() => setQuestionIndex((current) => current - 1)}
+                >
+                  <ChevronLeft size={11} />
+                </button>
+                <button
+                  type="button"
+                  className="wb-icon-button h-5 w-5"
+                  aria-label="Next clarification question"
+                  title="Next question"
+                  disabled={isLast || !answer.trim()}
+                  onClick={() => setQuestionIndex((current) => current + 1)}
+                >
+                  <ChevronRight size={11} />
+                </button>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="custom-scrollbar max-h-[min(300px,42vh)] overflow-y-auto px-2.5 py-2.5">
-          {context && (
+          {context && !isGenericResumeContext(context) && (
             <p className="mb-2 text-[9px] leading-4 text-[hsl(var(--wb-text-muted))]">
               {context}
             </p>
@@ -146,7 +208,7 @@ export function AssistantClarificationDock({
                         : "border-[hsl(var(--wb-border-subtle))] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
                     )}
                     disabled={isSubmitting}
-                    onClick={() => setCurrentAnswer(value, true)}
+                    onClick={() => void answerCurrentQuestion(value)}
                   >
                     <span className="min-w-0 flex-1">
                       <span className="block">{option.label}</span>
@@ -156,7 +218,6 @@ export function AssistantClarificationDock({
                         </span>
                       )}
                     </span>
-                    {selected && <Check size={11} className="mt-0.5 shrink-0" />}
                   </button>
                 );
               })}
@@ -168,62 +229,32 @@ export function AssistantClarificationDock({
               className="mt-2 flex gap-1"
               onSubmit={(event: FormEvent) => {
                 event.preventDefault();
-                if (!answer.trim()) return;
-                if (isLast && allAnswered) void submit();
-                else setQuestionIndex((current) => current + 1);
+                void answerCurrentQuestion(freeTextAnswer);
               }}
             >
               <input
                 value={freeTextAnswer}
-                onChange={(event) => setCurrentAnswer(event.target.value)}
+                onChange={(event) => setCurrentDraft(event.target.value)}
                 className="wb-field min-w-0 flex-1 text-[10px]"
-                placeholder={
-                  selectedOption
-                    ? "Or type a different answer"
-                    : "Or type an answer"
-                }
+                placeholder="Or type an answer · Enter to continue"
                 aria-label="Clarification answer"
                 disabled={isSubmitting}
               />
             </form>
           )}
         </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
 
-        <div className="flex items-center gap-1 border-t border-[hsl(var(--wb-border-subtle))] px-2 py-1.5">
-          <button
-            type="button"
-            className="wb-text-button h-6 px-1.5 text-[10px]"
-            aria-label="Previous clarification question"
-            disabled={questionIndex === 0 || isSubmitting}
-            onClick={() => setQuestionIndex((current) => current - 1)}
-          >
-            <ChevronLeft size={11} />
-            Back
-          </button>
-          <span className="flex-1" />
-          {!isLast ? (
-            <button
-              type="button"
-              className="wb-primary-button h-6 px-2 text-[10px]"
-              disabled={!answer.trim() || isSubmitting}
-              onClick={() => setQuestionIndex((current) => current + 1)}
-            >
-              Next
-              <ChevronRight size={11} />
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="wb-primary-button h-6 px-2 text-[10px]"
-              disabled={!allAnswered || isSubmitting}
-              onClick={() => void submit()}
-            >
-              <Check size={11} />
-              Confirm answers
-            </button>
-          )}
-        </div>
-      </div>
-    </section>
+function isGenericResumeContext(context: string) {
+  const normalized = context
+    .trim()
+    .toLowerCase()
+    .replace(/[.!。]+$/u, "");
+  return (
+    normalized === "your answer will resume this same turn" ||
+    normalized === "your answer will resume the same turn"
   );
 }

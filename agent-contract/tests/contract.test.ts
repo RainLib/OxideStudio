@@ -3,6 +3,8 @@ import {
   AGENT_HOST_MAX_FRAME_BYTES,
   AGENT_HOST_PROTOCOL_VERSION,
   agentEventSchema,
+  artifactReadRequestSchema,
+  artifactSearchRequestSchema,
   graphCheckpointPutRequestSchema,
   initializeAgentHostParamsSchema,
   resumeInterruptSchema,
@@ -80,6 +82,52 @@ describe("agent host contract", () => {
         content: 42,
       }),
     ).toThrow();
+  });
+
+  it("validates provider-reported model usage without message content", () => {
+    expect(() =>
+      agentEventSchema.parse({
+        type: "model.usage",
+        threadId: "thread",
+        turnId: "turn",
+        sequence: 3,
+        occurredAt: Date.now(),
+        calls: 2,
+        inputTokens: 1_200,
+        outputTokens: 300,
+        totalTokens: 1_500,
+      }),
+    ).not.toThrow();
+  });
+
+  it("bounds artifact range reads and searches", () => {
+    const metadata = {
+      requestId: "request",
+      threadId: "thread",
+      turnId: "turn",
+      contextVersion: "context",
+      deadline: Date.now() + 30_000,
+      projectId: "project",
+      artifactId: "tool-result-1",
+    };
+    expect(
+      artifactReadRequestSchema.parse({
+        ...metadata,
+        offset: 1024,
+      }),
+    ).toMatchObject({ maxBytes: 32 * 1024 });
+    expect(() =>
+      artifactReadRequestSchema.parse({
+        ...metadata,
+        maxBytes: 64 * 1024 + 1,
+      }),
+    ).toThrow();
+    expect(
+      artifactSearchRequestSchema.parse({
+        ...metadata,
+        query: "customer_id",
+      }),
+    ).toMatchObject({ maxMatches: 8, contextBytes: 120 });
   });
 
   it("validates opaque typed graph checkpoint blobs", () => {

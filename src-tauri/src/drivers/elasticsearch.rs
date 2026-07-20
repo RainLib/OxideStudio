@@ -38,11 +38,17 @@ impl ElasticsearchDriver {
     pub fn new(url: &str) -> Result<Self> {
         let mut base_url = normalize_elasticsearch_base_url(url)?;
         let auth = extract_basic_auth(&mut base_url)?;
+        let client_builder = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30));
+        // Unit tests never perform a real transport request. Avoid asking
+        // macOS SystemConfiguration for proxy state in headless/sandboxed
+        // runners, where the framework can return a null dynamic store.
+        #[cfg(test)]
+        let client_builder = client_builder.no_proxy();
         Ok(Self {
             base_url,
-            client: Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(30))
+            client: client_builder
                 .build()
                 .context("Failed to initialize Elasticsearch HTTP client")?,
             auth,
