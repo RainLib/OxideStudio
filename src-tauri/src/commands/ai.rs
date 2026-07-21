@@ -408,7 +408,7 @@ async fn send_inline_completion(
                     "messages": [
                         {
                             "role": "system",
-                            "content": "Complete the database-language text at the cursor. Return only the exact text to insert, with no Markdown fence or explanation. Respect the supplied dialect, schema/LSP context, suffix, and project snippets. Do not repeat the prefix or suffix."
+                            "content": "Complete the database-language text at the cursor. Return only the exact text to insert, with no Markdown fence or explanation. Respect the supplied dialect, schema/LSP context, suffix, and project snippets. Do not repeat the prefix or suffix. For Elasticsearch Console, preserve the exact METHOD /relative/path followed by a JSON or NDJSON body, never quote an index in the request path, stay inside the active request, and only use mapping fields supplied for the active index. Prefer a short syntactically complete continuation; do not invent an index, field, endpoint, or unsupported clause."
                         },
                         { "role": "user", "content": user_payload.to_string() }
                     ],

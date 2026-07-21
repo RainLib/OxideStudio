@@ -37,7 +37,7 @@ fn current_timestamp_millis() -> i64 {
         .unwrap_or(0)
 }
 
-fn store_connection_from_config(
+pub(crate) fn store_connection_from_config(
     project_id: &str,
     connection: &ConfigSavedConnection,
 ) -> Result<StoreSavedConnection, String> {
@@ -55,6 +55,43 @@ fn store_connection_from_config(
         created_at: now,
         updated_at: now,
     })
+}
+
+pub(crate) async fn migrate_legacy_connections(
+    meta_store: &MetaStore,
+    config_manager: &ConfigManager,
+) -> Result<usize, String> {
+    let legacy = config_manager.load().connections;
+    if legacy.is_empty() {
+        return Ok(0);
+    }
+    let mut by_project = std::collections::BTreeMap::<String, Vec<StoreSavedConnection>>::new();
+    for connection in &legacy {
+        let project_id = if connection.project_id.trim().is_empty() {
+            "sqls"
+        } else {
+            connection.project_id.as_str()
+        };
+        by_project
+            .entry(project_id.to_string())
+            .or_default()
+            .push(store_connection_from_config(project_id, connection)?);
+    }
+    for (project_id, connections) in by_project {
+        if meta_store
+            .get_connections(&project_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .is_empty()
+        {
+            meta_store
+                .replace_connections(&project_id, &connections)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    config_manager.save(&crate::core::config::AppConfig::default());
+    Ok(legacy.len())
 }
 
 fn config_connection_from_store(
@@ -228,19 +265,13 @@ pub async fn save_connections(
             .await
             .map_err(|error| error.to_string())?;
 
-        // Keep the legacy config in sync until its one-time migration fallback can
-        // be removed. Otherwise deleting the final connection leaves the legacy
-        // entry behind and load_connections imports it again on the next launch.
+        // The legacy JSON file is now migration input only. Never write database
+        // credentials back to it after the encrypted SQLite credential store
+        // has accepted the current project.
         let mut legacy_config = config_manager.load();
         legacy_config
             .connections
             .retain(|connection| connection.project_id != project_id);
-        legacy_config
-            .connections
-            .extend(connections.into_iter().map(|mut connection| {
-                connection.project_id = project_id.clone();
-                connection
-            }));
         config_manager.save(&legacy_config);
         Ok("Connections saved successfully".to_string())
     }
@@ -291,6 +322,11 @@ pub async fn load_connections(
                     .replace_connections(&project_id, &store_connections)
                     .await
                     .map_err(|error| error.to_string())?;
+                let mut legacy_config = config_manager.load();
+                legacy_config
+                    .connections
+                    .retain(|connection| connection.project_id != project_id);
+                config_manager.save(&legacy_config);
             }
         }
 

@@ -1,0 +1,44 @@
+[workspace]
+members = ["contracts", "control-plane", "gateway"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1.89"
+axum = "0.8.9"
+base64 = "0.22"
+cedar-policy = { version = "4.11.2", default-features = false }
+chrono = { version = "0.4", features = ["serde"] }
+# Keep the same release candidate selected by russh in the desktop driver
+# workspace so the gateway can reuse oxide-studio-lib without duplicate,
+# semver-incompatible signature traits.
+ed25519-dalek = { version = "=3.0.0-rc.1", features = ["rand_core"] }
+futures = "0.3"
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto"] }
+prost = "0.14.4"
+percent-encoding = "2.3"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json"] }
+sqlparser = { version = "0.59.0", features = ["visitor"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tonic = { version = "0.14.6", features = ["transport", "tls-ring"] }
+tonic-prost = "0.14.4"
+tonic-prost-build = "0.14.4"
+tower-http = { version = "0.7.0", features = ["cors", "request-id", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1.24.0", features = ["serde", "v4"] }
+url = "2.5"
+zeroize = "1"

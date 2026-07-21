@@ -1,6 +1,6 @@
 use crate::core::{
     driver::DatabaseDriver,
-    protocol::{CollectionInfo, ColumnDef, ColumnInfo, QueryResult},
+    protocol::{CollectionInfo, ColumnDef, ColumnInfo, QueryResponseMeta, QueryResult},
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -8,7 +8,7 @@ use percent_encoding::percent_decode_str;
 use reqwest::{Client, Method, StatusCode, Url};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 pub struct ElasticsearchDriver {
@@ -89,13 +89,23 @@ impl ElasticsearchDriver {
         for request in requests {
             let request = scope_search_request_to_index(request, active_index.as_deref());
             let request = self.prepare_request_for_server(request).await?;
+            let started_at = Instant::now();
             let (status, body) = self.send_request(&request).await?;
+            let response_meta = QueryResponseMeta {
+                request_method: request.method.as_str().to_string(),
+                request_path: request.path.clone(),
+                status,
+                duration_ms: started_at.elapsed().as_millis() as u64,
+                raw_response: body.clone(),
+            };
             let normalized = normalize_elasticsearch_response(body);
-            if let Some(result) = elasticsearch_table_result(&normalized) {
-                results.push(result);
+            let mut result = if let Some(result) = elasticsearch_table_result(&normalized) {
+                result
             } else {
-                results.push(elasticsearch_request_result(&request, status, normalized));
-            }
+                elasticsearch_request_result(&request, status, normalized)
+            };
+            result.response_meta = Some(response_meta);
+            results.push(result);
         }
 
         Ok(results)
@@ -457,7 +467,8 @@ fn parse_elasticsearch_server_info(body: &Value) -> Result<ElasticsearchServerIn
 }
 
 fn parse_elasticsearch_requests(input: &str) -> Result<Vec<ElasticsearchRequest>> {
-    let input = input.trim();
+    let sanitized = strip_elasticsearch_console_comments(input);
+    let input = sanitized.trim();
     if input.is_empty() {
         return Ok(Vec::new());
     }
@@ -511,6 +522,105 @@ fn parse_elasticsearch_requests(input: &str) -> Result<Vec<ElasticsearchRequest>
     }
 
     Ok(requests)
+}
+
+fn strip_elasticsearch_console_comments(input: &str) -> String {
+    let characters = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut line_has_only_whitespace = true;
+
+    while index < characters.len() {
+        let character = characters[index];
+        let next = characters.get(index + 1).copied();
+
+        if character == '\n' {
+            output.push('\n');
+            in_line_comment = false;
+            line_has_only_whitespace = true;
+            index += 1;
+            continue;
+        }
+
+        if in_line_comment {
+            output.push(' ');
+            index += 1;
+            continue;
+        }
+
+        if in_block_comment {
+            output.push(' ');
+            if character == '*' && next == Some('/') {
+                output.push(' ');
+                in_block_comment = false;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+
+        if in_string {
+            output.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            line_has_only_whitespace = false;
+            index += 1;
+            continue;
+        }
+
+        if character == '"' {
+            output.push(character);
+            in_string = true;
+            line_has_only_whitespace = false;
+            index += 1;
+            continue;
+        }
+
+        if character == '/'
+            && next == Some('/')
+            && index
+                .checked_sub(1)
+                .and_then(|position| characters.get(position))
+                != Some(&':')
+        {
+            output.push_str("  ");
+            in_line_comment = true;
+            index += 2;
+            continue;
+        }
+
+        if character == '/' && next == Some('*') {
+            output.push_str("  ");
+            in_block_comment = true;
+            index += 2;
+            continue;
+        }
+
+        if character == '#' && line_has_only_whitespace {
+            output.push(' ');
+            in_line_comment = true;
+            index += 1;
+            continue;
+        }
+
+        output.push(character);
+        if !character.is_whitespace() {
+            line_has_only_whitespace = false;
+        }
+        index += 1;
+    }
+
+    output
 }
 
 fn parse_request_line(line: &str) -> Result<Option<(Method, String, Option<String>)>> {
@@ -1053,6 +1163,33 @@ mod tests {
     }
 
     #[test]
+    fn strips_console_comments_without_changing_json_strings() {
+        let requests = parse_elasticsearch_requests(
+            r#"
+            # GET /ignored
+            /*
+            POST /also-ignored/_search
+            {}
+            */
+            POST /users/_search
+            {
+              // Search only the API URL stored in the document.
+              "url": "https://example.test/path#fragment",
+              "query": {"match_all": {}}
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/users/_search");
+        let body = requests[0].body.as_deref().unwrap();
+        assert!(!body.contains("Search only"));
+        assert!(body.contains("https://example.test/path#fragment"));
+        assert!(serde_json::from_str::<Value>(body).is_ok());
+    }
+
+    #[test]
     fn rejects_invalid_request_lines() {
         assert!(parse_elasticsearch_requests("GET").is_err());
         assert!(parse_elasticsearch_requests("GET https://other.test/_search").is_err());
@@ -1170,6 +1307,7 @@ mod tests {
         assert_eq!(result.rows.len(), 2);
         assert_eq!(result.rows[0][0], json!("users"));
         assert_eq!(result.rows[1][3], json!("Grace"));
+        assert!(result.response_meta.is_none());
     }
 
     #[test]

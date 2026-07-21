@@ -5,10 +5,11 @@
     "type": "module",
     "workspaces": [
         "agent-contract",
-        "agent-host"
+        "agent-host",
+        "enterprise/admin-web"
     ],
     "scripts": {
-        "dev": "vite",
+        "dev": "node scripts/start-vite.mjs",
         "postinstall": "node scripts/patch-monaco-react.mjs",
         "build": "tsc && vite build && node scripts/verify-frontend-bundle.mjs",
         "verify:frontend-bundle": "node scripts/verify-frontend-bundle.mjs",
@@ -20,8 +21,10 @@
         "test:release": "node --test scripts/*.node-test.mjs",
         "test:live-db": "bash scripts/test-live-databases.sh",
         "agent-host:build": "npm run build --workspace @oxide/agent-host",
-    "agent-host:package": "npm run package --workspace @oxide/agent-host --",
-    "oxide-agent:prepare": "node scripts/prepare-oxide-agent.mjs",
+        "agent-host:package": "npm run package --workspace @oxide/agent-host --",
+        "oxide-agent:prepare": "node scripts/prepare-oxide-agent.mjs",
+        "enterprise:admin:build": "npm run build --workspace @oxide/enterprise-admin",
+        "enterprise:admin:dev": "npm run dev --workspace @oxide/enterprise-admin",
         "test:agent-contract": "npm test --workspace @oxide/agent-contract",
         "test:agent-host": "npm test --workspace @oxide/agent-host"
     },

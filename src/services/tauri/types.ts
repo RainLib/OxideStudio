@@ -80,6 +80,27 @@ export interface QueryResult {
   rowsAffected?: number;
   statementType?: string;
   message?: string;
+  responseMeta?: QueryResponseMeta;
+}
+
+export interface QueryResponseMeta {
+  requestMethod: string;
+  requestPath: string;
+  status: number;
+  durationMs: number;
+  rawResponse: unknown;
+}
+
+export interface ElasticsearchConsoleFileImportResult {
+  filePath: string;
+  fileName: string;
+  content: string;
+}
+
+export interface ElasticsearchConsoleFileExportResult {
+  exported: boolean;
+  filePath?: string | null;
+  byteCount: number;
 }
 
 export type ExplainPlanMode = "estimate" | "analyze";
@@ -150,11 +171,25 @@ export interface TableSort {
   direction: "asc" | "desc";
 }
 
-export type TableExportFormat = "csv" | "json";
+export type TableExportFormat = "csv" | "json" | "sql";
 
 export interface TableExportResult {
   filePath: string;
   rowsExported: number;
+}
+
+export type TableImportFormat = "csv" | "json";
+
+export interface TableImportResult {
+  filePath: string;
+  rowsImported: number;
+  batches: number;
+}
+
+export interface SqlScriptImportResult {
+  filePath: string;
+  statementsExecuted: number;
+  rowsAffected: number;
 }
 
 export interface TableRowUpdate {

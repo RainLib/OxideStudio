@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   loadConnections: vi.fn(async () => []),
   saveConnections: vi.fn(async () => undefined),
   testConnection: vi.fn(async () => undefined),
+  connectManagedSource: vi.fn(async () => undefined),
 }));
 
 vi.mock("@/services/tauri", () => ({
@@ -22,6 +23,12 @@ vi.mock("@/services/tauri", () => ({
     loadConnections: mocks.loadConnections,
     saveConnections: mocks.saveConnections,
     testConnection: mocks.testConnection,
+  },
+}));
+
+vi.mock("@/services/tauri/enterprise.service", () => ({
+  enterpriseService: {
+    connectManagedSource: mocks.connectManagedSource,
   },
 }));
 
@@ -51,6 +58,25 @@ function deferred<T = void>() {
     reject = promiseReject;
   });
   return { promise, resolve, reject };
+}
+
+function managedConnection(id: string): ConnectionConfig {
+  return connection({
+    id,
+    projectId: "managed-project",
+    origin: "managed",
+    managedDescriptor: {
+      organizationId: "organization-1",
+      projectId: "managed-project",
+      dataSourceId: id,
+      gatewayId: "gateway-1",
+      driver: "postgres",
+      displayName: id,
+      capabilities: ["resource.discover", "metadata.read", "query.read"],
+      allowedResourceSummary: ["app/public"],
+      policyRevision: "policy-1",
+    },
+  });
 }
 
 function createStorageMock() {
@@ -614,5 +640,31 @@ describe("connection store", () => {
     expect(useConnectionStore.getState().isConnected).toBe(true);
     expect(mocks.disconnect).toHaveBeenCalledWith("postgres-1");
     expect(mocks.disconnect).not.toHaveBeenCalledWith("mysql-1");
+  });
+
+  it("keeps the newest managed data source active when Gateway handshakes finish out of order", async () => {
+    const firstConnect = deferred();
+    const secondConnect = deferred();
+    localStorage.setItem("oxide-studio-active-project", "managed-project");
+    mocks.connectManagedSource.mockImplementation((id: string) => {
+      if (id === "managed-1") return firstConnect.promise;
+      return secondConnect.promise;
+    });
+
+    const first = useConnectionStore
+      .getState()
+      .connect(managedConnection("managed-1"));
+    const second = useConnectionStore
+      .getState()
+      .connect(managedConnection("managed-2"));
+
+    secondConnect.resolve();
+    await expect(second).resolves.toBeNull();
+    expect(useConnectionStore.getState().activeConnectionId).toBe("managed-2");
+
+    firstConnect.resolve();
+    await expect(first).resolves.toBeNull();
+    expect(useConnectionStore.getState().activeConnectionId).toBe("managed-2");
+    expect(mocks.disconnect).toHaveBeenCalledWith("managed-1");
   });
 });

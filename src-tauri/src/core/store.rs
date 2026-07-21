@@ -1,9 +1,20 @@
-use anyhow::{Context, Result};
+use crate::core::private_file::create_private_file;
+use aes_gcm::{
+    aead::{Aead, Payload},
+    Aes256Gcm, KeyInit, Nonce,
+};
+use anyhow::{anyhow, Context, Result};
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
+use std::path::Path;
 use tauri::{AppHandle, Manager};
+use zeroize::{Zeroize, Zeroizing};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+const CONNECTION_CREDENTIAL_KEY_BYTES: usize = 32;
+const CONNECTION_CREDENTIAL_KEY_FILE: &str = "connection-credentials-v1.secret";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedConnection {
     pub id: String,
     #[serde(default = "default_project_id")]
@@ -146,15 +157,90 @@ fn current_timestamp_millis() -> i64 {
 
 pub struct MetaStore {
     pool: Pool<Sqlite>,
+    credential_key: Zeroizing<[u8; CONNECTION_CREDENTIAL_KEY_BYTES]>,
+}
+
+struct ProtectedConnectionCredentials {
+    ciphertext: Vec<u8>,
+    nonce: [u8; 12],
+}
+
+fn connection_credential_aad(project_id: &str, connection_id: &str) -> Vec<u8> {
+    format!("oxide-connection-credential-v1\0{project_id}\0{connection_id}").into_bytes()
+}
+
+fn load_or_create_credential_key(
+    path: &Path,
+) -> Result<Zeroizing<[u8; CONNECTION_CREDENTIAL_KEY_BYTES]>> {
+    if let Some(key) = read_credential_key(path)? {
+        return Ok(Zeroizing::new(key));
+    }
+    let mut generated = [0_u8; CONNECTION_CREDENTIAL_KEY_BYTES];
+    OsRng.fill_bytes(&mut generated);
+    if create_private_file(path, &generated)? {
+        return Ok(Zeroizing::new(generated));
+    }
+    generated.zeroize();
+    read_credential_key(path)?
+        .map(Zeroizing::new)
+        .context("local connection credential key was not created")
+}
+
+fn read_credential_key(path: &Path) -> Result<Option<[u8; CONNECTION_CREDENTIAL_KEY_BYTES]>> {
+    let mut bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("failed to read local connection credential key"),
+    };
+    if bytes.len() != CONNECTION_CREDENTIAL_KEY_BYTES {
+        bytes.zeroize();
+        return Err(anyhow!("local connection credential key is invalid"));
+    }
+    let mut key = [0_u8; CONNECTION_CREDENTIAL_KEY_BYTES];
+    key.copy_from_slice(&bytes);
+    bytes.zeroize();
+    Ok(Some(key))
+}
+
+fn config_contains_plaintext_credentials(config: &serde_json::Value) -> bool {
+    let Some(object) = config.as_object() else {
+        return false;
+    };
+    ["url", "connectionUrl", "password"].into_iter().any(|key| {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    }) || object
+        .get("sshTunnel")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|tunnel| {
+            ["password", "privateKeyPassphrase"].into_iter().any(|key| {
+                tunnel
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
+            })
+        })
 }
 
 impl MetaStore {
+    #[cfg(test)]
+    fn for_test(pool: Pool<Sqlite>) -> Self {
+        Self {
+            pool,
+            credential_key: Zeroizing::new([7_u8; CONNECTION_CREDENTIAL_KEY_BYTES]),
+        }
+    }
+
     pub async fn new(app: &AppHandle) -> Result<Self> {
         let app_dir = app
             .path()
             .app_config_dir()
             .context("failed to get app config dir")?;
         let db_path = app_dir.join("metadata.db");
+        let credential_key =
+            load_or_create_credential_key(&app_dir.join(CONNECTION_CREDENTIAL_KEY_FILE))?;
 
         // Ensure directory exists
         if let Some(parent) = db_path.parent() {
@@ -169,7 +255,10 @@ impl MetaStore {
             .await
             .context("failed to connect to metadata database")?;
 
-        let store = Self { pool };
+        let store = Self {
+            pool,
+            credential_key,
+        };
         store.init().await?;
 
         Ok(store)
@@ -187,6 +276,20 @@ impl MetaStore {
                 config JSON NOT NULL,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS connection_credentials (
+                project_id TEXT NOT NULL,
+                connection_id TEXT NOT NULL,
+                ciphertext BLOB NOT NULL,
+                nonce BLOB NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (project_id, connection_id)
             );
             "#,
         )
@@ -525,6 +628,10 @@ impl MetaStore {
             .bind(id)
             .execute(&mut *tx)
             .await?;
+        sqlx::query("DELETE FROM connection_credentials WHERE project_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM connections WHERE project_id = ?")
             .bind(id)
             .execute(&mut *tx)
@@ -561,6 +668,9 @@ impl MetaStore {
     }
 
     pub async fn save_connection(&self, conn: &SavedConnection) -> Result<()> {
+        let (safe_config, protected_credentials) =
+            self.protect_connection_config(&conn.project_id, &conn.id, &conn.config)?;
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
             INSERT INTO connections (id, project_id, name, driver, config, created_at, updated_at)
@@ -577,11 +687,20 @@ impl MetaStore {
         .bind(&conn.project_id)
         .bind(&conn.name)
         .bind(&conn.driver)
-        .bind(&conn.config)
+        .bind(&safe_config)
         .bind(conn.created_at)
         .bind(conn.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        self.save_protected_credentials(
+            &mut tx,
+            &conn.project_id,
+            &conn.id,
+            protected_credentials,
+            conn.updated_at,
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -595,6 +714,10 @@ impl MetaStore {
             .bind(project_id)
             .execute(&mut *tx)
             .await?;
+        sqlx::query("DELETE FROM connection_credentials WHERE project_id = ?")
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await?;
 
         for conn in connections {
             let scoped_project_id = if conn.project_id.is_empty() {
@@ -602,6 +725,8 @@ impl MetaStore {
             } else {
                 conn.project_id.as_str()
             };
+            let (safe_config, protected_credentials) =
+                self.protect_connection_config(scoped_project_id, &conn.id, &conn.config)?;
             sqlx::query(
                 r#"
                 INSERT INTO connections (id, project_id, name, driver, config, created_at, updated_at)
@@ -618,10 +743,18 @@ impl MetaStore {
             .bind(scoped_project_id)
             .bind(&conn.name)
             .bind(&conn.driver)
-            .bind(&conn.config)
+            .bind(&safe_config)
             .bind(conn.created_at)
             .bind(conn.updated_at)
             .execute(&mut *tx)
+            .await?;
+            self.save_protected_credentials(
+                &mut tx,
+                scoped_project_id,
+                &conn.id,
+                protected_credentials,
+                conn.updated_at,
+            )
             .await?;
         }
 
@@ -630,22 +763,54 @@ impl MetaStore {
     }
 
     pub async fn get_connections(&self, project_id: &str) -> Result<Vec<SavedConnection>> {
-        let recs = sqlx::query("SELECT * FROM connections WHERE project_id = ? ORDER BY name")
-            .bind(project_id)
-            .fetch_all(&self.pool)
-            .await?;
+        let recs = sqlx::query(
+            "SELECT c.*, s.ciphertext AS secret_ciphertext, s.nonce AS secret_nonce
+             FROM connections c
+             LEFT JOIN connection_credentials s
+               ON s.project_id = c.project_id AND s.connection_id = c.id
+             WHERE c.project_id = ? ORDER BY c.name",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
 
         let mut connections = Vec::new();
+        let mut legacy_plaintext = Vec::new();
         for rec in recs {
-            connections.push(SavedConnection {
-                id: rec.get("id"),
+            let id: String = rec.get("id");
+            let mut config: serde_json::Value = rec.get("config");
+            let ciphertext = rec.try_get::<Option<Vec<u8>>, _>("secret_ciphertext")?;
+            let nonce = rec.try_get::<Option<Vec<u8>>, _>("secret_nonce")?;
+            let protected = ciphertext.is_some() && nonce.is_some();
+            match (ciphertext, nonce) {
+                (Some(ciphertext), Some(nonce)) => {
+                    self.restore_connection_config(
+                        project_id,
+                        &id,
+                        &mut config,
+                        &ciphertext,
+                        &nonce,
+                    )?;
+                }
+                (None, None) => {}
+                _ => anyhow::bail!("stored local connection credential record is incomplete"),
+            }
+            let connection = SavedConnection {
+                id,
                 project_id: rec.get("project_id"),
                 name: rec.get("name"),
                 driver: rec.get("driver"),
-                config: rec.get("config"),
+                config,
                 created_at: rec.get("created_at"),
                 updated_at: rec.get("updated_at"),
-            });
+            };
+            if !protected && config_contains_plaintext_credentials(&connection.config) {
+                legacy_plaintext.push(connection.clone());
+            }
+            connections.push(connection);
+        }
+        for connection in legacy_plaintext {
+            self.save_connection(&connection).await?;
         }
         Ok(connections)
     }
@@ -656,6 +821,164 @@ impl MetaStore {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        sqlx::query(
+            "DELETE FROM connection_credentials WHERE project_id = ? AND connection_id = ?",
+        )
+        .bind(project_id)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    fn protect_connection_config(
+        &self,
+        project_id: &str,
+        connection_id: &str,
+        config: &serde_json::Value,
+    ) -> Result<(serde_json::Value, Option<ProtectedConnectionCredentials>)> {
+        let mut safe = config.clone();
+        let Some(object) = safe.as_object_mut() else {
+            return Ok((safe, None));
+        };
+        let mut secrets = serde_json::Map::new();
+        for key in ["url", "connectionUrl", "password"] {
+            if let Some(value) = object.remove(key) {
+                if !value.is_null() && value.as_str().is_none_or(|text| !text.is_empty()) {
+                    secrets.insert(key.to_string(), value);
+                }
+            }
+        }
+        object.insert("url".into(), serde_json::Value::String(String::new()));
+        if let Some(tunnel) = object
+            .get_mut("sshTunnel")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            let mut tunnel_secrets = serde_json::Map::new();
+            for key in ["password", "privateKeyPassphrase"] {
+                if let Some(value) = tunnel.remove(key) {
+                    if !value.is_null() && value.as_str().is_none_or(|text| !text.is_empty()) {
+                        tunnel_secrets.insert(key.to_string(), value);
+                    }
+                }
+            }
+            if !tunnel_secrets.is_empty() {
+                secrets.insert(
+                    "sshTunnel".into(),
+                    serde_json::Value::Object(tunnel_secrets),
+                );
+            }
+        }
+        if secrets.is_empty() {
+            return Ok((safe, None));
+        }
+        let mut plaintext = serde_json::to_vec(&secrets)?;
+        let cipher = Aes256Gcm::new_from_slice(self.credential_key.as_ref())
+            .context("invalid local credential key")?;
+        let mut nonce_bytes = [0_u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: &plaintext,
+                    aad: &connection_credential_aad(project_id, connection_id),
+                },
+            )
+            .map_err(|_| anyhow!("failed to protect local connection credentials"))?;
+        plaintext.zeroize();
+        Ok((
+            safe,
+            Some(ProtectedConnectionCredentials {
+                ciphertext,
+                nonce: nonce_bytes,
+            }),
+        ))
+    }
+
+    fn restore_connection_config(
+        &self,
+        project_id: &str,
+        connection_id: &str,
+        config: &mut serde_json::Value,
+        ciphertext: &[u8],
+        nonce: &[u8],
+    ) -> Result<()> {
+        let nonce_bytes: [u8; 12] = nonce
+            .try_into()
+            .map_err(|_| anyhow!("local connection credential nonce is invalid"))?;
+        let cipher = Aes256Gcm::new_from_slice(self.credential_key.as_ref())
+            .context("invalid local credential key")?;
+        let nonce = Nonce::from(nonce_bytes);
+        let mut plaintext = cipher
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad: &connection_credential_aad(project_id, connection_id),
+                },
+            )
+            .map_err(|_| anyhow!("local connection credentials could not be authenticated"))?;
+        let secrets: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&plaintext)
+                .context("local connection credentials are invalid")?;
+        plaintext.zeroize();
+        let object = config
+            .as_object_mut()
+            .context("stored local connection config is invalid")?;
+        for (key, value) in secrets {
+            if key == "sshTunnel" {
+                let tunnel = object
+                    .entry("sshTunnel")
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut()
+                    .context("stored SSH tunnel config is invalid")?;
+                if let Some(values) = value.as_object() {
+                    tunnel.extend(values.clone());
+                }
+            } else {
+                object.insert(key, value);
+            }
+        }
+        Ok(())
+    }
+
+    async fn save_protected_credentials(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, Sqlite>,
+        project_id: &str,
+        connection_id: &str,
+        protected: Option<ProtectedConnectionCredentials>,
+        updated_at: i64,
+    ) -> Result<()> {
+        if let Some(protected) = protected {
+            sqlx::query(
+                "INSERT INTO connection_credentials
+                 (project_id, connection_id, ciphertext, nonce, updated_at)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT(project_id, connection_id) DO UPDATE SET
+                   ciphertext = excluded.ciphertext,
+                   nonce = excluded.nonce,
+                   updated_at = excluded.updated_at",
+            )
+            .bind(project_id)
+            .bind(connection_id)
+            .bind(protected.ciphertext)
+            .bind(protected.nonce.to_vec())
+            .bind(updated_at)
+            .execute(&mut **transaction)
+            .await?;
+        } else {
+            sqlx::query(
+                "DELETE FROM connection_credentials
+                 WHERE project_id = ? AND connection_id = ?",
+            )
+            .bind(project_id)
+            .bind(connection_id)
+            .execute(&mut **transaction)
+            .await?;
+        }
         Ok(())
     }
 
@@ -1374,6 +1697,58 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn connection_credentials_are_encrypted_outside_metadata_json() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = MetaStore::for_test(pool);
+        store.init().await.unwrap();
+        let connection = SavedConnection {
+            id: "secure".into(),
+            project_id: "sqls".into(),
+            name: "Secure".into(),
+            driver: "postgres".into(),
+            config: serde_json::json!({
+                "id": "secure",
+                "projectId": "sqls",
+                "name": "Secure",
+                "driver": "postgres",
+                "url": "postgres://app:top-secret@example.test/db",
+                "password": "top-secret",
+                "sshTunnel": {
+                    "password": "ssh-secret",
+                    "privateKeyPassphrase": "key-secret"
+                }
+            }),
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.save_connection(&connection).await.unwrap();
+
+        let raw: String =
+            sqlx::query_scalar("SELECT CAST(config AS TEXT) FROM connections WHERE id = 'secure'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!(!raw.contains("top-secret"));
+        assert!(!raw.contains("ssh-secret"));
+        assert!(!raw.contains("postgres://"));
+        let ciphertext: Vec<u8> = sqlx::query_scalar(
+            "SELECT ciphertext FROM connection_credentials
+             WHERE project_id = 'sqls' AND connection_id = 'secure'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert!(!String::from_utf8_lossy(&ciphertext).contains("top-secret"));
+
+        let restored = store.get_connections("sqls").await.unwrap();
+        assert_eq!(restored, vec![connection]);
+    }
+
+    #[tokio::test]
     async fn migrates_legacy_projects_with_nullable_root_path() {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -1400,7 +1775,7 @@ mod tests {
         .await
         .unwrap();
 
-        let store = MetaStore { pool };
+        let store = MetaStore::for_test(pool);
         store.init().await.unwrap();
 
         let legacy = store.get_project("legacy").await.unwrap().unwrap();
@@ -1427,7 +1802,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        let store = MetaStore { pool };
+        let store = MetaStore::for_test(pool);
         store.init().await.unwrap();
 
         let project = Project {
@@ -1490,7 +1865,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        let store = MetaStore { pool };
+        let store = MetaStore::for_test(pool);
         store.init().await.unwrap();
 
         let project = Project {
@@ -1558,7 +1933,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        let store = MetaStore { pool };
+        let store = MetaStore::for_test(pool);
         store.init().await.unwrap();
 
         let entries = (0..505)
@@ -1601,7 +1976,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        let store = MetaStore { pool };
+        let store = MetaStore::for_test(pool);
         store.init().await.unwrap();
         for id in ["project-a", "project-b"] {
             store
@@ -1712,7 +2087,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        let store = MetaStore { pool };
+        let store = MetaStore::for_test(pool);
         store.init().await.unwrap();
         let mut task = AssistantTaskRecord {
             id: "invalid".to_string(),

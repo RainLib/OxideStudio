@@ -1,0 +1,9 @@
+[
+  {
+    "id": "00000000-0000-0000-0000-000000000002",
+    "driver": "postgres",
+    "secretRef": "env:OXIDE_SECRET_DEV_DATABASE",
+    "connectionTemplate": null,
+    "capabilities": ["resource.discover", "metadata.read", "query.read"]
+  }
+]

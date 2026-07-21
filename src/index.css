@@ -192,6 +192,35 @@
   scrollbar-width: none;
 }
 
+.monaco-editor .oxide-es-run-glyph {
+  cursor: pointer;
+}
+
+.monaco-editor .oxide-es-run-glyph::before {
+  content: "";
+  display: block;
+  width: 0;
+  height: 0;
+  margin: 5px auto 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 7px solid hsl(var(--wb-text-muted));
+  transition:
+    border-left-color 160ms ease-out,
+    transform 160ms ease-out;
+}
+
+.monaco-editor .oxide-es-run-glyph:hover::before {
+  border-left-color: hsl(var(--wb-accent));
+  transform: translateX(1px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .monaco-editor .oxide-es-run-glyph::before {
+    transition: none;
+  }
+}
+
 .custom-scrollbar::-webkit-scrollbar {
   width: 4px;
 }

@@ -5,15 +5,21 @@ use crate::core::{
     manager::ConnectionManager,
     parser::{CompletionContext, SqlParser},
     protocol::{ExplainPlan, ExplainPlanMode, QueryResult, Response},
-    statement::{validate_read_only_sql, StatementScanDialect},
+    statement::{split_sql_statements, validate_read_only_sql, StatementScanDialect},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
-use tauri::State;
-use tokio::sync::{watch, Mutex as AsyncMutex};
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
+use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
+
+const MAX_SQL_IMPORT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_CONSOLE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// SQL Parser 状态
 pub struct ParserState(pub Mutex<SqlParser>);
@@ -35,6 +41,30 @@ pub struct ExplainQueryRequest {
     pub database: Option<String>,
     pub query_id: String,
     pub mode: ExplainPlanMode,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSqlScriptResult {
+    pub file_path: String,
+    pub statements_executed: u64,
+    pub rows_affected: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleFileImportResult {
+    pub file_path: String,
+    pub file_name: String,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleFileExportResult {
+    pub exported: bool,
+    pub file_path: Option<String>,
+    pub byte_count: usize,
 }
 
 impl QueryCancellationState {
@@ -91,6 +121,194 @@ pub async fn execute_query(
         database,
     )
     .await
+}
+
+#[tauri::command]
+pub async fn import_sql_script(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    file_path: String,
+    schema: Option<String>,
+    database: Option<String>,
+) -> Result<Response<ImportSqlScriptResult>, String> {
+    let result: Result<ImportSqlScriptResult, String> = async {
+        let path = PathBuf::from(file_path.trim());
+        if path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_none_or(|extension| !extension.eq_ignore_ascii_case("sql"))
+        {
+            return Err("Select a .sql script to import".to_string());
+        }
+        let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+        if !metadata.is_file() {
+            return Err("The selected SQL import path is not a file".to_string());
+        }
+        if metadata.len() > MAX_SQL_IMPORT_BYTES {
+            return Err(format!(
+                "SQL import files are limited to {} MB",
+                MAX_SQL_IMPORT_BYTES / 1024 / 1024
+            ));
+        }
+        let sql = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        let dialect = manager
+            .statement_scan_dialect(&connection_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "SQL script import is only available for SQL data sources".to_string()
+            })?;
+        let statements = split_sql_statements(&sql, dialect);
+        if statements.is_empty() {
+            return Err(
+                "The selected SQL script does not contain executable statements".to_string(),
+            );
+        }
+
+        let results = match database.as_deref().filter(|value| !value.trim().is_empty()) {
+            Some(database) => {
+                manager
+                    .query_database_with_context(
+                        &connection_id,
+                        database,
+                        &sql,
+                        schema.as_deref(),
+                        None,
+                    )
+                    .await
+            }
+            None => {
+                manager
+                    .query(
+                        &connection_id,
+                        &sql,
+                        schema.filter(|value| !value.trim().is_empty()),
+                        None,
+                        None,
+                    )
+                    .await
+            }
+        }
+        .map_err(|error| error.to_string())?;
+
+        Ok(ImportSqlScriptResult {
+            file_path: path.display().to_string(),
+            statements_executed: statements.len() as u64,
+            rows_affected: results
+                .iter()
+                .filter_map(|result| result.rows_affected)
+                .sum(),
+        })
+    }
+    .await;
+
+    match result {
+        Ok(imported) => Ok(Response::ok(imported)),
+        Err(error) => Ok(Response::err("IMPORT_SQL_SCRIPT_ERROR", &error)),
+    }
+}
+
+#[tauri::command]
+pub async fn import_elasticsearch_console_file(
+    app: AppHandle,
+) -> Result<Response<Option<ConsoleFileImportResult>>, String> {
+    let (sender, receiver) = oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Elasticsearch Console", &["txt", "es", "esdsl", "json"])
+        .set_title("Import Elasticsearch Console requests")
+        .pick_file(move |selection| {
+            let _ = sender.send(selection);
+        });
+    let selection = receiver
+        .await
+        .map_err(|_| "Elasticsearch Console import dialog closed unexpectedly".to_string())?;
+    let Some(selection) = selection else {
+        return Ok(Response::ok(None));
+    };
+    let path = selection
+        .into_path()
+        .map_err(|_| "The selected Console import is not a local file".to_string())?;
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .map_err(|error| format!("Unable to inspect the selected Console file: {error}"))?;
+    if !metadata.is_file() {
+        return Ok(Response::err(
+            "ELASTICSEARCH_CONSOLE_IMPORT_ERROR",
+            "The selected Console import path is not a file",
+        ));
+    }
+    if metadata.len() > MAX_CONSOLE_FILE_BYTES {
+        return Ok(Response::err(
+            "ELASTICSEARCH_CONSOLE_IMPORT_ERROR",
+            &format!(
+                "Elasticsearch Console imports are limited to {} MB",
+                MAX_CONSOLE_FILE_BYTES / 1024 / 1024
+            ),
+        ));
+    }
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|error| format!("Unable to read the selected Console file: {error}"))?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Elasticsearch Console")
+        .to_string();
+
+    Ok(Response::ok(Some(ConsoleFileImportResult {
+        file_path: path.to_string_lossy().into_owned(),
+        file_name,
+        content,
+    })))
+}
+
+#[tauri::command]
+pub async fn export_elasticsearch_console_file(
+    app: AppHandle,
+    content: String,
+) -> Result<Response<ConsoleFileExportResult>, String> {
+    if content.len() as u64 > MAX_CONSOLE_FILE_BYTES {
+        return Ok(Response::err(
+            "ELASTICSEARCH_CONSOLE_EXPORT_ERROR",
+            &format!(
+                "Elasticsearch Console exports are limited to {} MB",
+                MAX_CONSOLE_FILE_BYTES / 1024 / 1024
+            ),
+        ));
+    }
+
+    let (sender, receiver) = oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Elasticsearch Console", &["txt"])
+        .set_title("Export Elasticsearch Console requests")
+        .set_file_name("elasticsearch-console.txt")
+        .save_file(move |selection| {
+            let _ = sender.send(selection);
+        });
+    let selection = receiver
+        .await
+        .map_err(|_| "Elasticsearch Console export dialog closed unexpectedly".to_string())?;
+    let Some(selection) = selection else {
+        return Ok(Response::ok(ConsoleFileExportResult {
+            exported: false,
+            file_path: None,
+            byte_count: 0,
+        }));
+    };
+    let path = selection
+        .into_path()
+        .map_err(|_| "The selected Console export destination is not a local file".to_string())?;
+    tokio::fs::write(&path, content.as_bytes())
+        .await
+        .map_err(|error| format!("Unable to export Elasticsearch Console requests: {error}"))?;
+
+    Ok(Response::ok(ConsoleFileExportResult {
+        exported: true,
+        file_path: Some(path.to_string_lossy().into_owned()),
+        byte_count: content.len(),
+    }))
 }
 
 /// Execute one assistant-approved SQL read behind a backend-enforced read-only
@@ -391,12 +609,24 @@ async fn execute_query_with_cancellation(
 
     match result {
         Ok(response) => Ok(response),
-        Err(error) => Ok(Response::err_with_details(
-            "QUERY_EXECUTION_FAILED",
-            &error.to_string(),
-            false,
-            Some(query_context),
-        )),
+        Err(error) => {
+            let message = error.to_string();
+            if message.starts_with("Connection not found:") {
+                Ok(Response::err_with_details(
+                    "CONNECTION_SESSION_NOT_FOUND",
+                    "The saved data source is available, but its live connection session is not active.",
+                    true,
+                    Some(query_context),
+                ))
+            } else {
+                Ok(Response::err_with_details(
+                    "QUERY_EXECUTION_FAILED",
+                    &message,
+                    false,
+                    Some(query_context),
+                ))
+            }
+        }
     }
 }
 

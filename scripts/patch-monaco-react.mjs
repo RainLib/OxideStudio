@@ -13,6 +13,18 @@ const packageRoot = join(
 const patches = {
   "dist/index.mjs": [
     {
+      name: "Editor stale onMount guard",
+      original: "W(()=>{s&&L.current(o.current,d.current)},[s])",
+      replacement:
+        "W(()=>{s&&o.current&&d.current&&L.current(o.current,d.current)},[s])",
+    },
+    {
+      name: "DiffEditor stale onMount guard",
+      original: "ne(()=>{M&&d.current(u.current,c.current)},[M])",
+      replacement:
+        "ne(()=>{M&&u.current&&c.current&&d.current(u.current,c.current)},[M])",
+    },
+    {
       name: "Editor lifecycle",
       original:
         "function pe(){I.current?.dispose(),V?y&&_.set(m,o.current.saveViewState()):o.current.getModel()?.dispose(),o.current.dispose()}",
@@ -28,6 +40,20 @@ const patches = {
     },
   ],
   "dist/index.js": [
+    {
+      name: "Editor stale onMount guard",
+      original:
+        "(0,c.useEffect)(()=>{d&&U.current(n.current,a.current)},[d])",
+      replacement:
+        "(0,c.useEffect)(()=>{d&&n.current&&a.current&&U.current(n.current,a.current)},[d])",
+    },
+    {
+      name: "DiffEditor stale onMount guard",
+      original:
+        "(0,f.useEffect)(()=>{y&&a.current(p.current,u.current)},[y])",
+      replacement:
+        "(0,f.useEffect)(()=>{y&&p.current&&u.current&&a.current(p.current,u.current)},[y])",
+    },
     {
       name: "Editor lifecycle",
       original:

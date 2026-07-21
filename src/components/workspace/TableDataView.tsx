@@ -1016,6 +1016,7 @@ export function TableDataView() {
         onImport={() => importInputRef.current?.click()}
         onExportCsv={() => void handleExport("csv")}
         onExportJson={() => void handleExport("json")}
+        onExportSql={() => void handleExport("sql")}
       />
 
       {/* Query Builder Filter Row */}

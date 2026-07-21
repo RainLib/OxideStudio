@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, HashSet},
-    fs::{create_dir_all, File},
-    io::{BufWriter, Write},
-    path::PathBuf,
+    fs::{create_dir_all, metadata, File},
+    io::{BufReader, BufWriter, Read, Write},
+    path::{Path, PathBuf},
     str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -22,6 +22,8 @@ use tauri::{AppHandle, Manager, State};
 
 const DEFAULT_PAGE_SIZE: u32 = 500;
 const MAX_PAGE_SIZE: u32 = 5_000;
+const MAX_IMPORT_FILE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_IMPORT_ROWS: usize = 100_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +39,7 @@ pub struct TablePageResult {
 pub enum TableExportFormat {
     Csv,
     Json,
+    Sql,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +47,21 @@ pub enum TableExportFormat {
 pub struct TableExportResult {
     pub file_path: String,
     pub rows_exported: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TableImportFormat {
+    Csv,
+    Json,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableImportResult {
+    pub file_path: String,
+    pub rows_imported: u64,
+    pub batches: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -348,6 +366,7 @@ fn export_file_path(
     let extension = match format {
         TableExportFormat::Csv => "csv",
         TableExportFormat::Json => "json",
+        TableExportFormat::Sql => "sql",
     };
     let schema = sanitize_file_part(schema);
     let table = sanitize_file_part(table);
@@ -364,6 +383,47 @@ fn row_to_object(columns: &[String], row: &[Value]) -> Value {
         );
     }
     Value::Object(object)
+}
+
+fn sql_export_literal(value: &Value) -> String {
+    match value {
+        Value::Null => "NULL".to_string(),
+        Value::Bool(value) => {
+            if *value {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
+        }
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => sql_string_literal(value),
+        Value::Array(_) | Value::Object(_) => {
+            sql_string_literal(&serde_json::to_string(value).unwrap_or_default())
+        }
+    }
+}
+
+fn sql_insert_statement(
+    kind: DatabaseKind,
+    schema: &str,
+    table: &str,
+    columns: &[String],
+    row: &[Value],
+) -> String {
+    let columns = columns
+        .iter()
+        .map(|column| kind.quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let values = row
+        .iter()
+        .map(sql_export_literal)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "INSERT INTO {} ({columns}) VALUES ({values});",
+        kind.qualified_table(schema_option(schema), table),
+    )
 }
 
 fn sql_string_literal(value: &str) -> String {
@@ -2035,6 +2095,13 @@ pub async fn export_table_data(
 
         if matches!(format, TableExportFormat::Json) {
             writer.write_all(b"[").map_err(|e| e.to_string())?;
+        } else if matches!(format, TableExportFormat::Sql) {
+            writeln!(
+                writer,
+                "-- OxideStudio data export for {}",
+                kind.qualified_table(schema_option(&schema), &table)
+            )
+            .map_err(|e| e.to_string())?;
         }
 
         loop {
@@ -2109,6 +2176,14 @@ pub async fn export_table_data(
                         serde_json::to_writer(&mut writer, &object).map_err(|e| e.to_string())?;
                         wrote_json_row = true;
                     }
+                    TableExportFormat::Sql => {
+                        writeln!(
+                            writer,
+                            "{}",
+                            sql_insert_statement(kind, &schema, &table, &columns, row)
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
                 }
             }
 
@@ -2136,6 +2211,274 @@ pub async fn export_table_data(
     match result {
         Ok(export) => Ok(Response::ok(export)),
         Err(error) => Ok(Response::err("EXPORT_TABLE_DATA_ERROR", &error)),
+    }
+}
+
+fn validate_import_file(path: &Path, format: TableImportFormat) -> Result<(), String> {
+    let file_metadata = metadata(path).map_err(|error| error.to_string())?;
+    if !file_metadata.is_file() {
+        return Err("The selected import path is not a file".to_string());
+    }
+    if file_metadata.len() > MAX_IMPORT_FILE_BYTES {
+        return Err(format!(
+            "Import files are limited to {} MB",
+            MAX_IMPORT_FILE_BYTES / 1024 / 1024
+        ));
+    }
+
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let accepted = match format {
+        TableImportFormat::Csv => extension == "csv",
+        TableImportFormat::Json => matches!(extension.as_str(), "json" | "jsonl" | "ndjson"),
+    };
+    if accepted {
+        Ok(())
+    } else {
+        Err(format!(
+            "The selected file does not match the {format:?} format"
+        ))
+    }
+}
+
+fn canonical_import_columns(
+    headers: &[String],
+    columns: &BTreeMap<String, ColumnInfo>,
+) -> Result<Vec<String>, String> {
+    if headers.is_empty() {
+        return Err("The import file does not contain any columns".to_string());
+    }
+    let mut seen = HashSet::new();
+    let mut canonical = Vec::with_capacity(headers.len());
+    for header in headers {
+        let header = header.trim();
+        if header.is_empty() {
+            return Err("Import column names cannot be empty".to_string());
+        }
+        let column_name = if columns.contains_key(header) {
+            header.to_string()
+        } else {
+            let matches = columns
+                .keys()
+                .filter(|column| column.eq_ignore_ascii_case(header))
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [column] => (*column).clone(),
+                [] => return Err(format!("Import file contains unknown column: {header}")),
+                _ => {
+                    return Err(format!(
+                        "Import column {header} matches more than one table column"
+                    ));
+                }
+            }
+        };
+        if !seen.insert(column_name.clone()) {
+            return Err(format!(
+                "Import file contains duplicate column: {column_name}"
+            ));
+        }
+        canonical.push(column_name);
+    }
+    Ok(canonical)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_import_batch(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    kind: DatabaseKind,
+    schema: &str,
+    table: &str,
+    columns: &BTreeMap<String, ColumnInfo>,
+    rows: &mut Vec<BTreeMap<String, Value>>,
+) -> Result<u64, String> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let statements = rows
+        .iter()
+        .map(|row| {
+            build_insert_mutation(kind, schema, table, columns, row)
+                .map(|(sql, params)| ParameterizedStatement { sql, params })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let imported = execute_target_parameterized_batch(manager, connection_id, database, &statements)
+        .await
+        .map_err(|error| error.to_string())?
+        .len() as u64;
+    rows.clear();
+    Ok(imported)
+}
+
+fn json_import_rows(path: &Path) -> Result<Vec<BTreeMap<String, Value>>, String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let mut reader = BufReader::new(file);
+    let mut source = String::new();
+    reader
+        .read_to_string(&mut source)
+        .map_err(|error| error.to_string())?;
+
+    let values = match serde_json::from_str::<Value>(&source) {
+        Ok(Value::Array(values)) => values,
+        Ok(Value::Object(object)) => vec![Value::Object(object)],
+        Ok(_) => {
+            return Err("JSON import expects an object or an array of objects".to_string());
+        }
+        Err(_) => source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| !line.trim().is_empty())
+            .map(|(index, line)| {
+                serde_json::from_str::<Value>(line)
+                    .map_err(|error| format!("Invalid JSON object on line {}: {error}", index + 1))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| match value {
+            Value::Object(object) => Ok(object.into_iter().collect()),
+            _ => Err(format!("JSON row {} is not an object", index + 1)),
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn import_table_data(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    driver: String,
+    schema: String,
+    table: String,
+    database: Option<String>,
+    file_path: String,
+    format: TableImportFormat,
+    first_row_header: Option<bool>,
+) -> Result<Response<TableImportResult>, String> {
+    let result: Result<TableImportResult, String> = async {
+        let kind = DatabaseKind::from_str(&driver).map_err(|error| error.to_string())?;
+        let path = PathBuf::from(file_path.trim());
+        validate_import_file(&path, format)?;
+        let database = database.as_deref();
+        ensure_target_relation_operation_allowed(
+            &manager,
+            &connection_id,
+            database,
+            &schema,
+            &table,
+            RelationOperation::DataMutation,
+        )
+        .await?;
+        let table_columns = get_target_columns(&manager, &connection_id, database, &schema, &table)
+            .await
+            .map_err(|error| error.to_string())?;
+        let ordered_columns = table_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let column_lookup = column_lookup(table_columns);
+        let mut pending_rows = Vec::new();
+
+        match format {
+            TableImportFormat::Csv => {
+                let has_headers = first_row_header.unwrap_or(true);
+                let mut reader = csv::ReaderBuilder::new()
+                    .has_headers(has_headers)
+                    .from_path(&path)
+                    .map_err(|error| error.to_string())?;
+                let headers = if has_headers {
+                    reader
+                        .headers()
+                        .map_err(|error| error.to_string())?
+                        .iter()
+                        .map(|value| value.trim().to_string())
+                        .collect::<Vec<_>>()
+                } else {
+                    ordered_columns
+                };
+                let headers = canonical_import_columns(&headers, &column_lookup)?;
+
+                for record in reader.records() {
+                    let record = record.map_err(|error| error.to_string())?;
+                    if record.len() != headers.len() {
+                        return Err(format!(
+                            "CSV row has {} values but {} columns were expected",
+                            record.len(),
+                            headers.len()
+                        ));
+                    }
+                    pending_rows.push(
+                        headers
+                            .iter()
+                            .zip(record.iter())
+                            .map(|(column, value)| {
+                                (column.clone(), Value::String(value.to_string()))
+                            })
+                            .collect(),
+                    );
+                    if pending_rows.len() > MAX_IMPORT_ROWS {
+                        return Err(format!(
+                            "Imports are limited to {MAX_IMPORT_ROWS} rows per transaction"
+                        ));
+                    }
+                }
+            }
+            TableImportFormat::Json => {
+                for row in json_import_rows(&path)? {
+                    let headers = row.keys().cloned().collect::<Vec<_>>();
+                    let canonical_headers = canonical_import_columns(&headers, &column_lookup)?;
+                    pending_rows.push(
+                        headers
+                            .into_iter()
+                            .zip(canonical_headers)
+                            .filter_map(|(source, target)| {
+                                row.get(&source).cloned().map(|value| (target, value))
+                            })
+                            .collect(),
+                    );
+                    if pending_rows.len() > MAX_IMPORT_ROWS {
+                        return Err(format!(
+                            "Imports are limited to {MAX_IMPORT_ROWS} rows per transaction"
+                        ));
+                    }
+                }
+            }
+        }
+
+        let rows_imported = if pending_rows.is_empty() {
+            0
+        } else {
+            execute_import_batch(
+                &manager,
+                &connection_id,
+                database,
+                kind,
+                &schema,
+                &table,
+                &column_lookup,
+                &mut pending_rows,
+            )
+            .await?
+        };
+
+        Ok(TableImportResult {
+            file_path: path.display().to_string(),
+            rows_imported,
+            batches: u64::from(rows_imported > 0),
+        })
+    }
+    .await;
+
+    match result {
+        Ok(imported) => Ok(Response::ok(imported)),
+        Err(error) => Ok(Response::err("IMPORT_TABLE_DATA_ERROR", &error)),
     }
 }
 
@@ -3372,15 +3715,16 @@ mod tests {
         build_drop_table_column_statement, build_drop_table_constraint_statement,
         build_drop_table_index_statement, build_insert_mutation,
         build_rename_table_column_statement, build_rename_table_index_statement,
-        build_structured_filter_where, build_table_order_by, build_update_mutation, column_lookup,
-        csv_escape, execute_target_parameterized_batch, generate_postgres_materialized_view_ddl,
-        generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
-        object_label_from_type, object_type_is_foreign_table, object_type_is_materialized_view,
-        object_type_is_view, postgres_view_definition_query, preview_metadata_required,
-        query_target, query_target_parameterized, relation_operation_allowed, sanitize_file_part,
-        summarize_mutation_affected, validated_raw_filter_sql, value_to_u64, view_definition_query,
-        AlterColumnValueMode, AlterTableColumn, CreateTableColumn, RelationOperation, TableFilter,
-        TableRowUpdate, TableSort,
+        build_structured_filter_where, build_table_order_by, build_update_mutation,
+        canonical_import_columns, column_lookup, csv_escape, execute_target_parameterized_batch,
+        generate_postgres_materialized_view_ddl, generate_postgres_table_ddl,
+        generate_postgres_view_ddl, get_target_columns, object_label_from_type,
+        object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
+        postgres_view_definition_query, preview_metadata_required, query_target,
+        query_target_parameterized, relation_operation_allowed, sanitize_file_part,
+        sql_insert_statement, summarize_mutation_affected, validated_raw_filter_sql, value_to_u64,
+        view_definition_query, AlterColumnValueMode, AlterTableColumn, CreateTableColumn,
+        RelationOperation, TableFilter, TableRowUpdate, TableSort,
     };
     use crate::core::{
         dialect::DatabaseKind,
@@ -3397,6 +3741,44 @@ mod tests {
     use std::collections::BTreeMap;
 
     struct PreviewTargetDriver;
+
+    #[test]
+    fn exports_replayable_sql_insert_statements() {
+        assert_eq!(
+            sql_insert_statement(
+                DatabaseKind::Postgres,
+                "public",
+                "users",
+                &["id".to_string(), "display name".to_string()],
+                &[json!(7), json!("O'Reilly")],
+            ),
+            r#"INSERT INTO "public"."users" ("id", "display name") VALUES (7, 'O''Reilly');"#
+        );
+        assert_eq!(
+            sql_insert_statement(
+                DatabaseKind::Mysql,
+                "app",
+                "events",
+                &["payload".to_string(), "active".to_string()],
+                &[json!({"kind": "login"}), json!(true)],
+            ),
+            r#"INSERT INTO `app`.`events` (`payload`, `active`) VALUES ('{"kind":"login"}', TRUE);"#
+        );
+    }
+
+    #[test]
+    fn import_headers_resolve_to_canonical_table_columns() {
+        let columns = column_lookup(vec![target_column("user_id"), target_column("DisplayName")]);
+        assert_eq!(
+            canonical_import_columns(
+                &["USER_ID".to_string(), "displayname".to_string()],
+                &columns,
+            )
+            .unwrap(),
+            vec!["user_id".to_string(), "DisplayName".to_string()]
+        );
+        assert!(canonical_import_columns(&["missing".to_string()], &columns).is_err());
+    }
 
     fn target_column(name: &str) -> ColumnInfo {
         ColumnInfo {

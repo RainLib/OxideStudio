@@ -18,18 +18,31 @@ import {
   writeConnectionDisplayCache,
   type ConnectionDisplaySummary,
 } from "@/startup/dataSourceDisplayCache";
+import type { ManagedDataSourceDescriptor } from "@/services/tauri/enterprise.service";
+import { enterpriseService } from "@/services/tauri/enterprise.service";
 
 const ACTIVE_PROJECT_KEY = "oxide-studio-active-project";
 const DEFAULT_PROJECT_ID = "sqls";
 export const CONNECTION_LOAD_TIMEOUT_MS = 15_000;
 
 export interface ConnectionConfig extends SavedConnection {
+  origin?: "local" | "managed";
+  managedDescriptor?: ManagedDataSourceDescriptor;
   host?: string;
   port?: number;
   user?: string;
   password?: string;
   database?: string;
   tags?: string[];
+}
+
+export function isManagedConnection(
+  config: ConnectionConfig,
+): config is ConnectionConfig & {
+  origin: "managed";
+  managedDescriptor: ManagedDataSourceDescriptor;
+} {
+  return config.origin === "managed" && Boolean(config.managedDescriptor);
 }
 
 export type { ConnectionDisplaySummary } from "@/startup/dataSourceDisplayCache";
@@ -261,6 +274,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   saveConnection: async (config) => {
+    if (isManagedConnection(config)) {
+      throw new Error(
+        "Managed data sources cannot be changed or saved on this device.",
+      );
+    }
     const scopedConfig = scopeConnectionToActiveProject(config);
     const connections = get().connections;
     const existingIndex = connections.findIndex(
@@ -295,6 +313,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   removeConnection: async (id) => {
     const state = get();
+    const connectionToRemove = state.connections.find(
+      (connection) => connection.id === id,
+    );
+    if (connectionToRemove && isManagedConnection(connectionToRemove)) {
+      throw new Error(
+        "Managed data sources are assigned by your organization and cannot be removed locally.",
+      );
+    }
     const remainingConnections = state.connections.filter(
       (connection) => connection.id !== id,
     );
@@ -368,6 +394,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   testConnection: async (config) => {
+    if (isManagedConnection(config)) {
+      return "Managed data sources are tested by the enterprise Gateway.";
+    }
     try {
       await connectionService.testConnection(
         config.driver,
@@ -381,6 +410,69 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   connect: (config) => {
+    if (isManagedConnection(config)) {
+      const projectId = connectionProjectId(config);
+      const descriptor = config.managedDescriptor;
+      const scopeKey = connectionScopeKey(config);
+      const pending = pendingConnects.get(scopeKey);
+      if (pending) {
+        if (pending.attemptId !== latestConnectAttempt) {
+          latestConnectAttempt += 1;
+          pending.attemptId = latestConnectAttempt;
+        }
+        return pending.promise;
+      }
+      latestConnectAttempt += 1;
+      const flight: PendingConnect = {
+        attemptId: latestConnectAttempt,
+        promise: Promise.resolve(null),
+      };
+      flight.promise = (async () => {
+        try {
+          await enterpriseService.connectManagedSource(config.id, descriptor);
+          if (
+            flight.attemptId !== latestConnectAttempt ||
+            activeProjectId() !== projectId
+          ) {
+            if (get().activeConnectionId !== config.id) {
+              await connectionService.disconnect(config.id).catch(() => {
+                // A superseded managed session may already have been replaced.
+              });
+            }
+            return null;
+          }
+          const schemaStore = useSchemaStore.getState();
+          if (get().activeConnectionId !== config.id) {
+            schemaStore.snapshotActiveMetadata();
+          }
+          if (!schemaStore.restoreConnectionSnapshot(config.id)) {
+            schemaStore.clearActiveMetadata();
+          }
+          set({
+            activeConnectionId: config.id,
+            connectedConnectionIds: Array.from(
+              new Set([...get().connectedConnectionIds, config.id]),
+            ),
+            isConnected: true,
+          });
+          return null;
+        } catch (error) {
+          if (
+            flight.attemptId !== latestConnectAttempt ||
+            activeProjectId() !== projectId
+          ) {
+            return null;
+          }
+          return error instanceof Error ? error.message : String(error);
+        } finally {
+          if (pendingConnects.get(scopeKey) === flight) {
+            pendingConnects.delete(scopeKey);
+          }
+        }
+      })();
+      pendingConnects.set(scopeKey, flight);
+      return flight.promise;
+    }
     const projectId = connectionProjectId(config);
     const scopedConfig = { ...config, projectId };
     const scopeKey = connectionScopeKey(scopedConfig);
@@ -591,6 +683,58 @@ export async function ensureConnectionReady(
     return {
       status: "error",
       message: `Could not connect to "${initialConnection.name}": ${connectionError}`,
+    };
+  }
+
+  if (!currentState.connectedConnectionIds.includes(connectionId)) {
+    return { status: "cancelled" };
+  }
+
+  return { status: "ready", connection: currentConnection };
+}
+
+/**
+ * Rebuilds an in-memory backend session for a saved data source.
+ *
+ * The frontend connection list survives workspace hydration, while Rust
+ * driver sessions intentionally do not. A query can therefore discover that
+ * a previously connected session disappeared after a reload or project
+ * switch. Calling connect directly is safe here because the backend replaces
+ * the missing/stale driver atomically under the same saved connection ID.
+ */
+export async function restoreConnectionSession(
+  connectionId: string,
+): Promise<ConnectionReadiness> {
+  const initialState = useConnectionStore.getState();
+  const initialConnection = initialState.connections.find(
+    (connection) => connection.id === connectionId,
+  );
+  if (!initialConnection) {
+    return {
+      status: "error",
+      message:
+        "This query's data source is no longer available in the active project. Choose another data source and try again.",
+    };
+  }
+
+  const initialScopeKey = connectionScopeKey(initialConnection);
+  const connectionError = await initialState.connect(initialConnection);
+  const currentState = useConnectionStore.getState();
+  const currentConnection = currentState.connections.find(
+    (connection) => connection.id === connectionId,
+  );
+
+  if (
+    !currentConnection ||
+    connectionScopeKey(currentConnection) !== initialScopeKey
+  ) {
+    return { status: "cancelled" };
+  }
+
+  if (connectionError) {
+    return {
+      status: "error",
+      message: `Could not restore “${initialConnection.name}”: ${connectionError}`,
     };
   }
 

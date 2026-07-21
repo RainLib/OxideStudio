@@ -2,6 +2,7 @@ import { cn } from "@/lib/utils";
 import {
   Check,
   Columns3,
+  FileCode2,
   FileJson,
   LockKeyhole,
   LockKeyholeOpen,
@@ -37,6 +38,7 @@ interface TableDataToolbarProps {
   onImport: () => void;
   onExportCsv: () => void;
   onExportJson: () => void;
+  onExportSql: () => void;
 }
 
 export function TableDataToolbar({
@@ -60,6 +62,7 @@ export function TableDataToolbar({
   onImport,
   onExportCsv,
   onExportJson,
+  onExportSql,
 }: TableDataToolbarProps) {
   const mutationDisabled = isExecuting || readOnly || !editingEnabled;
 
@@ -162,6 +165,13 @@ export function TableDataToolbar({
           disabled={isExecuting || exportDisabled}
         >
           <FileJson size={14} />
+        </ToolbarButton>
+        <ToolbarButton
+          title="Export SQL inserts"
+          onClick={onExportSql}
+          disabled={isExecuting || exportDisabled}
+        >
+          <FileCode2 size={14} />
         </ToolbarButton>
       </div>
     </div>

@@ -50,4 +50,61 @@ describe("table service database scope", () => {
       database: "analytics",
     });
   });
+
+  it("passes SQL export and JSON import options through the table contract", async () => {
+    mocks.invoke
+      .mockResolvedValueOnce({
+        success: true,
+        data: { filePath: "/tmp/users.sql", rowsExported: 2 },
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        data: {
+          filePath: "/tmp/users.json",
+          rowsImported: 2,
+          batches: 1,
+        },
+      });
+
+    await tableService.exportTableData(
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      "sql",
+    );
+    await tableService.importTableData(
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      "/tmp/users.json",
+      "json",
+      true,
+      "analytics",
+    );
+
+    expect(mocks.invoke).toHaveBeenNthCalledWith(1, "export_table_data", {
+      connectionId: "postgres-1",
+      driver: "postgres",
+      schema: "public",
+      table: "users",
+      format: "sql",
+      filterSql: undefined,
+      filters: undefined,
+      sort: undefined,
+      pageSize: 5000,
+      maxRows: undefined,
+    });
+    expect(mocks.invoke).toHaveBeenNthCalledWith(2, "import_table_data", {
+      connectionId: "postgres-1",
+      driver: "postgres",
+      schema: "public",
+      table: "users",
+      filePath: "/tmp/users.json",
+      format: "json",
+      firstRowHeader: true,
+      database: "analytics",
+    });
+  });
 });

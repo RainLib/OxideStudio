@@ -161,6 +161,13 @@ SQL 拼接、标识符引用、只读判断、修订冲突和路径穿越防护�
 
 非关系型对象仍通过同一 capability 边界进入工作区，但不伪装成 SQL：MongoDB collection、Redis key 与 Elasticsearch index 打开只读、有界的原生数据预览。Redis Explorer 保留 `db N` namespace 层；Elasticsearch 连接时探测 6/7/8 主版本，6.x 使用 typed mapping/document path，7/8 使用 typeless API。完整的服务端分页、过滤和编辑能力仍需各数据模型独立实现。
 
+Elasticsearch Query DSL 使用独立的 Kibana Console 文档模型。编辑器按
+`METHOD index/_endpoint` 请求行切分文档，光标执行只运行当前请求，选区执行运行选区，
+整页执行运行全部请求；本地 Console provider 提供方法、端点、Query DSL 片段和逐请求
+格式化，schema-aware LSP 继续补充当前 index mapping 字段。关系型数据交换复用 Rust
+后端：表数据通过参数化事务批次导入，CSV、
+JSON 和 SQL `INSERT` 导出采用有界分页写盘，SQL dump 导入保留脚本自身的事务语义。
+
 SQLite 和 SQL Server 当前没有运行时 driver；Cargo 中的 `sqlx/sqlite` feature 只服务本地 `MetaStore`，不代表可连接 SQLite 数据源。任何面向用户或 AI 的支持列表都以后端 `list_database_capabilities` 为权威来源，前端 profile 只提供显示/连接表单信息和离线降级。
 
 ### 4.4 本地持久化

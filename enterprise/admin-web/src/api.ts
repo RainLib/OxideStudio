@@ -1,0 +1,156 @@
+export interface AdminOverview {
+  organization: { id: string; displayName: string };
+  members: Array<{
+    id: string;
+    displayName: string;
+    email: string;
+    status: string;
+    role: string;
+  }>;
+  projects: Array<{
+    id: string;
+    displayName: string;
+    memberCount: number;
+    dataSourceCount: number;
+    policyRevision: string;
+    dataSources: Array<{
+      id: string;
+      displayName: string;
+      driver: string;
+    }>;
+  }>;
+  gateways: Array<{
+    id: string;
+    displayName: string;
+    status: string;
+    lastSeenAt?: string;
+  }>;
+}
+
+const baseUrl = (
+  import.meta.env.VITE_OXIDE_CONTROL_PLANE_URL || ""
+).replace(/\/$/, "");
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const accessToken = adminAuth.accessToken();
+  if (!accessToken) throw new Error("Sign in to administer this organization.");
+  const response = await fetch(`${baseUrl}${path}`, {
+    ...init,
+    credentials: "omit",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${accessToken}`,
+      ...init?.headers,
+    },
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as
+      | { error?: { message?: string } }
+      | null;
+    throw new Error(
+      payload?.error?.message || `Enterprise request failed (${response.status})`,
+    );
+  }
+  return response.json() as Promise<T>;
+}
+
+export const adminApi = {
+  createOrganization: (slug: string, displayName: string) =>
+    request<{ id: string }>("/v1/organizations", {
+      method: "POST",
+      body: JSON.stringify({ slug, displayName }),
+    }),
+  overview: (organizationId: string) =>
+    request<AdminOverview>(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/overview`,
+    ),
+  invite: (organizationId: string, email: string, role: string) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/invitations`,
+      {
+        method: "POST",
+        body: JSON.stringify({ email, role }),
+      },
+    ),
+  createProject: (organizationId: string, displayName: string) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/managed-projects`,
+      {
+        method: "POST",
+        body: JSON.stringify({ displayName }),
+      },
+    ),
+  registerGateway: (
+    organizationId: string,
+    displayName: string,
+    directEndpoint: string,
+  ) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/gateways`,
+      {
+        method: "POST",
+        body: JSON.stringify({ displayName, directEndpoint }),
+      },
+    ),
+  activateGateway: (organizationId: string, gatewayId: string) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/gateways/${encodeURIComponent(gatewayId)}/activate`,
+      { method: "POST", body: "{}" },
+    ),
+  registerDataSource: (
+    organizationId: string,
+    input: {
+      projectId: string;
+      gatewayId: string;
+      driver: string;
+      displayName: string;
+      capabilities: string[];
+    },
+  ) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/data-sources`,
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    ),
+  assignProject: (
+    organizationId: string,
+    projectId: string,
+    principalId: string,
+  ) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/project-assignments`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          projectId,
+          principalKind: "user",
+          principalId,
+        }),
+      },
+    ),
+  createGrant: (
+    organizationId: string,
+    input: {
+      projectId: string;
+      principalId: string;
+      dataSourceId?: string;
+      resourcePath: string[];
+      actions: string[];
+      effect: "permit" | "forbid";
+    },
+  ) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/access-grants`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          ...input,
+          dataSourceId: input.dataSourceId || null,
+          principalKind: "user",
+        }),
+      },
+    ),
+};
+import { adminAuth } from "./auth";

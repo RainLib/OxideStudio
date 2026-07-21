@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   getDatabaseCapabilities: vi.fn(async () => {
     throw new Error("use fallback capabilities");
   }),
+  connect: vi.fn(async () => undefined),
   saveHistoryEntries: vi.fn(async () => undefined),
 }));
 
@@ -33,6 +34,9 @@ vi.mock("@/services/tauri/query-history.service", () => ({
 }));
 
 vi.mock("@/services/tauri", () => ({
+  connectionService: {
+    connect: mocks.connect,
+  },
   databaseService: {
     getDatabaseCapabilities: mocks.getDatabaseCapabilities,
   },
@@ -72,6 +76,7 @@ function resetWorkspaceState() {
       },
     ],
     activeConnectionId: "postgres-1",
+    connectedConnectionIds: ["postgres-1"],
     isConnected: true,
     isLoading: false,
     selectedConnection: null,
@@ -112,6 +117,7 @@ describe("query run cancellation store", () => {
     mocks.explainQuery.mockClear();
     mocks.cancelQuery.mockClear();
     mocks.getDatabaseCapabilities.mockClear();
+    mocks.connect.mockClear();
     mocks.saveHistoryEntries.mockClear();
     useHistoryStore.setState({
       projectId: "sqls",
@@ -172,6 +178,55 @@ describe("query run cancellation store", () => {
       errorMessage: "syntax error near FROM",
       executionMode: "statement",
     });
+  });
+
+  it("restores a missing backend session and retries the query once", async () => {
+    mocks.executeQuery
+      .mockRejectedValueOnce(
+        new Error("Connection not found: internal-connection-id"),
+      )
+      .mockResolvedValueOnce([]);
+
+    await useTabStore.getState().runTabQuery("tab-1", "postgres-1");
+
+    expect(mocks.connect).toHaveBeenCalledTimes(1);
+    expect(mocks.executeQuery).toHaveBeenCalledTimes(2);
+    expect(useTabStore.getState().tabs[0]).toMatchObject({
+      isExecuting: false,
+      runningQueryId: null,
+      error: null,
+    });
+  });
+
+  it("keeps the previous result mounted while a query reruns", async () => {
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          results: [
+            {
+              columns: [{ name: "value", data_type: "integer" }],
+              rows: [[1]],
+            },
+          ],
+        },
+      ],
+    });
+    mocks.executeQuery.mockImplementationOnce(async () => {
+      expect(useTabStore.getState().tabs[0]?.results?.[0]?.rows).toEqual([
+        [1],
+      ]);
+      return [
+        {
+          columns: [{ name: "value", data_type: "integer" }],
+          rows: [[2]],
+        },
+      ];
+    });
+
+    await useTabStore.getState().runTabQuery("tab-1", "postgres-1");
+
+    expect(useTabStore.getState().tabs[0]?.results?.[0]?.rows).toEqual([[2]]);
   });
 
   it("surfaces cancel invocation errors without clearing the running query id", async () => {
@@ -264,6 +319,7 @@ describe("query run cancellation store", () => {
         },
       ],
       activeConnectionId: "redis-1",
+      connectedConnectionIds: ["redis-1"],
       isConnected: true,
     });
     useSchemaStore.setState({

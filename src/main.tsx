@@ -1,4 +1,3 @@
-import App from "./App";
 import { mountApp } from "./bootstrap";
 
 function showStartupError(error: unknown) {
@@ -9,13 +8,11 @@ function showStartupError(error: unknown) {
   if (errorElement) errorElement.textContent = message;
 }
 
+window.dispatchEvent(new Event("oxide:module-entry-ready"));
+
 try {
-  // Keep React bootstrap and App in one startup graph instead of waiting for
-  // two runtime dynamic-import round trips. The App module starts the workspace
-  // chunk immediately; database hydration still begins only after the real
-  // workspace has committed.
-  mountApp(App);
+  mountApp();
 } catch (error) {
-  showStartupError(error);
-  throw error;
+    showStartupError(error);
+    console.error("Failed to load the OxideStudio application:", error);
 }

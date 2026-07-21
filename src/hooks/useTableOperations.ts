@@ -2,8 +2,12 @@ import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
 import { tableService } from "@/services/tauri";
-import type { TableExportFormat } from "@/services/tauri/types";
+import type {
+  TableExportFormat,
+  TableImportFormat,
+} from "@/services/tauri/types";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { open } from "@tauri-apps/plugin-dialog";
 import { DEFAULT_DATABASE_DRIVER } from "@/lib/databaseDialect";
 import { useTaskStore } from "@/store/useTaskStore";
 import {
@@ -158,6 +162,61 @@ export function useTableOperations() {
     }
   };
 
+  const importTableData = async (
+    tableName: string,
+    format: TableImportFormat,
+  ) => {
+    if (!activeConnectionId || !currentSchema) return;
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [
+        format === "csv"
+          ? { name: "CSV data", extensions: ["csv"] }
+          : { name: "JSON data", extensions: ["json", "jsonl", "ndjson"] },
+      ],
+    });
+    if (typeof selected !== "string") return;
+    const confirmed = window.confirm(
+      `Import ${format.toUpperCase()} rows into "${tableName}"?\n\nExisting rows are not replaced. Each imported record will be inserted as a new row.`,
+    );
+    if (!confirmed) return;
+
+    const driver = getDriver();
+    const taskStore = useTaskStore.getState();
+    const taskId = taskStore.startTask({
+      kind: "import",
+      title: `Import ${tableName}`,
+      detail: format.toUpperCase(),
+    });
+
+    try {
+      const imported = await tableService.importTableData(
+        activeConnectionId,
+        driver,
+        currentSchema,
+        tableName,
+        selected,
+        format,
+      );
+      taskStore.finishTask(
+        taskId,
+        `${imported.rowsImported.toLocaleString()} rows imported`,
+      );
+      await useTabStore
+        .getState()
+        .refreshTableTabs(
+          activeConnectionId,
+          currentSchema,
+          tableName,
+          false,
+        );
+    } catch (error: any) {
+      taskStore.failTask(taskId, error?.message || String(error));
+      throw error;
+    }
+  };
+
   const getTableDdl = async (
     tableName: string,
     objectType?: string | null
@@ -220,6 +279,7 @@ export function useTableOperations() {
     dropTable,
     renameTable,
     exportTableData,
+    importTableData,
     getTableDdl,
     getViewDefinition,
     refreshMaterializedView,

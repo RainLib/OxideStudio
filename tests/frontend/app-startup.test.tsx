@@ -8,6 +8,7 @@ import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { StartupWorkbenchShell } from "@/App";
 import {
+  peekStartupIntent,
   subscribeStartupIntents,
   type StartupIntent,
 } from "@/startup/startupIntents";
@@ -114,6 +115,40 @@ describe("application startup", () => {
     unsubscribe();
   });
 
+  it("queues a cached data source activation from the interactive startup explorer", async () => {
+    const received: StartupIntent[] = [];
+    const unsubscribe = subscribeStartupIntents((intent) =>
+      received.push(intent),
+    );
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <StartupWorkbenchShell
+          cachedDataSources={[
+            {
+              id: "connection-1",
+              name: "Analytics",
+              driver: "postgres",
+            },
+          ]}
+          hasDataSourceCache
+        />,
+      );
+    });
+
+    const dataSource = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Analytics"),
+    );
+    await act(async () => dataSource?.click());
+
+    expect(received).toEqual([
+      { type: "open-data-source", connectionId: "connection-1" },
+    ]);
+    expect(dataSource?.getAttribute("aria-busy")).toBe("true");
+    unsubscribe();
+  });
+
   it("keeps an inline startup action pending across the React shell handoff", async () => {
     window.__oxideStartupIntents = ["project-files"];
     root = createRoot(container);
@@ -135,28 +170,43 @@ describe("application startup", () => {
     ).toBe(false);
   });
 
-  it("does not turn a slow workspace transform into a false Reload error", () => {
+  it("does not turn a slow application transform into a false startup state", () => {
     const html = readFileSync(resolve(process.cwd(), "index.html"), "utf8");
 
-    expect(html).toContain("Still preparing the workspace…");
+    expect(html).toContain("oxide:module-entry-ready");
     expect(html).toContain("oxide:react-shell-ready");
-    expect(html).not.toContain(
-      "OxideStudio did not finish starting. Reload the window to try again.",
-    );
+    expect(html).not.toContain("Still preparing the workspace…");
+    expect(html).not.toContain("slowStartupTimer");
   });
 
-  it("starts the React entry and workspace request without a serial frame waterfall", () => {
+  it("uses a stable entry while keeping the workspace runtime split", () => {
     const main = readFileSync(
       resolve(process.cwd(), "src/main.tsx"),
       "utf8",
     );
     const app = readFileSync(resolve(process.cwd(), "src/App.tsx"), "utf8");
+    const workspace = readFileSync(
+      resolve(process.cwd(), "src/pages/workspace.tsx"),
+      "utf8",
+    );
 
-    expect(main).toContain('import App from "./App"');
     expect(main).toContain('import { mountApp } from "./bootstrap"');
     expect(main).not.toContain('import("./bootstrap")');
+    expect(main).toContain("oxide:module-entry-ready");
     expect(app).toContain('void import("@/pages/workspace")');
     expect(app).not.toContain("setWorkspaceEnabled");
     expect(app).not.toContain("requestAnimationFrame");
+    expect(workspace).toContain('import("@/pages/workspaceRuntime")');
+  });
+
+  it("restores a static cached data source intent after React loads", () => {
+    window.__oxideStartupIntents = [
+      "open-data-source:connection%2Fanalytics",
+    ];
+
+    expect(peekStartupIntent()).toEqual({
+      type: "open-data-source",
+      connectionId: "connection/analytics",
+    });
   });
 });

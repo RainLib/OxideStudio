@@ -40,6 +40,13 @@ export interface InlineLspContext {
   candidates?: Array<{ label: string; insertText?: string; kind?: number }>;
   diagnostics?: Array<{ severity?: number; message: string }>;
   errorCount?: number;
+  console?: {
+    request: string;
+    method?: string;
+    path?: string;
+    index?: string;
+    area: string;
+  };
 }
 
 export interface ProjectSnippet {

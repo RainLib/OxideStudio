@@ -42,6 +42,15 @@ export interface QueryResult {
     rowsAffected?: number;
     statementType?: string;
     message?: string;
+    responseMeta?: QueryResponseMeta;
+}
+
+export interface QueryResponseMeta {
+    requestMethod: string;
+    requestPath: string;
+    status: number;
+    durationMs: number;
+    rawResponse: unknown;
 }
 
 export interface ColumnDef {

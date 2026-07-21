@@ -18,6 +18,22 @@ pub struct QueryResult {
     pub statement_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(
+        default,
+        rename = "responseMeta",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub response_meta: Option<QueryResponseMeta>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryResponseMeta {
+    pub request_method: String,
+    pub request_path: String,
+    pub status: u16,
+    pub duration_ms: u64,
+    pub raw_response: serde_json::Value,
 }
 
 impl QueryResult {
@@ -28,6 +44,7 @@ impl QueryResult {
             rows_affected: None,
             statement_type: None,
             message: None,
+            response_meta: None,
         }
     }
 
@@ -44,6 +61,7 @@ impl QueryResult {
             rows_affected: Some(rows_affected),
             statement_type: Some(statement_type.to_string()),
             message: Some(message),
+            response_meta: None,
         }
     }
 }

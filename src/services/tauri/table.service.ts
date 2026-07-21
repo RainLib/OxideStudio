@@ -11,6 +11,8 @@ import type {
   TableRowUpdate,
   TableExportFormat,
   TableExportResult,
+  TableImportFormat,
+  TableImportResult,
   TableFilter,
   TableSort,
   TablePageResult,
@@ -100,6 +102,28 @@ export async function exportTableData(
     sort,
     pageSize,
     maxRows,
+  });
+}
+
+export async function importTableData(
+  connectionId: string,
+  driver: DatabaseDriver,
+  schema: string,
+  table: string,
+  filePath: string,
+  format: TableImportFormat,
+  firstRowHeader = true,
+  databaseName?: string
+): Promise<TableImportResult> {
+  return invokeWithInterceptors<TableImportResult>("import_table_data", {
+    connectionId,
+    driver,
+    schema,
+    table,
+    filePath,
+    format,
+    firstRowHeader,
+    database: databaseName,
   });
 }
 
@@ -494,6 +518,7 @@ export async function refreshMaterializedView(
 export const tableService = {
   previewTablePage,
   exportTableData,
+  importTableData,
   mutateTableRows,
   createTable,
   createView,

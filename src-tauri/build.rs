@@ -13,5 +13,15 @@ fn main() {
         std::env::set_var("TAURI_CONFIG", r#"{"bundle":{"externalBin":[]}}"#);
     }
 
+    tonic_prost_build::configure()
+        .build_server(false)
+        .build_client(true)
+        .compile_protos(
+            &["../enterprise/gateway/proto/oxide_gateway.proto"],
+            &["../enterprise/gateway/proto"],
+        )
+        .expect("enterprise Gateway client protocol must compile");
+    println!("cargo:rerun-if-changed=../enterprise/gateway/proto/oxide_gateway.proto");
+
     tauri_build::build()
 }

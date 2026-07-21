@@ -1,0 +1,190 @@
+openapi: 3.1.0
+info:
+  title: Oxide Enterprise Control Plane
+  version: 1.0.0
+servers:
+  - url: https://oxide.example.com
+security:
+  - oidc: []
+paths:
+  /v1/organizations:
+    post:
+      operationId: createOrganization
+      responses:
+        "200":
+          description: Organization created with the caller as owner
+  /v1/me:
+    get:
+      operationId: getCurrentUser
+      responses:
+        "200":
+          description: Current identity and organization memberships
+  /v1/managed-projects:
+    get:
+      operationId: listManagedProjects
+      responses:
+        "200":
+          description: Assigned projects and secret-free data-source descriptors
+  /v1/access-sessions:
+    post:
+      operationId: createAccessSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccessSessionRequest"
+      responses:
+        "200":
+          description: Short-lived Gateway access ticket
+        "403":
+          $ref: "#/components/responses/AccessDenied"
+  /v1/admin/organizations/{organizationId}/overview:
+    get:
+      operationId: getOrganizationOverview
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      responses:
+        "200":
+          description: Organization administration summary
+        "403":
+          $ref: "#/components/responses/AccessDenied"
+  /v1/admin/organizations/{organizationId}/invitations:
+    post:
+      operationId: inviteOrganizationMember
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      responses:
+        "200":
+          description: Invitation created or refreshed
+        "403":
+          $ref: "#/components/responses/AccessDenied"
+  /v1/admin/organizations/{organizationId}/managed-projects:
+    post:
+      operationId: createManagedProject
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      responses:
+        "200":
+          description: Managed project created
+  /v1/admin/organizations/{organizationId}/gateways:
+    post:
+      operationId: registerGateway
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      responses:
+        "200":
+          description: Credential-free Gateway route registered
+  /v1/admin/organizations/{organizationId}/gateways/{gatewayId}/activate:
+    post:
+      operationId: activateGateway
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+        - name: gatewayId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Gateway activated after out-of-band mTLS verification
+  /v1/admin/organizations/{organizationId}/data-sources:
+    post:
+      operationId: registerManagedDataSource
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      responses:
+        "200":
+          description: Secret-free managed data source descriptor registered
+  /v1/admin/organizations/{organizationId}/project-assignments:
+    post:
+      operationId: assignManagedProject
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      responses:
+        "200":
+          description: Assignment created
+        "403":
+          $ref: "#/components/responses/AccessDenied"
+  /v1/admin/organizations/{organizationId}/access-grants:
+    post:
+      operationId: createAccessGrant
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      responses:
+        "200":
+          description: Grant created and policy revision advanced
+        "403":
+          $ref: "#/components/responses/AccessDenied"
+components:
+  securitySchemes:
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: https://identity.example.com/.well-known/openid-configuration
+  parameters:
+    OrganizationId:
+      name: organizationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    AccessSessionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - deviceId
+        - organizationId
+        - projectId
+        - dataSourceId
+        - action
+        - resourcePath
+        - requestId
+        - source
+      properties:
+        deviceId:
+          type: string
+          format: uuid
+        organizationId:
+          type: string
+          format: uuid
+        projectId:
+          type: string
+          format: uuid
+        dataSourceId:
+          type: string
+          format: uuid
+        action:
+          type: string
+          enum:
+            - resourceDiscover
+            - metadataRead
+            - queryRead
+            - dataWrite
+            - schemaDdl
+            - dataExport
+            - aiUse
+            - mcpUse
+        resourcePath:
+          type: array
+          maxItems: 16
+          items:
+            type: string
+        requestId:
+          type: string
+          format: uuid
+        source:
+          type: string
+        maxRows:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        maxResultBytes:
+          type: integer
+          minimum: 4096
+          maximum: 1048576
+  responses:
+    AccessDenied:
+      description: Membership, assignment, or policy denied the operation

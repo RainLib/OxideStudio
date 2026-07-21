@@ -29,6 +29,7 @@ import {
 } from "@/lib/queryHistory";
 import {
   ensureConnectionReady,
+  restoreConnectionSession,
   useConnectionStore,
 } from "./useConnectionStore";
 import { useSchemaStore } from "./useSchemaStore";
@@ -44,6 +45,7 @@ import {
   redisSelectedDatabase,
 } from "@/lib/querySafety";
 import type { Diagnostic } from "@/services/lsp/types";
+import { isMissingConnectionSession } from "@/lib/queryErrorPresentation";
 import {
   extractSchemaContextChange,
   metadataRefreshNamespaces,
@@ -55,6 +57,7 @@ import {
   type EditorPatchPreview,
 } from "@/lib/editorPatch";
 import { documentTextRevision } from "@/lib/documentRevision";
+import { compileElasticsearchConsoleExecution } from "@/lib/elasticsearchConsole";
 
 async function refreshMetadataAfterQuery(
   connectionId: string,
@@ -132,15 +135,22 @@ export function queryTextForLanguage(
   query: string,
   driver: string,
   language?: QueryLanguage,
+  elasticsearchVariables?: Record<string, string>,
 ) {
   const trimmed = query.trim();
-  if (
-    !["elasticsearch", "elastic"].includes(driver.trim().toLowerCase()) ||
-    language !== "elasticsearch-eql" ||
-    ELASTICSEARCH_REQUEST_LINE.test(trimmed)
-  ) {
+  const isElasticsearch = ["elasticsearch", "elastic"].includes(
+    driver.trim().toLowerCase(),
+  );
+  if (!isElasticsearch) {
     return query;
   }
+  if (language !== "elasticsearch-eql") {
+    return compileElasticsearchConsoleExecution(
+      query,
+      elasticsearchVariables,
+    );
+  }
+  if (ELASTICSEARCH_REQUEST_LINE.test(trimmed)) return query;
 
   const body = trimmed.startsWith("{")
     ? trimmed
@@ -180,6 +190,7 @@ export interface TabData {
   schemaName?: string;
   objectType?: string | null;
   queryLanguage?: QueryLanguage;
+  elasticsearchVariables?: Record<string, string>;
   filters?: any[];
   results: QueryResult[] | null;
   explainPlan?: ExplainPlan | null;
@@ -579,6 +590,7 @@ interface TabState {
         | "schemaName"
         | "objectType"
         | "queryLanguage"
+        | "elasticsearchVariables"
         | "filters"
         | "fileProjectId"
         | "fileRootPath"
@@ -666,6 +678,10 @@ interface TabState {
   reopenTab: () => void;
   updateTabSql: (id: string, sql: string) => void;
   setQueryLanguage: (id: string, language: QueryLanguage) => void;
+  setElasticsearchVariables: (
+    id: string,
+    variables: Record<string, string>,
+  ) => void;
   setEditorSelection: (
     id: string,
     selection: EditorSelectionState | null,
@@ -1372,6 +1388,14 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
   },
 
+  setElasticsearchVariables: (id, elasticsearchVariables) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === id ? { ...tab, elasticsearchVariables } : tab,
+      ),
+    }));
+  },
+
   setEditorSelection: (id: string, selection: EditorSelectionState | null) => {
     set((state) => ({
       tabs: state.tabs.map((t) =>
@@ -1513,6 +1537,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       editorQuery,
       connection?.driver || DEFAULT_DATABASE_DRIVER,
       tab.queryLanguage,
+      tab.elasticsearchVariables,
     );
     const isNativeObjectDataLoad =
       tab.type === "table" &&
@@ -1565,10 +1590,9 @@ export const useTabStore = create<TabState>((set, get) => ({
               isExecuting: true,
               runningQueryId: queryId,
               error: null,
-              results: null,
               explainPlan: null,
               queryOutputView: "results",
-              activeResultIndex: 0,
+              activeResultIndex: t.activeResultIndex ?? 0,
             }
           : t,
       ),
@@ -1580,14 +1604,97 @@ export const useTabStore = create<TabState>((set, get) => ({
         schemaContext,
       );
 
-      const results = await queryService.executeQuery(
-        connectionId,
-        sqlToRun,
-        tab.databaseName ? undefined : schemaContext || undefined,
-        transactionId,
-        queryId,
-        tab.databaseName,
+      const readiness = await ensureConnectionReady(connectionId);
+      const currentTab = get().tabs.find((candidate) => candidate.id === id);
+      const tabContextIsCurrent = Boolean(
+        currentTab &&
+        currentTab.connectionId === tab.connectionId &&
+        currentTab.databaseName === tab.databaseName,
       );
+      if (!tabContextIsCurrent || readiness.status === "cancelled") {
+        taskStore.cancelTask(taskId, "Workspace changed before the query began");
+        set((state) => ({
+          tabs: state.tabs.map((candidate) =>
+            candidate.id === id && candidate.runningQueryId === queryId
+              ? {
+                  ...candidate,
+                  isExecuting: false,
+                  runningQueryId: null,
+                }
+              : candidate,
+          ),
+        }));
+        return;
+      }
+      if (readiness.status === "error") {
+        throw new Error(readiness.message);
+      }
+
+      const execute = () =>
+        queryService.executeQuery(
+          connectionId,
+          sqlToRun,
+          tab.databaseName ? undefined : schemaContext || undefined,
+          transactionId,
+          queryId,
+          tab.databaseName,
+        );
+
+      let results: QueryResult[];
+      try {
+        results = await execute();
+      } catch (error) {
+        if (!isMissingConnectionSession(error)) throw error;
+        if (transactionId) {
+          throw new Error(
+            "The connection session for this transaction expired. Start a new transaction before running the query again; OxideStudio will not replay transactional statements automatically.",
+          );
+        }
+
+        taskStore.updateTask(taskId, {
+          detail: `Restoring ${readiness.connection.name} before retrying`,
+        });
+        const restored = await restoreConnectionSession(connectionId);
+        const latestTab = get().tabs.find((candidate) => candidate.id === id);
+        const contextIsStillCurrent = Boolean(
+          latestTab &&
+          latestTab.runningQueryId === queryId &&
+          latestTab.connectionId === tab.connectionId &&
+          latestTab.databaseName === tab.databaseName,
+        );
+        if (!contextIsStillCurrent || restored.status === "cancelled") {
+          taskStore.cancelTask(
+            taskId,
+            "Workspace changed while reconnecting the data source",
+          );
+          set((state) => ({
+            tabs: state.tabs.map((candidate) =>
+              candidate.id === id && candidate.runningQueryId === queryId
+                ? {
+                    ...candidate,
+                    isExecuting: false,
+                    runningQueryId: null,
+                  }
+                : candidate,
+            ),
+          }));
+          return;
+        }
+        if (restored.status === "error") {
+          throw new Error(restored.message);
+        }
+
+        try {
+          results = await execute();
+        } catch (retryError) {
+          if (isMissingConnectionSession(retryError)) {
+            throw new Error(
+              `Could not reconnect to “${restored.connection.name}”: the backend session closed again immediately. Test this data source in Connection Settings, then retry the query.`,
+            );
+          }
+          throw retryError;
+        }
+      }
 
       console.log("[TabStore] Query successfully finished", results);
       const rowCount = queryHistoryRowCount(results);

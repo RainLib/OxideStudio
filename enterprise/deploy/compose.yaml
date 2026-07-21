@@ -1,0 +1,78 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: oxide_enterprise
+      POSTGRES_USER: oxide
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    volumes:
+      - control-plane-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oxide -d oxide_enterprise"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    command: ["start-dev", "--http-port=8080"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?required}
+    ports:
+      - "8080:8080"
+
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: enterprise/deploy/Dockerfile.control-plane
+    environment:
+      DATABASE_URL: postgres://oxide:${POSTGRES_PASSWORD}@postgres/oxide_enterprise
+      OXIDE_CONTROL_PLANE_BIND: 0.0.0.0:8787
+      OXIDE_OIDC_ISSUER: http://keycloak:8080/realms/oxide
+      OXIDE_OIDC_AUDIENCE: oxide-control-plane
+      OXIDE_OIDC_JWKS_URL: http://keycloak:8080/realms/oxide/protocol/openid-connect/certs
+      OXIDE_TICKET_SIGNING_KEY_BASE64: ${OXIDE_TICKET_SIGNING_KEY_BASE64:?required}
+      OXIDE_ALLOWED_ORIGINS: http://localhost:1430
+    ports:
+      - "8787:8787"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  admin-web:
+    build:
+      context: ../..
+      dockerfile: enterprise/deploy/Dockerfile.admin-web
+      args:
+        VITE_OXIDE_CONTROL_PLANE_URL: http://localhost:8787
+        VITE_OXIDE_OIDC_ISSUER: http://localhost:8080/realms/oxide
+    ports:
+      - "1430:8080"
+
+  # The development Gateway demonstrates process isolation only. Production
+  # deployments must use Vault/cloud SecretProvider and mounted mTLS material.
+  gateway:
+    profiles: ["gateway"]
+    build:
+      context: ../..
+      dockerfile: enterprise/deploy/Dockerfile.gateway
+    environment:
+      OXIDE_GATEWAY_ID: ${OXIDE_GATEWAY_ID:?required}
+      OXIDE_GATEWAY_BIND: 0.0.0.0:8790
+      OXIDE_CONTROL_PLANE_VERIFYING_KEY_BASE64: ${OXIDE_CONTROL_PLANE_VERIFYING_KEY_BASE64:?required}
+      OXIDE_GATEWAY_SOURCES_FILE: /etc/oxide/sources.json
+      OXIDE_GATEWAY_TLS_CERTIFICATE: /etc/oxide/tls/server.crt
+      OXIDE_GATEWAY_TLS_PRIVATE_KEY: /etc/oxide/tls/server.key
+      OXIDE_GATEWAY_CLIENT_CA_CERTIFICATE: /etc/oxide/tls/client-ca.crt
+      OXIDE_SECRET_PROVIDER: environment
+      OXIDE_ALLOW_ENVIRONMENT_SECRETS: "true"
+      OXIDE_SECRET_DEV_DATABASE: ${OXIDE_GATEWAY_DATA_SOURCE_URL:?required}
+    volumes:
+      - ./development/sources.json:/etc/oxide/sources.json:ro
+      - ./development/tls:/etc/oxide/tls:ro
+    ports:
+      - "8790:8790"
+
+volumes:
+  control-plane-db:

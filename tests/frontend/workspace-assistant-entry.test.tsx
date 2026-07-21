@@ -5,7 +5,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LeftPanel } from "@/components/workspace/LeftPanel";
-import { WorkspacePage } from "@/pages/workspace";
+import { WorkspaceRuntime as WorkspacePage } from "@/pages/workspaceRuntime";
 import { DEFAULT_APP_SETTINGS } from "@/lib/appSettings";
 import { moveSideToolWindow } from "@/lib/workbenchLayout";
 import { useSettingsStore } from "@/store/useSettingsStore";

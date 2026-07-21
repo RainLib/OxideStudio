@@ -1,4 +1,14 @@
-export type StartupIntent = "new-query" | "project-files" | "command-palette";
+export type StartupActionIntent =
+  | "new-query"
+  | "project-files"
+  | "command-palette";
+
+export type StartupIntent =
+  | StartupActionIntent
+  | {
+      type: "open-data-source";
+      connectionId: string;
+    };
 
 type StartupIntentListener = (intent: StartupIntent) => void;
 
@@ -10,8 +20,9 @@ declare global {
 
 const pendingIntents: StartupIntent[] = [];
 const listeners = new Set<StartupIntentListener>();
+const OPEN_DATA_SOURCE_PREFIX = "open-data-source:";
 
-function isStartupIntent(value: string): value is StartupIntent {
+function isStartupActionIntent(value: string): value is StartupActionIntent {
   return (
     value === "new-query" ||
     value === "project-files" ||
@@ -19,15 +30,41 @@ function isStartupIntent(value: string): value is StartupIntent {
   );
 }
 
+function parseInlineStartupIntent(value: string): StartupIntent | null {
+  if (isStartupActionIntent(value)) return value;
+  if (!value.startsWith(OPEN_DATA_SOURCE_PREFIX)) return null;
+  const encodedConnectionId = value.slice(OPEN_DATA_SOURCE_PREFIX.length);
+  if (!encodedConnectionId) return null;
+  try {
+    const connectionId = decodeURIComponent(encodedConnectionId).trim();
+    return connectionId
+      ? { type: "open-data-source", connectionId }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function startupIntentKey(intent: StartupIntent) {
+  return typeof intent === "string"
+    ? intent
+    : `${intent.type}:${intent.connectionId}`;
+}
+
 function enqueue(intent: StartupIntent) {
-  if (!pendingIntents.includes(intent)) pendingIntents.push(intent);
+  const key = startupIntentKey(intent);
+  if (!pendingIntents.some((pending) => startupIntentKey(pending) === key)) {
+    pendingIntents.push(intent);
+  }
 }
 
 export function peekStartupIntent(): StartupIntent | null {
   const queuedIntent = pendingIntents[0];
   if (queuedIntent) return queuedIntent;
 
-  const inlineIntent = window.__oxideStartupIntents?.find(isStartupIntent);
+  const inlineIntent = window.__oxideStartupIntents
+    ?.map(parseInlineStartupIntent)
+    .find((intent): intent is StartupIntent => intent !== null);
   return inlineIntent ?? null;
 }
 
@@ -44,7 +81,8 @@ export function subscribeStartupIntents(listener: StartupIntentListener) {
 
   const inlineIntents = window.__oxideStartupIntents?.splice(0) ?? [];
   inlineIntents.forEach((intent) => {
-    if (isStartupIntent(intent)) enqueue(intent);
+    const parsed = parseInlineStartupIntent(intent);
+    if (parsed) enqueue(parsed);
   });
 
   const queued = pendingIntents.splice(0);

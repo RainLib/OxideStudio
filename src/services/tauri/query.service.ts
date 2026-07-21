@@ -4,6 +4,9 @@ import type {
   CompletionContext,
   ExplainPlan,
   ExplainQueryRequest,
+  ElasticsearchConsoleFileExportResult,
+  ElasticsearchConsoleFileImportResult,
+  SqlScriptImportResult,
 } from "./types";
 
 /**
@@ -40,6 +43,35 @@ export async function cancelQuery(queryId: string): Promise<string> {
   return invokeWithInterceptors<string>("cancel_query", {
     queryId,
   });
+}
+
+export async function importSqlScript(
+  connectionId: string,
+  filePath: string,
+  schema?: string,
+  database?: string,
+): Promise<SqlScriptImportResult> {
+  return invokeWithInterceptors<SqlScriptImportResult>("import_sql_script", {
+    connectionId,
+    filePath,
+    schema,
+    database,
+  });
+}
+
+export async function importElasticsearchConsoleFile(): Promise<ElasticsearchConsoleFileImportResult | null> {
+  return invokeWithInterceptors<ElasticsearchConsoleFileImportResult | null>(
+    "import_elasticsearch_console_file",
+  );
+}
+
+export async function exportElasticsearchConsoleFile(
+  content: string,
+): Promise<ElasticsearchConsoleFileExportResult> {
+  return invokeWithInterceptors<ElasticsearchConsoleFileExportResult>(
+    "export_elasticsearch_console_file",
+    { content },
+  );
 }
 
 export async function executeReadOnlyQuery(
@@ -84,6 +116,9 @@ export async function getSqlCompletion(
 export const queryService = {
   executeQuery,
   executeReadOnlyQuery,
+  importSqlScript,
+  importElasticsearchConsoleFile,
+  exportElasticsearchConsoleFile,
   explainQuery,
   cancelQuery,
   getSqlCompletion,

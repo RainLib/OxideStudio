@@ -10,6 +10,7 @@ import {
   Pin,
   PinOff,
   Download,
+  Upload,
   TableProperties,
   Code2,
   Trash2,
@@ -368,6 +369,16 @@ export function SchemaSidebar() {
   const [expandedObjectGroupKeys, setExpandedObjectGroupKeys] = useState<
     string[]
   >([]);
+
+  // Programmatic activation (startup cache, Search Everywhere, AI navigation)
+  // should expose the same tree state as a direct row click. Paint cached
+  // metadata immediately while the remote session is still connecting.
+  useEffect(() => {
+    if (!activeConnectionId) return;
+    setExpandedConnectionIds((current) =>
+      current.includes(activeConnectionId) ? current : [activeConnectionId],
+    );
+  }, [activeConnectionId]);
   const databaseRevealRequest = useDatabaseNavigationStore(
     (state) => state.revealRequest,
   );
@@ -427,6 +438,7 @@ export function SchemaSidebar() {
     dropTable,
     renameTable,
     exportTableData,
+    importTableData,
     getTableDdl,
     getViewDefinition,
     refreshMaterializedView,
@@ -3086,6 +3098,33 @@ export function SchemaSidebar() {
                           <ContextMenuSubContent className={menuContentClass}>
                             <ContextMenuItem
                               className={menuItemClass}
+                              disabled={isReadOnlyRelation}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
+                                  importTableData(table.name, "csv"),
+                                )
+                              }
+                            >
+                              <Upload className="mr-2 h-3.5 w-3.5" />
+                              Import CSV...
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              disabled={isReadOnlyRelation}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
+                                  importTableData(table.name, "json"),
+                                )
+                              }
+                            >
+                              <Upload className="mr-2 h-3.5 w-3.5" />
+                              Import JSON...
+                            </ContextMenuItem>
+                            <ContextMenuSeparator
+                              className={menuSeparatorClass}
+                            />
+                            <ContextMenuItem
+                              className={menuItemClass}
                               onClick={() =>
                                 void runForSchema(schema, () =>
                                   exportTableData(table.name, "csv"),
@@ -3105,6 +3144,17 @@ export function SchemaSidebar() {
                             >
                               <Download className="mr-2 h-3.5 w-3.5" />
                               Export JSON
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
+                                  exportTableData(table.name, "sql"),
+                                )
+                              }
+                            >
+                              <Download className="mr-2 h-3.5 w-3.5" />
+                              Export SQL Inserts
                             </ContextMenuItem>
                           </ContextMenuSubContent>
                         </ContextMenuSub>

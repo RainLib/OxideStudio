@@ -1,5 +1,6 @@
 import { invokeRawCommand } from "./client";
 import type { SavedConnection } from "./types";
+import type { ManagedDataSourceDescriptor } from "./enterprise.service";
 
 export interface Resource {
   id: string;
@@ -18,6 +19,11 @@ export interface Project {
   root_path?: string | null;
   created_at: number;
   updated_at: number;
+  origin?: "local" | "managed";
+  organization_id?: string;
+  organization_name?: string;
+  policy_revision?: string;
+  managed_data_sources?: ManagedDataSourceDescriptor[];
 }
 
 const ACTIVE_PROJECT_KEY = "oxide-studio-active-project";

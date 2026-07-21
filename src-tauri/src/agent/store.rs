@@ -957,9 +957,10 @@ fn encrypt(
     let cipher = Aes256Gcm::new_from_slice(key).context("invalid agent encryption key")?;
     let mut nonce_bytes = [0u8; 12];
     OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
     let ciphertext = cipher
         .encrypt(
-            Nonce::from_slice(&nonce_bytes),
+            &nonce,
             Payload {
                 msg: plaintext,
                 aad: &record_key.aad(),
@@ -975,9 +976,10 @@ fn encrypt(
 
 fn decrypt(key: &[u8; 32], record_key: &RecordKey, record: &EncryptedRecord) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(key).context("invalid agent encryption key")?;
+    let nonce = Nonce::from(record.nonce);
     cipher
         .decrypt(
-            Nonce::from_slice(&record.nonce),
+            &nonce,
             Payload {
                 msg: &record.ciphertext,
                 aad: &record_key.aad(),
@@ -996,9 +998,10 @@ fn encrypt_json(
     let cipher = Aes256Gcm::new_from_slice(key).context("invalid agent encryption key")?;
     let mut nonce_bytes = [0u8; 12];
     OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
     let ciphertext = cipher
         .encrypt(
-            Nonce::from_slice(&nonce_bytes),
+            &nonce,
             Payload {
                 msg: &plaintext,
                 aad,
@@ -1015,9 +1018,10 @@ fn encrypt_json(
 
 fn decrypt_json(key: &[u8; 32], aad: &[u8], record: &EncryptedRecord) -> Result<Value> {
     let cipher = Aes256Gcm::new_from_slice(key).context("invalid agent encryption key")?;
+    let nonce = Nonce::from(record.nonce);
     let mut plaintext = cipher
         .decrypt(
-            Nonce::from_slice(&record.nonce),
+            &nonce,
             Payload {
                 msg: &record.ciphertext,
                 aad,

@@ -1,0 +1,647 @@
+use crate::{
+    auth::OidcVerifier,
+    store::{allowed_paths_for_action, ControlPlaneStore},
+};
+use axum::{
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
+use oxide_enterprise_contracts::{
+    AccessAction, AccessSessionClaims, AccessSessionTicket, AuthorizationRequest, GrantEffect,
+    OrganizationMembership, PolicyEvaluator, TicketSigner, User, DEFAULT_ACCESS_TICKET_TTL_SECONDS,
+    ENTERPRISE_CONTRACT_VERSION,
+};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeSet, sync::Arc, time::SystemTime};
+use uuid::Uuid;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub store: ControlPlaneStore,
+    pub verifier: Arc<OidcVerifier>,
+    pub ticket_signer: Arc<TicketSigner>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeResponse {
+    user: User,
+    memberships: Vec<OrganizationMembership>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccessSessionRequest {
+    device_id: Uuid,
+    organization_id: Uuid,
+    project_id: Uuid,
+    data_source_id: Uuid,
+    action: AccessAction,
+    resource_path: Vec<String>,
+    request_id: Uuid,
+    source: String,
+    max_rows: Option<u32>,
+    max_result_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccessSessionResponse {
+    ticket: AccessSessionTicket,
+    expires_at: i64,
+    policy_revision: String,
+    gateway_endpoint: String,
+}
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(health))
+        .route("/v1/organizations", post(create_organization))
+        .route("/v1/me", get(me))
+        .route("/v1/managed-projects", get(managed_projects))
+        .route("/v1/access-sessions", post(create_access_session))
+        .route(
+            "/v1/admin/organizations/{organization_id}/overview",
+            get(admin_overview),
+        )
+        .route(
+            "/v1/admin/organizations/{organization_id}/invitations",
+            post(invite_member),
+        )
+        .route(
+            "/v1/admin/organizations/{organization_id}/managed-projects",
+            post(create_managed_project),
+        )
+        .route(
+            "/v1/admin/organizations/{organization_id}/gateways",
+            post(register_gateway),
+        )
+        .route(
+            "/v1/admin/organizations/{organization_id}/gateways/{gateway_id}/activate",
+            post(activate_gateway),
+        )
+        .route(
+            "/v1/admin/organizations/{organization_id}/data-sources",
+            post(register_data_source),
+        )
+        .route(
+            "/v1/admin/organizations/{organization_id}/project-assignments",
+            post(assign_project),
+        )
+        .route(
+            "/v1/admin/organizations/{organization_id}/access-grants",
+            post(create_access_grant),
+        )
+        .with_state(state)
+}
+
+async fn health() -> &'static str {
+    "ok"
+}
+
+async fn me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<MeResponse>, ApiError> {
+    let identity = state.verifier.authenticate(&headers)?;
+    let user = state.store.sync_identity(&identity).await?;
+    let memberships = state.store.memberships(user.id).await?;
+    Ok(Json(MeResponse { user, memberships }))
+}
+
+async fn managed_projects(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<oxide_enterprise_contracts::ManagedProject>>, ApiError> {
+    let identity = state.verifier.authenticate(&headers)?;
+    let user = state.store.sync_identity(&identity).await?;
+    Ok(Json(state.store.managed_projects(user.id).await?))
+}
+
+async fn create_access_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<AccessSessionRequest>,
+) -> Result<Json<AccessSessionResponse>, ApiError> {
+    if input.resource_path.len() > 16
+        || input
+            .resource_path
+            .iter()
+            .any(|segment| segment.is_empty() || segment.len() > 256)
+    {
+        return Err(ApiError::bad_request("invalid resource path"));
+    }
+    let identity = state.verifier.authenticate(&headers)?;
+    let user = state.store.sync_identity(&identity).await?;
+    state
+        .store
+        .require_project_assignment(user.id, input.organization_id, input.project_id)
+        .await
+        .map_err(|_| ApiError::forbidden("managed project access is not assigned"))?;
+    let request = AuthorizationRequest {
+        principal_id: user.id,
+        organization_id: input.organization_id,
+        project_id: input.project_id,
+        data_source_id: input.data_source_id,
+        resource_path: input.resource_path.clone(),
+        action: input.action,
+    };
+    let grants = state
+        .store
+        .grants_for_user(user.id, input.organization_id, input.project_id)
+        .await?;
+    let allowed = if input.action == AccessAction::ResourceDiscover {
+        PolicyEvaluator::can_discover(&request, &grants)?
+    } else {
+        PolicyEvaluator::is_allowed(&request, &grants)?
+    };
+    let forbidden_resource_paths =
+        ControlPlaneStore::forbidden_paths_for_action(&grants, input.data_source_id, input.action);
+    let allowed_resource_paths =
+        allowed_paths_for_action(user.id, input.data_source_id, &grants, input.action);
+    state
+        .store
+        .write_audit(
+            input.organization_id,
+            user.id,
+            input.device_id,
+            input.project_id,
+            input.data_source_id,
+            &input.resource_path,
+            input.action,
+            if allowed { "allow" } else { "deny" },
+            if allowed {
+                "POLICY_ALLOWED"
+            } else {
+                "POLICY_DENIED"
+            },
+            input.request_id,
+            &input.source,
+        )
+        .await?;
+    if !allowed {
+        return Err(ApiError::forbidden(
+            "the assigned enterprise policy does not allow this operation",
+        ));
+    }
+
+    let (gateway_id, gateway_endpoint, policy_revision) = state
+        .store
+        .gateway_for_source(
+            input.organization_id,
+            input.project_id,
+            input.data_source_id,
+        )
+        .await?;
+    let gateway_endpoint = validated_gateway_endpoint(&gateway_endpoint)?;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|value| value.as_secs() as i64)
+        .unwrap_or(0);
+    let expires_at = now + DEFAULT_ACCESS_TICKET_TTL_SECONDS;
+    let claims = AccessSessionClaims {
+        version: ENTERPRISE_CONTRACT_VERSION,
+        issuer: "oxide-control-plane".into(),
+        audience: gateway_id,
+        principal_id: user.id,
+        device_id: input.device_id,
+        organization_id: input.organization_id,
+        project_id: input.project_id,
+        data_source_id: input.data_source_id,
+        actions: BTreeSet::from([input.action]),
+        resource_path: input.resource_path,
+        allowed_resource_paths,
+        forbidden_resource_paths,
+        policy_revision: policy_revision.clone(),
+        nonce: Uuid::new_v4(),
+        issued_at: now,
+        expires_at,
+        max_rows: input.max_rows.unwrap_or(200).clamp(1, 1_000),
+        max_result_bytes: input
+            .max_result_bytes
+            .unwrap_or(262_144)
+            .clamp(4_096, 1_048_576),
+    };
+    let ticket = state.ticket_signer.sign(&claims)?;
+    Ok(Json(AccessSessionResponse {
+        ticket,
+        expires_at,
+        policy_revision,
+        gateway_endpoint,
+    }))
+}
+
+fn validated_gateway_endpoint(value: &str) -> Result<String, ApiError> {
+    let endpoint = reqwest::Url::parse(value)
+        .map_err(|_| ApiError::internal("stored Gateway endpoint is invalid"))?;
+    if endpoint.scheme() != "https"
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.host_str().is_none()
+    {
+        return Err(ApiError::internal(
+            "stored Gateway endpoint is not a credential-free HTTPS endpoint",
+        ));
+    }
+    Ok(endpoint.as_str().trim_end_matches('/').to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InviteMemberRequest {
+    email: String,
+    role: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateOrganizationRequest {
+    slug: String,
+    display_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateManagedProjectRequest {
+    display_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RegisterGatewayRequest {
+    display_name: String,
+    direct_endpoint: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RegisterDataSourceRequest {
+    project_id: Uuid,
+    gateway_id: Uuid,
+    driver: String,
+    display_name: String,
+    capabilities: BTreeSet<AccessAction>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProjectAssignmentRequest {
+    project_id: Uuid,
+    principal_kind: String,
+    principal_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateAccessGrantRequest {
+    project_id: Uuid,
+    principal_kind: String,
+    principal_id: Uuid,
+    data_source_id: Option<Uuid>,
+    resource_path: Vec<String>,
+    actions: BTreeSet<AccessAction>,
+    effect: GrantEffect,
+}
+
+async fn create_organization(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateOrganizationRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let slug = input.slug.trim().to_ascii_lowercase();
+    let display_name = validate_display_name(&input.display_name)?;
+    if slug.len() < 2
+        || slug.len() > 64
+        || !slug.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
+        || slug.starts_with('-')
+        || slug.ends_with('-')
+    {
+        return Err(ApiError::bad_request(
+            "organization slug must use lowercase letters, numbers, and internal hyphens",
+        ));
+    }
+    let identity = state.verifier.authenticate(&headers)?;
+    let user = state.store.sync_identity(&identity).await?;
+    let organization_id = state
+        .store
+        .create_organization(user.id, &slug, &display_name)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "id": organization_id,
+        "slug": slug,
+        "displayName": display_name,
+        "role": "owner",
+    })))
+}
+
+async fn create_managed_project(
+    State(state): State<AppState>,
+    Path(organization_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateManagedProjectRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let display_name = validate_display_name(&input.display_name)?;
+    let identity = state.verifier.authenticate(&headers)?;
+    let user = state.store.sync_identity(&identity).await?;
+    require_admin(&state, user.id, organization_id).await?;
+    let project_id = state
+        .store
+        .create_managed_project(organization_id, &display_name)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "id": project_id,
+        "displayName": display_name,
+    })))
+}
+
+async fn register_gateway(
+    State(state): State<AppState>,
+    Path(organization_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RegisterGatewayRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let display_name = validate_display_name(&input.display_name)?;
+    let endpoint = validated_gateway_endpoint(&input.direct_endpoint)?;
+    let identity = state.verifier.authenticate(&headers)?;
+    let user = state.store.sync_identity(&identity).await?;
+    require_admin(&state, user.id, organization_id).await?;
+    let gateway_id = state
+        .store
+        .register_gateway(organization_id, &display_name, &endpoint)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "id": gateway_id,
+        "displayName": display_name,
+        "status": "pending",
+    })))
+}
+
+async fn register_data_source(
+    State(state): State<AppState>,
+    Path(organization_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RegisterDataSourceRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let display_name = validate_display_name(&input.display_name)?;
+    let driver = input.driver.trim().to_ascii_lowercase();
+    if !matches!(driver.as_str(), "postgres" | "postgresql" | "mysql")
+        || input.capabilities.is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "stage-one managed data sources support PostgreSQL and MySQL with at least one capability",
+        ));
+    }
+    let identity = state.verifier.authenticate(&headers)?;
+    let user = state.store.sync_identity(&identity).await?;
+    require_admin(&state, user.id, organization_id).await?;
+    let data_source_id = state
+        .store
+        .register_data_source(
+            organization_id,
+            input.project_id,
+            input.gateway_id,
+            &driver,
+            &display_name,
+            &input.capabilities,
+        )
+        .await?;
+    Ok(Json(serde_json::json!({
+        "id": data_source_id,
+        "displayName": display_name,
+        "driver": driver,
+    })))
+}
+
+async fn activate_gateway(
+    State(state): State<AppState>,
+    Path((organization_id, gateway_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = state.verifier.authenticate(&headers)?;
+    let user = state.store.sync_identity(&identity).await?;
+    require_admin(&state, user.id, organization_id).await?;
+    state
+        .store
+        .activate_gateway(organization_id, gateway_id)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "id": gateway_id,
+        "status": "active",
+    })))
+}
+
+async fn require_admin(
+    state: &AppState,
+    user_id: Uuid,
+    organization_id: Uuid,
+) -> Result<(), ApiError> {
+    state
+        .store
+        .require_organization_admin(user_id, organization_id)
+        .await
+        .map_err(|_| ApiError::forbidden("organization administrator access is required"))
+}
+
+fn validate_display_name(value: &str) -> Result<String, ApiError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(
+            "display name must contain between 1 and 128 visible characters",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+async fn admin_overview(
+    State(state): State<AppState>,
+    Path(organization_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = state.verifier.authenticate(&headers)?;
+    let user = state.store.sync_identity(&identity).await?;
+    state
+        .store
+        .require_organization_admin(user.id, organization_id)
+        .await
+        .map_err(|_| ApiError::forbidden("organization administrator access is required"))?;
+    Ok(Json(state.store.admin_overview(organization_id).await?))
+}
+
+async fn invite_member(
+    State(state): State<AppState>,
+    Path(organization_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<InviteMemberRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let email = input.email.trim().to_ascii_lowercase();
+    if !email.contains('@') || email.len() > 320 {
+        return Err(ApiError::bad_request("a valid email address is required"));
+    }
+    if !matches!(input.role.as_str(), "member" | "administrator") {
+        return Err(ApiError::bad_request("unsupported organization role"));
+    }
+    let identity = state.verifier.authenticate(&headers)?;
+    let user = state.store.sync_identity(&identity).await?;
+    state
+        .store
+        .require_organization_admin(user.id, organization_id)
+        .await
+        .map_err(|_| ApiError::forbidden("organization administrator access is required"))?;
+    let invitation_id = state
+        .store
+        .invite_member(organization_id, user.id, &email, &input.role)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "id": invitation_id,
+        "status": "pending",
+    })))
+}
+
+async fn assign_project(
+    State(state): State<AppState>,
+    Path(organization_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<ProjectAssignmentRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_principal_kind(&input.principal_kind)?;
+    let identity = state.verifier.authenticate(&headers)?;
+    let user = state.store.sync_identity(&identity).await?;
+    state
+        .store
+        .require_organization_admin(user.id, organization_id)
+        .await
+        .map_err(|_| ApiError::forbidden("organization administrator access is required"))?;
+    state
+        .store
+        .assign_project(
+            organization_id,
+            input.project_id,
+            &input.principal_kind,
+            input.principal_id,
+        )
+        .await?;
+    Ok(Json(serde_json::json!({ "status": "assigned" })))
+}
+
+async fn create_access_grant(
+    State(state): State<AppState>,
+    Path(organization_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateAccessGrantRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_principal_kind(&input.principal_kind)?;
+    if input.actions.is_empty()
+        || input.resource_path.len() > 16
+        || input
+            .resource_path
+            .iter()
+            .any(|segment| segment.is_empty() || segment.len() > 256)
+    {
+        return Err(ApiError::bad_request("invalid access grant scope"));
+    }
+    let identity = state.verifier.authenticate(&headers)?;
+    let user = state.store.sync_identity(&identity).await?;
+    state
+        .store
+        .require_organization_admin(user.id, organization_id)
+        .await
+        .map_err(|_| ApiError::forbidden("organization administrator access is required"))?;
+    let grant_id = state
+        .store
+        .create_access_grant(
+            organization_id,
+            input.project_id,
+            &input.principal_kind,
+            input.principal_id,
+            input.data_source_id,
+            &input.resource_path,
+            &input.actions,
+            input.effect,
+        )
+        .await?;
+    Ok(Json(serde_json::json!({
+        "id": grant_id,
+        "status": "created",
+    })))
+}
+
+fn validate_principal_kind(value: &str) -> Result<(), ApiError> {
+    if matches!(value, "user" | "group") {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request("principalKind must be user or group"))
+    }
+}
+
+struct ApiError {
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+}
+
+impl ApiError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "INVALID_REQUEST",
+            message: message.into(),
+        }
+    }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "ACCESS_DENIED",
+            message: message.into(),
+        }
+    }
+}
+
+impl ApiError {
+    fn internal(error: impl std::fmt::Display) -> Self {
+        tracing::warn!(error = %error, "control-plane request failed");
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "INTERNAL_ERROR",
+            message: "The enterprise service could not complete the request.".into(),
+        }
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::internal(error)
+    }
+}
+
+impl From<oxide_enterprise_contracts::PolicyError> for ApiError {
+    fn from(error: oxide_enterprise_contracts::PolicyError) -> Self {
+        Self::internal(error)
+    }
+}
+
+impl From<oxide_enterprise_contracts::TicketError> for ApiError {
+    fn from(error: oxide_enterprise_contracts::TicketError) -> Self {
+        Self::internal(error)
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        (
+            self.status,
+            Json(serde_json::json!({
+                "error": {
+                    "code": self.code,
+                    "message": self.message,
+                }
+            })),
+        )
+            .into_response()
+    }
+}

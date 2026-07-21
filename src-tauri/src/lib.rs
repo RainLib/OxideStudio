@@ -4,6 +4,7 @@ pub mod agent;
 pub mod commands;
 pub mod core;
 pub mod drivers;
+pub mod enterprise;
 pub mod lsp;
 
 use commands::query::{ParserState, QueryCancellationState};
@@ -55,11 +56,34 @@ pub fn run() {
             let meta_store = block_on(core::store::MetaStore::new(app.handle()))
                 .expect("failed to initialize metadata store");
             app.manage(meta_store);
+            let migration_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let meta_store = migration_handle.state::<core::store::MetaStore>();
+                let config_manager = migration_handle.state::<ConfigManager>();
+                match commands::connection::migrate_legacy_connections(&meta_store, &config_manager)
+                    .await
+                {
+                    Ok(count) if count > 0 => {
+                        tracing::info!(
+                            connection_count = count,
+                            "migrated legacy local connection credentials"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "legacy connection credential migration was deferred"
+                        );
+                    }
+                }
+            });
 
             // Initialize SQL Parser state
             app.manage(ParserState(Mutex::new(SqlParser::new())));
             app.manage(QueryCancellationState::default());
             app.manage(commands::ai::AiCancellationState::default());
+            app.manage(enterprise::EnterpriseClient::new(app.handle()));
             // AgentHostManager is side-effect free here. The sidecar and
             // encrypted local store are initialized lazily by the first agent command.
             app.manage(agent::AgentHostManager::new(app.handle()));
@@ -106,8 +130,20 @@ pub fn run() {
             commands::agent::agent_search_artifact,
             commands::agent::agent_export_artifact,
             commands::agent::agent_clear_project_state,
+            // Optional enterprise account and managed-project commands. These
+            // initialize lazily and never block anonymous/local startup.
+            enterprise::enterprise_get_account_status,
+            enterprise::enterprise_get_public_config,
+            enterprise::enterprise_configure_account,
+            enterprise::enterprise_sign_in,
+            enterprise::enterprise_sync_projects,
+            enterprise::enterprise_sign_out,
+            enterprise::enterprise_connect_managed_source,
             // Query commands
             commands::query::execute_query,
+            commands::query::import_sql_script,
+            commands::query::import_elasticsearch_console_file,
+            commands::query::export_elasticsearch_console_file,
             commands::query::execute_read_only_query,
             commands::query::explain_query,
             commands::query::cancel_query,
@@ -141,6 +177,7 @@ pub fn run() {
             // Table commands
             commands::table::preview_table_page,
             commands::table::export_table_data,
+            commands::table::import_table_data,
             commands::table::mutate_table_rows,
             commands::table::create_table,
             commands::table::create_view,

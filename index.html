@@ -192,12 +192,35 @@
         .startup-cached-row {
           display: flex;
           height: 24px;
+          width: 100%;
           min-width: 0;
           align-items: center;
           gap: 6px;
+          border: 0;
+          border-radius: 3px;
           padding: 0 7px;
+          background: transparent;
           color: var(--startup-muted);
+          cursor: pointer;
+          font-family: inherit;
           font-size: 11px;
+          text-align: left;
+        }
+
+        .startup-cached-row:hover,
+        .startup-cached-row:focus-visible {
+          background: var(--startup-placeholder-soft);
+          color: var(--startup-text);
+          outline: none;
+        }
+
+        .startup-cached-row:focus-visible {
+          box-shadow: inset 0 0 0 1px #ea580c;
+        }
+
+        .startup-cached-row:disabled {
+          cursor: wait;
+          opacity: 0.76;
         }
 
         .startup-cached-row-name {
@@ -537,8 +560,18 @@
               } else {
                 region.replaceChildren(
                   ...items.map((item) => {
-                    const row = document.createElement("div");
+                    const row = document.createElement("button");
                     row.className = "startup-cached-row";
+                    row.type = "button";
+                    row.title = `Open ${item.name}`;
+                    row.addEventListener("click", () => {
+                      const intent = `open-data-source:${encodeURIComponent(item.id)}`;
+                      if (!window.__oxideStartupIntents.includes(intent)) {
+                        window.__oxideStartupIntents.push(intent);
+                      }
+                      row.disabled = true;
+                      row.setAttribute("aria-busy", "true");
+                    });
                     const chevron = document.createElement("span");
                     chevron.textContent = "›";
                     const icon = document.createElement("span");
@@ -563,26 +596,29 @@
           .getElementById("loader-retry")
           ?.addEventListener("click", () => window.location.reload());
 
-        const slowStartupTimer = window.setTimeout(() => {
-          const loader = document.getElementById("app-loader");
-          if (!loader) return;
-
-          // Slow module transforms are not startup failures. Keep the shell
-          // usable and reserve the Reload action for a real bootstrap error,
-          // which src/main.tsx reports explicitly.
-          const label = loader.querySelector(".startup-progress-label");
-          if (label) label.textContent = "Still preparing the workspace…";
-          const progress = loader.querySelector(".startup-progress-track");
-          progress?.setAttribute("aria-label", "Still preparing the workspace");
-        }, 15000);
+        window.addEventListener(
+          "oxide:module-entry-ready",
+          () => {
+            const loader = document.getElementById("app-loader");
+            if (!loader) return;
+            const label = loader.querySelector(".startup-progress-label");
+            if (label) label.textContent = "Loading interface…";
+            const progress = loader.querySelector(".startup-progress-track");
+            progress?.setAttribute("aria-label", "Loading interface");
+            progress?.setAttribute("aria-valuenow", "20");
+            const value = loader.querySelector(".startup-progress-value");
+            if (value instanceof HTMLElement) value.style.width = "20%";
+          },
+          { once: true },
+        );
 
         window.addEventListener(
           "oxide:react-shell-ready",
-          () => window.clearTimeout(slowStartupTimer),
+          () => performance.mark?.("oxide-react-shell-ready"),
           { once: true },
         );
       })();
     </script>
-    <script type="module" src="/src/main.tsx"></script>
+    <script type="module" src="/src/main.tsx?entry=workspace-shell-v2"></script>
   </body>
 </html>

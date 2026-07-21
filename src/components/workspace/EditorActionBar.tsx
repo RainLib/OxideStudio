@@ -14,11 +14,18 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n";
 import type { QueryHistoryItem } from "@/lib/queryHistory";
 import {
   Braces,
   ChevronDown,
+  Download,
   BookmarkPlus,
   FileCode2,
   History,
@@ -29,6 +36,7 @@ import {
   Square,
   Star,
   Trash2,
+  Upload,
   WandSparkles,
 } from "lucide-react";
 import { useState } from "react";
@@ -60,6 +68,9 @@ interface EditorActionBarProps {
   onRunCurrent: () => void;
   onExplain: (mode: "estimate" | "analyze") => void;
   onCancelRun: () => void;
+  onImportSqlScript?: () => void;
+  onImportConsoleRequests?: () => void;
+  onExportConsoleRequests?: () => void;
   isExecuting: boolean;
   isConnected: boolean;
   supportsExplainPlan: boolean;
@@ -77,6 +88,9 @@ interface EditorActionBarProps {
   onConfigureParameters: () => void;
   queryLanguage?: QueryLanguage;
   onQueryLanguageChange?: (language: QueryLanguage) => void;
+  elasticsearchVariableNames?: string[];
+  elasticsearchVariables?: Record<string, string>;
+  onElasticsearchVariableChange?: (name: string, value: string) => void;
 }
 
 const dialogClass =
@@ -108,6 +122,9 @@ export function EditorActionBar({
   onRunCurrent,
   onExplain,
   onCancelRun,
+  onImportSqlScript,
+  onImportConsoleRequests,
+  onExportConsoleRequests,
   isExecuting,
   isConnected,
   supportsExplainPlan,
@@ -125,7 +142,11 @@ export function EditorActionBar({
   onConfigureParameters,
   queryLanguage,
   onQueryLanguageChange,
+  elasticsearchVariableNames = [],
+  elasticsearchVariables = {},
+  onElasticsearchVariableChange,
 }: EditorActionBarProps) {
+  const { t } = useI18n();
   const [isSaveOpen, setIsSaveOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
@@ -136,6 +157,11 @@ export function EditorActionBar({
   const consoleExecutionLabel = isElasticsearchDsl
     ? "Run All Requests"
     : "Run Console";
+  const currentExecutionShortcut = isElasticsearchDsl ? "⌘↵" : "⌘⇧↵";
+  const consoleExecutionShortcut = isElasticsearchDsl ? "⌘⇧↵" : "⌘↵";
+  const missingVariableCount = elasticsearchVariableNames.filter(
+    (name) => !Object.prototype.hasOwnProperty.call(elasticsearchVariables, name),
+  ).length;
 
   const handleSave = () => {
     const normalizedName = saveName.trim();
@@ -161,7 +187,7 @@ export function EditorActionBar({
               ? "Stop Query"
               : parameterCount > 0
                 ? `Set ${parameterCount} SQL ${parameterCount === 1 ? "parameter" : "parameters"} and run`
-                : `${currentExecutionLabel} (⌘⇧Enter)`
+                : `${currentExecutionLabel} (${currentExecutionShortcut})`
           }
         >
           {isExecuting ? (
@@ -185,13 +211,51 @@ export function EditorActionBar({
             <DropdownMenuItem className={menuItemClass} onClick={onRunCurrent}>
               <Play size={13} className="mr-2 text-emerald-400" />
               {currentExecutionLabel}
-              <span className="ml-auto text-[10px] wb-muted">⌘⇧↵</span>
+              <span className="ml-auto text-[10px] wb-muted">
+                {currentExecutionShortcut}
+              </span>
             </DropdownMenuItem>
             <DropdownMenuItem className={menuItemClass} onClick={onRun}>
               <FileCode2 size={13} className="mr-2" />
               {consoleExecutionLabel}
-              <span className="ml-auto text-[10px] wb-muted">⌘↵</span>
+              <span className="ml-auto text-[10px] wb-muted">
+                {consoleExecutionShortcut}
+              </span>
             </DropdownMenuItem>
+            {(onImportSqlScript ||
+              onImportConsoleRequests ||
+              onExportConsoleRequests) && (
+              <>
+                <div className="my-1 h-px bg-[hsl(var(--wb-border-subtle))]" />
+                {onImportSqlScript && (
+                  <DropdownMenuItem
+                    className={menuItemClass}
+                    onClick={onImportSqlScript}
+                  >
+                    <Upload size={13} className="mr-2" />
+                    Import SQL Script...
+                  </DropdownMenuItem>
+                )}
+                {onImportConsoleRequests && (
+                  <DropdownMenuItem
+                    className={menuItemClass}
+                    onClick={onImportConsoleRequests}
+                  >
+                    <Upload size={13} className="mr-2" />
+                    Import Console Requests...
+                  </DropdownMenuItem>
+                )}
+                {onExportConsoleRequests && (
+                  <DropdownMenuItem
+                    className={menuItemClass}
+                    onClick={onExportConsoleRequests}
+                  >
+                    <Download size={13} className="mr-2" />
+                    Export Console Requests...
+                  </DropdownMenuItem>
+                )}
+              </>
+            )}
             {supportsExplainPlan && (
               <>
                 <div className="my-1 h-px bg-[hsl(var(--wb-border-subtle))]" />
@@ -269,7 +333,11 @@ export function EditorActionBar({
           type="button"
           className="wb-editor-optional wb-icon-button"
           onClick={onFormat}
-          title="Format SQL (⌘L)"
+          title={
+            isElasticsearchDsl
+              ? "Auto-indent Current Request (⌘I)"
+              : "Format SQL (⌘L)"
+          }
         >
           <WandSparkles size={13} />
         </button>
@@ -288,6 +356,66 @@ export function EditorActionBar({
       </div>
 
       <div className="wb-editor-secondary-actions flex min-w-0 shrink-0 items-center gap-0.5">
+        {isElasticsearchDsl &&
+          elasticsearchVariableNames.length > 0 &&
+          onElasticsearchVariableChange && (
+            <Popover>
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  className={cn(
+                    "wb-text-button h-6 gap-1 px-1.5 text-[10px]",
+                    missingVariableCount > 0 && "text-amber-400",
+                  )}
+                  title={t("elasticsearch.variables.title")}
+                >
+                  <Braces size={11} />
+                  {elasticsearchVariableNames.length}
+                  {missingVariableCount > 0 && (
+                    <span className="text-[9px]">
+                      {t("elasticsearch.variables.missing", {
+                        count: missingVariableCount,
+                      })}
+                    </span>
+                  )}
+                </button>
+              </PopoverTrigger>
+              <PopoverContent
+                align="end"
+                className="w-80 rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_8px_24px_rgba(0,0,0,0.36)]"
+              >
+                <div className="border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2">
+                  <div className="text-[11px] font-semibold">
+                    {t("elasticsearch.variables.title")}
+                  </div>
+                  <p className="mt-0.5 text-[10px] leading-4 wb-muted">
+                    {t("elasticsearch.variables.description")}
+                  </p>
+                </div>
+                <div className="max-h-64 space-y-2 overflow-y-auto p-3">
+                  {elasticsearchVariableNames.map((name) => (
+                    <label key={name} className="block">
+                      <span className="mb-1 block font-mono text-[10px] wb-muted">
+                        {"${"}
+                        {name}
+                        {"}"}
+                      </span>
+                      <Input
+                        value={elasticsearchVariables[name] ?? ""}
+                        onChange={(event) =>
+                          onElasticsearchVariableChange(name, event.target.value)
+                        }
+                        placeholder={t("elasticsearch.variables.value", {
+                          name,
+                        })}
+                        className="h-7 rounded-[4px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 font-mono text-[11px]"
+                      />
+                    </label>
+                  ))}
+                </div>
+              </PopoverContent>
+            </Popover>
+          )}
         {queryLanguage && onQueryLanguageChange && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>

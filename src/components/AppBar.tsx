@@ -1,5 +1,6 @@
 import {
   lazy,
+  Fragment,
   Suspense,
   type FormEvent,
   type ReactNode,
@@ -43,6 +44,7 @@ import { Button } from "@/components/ui/button";
 import { APP_EVENT_OPEN_SETTINGS } from "@/lib/actionEvents";
 import type { Project } from "@/services/tauri/store.service";
 import type { SettingsSection } from "@/components/settings/SettingsDialog";
+import { EnterpriseAccountMenu } from "@/components/EnterpriseAccountMenu";
 
 const SettingsDialog = lazy(() =>
   import("@/components/settings/SettingsDialog").then((module) => ({
@@ -185,6 +187,17 @@ export function AppBar({ center, right }: AppBarProps) {
       ),
     );
   }, [projectRootPath, projects]);
+  const projectGroups = useMemo(() => {
+    const groups = new Map<string, Project[]>();
+    for (const project of projects) {
+      const group =
+        project.origin === "managed"
+          ? project.organization_name || "Organization"
+          : "My Projects";
+      groups.set(group, [...(groups.get(group) || []), project]);
+    }
+    return [...groups.entries()];
+  }, [projects]);
 
   const openProjectDialog = () => {
     setProjectAlias("");
@@ -346,14 +359,17 @@ export function AppBar({ center, right }: AppBarProps) {
               sideOffset={6}
               className="w-80 rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_4px_8px_rgba(0,0,0,0.35)]"
             >
-              <div className="px-2 py-1 text-[10px] font-semibold uppercase wb-muted">
-                Projects
-              </div>
               <div className="max-h-72 overflow-y-auto">
-                {projects.map((project) => {
-                  const isActive = project.id === activeProjectId;
-                  const isDefault = project.id === "sqls";
-                  return (
+                {projectGroups.map(([group, groupedProjects]) => (
+                  <Fragment key={group}>
+                    <div className="px-2 pb-1 pt-1.5 text-[9px] font-semibold uppercase tracking-wide wb-muted">
+                      {group}
+                    </div>
+                    {groupedProjects.map((project) => {
+                      const isActive = project.id === activeProjectId;
+                      const isDefault = project.id === "sqls";
+                      const isManaged = project.origin === "managed";
+                      return (
                     <div
                       key={project.id}
                       className={`group flex min-h-10 items-center rounded-[3px] ${
@@ -387,14 +403,16 @@ export function AppBar({ center, right }: AppBarProps) {
                             className="block truncate text-[10px] leading-3 text-[hsl(var(--wb-text-muted))]"
                             title={project.root_path || undefined}
                           >
-                            {project.root_path ||
+                            {isManaged
+                              ? `${project.managed_data_sources?.length || 0} managed data sources`
+                              : project.root_path ||
                               (isDefault
                                 ? "Built-in workspace"
                                 : "No project directory")}
                           </span>
                         </span>
                       </button>
-                      {!isDefault && (
+                      {!isDefault && !isManaged && (
                         <button
                           type="button"
                           className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-[3px] text-[hsl(var(--wb-text-muted))] opacity-0 outline-none transition-[color,background-color,opacity] hover:bg-[hsl(var(--destructive)/0.12)] hover:text-[hsl(var(--destructive))] focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-[hsl(var(--destructive))] group-hover:opacity-100 group-focus-within:opacity-100"
@@ -410,8 +428,10 @@ export function AppBar({ center, right }: AppBarProps) {
                         </button>
                       )}
                     </div>
-                  );
-                })}
+                      );
+                    })}
+                  </Fragment>
+                ))}
               </div>
               <div className="my-1 h-px bg-[hsl(var(--wb-border-subtle))]" />
               <button
@@ -444,6 +464,7 @@ export function AppBar({ center, right }: AppBarProps) {
       <div className="h-full flex items-center gap-1 shrink-0 ml-auto pr-1">
         {right && <div className="flex items-center gap-1 pr-1">{right}</div>}
         <div className="flex items-center gap-0.5 pl-0.5">
+          <EnterpriseAccountMenu />
           <Popover open={settingsMenuOpen} onOpenChange={setSettingsMenuOpen}>
             <PopoverTrigger asChild>
               <button

@@ -1,0 +1,921 @@
+use crate::auth::AuthenticatedIdentity;
+use anyhow::{Context, Result};
+use oxide_enterprise_contracts::{
+    AccessAction, AccessGrant, AuthorizationRequest, GrantEffect, ManagedDataSourceDescriptor,
+    ManagedProject, MembershipStatus, OrganizationMembership, OrganizationSummary, PolicyEvaluator,
+    User,
+};
+use sqlx::{PgPool, Row};
+use std::collections::{BTreeSet, HashMap};
+use uuid::Uuid;
+
+#[derive(Clone)]
+pub struct ControlPlaneStore {
+    pool: PgPool,
+}
+
+impl ControlPlaneStore {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn create_organization(
+        &self,
+        owner_user_id: Uuid,
+        slug: &str,
+        display_name: &str,
+    ) -> Result<Uuid> {
+        let organization_id = Uuid::new_v4();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO organizations (id, slug, display_name)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(organization_id)
+        .bind(slug)
+        .bind(display_name)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO organization_memberships
+             (organization_id, user_id, status, organization_role)
+             VALUES ($1, $2, 'active', 'owner')",
+        )
+        .bind(organization_id)
+        .bind(owner_user_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(organization_id)
+    }
+
+    pub async fn create_managed_project(
+        &self,
+        organization_id: Uuid,
+        display_name: &str,
+    ) -> Result<Uuid> {
+        let project_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO managed_projects (id, organization_id, display_name)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(project_id)
+        .bind(organization_id)
+        .bind(display_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(project_id)
+    }
+
+    pub async fn register_gateway(
+        &self,
+        organization_id: Uuid,
+        display_name: &str,
+        direct_endpoint: &str,
+    ) -> Result<Uuid> {
+        let gateway_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO gateways
+             (id, organization_id, display_name, direct_endpoint, status)
+             VALUES ($1, $2, $3, $4, 'pending')",
+        )
+        .bind(gateway_id)
+        .bind(organization_id)
+        .bind(display_name)
+        .bind(direct_endpoint)
+        .execute(&self.pool)
+        .await?;
+        Ok(gateway_id)
+    }
+
+    pub async fn activate_gateway(&self, organization_id: Uuid, gateway_id: Uuid) -> Result<()> {
+        let updated = sqlx::query(
+            "UPDATE gateways
+             SET status = 'active', last_seen_at = now()
+             WHERE id = $1 AND organization_id = $2",
+        )
+        .bind(gateway_id)
+        .bind(organization_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if updated != 1 {
+            anyhow::bail!("Gateway is not available");
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn register_data_source(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        gateway_id: Uuid,
+        driver: &str,
+        display_name: &str,
+        capabilities: &BTreeSet<AccessAction>,
+    ) -> Result<Uuid> {
+        let valid_scope: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+               SELECT 1
+               FROM managed_projects p
+               JOIN gateways g ON g.organization_id = p.organization_id
+               WHERE p.id = $1 AND p.organization_id = $2 AND g.id = $3
+             )",
+        )
+        .bind(project_id)
+        .bind(organization_id)
+        .bind(gateway_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !valid_scope {
+            anyhow::bail!("managed project and Gateway must belong to this organization");
+        }
+        let data_source_id = Uuid::new_v4();
+        let capabilities = capabilities
+            .iter()
+            .map(|action| action.as_str())
+            .collect::<Vec<_>>();
+        sqlx::query(
+            "INSERT INTO data_sources
+             (id, organization_id, project_id, gateway_id, driver, display_name, capabilities)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(data_source_id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(gateway_id)
+        .bind(driver)
+        .bind(display_name)
+        .bind(serde_json::to_value(capabilities)?)
+        .execute(&self.pool)
+        .await?;
+        Ok(data_source_id)
+    }
+
+    pub async fn sync_identity(&self, identity: &AuthenticatedIdentity) -> Result<User> {
+        if let Some(row) = sqlx::query(
+            "SELECT u.id, u.display_name
+             FROM user_identities i JOIN users u ON u.id = i.user_id
+             WHERE i.issuer = $1 AND i.subject = $2",
+        )
+        .bind(&identity.issuer)
+        .bind(&identity.subject)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            let id: Uuid = row.try_get("id")?;
+            sqlx::query("UPDATE users SET display_name = $1, updated_at = now() WHERE id = $2")
+                .bind(&identity.display_name)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            self.accept_verified_invitations(id, identity).await?;
+            return Ok(User {
+                id,
+                display_name: identity.display_name.clone(),
+                verified_emails: identity.verified_email.clone().into_iter().collect(),
+            });
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, display_name) VALUES ($1, $2)")
+            .bind(id)
+            .bind(&identity.display_name)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO user_identities
+             (issuer, subject, user_id, kind, verified_email)
+             VALUES ($1, $2, $3, 'oidc', $4)",
+        )
+        .bind(&identity.issuer)
+        .bind(&identity.subject)
+        .bind(id)
+        .bind(&identity.verified_email)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        self.accept_verified_invitations(id, identity).await?;
+        Ok(User {
+            id,
+            display_name: identity.display_name.clone(),
+            verified_emails: identity.verified_email.clone().into_iter().collect(),
+        })
+    }
+
+    async fn accept_verified_invitations(
+        &self,
+        user_id: Uuid,
+        identity: &AuthenticatedIdentity,
+    ) -> Result<()> {
+        let Some(email) = identity.verified_email.as_deref() else {
+            return Ok(());
+        };
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO organization_memberships
+             (organization_id, user_id, status, organization_role)
+             SELECT i.organization_id, $1, 'active', i.organization_role
+             FROM organization_invitations i
+             JOIN organizations o ON o.id = i.organization_id
+             WHERE i.invited_email = lower($2)
+               AND i.status = 'pending'
+               AND i.expires_at > now()
+               AND (
+                 NOT o.requires_enterprise_sso
+                 OR o.required_oidc_issuer = $3
+               )
+             ON CONFLICT (organization_id, user_id)
+             DO UPDATE SET status = 'active',
+                           organization_role = EXCLUDED.organization_role,
+                           updated_at = now()",
+        )
+        .bind(user_id)
+        .bind(email)
+        .bind(&identity.issuer)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE organization_invitations i
+             SET status = 'accepted'
+             FROM organizations o
+             WHERE o.id = i.organization_id
+               AND i.invited_email = lower($1)
+               AND i.status = 'pending'
+               AND i.expires_at > now()
+               AND (
+                 NOT o.requires_enterprise_sso
+                 OR o.required_oidc_issuer = $2
+               )",
+        )
+        .bind(email)
+        .bind(&identity.issuer)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn memberships(&self, user_id: Uuid) -> Result<Vec<OrganizationMembership>> {
+        let rows = sqlx::query(
+            "SELECT o.id, o.slug, o.display_name, o.requires_enterprise_sso,
+                    o.auth_policy_revision, m.status, m.organization_role
+             FROM organization_memberships m
+             JOIN organizations o ON o.id = m.organization_id
+             WHERE m.user_id = $1
+             ORDER BY o.display_name",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(OrganizationMembership {
+                    organization: OrganizationSummary {
+                        id: row.try_get("id")?,
+                        slug: row.try_get("slug")?,
+                        display_name: row.try_get("display_name")?,
+                    },
+                    user_id,
+                    status: parse_membership_status(row.try_get("status")?)?,
+                    organization_role: row.try_get("organization_role")?,
+                    auth_policy_revision: row.try_get("auth_policy_revision")?,
+                    requires_enterprise_sso: row.try_get("requires_enterprise_sso")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn require_organization_admin(
+        &self,
+        user_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<()> {
+        let allowed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM organization_memberships
+                WHERE organization_id = $1 AND user_id = $2
+                  AND status = 'active'
+                  AND organization_role IN ('owner', 'administrator')
+             )",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !allowed {
+            anyhow::bail!("organization administrator access is required");
+        }
+        Ok(())
+    }
+
+    pub async fn require_project_assignment(
+        &self,
+        user_id: Uuid,
+        organization_id: Uuid,
+        project_id: Uuid,
+    ) -> Result<()> {
+        let allowed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                FROM managed_projects p
+                JOIN organization_memberships m
+                  ON m.organization_id = p.organization_id
+                 AND m.user_id = $1
+                 AND m.status = 'active'
+                JOIN project_assignments a ON a.project_id = p.id
+                LEFT JOIN group_members gm
+                  ON a.principal_kind = 'group'
+                 AND gm.group_id = a.principal_id
+                 AND gm.user_id = $1
+                WHERE p.id = $2
+                  AND p.organization_id = $3
+                  AND (
+                    (a.principal_kind = 'user' AND a.principal_id = $1)
+                    OR gm.user_id = $1
+                  )
+             )",
+        )
+        .bind(user_id)
+        .bind(project_id)
+        .bind(organization_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !allowed {
+            anyhow::bail!("managed project is not assigned to this user");
+        }
+        Ok(())
+    }
+
+    pub async fn admin_overview(&self, organization_id: Uuid) -> Result<serde_json::Value> {
+        let organization = sqlx::query("SELECT id, display_name FROM organizations WHERE id = $1")
+            .bind(organization_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .context("organization is not available")?;
+        let member_rows = sqlx::query(
+            "SELECT u.id, u.display_name, m.status, m.organization_role,
+                    COALESCE(
+                      (SELECT verified_email FROM user_identities
+                       WHERE user_id = u.id AND verified_email IS NOT NULL
+                       ORDER BY created_at LIMIT 1),
+                      ''
+                    ) AS email
+             FROM organization_memberships m
+             JOIN users u ON u.id = m.user_id
+             WHERE m.organization_id = $1
+             ORDER BY u.display_name",
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let project_rows = sqlx::query(
+            "SELECT p.id, p.display_name, p.policy_revision,
+                    (SELECT count(*) FROM data_sources d
+                     WHERE d.project_id = p.id) AS data_source_count,
+                    (SELECT count(*) FROM project_assignments a
+                     WHERE a.project_id = p.id) AS member_count
+             FROM managed_projects p
+             WHERE p.organization_id = $1
+             ORDER BY p.display_name",
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let source_rows = sqlx::query(
+            "SELECT id, project_id, display_name, driver
+             FROM data_sources
+             WHERE organization_id = $1
+             ORDER BY display_name",
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut sources_by_project = HashMap::<Uuid, Vec<serde_json::Value>>::new();
+        for row in source_rows {
+            sources_by_project
+                .entry(row.try_get("project_id")?)
+                .or_default()
+                .push(serde_json::json!({
+                    "id": row.try_get::<Uuid, _>("id")?,
+                    "displayName": row.try_get::<String, _>("display_name")?,
+                    "driver": row.try_get::<String, _>("driver")?,
+                }));
+        }
+        let gateway_rows = sqlx::query(
+            "SELECT id, display_name, status, last_seen_at
+             FROM gateways WHERE organization_id = $1 ORDER BY display_name",
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(serde_json::json!({
+            "organization": {
+                "id": organization.try_get::<Uuid, _>("id")?,
+                "displayName": organization.try_get::<String, _>("display_name")?,
+            },
+            "members": member_rows.into_iter().map(|row| {
+                serde_json::json!({
+                    "id": row.get::<Uuid, _>("id"),
+                    "displayName": row.get::<String, _>("display_name"),
+                    "email": row.get::<String, _>("email"),
+                    "status": row.get::<String, _>("status"),
+                    "role": row.get::<String, _>("organization_role"),
+                })
+            }).collect::<Vec<_>>(),
+            "projects": project_rows.into_iter().map(|row| {
+                let project_id = row.get::<Uuid, _>("id");
+                serde_json::json!({
+                    "id": project_id,
+                    "displayName": row.get::<String, _>("display_name"),
+                    "dataSourceCount": row.get::<i64, _>("data_source_count"),
+                    "memberCount": row.get::<i64, _>("member_count"),
+                    "policyRevision": row.get::<String, _>("policy_revision"),
+                    "dataSources": sources_by_project.remove(&project_id).unwrap_or_default(),
+                })
+            }).collect::<Vec<_>>(),
+            "gateways": gateway_rows.into_iter().map(|row| {
+                serde_json::json!({
+                    "id": row.get::<Uuid, _>("id"),
+                    "displayName": row.get::<String, _>("display_name"),
+                    "status": row.get::<String, _>("status"),
+                    "lastSeenAt": row.try_get::<chrono::DateTime<chrono::Utc>, _>("last_seen_at").ok(),
+                })
+            }).collect::<Vec<_>>(),
+        }))
+    }
+
+    pub async fn invite_member(
+        &self,
+        organization_id: Uuid,
+        invited_by: Uuid,
+        email: &str,
+        role: &str,
+    ) -> Result<Uuid> {
+        let invitation_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO organization_invitations
+             (id, organization_id, invited_email, organization_role, invited_by, expires_at)
+             VALUES ($1, $2, lower($3), $4, $5, now() + interval '7 days')
+             ON CONFLICT (organization_id, invited_email, status)
+             DO UPDATE SET organization_role = EXCLUDED.organization_role,
+                           invited_by = EXCLUDED.invited_by,
+                           expires_at = EXCLUDED.expires_at",
+        )
+        .bind(invitation_id)
+        .bind(organization_id)
+        .bind(email)
+        .bind(role)
+        .bind(invited_by)
+        .execute(&self.pool)
+        .await?;
+        Ok(invitation_id)
+    }
+
+    pub async fn assign_project(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        principal_kind: &str,
+        principal_id: Uuid,
+    ) -> Result<()> {
+        let project_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+               SELECT 1 FROM managed_projects
+               WHERE id = $1 AND organization_id = $2
+             )",
+        )
+        .bind(project_id)
+        .bind(organization_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !project_exists {
+            anyhow::bail!("managed project is not available");
+        }
+        sqlx::query(
+            "INSERT INTO project_assignments
+             (project_id, principal_kind, principal_id)
+             VALUES ($1, $2, $3)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(project_id)
+        .bind(principal_kind)
+        .bind(principal_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_access_grant(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        principal_kind: &str,
+        principal_id: Uuid,
+        data_source_id: Option<Uuid>,
+        resource_path: &[String],
+        actions: &BTreeSet<AccessAction>,
+        effect: GrantEffect,
+    ) -> Result<Uuid> {
+        let mut tx = self.pool.begin().await?;
+        let project_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+               SELECT 1 FROM managed_projects
+               WHERE id = $1 AND organization_id = $2
+             )",
+        )
+        .bind(project_id)
+        .bind(organization_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !project_exists {
+            anyhow::bail!("managed project is not available");
+        }
+        if let Some(data_source_id) = data_source_id {
+            let source_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                   SELECT 1 FROM data_sources
+                   WHERE id = $1 AND project_id = $2 AND organization_id = $3
+                 )",
+            )
+            .bind(data_source_id)
+            .bind(project_id)
+            .bind(organization_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !source_exists {
+                anyhow::bail!("managed data source is not available");
+            }
+        }
+        let id = Uuid::new_v4();
+        let actions = actions
+            .iter()
+            .map(|action| action.as_str())
+            .collect::<Vec<_>>();
+        sqlx::query(
+            "INSERT INTO access_grants
+             (id, organization_id, project_id, principal_kind, principal_id,
+              data_source_id, resource_path, actions, effect)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(principal_kind)
+        .bind(principal_id)
+        .bind(data_source_id)
+        .bind(serde_json::to_value(resource_path)?)
+        .bind(serde_json::to_value(actions)?)
+        .bind(match effect {
+            GrantEffect::Permit => "permit",
+            GrantEffect::Forbid => "forbid",
+        })
+        .execute(&mut *tx)
+        .await?;
+        let revision = Uuid::new_v4().to_string();
+        sqlx::query(
+            "UPDATE managed_projects SET policy_revision = $1, updated_at = now()
+             WHERE id = $2 AND organization_id = $3",
+        )
+        .bind(&revision)
+        .bind(project_id)
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE data_sources SET policy_revision = $1, updated_at = now()
+             WHERE project_id = $2 AND organization_id = $3
+               AND ($4::uuid IS NULL OR id = $4)",
+        )
+        .bind(&revision)
+        .bind(project_id)
+        .bind(organization_id)
+        .bind(data_source_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE organizations SET auth_policy_revision = $1 WHERE id = $2")
+            .bind(&revision)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(id)
+    }
+
+    pub async fn managed_projects(&self, user_id: Uuid) -> Result<Vec<ManagedProject>> {
+        let project_rows = sqlx::query(
+            "SELECT DISTINCT p.id, p.organization_id, p.display_name, p.policy_revision,
+                    o.display_name AS organization_name
+             FROM managed_projects p
+             JOIN organizations o ON o.id = p.organization_id
+             JOIN organization_memberships m
+               ON m.organization_id = p.organization_id
+              AND m.user_id = $1 AND m.status = 'active'
+             LEFT JOIN group_members gm ON gm.user_id = $1
+             JOIN project_assignments a ON a.project_id = p.id
+              AND ((a.principal_kind = 'user' AND a.principal_id = $1)
+                OR (a.principal_kind = 'group' AND a.principal_id = gm.group_id))
+             ORDER BY o.display_name, p.display_name",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut projects = Vec::with_capacity(project_rows.len());
+        for row in project_rows {
+            let project_id: Uuid = row.try_get("id")?;
+            let organization_id: Uuid = row.try_get("organization_id")?;
+            let sources = self
+                .data_sources(user_id, organization_id, project_id)
+                .await?;
+            let project = ManagedProject {
+                id: project_id,
+                organization_id,
+                organization_name: row.try_get("organization_name")?,
+                display_name: row.try_get("display_name")?,
+                policy_revision: row.try_get("policy_revision")?,
+                data_sources: sources,
+            };
+            project.validate()?;
+            projects.push(project);
+        }
+        Ok(projects)
+    }
+
+    async fn data_sources(
+        &self,
+        user_id: Uuid,
+        organization_id: Uuid,
+        project_id: Uuid,
+    ) -> Result<Vec<ManagedDataSourceDescriptor>> {
+        let rows = sqlx::query(
+            "SELECT id, gateway_id, driver, display_name, capabilities,
+                    allowed_resource_summary, policy_revision
+             FROM data_sources
+             WHERE organization_id = $1 AND project_id = $2
+             ORDER BY display_name",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut descriptors = rows
+            .into_iter()
+            .map(|row| {
+                let capabilities: Vec<String> =
+                    serde_json::from_value(row.try_get("capabilities")?)?;
+                let allowed_resource_summary: Vec<String> =
+                    serde_json::from_value(row.try_get("allowed_resource_summary")?)?;
+                let descriptor = ManagedDataSourceDescriptor {
+                    organization_id,
+                    project_id,
+                    data_source_id: row.try_get("id")?,
+                    gateway_id: row.try_get("gateway_id")?,
+                    driver: row.try_get("driver")?,
+                    display_name: row.try_get("display_name")?,
+                    capabilities: capabilities.into_iter().collect(),
+                    allowed_resource_summary,
+                    policy_revision: row.try_get("policy_revision")?,
+                };
+                descriptor.validate_secret_free()?;
+                Ok(descriptor)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let grants = self
+            .grants_for_user(user_id, organization_id, project_id)
+            .await?;
+        descriptors.retain_mut(|descriptor| {
+            let discoverable_paths = allowed_paths_for_action(
+                user_id,
+                descriptor.data_source_id,
+                &grants,
+                AccessAction::ResourceDiscover,
+            );
+            if discoverable_paths.is_empty() {
+                return false;
+            }
+            descriptor.allowed_resource_summary = discoverable_paths
+                .iter()
+                .map(|path| path.join("/"))
+                .collect();
+            descriptor.capabilities = [
+                AccessAction::ResourceDiscover,
+                AccessAction::MetadataRead,
+                AccessAction::QueryRead,
+                AccessAction::DataWrite,
+                AccessAction::SchemaDdl,
+                AccessAction::DataExport,
+                AccessAction::AiUse,
+                AccessAction::McpUse,
+            ]
+            .into_iter()
+            .filter(|action| {
+                !allowed_paths_for_action(user_id, descriptor.data_source_id, &grants, *action)
+                    .is_empty()
+            })
+            .map(|action| action.as_str().to_string())
+            .collect();
+            true
+        });
+        Ok(descriptors)
+    }
+
+    pub async fn gateway_for_source(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        data_source_id: Uuid,
+    ) -> Result<(Uuid, String, String)> {
+        let row = sqlx::query(
+            "SELECT d.gateway_id, d.policy_revision, g.direct_endpoint
+             FROM data_sources d
+             JOIN gateways g ON g.id = d.gateway_id
+             WHERE d.id = $1 AND d.organization_id = $2 AND d.project_id = $3
+               AND g.status = 'active'",
+        )
+        .bind(data_source_id)
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .context("managed data source is not available")?;
+        Ok((
+            row.try_get("gateway_id")?,
+            row.try_get("direct_endpoint")?,
+            row.try_get("policy_revision")?,
+        ))
+    }
+
+    pub async fn grants_for_user(
+        &self,
+        user_id: Uuid,
+        organization_id: Uuid,
+        project_id: Uuid,
+    ) -> Result<Vec<AccessGrant>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT g.id, g.data_source_id, g.resource_path,
+                    g.actions, g.effect
+             FROM access_grants g
+             LEFT JOIN group_members gm
+               ON g.principal_kind = 'group' AND gm.group_id = g.principal_id
+             WHERE g.organization_id = $1 AND g.project_id = $2
+               AND ((g.principal_kind = 'user' AND g.principal_id = $3)
+                 OR gm.user_id = $3)",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let actions: Vec<String> = serde_json::from_value(row.try_get("actions")?)?;
+                Ok(AccessGrant {
+                    id: row.try_get("id")?,
+                    principal_id: user_id,
+                    organization_id,
+                    project_id,
+                    data_source_id: row.try_get("data_source_id")?,
+                    resource_path: serde_json::from_value(row.try_get("resource_path")?)?,
+                    actions: actions
+                        .into_iter()
+                        .map(|action| parse_action(&action))
+                        .collect::<Result<BTreeSet<_>>>()?,
+                    effect: match row.try_get::<String, _>("effect")?.as_str() {
+                        "permit" => GrantEffect::Permit,
+                        "forbid" => GrantEffect::Forbid,
+                        value => anyhow::bail!("invalid stored grant effect: {value}"),
+                    },
+                })
+            })
+            .collect()
+    }
+
+    pub fn forbidden_paths_for_action(
+        grants: &[AccessGrant],
+        data_source_id: Uuid,
+        action: AccessAction,
+    ) -> Vec<Vec<String>> {
+        grants
+            .iter()
+            .filter(|grant| {
+                grant.effect == GrantEffect::Forbid
+                    && grant.actions.contains(&action)
+                    && grant
+                        .data_source_id
+                        .is_none_or(|value| value == data_source_id)
+            })
+            .map(|grant| grant.resource_path.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .take(256)
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_audit(
+        &self,
+        organization_id: Uuid,
+        user_id: Uuid,
+        device_id: Uuid,
+        project_id: Uuid,
+        data_source_id: Uuid,
+        resource_path: &[String],
+        action: AccessAction,
+        decision: &str,
+        reason: &str,
+        request_id: Uuid,
+        source: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO audit_events
+             (id, organization_id, user_id, device_id, project_id, data_source_id,
+              resource_path, action, decision, reason_code, request_id, source)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(organization_id)
+        .bind(user_id)
+        .bind(device_id)
+        .bind(project_id)
+        .bind(data_source_id)
+        .bind(serde_json::to_value(resource_path)?)
+        .bind(action.as_str())
+        .bind(decision)
+        .bind(reason)
+        .bind(request_id)
+        .bind(source)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+fn parse_membership_status(value: String) -> Result<MembershipStatus> {
+    match value.as_str() {
+        "invited" => Ok(MembershipStatus::Invited),
+        "active" => Ok(MembershipStatus::Active),
+        "suspended" => Ok(MembershipStatus::Suspended),
+        _ => anyhow::bail!("invalid stored membership status: {value}"),
+    }
+}
+
+pub(crate) fn allowed_paths_for_action(
+    user_id: Uuid,
+    data_source_id: Uuid,
+    grants: &[AccessGrant],
+    action: AccessAction,
+) -> Vec<Vec<String>> {
+    let mut candidates = grants
+        .iter()
+        .filter(|grant| {
+            grant.effect == GrantEffect::Permit
+                && grant.actions.contains(&action)
+                && grant
+                    .data_source_id
+                    .is_none_or(|value| value == data_source_id)
+        })
+        .map(|grant| grant.resource_path.clone())
+        .collect::<BTreeSet<_>>();
+    candidates.retain(|resource_path| {
+        let Some(grant) = grants.iter().find(|grant| {
+            grant.effect == GrantEffect::Permit
+                && grant.actions.contains(&action)
+                && grant.resource_path == *resource_path
+                && grant
+                    .data_source_id
+                    .is_none_or(|value| value == data_source_id)
+        }) else {
+            return false;
+        };
+        PolicyEvaluator::is_allowed(
+            &AuthorizationRequest {
+                principal_id: user_id,
+                organization_id: grant.organization_id,
+                project_id: grant.project_id,
+                data_source_id,
+                resource_path: resource_path.clone(),
+                action,
+            },
+            grants,
+        )
+        .unwrap_or(false)
+    });
+    candidates.into_iter().collect()
+}
+
+fn parse_action(value: &str) -> Result<AccessAction> {
+    match value {
+        "resource.discover" => Ok(AccessAction::ResourceDiscover),
+        "metadata.read" => Ok(AccessAction::MetadataRead),
+        "query.read" => Ok(AccessAction::QueryRead),
+        "data.write" => Ok(AccessAction::DataWrite),
+        "schema.ddl" => Ok(AccessAction::SchemaDdl),
+        "data.export" => Ok(AccessAction::DataExport),
+        "ai.use" => Ok(AccessAction::AiUse),
+        "mcp.use" => Ok(AccessAction::McpUse),
+        _ => anyhow::bail!("invalid stored access action: {value}"),
+    }
+}

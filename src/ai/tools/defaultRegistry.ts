@@ -12,7 +12,10 @@ import {
 import type { Diagnostic } from "@/services/lsp/types";
 import type { DatabaseDriver, QueryResult } from "@/services/tauri/types";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
-import { useConnectionStore } from "@/store/useConnectionStore";
+import {
+  isManagedConnection,
+  useConnectionStore,
+} from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import {
   querySchemaContextForTab,
@@ -91,6 +94,10 @@ export function createWorkspaceAiToolContext(
   const activeConnection = connectionState.connections.find(
     (connection) => connection.id === connectionState.activeConnectionId,
   );
+  const authorizedLocalConnection =
+    activeConnection && !isManagedConnection(activeConnection)
+      ? activeConnection
+      : null;
   const activeTab = tabState.tabs.find(
     (tab) => tab.id === tabState.activeTabId,
   );
@@ -100,8 +107,8 @@ export function createWorkspaceAiToolContext(
     workspaceContext: createWorkspaceContextBinding(
       captureWorkspaceUiActionContext(),
     ),
-    activeConnectionId: connectionState.activeConnectionId,
-    activeDriver: activeConnection?.driver ?? null,
+    activeConnectionId: authorizedLocalConnection?.id ?? null,
+    activeDriver: authorizedLocalConnection?.driver ?? null,
     activeNamespace: schemaState.currentSchema,
     activeTab: activeTab ? workspaceTabSummaryFromTab(activeTab) : null,
   };
@@ -110,11 +117,14 @@ export function createWorkspaceAiToolContext(
 export function createWorkspaceAiToolAdapters(): AiToolAdapters {
   return {
     listConnections: () =>
-      useConnectionStore.getState().connections.map((connection) => ({
-        id: connection.id,
-        name: connection.name,
-        driver: connection.driver,
-      })),
+      useConnectionStore
+        .getState()
+        .connections.filter((connection) => !isManagedConnection(connection))
+        .map((connection) => ({
+          id: connection.id,
+          name: connection.name,
+          driver: connection.driver,
+        })),
 
     getConnectionCapabilities: (driver) =>
       databaseService.getDatabaseCapabilities(driver),
@@ -144,6 +154,7 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
           "No active connection is available for metadata.listCollections",
         );
       }
+      requireLocalAiConnection(connectionId);
       const namespace =
         input.namespace || useSchemaStore.getState().currentSchema || "";
       return schemaService.getCollections(connectionId, namespace);
@@ -468,6 +479,11 @@ async function getLspCompletions(
   const connection = useConnectionStore
     .getState()
     .connections.find((candidate) => candidate.id === connectionId);
+  if (connection && isManagedConnection(connection)) {
+    throw new Error(
+      "Managed AI access requires an organization ai.use grant and an enterprise Gateway session.",
+    );
+  }
   const driver = connection?.driver ?? context.activeDriver ?? null;
   if (!driver) {
     throw new Error(`Connection driver is not available for ${connectionId}`);
@@ -851,6 +867,11 @@ async function resolveMetadataTarget(
   const connection = useConnectionStore
     .getState()
     .connections.find((candidate) => candidate.id === connectionId);
+  if (connection && isManagedConnection(connection)) {
+    throw new Error(
+      "Managed AI access requires an organization ai.use grant and an enterprise Gateway session.",
+    );
+  }
   const driver = connection?.driver ?? context.activeDriver ?? null;
   if (!driver) {
     throw new Error(`Connection driver is not available for ${connectionId}`);
@@ -887,6 +908,17 @@ function resolveQueryExecutionTarget(
     undefined;
 
   return { connectionId, namespace, driver };
+}
+
+function requireLocalAiConnection(connectionId: string) {
+  const connection = useConnectionStore
+    .getState()
+    .connections.find((candidate) => candidate.id === connectionId);
+  if (connection && isManagedConnection(connection)) {
+    throw new Error(
+      "Managed AI access is unavailable without an organization ai.use grant.",
+    );
+  }
 }
 
 function inferActiveQueryNamespace(

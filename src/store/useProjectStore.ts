@@ -10,6 +10,7 @@ import { useSchemaStore } from "@/store/useSchemaStore";
 import { confirmDiscardAllTabChanges, useTabStore } from "@/store/useTabStore";
 import { unstable_batchedUpdates } from "react-dom";
 import { useEditorGroupStore } from "@/store/useEditorGroupStore";
+import { useEnterpriseAccountStore } from "@/store/useEnterpriseAccountStore";
 
 const DEFAULT_PROJECT: Project = {
   id: "sqls",
@@ -26,9 +27,62 @@ interface ProjectState {
   activeProjectName: string;
   isLoading: boolean;
   loadProjects: () => Promise<void>;
+  reconcileManagedProjects: () => void;
   setActiveProject: (projectId: string) => boolean;
   createProject: (name: string, rootPath?: string | null) => Promise<Project>;
   deleteProject: (projectId: string) => Promise<void>;
+}
+
+function enterpriseProjects(): Project[] {
+  const { memberships, managedProjects } =
+    useEnterpriseAccountStore.getState().status;
+  const organizations = new Map(
+    memberships.map((membership) => [
+      membership.organization.id,
+      membership.organization.displayName,
+    ]),
+  );
+  const now = Date.now();
+  return managedProjects.map((project) => ({
+    id: project.id,
+    name: project.displayName,
+    root_path: null,
+    created_at: now,
+    updated_at: now,
+    origin: "managed" as const,
+    organization_id: project.organizationId,
+    organization_name:
+      organizations.get(project.organizationId) || project.organizationId,
+    policy_revision: project.policyRevision,
+    managed_data_sources: project.dataSources,
+  }));
+}
+
+function mergeProjects(localProjects: Project[]) {
+  const managed = enterpriseProjects();
+  return [
+    ...localProjects.map((project) => ({
+      ...project,
+      origin: "local" as const,
+    })),
+    ...managed,
+  ];
+}
+
+function managedProjectConnections(
+  project: Project,
+): Awaited<ReturnType<typeof readProjectConnections>> {
+  return (project.managed_data_sources || []).map((descriptor) => ({
+    id: descriptor.dataSourceId,
+    projectId: project.id,
+    name: descriptor.displayName,
+    driver: descriptor.driver,
+    url: "",
+    connectionUrl: "",
+    origin: "managed" as const,
+    managedDescriptor: descriptor,
+    database: descriptor.allowedResourceSummary[0],
+  }));
 }
 
 function readActiveProjectId() {
@@ -132,7 +186,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ isLoading: true });
     try {
       const projects = await storeService.getProjects();
-      const mergedProjects = projects.length > 0 ? projects : [DEFAULT_PROJECT];
+      const localProjects = projects.length > 0 ? projects : [DEFAULT_PROJECT];
+      const mergedProjects = mergeProjects(localProjects);
       const savedProjectId = readActiveProjectId();
       const activeProject =
         mergedProjects.find((project) => project.id === savedProjectId) ||
@@ -157,6 +212,39 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
 
+  reconcileManagedProjects: () => {
+    const state = get();
+    const localProjects = state.projects.filter(
+      (project) => project.origin !== "managed",
+    );
+    const projects = mergeProjects(
+      localProjects.length > 0 ? localProjects : [DEFAULT_PROJECT],
+    );
+    const activeStillExists = projects.some(
+      (project) => project.id === state.activeProjectId,
+    );
+    if (activeStillExists) {
+      set({ projects });
+      return;
+    }
+    const fallback =
+      projects.find((project) => project.id === DEFAULT_PROJECT.id) ||
+      projects[0] ||
+      DEFAULT_PROJECT;
+    latestProjectSwitch += 1;
+    void readProjectConnections(fallback.id)
+      .catch(() => [])
+      .then((connections) => {
+        replaceProjectWorkspace(fallback, connections, () => {
+          set({
+            projects,
+            activeProjectId: fallback.id,
+            activeProjectName: fallback.name,
+          });
+        });
+      });
+  },
+
   setActiveProject: (projectId: string) => {
     const project =
       get().projects.find((item) => item.id === projectId) || DEFAULT_PROJECT;
@@ -164,7 +252,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!confirmDiscardAllTabChanges("switch projects")) return false;
 
     const switchId = ++latestProjectSwitch;
-    void readProjectConnections(project.id)
+    const connectionRequest =
+      project.origin === "managed"
+        ? Promise.resolve(managedProjectConnections(project))
+        : readProjectConnections(project.id);
+    void connectionRequest
       .then((connections) => {
         if (switchId !== latestProjectSwitch) return;
         replaceProjectWorkspace(project, connections, () => {
@@ -241,6 +333,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const state = get();
     const project = state.projects.find((item) => item.id === projectId);
     if (!project) return;
+    if (project.origin === "managed") {
+      throw new Error(
+        "Managed projects are assigned by your organization and cannot be deleted locally.",
+      );
+    }
     const isActiveProject = state.activeProjectId === projectId;
     if (
       isActiveProject &&

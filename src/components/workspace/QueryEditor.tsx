@@ -9,7 +9,7 @@ import { ThemeContext } from "@/theme/ThemeProvider";
 import Editor, { useMonaco } from "@monaco-editor/react";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState, useContext, useMemo } from "react";
-// import { queryService, schemaService } from "@/services/tauri";
+import { queryService } from "@/services/tauri";
 import { useLspClient } from "@/hooks/useLspClient";
 import {
   DEFAULT_DATABASE_DRIVER,
@@ -70,6 +70,7 @@ import {
 import { saveProjectFileTab } from "@/lib/projectFileTabs";
 import { useProjectFilesStore } from "@/store/useProjectFilesStore";
 import { useProjectStore } from "@/store/useProjectStore";
+import { useTaskStore } from "@/store/useTaskStore";
 import { usePostgresDatabaseDiscovery } from "@/hooks/usePostgresDatabaseDiscovery";
 import { postgresConnectionDatabaseName } from "./PostgresDatabaseTree";
 import { useAiSettingsStore } from "@/store/useAiSettingsStore";
@@ -101,9 +102,19 @@ import {
   type InlineCompletionStatus,
 } from "@/lib/inlineCompletion";
 import {
+  elasticsearchRequestNavigationOffset,
   elasticsearchRequestAtOffset,
+  elasticsearchRequestsForSelection,
+  elasticsearchConsoleCompletionContext,
+  elasticsearchConsoleInlineSuggestion,
+  elasticsearchConsoleRequestContext,
+  elasticsearchSchemaCompletionsForContext,
+  elasticsearchConsoleVariableNames,
   ELASTICSEARCH_CONSOLE_LANGUAGE_ID,
+  formatElasticsearchConsole,
+  parseElasticsearchConsoleRequests,
   registerElasticsearchConsoleLanguage,
+  validateElasticsearchConsole,
 } from "@/lib/elasticsearchConsole";
 
 type TransactionMode = "auto" | "manual";
@@ -266,6 +277,7 @@ export function QueryEditor({
     activeTabId,
     updateTabSql,
     setQueryLanguage,
+    setElasticsearchVariables,
     runTabQuery,
     runExplainPlan,
     cancelTabQuery,
@@ -335,6 +347,9 @@ export function QueryEditor({
   const inlineCompletionCacheRef = useRef(new InlineCompletionCache());
   const inlineCompletionAbortRef = useRef<AbortController | null>(null);
   const inlineCompletionListenersRef = useRef(new Set<() => void>());
+  const runAllActionRef = useRef<() => void>(() => {});
+  const runCurrentActionRef = useRef<() => void>(() => {});
+  const formatActionRef = useRef<() => void>(() => {});
   const activeTransactionsRef = useRef<Map<string, QueryTransactionSession>>(
     new Map(),
   );
@@ -410,13 +425,26 @@ export function QueryEditor({
     !isElasticsearchEql &&
     supportsLspLanguageId(driver) &&
     (!activeProjectFileLanguage || activeProjectFileLanguage.usesDatabaseLsp);
+  const isElasticsearchConsole =
+    driver === "elasticsearch" &&
+    activeTab?.queryLanguage !== "elasticsearch-eql";
+  const preferredElasticsearchIndex = isElasticsearchConsole
+    ? activeTab?.tableName || activeTab?.targetSchema || undefined
+    : undefined;
+  const activeDocumentSql = activeTab?.sql || "";
+  const elasticsearchVariableNames = useMemo(
+    () =>
+      isElasticsearchConsole
+        ? elasticsearchConsoleVariableNames(activeDocumentSql)
+        : [],
+    [activeDocumentSql, isElasticsearchConsole],
+  );
   const canExecuteDocument =
     !isProjectFilePreview &&
     (!activeProjectFileLanguage || activeProjectFileLanguage.executable);
   const capabilities = defaultDatabaseCapabilities(driver);
   const supportsTransactions =
     capabilities.supportsTransactions && !activeTab?.databaseName;
-  const activeDocumentSql = activeTab?.sql || "";
   const monaco = useMonaco();
   const {
     isReady: lspReady,
@@ -811,7 +839,7 @@ export function QueryEditor({
 
     const completionDisposables = LSP_PROVIDER_LANGUAGES.map((language) =>
       monaco.languages.registerCompletionItemProvider(language, {
-        triggerCharacters: [" ", ".", "(", ",", '"', "@"],
+        triggerCharacters: [" ", ".", "(", ",", '"', "@", "/", "{", ":"],
         provideCompletionItems: async (
           model: any,
           position: any,
@@ -822,6 +850,32 @@ export function QueryEditor({
             if (!isSupportedLspModelUri(uri)) return { suggestions: [] };
 
             const identity = extractLspDocumentIdentity(uri);
+            const isElasticsearchDocument =
+              identity?.driver === "elasticsearch" ||
+              identity?.driver === "elastic";
+            const elasticsearchContext = isElasticsearchDocument
+              ? elasticsearchConsoleCompletionContext(
+                  model.getValue(),
+                  model.getOffsetAt(position),
+                )
+              : null;
+            const elasticsearchRequestContext = elasticsearchContext
+              ? elasticsearchConsoleRequestContext(
+                  model.getValue(),
+                  model.getOffsetAt(position),
+                  preferredElasticsearchIndex,
+                )
+              : null;
+            if (
+              elasticsearchContext &&
+              elasticsearchContext.area !== "path" &&
+              elasticsearchContext.area !== "field-name"
+            ) {
+              // Console syntax owns methods, REST operations, and Query DSL
+              // keys. Asking the SQL LSP in those positions both delays the
+              // popup and leaks SQL keywords into an Elasticsearch request.
+              return { suggestions: [] };
+            }
             const languageId = identity?.driver
               ? lspLanguageId(identity.driver)
               : "sql";
@@ -868,10 +922,38 @@ export function QueryEditor({
                   position.column,
                 )
               : range;
-            const filteredItems = filterCompletionsForSqlContext(
-              items,
-              sqlContextKeyword,
+            const filteredItems = elasticsearchContext
+              ? elasticsearchSchemaCompletionsForContext(
+                  items,
+                  elasticsearchContext,
+                  elasticsearchRequestContext?.index ||
+                    preferredElasticsearchIndex,
+                )
+              : filterCompletionsForSqlContext(items, sqlContextKeyword);
+            const lineBeforeCursor = model
+              .getLineContent(position.lineNumber)
+              .slice(0, position.column - 1);
+            const requestPathPrefix = lineBeforeCursor.match(
+              /^(\s*(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+)(.*)$/i,
             );
+            const jsonStringFragment = lineBeforeCursor.match(
+              /"[\w.@*-]*"?$/u,
+            )?.[0];
+            const elasticsearchInsertRange = requestPathPrefix
+              ? new monaco.Range(
+                  position.lineNumber,
+                  requestPathPrefix[1]!.length + 1,
+                  position.lineNumber,
+                  position.column,
+                )
+              : jsonStringFragment?.endsWith('"')
+                ? new monaco.Range(
+                    position.lineNumber,
+                    lineBeforeCursor.length - jsonStringFragment.length + 1,
+                    position.lineNumber,
+                    position.column,
+                  )
+                : insertRange;
 
             // Convert LSP completion items to Monaco format
             const suggestions = filteredItems.map((item) => ({
@@ -894,7 +976,9 @@ export function QueryEditor({
                   : undefined,
               range: item.textEdit
                 ? toMonacoRange(monaco, item.textEdit.range)
-                : insertRange,
+                : elasticsearchContext
+                  ? elasticsearchInsertRange
+                  : insertRange,
             }));
 
             return { suggestions };
@@ -998,16 +1082,21 @@ export function QueryEditor({
         ...formattingDisposables,
       ].forEach((disposable) => disposable.dispose());
     };
-  }, [isActivePane, monaco, lspReady, lspClient]);
+  }, [
+    isActivePane,
+    monaco,
+    lspReady,
+    lspClient,
+    preferredElasticsearchIndex,
+  ]);
 
   useEffect(() => {
     const settings = editorSettings.inlineCompletion;
     if (
       !isActivePane ||
       !monaco ||
-      !lspReady ||
       !settings.enabled ||
-      !canUseLsp
+      ((!lspReady || !canUseLsp) && !isElasticsearchConsole)
     ) {
       inlineCompletionAbortRef.current?.abort();
       setInlineCompletionStatus(settings.enabled ? "offline" : "off");
@@ -1040,7 +1129,7 @@ export function QueryEditor({
             disposed ||
             uri !== documentUri ||
             !isSupportedLspModelUri(uri) ||
-            context.selectedSuggestionInfo
+            (context.selectedSuggestionInfo && !isElasticsearchConsole)
           ) {
             return { items: [] };
           }
@@ -1052,6 +1141,56 @@ export function QueryEditor({
           const offset = model.getOffsetAt(position);
           const value = model.getValue();
           const bounded = boundedInlineContext(value, offset);
+          const inlineResult = (text: string, replaceSuffixLength = 0) => {
+            if (!text) return { items: [] };
+            const insertText =
+              text.includes("\n") &&
+              position.column < model.getLineMaxColumn(position.lineNumber)
+                ? text.split("\n", 1)[0]
+                : text;
+            const endPosition = replaceSuffixLength
+              ? model.getPositionAt(
+                  Math.min(value.length, offset + replaceSuffixLength),
+                )
+              : position;
+            return {
+              items: insertText
+                ? [
+                    {
+                      insertText,
+                      range: new monaco.Range(
+                        position.lineNumber,
+                        position.column,
+                        endPosition.lineNumber,
+                        endPosition.column,
+                      ),
+                      completeBracketPairs: true,
+                      command: {
+                        id: "editor.action.inlineSuggest.trigger",
+                        title: "Continue inline completion",
+                      },
+                    },
+                  ]
+                : [],
+            };
+          };
+          if (
+            isElasticsearchConsole &&
+            !hasSelection &&
+            (explicit || settings.automaticSuggestions)
+          ) {
+            const consoleText = elasticsearchConsoleInlineSuggestion(
+              value,
+              offset,
+              preferredElasticsearchIndex,
+            );
+            if (consoleText) {
+              setInlineCompletionStatus("local");
+              const replaceClosingQuote =
+                value[offset] === '"' && consoleText.includes('"') ? 1 : 0;
+              return inlineResult(consoleText, replaceClosingQuote);
+            }
+          }
           if (
             !shouldRequestAiInlineCompletion({
               prefix: bounded.prefix,
@@ -1060,6 +1199,10 @@ export function QueryEditor({
               explicit,
             })
           ) {
+            return { items: [] };
+          }
+          if (!lspReady || !canUseLsp) {
+            setInlineCompletionStatus("offline");
             return { items: [] };
           }
 
@@ -1083,31 +1226,91 @@ export function QueryEditor({
             position.lineNumber - 1,
             position.column - 1,
           );
-          const localText = localInlineSuggestion(bounded.prefix, lspContext);
-          const inlineResult = (text: string) => {
-            if (!text) return { items: [] };
-            const insertText =
-              text.includes("\n") &&
-              position.column < model.getLineMaxColumn(position.lineNumber)
-                ? text.split("\n", 1)[0]
-                : text;
-            return {
-              items: insertText
-                ? [
-                    {
-                      insertText,
-                      range: new monaco.Range(
-                        position.lineNumber,
-                        position.column,
-                        position.lineNumber,
-                        position.column,
-                      ),
-                      completeBracketPairs: true,
-                    },
-                  ]
-                : [],
-            };
-          };
+          const consoleContext = isElasticsearchConsole
+            ? elasticsearchConsoleCompletionContext(value, offset)
+            : null;
+          const consoleRequestContext = consoleContext
+            ? elasticsearchConsoleRequestContext(
+                value,
+                offset,
+                preferredElasticsearchIndex,
+              )
+            : null;
+          const completionContext =
+            consoleRequestContext?.startOffset !== undefined
+              ? boundedInlineContext(
+                  consoleRequestContext.request,
+                  offset - consoleRequestContext.startOffset,
+                )
+              : bounded;
+          const scopedLspContext = consoleContext
+            ? {
+                ...lspContext,
+                clause: `ElasticsearchConsole:${consoleContext.area}`,
+                referencedObjects: consoleRequestContext?.index
+                  ? [consoleRequestContext.index]
+                  : [],
+                expectedKinds:
+                  consoleContext.area === "field-name" ||
+                  (consoleContext.area === "value" &&
+                    ["field", "fields", "_source"].includes(
+                      consoleContext.valueKey || "",
+                    ))
+                    ? ["mapping-field"]
+                    : [consoleContext.area],
+                candidates: (lspContext.candidates || [])
+                  .filter((candidate) => candidate.kind === 5)
+                  .filter(
+                    (candidate, index, rows) =>
+                      rows.findIndex(
+                        (item) =>
+                          item.label.toLowerCase() ===
+                          candidate.label.toLowerCase(),
+                      ) === index,
+                  ),
+                console: {
+                  ...consoleRequestContext,
+                  request: consoleRequestContext?.request || "",
+                  area: consoleContext.area,
+                },
+              }
+            : lspContext;
+          const canUseSchemaInlineCandidate = Boolean(
+            consoleContext &&
+              (consoleContext.area === "field-name" ||
+                (consoleContext.area === "value" &&
+                  ["field", "fields", "_source"].includes(
+                    consoleContext.valueKey || "",
+                  ))),
+          );
+          const localText =
+            !isElasticsearchConsole || canUseSchemaInlineCandidate
+              ? localInlineSuggestion(
+                  completionContext.prefix,
+                  scopedLspContext,
+                )
+              : "";
+
+          // Mapping-aware LSP output is authoritative for Elasticsearch field
+          // positions. Do not let a faster model response replace it with a
+          // plausible but nonexistent field from another index.
+          if (isElasticsearchConsole && localText) {
+            setInlineCompletionStatus("local");
+            return inlineResult(localText);
+          }
+
+          // Console syntax and mapping positions are deterministic. If the
+          // local Console/LSP sources have no valid continuation, showing no
+          // ghost text is safer than asking the model to invent a REST
+          // operation, JSON key, or mapping field. AI remains available only
+          // for genuinely unclassified Console content.
+          if (
+            isElasticsearchConsole &&
+            consoleContext?.area !== "unknown"
+          ) {
+            setInlineCompletionStatus("local");
+            return { items: [] };
+          }
 
           const provider = aiProviderConfig();
           if (!aiEnabled || !provider) {
@@ -1115,13 +1318,14 @@ export function QueryEditor({
             return inlineResult(localText);
           }
           const aiLspContext = settings.includeSchemaMetadata
-            ? lspContext
+            ? scopedLspContext
             : {
-                dialect: lspContext.dialect,
-                clause: lspContext.clause,
-                expectedKinds: lspContext.expectedKinds,
-                diagnostics: lspContext.diagnostics,
-                errorCount: lspContext.errorCount,
+                dialect: scopedLspContext.dialect,
+                clause: scopedLspContext.clause,
+                expectedKinds: scopedLspContext.expectedKinds,
+                diagnostics: scopedLspContext.diagnostics,
+                errorCount: scopedLspContext.errorCount,
+                console: scopedLspContext.console,
               };
           const requestBase = {
             protocol: inlineCompletionProtocol,
@@ -1130,8 +1334,8 @@ export function QueryEditor({
               model: inlineCompletionModel.trim() || provider.model,
               timeoutMs: 4_000,
             },
-            prefix: redactSecretString(bounded.prefix),
-            suffix: redactSecretString(bounded.suffix),
+            prefix: redactSecretString(completionContext.prefix),
+            suffix: redactSecretString(completionContext.suffix),
             languageId: documentLanguageId,
             dialect: driver,
             ...(activeTab?.fileRelativePath
@@ -1165,8 +1369,8 @@ export function QueryEditor({
                       projectId,
                       expectedRoot: projectRootPath,
                       activeFile: activeTab?.fileRelativePath,
-                      query: bounded.prefix,
-                      referencedObjects: lspContext.referencedObjects,
+                      query: completionContext.prefix,
+                      referencedObjects: scopedLspContext.referencedObjects,
                     })
                   : [];
               if (abortController.signal.aborted) return "";
@@ -1194,22 +1398,26 @@ export function QueryEditor({
               }
               const completion = cleanInlineSuggestion(
                 result.text,
-                bounded.prefix,
-                bounded.suffix,
+                completionContext.prefix,
+                completionContext.suffix,
               );
               if (!completion) return "";
               const nextText = `${value.slice(0, offset)}${completion}${value.slice(offset)}`;
-              const nextDiagnostics = await lspClient.validateInlineCompletion(
-                uri,
-                nextText,
-              );
-              const baselineErrors =
-                lspContext.errorCount ??
-                (lspContext.diagnostics || []).filter(
-                  (diagnostic) => diagnostic.severity === 1,
-                ).length;
-              const nextErrors = nextDiagnostics.filter(
-                (diagnostic) => diagnostic.severity === 1,
+              const nextDiagnostics = isElasticsearchConsole
+                ? validateElasticsearchConsole(nextText)
+                : await lspClient.validateInlineCompletion(uri, nextText);
+              const baselineErrors = isElasticsearchConsole
+                ? validateElasticsearchConsole(value).filter(
+                    (diagnostic) => diagnostic.severity === "error",
+                  ).length
+                : (lspContext.errorCount ??
+                  (lspContext.diagnostics || []).filter(
+                    (diagnostic) => diagnostic.severity === 1,
+                  ).length);
+              const nextErrors = nextDiagnostics.filter((diagnostic) =>
+                isElasticsearchConsole
+                  ? diagnostic.severity === "error"
+                  : diagnostic.severity === 1,
               ).length;
               if (nextErrors > baselineErrors) return "";
               inlineCompletionCacheRef.current.set(cacheKey, completion);
@@ -1273,6 +1481,7 @@ export function QueryEditor({
     editorSettings.inlineCompletion,
     inlineCompletionModel,
     inlineCompletionProtocol,
+    isElasticsearchConsole,
     isActivePane,
     lspClient,
     lspReady,
@@ -1280,6 +1489,7 @@ export function QueryEditor({
     mountedEditor,
     projectId,
     projectRootPath,
+    preferredElasticsearchIndex,
   ]);
 
   useEffect(() => {
@@ -1384,10 +1594,7 @@ export function QueryEditor({
   };
 
   const currentElasticsearchRequest = (editor: any, model: any) => {
-    if (
-      driver !== "elasticsearch" ||
-      activeTab?.queryLanguage === "elasticsearch-eql"
-    ) {
+    if (!isElasticsearchConsole) {
       return null;
     }
 
@@ -1418,6 +1625,125 @@ export function QueryEditor({
     }
   };
 
+  const handleImportSqlScript = async () => {
+    if (
+      !effectiveConnectionId ||
+      !activeTab ||
+      !capabilities.supportsSqlQuery
+    ) {
+      return;
+    }
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "SQL scripts", extensions: ["sql"] }],
+    });
+    if (typeof selected !== "string") return;
+    const pathParts = selected.split(/[\\/]/);
+    const fileName = pathParts[pathParts.length - 1] || "SQL script";
+    if (
+      !window.confirm(
+        `Run "${fileName}" against the selected data source?\n\nThe script may create, update, or delete data. OxideStudio will execute it using the active database and schema.`,
+      )
+    ) {
+      return;
+    }
+
+    const taskStore = useTaskStore.getState();
+    const taskId = taskStore.startTask({
+      kind: "import",
+      title: `Import ${fileName}`,
+      detail: activeConnection?.name || effectiveConnectionId,
+    });
+    try {
+      const imported = await queryService.importSqlScript(
+        effectiveConnectionId,
+        selected,
+        activeTab.targetSchema ?? currentSchema ?? undefined,
+        activeTab.databaseName,
+      );
+      taskStore.finishTask(
+        taskId,
+        `${imported.statementsExecuted.toLocaleString()} statements · ${imported.rowsAffected.toLocaleString()} rows affected`,
+      );
+      await loadSchemas(effectiveConnectionId, true);
+      const schemaToRefresh = activeTab.targetSchema ?? currentSchema;
+      if (schemaToRefresh) {
+        await loadTables(effectiveConnectionId, schemaToRefresh, true);
+      }
+      bumpMetadataVersion();
+    } catch (error: any) {
+      taskStore.failTask(taskId, error?.message || String(error));
+    }
+  };
+
+  const handleImportConsoleRequests = async () => {
+    if (!activeTab || !isElasticsearchConsole) return;
+    if (
+      activeTab.sql.trim() &&
+      !window.confirm(
+        "Importing Console requests replaces the current editor content. Continue?",
+      )
+    ) {
+      return;
+    }
+
+    const tasks = useTaskStore.getState();
+    const taskId = tasks.startTask({
+      kind: "import",
+      title: "Import Elasticsearch Console requests",
+    });
+    try {
+      const imported = await queryService.importElasticsearchConsoleFile();
+      if (!imported) {
+        tasks.cancelTask(taskId, "Import cancelled");
+        return;
+      }
+      updateTabSql(activeTab.id, imported.content);
+      tasks.finishTask(
+        taskId,
+        `${imported.fileName} · ${imported.content.length.toLocaleString()} characters`,
+      );
+      window.requestAnimationFrame(() => {
+        editorRef.current?.setPosition({ lineNumber: 1, column: 1 });
+        editorRef.current?.focus();
+      });
+    } catch (error) {
+      tasks.failTask(
+        taskId,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  };
+
+  const handleExportConsoleRequests = async () => {
+    if (!activeTab || !isElasticsearchConsole) return;
+    const source = editorRef.current?.getModel()?.getValue() ?? activeTab.sql;
+    const tasks = useTaskStore.getState();
+    const taskId = tasks.startTask({
+      kind: "export",
+      title: "Export Elasticsearch Console requests",
+    });
+    try {
+      const exported =
+        await queryService.exportElasticsearchConsoleFile(source);
+      if (!exported.exported) {
+        tasks.cancelTask(taskId, "Export cancelled");
+        return;
+      }
+      tasks.finishTask(
+        taskId,
+        `${exported.byteCount.toLocaleString()} bytes`,
+      );
+    } catch (error) {
+      tasks.failTask(
+        taskId,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  };
+
   const handleRunCurrent = () => {
     if (
       !canExecuteDocument ||
@@ -1437,12 +1763,30 @@ export function QueryEditor({
 
     // If something is selected, run only that.
     if (selectedText && selectedText.trim()) {
-      if (requestParameterizedExecution(selectedText, transactionId)) return;
-      if (!confirmEditorExecution(selectedText)) return;
+      const selectionStart = model.getOffsetAt({
+        lineNumber: selection.startLineNumber,
+        column: selection.startColumn,
+      });
+      const selectionEnd = model.getOffsetAt({
+        lineNumber: selection.endLineNumber,
+        column: selection.endColumn,
+      });
+      const executionText = isElasticsearchConsole
+        ? elasticsearchRequestsForSelection(
+            model.getValue(),
+            selectionStart,
+            selectionEnd,
+          )
+            .map((request) => request.text)
+            .join("\n\n")
+        : selectedText;
+      if (!executionText.trim()) return;
+      if (requestParameterizedExecution(executionText, transactionId)) return;
+      if (!confirmEditorExecution(executionText)) return;
       runTabQuery(
         activeTab.id,
         effectiveConnectionId,
-        selectedText,
+        executionText,
         transactionId,
       );
     } else {
@@ -1662,10 +2006,227 @@ export function QueryEditor({
   };
 
   const handleFormat = () => {
-    if (editorRef.current) {
-      editorRef.current.getAction("editor.action.formatDocument").run();
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    if (!editor || !model) return;
+    if (!isElasticsearchConsole) {
+      editor.getAction("editor.action.formatDocument").run();
+      return;
     }
+
+    const selection = editor.getSelection();
+    const cursor = editor.getPosition();
+    if (!selection && !cursor) return;
+    const selectionStart = selection
+      ? model.getOffsetAt({
+          lineNumber: selection.startLineNumber,
+          column: selection.startColumn,
+        })
+      : model.getOffsetAt(cursor);
+    const selectionEnd =
+      selection && !selection.isEmpty()
+        ? model.getOffsetAt({
+            lineNumber: selection.endLineNumber,
+            column: selection.endColumn,
+          })
+        : selectionStart;
+    const requests = elasticsearchRequestsForSelection(
+      model.getValue(),
+      selectionStart,
+      selectionEnd,
+    );
+    if (requests.length === 0) return;
+
+    const startOffset = requests[0]!.startOffset;
+    const endOffset = requests[requests.length - 1]!.endOffset;
+    const source = model.getValue().slice(startOffset, endOffset);
+    const formatted = formatElasticsearchConsole(source);
+    if (!formatted || formatted === source) return;
+    const start = model.getPositionAt(startOffset);
+    const end = model.getPositionAt(endOffset);
+    editor.executeEdits("oxide.elasticsearch.format", [
+      {
+        range: {
+          startLineNumber: start.lineNumber,
+          startColumn: start.column,
+          endLineNumber: end.lineNumber,
+          endColumn: end.column,
+        },
+        text: formatted,
+        forceMoveMarkers: true,
+      },
+    ]);
   };
+
+  runAllActionRef.current = handleRun;
+  runCurrentActionRef.current = handleRunCurrent;
+  formatActionRef.current = handleFormat;
+
+  useEffect(() => {
+    if (!monaco || !mountedEditor) return;
+    const model = mountedEditor.getModel();
+    if (!model) return;
+
+    if (!isElasticsearchConsole) {
+      monaco.editor.setModelMarkers(model, "elasticsearch-console", []);
+      return;
+    }
+
+    const markers = validateElasticsearchConsole(model.getValue()).map(
+      (diagnostic) => {
+        const start = model.getPositionAt(diagnostic.startOffset);
+        const end = model.getPositionAt(
+          Math.max(diagnostic.startOffset + 1, diagnostic.endOffset),
+        );
+        return {
+          severity:
+            diagnostic.severity === "error"
+              ? monaco.MarkerSeverity.Error
+              : monaco.MarkerSeverity.Warning,
+          message: diagnostic.message,
+          source: "Elasticsearch Console",
+          startLineNumber: start.lineNumber,
+          startColumn: start.column,
+          endLineNumber: end.lineNumber,
+          endColumn: end.column,
+        };
+      },
+    );
+    monaco.editor.setModelMarkers(model, "elasticsearch-console", markers);
+  }, [
+    activeDocumentSql,
+    isElasticsearchConsole,
+    monaco,
+    mountedEditor,
+  ]);
+
+  useEffect(() => {
+    if (!monaco || !mountedEditor || !isElasticsearchConsole) return;
+    const model = mountedEditor.getModel();
+    if (!model) return;
+
+    const requests = parseElasticsearchConsoleRequests(model.getValue());
+    const requestLines = new Set(
+      requests.map(
+        (request) => model.getPositionAt(request.startOffset).lineNumber,
+      ),
+    );
+    const decorationIds = mountedEditor.deltaDecorations(
+      [],
+      Array.from(requestLines).map((lineNumber) => ({
+        range: {
+          startLineNumber: lineNumber,
+          startColumn: 1,
+          endLineNumber: lineNumber,
+          endColumn: 1,
+        },
+        options: {
+          isWholeLine: true,
+          glyphMarginClassName: "oxide-es-run-glyph",
+          glyphMarginHoverMessage: {
+            value: "Run this Elasticsearch request (⌘/Ctrl+Enter)",
+          },
+        },
+      })),
+    );
+    const mouseDisposable = mountedEditor.onMouseDown((event: any) => {
+      if (
+        event.target?.type !==
+          monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN ||
+        !requestLines.has(event.target.position?.lineNumber)
+      ) {
+        return;
+      }
+      const position = {
+        lineNumber: event.target.position.lineNumber,
+        column: 1,
+      };
+      mountedEditor.setPosition(position);
+      mountedEditor.setSelection({
+        startLineNumber: position.lineNumber,
+        startColumn: 1,
+        endLineNumber: position.lineNumber,
+        endColumn: 1,
+      });
+      mountedEditor.focus();
+      runCurrentActionRef.current();
+    });
+
+    return () => {
+      mouseDisposable.dispose();
+      mountedEditor.deltaDecorations(decorationIds, []);
+    };
+  }, [
+    activeDocumentSql,
+    isElasticsearchConsole,
+    monaco,
+    mountedEditor,
+  ]);
+
+  useEffect(() => {
+    if (!monaco || !mountedEditor || !isElasticsearchConsole) return;
+
+    const navigate = (direction: "previous" | "next") => {
+      const model = mountedEditor.getModel();
+      const position = mountedEditor.getPosition();
+      if (!model || !position) return;
+      const offset = elasticsearchRequestNavigationOffset(
+        model.getValue(),
+        model.getOffsetAt(position),
+        direction,
+      );
+      if (offset === null) return;
+      const target = model.getPositionAt(offset);
+      mountedEditor.setPosition(target);
+      mountedEditor.revealPositionInCenterIfOutsideViewport(target);
+      mountedEditor.focus();
+    };
+
+    const actions = [
+      mountedEditor.addAction({
+        id: "oxide.elasticsearch.runCurrent",
+        label: "Run current Elasticsearch request",
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
+        run: () => runCurrentActionRef.current(),
+      }),
+      mountedEditor.addAction({
+        id: "oxide.elasticsearch.runAll",
+        label: "Run all Elasticsearch requests",
+        keybindings: [
+          monaco.KeyMod.CtrlCmd |
+            monaco.KeyMod.Shift |
+            monaco.KeyCode.Enter,
+        ],
+        run: () => runAllActionRef.current(),
+      }),
+      mountedEditor.addAction({
+        id: "oxide.elasticsearch.formatCurrent",
+        label: "Auto-indent current Elasticsearch request",
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyI],
+        run: () => formatActionRef.current(),
+      }),
+      mountedEditor.addAction({
+        id: "oxide.elasticsearch.nextRequest",
+        label: "Go to next Elasticsearch request",
+        keybindings: [
+          monaco.KeyMod.CtrlCmd | monaco.KeyCode.DownArrow,
+        ],
+        run: () => navigate("next"),
+      }),
+      mountedEditor.addAction({
+        id: "oxide.elasticsearch.previousRequest",
+        label: "Go to previous Elasticsearch request",
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.UpArrow],
+        run: () => navigate("previous"),
+      }),
+    ];
+
+    return () => actions.forEach((action) => action.dispose());
+  }, [
+    isElasticsearchConsole,
+    monaco,
+    mountedEditor,
+  ]);
 
   const handleTransactionModeChange = (mode: TransactionMode) => {
     if (!supportsTransactions) return;
@@ -1758,6 +2319,7 @@ export function QueryEditor({
       tabSize: editorSettings.tabSize,
       wordWrap: editorSettings.wordWrap,
       minimap: { enabled: editorSettings.minimap },
+      glyphMargin: isElasticsearchConsole,
       inlineSuggest: { enabled: editorSettings.inlineCompletion.enabled },
       lineNumbers:
         editorSettings.keybindingMode === "vim" &&
@@ -1773,6 +2335,7 @@ export function QueryEditor({
       editorSettings.tabSize,
       editorSettings.vim.relativeLineNumbers,
       editorSettings.wordWrap,
+      isElasticsearchConsole,
     ],
   );
 
@@ -1859,6 +2422,15 @@ export function QueryEditor({
           onRunCurrent={handleRunCurrent}
           onExplain={handleExplain}
           onCancelRun={handleCancelRun}
+          onImportSqlScript={
+            capabilities.supportsSqlQuery ? handleImportSqlScript : undefined
+          }
+          onImportConsoleRequests={
+            isElasticsearchConsole ? handleImportConsoleRequests : undefined
+          }
+          onExportConsoleRequests={
+            isElasticsearchConsole ? handleExportConsoleRequests : undefined
+          }
           isExecuting={activeTab.isExecuting}
           isConnected={Boolean(effectiveConnectionId && canExecuteDocument)}
           supportsExplainPlan={
@@ -1885,6 +2457,14 @@ export function QueryEditor({
           }
           onQueryLanguageChange={(queryLanguage) =>
             setQueryLanguage(activeTab.id, queryLanguage)
+          }
+          elasticsearchVariableNames={elasticsearchVariableNames}
+          elasticsearchVariables={activeTab.elasticsearchVariables}
+          onElasticsearchVariableChange={(name, value) =>
+            setElasticsearchVariables(activeTab.id, {
+              ...activeTab.elasticsearchVariables,
+              [name]: value,
+            })
           }
         />
       )}
@@ -1955,6 +2535,10 @@ export function QueryEditor({
             value={activeTab.sql}
             onChange={(value) => updateTabSql(activeTab.id, value || "")}
             onMount={(editor, monaco) => {
+              // @monaco-editor/react may deliver a stale onMount callback
+              // after a rapid model/language replacement. Ignore that callback
+              // instead of taking down the entire workspace.
+              if (!editor || !monaco) return;
               editorRef.current = editor;
               setMountedEditor(editor);
               inlineKeysContextRef.current = editor.createContextKey(

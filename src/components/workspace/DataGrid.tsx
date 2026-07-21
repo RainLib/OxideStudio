@@ -26,6 +26,7 @@ import {
 } from "@glideapps/glide-data-grid";
 import "@glideapps/glide-data-grid/dist/index.css";
 import { useTabStore } from "@/store/useTabStore";
+import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTheme } from "@/theme/useTheme";
 import { createTypedCell, applyFilter, compareValues } from "@/lib/gridUtils";
@@ -42,6 +43,7 @@ import {
   Rows3,
   Search,
   CircleSlash2,
+  CircleAlert,
   SquarePen,
   Trash2,
 } from "lucide-react";
@@ -77,6 +79,7 @@ import {
   summarizeSelection,
 } from "@/lib/selectionAggregate";
 import { SelectionAggregateBar } from "./SelectionAggregateBar";
+import { presentQueryError } from "@/lib/queryErrorPresentation";
 
 interface GridValueEditorTarget extends ValueEditorTarget {
   tabId: string;
@@ -194,12 +197,14 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       setColumnHidden,
       showAllColumns,
       deleteRows,
+      runTabQuery,
       findOrCreateTableTab,
       loadTablePage,
       setFilterMode,
       setVisualFilters,
       setSqlFilter,
     } = useTabStore();
+    const connections = useConnectionStore((state) => state.connections);
     const dataGridSettings = useSettingsStore(
       (state) => state.settings.dataGrid,
     );
@@ -216,6 +221,16 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     const resultIndex = activeTab?.activeResultIndex ?? 0;
     const result = activeTab?.results?.[resultIndex] ?? activeTab?.results?.[0];
     const error = activeTab?.error;
+    const errorConnection = connections.find(
+      (connection) => connection.id === activeTab?.connectionId,
+    );
+    const errorPresentation = useMemo(
+      () =>
+        error
+          ? presentQueryError(error, errorConnection?.name)
+          : null,
+      [error, errorConnection?.name],
+    );
     const gridState = activeTab?.gridState;
     const pendingEdits = activeTab?.pendingEdits || EMPTY_PENDING_EDITS;
     const isEditable = activeTab?.type === "table" && !readOnly;
@@ -1616,10 +1631,64 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       [gridFontSize, gridScale, mode],
     );
 
-    if (error) {
+    if (error && errorPresentation) {
       return (
-        <div className="flex items-center justify-center h-full text-red-400 text-sm">
-          Error: {error}
+        <div
+          role="alert"
+          className="flex h-full items-center justify-center overflow-auto px-6 py-8"
+        >
+          <div className="w-full max-w-[560px] rounded-[6px] border border-[hsl(var(--destructive)/0.28)] bg-[hsl(var(--destructive)/0.06)] px-5 py-4">
+            <div className="flex items-start gap-3">
+              <CircleAlert
+                size={18}
+                className="mt-0.5 shrink-0 text-[hsl(var(--destructive))]"
+                aria-hidden="true"
+              />
+              <div className="min-w-0 flex-1">
+                <h3 className="text-[13px] font-semibold text-[hsl(var(--wb-text))]">
+                  {errorPresentation.title}
+                </h3>
+                <p className="mt-1 text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
+                  {errorPresentation.description}
+                </p>
+                {errorPresentation.suggestion && (
+                  <p className="mt-2 text-[12px] leading-5 text-[hsl(var(--wb-text))]">
+                    {errorPresentation.suggestion}
+                  </p>
+                )}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {errorPresentation.retryable &&
+                    activeTab?.connectionId && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-7 gap-1.5 rounded-[4px] px-2.5 text-[11px]"
+                        disabled={activeTab.isExecuting}
+                        onClick={() =>
+                          void runTabQuery(
+                            activeTab.id,
+                            activeTab.connectionId!,
+                          )
+                        }
+                      >
+                        <RotateCcw size={12} aria-hidden="true" />
+                        Run query again
+                      </Button>
+                    )}
+                </div>
+                {errorPresentation.technicalDetails && (
+                  <details className="mt-3 text-[11px] text-[hsl(var(--wb-text-muted))]">
+                    <summary className="cursor-pointer select-none hover:text-[hsl(var(--wb-text))]">
+                      Technical details
+                    </summary>
+                    <code className="mt-2 block [overflow-wrap:anywhere] rounded-[4px] bg-[hsl(var(--wb-editor))] px-2.5 py-2 font-mono leading-4">
+                      {errorPresentation.technicalDetails}
+                    </code>
+                  </details>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
       );
     }

@@ -22,8 +22,9 @@ export interface WorkspaceHydrationTasks {
   loadConnections: () => Promise<void>;
 }
 
-const CORE_TASK_COUNT = 3;
+const CORE_TASK_COUNT = 2;
 const READY_VISIBILITY_MS = 300;
+export const STARTUP_CORE_TASK_TIMEOUT_MS = 2_000;
 
 const initialSnapshot = (): StartupProgressSnapshot => ({
   active: true,
@@ -79,13 +80,27 @@ export function markWorkspaceModuleReady() {
   update({
     phase: "workspace",
     progress: Math.max(snapshot.progress, 0.3),
-    label: "Preparing workspace…",
+    label: "Loading editor components in the background…",
   });
 }
 
+export function markWorkspaceShellInteractive() {
+  if (snapshot.phase !== "workspace") return;
+  update({
+    phase: "ready",
+    progress: 1,
+    label: "Interface ready",
+  });
+  if (readyTimer) clearTimeout(readyTimer);
+  readyTimer = setTimeout(() => {
+    readyTimer = null;
+    update({ active: false });
+  }, READY_VISIBILITY_MS);
+}
+
 function hydrationLabel(completedTasks: number) {
-  if (completedTasks < 2) return "Loading projects and settings…";
-  return "Loading data sources…";
+  if (completedTasks < CORE_TASK_COUNT) return "Loading projects and settings…";
+  return "Workspace ready";
 }
 
 function markTaskComplete(taskName: string, error?: unknown) {
@@ -104,15 +119,38 @@ function markTaskComplete(taskName: string, error?: unknown) {
   });
 }
 
-async function runTask(taskName: string, task: () => Promise<void>) {
+type SettledTask = { error?: unknown };
+
+function startTask(task: () => Promise<void>): Promise<SettledTask> {
   try {
-    await task();
-    markTaskComplete(taskName);
+    return task().then(
+      () => ({}),
+      (error) => ({ error }),
+    );
   } catch (error) {
-    // Startup data is recoverable and individual stores expose their own
-    // retry/error states. A rejected task must never block the workbench.
-    markTaskComplete(taskName, error);
+    return Promise.resolve({ error });
   }
+}
+
+async function trackCoreTask(
+  taskName: string,
+  operation: Promise<SettledTask>,
+) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<SettledTask>((resolve) => {
+    timer = setTimeout(
+      () =>
+        resolve({
+          error: new Error(
+            `${taskName} is still loading and will continue in the background`,
+          ),
+        }),
+      STARTUP_CORE_TASK_TIMEOUT_MS,
+    );
+  });
+  const result = await Promise.race([operation, deadline]);
+  if (timer) clearTimeout(timer);
+  markTaskComplete(taskName, result.error);
 }
 
 export function startWorkspaceHydration(tasks: WorkspaceHydrationTasks) {
@@ -129,15 +167,20 @@ export function startWorkspaceHydration(tasks: WorkspaceHydrationTasks) {
   });
 
   hydrationPromise = (async () => {
-    const projectTask = runTask("projects", tasks.loadProjects);
-    const settingsTask = runTask("settings", tasks.loadSettings);
+    const projectOperation = startTask(tasks.loadProjects);
+    const settingsOperation = startTask(tasks.loadSettings);
 
-    // Connections are project-scoped. Wait for project canonicalization before
-    // reading them so a saved project cannot briefly show another project's
-    // data sources during startup.
-    await projectTask;
-    const connectionTask = runTask("data sources", tasks.loadConnections);
-    await Promise.all([settingsTask, connectionTask]);
+    const projectTask = trackCoreTask("projects", projectOperation);
+    const settingsTask = trackCoreTask("settings", settingsOperation);
+
+    // Connections are project-scoped, but they are data rather than workbench
+    // chrome. Start them only after the real project operation settles and
+    // never keep the workbench startup state waiting for them.
+    void projectOperation.then(() => {
+      void startTask(tasks.loadConnections);
+    });
+
+    await Promise.all([projectTask, settingsTask]);
 
     update({
       active: true,

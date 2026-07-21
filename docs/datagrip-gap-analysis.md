@@ -84,8 +84,8 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 
 | DataGrip 基线 | OxideStudio 状态 | 当前证据与差距 | 优先级 |
 | --- | --- | --- | --- |
-| CSV 导入 | 已具备/部分 | 已有编码/delimiter/header/空值策略预览、逐列映射、类型预检和 PostgreSQL/MySQL 原子 batch；32 MiB/10 万行以上仍需 Rust native streaming | P1 |
-| 多格式导出 | 部分具备 | CSV、JSON 已有；缺少 SQL insert、Markdown、XML、Excel、自定义 extractor | P1 |
+| 数据导入 | 已具备/部分 | CSV 已有编码/delimiter/header/空值策略预览、逐列映射和类型预检；表对象菜单支持 CSV、JSON/JSONL/NDJSON 参数化原子导入，SQL Console 支持显式确认后运行 `.sql` 脚本；32 MiB/10 万行以上仍需 Rust native streaming | P1 |
+| 多格式导出 | 部分具备 | CSV、JSON 与可重放的 SQL `INSERT` 已有；缺少 Markdown、XML、Excel、自定义 extractor | P1 |
 | schema/object DDL 导出 | 部分具备 | 支持对象 DDL 查看/复制；缺少选择集、依赖顺序和批量导出 | P1 |
 | pg_dump / mysqldump | 缺失 | 没有原生工具发现、参数配置、进度和恢复流程 | P1/P2 |
 

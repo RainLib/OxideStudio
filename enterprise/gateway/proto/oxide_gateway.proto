@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package oxide.enterprise.gateway.v1;
+
+service DataPlane {
+  rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
+  rpc ListResources(ResourceRequest) returns (ResourceResponse);
+  rpc ExecuteReadOnly(QueryRequest) returns (stream QueryChunk);
+}
+
+message CapabilitiesRequest {
+  string access_ticket = 1;
+  RequestScope scope = 2;
+}
+
+message CapabilitiesResponse {
+  uint32 contract_version = 1;
+  repeated string capabilities = 2;
+  string policy_revision = 3;
+}
+
+message RequestScope {
+  string principal_id = 1;
+  string organization_id = 2;
+  string project_id = 3;
+  string data_source_id = 4;
+  repeated string resource_path = 5;
+  string action = 6;
+  string request_id = 7;
+}
+
+message QueryRequest {
+  string access_ticket = 1;
+  RequestScope scope = 2;
+  string sql = 3;
+  optional string database = 4;
+  optional string schema = 5;
+}
+
+message ResourceRequest {
+  string access_ticket = 1;
+  RequestScope scope = 2;
+  string kind = 3;
+  optional string database = 4;
+  optional string schema = 5;
+  optional string object_name = 6;
+}
+
+message ResourceItem {
+  string kind = 1;
+  string name = 2;
+  bytes metadata_json = 3;
+}
+
+message ResourceResponse {
+  repeated ResourceItem items = 1;
+  string policy_revision = 2;
+}
+
+message QueryChunk {
+  enum Encoding {
+    ENCODING_UNSPECIFIED = 0;
+    JSON = 1;
+    ARROW_IPC = 2;
+  }
+
+  Encoding encoding = 1;
+  bytes payload = 2;
+  uint64 sequence = 3;
+  bool final_chunk = 4;
+  uint64 returned_rows = 5;
+  bool truncated = 6;
+}

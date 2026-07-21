@@ -23,7 +23,10 @@ import { AssistantClarificationDock } from "./assistant/AssistantClarificationDo
 import { createWorkspaceUiActionRegistry } from "@/ai/ui-actions";
 import type { UiActionRequest } from "@/ai/ui-actions/types";
 import { useProjectStore } from "@/store/useProjectStore";
-import { useConnectionStore } from "@/store/useConnectionStore";
+import {
+  isManagedConnection,
+  useConnectionStore,
+} from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { cn } from "@/lib/utils";
 import { useAssistantAgentSession } from "@/hooks/useAssistantAgentSession";
@@ -53,19 +56,36 @@ function AgentHostAssistantSidebar() {
   const updateAiSettings = useAiSettingsStore((state) => state.updateSettings);
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const activeConnectionId = useConnectionStore(
-    (state) => state.activeConnectionId,
+    (state) => {
+      const connection = state.connections.find(
+        (candidate) => candidate.id === state.activeConnectionId,
+      );
+      return connection && !isManagedConnection(connection)
+        ? connection.id
+        : null;
+    },
   );
   const activeDriver = useConnectionStore(
     (state) =>
-      state.connections.find(
+      (() => {
+        const connection = state.connections.find(
         (connection) => connection.id === state.activeConnectionId,
-      )?.driver ?? null,
+        );
+        return connection && !isManagedConnection(connection)
+          ? connection.driver
+          : null;
+      })(),
   );
   const activeConnectionDatabase = useConnectionStore(
     (state) =>
-      state.connections.find(
+      (() => {
+        const connection = state.connections.find(
         (connection) => connection.id === state.activeConnectionId,
-      )?.database ?? null,
+        );
+        return connection && !isManagedConnection(connection)
+          ? connection.database ?? null
+          : null;
+      })(),
   );
   const activeNamespace = useSchemaStore((state) => state.currentSchema);
   const { tabs, activeTabId } = useTabStore();
