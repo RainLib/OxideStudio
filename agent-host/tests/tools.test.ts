@@ -4,6 +4,7 @@ import {
   canonicalInputDigest,
   citationCandidatesFromObservation,
   projectToolRelativePath,
+  toolRequiresApproval,
 } from "../src/tools.js";
 import { resolveCitedAnswer } from "../src/runtime.js";
 
@@ -40,6 +41,30 @@ describe("approvalSummary", () => {
     expect(summary).toContain("Replace queries/report.sql");
     expect(summary).toContain("31 characters");
     expect(summary).not.toContain("SELECT secret");
+  });
+});
+
+describe("toolRequiresApproval", () => {
+  const manifest = (
+    name: string,
+    permissions: Array<"read" | "write">,
+  ) => ({
+    name,
+    description: "test",
+    inputSchema: { type: "object" },
+    permissions,
+  });
+
+  it("treats project file edits as reviewable writes without weakening other approvals", () => {
+    expect(
+      toolRequiresApproval(manifest("project.writeFile", ["write"])),
+    ).toBe(false);
+    expect(toolRequiresApproval(manifest("database.mutate", ["write"]))).toBe(
+      true,
+    );
+    expect(toolRequiresApproval(manifest("project.readFile", ["read"]))).toBe(
+      false,
+    );
   });
 });
 

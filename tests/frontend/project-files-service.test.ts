@@ -74,6 +74,7 @@ describe("project files service", () => {
         modifiedAt: 30,
         isSymlink: false,
       })
+      .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(undefined);
 
     await projectFilesService.setProjectRoot("project-1", "C:\\workspace");
@@ -109,6 +110,12 @@ describe("project files service", () => {
       "archive/daily.sql",
     );
     await projectFilesService.deleteProjectEntry("project-1", "archive", true);
+    await projectFilesService.deleteProjectFileIfRevision(
+      "project-1",
+      "queries/new.sql",
+      "revision-2",
+      "C:\\workspace",
+    );
 
     expect(entries[0]?.relativePath).toBe("queries/daily.sql");
     expect(read.relativePath).toBe("queries/daily.sql");
@@ -170,6 +177,15 @@ describe("project files service", () => {
           projectId: "project-1",
           relativePath: "archive",
           recursive: true,
+        },
+      ],
+      [
+        "delete_project_file_if_revision",
+        {
+          projectId: "project-1",
+          relativePath: "queries/new.sql",
+          expectedRevision: "revision-2",
+          expectedRoot: "C:\\workspace",
         },
       ],
     ]);
@@ -297,6 +313,27 @@ describe("project files service", () => {
       code: "REVISION_CONFLICT",
       relativePath: "query.sql",
       message: "the file changed on disk",
+    });
+  });
+
+  it("keeps revision-guarded created-file undo conflicts typed", async () => {
+    mocks.invoke.mockRejectedValueOnce({
+      code: "REVISION_CONFLICT",
+      message: "the created file changed on disk",
+      retryable: false,
+      category: "projectFile",
+      context: { relativePath: "query.sql" },
+    });
+
+    await expect(
+      projectFilesService.deleteProjectFileIfRevision(
+        "project-1",
+        "query.sql",
+        "revision-agent",
+      ),
+    ).rejects.toMatchObject({
+      code: "REVISION_CONFLICT",
+      relativePath: "query.sql",
     });
   });
 });

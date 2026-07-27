@@ -273,7 +273,10 @@ async function invokeProxyTool(
   });
 
   let approvalLease: string | undefined;
-  if (manifest.permissions.some((permission) => permission !== "read")) {
+  const mutation = manifest.permissions.some(
+    (permission) => permission !== "read",
+  );
+  if (toolRequiresApproval(manifest)) {
     const approvalResume = execution.matchingResume("approval");
     const approvalId =
       approvalResume
@@ -338,7 +341,7 @@ async function invokeProxyTool(
         request,
         execution.remainingMs(),
       );
-    const raw = approvalLease
+    const raw = mutation
       ? await execution.withMutationLock(invoke)
       : await execution.withReadOnlyLimit(invoke);
     const observation = boundedObservationSchema.parse(raw);
@@ -635,6 +638,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function isReviewableWorkspaceWrite(manifest: AgentToolManifestEntry) {
+  return (
+    manifest.name === "project.writeFile" &&
+    manifest.permissions.length === 1 &&
+    manifest.permissions[0] === "write"
+  );
+}
+
+export function toolRequiresApproval(manifest: AgentToolManifestEntry) {
+  return (
+    manifest.permissions.some((permission) => permission !== "read") &&
+    !isReviewableWorkspaceWrite(manifest)
+  );
+}
+
 function isToolAllowedForProfile(
   manifest: AgentToolManifestEntry,
   profile: "chat" | "plan" | "agent",
@@ -661,7 +679,7 @@ function approvalRisk(
 function processLabel(toolName: string): string {
   if (toolName === "project.listFiles") return "Listed project files";
   if (toolName === "project.readFile") return "Read project file";
-  if (toolName === "project.writeFile") return "Proposed file change";
+  if (toolName === "project.writeFile") return "Edited project file";
   if (toolName.startsWith("metadata.")) return "Read schema";
   if (toolName.startsWith("query.")) return "Ran query analysis";
   if (toolName.startsWith("lsp.")) return "Read editor diagnostics";

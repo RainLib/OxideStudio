@@ -452,7 +452,9 @@ export function AssistantPromptBox({
                     Stored passwords, connection URLs and the provider API key
                     are not inserted automatically. Included editor text may
                     itself contain secrets, so review the preview. Context is
-                    frozen when you send; mutations still require approval.
+                    frozen when you send. Reviewable project file edits apply
+                    immediately and can be undone; database and external
+                    mutations still require approval.
                   </p>
                 </div>
               </PopoverContent>

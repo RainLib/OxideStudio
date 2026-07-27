@@ -253,6 +253,11 @@ export type AgentHostEvent =
       previousRevision?: string | null;
       introducedLines?: number[];
       lineEvidenceTruncated?: boolean;
+      originalContent?: string;
+      appliedContent?: string;
+      additions?: number;
+      deletions?: number;
+      reviewable?: boolean;
     })
   | (AgentEventBase<"file.proposed"> & {
       callId: string;
@@ -558,7 +563,28 @@ function isAgentHostEvent(value: unknown): value is AgentHostEvent {
                 (index === 0 || line > lines[index - 1]!),
             ))) &&
         (event.lineEvidenceTruncated === undefined ||
-          typeof event.lineEvidenceTruncated === "boolean")
+          typeof event.lineEvidenceTruncated === "boolean") &&
+        (event.originalContent === undefined ||
+          (typeof event.originalContent === "string" &&
+            event.originalContent.length <= 256 * 1024)) &&
+        (event.appliedContent === undefined ||
+          (typeof event.appliedContent === "string" &&
+            event.appliedContent.length <= 256 * 1024)) &&
+        (event.additions === undefined ||
+          (typeof event.additions === "number" &&
+            Number.isInteger(event.additions) &&
+            event.additions >= 0)) &&
+        (event.deletions === undefined ||
+          (typeof event.deletions === "number" &&
+            Number.isInteger(event.deletions) &&
+            event.deletions >= 0)) &&
+        (event.reviewable === undefined ||
+          typeof event.reviewable === "boolean") &&
+        (event.reviewable !== true ||
+          (typeof event.originalContent === "string" &&
+            typeof event.appliedContent === "string" &&
+            typeof event.additions === "number" &&
+            typeof event.deletions === "number"))
       );
     case "file.proposed":
       return (

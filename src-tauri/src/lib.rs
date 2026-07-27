@@ -249,6 +249,7 @@ pub fn run() {
             commands::project_files::write_project_file,
             commands::project_files::rename_project_entry,
             commands::project_files::delete_project_entry,
+            commands::project_files::delete_project_file_if_revision,
             // App settings commands
             commands::settings::get_app_settings,
             commands::settings::get_app_settings_path,

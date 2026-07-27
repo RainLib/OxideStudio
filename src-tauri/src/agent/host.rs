@@ -145,7 +145,10 @@ impl RustHostTool {
     }
 
     const fn permissions(self) -> &'static [&'static str] {
-        &["read"]
+        match self {
+            Self::ProjectWriteFile => &["write"],
+            _ => &["read"],
+        }
     }
 
     fn from_name(name: &str) -> Option<Self> {
@@ -1671,11 +1674,11 @@ impl AgentHostInner {
         .await;
     }
 
-    async fn emit_trusted_project_file_proposal(
+    async fn emit_trusted_project_file_change(
         &self,
         metadata: &RequestMetadata,
         call_id: &str,
-        proposal: &crate::commands::project_files::ProjectFileProposal,
+        change: &crate::commands::project_files::ProjectFileAppliedChange,
         created: bool,
     ) {
         let key = TurnKey::from_metadata(metadata);
@@ -1685,10 +1688,10 @@ impl AgentHostInner {
             *sequence = sequence.saturating_add(1);
             *sequence
         };
-        let event = trusted_project_file_proposal_event(
+        let event = trusted_project_file_change_event(
             metadata,
             call_id,
-            proposal,
+            change,
             created,
             sequence,
             now_millis(),
@@ -1718,10 +1721,7 @@ impl AgentHostInner {
             SidecarRequestError::security(anyhow!("tool is not present in the turn manifest"))
         })?;
 
-        let high_risk = tool
-            .permissions
-            .iter()
-            .any(|permission| matches!(permission.as_str(), "write" | "destructive" | "external"));
+        let high_risk = tool_requires_approval(&request.tool_name, &tool.permissions);
         if high_risk {
             let lease = request
                 .approval_lease
@@ -1742,7 +1742,7 @@ impl AgentHostInner {
             .map_err(SidecarRequestError::security)?;
         } else if request.approval_lease.is_some() {
             return Err(SidecarRequestError::security(anyhow!(
-                "read-only tools must not receive approval leases"
+                "this tool must not receive an approval lease"
             )));
         }
 
@@ -1830,7 +1830,7 @@ impl AgentHostInner {
                     .get("create")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                let proposal = crate::commands::project_files::agent_prepare_project_file_change(
+                let change = crate::commands::project_files::agent_apply_project_file_change(
                     &store,
                     &turn.project_id,
                     &path,
@@ -1840,21 +1840,22 @@ impl AgentHostInner {
                 )
                 .await
                 .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
-                self.emit_trusted_project_file_proposal(
+                self.emit_trusted_project_file_change(
                     &request.metadata,
                     &request.call_id,
-                    &proposal,
+                    &change,
                     create,
                 )
                 .await;
                 Ok(json!({
-                    "relativePath": proposal.relative_path,
+                    "relativePath": change.relative_path,
                     "operation": if create { "created" } else { "updated" },
-                    "proposedRevision": proposal.proposed_revision,
-                    "baseRevision": proposal.base_revision,
-                    "additions": proposal.additions,
-                    "deletions": proposal.deletions,
-                    "pendingReview": true,
+                    "revision": change.revision,
+                    "previousRevision": change.previous_revision,
+                    "additions": change.additions,
+                    "deletions": change.deletions,
+                    "applied": true,
+                    "reviewable": true,
                 }))
             }
             RustHostTool::ConnectionList => {
@@ -3950,29 +3951,41 @@ fn non_empty(value: &str) -> Option<&str> {
     (!value.trim().is_empty()).then_some(value)
 }
 
-fn trusted_project_file_proposal_event(
+fn tool_requires_approval(tool_name: &str, permissions: &[String]) -> bool {
+    let reviewable_workspace_write =
+        tool_name == "project.writeFile" && permissions.len() == 1 && permissions[0] == "write";
+    !reviewable_workspace_write
+        && permissions
+            .iter()
+            .any(|permission| matches!(permission.as_str(), "write" | "destructive" | "external"))
+}
+
+fn trusted_project_file_change_event(
     metadata: &RequestMetadata,
     call_id: &str,
-    proposal: &crate::commands::project_files::ProjectFileProposal,
+    change: &crate::commands::project_files::ProjectFileAppliedChange,
     created: bool,
     sequence: u64,
     occurred_at: i64,
 ) -> Value {
     json!({
-        "type": "file.proposed",
+        "type": "file.changed",
         "threadId": metadata.thread_id,
         "turnId": metadata.turn_id,
         "sequence": sequence,
         "occurredAt": occurred_at,
         "callId": call_id,
-        "relativePath": proposal.relative_path,
+        "relativePath": change.relative_path,
         "operation": if created { "created" } else { "updated" },
-        "proposedRevision": proposal.proposed_revision,
-        "baseRevision": proposal.base_revision,
-        "originalContent": proposal.original_content,
-        "proposedContent": proposal.proposed_content,
-        "additions": proposal.additions,
-        "deletions": proposal.deletions,
+        "revision": change.revision,
+        "previousRevision": change.previous_revision,
+        "originalContent": change.original_content,
+        "appliedContent": change.applied_content,
+        "additions": change.additions,
+        "deletions": change.deletions,
+        "introducedLines": change.introduced_lines,
+        "lineEvidenceTruncated": change.line_evidence_truncated,
+        "reviewable": true,
     })
 }
 
@@ -4720,11 +4733,19 @@ mod tests {
     use super::*;
 
     fn tool_manifest(name: &str) -> AgentToolManifestEntry {
+        let permissions = RustHostTool::from_name(name)
+            .map(|tool| {
+                tool.permissions()
+                    .iter()
+                    .map(|permission| (*permission).to_string())
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["read".to_string()]);
         AgentToolManifestEntry {
             name: name.to_string(),
             description: "test tool".to_string(),
             input_schema: json!({"type":"object"}),
-            permissions: vec!["read".to_string()],
+            permissions,
             timeout_ms: None,
             result_limit: None,
         }
@@ -4751,6 +4772,26 @@ mod tests {
     }
 
     #[test]
+    fn reviewable_project_writes_bypass_preapproval_without_weakening_other_mutations() {
+        assert!(!tool_requires_approval(
+            "project.writeFile",
+            &["write".to_string()]
+        ));
+        assert!(tool_requires_approval(
+            "database.mutate",
+            &["write".to_string()]
+        ));
+        assert!(tool_requires_approval(
+            "project.writeFile",
+            &["destructive".to_string()]
+        ));
+        assert!(!tool_requires_approval(
+            "project.readFile",
+            &["read".to_string()]
+        ));
+    }
+
+    #[test]
     fn installed_tool_catalog_and_manifest_validation_share_one_dispatch_enum() {
         let advertised = installed_host_tool_names();
         assert_eq!(advertised.len(), RustHostTool::ALL.len());
@@ -4770,9 +4811,9 @@ mod tests {
         )
         .is_err());
 
-        let mut escalated_proposal = tool_manifest("project.writeFile");
-        escalated_proposal.permissions = vec!["write".to_string()];
-        assert!(validate_host_tool_manifest(AgentProfile::Agent, &[escalated_proposal]).is_err());
+        let mut downgraded_write = tool_manifest("project.writeFile");
+        downgraded_write.permissions = vec!["read".to_string()];
+        assert!(validate_host_tool_manifest(AgentProfile::Agent, &[downgraded_write]).is_err());
         assert!(validate_host_tool_manifest(
             AgentProfile::Chat,
             &[tool_manifest("workspace.getActiveTab")]
@@ -5119,7 +5160,7 @@ mod tests {
     }
 
     #[test]
-    fn trusted_file_proposal_events_include_review_content_without_writing() {
+    fn trusted_file_change_events_include_applied_content_for_review() {
         let metadata = RequestMetadata {
             request_id: "request".to_string(),
             thread_id: "thread".to_string(),
@@ -5127,30 +5168,32 @@ mod tests {
             context_version: "context".to_string(),
             deadline: now_millis() + 10_000,
         };
-        let proposal = crate::commands::project_files::ProjectFileProposal {
+        let change = crate::commands::project_files::ProjectFileAppliedChange {
             relative_path: "queries/report.sql".to_string(),
-            proposed_revision: "a".repeat(64),
-            base_revision: None,
+            revision: "a".repeat(64),
+            previous_revision: None,
             original_content: String::new(),
-            proposed_content: "select 1;\nselect 2;".to_string(),
+            applied_content: "select 1;\nselect 2;".to_string(),
             additions: 2,
             deletions: 0,
+            introduced_lines: vec![1, 2],
+            line_evidence_truncated: false,
         };
-        let event =
-            trusted_project_file_proposal_event(&metadata, "call-1", &proposal, true, 4, 100);
+        let event = trusted_project_file_change_event(&metadata, "call-1", &change, true, 4, 100);
 
-        assert_eq!(event["type"], "file.proposed");
+        assert_eq!(event["type"], "file.changed");
         assert_eq!(event["relativePath"], "queries/report.sql");
         assert_eq!(event["operation"], "created");
-        assert_eq!(event["proposedRevision"], "a".repeat(64));
-        assert_eq!(event["baseRevision"], Value::Null);
+        assert_eq!(event["revision"], "a".repeat(64));
+        assert_eq!(event["previousRevision"], Value::Null);
         assert_eq!(event["originalContent"], "");
-        assert_eq!(event["proposedContent"], "select 1;\nselect 2;");
+        assert_eq!(event["appliedContent"], "select 1;\nselect 2;");
         assert_eq!(event["additions"], 2);
         assert_eq!(event["deletions"], 0);
+        assert_eq!(event["reviewable"], true);
         assert!(event.get("absolutePath").is_none());
         assert!(!valid_agent_event_shape(
-            "file.proposed",
+            "file.changed",
             event.as_object().unwrap()
         ));
     }

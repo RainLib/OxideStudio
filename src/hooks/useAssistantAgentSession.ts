@@ -28,6 +28,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   projectFilesService,
+  isProjectFileRevisionConflict,
   type ProjectFileWriteResult,
 } from "@/services/tauri/project-files.service";
 import {
@@ -85,23 +86,26 @@ export type AssistantAgentSession = {
   ) => Promise<void>;
   cancelTurn: (turnId: string) => Promise<void>;
   resumeTurn: (turnId: string, contextFingerprint: string) => Promise<void>;
-  applyFileProposal: (
+  keepFileChange: (
+    turnId: string,
+    callId: string,
+  ) => void;
+  undoFileChange: (
     turnId: string,
     callId: string,
     expectedRoot?: string | null,
   ) => Promise<void>;
-  rejectFileProposal: (turnId: string, callId: string) => void;
-  acceptFileProposalHunk: (
-    turnId: string,
-    callId: string,
-    hunk: LineDiffHunk,
-    expectedRoot?: string | null,
-  ) => Promise<void>;
-  rejectFileProposalHunk: (
+  keepFileChangeHunk: (
     turnId: string,
     callId: string,
     hunk: LineDiffHunk,
   ) => void;
+  undoFileChangeHunk: (
+    turnId: string,
+    callId: string,
+    hunk: LineDiffHunk,
+    expectedRoot?: string | null,
+  ) => Promise<void>;
   clear: () => void;
   refreshStatus: () => Promise<void>;
 };
@@ -255,6 +259,23 @@ export function useAssistantAgentSession(
           setContextMetrics((current) =>
             newerContextMetrics(current, eventMetrics),
           );
+        }
+        if (
+          event.type === "file.changed" &&
+          event.reviewable === true &&
+          typeof event.appliedContent === "string"
+        ) {
+          const turn = turnsRef.current.find(
+            (candidate) => candidate.id === event.turnId,
+          );
+          if (turn) {
+            syncAppliedProjectFile(
+              turn.projectId,
+              event.relativePath,
+              event.appliedContent,
+              event.revision,
+            );
+          }
         }
         mutateTurns((current) =>
           current.map((turn) =>
@@ -721,13 +742,13 @@ export function useAssistantAgentSession(
     [updateTurn],
   );
 
-  const commitProposalContent = useCallback(
+  const writeReviewedFileContent = useCallback(
     async (
       turnId: string,
       callId: string,
       content: string,
       expectedRoot?: string | null,
-    ): Promise<ProjectFileWriteResult> => {
+    ): Promise<ProjectFileWriteResult | null> => {
       const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
       const proposal = turn?.fileProposals?.find(
         (candidate) => candidate.callId === callId,
@@ -740,7 +761,7 @@ export function useAssistantAgentSession(
       }
       const writeKey = `${turnId}:${callId}`;
       if (fileProposalWritesRef.current.has(writeKey)) {
-        throw new Error("This file change is already being applied.");
+        throw new Error("This file change is already being updated.");
       }
       fileProposalWritesRef.current.add(writeKey);
 
@@ -750,21 +771,29 @@ export function useAssistantAgentSession(
         error: null,
       }));
       try {
-        const result =
-          proposal.operation === "created" && !proposal.baseRevision
-            ? await projectFilesService.createProjectFile(
+        if (!proposal.baseRevision) {
+          throw new Error("The applied file revision is unavailable for undo.");
+        }
+        const deleteCreatedFile =
+          proposal.operation === "created" &&
+          proposal.createdFileCanBeDeleted !== false &&
+          content === proposal.originalContent;
+        const result = deleteCreatedFile
+          ? await projectFilesService
+              .deleteProjectFileIfRevision(
                 turn.projectId,
                 proposal.relativePath,
-                content,
+                proposal.baseRevision,
                 expectedRoot,
               )
-            : await projectFilesService.writeProjectFile(
-                turn.projectId,
-                proposal.relativePath,
-                content,
-                proposal.baseRevision || "",
-                expectedRoot,
-              );
+              .then(() => null)
+          : await projectFilesService.writeProjectFile(
+              turn.projectId,
+              proposal.relativePath,
+              content,
+              proposal.baseRevision,
+              expectedRoot,
+            );
         const tabs = useTabStore.getState();
         const openTab = tabs.tabs.find(
           (tab) =>
@@ -773,8 +802,12 @@ export function useAssistantAgentSession(
             tab.fileRelativePath === proposal.relativePath,
         );
         if (openTab && !openTab.isDirty) {
-          tabs.updateTabSql(openTab.id, content);
-          tabs.markProjectFileSaved(openTab.id, result.revision, content);
+          if (result) {
+            tabs.updateTabSql(openTab.id, content);
+            tabs.markProjectFileSaved(openTab.id, result.revision, content);
+          } else {
+            tabs.closeTab(openTab.id);
+          }
         }
         useProjectFilesStore.getState().syncActiveProject();
         void useProjectFilesStore
@@ -785,18 +818,32 @@ export function useAssistantAgentSession(
         return result;
       } catch (error) {
         fileProposalWritesRef.current.delete(writeKey);
+        const message = fileReviewError(error);
         updateFileProposal(turnId, callId, (current) => ({
           ...current,
           isApplying: false,
-          error: errorMessage(error),
+          error: message,
         }));
-        throw error;
+        throw new Error(message);
       }
     },
     [updateFileProposal],
   );
 
-  const applyFileProposal = useCallback(
+  const keepFileChange = useCallback(
+    (turnId: string, callId: string) => {
+      updateFileProposal(turnId, callId, (proposal) => ({
+        ...proposal,
+        status: "accepted",
+        isApplying: false,
+        error: null,
+        resolvedAt: Date.now(),
+      }));
+    },
+    [updateFileProposal],
+  );
+
+  const undoFileChange = useCallback(
     async (
       turnId: string,
       callId: string,
@@ -807,60 +854,75 @@ export function useAssistantAgentSession(
         (candidate) => candidate.callId === callId,
       );
       if (!turn || !proposal || proposal.status !== "pending") return;
-      const result = await commitProposalContent(
+      const result = await writeReviewedFileContent(
         turnId,
         callId,
-        proposal.proposedContent,
+        proposal.originalContent,
         expectedRoot,
       );
+      const sourceCallIds = new Set(proposal.sourceCallIds ?? [proposal.callId]);
+      const partiallyKept = proposal.keptChanges === true;
       updateTurn(turnId, (current) => ({
         ...current,
         fileProposals: (current.fileProposals ?? []).map((candidate) =>
           candidate.callId === callId
             ? {
                 ...candidate,
-                status: "accepted" as const,
+                baseRevision: result?.revision ?? candidate.baseRevision,
+                status: partiallyKept ? ("mixed" as const) : ("rejected" as const),
                 isApplying: false,
                 error: null,
-                baseRevision: result.revision,
-                proposedRevision: result.revision,
-                originalContent: proposal.proposedContent,
-                additions: 0,
-                deletions: 0,
                 resolvedAt: Date.now(),
               }
             : candidate,
         ),
-        fileChanges: upsertProjectFileChange(current.fileChanges, {
-          callId,
-          relativePath: proposal.relativePath,
-          operation: proposal.operation,
-          revision: result.revision,
-          previousRevision: result.previousRevision,
-          introducedLines: result.introducedLines,
-          lineEvidenceTruncated: result.lineEvidenceTruncated,
-          occurredAt: Date.now(),
-        }),
+        fileChanges: partiallyKept
+          ? updateReviewedFileAttribution(
+              current.fileChanges,
+              proposal,
+              result,
+            )
+          : (current.fileChanges ?? []).filter(
+              (change) => !sourceCallIds.has(change.callId),
+            ),
         updatedAt: Date.now(),
       }));
     },
-    [commitProposalContent, updateTurn],
+    [updateTurn, writeReviewedFileContent],
   );
 
-  const rejectFileProposal = useCallback(
-    (turnId: string, callId: string) => {
-      updateFileProposal(turnId, callId, (proposal) => ({
-        ...proposal,
-        status: "rejected",
-        isApplying: false,
-        error: null,
-        resolvedAt: Date.now(),
-      }));
+  const keepFileChangeHunk = useCallback(
+    (turnId: string, callId: string, hunk: LineDiffHunk) => {
+      updateFileProposal(turnId, callId, (proposal) => {
+        const originalContent = applyLineDiffHunk(
+          proposal.originalContent,
+          proposal.proposedContent,
+          hunk,
+          "accept",
+        );
+        const counts = lineDiffCounts(originalContent, proposal.proposedContent);
+        const completed = counts.additions === 0 && counts.deletions === 0;
+        return {
+          ...proposal,
+          originalContent,
+          keptChanges: true,
+          createdFileCanBeDeleted:
+            proposal.operation === "created"
+              ? false
+              : proposal.createdFileCanBeDeleted,
+          additions: counts.additions,
+          deletions: counts.deletions,
+          status: completed ? "accepted" : proposal.status,
+          isApplying: false,
+          error: null,
+          resolvedAt: completed ? Date.now() : null,
+        };
+      });
     },
     [updateFileProposal],
   );
 
-  const acceptFileProposalHunk = useCallback(
+  const undoFileChangeHunk = useCallback(
     async (
       turnId: string,
       callId: string,
@@ -872,81 +934,57 @@ export function useAssistantAgentSession(
         (candidate) => candidate.callId === callId,
       );
       if (!turn || !proposal || proposal.status !== "pending") return;
-      const acceptedContent = applyLineDiffHunk(
+      const nextContent = applyLineDiffHunk(
         proposal.originalContent,
         proposal.proposedContent,
         hunk,
-        "accept",
+        "reject",
       );
-      const result = await commitProposalContent(
+      const result = await writeReviewedFileContent(
         turnId,
         callId,
-        acceptedContent,
+        nextContent,
         expectedRoot,
       );
-      const counts = lineDiffCounts(
-        acceptedContent,
-        proposal.proposedContent,
-      );
+      const counts = lineDiffCounts(proposal.originalContent, nextContent);
       const completed = counts.additions === 0 && counts.deletions === 0;
+      const sourceCallIds = new Set(proposal.sourceCallIds ?? [proposal.callId]);
+      const partiallyKept = proposal.keptChanges === true;
       updateTurn(turnId, (current) => ({
         ...current,
         fileProposals: (current.fileProposals ?? []).map((candidate) =>
           candidate.callId === callId
             ? {
                 ...candidate,
-                operation: "updated" as const,
-                baseRevision: result.revision,
-                originalContent: acceptedContent,
+                proposedContent: nextContent,
+                proposedRevision: result?.revision ?? candidate.proposedRevision,
+                baseRevision: result?.revision ?? candidate.baseRevision,
                 additions: counts.additions,
                 deletions: counts.deletions,
-                status: completed ? ("accepted" as const) : candidate.status,
+                status: completed
+                  ? partiallyKept
+                    ? ("mixed" as const)
+                    : ("rejected" as const)
+                  : candidate.status,
                 isApplying: false,
                 error: null,
                 resolvedAt: completed ? Date.now() : null,
               }
             : candidate,
         ),
-        fileChanges: upsertProjectFileChange(current.fileChanges, {
-          callId: `${callId}:hunk:${hunk.id}`,
-          relativePath: proposal.relativePath,
-          operation: proposal.operation,
-          revision: result.revision,
-          previousRevision: result.previousRevision,
-          introducedLines: result.introducedLines,
-          lineEvidenceTruncated: result.lineEvidenceTruncated,
-          occurredAt: Date.now(),
-        }),
+        fileChanges: completed && !partiallyKept
+          ? (current.fileChanges ?? []).filter(
+              (change) => !sourceCallIds.has(change.callId),
+            )
+          : updateReviewedFileAttribution(
+              current.fileChanges,
+              proposal,
+              result,
+            ),
         updatedAt: Date.now(),
       }));
     },
-    [commitProposalContent, updateTurn],
-  );
-
-  const rejectFileProposalHunk = useCallback(
-    (turnId: string, callId: string, hunk: LineDiffHunk) => {
-      updateFileProposal(turnId, callId, (proposal) => {
-        const proposedContent = applyLineDiffHunk(
-          proposal.originalContent,
-          proposal.proposedContent,
-          hunk,
-          "reject",
-        );
-        const counts = lineDiffCounts(proposal.originalContent, proposedContent);
-        const completed = counts.additions === 0 && counts.deletions === 0;
-        return {
-          ...proposal,
-          proposedContent,
-          additions: counts.additions,
-          deletions: counts.deletions,
-          status: completed ? "rejected" : proposal.status,
-          isApplying: false,
-          error: null,
-          resolvedAt: completed ? Date.now() : null,
-        };
-      });
-    },
-    [updateFileProposal],
+    [updateTurn, writeReviewedFileContent],
   );
 
   const activeTurn = useMemo(
@@ -975,10 +1013,10 @@ export function useAssistantAgentSession(
     decideApproval,
     cancelTurn,
     resumeTurn,
-    applyFileProposal,
-    rejectFileProposal,
-    acceptFileProposalHunk,
-    rejectFileProposalHunk,
+    keepFileChange,
+    undoFileChange,
+    keepFileChangeHunk,
+    undoFileChangeHunk,
     clear,
     refreshStatus,
   };
@@ -1067,6 +1105,16 @@ export function reduceAgentHostEvent(
       return {
         ...turn,
         ...common,
+        process: turn.process.map((item) =>
+          item.id === `tool:${event.callId}` || item.id === event.callId
+            ? {
+                ...item,
+                relativePath: event.relativePath,
+                additions: event.additions,
+                deletions: event.deletions,
+              }
+            : item,
+        ),
         fileChanges: upsertProjectFileChange(turn.fileChanges, {
           callId: event.callId,
           relativePath: event.relativePath,
@@ -1075,8 +1123,35 @@ export function reduceAgentHostEvent(
           previousRevision: event.previousRevision,
           introducedLines: event.introducedLines,
           lineEvidenceTruncated: event.lineEvidenceTruncated,
+          additions: event.additions,
+          deletions: event.deletions,
           occurredAt: event.occurredAt,
         }),
+        fileProposals:
+          event.reviewable === true &&
+          typeof event.originalContent === "string" &&
+          typeof event.appliedContent === "string" &&
+          typeof event.additions === "number" &&
+          typeof event.deletions === "number"
+            ? upsertAppliedFileReview(turn.fileProposals, {
+                callId: event.callId,
+                sourceCallIds: [event.callId],
+                relativePath: event.relativePath,
+                operation: event.operation,
+                proposedRevision: event.revision,
+                baseRevision: event.revision,
+                originalContent: event.originalContent,
+                proposedContent: event.appliedContent,
+                additions: event.additions,
+                deletions: event.deletions,
+                status: "pending",
+                keptChanges: false,
+                createdFileCanBeDeleted: event.operation === "created",
+                appliedImmediately: true,
+                error: null,
+                occurredAt: event.occurredAt,
+              })
+            : turn.fileProposals,
       };
     case "file.proposed":
       return {
@@ -1092,8 +1167,9 @@ export function reduceAgentHostEvent(
           proposedContent: event.proposedContent,
           additions: event.additions,
           deletions: event.deletions,
-          status: "pending",
-          error: null,
+          status: "rejected",
+          appliedImmediately: false,
+          error: "This legacy proposal was not applied to disk and cannot be reviewed as an immediate Agent edit.",
           occurredAt: event.occurredAt,
         }),
       };
@@ -1266,7 +1342,7 @@ function fallbackToolPhaseDescription(toolName: string, label: string) {
     return "I’ll read the relevant project file before deciding what needs to change.";
   }
   if (toolName === "project.writeFile") {
-    return "I’ll prepare the requested file change for review without writing it to disk.";
+    return "I’ll update the requested project file and leave the change available for review or undo.";
   }
   if (toolName.startsWith("metadata.")) {
     return "I’ll inspect the relevant database metadata before continuing.";
@@ -1445,6 +1521,67 @@ function upsertProjectFileProposal(
   return [...withoutDuplicate, proposal].slice(-128);
 }
 
+function upsertAppliedFileReview(
+  proposals: AssistantTurn["fileProposals"],
+  review: NonNullable<AssistantTurn["fileProposals"]>[number],
+) {
+  const current = proposals ?? [];
+  const previous = [...current]
+    .reverse()
+    .find(
+      (candidate) =>
+        candidate.status === "pending" &&
+        candidate.relativePath === review.relativePath,
+    );
+  if (!previous || previous.proposedContent !== review.originalContent) {
+    return upsertProjectFileProposal(current, review);
+  }
+  const counts = lineDiffCounts(
+    previous.originalContent,
+    review.proposedContent,
+  );
+  return current.map((candidate) =>
+    candidate.callId === previous.callId
+      ? {
+          ...review,
+          callId: previous.callId,
+          sourceCallIds: Array.from(
+            new Set([
+              ...(previous.sourceCallIds ?? [previous.callId]),
+              ...((review.sourceCallIds ?? [review.callId])),
+            ]),
+          ),
+          operation: previous.operation,
+          originalContent: previous.originalContent,
+          keptChanges: previous.keptChanges,
+          createdFileCanBeDeleted: previous.createdFileCanBeDeleted,
+          additions: counts.additions,
+          deletions: counts.deletions,
+        }
+      : candidate,
+  );
+}
+
+function updateReviewedFileAttribution(
+  changes: AssistantTurn["fileChanges"],
+  proposal: AssistantProjectFileProposal,
+  result: ProjectFileWriteResult | null,
+) {
+  if (!result) return changes ?? [];
+  const sourceCallIds = new Set(proposal.sourceCallIds ?? [proposal.callId]);
+  const remaining = (changes ?? []).filter(
+    (change) => !sourceCallIds.has(change.callId),
+  );
+  return upsertProjectFileChange(remaining, {
+    callId: proposal.callId,
+    relativePath: proposal.relativePath,
+    operation: proposal.operation,
+    revision: result.revision,
+    previousRevision: result.previousRevision,
+    occurredAt: Date.now(),
+  });
+}
+
 function requestMetadata(
   turn: AssistantTurn,
   contextVersion: string,
@@ -1531,9 +1668,40 @@ function errorMessage(error: unknown) {
   return "Agent Host command failed.";
 }
 
+function fileReviewError(error: unknown) {
+  if (isProjectFileRevisionConflict(error)) {
+    return "This file changed after the Agent edit, so OxideStudio did not undo it. Review the current file and retry from a fresh diff.";
+  }
+  return errorMessage(error);
+}
+
 function parentProjectPath(relativePath: string) {
   const separator = relativePath.lastIndexOf("/");
   return separator < 0 ? "" : relativePath.slice(0, separator);
+}
+
+function syncAppliedProjectFile(
+  projectId: string,
+  relativePath: string,
+  content: string,
+  revision: string,
+) {
+  const tabs = useTabStore.getState();
+  const openTab = tabs.tabs.find(
+    (tab) =>
+      !tab.agentFileDiffPreview &&
+      tab.fileProjectId === projectId &&
+      tab.fileRelativePath === relativePath,
+  );
+  if (openTab && !openTab.isDirty) {
+    tabs.updateTabSql(openTab.id, content);
+    tabs.markProjectFileSaved(openTab.id, revision, content);
+  }
+  useProjectFilesStore.getState().syncActiveProject();
+  void useProjectFilesStore
+    .getState()
+    .refreshDirectory(parentProjectPath(relativePath))
+    .catch(() => undefined);
 }
 
 function restoreConversationTurns(value: unknown): AssistantTurn[] {
@@ -1674,6 +1842,14 @@ function restoreProjectFileChanges(
               ))) &&
           (change.lineEvidenceTruncated === undefined ||
             typeof change.lineEvidenceTruncated === "boolean") &&
+          (change.additions === undefined ||
+            (typeof change.additions === "number" &&
+              Number.isInteger(change.additions) &&
+              change.additions >= 0)) &&
+          (change.deletions === undefined ||
+            (typeof change.deletions === "number" &&
+              Number.isInteger(change.deletions) &&
+              change.deletions >= 0)) &&
           typeof change.occurredAt === "number" &&
           Number.isFinite(change.occurredAt)
         );
@@ -1695,6 +1871,12 @@ function restoreProjectFileProposals(
         const proposal = candidate as Record<string, unknown>;
         return (
           typeof proposal.callId === "string" &&
+          (proposal.sourceCallIds === undefined ||
+            (Array.isArray(proposal.sourceCallIds) &&
+              proposal.sourceCallIds.length <= 128 &&
+              proposal.sourceCallIds.every(
+                (callId) => typeof callId === "string" && callId.length > 0,
+              ))) &&
           safeRestoredProjectPath(proposal.relativePath) &&
           (proposal.operation === "created" ||
             proposal.operation === "updated") &&
@@ -1716,11 +1898,29 @@ function restoreProjectFileProposals(
           proposal.deletions >= 0 &&
           (proposal.status === "pending" ||
             proposal.status === "accepted" ||
-            proposal.status === "rejected") &&
+            proposal.status === "rejected" ||
+            proposal.status === "mixed") &&
+          (proposal.keptChanges === undefined ||
+            typeof proposal.keptChanges === "boolean") &&
+          (proposal.createdFileCanBeDeleted === undefined ||
+            typeof proposal.createdFileCanBeDeleted === "boolean") &&
+          (proposal.appliedImmediately === undefined ||
+            typeof proposal.appliedImmediately === "boolean") &&
           typeof proposal.occurredAt === "number" &&
           Number.isFinite(proposal.occurredAt)
         );
       },
+    )
+    .map((proposal) =>
+      proposal.status === "pending" && proposal.appliedImmediately !== true
+        ? {
+            ...proposal,
+            status: "rejected" as const,
+            error:
+              "This review was created by the previous proposal-only workflow and was not applied to disk.",
+            resolvedAt: Date.now(),
+          }
+        : proposal,
     )
     .slice(-128);
 }

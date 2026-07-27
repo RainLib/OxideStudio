@@ -244,7 +244,7 @@ describe("assistant turn projection", () => {
         id: "commentary:tool:call-write",
         kind: "commentary",
         title:
-          "I’ll prepare the requested file change for review without writing it to disk.",
+          "I’ll update the requested project file and leave the change available for review or undo.",
       }),
       expect.objectContaining({
         id: "tool:call-write",
@@ -291,7 +291,7 @@ describe("assistant turn projection", () => {
     expect(assistantConversationHistoryFromTurns([turn])).toEqual([]);
   });
 
-  it("stores a file proposal as pending review without claiming a disk change", () => {
+  it("stores an applied file change for review and records its disk revision", () => {
     let turn = createAssistantTurn({
       id: "turn-1",
       requestId: "request-1",
@@ -304,16 +304,28 @@ describe("assistant turn projection", () => {
 
     turn = reduceAgentHostEvent(
       turn,
-      event("file.proposed", 1, {
+      event("tool.started", 1, {
+        callId: "write-1",
+        toolName: "project.writeFile",
+        label: "Edit project file",
+        relativePath: "queries/pending.sql",
+      }),
+    );
+    turn = reduceAgentHostEvent(
+      turn,
+      event("file.changed", 2, {
         callId: "write-1",
         relativePath: "queries/pending.sql",
         operation: "created",
-        proposedRevision: "a".repeat(64),
-        baseRevision: null,
+        revision: "a".repeat(64),
+        previousRevision: null,
         originalContent: "",
-        proposedContent: "select 1;\n",
+        appliedContent: "select 1;\n",
         additions: 1,
         deletions: 0,
+        introducedLines: [1],
+        lineEvidenceTruncated: false,
+        reviewable: true,
       }),
     );
 
@@ -322,9 +334,79 @@ describe("assistant turn projection", () => {
         callId: "write-1",
         status: "pending",
         proposedContent: "select 1;\n",
+        baseRevision: "a".repeat(64),
       }),
     ]);
-    expect(turn.fileChanges).toBeUndefined();
+    expect(turn.fileChanges).toEqual([
+      expect.objectContaining({
+        callId: "write-1",
+        revision: "a".repeat(64),
+        additions: 1,
+        deletions: 0,
+      }),
+    ]);
+    expect(turn.process).toContainEqual(
+      expect.objectContaining({
+        id: "tool:write-1",
+        additions: 1,
+        deletions: 0,
+      }),
+    );
+  });
+
+  it("combines sequential Agent writes into one net file review", () => {
+    let turn = createAssistantTurn({
+      id: "turn-1",
+      requestId: "request-1",
+      projectId: "project-1",
+      requestedMode: "agent",
+      mode: "agent",
+      userMessage: "Update a query twice",
+      now: 10,
+    });
+    turn = reduceAgentHostEvent(
+      turn,
+      event("file.changed", 1, {
+        callId: "write-1",
+        relativePath: "queries/report.sql",
+        operation: "updated",
+        revision: "a".repeat(64),
+        previousRevision: "0".repeat(64),
+        originalContent: "select 1;\n",
+        appliedContent: "select 2;\n",
+        additions: 1,
+        deletions: 1,
+        reviewable: true,
+      }),
+    );
+    turn = reduceAgentHostEvent(
+      turn,
+      event("file.changed", 2, {
+        callId: "write-2",
+        relativePath: "queries/report.sql",
+        operation: "updated",
+        revision: "b".repeat(64),
+        previousRevision: "a".repeat(64),
+        originalContent: "select 2;\n",
+        appliedContent: "select 3;\nwhere active;\n",
+        additions: 2,
+        deletions: 1,
+        reviewable: true,
+      }),
+    );
+
+    expect(turn.fileProposals).toEqual([
+      expect.objectContaining({
+        callId: "write-1",
+        sourceCallIds: ["write-1", "write-2"],
+        originalContent: "select 1;\n",
+        proposedContent: "select 3;\nwhere active;\n",
+        baseRevision: "b".repeat(64),
+        additions: 2,
+        deletions: 1,
+      }),
+    ]);
+    expect(turn.fileChanges).toHaveLength(2);
   });
 });
 

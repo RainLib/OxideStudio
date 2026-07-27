@@ -748,7 +748,7 @@ export function systemPrompt(profile: StartTurnParams["profile"]): string {
     "Use ask_user only for material ambiguity; at most two clarification rounds are available.",
     "For ask_user, provide 1-3 questions with 2-3 concrete options each. Never add an Other, Custom, or free-text option because the UI always provides a separate free-text answer.",
     "Filesystem and shell access are forbidden. Database access is only through the supplied tools.",
-    "project.writeFile only stages a reviewable file proposal and never changes the project on disk. Describe its result as proposed or pending review; never say the file was created, updated, or applied until the user accepts it in the OxideStudio review UI.",
+    "project.writeFile atomically updates the project on disk immediately and records a Git-style review item. Describe successful results as created or updated, and tell the user the change can be kept or undone in the OxideStudio review UI.",
     "query.runReadOnly is driver-aware: use SQL SELECT for relational databases, MongoDB read-command JSON for MongoDB, Redis read commands for Redis, and Elasticsearch DSL as JSON or Kibana syntax such as POST index/_search followed by the JSON body. Never send SQL to a non-SQL connection.",
     "When a tool observation contains artifactRef, use context_search_artifact to find relevant JSON ranges and context_read_artifact to read only those ranges. Do not guess omitted data.",
     "Metadata and Explain Plan observations may include trusted citations. Append the exact token [[cite:citation-id]] to each factual sentence that relies on that evidence. Use a databaseSchema citation for aggregate/list claims and a databaseObject citation for object details. Use only citation ids present in the observation, never invent or alter one. Do not cite claims that are only suggestions or inference.",
@@ -765,7 +765,7 @@ export function systemPrompt(profile: StartTurnParams["profile"]): string {
     );
   } else {
     shared.push(
-      "This is Agent mode. Prefer bounded read-only discovery. Risky tools require exact one-time approval. Keep mutations serial and verify context immediately before use.",
+      "This is Agent mode. Prefer bounded read-only discovery. Risky database and external tools require exact one-time approval; reviewable project.writeFile changes apply immediately without a pre-approval prompt. Keep mutations serial and verify context immediately before use.",
       "Before each distinct work phase, write one concise user-visible sentence describing what you will inspect or change and why, then perform that phase's tool calls. Add a new update when the objective changes, avoid narrating trivial calls, and never reveal hidden reasoning.",
       "Use no more than two subagents at a time.",
     );

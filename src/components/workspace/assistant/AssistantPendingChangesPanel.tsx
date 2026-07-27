@@ -8,7 +8,7 @@ import {
   ChevronRight,
   FileDiff,
   Loader2,
-  X,
+  Undo2,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 
@@ -42,16 +42,16 @@ export function pendingAssistantFileProposals(
 export function AssistantPendingChangesPanel({
   turns,
   onOpen,
-  onAccept,
-  onReject,
+  onKeep,
+  onUndo,
 }: {
   turns: readonly AssistantTurn[];
   onOpen: (item: PendingAssistantFileProposal) => void;
-  onAccept: (item: PendingAssistantFileProposal) => Promise<void>;
-  onReject: (item: PendingAssistantFileProposal) => void;
+  onKeep: (item: PendingAssistantFileProposal) => void;
+  onUndo: (item: PendingAssistantFileProposal) => Promise<void>;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [bulkAction, setBulkAction] = useState<"accept" | "reject" | null>(
+  const [bulkAction, setBulkAction] = useState<"keep" | "undo" | null>(
     null,
   );
   const [error, setError] = useState<string | null>(null);
@@ -73,26 +73,27 @@ export function AssistantPendingChangesPanel({
     bulkAction !== null ||
     pending.some((item) => item.proposal.isApplying);
 
-  const acceptAll = async () => {
+  const keepAll = () => {
     if (busy) return;
-    setBulkAction("accept");
+    setBulkAction("keep");
+    setError(null);
+    for (const item of pending) onKeep(item);
+    setBulkAction(null);
+  };
+
+  const undoAll = async () => {
+    if (busy) return;
+    setBulkAction("undo");
     setError(null);
     try {
-      for (const item of pending) {
-        await onAccept(item);
+      for (const item of [...pending].reverse()) {
+        await onUndo(item);
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setBulkAction(null);
     }
-  };
-
-  const rejectAll = () => {
-    if (busy) return;
-    setBulkAction("reject");
-    for (const item of pending) onReject(item);
-    setBulkAction(null);
   };
 
   return (
@@ -131,26 +132,29 @@ export function AssistantPendingChangesPanel({
                   <button
                     type="button"
                     className="text-[hsl(var(--wb-text-muted))] opacity-0 outline-none hover:text-red-300 focus-visible:opacity-100 group-hover:opacity-100"
-                    title={`Reject ${item.proposal.relativePath}`}
-                    aria-label={`Reject ${item.proposal.relativePath}`}
-                    onClick={() => onReject(item)}
-                  >
-                    <X size={11} />
-                  </button>
-                  <button
-                    type="button"
-                    className="text-[hsl(var(--wb-text-muted))] opacity-0 outline-none hover:text-emerald-300 focus-visible:opacity-100 group-hover:opacity-100"
-                    title={`Accept ${item.proposal.relativePath}`}
-                    aria-label={`Accept ${item.proposal.relativePath}`}
+                    title={`Undo ${item.proposal.relativePath}`}
+                    aria-label={`Undo ${item.proposal.relativePath}`}
                     onClick={() => {
                       setError(null);
-                      void onAccept(item).catch((reason) =>
+                      void onUndo(item).catch((reason) =>
                         setError(
                           reason instanceof Error
                             ? reason.message
                             : String(reason),
                         ),
                       );
+                    }}
+                  >
+                    <Undo2 size={11} />
+                  </button>
+                  <button
+                    type="button"
+                    className="text-[hsl(var(--wb-text-muted))] opacity-0 outline-none hover:text-emerald-300 focus-visible:opacity-100 group-hover:opacity-100"
+                    title={`Keep ${item.proposal.relativePath}`}
+                    aria-label={`Keep ${item.proposal.relativePath}`}
+                    onClick={() => {
+                      setError(null);
+                      onKeep(item);
                     }}
                   >
                     <Check size={11} />
@@ -175,7 +179,7 @@ export function AssistantPendingChangesPanel({
             aria-hidden="true"
           />
           <span className="truncate">
-            {pending.length} pending {pending.length === 1 ? "file" : "files"}
+            {pending.length} changed {pending.length === 1 ? "file" : "files"}
           </span>
           <span className="shrink-0 font-mono text-emerald-400">
             +{additions}
@@ -194,23 +198,23 @@ export function AssistantPendingChangesPanel({
           <Loader2
             size={12}
             className="animate-spin text-[hsl(var(--wb-accent))]"
-            aria-label="Applying file changes"
+            aria-label="Updating file changes"
           />
         ) : (
           <>
             <button
               type="button"
               className="wb-text-button h-6 px-1.5 text-[10px]"
-              onClick={rejectAll}
+              onClick={() => void undoAll()}
             >
-              Reject all
+              Undo all
             </button>
             <button
               type="button"
               className="wb-text-button h-6 px-1.5 text-[10px] text-emerald-300"
-              onClick={() => void acceptAll()}
+              onClick={keepAll}
             >
-              Accept all
+              Keep all
             </button>
           </>
         )}

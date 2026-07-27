@@ -519,16 +519,16 @@ function AgentHostAssistantSidebar() {
     );
   };
 
-  const acceptPendingFileProposal = (item: PendingAssistantFileProposal) =>
-    session.applyFileProposal(
+  const keepPendingFileChange = (item: PendingAssistantFileProposal) => {
+    session.keepFileChange(item.turnId, item.proposal.callId);
+  };
+
+  const undoPendingFileChange = (item: PendingAssistantFileProposal) =>
+    session.undoFileChange(
       item.turnId,
       item.proposal.callId,
       activeProjectRoot,
     );
-
-  const rejectPendingFileProposal = (item: PendingAssistantFileProposal) => {
-    session.rejectFileProposal(item.turnId, item.proposal.callId);
-  };
 
   useEffect(() => {
     const listener = (rawEvent: Event) => {
@@ -541,25 +541,25 @@ function AgentHostAssistantSidebar() {
           candidate.proposal.callId === detail.callId,
       );
       if (!item) return;
-      if (detail.action === "accept-file") {
-        void acceptPendingFileProposal(item).catch(() => undefined);
-      } else if (detail.action === "reject-file") {
-        rejectPendingFileProposal(item);
-      } else if (detail.action === "accept-hunk" && detail.hunk) {
+      if (detail.action === "keep-file") {
+        keepPendingFileChange(item);
+      } else if (detail.action === "undo-file") {
+        void undoPendingFileChange(item).catch(() => undefined);
+      } else if (detail.action === "keep-hunk" && detail.hunk) {
+        session.keepFileChangeHunk(
+          item.turnId,
+          item.proposal.callId,
+          detail.hunk,
+        );
+      } else if (detail.action === "undo-hunk" && detail.hunk) {
         void session
-          .acceptFileProposalHunk(
+          .undoFileChangeHunk(
             item.turnId,
             item.proposal.callId,
             detail.hunk,
             activeProjectRoot,
           )
           .catch(() => undefined);
-      } else if (detail.action === "reject-hunk" && detail.hunk) {
-        session.rejectFileProposalHunk(
-          item.turnId,
-          item.proposal.callId,
-          detail.hunk,
-        );
       }
     };
     window.addEventListener(APP_EVENT_AGENT_FILE_REVIEW, listener);
@@ -696,8 +696,8 @@ function AgentHostAssistantSidebar() {
         <AssistantPendingChangesPanel
           turns={session.turns}
           onOpen={openPendingFileProposal}
-          onAccept={acceptPendingFileProposal}
-          onReject={rejectPendingFileProposal}
+          onKeep={keepPendingFileChange}
+          onUndo={undoPendingFileChange}
         />
 
         {composeRequest && message.trim() && (

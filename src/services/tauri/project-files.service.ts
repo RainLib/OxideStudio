@@ -405,4 +405,30 @@ export const projectFilesService = {
       ...expectedRootArgument(expectedRoot),
     });
   },
+
+  deleteProjectFileIfRevision: async (
+    projectId: string,
+    relativePath: string,
+    expectedRevision: string,
+    expectedRoot?: string | null,
+  ): Promise<void> => {
+    const normalizedPath = normalizeProjectRelativePath(relativePath);
+    try {
+      await invokeRawCommand("delete_project_file_if_revision", {
+        projectId: requireProjectId(projectId),
+        relativePath: normalizedPath,
+        expectedRevision,
+        ...expectedRootArgument(expectedRoot),
+      });
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "REVISION_CONFLICT") {
+        throw new ProjectFileRevisionConflictError(
+          normalizedPath,
+          error.message,
+          error,
+        );
+      }
+      throw error;
+    }
+  },
 };

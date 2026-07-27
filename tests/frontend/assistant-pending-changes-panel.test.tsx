@@ -24,7 +24,7 @@ describe("Assistant pending changes review", () => {
     container.remove();
   });
 
-  it("summarizes pending files above the composer and expands the file list", async () => {
+  it("summarizes changed files above the composer and expands the file list", async () => {
     const turn: AssistantTurn = {
       ...createAssistantTurn({
         id: "turn-1",
@@ -51,21 +51,21 @@ describe("Assistant pending changes review", () => {
       ],
     };
     const onOpen = vi.fn();
-    const onAccept = vi.fn(async () => undefined);
-    const onReject = vi.fn();
+    const onKeep = vi.fn();
+    const onUndo = vi.fn(async () => undefined);
 
     await act(async () => {
       root.render(
         <AssistantPendingChangesPanel
           turns={[turn]}
           onOpen={onOpen}
-          onAccept={onAccept}
-          onReject={onReject}
+          onKeep={onKeep}
+          onUndo={onUndo}
         />,
       );
     });
 
-    expect(container.textContent).toContain("1 pending file");
+    expect(container.textContent).toContain("1 changed file");
     expect(container.textContent).toContain("+2");
     expect(container.textContent).toContain("−1");
     expect(container.textContent).not.toContain("sql/report.sql");
@@ -88,13 +88,13 @@ describe("Assistant pending changes review", () => {
       }),
     );
 
-    const acceptAll = Array.from(container.querySelectorAll("button")).find(
-      (button) => button.textContent?.includes("Accept all"),
+    const keepAll = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Keep all"),
     );
     await act(async () => {
-      acceptAll?.click();
+      keepAll?.click();
       await Promise.resolve();
     });
-    expect(onAccept).toHaveBeenCalledTimes(1);
+    expect(onKeep).toHaveBeenCalledTimes(1);
   });
 });

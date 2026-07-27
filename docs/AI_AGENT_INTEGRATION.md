@@ -96,7 +96,8 @@ host 到 sidecar 的主要方法为 initialize、openThread、start/resume/cance
 - 接收 Rust 按项目、连接、provider capability 和 policy 过滤后的 manifest。
 - 无依赖的只读工作可有界并行，mutation 在 sidecar 内串行。
 - 可使用只读 `schema_analyst`、`query_reviewer`、`plan_verifier` 子代理；通用和异步子代理未启用。
-- write/destructive 调用必须经过 sidecar approval interrupt、UI 用户决定、Rust 一次性 lease 和调用时的 Rust 二次复核。
+- `project.writeFile` 以真实 `write` 权限串行、原子地直接落盘，并生成带写入前后内容和 applied revision 的可信 `file.changed` 审阅事件；用户可 Keep、整文件 Undo 或逐 hunk Keep/Undo。Undo 必须匹配 applied revision，新建文件也只在 revision 未变化时删除。
+- 数据库写入、destructive 和 external 调用仍必须经过 sidecar approval interrupt、UI 用户决定、Rust 一次性 lease 和调用时的 Rust 二次复核；项目文件的可撤回直写例外不会放宽这些工具。
 
 不支持 tool calling 的 provider 只能用于 Chat；Plan/Agent 返回明确的 capability error。
 
@@ -182,10 +183,11 @@ Rust 的 `agent_threads`、`agent_checkpoints`、`agent_artifacts`、`agent_grap
 
 一个 Turn 固定为：用户问题 → 执行过程 → coordinator 最终答案。
 
-- tool、todo、subagent 和 compaction 映射为当前 Turn 的 compact process disclosure，不创建独立聊天消息。
-- 同一 Turn 无论产生多少 plan/tool/subagent 事件都只展示一个 process disclosure；运行时标题跟随当前动作并使用流动高亮，完成后生成动作摘要且默认收起，展开后才渲染完整步骤与结果。
-- coordinator 主动输出的公开进度说明会在下一次工具调用前转存为 `commentary` process item；这不是原始 chain-of-thought。展开 disclosure 可查看该说明以及最多约 2 KB 的有界工具输出预览，超限结果仍只通过加密 Artifact 按范围读取。
-- 成功过程默认收起；clarification、approval、failure、stale context 默认展开。
+- tool、todo、subagent 和 compaction 映射为当前 Turn 的 process timeline，不创建独立聊天消息。
+- Turn 活动期间按事件顺序直接平铺公开进度与工具步骤，不再套一层 `Working` disclosure；当前执行步骤使用 accent 高亮，streaming draft 不提前混入过程内容。
+- coordinator 主动输出的公开进度说明会在下一次工具调用前转存为 `commentary` process item；这不是原始 chain-of-thought。工具步骤可展开查看最多约 2 KB 的有界输出预览，超限结果仍只通过加密 Artifact 按范围读取。
+- Turn 完成、失败、取消或暂停后，时间线才合并为默认收起的 `Worked for …`/终态 disclosure；clarification 与 approval 继续以内联交互呈现。
+- 项目文件步骤使用读取、编辑、删除语义图标；读取跳到文件，编辑跳到主 Monaco Diff，并在步骤旁显示该次写入的新增/删除行数。
 - 最终 coordinator 输出才是 Assistant 正文；artifact、patch 和导航 action 位于正文下方。
 - minimap 以每个完整问答 Turn 生成一个中性灰 marker，中间 stage 不单独记录。
 - minimap 仅在宽面板且真实溢出时显示；支持 hover/focus、键盘和 reduced motion。

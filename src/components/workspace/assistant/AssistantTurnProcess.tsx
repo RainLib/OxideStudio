@@ -1,5 +1,6 @@
 import {
   assistantTurnCanResume,
+  assistantTurnIsActive,
   type AssistantApproval,
   type AssistantProcessItem,
   type AssistantProjectFileChange,
@@ -14,13 +15,18 @@ import {
   ChevronRight,
   CircleAlert,
   CircleStop,
+  FileSearch,
   HelpCircle,
   Loader2,
+  Pencil,
   Play,
+  Search,
   ShieldAlert,
+  SquareTerminal,
+  Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
 type AssistantTurnProcessProps = {
   turn: AssistantTurn;
@@ -47,18 +53,6 @@ const VISIBLE_STATUS_WITHOUT_PROCESS = new Set<AssistantTurn["status"]>([
   "cancelling",
 ]);
 
-const COLLAPSED_PROCESS_STATUS = new Set<AssistantTurn["status"]>([
-  "completed",
-  "cancelled",
-]);
-
-const TIMED_PROCESS_STATUS = new Set<AssistantTurn["status"]>([
-  "queued",
-  "planning",
-  "running",
-  "cancelling",
-]);
-
 export function AssistantTurnProcess({
   turn,
   contextFingerprint,
@@ -76,12 +70,20 @@ export function AssistantTurnProcess({
   return (
     <div className="space-y-2" data-assistant-turn-process={turn.id}>
       {showActivity && (
-        <ProcessDisclosure
-          turn={turn}
-          onResume={() => onResume(turn.id, contextFingerprint)}
-          onOpenProjectFile={onOpenProjectFile}
-          onOpenProjectFileProposal={onOpenProjectFileProposal}
-        />
+        assistantTurnIsActive(turn) ? (
+          <LiveProcessTimeline
+            turn={turn}
+            onOpenProjectFile={onOpenProjectFile}
+            onOpenProjectFileProposal={onOpenProjectFileProposal}
+          />
+        ) : (
+          <ProcessDisclosure
+            turn={turn}
+            onResume={() => onResume(turn.id, contextFingerprint)}
+            onOpenProjectFile={onOpenProjectFile}
+            onOpenProjectFileProposal={onOpenProjectFileProposal}
+          />
+        )
       )}
 
       {pendingApprovals.map((approval) => (
@@ -102,6 +104,58 @@ export function AssistantTurnProcess({
   );
 }
 
+function LiveProcessTimeline({
+  turn,
+  onOpenProjectFile,
+  onOpenProjectFileProposal,
+}: {
+  turn: AssistantTurn;
+  onOpenProjectFile?: (relativePath: string) => Promise<unknown>;
+  onOpenProjectFileProposal?: (turnId: string, callId: string) => void;
+}) {
+  const { t } = useI18n();
+  const processItems = useMemo(
+    () => [...turn.process].sort((left, right) => left.sequence - right.sequence),
+    [turn.process],
+  );
+  const hasRunningItem = processItems.some((item) => item.status === "running");
+
+  return (
+    <section
+      className="space-y-1"
+      aria-label={t("assistant.processAria")}
+      data-assistant-live-process={turn.id}
+      data-process-status={turn.status}
+      data-process-running="true"
+      aria-live="polite"
+    >
+      {processItems.map((item) => (
+        <ProcessDetail
+          key={item.id}
+          item={item}
+          turnId={turn.id}
+          fileChange={matchingFileChange(item, turn.fileChanges)}
+          fileProposal={matchingFileProposal(item, turn.fileProposals)}
+          onOpenProjectFile={onOpenProjectFile}
+          onOpenProjectFileProposal={onOpenProjectFileProposal}
+        />
+      ))}
+      {!hasRunningItem && (
+        <div
+          className="flex min-h-6 min-w-0 items-center gap-2 py-0.5 text-[10px] font-medium text-[hsl(var(--wb-accent))]"
+          data-assistant-live-status
+          role="status"
+        >
+          <TurnStatusIcon turn={turn} />
+          <span className="min-w-0 truncate">
+            {turnProcessHeadline(turn, processItems, t)}
+          </span>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ProcessDisclosure({
   turn,
   onResume,
@@ -114,27 +168,19 @@ function ProcessDisclosure({
   onOpenProjectFileProposal?: (turnId: string, callId: string) => void;
 }) {
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(() =>
-    !COLLAPSED_PROCESS_STATUS.has(turn.status),
-  );
+  const [expanded, setExpanded] = useState(false);
   const processItems = useMemo(
     () => [...turn.process].sort((left, right) => left.sequence - right.sequence),
     [turn.process],
   );
-  const liveDescription = turn.final ? "" : turn.draft.trim();
-  const canExpand = processItems.length > 0 || Boolean(liveDescription);
-  const running = TIMED_PROCESS_STATUS.has(turn.status);
-
-  useEffect(() => {
-    setExpanded(!COLLAPSED_PROCESS_STATUS.has(turn.status));
-  }, [turn.status]);
+  const canExpand = processItems.length > 0;
 
   return (
     <section
       aria-label={t("assistant.processAria")}
       data-assistant-process-disclosure={turn.id}
       data-process-status={turn.status}
-      data-process-running={running ? "true" : "false"}
+      data-process-running="false"
     >
       <div className="flex min-h-6 items-start">
         {canExpand ? (
@@ -150,9 +196,7 @@ function ProcessDisclosure({
               <span
                 className={cn(
                   "min-w-0 truncate",
-                  running
-                    ? "font-medium text-[hsl(var(--wb-accent))]"
-                    : "text-[hsl(var(--wb-text))]",
+                  "text-[hsl(var(--wb-text))]",
                 )}
                 data-assistant-process-headline
               >
@@ -165,9 +209,7 @@ function ProcessDisclosure({
                 size={10}
                 className={cn(
                   "shrink-0 opacity-0 transition-[transform,opacity] duration-150 group-hover:opacity-100 group-focus-visible:opacity-100 motion-reduce:transition-none",
-                  running
-                    ? "text-[hsl(var(--wb-accent))]"
-                    : "text-[hsl(var(--wb-text-muted))]",
+                  "text-[hsl(var(--wb-text-muted))]",
                   expanded && "rotate-90",
                 )}
                 aria-hidden="true"
@@ -185,9 +227,7 @@ function ProcessDisclosure({
             <span
               className={cn(
                 "min-w-0 flex-1 truncate",
-                running
-                  ? "font-medium text-[hsl(var(--wb-accent))]"
-                  : "text-[hsl(var(--wb-text))]",
+                "text-[hsl(var(--wb-text))]",
               )}
               data-assistant-process-headline
             >
@@ -227,16 +267,6 @@ function ProcessDisclosure({
               onOpenProjectFileProposal={onOpenProjectFileProposal}
             />
           ))}
-          {liveDescription && (
-            <p
-              className="whitespace-pre-wrap break-words text-[10px] leading-4 text-[hsl(var(--wb-text))] [overflow-wrap:anywhere]"
-              data-assistant-live-process-description
-              role="status"
-              aria-live="polite"
-            >
-              {liveDescription}
-            </p>
-          )}
         </div>
       )}
     </section>
@@ -273,14 +303,15 @@ function ProcessDetail({
     );
   }
   if (
-    item.toolName === "project.readFile" ||
-    (item.toolName === "project.writeFile" && (relativePath || fileChange))
+    isProjectFileTool(item.toolName) &&
+    (item.toolName === "project.readFile" || relativePath || fileChange)
   ) {
     return (
       <ProjectFileProcessDetail
         item={item}
         turnId={turnId}
         relativePath={relativePath}
+        fileChange={fileChange}
         fileProposal={fileProposal}
         onOpenProjectFile={onOpenProjectFile}
         onOpenProjectFileProposal={onOpenProjectFileProposal}
@@ -311,6 +342,7 @@ function ProcessDetail({
               ? "font-medium text-[hsl(var(--wb-accent))]"
               : "text-[hsl(var(--wb-text))]",
           )}
+          data-assistant-process-item-title
         >
           {item.title}
         </div>
@@ -323,6 +355,7 @@ function ProjectFileProcessDetail({
   item,
   turnId,
   relativePath,
+  fileChange,
   fileProposal,
   onOpenProjectFile,
   onOpenProjectFileProposal,
@@ -330,13 +363,23 @@ function ProjectFileProcessDetail({
   item: AssistantProcessItem;
   turnId: string;
   relativePath?: string;
+  fileChange?: AssistantProjectFileChange;
   fileProposal?: AssistantProjectFileProposal;
   onOpenProjectFile?: (relativePath: string) => Promise<unknown>;
   onOpenProjectFileProposal?: (turnId: string, callId: string) => void;
 }) {
   const fileName = relativePath ? projectFileName(relativePath) : null;
+  const operation = projectFileOperation(item.toolName);
   const canReviewDiff = Boolean(
     fileProposal && onOpenProjectFileProposal,
+  );
+  const additions =
+    item.additions ?? fileChange?.additions ?? fileProposal?.additions;
+  const deletions =
+    item.deletions ?? fileChange?.deletions ?? fileProposal?.deletions;
+  const canOpen = Boolean(
+    relativePath &&
+      (canReviewDiff || (operation !== "delete" && onOpenProjectFile)),
   );
   const tone =
     item.status === "running"
@@ -349,9 +392,10 @@ function ProjectFileProcessDetail({
       data-assistant-process-item={item.id}
       data-process-status={item.status}
       data-project-file-process={relativePath || undefined}
+      data-project-file-operation={operation}
     >
       <div className="group flex min-w-0 max-w-full items-start gap-2">
-        <ProcessStatusIcon status={item.status} />
+        <ProjectFileOperationIcon operation={operation} status={item.status} />
         {relativePath ? (
           <button
             type="button"
@@ -359,10 +403,11 @@ function ProjectFileProcessDetail({
               "flex min-w-0 flex-1 items-center gap-1 truncate text-left text-[10px] outline-none focus-visible:text-[hsl(var(--wb-accent))]",
               tone,
             )}
+            disabled={!canOpen}
             onClick={() => {
               if (canReviewDiff && fileProposal) {
                 onOpenProjectFileProposal?.(turnId, fileProposal.callId);
-              } else {
+              } else if (operation !== "delete") {
                 void onOpenProjectFile?.(relativePath);
               }
             }}
@@ -374,16 +419,34 @@ function ProjectFileProcessDetail({
             data-project-file-name
           >
             <span className="min-w-0 truncate">{fileName}</span>
-            {canReviewDiff && (
+            {canOpen && (
               <ChevronRight
                 size={9}
-                className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                className="shrink-0 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 motion-reduce:transition-none"
                 aria-hidden="true"
               />
             )}
           </button>
         ) : (
           <span className={cn("text-[10px]", tone)}>Project file</span>
+        )}
+        {typeof additions === "number" && additions > 0 && (
+          <span
+            className="shrink-0 text-[10px] tabular-nums text-emerald-500"
+            aria-label={`${additions} lines added`}
+            data-project-file-additions
+          >
+            +{additions}
+          </span>
+        )}
+        {typeof deletions === "number" && deletions > 0 && (
+          <span
+            className="shrink-0 text-[10px] tabular-nums text-red-400"
+            aria-label={`${deletions} lines deleted`}
+            data-project-file-deletions
+          >
+            -{deletions}
+          </span>
         )}
       </div>
     </div>
@@ -417,7 +480,7 @@ function ExpandableProcessDetail({
         data-assistant-process-item-toggle={item.id}
         onClick={() => setExpanded((current) => !current)}
       >
-        <ProcessStatusIcon status={item.status} />
+        <ProcessKindIcon item={item} />
         <span
           className={cn(
             "min-w-0 break-words text-[10px]",
@@ -425,6 +488,7 @@ function ExpandableProcessDetail({
               ? "font-medium text-[hsl(var(--wb-accent))]"
               : "text-[hsl(var(--wb-text))]",
           )}
+          data-assistant-process-item-title
         >
           {item.title}
         </span>
@@ -464,7 +528,7 @@ function matchingFileChange(
   item: AssistantProcessItem,
   changes: readonly AssistantProjectFileChange[] | undefined,
 ) {
-  if (item.toolName !== "project.writeFile") return undefined;
+  if (!isProjectMutationTool(item.toolName)) return undefined;
   return changes?.find(
     (change) =>
       item.id === change.callId || item.id === `tool:${change.callId}`,
@@ -475,10 +539,14 @@ function matchingFileProposal(
   item: AssistantProcessItem,
   proposals: readonly AssistantProjectFileProposal[] | undefined,
 ) {
-  if (item.toolName !== "project.writeFile") return undefined;
+  if (!isProjectMutationTool(item.toolName)) return undefined;
   return proposals?.find(
     (proposal) =>
-      item.id === proposal.callId || item.id === `tool:${proposal.callId}`,
+      item.id === proposal.callId ||
+      item.id === `tool:${proposal.callId}` ||
+      proposal.sourceCallIds?.some(
+        (callId) => item.id === callId || item.id === `tool:${callId}`,
+      ),
   );
 }
 
@@ -486,16 +554,45 @@ function projectFilePath(
   item: AssistantProcessItem,
   change: AssistantProjectFileChange | undefined,
 ) {
-  if (
-    item.toolName !== "project.readFile" &&
-    item.toolName !== "project.writeFile"
-  ) {
+  if (!isProjectFileTool(item.toolName)) {
     return undefined;
   }
   return (
     item.relativePath?.trim() ||
     change?.relativePath ||
     projectFilePathFromDetail(item.detail)
+  );
+}
+
+type ProjectFileOperation = "read" | "edit" | "delete";
+
+function projectFileOperation(
+  toolName: string | null | undefined,
+): ProjectFileOperation {
+  if (toolName === "project.readFile") return "read";
+  if (
+    toolName === "project.deleteFile" ||
+    toolName === "project.removeFile" ||
+    toolName === "project.deleteEntry"
+  ) {
+    return "delete";
+  }
+  return "edit";
+}
+
+function isProjectFileTool(toolName: string | null | undefined) {
+  return (
+    projectFileOperation(toolName) !== "edit" ||
+    isProjectMutationTool(toolName)
+  );
+}
+
+function isProjectMutationTool(toolName: string | null | undefined) {
+  return (
+    toolName === "project.writeFile" ||
+    toolName === "project.deleteFile" ||
+    toolName === "project.removeFile" ||
+    toolName === "project.deleteEntry"
   );
 }
 
@@ -536,19 +633,9 @@ function ProcessDisclosureHeadline({
   processItems: AssistantProcessItem[];
 }) {
   const { t } = useI18n();
-  const timed = TIMED_PROCESS_STATUS.has(turn.status);
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    if (!timed) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, [timed]);
-
   const duration = formatProcessDuration(
-    Math.max(0, (timed ? now : turn.updatedAt) - turn.createdAt),
+    Math.max(0, turn.updatedAt - turn.createdAt),
   );
-  if (timed) return t("assistant.process.workingFor", { duration });
   if (turn.status === "completed") {
     return t("assistant.process.workedFor", { duration });
   }
@@ -683,6 +770,80 @@ function TurnStatusIcon({ turn }: { turn: AssistantTurn }) {
     return <CircleStop size={11} className="shrink-0 wb-muted" />;
   }
   return <CheckCircle2 size={11} className="shrink-0 text-emerald-500" />;
+}
+
+function ProjectFileOperationIcon({
+  operation,
+  status,
+}: {
+  operation: ProjectFileOperation;
+  status: AssistantProcessItem["status"];
+}) {
+  const className = cn(
+    "mt-0.5 shrink-0",
+    status === "running"
+      ? "text-[hsl(var(--wb-accent))]"
+      : status === "failed"
+        ? "text-amber-400"
+        : "text-[hsl(var(--wb-text-muted))]",
+  );
+  if (operation === "read") {
+    return (
+      <FileSearch
+        size={10}
+        className={className}
+        aria-hidden="true"
+        data-project-file-icon="read"
+      />
+    );
+  }
+  if (operation === "delete") {
+    return (
+      <Trash2
+        size={10}
+        className={className}
+        aria-hidden="true"
+        data-project-file-icon="delete"
+      />
+    );
+  }
+  return (
+    <Pencil
+      size={10}
+      className={className}
+      aria-hidden="true"
+      data-project-file-icon="edit"
+    />
+  );
+}
+
+function ProcessKindIcon({ item }: { item: AssistantProcessItem }) {
+  const toolName = item.toolName?.toLocaleLowerCase() ?? "";
+  const className = cn(
+    "mt-0.5 shrink-0",
+    item.status === "running"
+      ? "text-[hsl(var(--wb-accent))]"
+      : item.status === "failed"
+        ? "text-amber-400"
+        : "text-[hsl(var(--wb-text-muted))]",
+  );
+  if (
+    toolName.includes("command") ||
+    toolName.includes("terminal") ||
+    toolName.includes("shell") ||
+    toolName.startsWith("query.")
+  ) {
+    return <SquareTerminal size={10} className={className} aria-hidden="true" />;
+  }
+  if (
+    toolName.includes("search") ||
+    toolName.includes("find") ||
+    toolName.endsWith(".list") ||
+    toolName.includes("listfiles")
+  ) {
+    return <Search size={10} className={className} aria-hidden="true" />;
+  }
+  return <ProcessStatusIcon status={item.status} />;
 }
 
 function ProcessStatusIcon({

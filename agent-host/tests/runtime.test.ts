@@ -41,6 +41,10 @@ describe("Agent process narration", () => {
     expect(prompt).toContain("Before each distinct work phase");
     expect(prompt).toContain("then perform that phase's tool calls");
     expect(prompt).toContain("never reveal hidden reasoning");
+    expect(prompt).toContain(
+      "project.writeFile changes apply immediately without a pre-approval prompt",
+    );
+    expect(prompt).toContain("kept or undone");
   });
 });
 

@@ -92,6 +92,17 @@ describe("Assistant write-tool diff preview", () => {
           startedAt: 2,
           finishedAt: 3,
         },
+        {
+          id: "tool:call-delete-1",
+          sequence: 3,
+          kind: "tool",
+          title: "Delete project file",
+          toolName: "project.deleteFile",
+          relativePath: "sql/obsolete.sql",
+          status: "completed",
+          startedAt: 3,
+          finishedAt: 4,
+        },
       ],
       fileProposals: [
         {
@@ -145,6 +156,21 @@ describe("Assistant write-tool diff preview", () => {
     );
     expect(readFileButton?.textContent).toBe("source.sql");
     expect(writeFileButton?.textContent).toBe("report.sql");
+    expect(
+      container.querySelector('[data-project-file-icon="read"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-project-file-icon="edit"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-project-file-icon="delete"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-project-file-additions]')?.textContent,
+    ).toBe("+1");
+    expect(
+      container.querySelector('[data-project-file-deletions]')?.textContent,
+    ).toBe("-1");
     expect(container.textContent).not.toContain("Read project file");
     expect(container.textContent).not.toContain("Write project file");
     expect(container.textContent).not.toContain("sql/source.sql");

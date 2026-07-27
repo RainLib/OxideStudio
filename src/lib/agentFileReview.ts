@@ -13,7 +13,7 @@ export const APP_EVENT_AGENT_FILE_REVIEW =
 export type AgentFileReviewDecisionDetail = {
   turnId: string;
   callId: string;
-  action: "accept-file" | "reject-file" | "accept-hunk" | "reject-hunk";
+  action: "keep-file" | "undo-file" | "keep-hunk" | "undo-hunk";
   hunk?: LineDiffHunk;
 };
 

@@ -381,7 +381,7 @@ describe("AssistantConversation turns", () => {
     expect(outputPreview?.className).not.toContain("custom-scrollbar");
   });
 
-  it("keeps live stage descriptions in the Working timeline until completion", async () => {
+  it("shows a flat live timeline and withholds draft answer text until completion", async () => {
     const turn: AssistantTurn = {
       ...createAssistantTurn({
         id: "turn-live-process",
@@ -423,17 +423,20 @@ describe("AssistantConversation turns", () => {
       );
     });
 
-    const disclosure = container.querySelector<HTMLElement>(
-      '[data-assistant-process-disclosure="turn-live-process"]',
+    const timeline = container.querySelector<HTMLElement>(
+      '[data-assistant-live-process="turn-live-process"]',
     );
-    expect(disclosure?.textContent).toContain("Working for");
-    expect(disclosure?.textContent).toContain(
+    expect(timeline?.textContent).not.toContain("Working for");
+    expect(timeline?.textContent).toContain(
       "I’ll inspect the existing query before changing it.",
     );
+    expect(timeline?.textContent).toContain("Writing the answer");
+    expect(timeline?.textContent).not.toContain("verify the generated file");
     expect(
-      disclosure?.querySelector("[data-assistant-live-process-description]")
-        ?.textContent,
-    ).toContain("verify the generated file");
+      container.querySelector(
+        '[data-assistant-process-disclosure="turn-live-process"]',
+      ),
+    ).toBeNull();
     expect(
       container.querySelector("[data-assistant-final-response]"),
     ).toBeNull();

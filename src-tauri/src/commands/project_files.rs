@@ -118,6 +118,20 @@ pub struct ProjectFileProposal {
     pub deletions: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFileAppliedChange {
+    pub relative_path: String,
+    pub revision: String,
+    pub previous_revision: Option<String>,
+    pub original_content: String,
+    pub applied_content: String,
+    pub additions: usize,
+    pub deletions: usize,
+    pub introduced_lines: Vec<u32>,
+    pub line_evidence_truncated: bool,
+}
+
 fn project_file_line_evidence(previous: &str, next: &str) -> (Vec<u32>, bool) {
     let previous_lines = previous.lines().collect::<HashSet<_>>();
     let mut introduced_lines = Vec::new();
@@ -600,6 +614,39 @@ impl ProjectRoot {
                 format!("failed to delete project file: {}", relative.wire_path)
             })?;
         }
+        Ok(())
+    }
+
+    fn delete_file_if_revision(&self, relative_path: &str, expected_revision: &str) -> Result<()> {
+        let _mutation_guard = lock_project_file_mutations()?;
+        let relative = validate_relative_path(relative_path, false)?;
+        let lexical_path = self.path.join(&relative.path);
+        let link_metadata = fs::symlink_metadata(&lexical_path).map_err(|error| {
+            anyhow!(
+                "{REVISION_CONFLICT_PREFIX} file is no longer available for undo: {} ({error})",
+                relative.wire_path
+            )
+        })?;
+        if is_link_or_reparse(&link_metadata) {
+            bail!(
+                "{REVISION_CONFLICT_PREFIX} file target changed before undo: {}",
+                relative.wire_path
+            );
+        }
+        let path = self.assert_revision(&relative, expected_revision)?;
+        if !fs::metadata(&path)?.is_file() {
+            bail!(
+                "{REVISION_CONFLICT_PREFIX} project path is no longer a file: {}",
+                relative.wire_path
+            );
+        }
+        self.assert_revision(&relative, expected_revision)?;
+        fs::remove_file(&lexical_path).with_context(|| {
+            format!(
+                "failed to undo created project file: {}",
+                relative.wire_path
+            )
+        })?;
         Ok(())
     }
 
@@ -1227,14 +1274,14 @@ pub(crate) async fn agent_read_project_file(
     root.read_file(&relative.wire_path)
 }
 
-pub(crate) async fn agent_prepare_project_file_change(
+pub(crate) async fn agent_apply_project_file_change(
     meta_store: &MetaStore,
     project_id: &str,
     relative_path: &str,
     content: &str,
     expected_revision: Option<&str>,
     create: bool,
-) -> Result<ProjectFileProposal> {
+) -> Result<ProjectFileAppliedChange> {
     if content.len() as u64 > AGENT_PROJECT_FILE_LIMIT {
         bail!(
             "Agent project files are limited to {} KiB",
@@ -1244,7 +1291,28 @@ pub(crate) async fn agent_prepare_project_file_change(
     let root = project_root(meta_store, project_id, None)
         .await
         .map_err(anyhow::Error::msg)?;
-    root.prepare_file_change(relative_path, content, expected_revision, create)
+    let proposal = root.prepare_file_change(relative_path, content, expected_revision, create)?;
+    let write = if create {
+        root.create_file(relative_path, content)?
+    } else {
+        root.write_file(
+            relative_path,
+            content,
+            expected_revision.unwrap_or_default(),
+        )?
+    };
+    invalidate_completion_index(&root);
+    Ok(ProjectFileAppliedChange {
+        relative_path: write.relative_path,
+        revision: write.revision,
+        previous_revision: write.previous_revision,
+        original_content: proposal.original_content,
+        applied_content: proposal.proposed_content,
+        additions: proposal.additions,
+        deletions: proposal.deletions,
+        introduced_lines: write.introduced_lines,
+        line_evidence_truncated: write.line_evidence_truncated,
+    })
 }
 
 fn assert_expected_project_root(
@@ -2128,6 +2196,36 @@ pub async fn delete_project_entry(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn delete_project_file_if_revision(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+    relative_path: String,
+    expected_revision: String,
+    expected_root: Option<String>,
+) -> Result<(), CommandError> {
+    let error_context = serde_json::json!({
+        "projectId": project_id,
+        "relativePath": relative_path,
+    });
+    let root = project_root(&meta_store, &project_id, expected_root.as_deref())
+        .await
+        .map_err(|error| {
+            project_command_error(
+                "PROJECT_ROOT_RESOLUTION_FAILED",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?;
+    root.delete_file_if_revision(&relative_path, &expected_revision)
+        .map_err(|error| {
+            project_command_error("PROJECT_FILE_UNDO_FAILED", error, false, error_context)
+        })?;
+    invalidate_completion_index(&root);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2450,7 +2548,7 @@ mod tests {
     }
 
     #[test]
-    fn preparing_file_changes_never_mutates_the_project() {
+    fn applied_file_changes_write_immediately_and_can_be_safely_undone() {
         let temp = TempDir::new().unwrap();
         let root = ProjectRoot::new(temp.path()).unwrap();
         fs::write(temp.path().join("existing.sql"), "select 1;\n").unwrap();
@@ -2470,17 +2568,52 @@ mod tests {
         );
         assert_eq!(updated.additions, 1);
         assert_eq!(updated.deletions, 0);
+        let updated_write = root
+            .write_file(
+                "existing.sql",
+                &updated.proposed_content,
+                updated.base_revision.as_deref().unwrap(),
+            )
+            .unwrap();
         assert_eq!(
             fs::read_to_string(temp.path().join("existing.sql")).unwrap(),
-            "select 1;\n"
+            "select 1;\nselect 2;\n"
         );
 
         let created = root
             .prepare_file_change("sql/generated/new.sql", "select 3;\n", None, true)
             .unwrap();
         assert_eq!(created.base_revision, None);
-        assert!(!temp.path().join("sql").exists());
+        let created_write = root
+            .create_file("sql/generated/new.sql", &created.proposed_content)
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(temp.path().join("sql/generated/new.sql")).unwrap(),
+            "select 3;\n"
+        );
+
+        root.write_file(
+            "existing.sql",
+            &updated.original_content,
+            &updated_write.revision,
+        )
+        .unwrap();
+        root.delete_file_if_revision("sql/generated/new.sql", &created_write.revision)
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(temp.path().join("existing.sql")).unwrap(),
+            "select 1;\n"
+        );
         assert!(!temp.path().join("sql/generated/new.sql").exists());
+
+        let changed = root.create_file("changed.sql", "first\n").unwrap();
+        fs::write(temp.path().join("changed.sql"), "external\n").unwrap();
+        let conflict = root
+            .delete_file_if_revision("changed.sql", &changed.revision)
+            .unwrap_err()
+            .to_string();
+        assert!(conflict.starts_with(REVISION_CONFLICT_PREFIX), "{conflict}");
+        assert!(temp.path().join("changed.sql").exists());
     }
 
     #[test]

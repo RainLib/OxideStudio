@@ -306,14 +306,16 @@ describe("AssistantSidebar Agent Host path", () => {
       ],
     });
     const runningActivity = container.querySelector<HTMLElement>(
-      `[data-assistant-process-disclosure="${firstRequest.turnId}"]`,
+      `[data-assistant-live-process="${firstRequest.turnId}"]`,
     );
     expect(runningActivity?.textContent).toContain("Read schema metadata");
     expect(runningActivity?.dataset.processRunning).toBe("true");
     expect(
-      runningActivity?.querySelector("[data-assistant-process-headline]")
-        ?.className,
+      runningActivity
+        ?.querySelector('[data-assistant-process-item="plan:step-1"]')
+        ?.querySelector("[data-assistant-process-item-title]")?.className,
     ).toContain("text-[hsl(var(--wb-accent))]");
+    expect(runningActivity?.textContent).not.toContain("Working for");
     await emit({
       ...baseEvent(firstRequest.threadId, firstRequest.turnId, 2),
       type: "final.answer",
@@ -640,13 +642,13 @@ describe("AssistantSidebar Agent Host path", () => {
     );
     expect(container.textContent).toContain("Confirmed 2 answers");
     const confirmationActivity = container.querySelector<HTMLElement>(
-      `[data-assistant-process-disclosure="${request.turnId}"]`,
+      `[data-assistant-live-process="${request.turnId}"]`,
     );
     expect(
-      confirmationActivity?.querySelector("button")?.getAttribute(
-        "aria-expanded",
+      container.querySelector(
+        `[data-assistant-process-disclosure="${request.turnId}"]`,
       ),
-    ).toBe("true");
+    ).toBeNull();
     const confirmation = confirmationActivity?.querySelector<HTMLElement>(
       '[data-assistant-process-item="clarification:clarification-1"]',
     );
@@ -739,6 +741,18 @@ describe("AssistantSidebar Agent Host path", () => {
       type: "answer.delta",
       content: "Resumed from checkpoint",
       reset: true,
+    });
+    expect(container.textContent).not.toContain("Resumed from checkpoint");
+    await emit({
+      ...baseEvent(request.threadId, request.turnId, 2),
+      type: "final.answer",
+      content: "Resumed from checkpoint",
+      artifacts: [],
+    });
+    await emit({
+      ...baseEvent(request.threadId, request.turnId, 3),
+      type: "turn.status",
+      status: "completed",
     });
     expect(container.textContent).toContain("Resumed from checkpoint");
   });

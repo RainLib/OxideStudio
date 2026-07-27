@@ -235,16 +235,19 @@ describe("Agent Host Tauri service", () => {
         turnId: "turn-1",
         sequence: 6,
         occurredAt: 100,
-        type: "file.proposed",
-        callId: "call-proposal-1",
+        type: "file.changed",
+        callId: "call-reviewable-write-1",
         relativePath: "queries/pending.sql",
         operation: "created",
-        proposedRevision: "e".repeat(64),
-        baseRevision: null,
+        revision: "e".repeat(64),
+        previousRevision: null,
         originalContent: "",
-        proposedContent: "select 1;\n",
+        appliedContent: "select 1;\n",
         additions: 1,
         deletions: 0,
+        introducedLines: [1],
+        lineEvidenceTruncated: false,
+        reviewable: true,
       },
     });
     callback?.({
@@ -328,11 +331,12 @@ describe("Agent Host Tauri service", () => {
     );
     expect(listener).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        type: "file.proposed",
+        type: "file.changed",
         relativePath: "queries/pending.sql",
-        proposedContent: "select 1;\n",
+        appliedContent: "select 1;\n",
         additions: 1,
         deletions: 0,
+        reviewable: true,
       }),
     );
     cleanup();

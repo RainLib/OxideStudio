@@ -216,7 +216,7 @@ function projectWriteFileTool(adapters: AiToolAdapters): AiToolDefinition {
   return {
     name: "project.writeFile",
     description:
-      "Propose creating or replacing one UTF-8 file under the active project root. This never writes to disk: the user reviews the Git-style diff and explicitly applies or rejects it later. Replacements require the exact expectedRevision returned by project.readFile.",
+      "Create or atomically replace one UTF-8 file under the active project root. The change is written immediately and remains available in the Git-style review UI for Keep or Undo. Replacements require the exact expectedRevision returned by project.readFile.",
     inputSchema: {
       type: "object",
       properties: {
@@ -234,7 +234,7 @@ function projectWriteFileTool(adapters: AiToolAdapters): AiToolDefinition {
       required: ["path", "content"],
       additionalProperties: false,
     },
-    permissions: ["read"],
+    permissions: ["write"],
     capabilities: ["workspace"],
     timeoutMs: 10_000,
     resultLimit: { maxRows: 1, maxBytes: 8_000 },

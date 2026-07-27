@@ -2,7 +2,7 @@ import type { AgentFileDiffPreview } from "@/lib/agentFileReview";
 import { requestAgentFileReviewDecision } from "@/lib/agentFileReview";
 import { createLineDiffHunks } from "@/lib/lineDiff";
 import { cn } from "@/lib/utils";
-import { Check, Loader2, X } from "lucide-react";
+import { Check, Loader2, Undo2 } from "lucide-react";
 import { useMemo } from "react";
 
 export function AgentFileDiffReviewBar({
@@ -22,10 +22,10 @@ export function AgentFileDiffReviewBar({
 
   const decide = (
     action:
-      | "accept-file"
-      | "reject-file"
-      | "accept-hunk"
-      | "reject-hunk",
+      | "keep-file"
+      | "undo-file"
+      | "keep-hunk"
+      | "undo-hunk",
     hunk?: (typeof hunks)[number],
   ) =>
     requestAgentFileReviewDecision({
@@ -61,18 +61,18 @@ export function AgentFileDiffReviewBar({
             <button
               type="button"
               className="wb-text-button h-6 px-1.5 text-[10px]"
-              onClick={() => decide("reject-file")}
+              onClick={() => decide("undo-file")}
             >
-              <X size={10} aria-hidden="true" />
-              Reject
+              <Undo2 size={10} aria-hidden="true" />
+              Undo
             </button>
             <button
               type="button"
               className="wb-text-button h-6 px-1.5 text-[10px] text-emerald-300"
-              onClick={() => decide("accept-file")}
+              onClick={() => decide("keep-file")}
             >
               <Check size={10} aria-hidden="true" />
-              Accept
+              Keep
             </button>
           </>
         ) : (
@@ -84,7 +84,11 @@ export function AgentFileDiffReviewBar({
                 : "text-[hsl(var(--wb-text-muted))]",
             )}
           >
-            {preview.status === "accepted" ? "Applied" : "Rejected"}
+            {preview.status === "accepted"
+              ? "Kept"
+              : preview.status === "mixed"
+                ? "Partially kept"
+                : "Undone"}
           </span>
         )}
       </div>
@@ -103,18 +107,18 @@ export function AgentFileDiffReviewBar({
               <button
                 type="button"
                 className="text-[hsl(var(--wb-text-muted))] hover:text-red-300 focus-visible:outline-none focus-visible:text-red-300"
-                onClick={() => decide("reject-hunk", hunk)}
-                title="Reject this change"
+                onClick={() => decide("undo-hunk", hunk)}
+                title="Undo this change"
               >
-                Reject
+                Undo
               </button>
               <button
                 type="button"
                 className="text-[hsl(var(--wb-text-muted))] hover:text-emerald-300 focus-visible:outline-none focus-visible:text-emerald-300"
-                onClick={() => decide("accept-hunk", hunk)}
-                title="Accept this change"
+                onClick={() => decide("keep-hunk", hunk)}
+                title="Keep this change"
               >
-                Accept
+                Keep
               </button>
             </div>
           ))}

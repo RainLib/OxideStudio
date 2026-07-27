@@ -40,6 +40,8 @@ export type AssistantProcessItem = {
   detail?: string | null;
   toolName?: string | null;
   relativePath?: string | null;
+  additions?: number;
+  deletions?: number;
   status: AssistantProcessStatus;
   startedAt: number;
   finishedAt?: number | null;
@@ -111,11 +113,14 @@ export type AssistantProjectFileChange = {
   previousRevision?: string | null;
   introducedLines?: number[];
   lineEvidenceTruncated?: boolean;
+  additions?: number;
+  deletions?: number;
   occurredAt: number;
 };
 
 export type AssistantProjectFileProposal = {
   callId: string;
+  sourceCallIds?: string[];
   relativePath: string;
   operation: "created" | "updated";
   proposedRevision: string;
@@ -124,7 +129,10 @@ export type AssistantProjectFileProposal = {
   proposedContent: string;
   additions: number;
   deletions: number;
-  status: "pending" | "accepted" | "rejected";
+  status: "pending" | "accepted" | "rejected" | "mixed";
+  keptChanges?: boolean;
+  createdFileCanBeDeleted?: boolean;
+  appliedImmediately?: boolean;
   isApplying?: boolean;
   error?: string | null;
   occurredAt: number;
