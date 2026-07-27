@@ -8,6 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   getStatus: vi.fn(),
   getContextMetrics: vi.fn(),
+  loadConversationSnapshot: vi.fn(),
+  saveConversationSnapshot: vi.fn(),
+  importTextAttachment: vi.fn(),
   startTurn: vi.fn(),
   resumeTurn: vi.fn(),
   cancelTurn: vi.fn(),
@@ -21,6 +24,9 @@ vi.mock("@/services/tauri/agent-host.service", () => ({
   agentHostService: {
     getStatus: mocks.getStatus,
     getContextMetrics: mocks.getContextMetrics,
+    loadConversationSnapshot: mocks.loadConversationSnapshot,
+    saveConversationSnapshot: mocks.saveConversationSnapshot,
+    importTextAttachment: mocks.importTextAttachment,
     startTurn: mocks.startTurn,
     resumeTurn: mocks.resumeTurn,
     cancelTurn: mocks.cancelTurn,
@@ -37,12 +43,16 @@ vi.mock("@/services/tauri/agent-host.service", () => ({
     error instanceof Error && /unavailable|not found/iu.test(error.message),
 }));
 
-import { AssistantSidebar } from "@/components/workspace/AssistantSidebar";
+import {
+  AssistantSidebar,
+  assistantToolManifestForProfile,
+} from "@/components/workspace/AssistantSidebar";
 import { useAiSettingsStore } from "@/store/useAiSettingsStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
+import { useAssistantComposerStore } from "@/store/useAssistantComposerStore";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -53,6 +63,43 @@ const initialSchemaState = useSchemaStore.getState();
 const initialTabState = useTabStore.getState();
 
 describe("AssistantSidebar Agent Host path", () => {
+  it("filters tools by Chat, Plan, and Agent authority", () => {
+    const tools = [
+      {
+        name: "workspace.getActiveTab",
+        description: "Read active tab",
+        inputSchema: { type: "object" },
+        permissions: ["read" as const],
+      },
+      {
+        name: "query.runReadOnly",
+        description: "Run read-only query",
+        inputSchema: { type: "object" },
+        permissions: ["read" as const],
+      },
+      {
+        name: "project.writeFile",
+        description: "Write file",
+        inputSchema: { type: "object" },
+        permissions: ["write" as const],
+      },
+    ];
+
+    expect(
+      assistantToolManifestForProfile("chat", tools).map((tool) => tool.name),
+    ).toEqual(["workspace.getActiveTab"]);
+    expect(
+      assistantToolManifestForProfile("plan", tools).map((tool) => tool.name),
+    ).toEqual(["workspace.getActiveTab", "query.runReadOnly"]);
+    expect(
+      assistantToolManifestForProfile("agent", tools).map((tool) => tool.name),
+    ).toEqual([
+      "workspace.getActiveTab",
+      "query.runReadOnly",
+      "project.writeFile",
+    ]);
+  });
+
   let container: HTMLDivElement;
   let root: Root | null = null;
 
@@ -60,11 +107,34 @@ describe("AssistantSidebar Agent Host path", () => {
     vi.stubEnv("VITE_ASSISTANT_LEGACY_RUNTIME", "0");
     vi.clearAllMocks();
     mocks.listener = null;
+    mocks.loadConversationSnapshot.mockResolvedValue(null);
+    mocks.saveConversationSnapshot.mockResolvedValue({
+      projectId: "default",
+      threadId: "thread",
+      turns: [],
+      resumeRequests: [],
+      updatedAt: 1,
+    });
+    mocks.importTextAttachment.mockResolvedValue(null);
     mocks.getStatus.mockResolvedValue({
       protocolVersion: 1,
       available: true,
       state: "ready",
       capabilities: ["chat", "plan", "agent"],
+      installedTools: [
+        "project.listFiles",
+        "project.readFile",
+        "project.writeFile",
+        "connection.list",
+        "connection.capabilities",
+        "provider.list",
+        "workspace.getActiveTab",
+        "metadata.listCollections",
+        "metadata.listObjects",
+        "metadata.describeObject",
+        "query.runReadOnly",
+        "query.explain",
+      ],
       storageMode: "project",
       binaryPath: "/tmp/oxide-agent-host",
       lastError: null,
@@ -142,6 +212,7 @@ describe("AssistantSidebar Agent Host path", () => {
       ],
       activeTabId: "query-1",
     });
+    useAssistantComposerStore.setState({ request: null });
     container = document.createElement("div");
     document.body.appendChild(container);
   });
@@ -155,6 +226,7 @@ describe("AssistantSidebar Agent Host path", () => {
     useProjectStore.setState(initialProjectState, true);
     useSchemaStore.setState(initialSchemaState, true);
     useTabStore.setState(initialTabState, true);
+    useAssistantComposerStore.setState({ request: null });
     vi.useRealTimers();
     vi.unstubAllEnvs();
   });
@@ -202,7 +274,25 @@ describe("AssistantSidebar Agent Host path", () => {
         namespace: "public",
       }),
     );
-    expect(firstRequest.tools).toEqual(expect.any(Array));
+    expect(firstRequest.tools.map((tool: { name: string }) => tool.name)).toEqual([
+      "connection.list",
+      "connection.capabilities",
+      "metadata.listCollections",
+      "metadata.describeObject",
+      "metadata.listObjects",
+      "project.listFiles",
+      "project.readFile",
+      "project.writeFile",
+      "provider.list",
+      "query.explain",
+      "query.runReadOnly",
+      "workspace.getActiveTab",
+    ]);
+    expect(
+      firstRequest.tools.some(
+        (tool: { name: string }) => tool.name === "editor.proposePatch",
+      ),
+    ).toBe(false);
 
     await emit({
       ...baseEvent(firstRequest.threadId, firstRequest.turnId, 1),
@@ -219,9 +309,11 @@ describe("AssistantSidebar Agent Host path", () => {
       `[data-assistant-process-disclosure="${firstRequest.turnId}"]`,
     );
     expect(runningActivity?.textContent).toContain("Read schema metadata");
+    expect(runningActivity?.dataset.processRunning).toBe("true");
     expect(
-      runningActivity?.querySelector(".wb-assistant-process-running"),
-    ).not.toBeNull();
+      runningActivity?.querySelector("[data-assistant-process-headline]")
+        ?.className,
+    ).toContain("text-[hsl(var(--wb-accent))]");
     await emit({
       ...baseEvent(firstRequest.threadId, firstRequest.turnId, 2),
       type: "final.answer",
@@ -234,7 +326,8 @@ describe("AssistantSidebar Agent Host path", () => {
       status: "completed",
     });
 
-    expect(container.textContent).toContain("Read schema metadata");
+    expect(container.textContent).toContain("Worked for");
+    expect(container.textContent).not.toContain("Read schema metadata");
     expect(container.textContent).toContain("The users table has five columns.");
     expect(
       container.querySelector<HTMLElement>(
@@ -244,12 +337,18 @@ describe("AssistantSidebar Agent Host path", () => {
     const activityDisclosure = container.querySelector<HTMLElement>(
       `[data-assistant-process-disclosure="${firstRequest.turnId}"]`,
     );
+    expect(activityDisclosure?.dataset.processRunning).toBe("false");
+    expect(
+      activityDisclosure?.querySelector("[data-assistant-process-headline]")
+        ?.className,
+    ).not.toContain("text-[hsl(var(--wb-accent))]");
     expect(
       activityDisclosure?.querySelector("button")?.getAttribute("aria-expanded"),
     ).toBe("false");
     await act(async () => {
       activityDisclosure?.querySelector("button")?.click();
     });
+    expect(container.textContent).toContain("Read schema metadata");
     expect(
       activityDisclosure?.querySelector(
         '[data-assistant-process-item="plan:step-1"]',
@@ -269,6 +368,185 @@ describe("AssistantSidebar Agent Host path", () => {
       "Read schema metadata",
     );
     expect(container.querySelectorAll("[data-assistant-turn-id]")).toHaveLength(2);
+  });
+
+  it("does not overwrite an existing draft when a query-error fix prompt arrives", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value",
+    )?.set;
+    await act(async () => {
+      setter?.call(textarea, "Keep my draft");
+      textarea.dispatchEvent(
+        new InputEvent("input", { bubbles: true, data: "Keep my draft" }),
+      );
+      useAssistantComposerStore.getState().queueQueryErrorFix("query-1", {
+        code: "QUERY_EXECUTION_FAILED",
+        message: "syntax error",
+        retryable: false,
+        database: {
+          driver: "postgres",
+          sqlState: "42601",
+          documentLine: 1,
+          documentColumn: 8,
+        },
+      });
+      await flushAsyncWork();
+    });
+
+    expect(textarea.value).toBe("Keep my draft");
+    expect(
+      container.querySelector("[data-assistant-compose-suggestion]"),
+    ).not.toBeNull();
+
+    await clickButton(container, "Use prompt");
+    expect(textarea.value).toContain("SQLSTATE 42601");
+    expect(textarea.value).toContain("Do not run the SQL");
+    expect(useAssistantComposerStore.getState().request).toBeNull();
+  });
+
+  it("restores completed project conversations from the encrypted host snapshot", async () => {
+    mocks.loadConversationSnapshot.mockResolvedValueOnce({
+      projectId: "project-1",
+      threadId: "thread:restored",
+      turns: [
+        {
+          id: "turn:restored",
+          requestId: "request:restored",
+          threadId: "thread:restored",
+          projectId: "project-1",
+          requestedMode: "agent",
+          mode: "agent",
+          userMessage: "What changed in the project?",
+          status: "completed",
+          process: [],
+          clarifications: [],
+          approvals: [],
+          draft: "",
+          final: {
+            content: "Two SQL files changed.",
+            attachments: [],
+            artifactRefs: [],
+            createdAt: 2,
+          },
+          error: null,
+          errorDetail: null,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ],
+      resumeRequests: [],
+      updatedAt: 2,
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain("What changed in the project?");
+    expect(container.textContent).toContain("Two SQL files changed.");
+  });
+
+  it("recovers a legacy snapshot whose final content field is missing", async () => {
+    mocks.loadConversationSnapshot.mockResolvedValueOnce({
+      projectId: "project-1",
+      threadId: "thread:legacy",
+      turns: [
+        {
+          id: "turn:legacy",
+          requestId: "request:legacy",
+          threadId: "thread:legacy",
+          projectId: "project-1",
+          requestedMode: "agent",
+          mode: "agent",
+          userMessage: "Restore the previous response",
+          status: "completed",
+          process: [],
+          clarifications: [],
+          approvals: [],
+          draft: "Recovered streamed response.",
+          final: {
+            attachments: [],
+            artifactRefs: [],
+            createdAt: 2,
+          },
+          error: null,
+          errorDetail: null,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ],
+      resumeRequests: [],
+      updatedAt: 2,
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain("Recovered streamed response.");
+    expect(container.textContent).not.toContain("ErrorBoundary");
+  });
+
+  it("turns an Assistant SQL code block into a review-only editor patch", async () => {
+    mocks.loadConversationSnapshot.mockResolvedValueOnce({
+      projectId: "project-1",
+      threadId: "thread:sql-fix",
+      turns: [
+        {
+          id: "turn:sql-fix",
+          requestId: "request:sql-fix",
+          threadId: "thread:sql-fix",
+          projectId: "project-1",
+          requestedMode: "agent",
+          mode: "agent",
+          userMessage: "Fix the current query error",
+          status: "completed",
+          process: [],
+          clarifications: [],
+          approvals: [],
+          draft: "",
+          final: {
+            content: "Use the corrected statement:\n```sql\nSELECT id FROM users;\n```",
+            attachments: [],
+            artifactRefs: [],
+            createdAt: 2,
+          },
+          error: null,
+          errorDetail: null,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ],
+      resumeRequests: [],
+      updatedAt: 2,
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await clickButtonByAria(container, "Preview SQL in editor");
+
+    expect(useTabStore.getState().tabs[0]).toMatchObject({
+      sql: "SELECT * FROM users",
+      editorPatchPreview: {
+        title: "Review AI SQL correction",
+        originalText: "SELECT * FROM users",
+        replacement: "SELECT id FROM users;",
+      },
+    });
   });
 
   it("keeps the workspace available when the Agent Host command is missing", async () => {
@@ -368,17 +646,60 @@ describe("AssistantSidebar Agent Host path", () => {
       confirmationActivity?.querySelector("button")?.getAttribute(
         "aria-expanded",
       ),
-    ).toBe("false");
-    await act(async () => {
-      confirmationActivity?.querySelector("button")?.click();
-    });
+    ).toBe("true");
     const confirmation = confirmationActivity?.querySelector<HTMLElement>(
       '[data-assistant-process-item="clarification:clarification-1"]',
     );
+    await act(async () => {
+      confirmation
+        ?.querySelector<HTMLButtonElement>(
+          '[data-assistant-process-item-toggle="clarification:clarification-1"]',
+        )
+        ?.click();
+    });
     expect(confirmation?.textContent).toContain(
       "Which source should be on the left?",
     );
     expect(confirmation?.textContent).toContain("Staging");
+  });
+
+  it("approves against the turn's pinned workspace after the live schema changes", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await submitPrompt(container, "Create a project SQL file", "Run agent");
+    const request = mocks.startTurn.mock.calls[0]?.[0];
+
+    await emit({
+      ...baseEvent(request.threadId, request.turnId, 1),
+      type: "approval",
+      approvalId: "approval-write-1",
+      callId: "call-write-1",
+      inputDigest: "sha256:write-1",
+      toolName: "project.writeFile",
+      title: "Approve project.writeFile",
+      risk: "write",
+      summary: "Create sql/report.sql with 120 characters.",
+    });
+
+    await act(async () => {
+      useSchemaStore.setState({ currentSchema: "another_schema" });
+      await flushAsyncWork();
+    });
+    await clickButton(container, "Approve once");
+
+    expect(mocks.approveAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalId: "approval-write-1",
+        decision: "approve",
+        contextVersion: request.contextVersion,
+      }),
+    );
+    expect(container.textContent).not.toContain(
+      "The workspace changed while this request was running",
+    );
   });
 
   it("resumes a paused turn with its pinned workspace context", async () => {
@@ -412,6 +733,14 @@ describe("AssistantSidebar Agent Host path", () => {
         }),
       }),
     );
+
+    await emit({
+      ...baseEvent(request.threadId, request.turnId, 1),
+      type: "answer.delta",
+      content: "Resumed from checkpoint",
+      reset: true,
+    });
+    expect(container.textContent).toContain("Resumed from checkpoint");
   });
 
   it("does not invoke Agent Host when no AI provider is configured", async () => {
@@ -573,7 +902,7 @@ describe("AssistantSidebar Agent Host path", () => {
 
     expect(mocks.startTurn).not.toHaveBeenCalled();
     expect(container.textContent).toContain(
-      "Checking the AI runtime capabilities",
+      "has not published its installed tool catalog",
     );
     expect(container.textContent).not.toContain(
       "The AI runtime does not support Plan mode",

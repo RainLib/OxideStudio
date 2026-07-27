@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  extractQueryExecutionError,
   isMissingConnectionSession,
   presentQueryError,
 } from "@/lib/queryErrorPresentation";
@@ -33,5 +34,75 @@ describe("query error presentation", () => {
     expect(presentation.description).not.toContain("internal-connection-id");
     expect(presentation.suggestion).toContain("reconnect automatically");
     expect(presentation.technicalDetails).toContain("internal-connection-id");
+  });
+
+  it("validates database diagnostics and converts PostgreSQL character positions to Monaco offsets", () => {
+    const sql = "SELECT '🚀';\nSELECT FROM users";
+    const detail = extractQueryExecutionError(
+      new ApiError("syntax error at or near FROM", "QUERY_EXECUTION_FAILED", null, {
+        context: {
+          databaseError: {
+            driver: "postgres",
+            sqlState: "42601",
+            severity: "ERROR",
+            position: 8,
+            table: " users ",
+            column: "unsafe\ncolumn",
+          },
+        },
+      }),
+      "SELECT FROM users",
+      sql,
+      13,
+    );
+
+    expect(detail.database).toMatchObject({
+      driver: "postgres",
+      sqlState: "42601",
+      position: 8,
+      executionLine: 1,
+      executionColumn: 8,
+      documentLine: 2,
+      documentColumn: 8,
+      documentExecutionRange: {
+        startLine: 2,
+        startColumn: 1,
+        endLine: 2,
+        endColumn: 18,
+      },
+      table: "users",
+    });
+    expect(detail.database?.column).toBeUndefined();
+  });
+
+  it("presents constraint diagnostics as compact actionable metadata", () => {
+    const detail = extractQueryExecutionError(
+      new ApiError("duplicate key value", "QUERY_EXECUTION_FAILED", null, {
+        retryable: false,
+        context: {
+          databaseError: {
+            driver: "postgres",
+            sqlState: "23505",
+            kind: "uniqueViolation",
+            constraint: "users_email_key",
+          },
+        },
+      }),
+      "INSERT INTO users VALUES (1)",
+      "INSERT INTO users VALUES (1)",
+      0,
+    );
+    const presentation = presentQueryError(
+      detail.message,
+      "Postgres",
+      detail,
+    );
+
+    expect(presentation.retryable).toBe(false);
+    expect(presentation.suggestion).toContain("conflicting key value");
+    expect(presentation.metadata).toEqual([
+      { label: "SQLSTATE", value: "23505" },
+      { label: "Constraint", value: "users_email_key" },
+    ]);
   });
 });

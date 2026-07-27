@@ -17,6 +17,11 @@ import {
 import { defaultDatabaseName } from "@/lib/databaseDialect";
 import { parseConnectionUrl } from "@/lib/connectionUrlParser";
 import { useDatabaseNavigationStore } from "@/lib/databaseNavigation";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 
 export type PostgresDatabaseDiscoveryStatus =
   | "idle"
@@ -51,6 +56,11 @@ export interface PostgresDatabaseTreeProps {
   onLoadDatabase?: (database: string) => Promise<void>;
   /** Renders database-specific schemas and objects after that database is available. */
   renderDatabaseChildren?: (database: string) => ReactNode;
+  /** Adds database-scoped actions without coupling this tree to their policy. */
+  renderDatabaseContextMenu?: (
+    database: string,
+    isCurrent: boolean,
+  ) => ReactNode;
 }
 
 export function postgresConnectionDatabaseName(connection: {
@@ -121,6 +131,7 @@ export function PostgresDatabaseTree({
   databaseMatchesFilter,
   onLoadDatabase,
   renderDatabaseChildren,
+  renderDatabaseContextMenu,
 }: PostgresDatabaseTreeProps) {
   const databaseRevealRequest = useDatabaseNavigationStore(
     (state) => state.revealRequest
@@ -306,47 +317,60 @@ export function PostgresDatabaseTree({
               data-connected={isCurrent ? "true" : undefined}
               className="min-w-0"
             >
-              <button
-                type="button"
-                aria-expanded={isExpanded}
-                aria-controls={childrenId}
-                aria-busy={isDatabaseLoading || undefined}
-                onClick={() => toggleDatabase(database)}
-                className="flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))]"
-                title={
-                  isCurrent
-                    ? `Default database: ${database}`
-                    : `${isExpanded ? "Collapse" : "Expand"} database: ${database}`
-                }
-              >
-                {isExpanded ? (
-                  <ChevronDown
-                    size={12}
-                    className="shrink-0 wb-muted"
-                    aria-hidden="true"
-                  />
-                ) : (
-                  <ChevronRight
-                    size={12}
-                    className="shrink-0 wb-muted"
-                    aria-hidden="true"
-                  />
-                )}
-                <Database
-                  size={12}
-                  className={isCurrent ? "shrink-0" : "shrink-0 opacity-75"}
-                  style={isCurrent ? { color: connectionColor } : undefined}
-                  aria-hidden="true"
-                />
-                <span className={isCurrent ? "truncate font-medium" : "truncate"}>
-                  {database}
-                </span>
-                {isCurrent && (
-                  <span className="ml-auto shrink-0 rounded-[3px] border border-[hsl(var(--wb-accent)/0.28)] bg-[hsl(var(--wb-accent)/0.08)] px-1 text-[9px] font-normal leading-4 text-[hsl(var(--wb-text))]">
-                    default
-                  </span>
-                )}
-              </button>
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <button
+                    type="button"
+                    aria-expanded={isExpanded}
+                    aria-controls={childrenId}
+                    aria-busy={isDatabaseLoading || undefined}
+                    onClick={() => toggleDatabase(database)}
+                    className="flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))]"
+                    title={
+                      isCurrent
+                        ? `Default database: ${database}`
+                        : `${isExpanded ? "Collapse" : "Expand"} database: ${database}`
+                    }
+                  >
+                    {isExpanded ? (
+                      <ChevronDown
+                        size={12}
+                        className="shrink-0 wb-muted"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <ChevronRight
+                        size={12}
+                        className="shrink-0 wb-muted"
+                        aria-hidden="true"
+                      />
+                    )}
+                    <Database
+                      size={12}
+                      className={
+                        isCurrent ? "shrink-0" : "shrink-0 opacity-75"
+                      }
+                      style={isCurrent ? { color: connectionColor } : undefined}
+                      aria-hidden="true"
+                    />
+                    <span
+                      className={
+                        isCurrent ? "truncate font-medium" : "truncate"
+                      }
+                    >
+                      {database}
+                    </span>
+                    {isCurrent && (
+                      <span className="ml-auto shrink-0 rounded-[3px] border border-[hsl(var(--wb-accent)/0.28)] bg-[hsl(var(--wb-accent)/0.08)] px-1 text-[9px] font-normal leading-4 text-[hsl(var(--wb-text))]">
+                        default
+                      </span>
+                    )}
+                  </button>
+                </ContextMenuTrigger>
+                <ContextMenuContent className="w-56 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.35)]">
+                  {renderDatabaseContextMenu?.(database, isCurrent)}
+                </ContextMenuContent>
+              </ContextMenu>
 
               {isExpanded && (
                 <div

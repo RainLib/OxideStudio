@@ -8,6 +8,7 @@ pub use protocol::{
     AgentActionAccepted, AgentAnswerClarificationRequest, AgentApproveActionRequest,
     AgentArtifactExportRequest, AgentArtifactExportResult, AgentArtifactReadRequest,
     AgentArtifactReadResult, AgentArtifactSearchRequest, AgentArtifactSearchResult,
-    AgentCancelTurnRequest, AgentContextMetrics, AgentHostStatus, AgentProjectStateCleared,
-    AgentTurnAccepted, AgentTurnRequest,
+    AgentCancelTurnRequest, AgentContextMetrics, AgentConversationSnapshot,
+    AgentConversationSnapshotSaveRequest, AgentHostStatus, AgentProjectStateCleared,
+    AgentTextAttachment, AgentTurnAccepted, AgentTurnRequest,
 };

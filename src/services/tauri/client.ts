@@ -131,6 +131,8 @@ function commandCategory(command: string) {
     return "query";
   }
   if (
+    command.includes("schema_migration") ||
+    command.includes("schema_snapshot") ||
     /^(?:get|refresh|set_current)_(?:database_|cached_)?(?:databases|schemas|tables|collections|columns|indexes|constraints|referencing_foreign_keys|functions|schema)/.test(
       command,
     )

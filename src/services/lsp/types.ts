@@ -29,6 +29,80 @@ export interface TextEdit {
   newText: string;
 }
 
+export interface WorkspaceEdit {
+  changes?: Record<string, TextEdit[]>;
+}
+
+export interface SignatureParameter {
+  label: string | [number, number];
+  documentation?: string | { kind?: string; value?: string };
+}
+
+export interface SignatureInformation {
+  label: string;
+  documentation?: string | { kind?: string; value?: string };
+  parameters?: SignatureParameter[];
+  activeParameter?: number;
+}
+
+export interface SignatureHelp {
+  signatures: SignatureInformation[];
+  activeSignature?: number;
+  activeParameter?: number;
+}
+
+export interface LspCodeAction {
+  title: string;
+  kind?: string;
+  edit?: WorkspaceEdit;
+  isPreferred?: boolean;
+  disabled?: { reason: string };
+}
+
+export interface LspDocumentSymbol {
+  name: string;
+  detail?: string;
+  kind: number;
+  range: Range;
+  selectionRange: Range;
+  children?: LspDocumentSymbol[];
+}
+
+export interface LspFoldingRange {
+  startLine: number;
+  startCharacter?: number;
+  endLine: number;
+  endCharacter?: number;
+  kind?: string;
+}
+
+export interface LspSelectionRange {
+  range: Range;
+  parent?: LspSelectionRange;
+}
+
+export interface LspSemanticTokens {
+  resultId?: string;
+  data: number[];
+}
+
+export interface LspInlayHint {
+  position: Position;
+  label: string | Array<{ value: string; tooltip?: string }>;
+  kind?: number;
+  tooltip?: string | { kind?: string; value?: string };
+  textEdits?: TextEdit[];
+  paddingLeft?: boolean;
+  paddingRight?: boolean;
+}
+
+export interface LspWorkspaceSymbol {
+  name: string;
+  kind: number;
+  location: Location;
+  containerName?: string;
+}
+
 export interface CompletionItem {
   label: string;
   kind?: number;
@@ -64,6 +138,7 @@ export interface LspSqlsConfig {
 export interface Diagnostic {
   range: Range;
   severity?: DiagnosticSeverity;
+  code?: string | number;
   message: string;
   source?: string;
 }

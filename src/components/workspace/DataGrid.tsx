@@ -42,6 +42,7 @@ import {
   RotateCcw,
   Rows3,
   Search,
+  Sparkles,
   CircleSlash2,
   CircleAlert,
   SquarePen,
@@ -80,6 +81,10 @@ import {
 } from "@/lib/selectionAggregate";
 import { SelectionAggregateBar } from "./SelectionAggregateBar";
 import { presentQueryError } from "@/lib/queryErrorPresentation";
+import {
+  APP_EVENT_OPEN_ASSISTANT,
+  useAssistantComposerStore,
+} from "@/store/useAssistantComposerStore";
 
 interface GridValueEditorTarget extends ValueEditorTarget {
   tabId: string;
@@ -217,6 +222,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     );
     const gridScale = viewMetrics.scale;
     const activeTab = tabs.find((t) => t.id === activeTabId);
+    const queueQueryErrorFix = useAssistantComposerStore(
+      (state) => state.queueQueryErrorFix,
+    );
 
     const resultIndex = activeTab?.activeResultIndex ?? 0;
     const result = activeTab?.results?.[resultIndex] ?? activeTab?.results?.[0];
@@ -227,9 +235,13 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     const errorPresentation = useMemo(
       () =>
         error
-          ? presentQueryError(error, errorConnection?.name)
+          ? presentQueryError(
+              error,
+              errorConnection?.name,
+              activeTab?.queryError,
+            )
           : null,
-      [error, errorConnection?.name],
+      [activeTab?.queryError, error, errorConnection?.name],
     );
     const gridState = activeTab?.gridState;
     const pendingEdits = activeTab?.pendingEdits || EMPTY_PENDING_EDITS;
@@ -1651,12 +1663,50 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                 <p className="mt-1 text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
                   {errorPresentation.description}
                 </p>
+                {errorPresentation.metadata.length > 0 && (
+                  <dl className="mt-2 flex flex-wrap gap-1.5">
+                    {errorPresentation.metadata.map((item) => (
+                      <div
+                        key={`${item.label}:${item.value}`}
+                        className="inline-flex min-w-0 items-center gap-1 rounded-[3px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] px-1.5 py-0.5 font-mono text-[10px]"
+                      >
+                        <dt className="text-[hsl(var(--wb-text-muted))]">
+                          {item.label}
+                        </dt>
+                        <dd className="max-w-[260px] truncate text-[hsl(var(--wb-text))]">
+                          {item.value}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                )}
                 {errorPresentation.suggestion && (
                   <p className="mt-2 text-[12px] leading-5 text-[hsl(var(--wb-text))]">
                     {errorPresentation.suggestion}
                   </p>
                 )}
                 <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {activeTab?.type === "query" &&
+                    activeTab.queryError?.database && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-7 gap-1.5 rounded-[4px] px-2.5 text-[11px]"
+                        onClick={() => {
+                          queueQueryErrorFix(
+                            activeTab.id,
+                            activeTab.queryError!,
+                          );
+                          window.dispatchEvent(
+                            new CustomEvent(APP_EVENT_OPEN_ASSISTANT),
+                          );
+                        }}
+                      >
+                        <Sparkles size={12} aria-hidden="true" />
+                        Ask AI to fix
+                      </Button>
+                    )}
                   {errorPresentation.retryable &&
                     activeTab?.connectionId && (
                       <Button
@@ -1698,9 +1748,20 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         {activeTab?.type !== "table" && result && (
           <div className="h-9 shrink-0 border-b wb-data-toolbar flex items-center gap-2 px-3">
             <div className="text-xs text-muted-foreground">
+              {result.truncated ? "First " : ""}
               {result.rows.length.toLocaleString()} row
               {result.rows.length === 1 ? "" : "s"}
             </div>
+            {result.truncated && (
+              <div
+                className="flex min-w-0 items-center gap-1 text-[10px] text-[hsl(var(--wb-accent))]"
+                role="status"
+                title={`Result limited to ${(result.rowLimit || result.rows.length).toLocaleString()} rows. Add a LIMIT clause or narrow the query to retrieve a smaller, complete result.`}
+              >
+                <CircleAlert size={12} className="shrink-0" aria-hidden="true" />
+                <span className="truncate">Result truncated</span>
+              </div>
+            )}
             <div className="flex-1" />
             <Button
               variant="ghost"

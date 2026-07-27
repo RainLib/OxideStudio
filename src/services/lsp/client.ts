@@ -6,8 +6,18 @@ import type {
   CompletionResponse,
   HoverInfo,
   Location,
+  Position,
   Range,
   TextEdit,
+  WorkspaceEdit,
+  SignatureHelp,
+  LspCodeAction,
+  LspDocumentSymbol,
+  LspFoldingRange,
+  LspSelectionRange,
+  LspSemanticTokens,
+  LspInlayHint,
+  LspWorkspaceSymbol,
 } from "./types";
 import type { InlineLspContext } from "@/services/tauri/ai.service";
 
@@ -164,12 +174,14 @@ class LspClient {
       const result = await invoke<string>("lsp_shutdown", {
         ...this.commandSessionPayload(),
       });
-      this.initialized = false;
-      this.initializationPromise = null;
       console.log("[LSP] Shutdown:", result);
     } catch (error) {
       console.error("[LSP] Shutdown failed:", error);
       throw error;
+    } finally {
+      this.initialized = false;
+      this.binaryPath = null;
+      this.initializationPromise = null;
     }
   }
 
@@ -178,13 +190,21 @@ class LspClient {
    */
   async isRunning(): Promise<boolean> {
     try {
-      return await invoke<boolean>("lsp_is_running", {
+      const running = await invoke<boolean>("lsp_is_running", {
         ...this.commandSessionPayload(),
       });
+      if (!running) this.markDisconnected();
+      return running;
     } catch (error) {
       console.error("[LSP] Status check failed:", error);
+      this.markDisconnected();
       return false;
     }
+  }
+
+  markDisconnected(): void {
+    this.initialized = false;
+    this.binaryPath = null;
   }
 
   /**
@@ -376,6 +396,148 @@ class LspClient {
     }
   }
 
+  async formatRange(
+    uri: string,
+    range: Range,
+    tabSize: number,
+    insertSpaces: boolean
+  ): Promise<TextEdit[]> {
+    const response = await this.request<TextEdit[]>(
+      "textDocument/rangeFormatting",
+      {
+        textDocument: { uri },
+        range,
+        options: { tabSize, insertSpaces },
+      }
+    );
+    return parseTextEdits(response);
+  }
+
+  async getSignatureHelp(
+    uri: string,
+    line: number,
+    character: number
+  ): Promise<SignatureHelp | null> {
+    return this.request<SignatureHelp | null>("textDocument/signatureHelp", {
+      textDocument: { uri },
+      position: { line, character },
+    });
+  }
+
+  async prepareRename(
+    uri: string,
+    line: number,
+    character: number
+  ): Promise<Range | null> {
+    const response = await this.request<unknown>("textDocument/prepareRename", {
+      textDocument: { uri },
+      position: { line, character },
+    });
+    if (isObject(response) && "range" in response) {
+      return parseRange(response.range) || null;
+    }
+    return parseRange(response) || null;
+  }
+
+  async rename(
+    uri: string,
+    line: number,
+    character: number,
+    newName: string
+  ): Promise<WorkspaceEdit | null> {
+    return this.request<WorkspaceEdit | null>("textDocument/rename", {
+      textDocument: { uri },
+      position: { line, character },
+      newName,
+    });
+  }
+
+  async getCodeActions(
+    uri: string,
+    range: Range,
+    diagnostics: unknown[] = []
+  ): Promise<LspCodeAction[]> {
+    return (
+      (await this.request<LspCodeAction[] | null>("textDocument/codeAction", {
+        textDocument: { uri },
+        range,
+        context: { diagnostics },
+      })) || []
+    );
+  }
+
+  async getDocumentSymbols(uri: string): Promise<LspDocumentSymbol[]> {
+    return (
+      (await this.request<LspDocumentSymbol[] | null>(
+        "textDocument/documentSymbol",
+        { textDocument: { uri } }
+      )) || []
+    );
+  }
+
+  async getFoldingRanges(uri: string): Promise<LspFoldingRange[]> {
+    return (
+      (await this.request<LspFoldingRange[] | null>(
+        "textDocument/foldingRange",
+        { textDocument: { uri } }
+      )) || []
+    );
+  }
+
+  async getSelectionRanges(
+    uri: string,
+    positions: Position[]
+  ): Promise<LspSelectionRange[]> {
+    return (
+      (await this.request<LspSelectionRange[] | null>(
+        "textDocument/selectionRange",
+        { textDocument: { uri }, positions }
+      )) || []
+    );
+  }
+
+  async getSemanticTokens(uri: string): Promise<LspSemanticTokens | null> {
+    return this.request<LspSemanticTokens | null>(
+      "textDocument/semanticTokens/full",
+      { textDocument: { uri } }
+    );
+  }
+
+  async getInlayHints(uri: string, range: Range): Promise<LspInlayHint[]> {
+    return (
+      (await this.request<LspInlayHint[] | null>("textDocument/inlayHint", {
+        textDocument: { uri },
+        range,
+      })) || []
+    );
+  }
+
+  async searchWorkspaceSymbols(query: string): Promise<LspWorkspaceSymbol[]> {
+    return (
+      (await this.request<LspWorkspaceSymbol[] | null>("workspace/symbol", {
+        query,
+      })) || []
+    );
+  }
+
+  private async request<T>(method: string, params: unknown): Promise<T> {
+    if (!this.initialized) {
+      return null as T;
+    }
+    try {
+      return await invoke<T>("lsp_request", {
+        request: {
+          ...this.requestSessionPayload(),
+          method,
+          params,
+        },
+      });
+    } catch (error) {
+      console.error(`[LSP] ${method} failed:`, error);
+      throw error;
+    }
+  }
+
   /**
    * Update LSP configuration (connections)
    * Sends workspace/didChangeConfiguration notification
@@ -469,7 +631,6 @@ class LspClient {
         uri,
         version,
         textLength: text.length,
-        preview: text.substring(0, 50) + (text.length > 50 ? "..." : ""),
       });
 
       await invoke("lsp_did_open", {

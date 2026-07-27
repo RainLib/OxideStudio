@@ -14,6 +14,9 @@
 - [ADR-0010：Assistant Runtime 工具循环](decisions/0010-assistant-runtime-tool-loop.md)：运行时状态推进、预算、审批绑定、事件协议与取消边界。
 - [ADR-0011：Agent Task 安全持久化](decisions/0011-agent-task-summary-persistence.md)：项目级任务摘要、session 恢复、数据最小化和保留策略。
 - [ADR-0012：Deep Agents 桌面运行边界](decisions/0012-deep-agents-desktop-runtime-boundary.md)：Node-only 发布物审计、WebView 禁止直接打包、sidecar/服务协议与降级路径。
+- [ADR-0013：PostgreSQL Migration 安全执行](decisions/0013-schema-migration-execution.md)：指纹绑定、preflight 断言、原子 apply、持久日志、post-verify 与 rollback artifact。
+- [ADR-0014：Schema Diagram 快照 Artifact](decisions/0014-schema-diagram-artifact.md)：稳定快照输入、复合 FK、确定性布局、过滤缩放与 Explorer 联动。
+- [ADR-0015：Loaded Data Compare](decisions/0015-loaded-data-compare.md)：不可变结果快照、复合 key、重复键拒绝静默配对、数值容差与截断边界。
 - [AI Agent 产品与技术规格](AI_AGENT_PRODUCT_SPEC.md)：完整能力矩阵、状态机、页面动作协议、安全模型、Deep Agents 分层方案和 LSP 相关性规则。
 - [AI / Agent 集成](AI_AGENT_INTEGRATION.md)：应用内 Assistant、CLI、MCP、工具策略与审计。
 - [外部 AI 接入指南](EXTERNAL_AI_INTEGRATION.md)：通过 Rust `oxide-agent` 使用 MCP/CLI、固定项目与连接授权、调用五个只读工具。

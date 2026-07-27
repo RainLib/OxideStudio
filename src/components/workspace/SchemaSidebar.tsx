@@ -38,9 +38,11 @@ import { useConnectionStore } from "@/store/useConnectionStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
+import { useTaskStore } from "@/store/useTaskStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
 import {
   databaseObjectNavigationKey,
+  databaseSchemaNavigationKey,
   useDatabaseNavigationStore,
 } from "@/lib/databaseNavigation";
 import { useTableOperations } from "@/hooks/useTableOperations";
@@ -105,7 +107,10 @@ import {
 } from "./DatabaseExplorerChrome";
 import { DatabaseBrandIcon } from "@/components/icons/DatabaseBrandIcon";
 import { ConnectionGlyph } from "@/components/icons/ConnectionGlyph";
-import type { SchemaSnapshotIdentity } from "@/services/schemaSnapshotStore";
+import {
+  captureLiveSchemaSnapshot,
+  type SchemaSnapshotIdentity,
+} from "@/services/schemaSnapshotStore";
 import {
   PostgresDatabaseTree,
   postgresConnectionDatabaseName,
@@ -422,6 +427,9 @@ export function SchemaSidebar() {
   >(null);
   const [schemaSnapshotIdentity, setSchemaSnapshotIdentity] =
     useState<SchemaSnapshotIdentity | null>(null);
+  const [schemaDiagramLoadingKey, setSchemaDiagramLoadingKey] = useState<
+    string | null
+  >(null);
   const [capabilities, setCapabilities] = useState(() =>
     defaultDatabaseCapabilities(DEFAULT_DATABASE_DRIVER),
   );
@@ -1216,6 +1224,9 @@ export function SchemaSidebar() {
   const loadTablePage = useTabStore((state) => state.loadTablePage);
   const createTableTab = useTabStore((state) => state.createTableTab);
   const createTab = useTabStore((state) => state.createTab);
+  const openSchemaDiagramTab = useTabStore(
+    (state) => state.openSchemaDiagramTab,
+  );
   const runTabQuery = useTabStore((state) => state.runTabQuery);
   const setTableMetadata = useTabStore((state) => state.setTableMetadata);
 
@@ -1252,6 +1263,39 @@ export function SchemaSidebar() {
   const handleOpenConnectionProperties = (connectionId: string) => {
     selectConnection(connectionId);
     setIsDataSourceDialogOpen(true);
+  };
+
+  const handleOpenSchemaDiagram = async (identity: SchemaSnapshotIdentity) => {
+    const loadingKey = [
+      identity.connectionId,
+      identity.databaseName || "",
+      identity.schemaName,
+    ].join("\u0000");
+    if (schemaDiagramLoadingKey) return;
+    setSchemaDiagramLoadingKey(loadingKey);
+    setNamespaceError(null);
+    const tasks = useTaskStore.getState();
+    const taskId = tasks.startTask({
+      kind: "introspection",
+      title: `Diagram ${identity.schemaName}`,
+      detail: identity.databaseName || identity.connectionName,
+    });
+    try {
+      const connectionError = await setActiveConnection(identity.connectionId);
+      if (connectionError) throw new Error(connectionError);
+      const snapshot = await captureLiveSchemaSnapshot(identity);
+      openSchemaDiagramTab(snapshot);
+      tasks.finishTask(
+        taskId,
+        `${snapshot.relations.length.toLocaleString()} relations mapped`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      tasks.failTask(taskId, message);
+      setNamespaceError(`Diagram capture failed: ${message}`);
+    } finally {
+      setSchemaDiagramLoadingKey(null);
+    }
   };
 
   const handleRemoveDataSource = async () => {
@@ -1759,6 +1803,88 @@ export function SchemaSidebar() {
     await action();
   };
 
+  const handleImportSqlScript = async ({
+    connectionId,
+    schema,
+    database,
+  }: {
+    connectionId: string;
+    schema?: string;
+    database?: string;
+  }) => {
+    const connection = connections.find((item) => item.id === connectionId);
+    if (!connection) {
+      setNamespaceError("The selected data source is no longer available.");
+      return;
+    }
+    if (!defaultDatabaseCapabilities(connection.driver).supportsSqlQuery) {
+      setNamespaceError(
+        `${databaseDriverProfile(connection.driver).capabilities.displayName} does not accept SQL scripts.`,
+      );
+      return;
+    }
+
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "SQL scripts", extensions: ["sql"] }],
+    });
+    if (typeof selected !== "string") return;
+
+    const fileName = selected.split(/[\\/]/).pop() || "SQL script";
+    const target = [database, schema].filter(Boolean).join(".");
+    if (
+      !window.confirm(
+        `Run "${fileName}" against ${target || connection.name}?\n\nThe script may create, update, or delete data. It will run with the selected data source's permissions.`,
+      )
+    ) {
+      return;
+    }
+
+    const connectionError = await setActiveConnection(connectionId);
+    if (connectionError) {
+      setNamespaceError(connectionError);
+      return;
+    }
+
+    setNamespaceError(null);
+    const tasks = useTaskStore.getState();
+    const taskId = tasks.startTask({
+      kind: "import",
+      title: `Import ${fileName}`,
+      detail: target || connection.name,
+    });
+    try {
+      const imported = await queryService.importSqlScript(
+        connectionId,
+        selected,
+        schema,
+        database,
+      );
+      tasks.finishTask(
+        taskId,
+        `${imported.statementsExecuted.toLocaleString()} statements · ${imported.rowsAffected.toLocaleString()} rows affected`,
+      );
+      bumpMetadataVersion();
+
+      const configuredDatabase =
+        connection.driver === "postgres"
+          ? postgresConnectionDatabaseName(connection)
+          : undefined;
+      if (database && database !== configuredDatabase) {
+        setPostgresDatabaseRefreshVersion((version) => version + 1);
+      } else {
+        await loadSchemas(connectionId, true);
+        if (schema) await loadTables(connectionId, schema, true);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      tasks.failTask(taskId, message);
+      setNamespaceError(`SQL import failed: ${message}`);
+    }
+  };
+
   const handleConnectionRowClick = async (connectionId: string) => {
     const isExpanded = expandedConnectionIds.includes(connectionId);
     const isConnected = connectedConnectionIds.includes(connectionId);
@@ -1946,7 +2072,7 @@ export function SchemaSidebar() {
       }
 
       await handleSchemaSelect(target.schemaName);
-      if (!shouldAutoIntrospect) {
+      if (target.objectName && !shouldAutoIntrospect) {
         await hydrateSchemaObjectsFromCache(connection.id, target.schemaName);
       }
       if (cancelled) return;
@@ -1955,34 +2081,45 @@ export function SchemaSidebar() {
         connection.driver,
         target.schemaName,
       );
-      const objectsKey = objectGroupKey(
-        connection.id,
-        connection.driver,
-        target.schemaName,
-        "objects",
-      );
       setExpandedSchemaKeys((current) =>
         current.includes(schemaKey) ? current : [...current, schemaKey],
       );
-      setExpandedObjectGroupKeys((current) =>
-        current.includes(objectsKey) ? current : [...current, objectsKey],
-      );
-      selectTable(target.objectName);
       setFilterText("");
       window.requestAnimationFrame(() => {
-        const key = databaseObjectNavigationKey({
-          ...target,
-          databaseName:
-            target.databaseName ||
-            (connection.driver === "postgres" ? currentDatabase : undefined),
-        });
+        const databaseName =
+          target.databaseName ||
+          (connection.driver === "postgres" ? currentDatabase : undefined);
+        const key = target.objectName
+          ? databaseObjectNavigationKey({
+              ...target,
+              objectName: target.objectName,
+              databaseName,
+            })
+          : databaseSchemaNavigationKey({
+              ...target,
+              databaseName,
+            });
         const element = document.querySelector<HTMLElement>(
-          `[data-database-object-key="${key}"]`,
+          target.objectName
+            ? `[data-database-object-key="${key}"]`
+            : `[data-database-schema-key="${key}"]`,
         );
         element?.scrollIntoView({ block: "nearest" });
         element?.focus();
         clearDatabaseReveal(requestId);
       });
+      if (target.objectName) {
+        const objectsKey = objectGroupKey(
+          connection.id,
+          connection.driver,
+          target.schemaName,
+          "objects",
+        );
+        setExpandedObjectGroupKeys((current) =>
+          current.includes(objectsKey) ? current : [...current, objectsKey],
+        );
+        selectTable(target.objectName);
+      }
     })().catch((error) => {
       if (!cancelled) {
         setNamespaceError(
@@ -3120,6 +3257,32 @@ export function SchemaSidebar() {
                               <Upload className="mr-2 h-3.5 w-3.5" />
                               Import JSON...
                             </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              disabled={
+                                !defaultDatabaseCapabilities(
+                                  driver || DEFAULT_DATABASE_DRIVER,
+                                )
+                                  .supportsSqlQuery
+                              }
+                              onClick={() =>
+                                void handleImportSqlScript({
+                                  connectionId,
+                                  schema,
+                                  database:
+                                    driver === "postgres"
+                                      ? postgresConnectionDatabaseName(
+                                          connections.find(
+                                            (item) => item.id === connectionId,
+                                          ) || {},
+                                        )
+                                      : undefined,
+                                })
+                              }
+                            >
+                              <Upload className="mr-2 h-3.5 w-3.5" />
+                              Import SQL Script...
+                            </ContextMenuItem>
                             <ContextMenuSeparator
                               className={menuSeparatorClass}
                             />
@@ -3568,6 +3731,34 @@ export function SchemaSidebar() {
                       >
                         Properties...
                       </ContextMenuItem>
+                      <ContextMenuSub>
+                        <ContextMenuSubTrigger
+                          className={menuSubClass}
+                          disabled={
+                            !defaultDatabaseCapabilities(connection.driver)
+                              .supportsSqlQuery
+                          }
+                        >
+                          Import/Export
+                        </ContextMenuSubTrigger>
+                        <ContextMenuSubContent className={menuContentClass}>
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            onClick={() =>
+                              void handleImportSqlScript({
+                                connectionId: connection.id,
+                                database:
+                                  connection.driver === "postgres"
+                                    ? connectedPostgresDatabase
+                                    : undefined,
+                              })
+                            }
+                          >
+                            <Upload className="mr-2 h-3.5 w-3.5" />
+                            Import SQL Script...
+                          </ContextMenuItem>
+                        </ContextMenuSubContent>
+                      </ContextMenuSub>
                       <ContextMenuSeparator className={menuSeparatorClass} />
                       <ContextMenuItem
                         className={cn(menuItemClass, "text-destructive")}
@@ -3659,6 +3850,45 @@ export function SchemaSidebar() {
                               }
                             : undefined
                         }
+                        renderDatabaseContextMenu={(database) => (
+                          <>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() => void copyText(database)}
+                            >
+                              Copy Name
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void handleImportSqlScript({
+                                  connectionId: connection.id,
+                                  database,
+                                })
+                              }
+                            >
+                              <Upload className="mr-2 h-3.5 w-3.5" />
+                              Import SQL Script...
+                            </ContextMenuItem>
+                            <ContextMenuSeparator
+                              className={menuSeparatorClass}
+                            />
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void (database === connectedPostgresDatabase
+                                  ? handleRefreshConnection(connection.id)
+                                  : loadPostgresRemoteDatabase(
+                                      connection.id,
+                                      database,
+                                    ))
+                              }
+                            >
+                              <RefreshCw className="mr-2 h-3.5 w-3.5" />
+                              Refresh Selected
+                            </ContextMenuItem>
+                          </>
+                        )}
                         renderDatabaseChildren={(database) =>
                           database === connectedPostgresDatabase ? null : (
                             <PostgresRemoteDatabaseContents
@@ -3699,6 +3929,13 @@ export function SchemaSidebar() {
                                   schemaName: schema,
                                 });
                               }}
+                              onImportSqlScript={(databaseName, schema) =>
+                                void handleImportSqlScript({
+                                  connectionId: connection.id,
+                                  database: databaseName,
+                                  schema,
+                                })
+                              }
                               onOpenTable={(databaseName, schema, table) =>
                                 handlePostgresRemoteTableOpen(
                                   connection.id,
@@ -3750,6 +3987,16 @@ export function SchemaSidebar() {
                                     <button
                                       type="button"
                                       aria-expanded={isSchemaExpanded}
+                                      data-database-schema-key={databaseSchemaNavigationKey({
+                                        connectionId: connection.id,
+                                        databaseName:
+                                          connection.driver === "postgres"
+                                            ? postgresConnectionDatabaseName(
+                                                connection,
+                                              )
+                                            : connection.database || undefined,
+                                        schemaName: schema,
+                                      })}
                                       className={cn(
                                         "flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] transition-colors",
                                         isCurrentSchema
@@ -3891,6 +4138,33 @@ export function SchemaSidebar() {
                                     <ContextMenuItem
                                       className={menuItemClass}
                                       disabled={
+                                        Boolean(schemaDiagramLoadingKey) ||
+                                        !supportsTableWorkspace(
+                                          defaultDatabaseCapabilities(
+                                            connection.driver,
+                                          ),
+                                        )
+                                      }
+                                      onClick={() =>
+                                        void handleOpenSchemaDiagram({
+                                          projectId: activeProjectId,
+                                          connectionId: connection.id,
+                                          connectionName: connection.name,
+                                          driver: connection.driver,
+                                          databaseName:
+                                            connection.driver === "postgres"
+                                              ? connectedPostgresDatabase
+                                              : undefined,
+                                          schemaName: schema,
+                                        })
+                                      }
+                                    >
+                                      <Network className="mr-2 h-3.5 w-3.5" />
+                                      Open Schema Diagram
+                                    </ContextMenuItem>
+                                    <ContextMenuItem
+                                      className={menuItemClass}
+                                      disabled={
                                         !supportsTableWorkspace(
                                           defaultDatabaseCapabilities(
                                             connection.driver,
@@ -3922,6 +4196,39 @@ export function SchemaSidebar() {
                                       <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
                                       Schema Snapshots / Diff...
                                     </ContextMenuItem>
+                                    <ContextMenuSub>
+                                      <ContextMenuSubTrigger
+                                        className={menuSubClass}
+                                        disabled={
+                                          !defaultDatabaseCapabilities(
+                                            connection.driver,
+                                          ).supportsSqlQuery
+                                        }
+                                      >
+                                        Import/Export
+                                      </ContextMenuSubTrigger>
+                                      <ContextMenuSubContent
+                                        className={menuContentClass}
+                                      >
+                                        <ContextMenuItem
+                                          className={menuItemClass}
+                                          onClick={() =>
+                                            void handleImportSqlScript({
+                                              connectionId: connection.id,
+                                              schema,
+                                              database:
+                                                connection.driver ===
+                                                "postgres"
+                                                  ? connectedPostgresDatabase
+                                                  : undefined,
+                                            })
+                                          }
+                                        >
+                                          <Upload className="mr-2 h-3.5 w-3.5" />
+                                          Import SQL Script...
+                                        </ContextMenuItem>
+                                      </ContextMenuSubContent>
+                                    </ContextMenuSub>
                                     <ContextMenuItem
                                       className={menuItemClass}
                                       onClick={() =>

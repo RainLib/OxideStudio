@@ -457,10 +457,22 @@ describe("LspConnectionSyncer render integration", () => {
     expect(mocks.updateConfiguration).not.toHaveBeenCalled();
   });
 
-  it("does not scan Redis keys for LSP configuration", async () => {
+  it("syncs a bounded Redis key page into the active LSP session", async () => {
     mocks.getDatabaseCapabilities.mockResolvedValue(
       defaultDatabaseCapabilities("redis")
     );
+    mocks.getCollections.mockResolvedValue([
+      {
+        name: "user:1",
+        type: "hash",
+        documentCount: 3,
+      },
+      {
+        name: "session:1",
+        type: "string",
+        documentCount: 1,
+      },
+    ]);
     useConnectionStore.setState({
       connections: [
         {
@@ -501,8 +513,38 @@ describe("LspConnectionSyncer render integration", () => {
       await flushAsyncWork();
     });
 
-    expect(mocks.getCollections).not.toHaveBeenCalled();
+    expect(mocks.getCollections).toHaveBeenCalledWith("redis-1", "0");
     expect(mocks.getCollectionsPage).not.toHaveBeenCalled();
-    expect(mocks.updateConfiguration).not.toHaveBeenCalled();
+    expect(mocks.updateConfiguration).toHaveBeenCalledTimes(1);
+    const config = mocks.updateConfiguration.mock.calls[0][0];
+    expect(config).toMatchObject({
+      defaultDialect: "redis",
+      fileDialects: {
+        "oxide://query/redis-query.redis.redis": "redis",
+      },
+      schemas: [
+        {
+          database: "0",
+          tables: [
+            {
+              name: "user:1",
+              object_type: "hash",
+              columns: [
+                { name: "key", data_type: "string" },
+                { name: "type", data_type: "hash" },
+                { name: "value", data_type: "json" },
+              ],
+            },
+            {
+              name: "session:1",
+              object_type: "string",
+            },
+          ],
+        },
+      ],
+    });
+    expect(config.schemas[0].tables[0].source_location[0]).toContain(
+      "oxide://database-object/object"
+    );
   });
 });

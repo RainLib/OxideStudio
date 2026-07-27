@@ -10,6 +10,9 @@ import { DEFAULT_APP_SETTINGS } from "@/lib/appSettings";
 import { moveSideToolWindow } from "@/lib/workbenchLayout";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
+import { APP_EVENT_OPEN_ASSISTANT } from "@/store/useAssistantComposerStore";
+
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const settingsMocks = vi.hoisted(() => ({
   getAppSettings: vi.fn(),
@@ -209,5 +212,21 @@ describe("database workspace entry", () => {
 
     expect(explorerDock?.getAttribute("data-tool-window-side")).toBe("right");
     expect(assistantDock?.getAttribute("data-tool-window-side")).toBe("left");
+  });
+
+  it("opens the Assistant view when a query-error workflow requests it", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<WorkspacePage />);
+    });
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(APP_EVENT_OPEN_ASSISTANT));
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector("[data-testid='assistant-sidebar']"),
+    ).not.toBeNull();
+    expect(container.querySelector("#secondary-panel-files")).toBeNull();
   });
 });

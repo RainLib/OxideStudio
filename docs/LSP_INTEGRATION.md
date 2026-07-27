@@ -70,10 +70,15 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 60: MySQL `ON DUPLICATE KEY UPDATE` completions now support assignment editing with target columns, operators, value keywords, and comma continuation for additional assignments.
 - Phase 61: Hive and ClickHouse predicate completions now scope `WHERE`/`HAVING` fields to referenced tables, use bare column labels for single-table predicates, and avoid leaking unrelated table columns.
 - Phase 62: MySQL `INSERT ... SET` completions now support assignment editing and continue with `,` or `ON DUPLICATE KEY UPDATE` after completed values instead of invalid `WHERE` suggestions.
+- Phase 63: LSP processes are isolated by connection/language session, reference-counted across panes, health-checked and recovered after crashes, and shut down after a 30-second idle grace period.
+- Phase 64: Timed-out requests send the standard `$/cancelRequest` notification; document synchronization is capped at 4 MiB and document text is no longer written to logs.
+- Phase 65: Schema, table/key/index/collection, and column metadata now carry credential-free `oxide://database-object` source URIs. Definition jumps reveal the real Database Explorer object; references and safe rename cover all open documents in the same schema.
+- Phase 66: Monaco now consumes signature help, range formatting, rename, code actions, document/workspace symbols, folding, selection ranges, semantic tokens, and routine-parameter inlay hints through a strict Tauri request allowlist.
+- Phase 67: SQL inspections cover parser errors, mutation without `WHERE`, unconditioned joins, ambiguous unqualified columns, `SELECT *`, and obvious cross-dialect syntax risks. Quick fixes provide a non-matching mutation safety guard and schema-backed `*` expansion; `-- noinspection OXIDE###` suppresses a specific inspection.
+- Phase 68: Completion models CTE output columns, derived-table aliases, current-console temporary table creation/drop lifecycle, and routine overload signatures.
+- Phase 69: The bundled binary is rebuilt from the checked-out submodule worktree and accompanied by `sql-lsp.manifest.json`; startup verifies its SHA-256 and exposes the source revision/dirty state.
 
-⏳ **Pending:**
-
-- Full in-app TypeScript/Tauri AI registry live E2E coverage against Docker databases
+The shipped editor/LSP path has no known unimplemented protocol handler that it advertises. Closed, unopened project files are intentionally not read by the LSP process; project-wide code usage outside open documents remains an application indexing concern rather than hidden filesystem access by the language server.
 
 ## Setup Instructions
 
@@ -86,7 +91,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked revision is `v0.1.3-66-gadb4c7c`.
+Current tracked commit is `f8c238784faeb7b109adf9aa2706d6a26e4315af`. A locally rebuilt binary may report the same revision with `sourceDirty: true` while the reviewed submodule changes are still uncommitted; the adjacent manifest is the authoritative build evidence.
 
 ### 2. Prepare the Binary
 
@@ -97,6 +102,8 @@ bash src-tauri/build_prepare.sh
 ```
 
 `make dev` runs `lsp-build` first, then starts Tauri with `OXIDE_SKIP_SQL_LSP_PREPARE=1`; the Tauri `beforeDevCommand` also sets that flag so direct `npm run tauri -- dev` does not rewrite the watched bundled binary during startup. After changing `vendor/sql-lsp`, run `make lsp-build` or the script above before starting dev mode.
+
+The preparation script writes `src-tauri/binaries/sql-lsp.manifest.json` with the source revision, dirty flag, target platform/architecture, and SHA-256. `check_lsp_binary` rejects a binary when an adjacent manifest exists but its checksum does not match.
 
 If Tauri dev still rebuilds repeatedly with `src-tauri/binaries/sql-lsp changed`, stop the dev process before rebuilding the LSP binary. For a stable session while iterating on the frontend or app logic, use:
 
@@ -136,6 +143,7 @@ To verify it's working, check the console logs:
 - Async stdout reader task parses LSP messages
 - Async stdin writer task sends JSON-RPC requests
 - Request/response correlation using channels and HashMap
+- Standard JSON-RPC cancellation on timeout and per-session process isolation
 
 **Tauri Commands** (`src-tauri/src/commands/lsp.rs`):
 
@@ -145,6 +153,7 @@ To verify it's working, check the console logs:
 - `lsp_get_completions` - Get SQL completions (fully implemented)
 - `lsp_did_change_configuration` - Update LSP settings and schema context
 - `lsp_did_open`, `lsp_did_change`, `lsp_did_close` - Synchronize editor documents
+- `lsp_request` - Strictly allowlisted bridge for advanced read/refactor LSP methods
 - Commands keep the global state lock only while cloning the manager handle; slow LSP requests do not block health checks or shutdown.
 
 ### Frontend (TypeScript)
@@ -205,7 +214,7 @@ Run the protocol-level bundled LSP test after rebuilding `src-tauri/binaries/sql
 cargo test --manifest-path src-tauri/Cargo.toml --test lsp_integration -- --nocapture
 ```
 
-This spawns the packaged binary, performs a real LSP initialize/configuration/document/completion flow, and asserts schema-aware Redis key, MongoDB collection/field, and Elasticsearch index/field completions.
+This spawns the packaged binary, performs a real LSP initialize/configuration/document/completion flow, and asserts schema-aware Redis key, MongoDB collection/field, and Elasticsearch index/field completions. The submodule protocol suite additionally covers stable object URIs, cross-document references/rename, advanced editor capabilities, inspections/quick fixes, semantic tokens, parameter hints, and local relation inference.
 
 ## Troubleshooting
 

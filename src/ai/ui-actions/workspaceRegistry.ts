@@ -1,5 +1,8 @@
 import { APP_EVENT_OPEN_SETTINGS } from "@/lib/actionEvents";
-import { requestDatabaseObjectReveal } from "@/lib/databaseNavigation";
+import {
+  requestDatabaseObjectReveal,
+  requestDatabaseSchemaReveal,
+} from "@/lib/databaseNavigation";
 import { requestEditorRangeReveal } from "@/lib/editorNavigation";
 import { findExplainPlanNode } from "@/lib/explainPlan";
 import { requestExplainPlanNodeReveal } from "@/lib/explainPlanNavigation";
@@ -115,6 +118,31 @@ export function createWorkspaceUiActionRegistry() {
       useWorkbenchLayoutStore
         .getState()
         .setActiveToolWindow("databaseExplorer");
+    },
+  });
+
+  registry.register({
+    name: "database.revealSchema",
+    description: "Reveal an exact database schema or namespace in Database Explorer.",
+    validateTarget: requireFields("projectId", "connectionId", "schemaName"),
+    execute: async (target, context) => {
+      const connection = connectionById(target.connectionId!);
+      if (!connection) {
+        return notFound(context.actionId, "Data source", target.connectionId!);
+      }
+      const connectionError = await useConnectionStore
+        .getState()
+        .setActiveConnection(connection.id);
+      if (connectionError) throw new Error(connectionError);
+      useWorkbenchLayoutStore
+        .getState()
+        .setActiveToolWindow("databaseExplorer");
+      requestDatabaseSchemaReveal({
+        projectId: target.projectId,
+        connectionId: connection.id,
+        databaseName: target.databaseName,
+        schemaName: target.schemaName!,
+      });
     },
   });
 

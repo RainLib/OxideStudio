@@ -4,6 +4,7 @@ import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useHistoryStore } from "@/store/useHistoryStore";
 import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
+import { ApiError } from "@/services/tauri/types";
 
 const mocks = vi.hoisted(() => ({
   executeQuery: vi.fn(async () => []),
@@ -177,6 +178,59 @@ describe("query run cancellation store", () => {
       rowCount: null,
       errorMessage: "syntax error near FROM",
       executionMode: "statement",
+    });
+  });
+
+  it("keeps trusted PostgreSQL diagnostics and maps the statement position into the editor", async () => {
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          sql: "SELECT 1;\nSELECT FROM users",
+        },
+      ],
+    });
+    mocks.executeQuery.mockRejectedValueOnce(
+      new ApiError("syntax error at or near FROM", "QUERY_EXECUTION_FAILED", null, {
+        retryable: false,
+        category: "query",
+        context: {
+          databaseError: {
+            driver: "postgres",
+            sqlState: "42601",
+            severity: "ERROR",
+            position: 8,
+          },
+        },
+      }),
+    );
+
+    await useTabStore
+      .getState()
+      .runTabQuery(
+        "tab-1",
+        "postgres-1",
+        "SELECT FROM users",
+        undefined,
+        10,
+      );
+
+    expect(useTabStore.getState().tabs[0]).toMatchObject({
+      error: "syntax error at or near FROM",
+      queryError: {
+        code: "QUERY_EXECUTION_FAILED",
+        retryable: false,
+        database: {
+          driver: "postgres",
+          sqlState: "42601",
+          position: 8,
+          executionLine: 1,
+          executionColumn: 8,
+          documentOffset: 17,
+          documentLine: 2,
+          documentColumn: 8,
+        },
+      },
     });
   });
 

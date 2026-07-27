@@ -45,7 +45,11 @@ import {
   redisSelectedDatabase,
 } from "@/lib/querySafety";
 import type { Diagnostic } from "@/services/lsp/types";
-import { isMissingConnectionSession } from "@/lib/queryErrorPresentation";
+import {
+  extractQueryExecutionError,
+  isMissingConnectionSession,
+  type QueryExecutionErrorDetail,
+} from "@/lib/queryErrorPresentation";
 import {
   extractSchemaContextChange,
   metadataRefreshNamespaces,
@@ -58,6 +62,8 @@ import {
 } from "@/lib/editorPatch";
 import { documentTextRevision } from "@/lib/documentRevision";
 import { compileElasticsearchConsoleExecution } from "@/lib/elasticsearchConsole";
+import type { DataCompareSource } from "@/lib/dataCompare";
+import type { AgentFileDiffPreview } from "@/lib/agentFileReview";
 
 async function refreshMetadataAfterQuery(
   connectionId: string,
@@ -125,7 +131,13 @@ async function refreshMetadataAfterQuery(
   schemaStore.bumpMetadataVersion();
 }
 
-export type TabType = "query" | "table" | "create_table" | "schema_diff";
+export type TabType =
+  | "query"
+  | "table"
+  | "create_table"
+  | "schema_diff"
+  | "schema_diagram"
+  | "data_compare";
 export type QueryLanguage = "elasticsearch-dsl" | "elasticsearch-eql";
 
 const ELASTICSEARCH_REQUEST_LINE =
@@ -198,6 +210,7 @@ export interface TabData {
   isExecuting: boolean;
   runningQueryId?: string | null;
   error: string | null;
+  queryError?: QueryExecutionErrorDetail | null;
   activeResultIndex?: number;
   isPinned: boolean;
   gridState?: {
@@ -235,6 +248,7 @@ export interface TabData {
   tableFilters?: TableFilter[] | null;
   editorSelection?: EditorSelectionState | null;
   editorPatchPreview?: EditorPatchPreview | null;
+  agentFileDiffPreview?: AgentFileDiffPreview | null;
   lspDiagnostics?: Diagnostic[];
   fileProjectId?: string;
   fileRootPath?: string;
@@ -247,6 +261,10 @@ export interface TabData {
   schemaDiffSource?: SchemaSnapshot;
   schemaDiffTarget?: SchemaSnapshot;
   selectedSchemaChangeId?: string | null;
+  schemaDiagramSnapshot?: SchemaSnapshot;
+  selectedDiagramRelationName?: string | null;
+  dataCompareLeft?: DataCompareSource;
+  dataCompareRight?: DataCompareSource;
 }
 
 function fileNameFromPath(relativePath: string) {
@@ -331,6 +349,60 @@ export function confirmDiscardTableChanges(tabId: string, action: string) {
 
 function normalizedDatabaseName(databaseName: string | null | undefined) {
   return databaseName === "" || databaseName == null ? undefined : databaseName;
+}
+
+export function dataCompareSourceFromTab(
+  tab: TabData,
+  capturedAt = Date.now(),
+): DataCompareSource | null {
+  if (!canCreateDataCompareSource(tab)) return null;
+  const resultIndex = tab.type === "table" ? 0 : tab.activeResultIndex || 0;
+  const result = tab.results![resultIndex]!;
+  const primaryKeys = (tab.tableColumns || [])
+    .filter((column) => column.is_primary_key)
+    .map((column) => column.name)
+    .filter((column) => result.columns.some((candidate) => candidate.name === column));
+  return {
+    id: `${tab.id}:${resultIndex}:${capturedAt}`,
+    tabId: tab.id,
+    label: tab.title,
+    sourceKind: tab.type === "table" ? "table" : "query",
+    resultIndex,
+    page: tab.type === "table" ? tab.tablePage || 1 : undefined,
+    connectionId: tab.connectionId,
+    databaseName: tab.databaseName,
+    schemaName: tab.schemaName,
+    objectName: tab.tableName,
+    columns: result.columns.map((column) => ({
+      name: column.name,
+      dataType: column.data_type,
+    })),
+    rows: result.rows.map((row) => row.map(cloneDataCompareValue)),
+    suggestedKeyColumns: primaryKeys,
+    truncated: Boolean(result.truncated),
+    rowLimit: result.rowLimit,
+    capturedAt,
+  };
+}
+
+export function canCreateDataCompareSource(tab: TabData) {
+  if (tab.type !== "query" && tab.type !== "table") return false;
+  if (tab.isExecuting || hasPendingTableChanges(tab)) return false;
+  const resultIndex = tab.type === "table" ? 0 : tab.activeResultIndex || 0;
+  return Boolean(tab.results?.[resultIndex]?.columns.length);
+}
+
+function cloneDataCompareValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(cloneDataCompareValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        key,
+        cloneDataCompareValue(item),
+      ]),
+    );
+  }
+  return value;
 }
 
 function tabMatchesDatabase(
@@ -598,6 +670,7 @@ interface TabState {
         | "fileRevision"
         | "filePreview"
         | "isDirty"
+        | "agentFileDiffPreview"
       >
     >,
   ) => string;
@@ -631,6 +704,12 @@ interface TabState {
     target: SchemaSnapshot,
   ) => string;
   selectSchemaDiffChange: (tabId: string, changeId: string | null) => void;
+  openSchemaDiagramTab: (snapshot: SchemaSnapshot) => string;
+  selectSchemaDiagramRelation: (
+    tabId: string,
+    relationName: string | null,
+  ) => void;
+  openDataCompareTab: (leftTabId: string, rightTabId: string) => string | null;
   retargetTableTabs: (
     connectionId: string,
     schemaName: string,
@@ -656,6 +735,9 @@ interface TabState {
     size: number,
     rootPath?: string | null,
   ) => string;
+  openAgentFileDiffTab: (preview: AgentFileDiffPreview) => string;
+  syncAgentFileDiffPreview: (preview: AgentFileDiffPreview) => void;
+  dismissAgentFileDiffPreview: (turnId: string, callId: string) => void;
   markProjectFileSaved: (
     id: string,
     revision: string,
@@ -701,6 +783,7 @@ interface TabState {
     connectionId: string,
     sqlOverride?: string,
     transactionId?: string,
+    sourceStartOffset?: number,
   ) => Promise<void>;
   runExplainPlan: (
     id: string,
@@ -1024,6 +1107,119 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
   },
 
+  openSchemaDiagramTab: (snapshot) => {
+    const existing = get().tabs.find(
+      (tab) =>
+        tab.type === "schema_diagram" &&
+        tab.connectionId === snapshot.connectionId &&
+        tab.databaseName === (snapshot.databaseName || undefined) &&
+        tab.schemaName === snapshot.schemaName,
+    );
+    const title = `Diagram · ${snapshot.schemaName}`;
+    if (existing) {
+      set((state) => ({
+        activeTabId: existing.id,
+        tabs: state.tabs.map((tab) =>
+          tab.id === existing.id
+            ? {
+                ...tab,
+                title,
+                schemaDiagramSnapshot: snapshot,
+                selectedDiagramRelationName:
+                  tab.selectedDiagramRelationName &&
+                  snapshot.relations.some(
+                    (relation) =>
+                      relation.name === tab.selectedDiagramRelationName,
+                  )
+                    ? tab.selectedDiagramRelationName
+                    : snapshot.relations[0]?.name || null,
+              }
+            : tab,
+        ),
+      }));
+      return existing.id;
+    }
+
+    const tab: TabData = {
+      id: uuidv4(),
+      title,
+      type: "schema_diagram",
+      sql: "",
+      connectionId: snapshot.connectionId,
+      databaseName: snapshot.databaseName || undefined,
+      schemaName: snapshot.schemaName,
+      results: null,
+      isExecuting: false,
+      error: null,
+      isPinned: false,
+      schemaDiagramSnapshot: snapshot,
+      selectedDiagramRelationName: snapshot.relations[0]?.name || null,
+    };
+    set((state) => ({
+      tabs: [...state.tabs, tab],
+      activeTabId: tab.id,
+    }));
+    return tab.id;
+  },
+
+  selectSchemaDiagramRelation: (tabId, relationName) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId
+          ? { ...tab, selectedDiagramRelationName: relationName }
+          : tab,
+      ),
+    }));
+  },
+
+  openDataCompareTab: (leftTabId, rightTabId) => {
+    if (leftTabId === rightTabId) return null;
+    const leftTab = get().tabs.find((tab) => tab.id === leftTabId);
+    const rightTab = get().tabs.find((tab) => tab.id === rightTabId);
+    if (!leftTab || !rightTab) return null;
+    const capturedAt = Date.now();
+    const left = dataCompareSourceFromTab(leftTab, capturedAt);
+    const right = dataCompareSourceFromTab(rightTab, capturedAt);
+    if (!left || !right) return null;
+
+    const title = `Compare · ${left.label} ↔ ${right.label}`;
+    const existing = get().tabs.find(
+      (tab) =>
+        tab.type === "data_compare" &&
+        tab.dataCompareLeft?.tabId === leftTabId &&
+        tab.dataCompareRight?.tabId === rightTabId,
+    );
+    if (existing) {
+      set((state) => ({
+        activeTabId: existing.id,
+        tabs: state.tabs.map((tab) =>
+          tab.id === existing.id
+            ? { ...tab, title, dataCompareLeft: left, dataCompareRight: right }
+            : tab,
+        ),
+      }));
+      return existing.id;
+    }
+
+    const tab: TabData = {
+      id: uuidv4(),
+      title,
+      type: "data_compare",
+      sql: "",
+      results: null,
+      isExecuting: false,
+      error: null,
+      isPinned: false,
+      dataCompareLeft: left,
+      dataCompareRight: right,
+    };
+    set((state) => ({
+      tabs: [...state.tabs, tab],
+      activeTabId: tab.id,
+    }));
+    return tab.id;
+  },
+
   retargetTableTabs: (
     connectionId: string,
     schemaName: string,
@@ -1072,6 +1268,7 @@ export const useTabStore = create<TabState>((set, get) => ({
   ) => {
     const existing = get().tabs.find(
       (tab) =>
+        !tab.agentFileDiffPreview &&
         tab.fileProjectId === projectId &&
         tab.fileRelativePath === relativePath &&
         (!rootPath || !tab.fileRootPath || tab.fileRootPath === rootPath),
@@ -1101,6 +1298,7 @@ export const useTabStore = create<TabState>((set, get) => ({
   ) => {
     const existing = get().tabs.find(
       (tab) =>
+        !tab.agentFileDiffPreview &&
         tab.fileProjectId === projectId &&
         tab.fileRelativePath === relativePath &&
         (!rootPath || !tab.fileRootPath || tab.fileRootPath === rootPath),
@@ -1139,6 +1337,72 @@ export const useTabStore = create<TabState>((set, get) => ({
       filePreview,
       isDirty: false,
     });
+  },
+
+  openAgentFileDiffTab: (preview) => {
+    const existing = get().tabs.find(
+      (tab) =>
+        tab.agentFileDiffPreview?.turnId === preview.turnId &&
+        tab.agentFileDiffPreview.callId === preview.callId,
+    );
+    if (existing) {
+      set((state) => ({
+        activeTabId: existing.id,
+        tabs: state.tabs.map((tab) =>
+          tab.id === existing.id
+            ? {
+                ...tab,
+                sql: preview.originalContent,
+                fileRevision: preview.baseRevision || undefined,
+                agentFileDiffPreview: preview,
+                fileError: null,
+              }
+            : tab,
+        ),
+      }));
+      return existing.id;
+    }
+    return get().createTab(
+      "query",
+      `${fileNameFromPath(preview.relativePath)} (Diff)`,
+      preview.originalContent,
+      {
+        fileProjectId: preview.projectId,
+        fileRootPath: preview.expectedRoot || undefined,
+        fileRelativePath: preview.relativePath,
+        fileRevision: preview.baseRevision || undefined,
+        isDirty: false,
+        agentFileDiffPreview: preview,
+      },
+    );
+  },
+
+  syncAgentFileDiffPreview: (preview) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.agentFileDiffPreview?.turnId === preview.turnId &&
+        tab.agentFileDiffPreview.callId === preview.callId
+          ? {
+              ...tab,
+              sql: preview.originalContent,
+              fileRevision: preview.baseRevision || undefined,
+              agentFileDiffPreview: preview,
+              fileError: preview.error || null,
+            }
+          : tab,
+      ),
+    }));
+  },
+
+  dismissAgentFileDiffPreview: (turnId, callId) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.agentFileDiffPreview?.turnId === turnId &&
+        tab.agentFileDiffPreview.callId === callId
+          ? { ...tab, agentFileDiffPreview: null }
+          : tab,
+      ),
+    }));
   },
 
   markProjectFileSaved: (id, revision, savedContent) => {
@@ -1366,6 +1630,7 @@ export const useTabStore = create<TabState>((set, get) => ({
               ...tab,
               sql,
               explainPlan: tab.sql === sql ? tab.explainPlan : null,
+              queryError: tab.sql === sql ? tab.queryError : null,
               queryOutputView:
                 tab.sql === sql || !tab.explainPlan
                   ? tab.queryOutputView
@@ -1522,6 +1787,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     connectionId: string,
     sqlOverride?: string,
     transactionId?: string,
+    sourceStartOffset?: number,
   ) => {
     const tab = get().tabs.find((t) => t.id === id);
     if (!tab) return;
@@ -1590,6 +1856,7 @@ export const useTabStore = create<TabState>((set, get) => ({
               isExecuting: true,
               runningQueryId: queryId,
               error: null,
+              queryError: null,
               explainPlan: null,
               queryOutputView: "results",
               activeResultIndex: t.activeResultIndex ?? 0,
@@ -1721,6 +1988,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                 runningQueryId: null,
                 results: results || null,
                 activeResultIndex: 0,
+                queryError: null,
               }
             : t,
         ),
@@ -1736,8 +2004,14 @@ export const useTabStore = create<TabState>((set, get) => ({
           console.warn("[TabStore] Metadata refresh after query failed", error);
         });
       }
-    } catch (e: any) {
-      const message = e.message || String(e);
+    } catch (e: unknown) {
+      const queryError = extractQueryExecutionError(
+        e,
+        sqlToRun,
+        tab.sql,
+        sourceStartOffset ?? (sqlOverride === undefined ? 0 : undefined),
+      );
+      const message = queryError.message;
       const finishedAt = Date.now();
       useHistoryStore.getState().recordExecution({
         ...historyContext,
@@ -1756,6 +2030,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                 isExecuting: false,
                 runningQueryId: null,
                 error: message,
+                queryError,
               }
             : t,
         ),

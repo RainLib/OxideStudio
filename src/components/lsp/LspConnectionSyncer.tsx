@@ -10,6 +10,7 @@ import {
   type DatabaseCapabilities,
 } from "@/services/tauri";
 import {
+  assignLspObjectSourceLocations,
   collectionToLspTableDefinition,
   emptyLspTableDetails,
   selectLspTablesForSchema,
@@ -17,6 +18,7 @@ import {
   type LspSchemaDefinition,
   type LspTableDefinition,
 } from "@/services/lsp/schemaConfig";
+import { getLspDatabaseObjectUri } from "@/services/lsp/objectUri";
 import {
   getCachedLspMetadata,
   type CachedLspMetadata,
@@ -101,11 +103,7 @@ export function LspConnectionSyncer() {
   const tabs = useTabStore((state) => state.tabs);
   const activeTabId = useTabStore((state) => state.activeTabId);
   const activeConnection = connections.find((c) => c.id === activeConnectionId);
-  const supportsMetadataSync = Boolean(
-    activeConnection &&
-      defaultDatabaseCapabilities(activeConnection.driver).dataModel !==
-        "keyValue"
-  );
+  const supportsMetadataSync = Boolean(activeConnection);
   const hasConnectionQueryTab = tabs.some(
     (tab) =>
       tab.type === "query" &&
@@ -224,6 +222,40 @@ export function LspConnectionSyncer() {
       return schemaId;
     };
 
+    const objectSourceUri = (
+      catalog: LspCatalogTarget,
+      objectName?: string | null,
+      objectType?: string | null,
+      columnName?: string | null
+    ) =>
+      getLspDatabaseObjectUri({
+        connectionId: activeConnectionId,
+        databaseName: catalog.databaseName,
+        schemaName: catalog.schemaName,
+        objectName,
+        objectType,
+        columnName,
+      });
+
+    const assignSourceLocations = (
+      catalog: LspCatalogTarget,
+      definition: LspTableDefinition
+    ) =>
+      assignLspObjectSourceLocations(definition, {
+        tableUri: objectSourceUri(
+          catalog,
+          definition.name,
+          definition.object_type
+        ),
+        columnUri: (columnName) =>
+          objectSourceUri(
+            catalog,
+            definition.name,
+            definition.object_type,
+            columnName
+          ),
+      });
+
     const buildTableDefinition = async (
       catalog: LspCatalogTarget,
       table: { name: string; type?: string | null; comment?: string | null }
@@ -241,11 +273,16 @@ export function LspConnectionSyncer() {
         });
         const { columns, indexes, constraints } = metadata;
 
-        return {
+        return assignSourceLocations(catalog, {
           name: table.name,
           object_type: table.type || null,
           comment: table.comment || null,
-          ...emptyLspTableDetails(),
+          ...emptyLspTableDetails(
+            [
+              objectSourceUri(catalog, table.name, table.type || null),
+              1,
+            ]
+          ),
           indexes: indexes.map((index) => ({
             name: index.name,
             columns: index.columns || [],
@@ -273,9 +310,17 @@ export function LspConnectionSyncer() {
             default_value: col.default_value ?? null,
             auto_increment: !!col.is_auto_increment,
             comment: col.comment || null,
-            source_location: null,
+            source_location: [
+              objectSourceUri(
+                catalog,
+                table.name,
+                table.type || null,
+                col.name
+              ),
+              1,
+            ],
           })),
-        };
+        });
       } catch (error) {
         console.error(
           `[LSP] Failed to fetch metadata for ${[
@@ -287,13 +332,18 @@ export function LspConnectionSyncer() {
             .join(".")}:`,
           error
         );
-        return {
+        return assignSourceLocations(catalog, {
           name: table.name,
           object_type: table.type || null,
           comment: table.comment || null,
-          ...emptyLspTableDetails(),
+          ...emptyLspTableDetails(
+            [
+              objectSourceUri(catalog, table.name, table.type || null),
+              1,
+            ]
+          ),
           columns: [],
-        };
+        });
       }
     };
 
@@ -336,7 +386,8 @@ export function LspConnectionSyncer() {
           const canSyncTableMetadata = supportsTableWorkspace(capabilities);
           const canSyncCollectionMetadata =
             !canSyncTableMetadata &&
-            capabilities.supportsCollectionBrowsing;
+            (capabilities.supportsCollectionBrowsing ||
+              capabilities.supportsKeyValueBrowsing);
           const lspDialect = normalizeLspDialect(
             capabilities.lspLanguageId || connection.driver
           );
@@ -438,17 +489,31 @@ export function LspConnectionSyncer() {
               id: getSchemaId(catalog.schemaName, catalog.catalogName),
               catalog: catalog.catalogName,
               database: catalog.schemaName,
-              source_uri: null,
+              source_uri: objectSourceUri(catalog),
               tables: canSyncTableMetadata
-                ? catalog.tables.map((table) => ({
-                    name: table.name,
-                    object_type: table.type || null,
-                    comment: table.comment || null,
-                    ...emptyLspTableDetails(),
-                    columns: [],
-                  }))
+                ? catalog.tables.map((table) =>
+                    assignSourceLocations(catalog, {
+                      name: table.name,
+                      object_type: table.type || null,
+                      comment: table.comment || null,
+                      ...emptyLspTableDetails(
+                        [
+                          objectSourceUri(
+                            catalog,
+                            table.name,
+                            table.type || null
+                          ),
+                          1,
+                        ]
+                      ),
+                      columns: [],
+                    })
+                  )
                 : catalog.collections.map((collection) =>
-                    collectionToLspTableDefinition(capabilities, collection)
+                    assignSourceLocations(
+                      catalog,
+                      collectionToLspTableDefinition(capabilities, collection)
+                    )
                   ),
               functions: catalog.functions,
             })
@@ -489,6 +554,8 @@ export function LspConnectionSyncer() {
                     catalog.schemaName,
                     capabilities,
                     collection
+                  ).then((definition) =>
+                    assignSourceLocations(catalog, definition)
                   ),
               });
             });

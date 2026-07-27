@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -9,6 +17,7 @@ const lspSourceDir = join(repoRoot, "vendor", "sql-lsp");
 const binariesDir = join(repoRoot, "src-tauri", "binaries");
 const binaryName = process.platform === "win32" ? "sql-lsp.exe" : "sql-lsp";
 const targetBinary = join(binariesDir, binaryName);
+const targetManifest = join(binariesDir, "sql-lsp.manifest.json");
 
 console.log("=== SQL LSP Build Preparation ===");
 console.log(`Target: ${targetBinary}`);
@@ -20,6 +29,8 @@ if (process.env.OXIDE_SKIP_SQL_LSP_PREPARE === "1" && existsSync(targetBinary)) 
 }
 
 let sourceBinary = process.env.OXIDE_SQL_LSP_BINARY;
+let sourceRevision = "override";
+let sourceDirty = null;
 if (sourceBinary) {
   sourceBinary = resolve(sourceBinary);
   if (!existsSync(sourceBinary)) {
@@ -41,6 +52,18 @@ if (sourceBinary) {
     process.exit(cargo.status ?? 1);
   }
   sourceBinary = join(lspSourceDir, "target", "release", binaryName);
+  const revision = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: lspSourceDir,
+    encoding: "utf8",
+  });
+  if (revision.status === 0) {
+    sourceRevision = revision.stdout.trim();
+  }
+  const status = spawnSync("git", ["status", "--porcelain", "--untracked-files=no"], {
+    cwd: lspSourceDir,
+    encoding: "utf8",
+  });
+  sourceDirty = status.status === 0 ? status.stdout.trim().length > 0 : null;
 }
 
 if (!existsSync(sourceBinary)) {
@@ -57,4 +80,23 @@ if (existsSync(targetBinary) && digest(sourceBinary) === digest(targetBinary)) {
   renameSync(temporaryBinary, targetBinary);
 }
 
+const sha256 = digest(targetBinary);
+writeFileSync(
+  targetManifest,
+  `${JSON.stringify(
+    {
+      schemaVersion: 1,
+      sourceRevision,
+      sourceDirty,
+      sha256,
+      platform: process.platform,
+      architecture: process.arch,
+      profile: "release",
+    },
+    null,
+    2
+  )}\n`
+);
+
 console.log(`SQL LSP binary ready at ${targetBinary}`);
+console.log(`SQL LSP provenance: ${sourceRevision}${sourceDirty ? "-dirty" : ""} (${sha256})`);

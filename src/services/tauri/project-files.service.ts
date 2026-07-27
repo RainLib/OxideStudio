@@ -30,11 +30,46 @@ export interface ProjectFilePreview {
 export interface ProjectFileWriteResult {
   relativePath: string;
   revision: string;
+  previousRevision?: string | null;
+  introducedLines?: number[];
+  lineEvidenceTruncated?: boolean;
 }
 
 export interface ProjectCompletionSnippet {
   relativePath: string;
   content: string;
+}
+
+export interface ProjectGitFileChange {
+  relativePath: string;
+  previousPath?: string | null;
+  status: "modified" | "added" | "deleted" | "renamed" | "untracked" | "conflicted";
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+  conflicted: boolean;
+}
+
+export interface ProjectGitChangeSet {
+  isRepository: boolean;
+  branch?: string | null;
+  head?: string | null;
+  files: ProjectGitFileChange[];
+  truncated: boolean;
+}
+
+export type ProjectGitDiffScope = "all" | "staged" | "working";
+export type ProjectGitRevisionStatus = "available" | "missing" | "unavailable";
+
+export interface ProjectGitFileDiff {
+  relativePath: string;
+  patch: string;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+  truncated: boolean;
+  currentSideRevision: string | null;
+  currentSideRevisionStatus: ProjectGitRevisionStatus;
 }
 
 export class ProjectFileRevisionConflictError extends Error {
@@ -159,6 +194,36 @@ function normalizeWrite(
 }
 
 export const projectFilesService = {
+  getGitChanges: async (
+    projectId: string,
+    expectedRoot?: string | null,
+  ): Promise<ProjectGitChangeSet> => {
+    return await invokeRawCommand<ProjectGitChangeSet>(
+      "get_project_git_changes",
+      {
+        projectId: requireProjectId(projectId),
+        ...expectedRootArgument(expectedRoot),
+      },
+    );
+  },
+
+  getGitFileDiff: async (
+    projectId: string,
+    relativePath: string,
+    expectedRoot?: string | null,
+    scope: ProjectGitDiffScope = "all",
+  ): Promise<ProjectGitFileDiff> => {
+    return await invokeRawCommand<ProjectGitFileDiff>(
+      "get_project_git_file_diff",
+      {
+        projectId: requireProjectId(projectId),
+        relativePath: normalizeProjectRelativePath(relativePath),
+        scope,
+        ...expectedRootArgument(expectedRoot),
+      },
+    );
+  },
+
   getCompletionContext: async (options: {
     projectId: string;
     expectedRoot?: string | null;

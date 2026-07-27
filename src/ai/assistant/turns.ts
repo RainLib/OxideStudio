@@ -1,6 +1,7 @@
 import type { AssistantMode, ResolvedAssistantMode } from "./modes";
 import type { AssistantConversationMessage } from "./types";
 import type { AssistantAttachment } from "@/ai/ui-actions/types";
+import type { AgentCitation } from "@/services/tauri/agent-host.service";
 
 export type AssistantTurnStatus =
   | "queued"
@@ -38,6 +39,7 @@ export type AssistantProcessItem = {
   title: string;
   detail?: string | null;
   toolName?: string | null;
+  relativePath?: string | null;
   status: AssistantProcessStatus;
   startedAt: number;
   finishedAt?: number | null;
@@ -83,6 +85,7 @@ export type AssistantFinalMessage = {
   content: string;
   attachments: AssistantAttachment[];
   artifactRefs?: string[];
+  citations?: AgentCitation[];
   createdAt: number;
 };
 
@@ -100,6 +103,34 @@ export type AssistantModelUsageStats = {
   totalTokens: number;
 };
 
+export type AssistantProjectFileChange = {
+  callId: string;
+  relativePath: string;
+  operation: "created" | "updated";
+  revision: string;
+  previousRevision?: string | null;
+  introducedLines?: number[];
+  lineEvidenceTruncated?: boolean;
+  occurredAt: number;
+};
+
+export type AssistantProjectFileProposal = {
+  callId: string;
+  relativePath: string;
+  operation: "created" | "updated";
+  proposedRevision: string;
+  baseRevision?: string | null;
+  originalContent: string;
+  proposedContent: string;
+  additions: number;
+  deletions: number;
+  status: "pending" | "accepted" | "rejected";
+  isApplying?: boolean;
+  error?: string | null;
+  occurredAt: number;
+  resolvedAt?: number | null;
+};
+
 export type AssistantTurn = {
   id: string;
   requestId: string;
@@ -108,6 +139,11 @@ export type AssistantTurn = {
   requestedMode: AssistantMode;
   mode: ResolvedAssistantMode;
   userMessage: string;
+  userAttachments?: Array<{
+    id: string;
+    fileName: string;
+    byteCount: number;
+  }>;
   status: AssistantTurnStatus;
   process: AssistantProcessItem[];
   clarifications: AssistantClarification[];
@@ -116,6 +152,8 @@ export type AssistantTurn = {
   final?: AssistantFinalMessage | null;
   contextCompaction?: AssistantContextCompactionStats | null;
   modelUsage?: AssistantModelUsageStats | null;
+  fileChanges?: AssistantProjectFileChange[];
+  fileProposals?: AssistantProjectFileProposal[];
   error?: string | null;
   errorDetail?: string | null;
   createdAt: number;

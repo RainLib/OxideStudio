@@ -72,6 +72,7 @@ prost = "0.14.4"
 tonic = { version = "0.14.6", features = ["transport", "tls-webpki-roots"] }
 tonic-prost = "0.14.6"
 tokio-stream = "0.1.18"
+futures = "0.3"
 sqlparser = { version = "0.59.0", features = ["visitor"] }
 csv = "1.3"
 clap = { version = "=4.6.1", features = ["derive", "env"] }
@@ -82,7 +83,6 @@ dotenvy = "0.15.7"
 
 # LSP support
 tokio-util = { version = "0.7", features = ["codec"] }
-futures = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
 flate2 = "1.0"
 tar = "0.4"

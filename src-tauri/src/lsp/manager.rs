@@ -76,6 +76,7 @@ impl LspServerManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .context(format!(
                 "Failed to spawn LSP server process: {}",
@@ -227,7 +228,12 @@ impl LspServerManager {
                     LspOutgoingMessage::CancelRequest(id) => {
                         let mut pending = pending_responses_for_writer.lock().await;
                         pending.remove(&id);
-                        continue;
+                        drop(pending);
+                        (
+                            serde_json::to_string(&cancel_request_notification(id)),
+                            None,
+                            None,
+                        )
                     }
                 };
 
@@ -479,5 +485,25 @@ impl LspServerManager {
 
     pub fn session_key(&self) -> &str {
         &self.session_key
+    }
+}
+
+fn cancel_request_notification(id: u64) -> LspNotification {
+    LspNotification {
+        jsonrpc: "2.0".to_string(),
+        method: "$/cancelRequest".to_string(),
+        params: serde_json::json!({ "id": id }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cancel_request_notification;
+
+    #[test]
+    fn timeout_cancellation_uses_the_standard_lsp_notification() {
+        let notification = cancel_request_notification(42);
+        assert_eq!(notification.method, "$/cancelRequest");
+        assert_eq!(notification.params["id"], 42);
     }
 }

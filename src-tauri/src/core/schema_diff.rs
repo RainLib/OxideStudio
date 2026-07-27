@@ -99,12 +99,22 @@ pub struct SchemaChange {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub enum SchemaPreflightAssertion {
+    Advisory,
+    EmptyRows,
+    ZeroValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct SchemaPreflightCheck {
     pub id: String,
     pub change_id: String,
     pub label: String,
     pub sql: String,
     pub expectation: String,
+    pub assertion: SchemaPreflightAssertion,
+    pub result_column: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1718,6 +1728,8 @@ fn build_preflight_checks(
                 "Count rows before relation drop",
                 format!("SELECT COUNT(*) AS affected_rows FROM {relation};"),
                 "Review affected_rows and confirm that backups or rollback procedures exist.",
+                SchemaPreflightAssertion::Advisory,
+                Some("affected_rows"),
             )),
             SchemaChangeKind::ColumnDrop => {
                 if let Some(column_name) = change.child_name.as_deref() {
@@ -1729,6 +1741,8 @@ fn build_preflight_checks(
                             "SELECT COUNT(*) AS populated_rows FROM {relation} WHERE {column} IS NOT NULL;"
                         ),
                         "Review populated_rows; any value greater than zero represents data loss.",
+                        SchemaPreflightAssertion::Advisory,
+                        Some("populated_rows"),
                     ));
                 }
             }
@@ -1742,6 +1756,8 @@ fn build_preflight_checks(
                             "Verify table is empty before adding required column",
                             format!("SELECT COUNT(*) AS blocking_rows FROM {relation};"),
                             "blocking_rows must be 0 unless a backfill/default strategy is added.",
+                            SchemaPreflightAssertion::ZeroValue,
+                            Some("blocking_rows"),
                         ));
                     }
                 }
@@ -1762,6 +1778,8 @@ fn build_preflight_checks(
                                 "SELECT COUNT(*) AS blocking_rows FROM {relation} WHERE {column} IS NULL;"
                             ),
                             "blocking_rows must be 0.",
+                            SchemaPreflightAssertion::ZeroValue,
+                            Some("blocking_rows"),
                         ));
                     }
                 }
@@ -1805,6 +1823,8 @@ fn build_preflight_checks(
                                     "SELECT {columns}, COUNT(*) AS duplicate_count FROM {relation}{where_clause} GROUP BY {columns} HAVING COUNT(*) > 1 LIMIT 50;"
                                 ),
                                 "The query must return no rows.",
+                                SchemaPreflightAssertion::EmptyRows,
+                                None,
                             ));
                         } else if is_foreign_constraint(constraint) {
                             let depends_on_new_relation = created_relations
@@ -1827,6 +1847,8 @@ fn build_preflight_checks(
                                     "Find orphan rows before FOREIGN KEY",
                                     sql,
                                     "blocking_rows must be 0.",
+                                    SchemaPreflightAssertion::ZeroValue,
+                                    Some("blocking_rows"),
                                 ));
                             }
                         }
@@ -1888,6 +1910,8 @@ fn preflight_check(
     label: &str,
     sql: String,
     expectation: &str,
+    assertion: SchemaPreflightAssertion,
+    result_column: Option<&str>,
 ) -> SchemaPreflightCheck {
     SchemaPreflightCheck {
         id: stable_id("schema-preflight", &format!("{}:{label}", change.id)),
@@ -1895,6 +1919,8 @@ fn preflight_check(
         label: label.to_string(),
         sql,
         expectation: expectation.to_string(),
+        assertion,
+        result_column: result_column.map(ToString::to_string),
     }
 }
 
@@ -2455,6 +2481,16 @@ mod tests {
         let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
 
         assert_eq!(plan.preflight_checks.len(), 3);
+        assert_eq!(
+            plan.preflight_checks
+                .iter()
+                .filter(|check| check.assertion == SchemaPreflightAssertion::ZeroValue)
+                .count(),
+            2
+        );
+        assert!(plan.preflight_checks.iter().any(|check| {
+            check.assertion == SchemaPreflightAssertion::EmptyRows && check.result_column.is_none()
+        }));
         assert!(plan.preflight_sql.contains("blocking_rows"));
         assert!(plan.preflight_sql.contains("IS NULL"));
         assert!(plan.preflight_sql.contains("duplicate_count"));

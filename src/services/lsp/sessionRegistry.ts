@@ -13,6 +13,10 @@ type LspBinaryInfo = {
   exists: boolean;
   size_bytes?: number | null;
   modified_unix_ms?: number | null;
+  source_revision?: string | null;
+  source_dirty?: boolean | null;
+  sha256?: string | null;
+  integrity_verified?: boolean | null;
 };
 
 export type LspSessionDescriptor = {
@@ -21,8 +25,15 @@ export type LspSessionDescriptor = {
   client: LspClient;
 };
 
-const clientsBySessionKey = new Map<string, LspClient>();
+type LspSessionEntry = {
+  client: LspClient;
+  consumers: number;
+  shutdownTimer: ReturnType<typeof setTimeout> | null;
+};
+
+const clientsBySessionKey = new Map<string, LspSessionEntry>();
 let binaryInfoPromise: Promise<LspBinaryInfo> | null = null;
+export const LSP_SESSION_IDLE_SHUTDOWN_MS = 30_000;
 
 export function getLspSessionDescriptor(options: {
   connectionId: string | null | undefined;
@@ -37,13 +48,17 @@ export function getLspSessionDescriptor(options: {
     connectionId: options.connectionId,
     driver: options.driver,
   });
-  let client = clientsBySessionKey.get(key);
-  if (!client) {
-    client = new LspClient(key);
-    clientsBySessionKey.set(key, client);
+  let entry = clientsBySessionKey.get(key);
+  if (!entry) {
+    entry = {
+      client: new LspClient(key),
+      consumers: 0,
+      shutdownTimer: null,
+    };
+    clientsBySessionKey.set(key, entry);
   }
 
-  return { key, profile, client };
+  return { key, profile, client: entry.client };
 }
 
 export async function ensureLspSession(options: {
@@ -53,7 +68,10 @@ export async function ensureLspSession(options: {
   const descriptor = getLspSessionDescriptor(options);
   if (!descriptor) return null;
 
-  if (descriptor.client.isInitialized()) {
+  if (
+    descriptor.client.isInitialized() &&
+    (await descriptor.client.isRunning())
+  ) {
     return descriptor;
   }
 
@@ -64,6 +82,58 @@ export async function ensureLspSession(options: {
 
   await descriptor.client.initialize(binaryInfo.path);
   return descriptor;
+}
+
+/**
+ * Retains one mounted consumer of an LSP session. The matching release keeps a
+ * short idle grace period so pane switches do not churn the bundled process.
+ */
+export function retainLspSession(sessionKey: string) {
+  const entry = clientsBySessionKey.get(sessionKey);
+  if (!entry) return () => undefined;
+
+  if (entry.shutdownTimer) {
+    clearTimeout(entry.shutdownTimer);
+    entry.shutdownTimer = null;
+  }
+  entry.consumers += 1;
+  let released = false;
+
+  return () => {
+    if (released) return;
+    released = true;
+    releaseLspSession(sessionKey);
+  };
+}
+
+export async function shutdownLspSession(sessionKey: string) {
+  const entry = clientsBySessionKey.get(sessionKey);
+  if (!entry) return;
+  if (entry.shutdownTimer) clearTimeout(entry.shutdownTimer);
+  entry.shutdownTimer = null;
+  clientsBySessionKey.delete(sessionKey);
+  if (entry.client.isInitialized()) {
+    await entry.client.shutdown().catch(() => undefined);
+  }
+}
+
+export async function shutdownAllLspSessions() {
+  await Promise.all(
+    Array.from(clientsBySessionKey.keys(), (key) => shutdownLspSession(key))
+  );
+}
+
+function releaseLspSession(sessionKey: string) {
+  const entry = clientsBySessionKey.get(sessionKey);
+  if (!entry) return;
+  entry.consumers = Math.max(0, entry.consumers - 1);
+  if (entry.consumers > 0 || entry.shutdownTimer) return;
+
+  entry.shutdownTimer = setTimeout(() => {
+    const current = clientsBySessionKey.get(sessionKey);
+    if (!current || current !== entry || current.consumers > 0) return;
+    void shutdownLspSession(sessionKey);
+  }, LSP_SESSION_IDLE_SHUTDOWN_MS);
 }
 
 async function getBundledLspBinaryInfo() {

@@ -5,6 +5,7 @@ import {
   elasticsearchConsoleCompletions,
   elasticsearchConsoleCompletionContext,
   elasticsearchConsoleInlineSuggestion,
+  elasticsearchMappingFieldCompletions,
   elasticsearchConsoleRequestContext,
   elasticsearchSchemaCompletionsForContext,
   elasticsearchRequestAtOffset,
@@ -13,6 +14,9 @@ import {
   formatElasticsearchConsole,
   prepareElasticsearchConsoleExecution,
   parseElasticsearchConsoleRequests,
+  registerElasticsearchConsoleLanguage,
+  shouldOfferElasticsearchCompletions,
+  shouldTriggerElasticsearchCompletions,
   validateElasticsearchConsole,
 } from "@/lib/elasticsearchConsole";
 
@@ -192,6 +196,82 @@ describe("Elasticsearch Kibana Console requests", () => {
     ).not.toContain("GET");
   });
 
+  it("requests the suggestion widget while methods, operations, and DSL keys are typed", () => {
+    expect(shouldTriggerElasticsearchCompletions("P", 1, "P")).toBe(true);
+    expect(
+      shouldTriggerElasticsearchCompletions(
+        "POST /anocs_test/",
+        "POST /anocs_test/".length,
+        "/",
+      ),
+    ).toBe(true);
+
+    const queryKey = 'POST /anocs_test/_search\n{\n  "query": {\n    ""';
+    expect(shouldOfferElasticsearchCompletions(queryKey, queryKey.length - 1))
+      .toBe(true);
+    expect(
+      shouldTriggerElasticsearchCompletions(
+        queryKey,
+        queryKey.length - 1,
+        '"',
+      ),
+    ).toBe(true);
+
+    const fieldKey =
+      'POST /anocs_test/_search\n{\n  "query": {\n    "term": {\n      "g';
+    expect(
+      shouldTriggerElasticsearchCompletions(
+        fieldKey,
+        fieldKey.length,
+        "g",
+      ),
+    ).toBe(true);
+  });
+
+  it("registers Monaco trigger characters and operation suggestions", () => {
+    let completionProvider: any;
+    const disposable = { dispose: () => undefined };
+    const monaco: any = {
+      languages: {
+        getLanguages: () => [],
+        register: () => undefined,
+        setMonarchTokensProvider: () => disposable,
+        setLanguageConfiguration: () => disposable,
+        registerCompletionItemProvider: (_language: string, provider: any) => {
+          completionProvider = provider;
+          return disposable;
+        },
+        registerDocumentFormattingEditProvider: () => disposable,
+        registerCodeActionProvider: () => disposable,
+        CompletionItemKind: { Keyword: 1, Property: 2, Snippet: 3 },
+        CompletionItemInsertTextRule: { InsertAsSnippet: 4 },
+      },
+    };
+
+    registerElasticsearchConsoleLanguage(monaco);
+    expect(completionProvider.triggerCharacters).toEqual(
+      expect.arrayContaining(["P", "o", "_", "/", '"']),
+    );
+
+    const source = "POST /anocs_test/";
+    const result = completionProvider.provideCompletionItems(
+      {
+        getOffsetAt: () => source.length,
+        getWordUntilPosition: (position: any) => ({
+          startColumn: position.column,
+          endColumn: position.column,
+        }),
+        getLineContent: () => source,
+        getValue: () => source,
+      },
+      { lineNumber: 1, column: source.length + 1 },
+    );
+    expect(result.incomplete).toBe(true);
+    expect(result.suggestions.map((item: any) => item.label)).toEqual(
+      expect.arrayContaining(["_search", "_count", "_bulk"]),
+    );
+  });
+
   it("continues with Query DSL inside an auto-closed search body", () => {
     const source = 'POST /products/_search\n{"query": {';
     expect(
@@ -247,6 +327,45 @@ describe("Elasticsearch Kibana Console requests", () => {
         aggregationType.length,
       ).map((item) => item.label),
     ).toContain("terms");
+  });
+
+  it("offers cached mapping fields between an auto-closed pair of quotes", () => {
+    const source = `POST /qikan_summary/_search
+{
+  "query": {
+    "match": {
+      "": "value"
+    }
+  }
+}`;
+    const offset = source.indexOf('"": "value"') + 1;
+    const context = elasticsearchConsoleCompletionContext(source, offset);
+
+    expect(context).toMatchObject({
+      area: "field-name",
+      typed: "",
+      ownerKey: "match",
+    });
+    expect(
+      elasticsearchMappingFieldCompletions(
+        [
+          { name: "title", dataType: "text" },
+          { name: "qid", dataType: "long" },
+          { name: "title", dataType: "keyword" },
+        ],
+        context,
+        "qikan_summary",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        label: "qid",
+        insertText: '"qid"',
+      }),
+      expect.objectContaining({
+        label: "title",
+        insertText: '"title"',
+      }),
+    ]);
   });
 
   it("binds completion context to the request under the cursor", () => {
@@ -307,13 +426,18 @@ POST /archive/_search
       },
       {
         label: "gid",
-        detail: "Elasticsearch field in anocs_new",
+        detail: "Elasticsearch field in anocs_new: gid",
         insertText: '"gid"',
       },
       {
         label: "gid",
-        detail: "Elasticsearch field in older_index",
+        detail: "Elasticsearch field in older_index: gid",
         insertText: '"gid"',
+      },
+      {
+        label: "legacy_only",
+        detail: "Elasticsearch field in older_index: legacy_only",
+        insertText: '"legacy_only"',
       },
       {
         label: "_source",
@@ -357,7 +481,7 @@ POST /archive/_search
     ).toMatchObject([
       {
         label: "gid",
-        detail: "Elasticsearch field in anocs_new",
+        detail: "Elasticsearch field in anocs_new: gid",
       },
     ]);
   });

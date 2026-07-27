@@ -13,6 +13,7 @@ import {
   WorkbenchTitleTools,
 } from "@/components/workspace/WorkbenchChrome";
 import { useTabStore } from "@/store/useTabStore";
+import { useShallow } from "zustand/react/shallow";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
@@ -24,6 +25,7 @@ import { useUnsavedChangesGuard } from "@/hooks/useUnsavedChangesGuard";
 import { useShortcuts } from "@/hooks/useShortcuts";
 import { APP_EVENT_OPEN_PROJECT_FILES } from "@/lib/projectFilesNavigation";
 import { APP_EVENT_OPEN_COMMAND_PALETTE } from "@/lib/actionEvents";
+import { APP_EVENT_OPEN_ASSISTANT } from "@/store/useAssistantComposerStore";
 import { subscribeStartupIntents } from "@/startup/startupIntents";
 import { startWorkspaceHydration } from "@/startup/startupProgress";
 import { cn } from "@/lib/utils";
@@ -80,6 +82,16 @@ const SchemaDiffView = lazy(() =>
     default: module.SchemaDiffView,
   })),
 );
+const SchemaDiagramView = lazy(() =>
+  import("@/components/workspace/SchemaDiagramView").then((module) => ({
+    default: module.SchemaDiagramView,
+  })),
+);
+const DataCompareView = lazy(() =>
+  import("@/components/workspace/DataCompareView").then((module) => ({
+    default: module.DataCompareView,
+  })),
+);
 const LspConnectionSyncer = lazy(() =>
   import("@/components/lsp/LspConnectionSyncer").then((module) => ({
     default: module.LspConnectionSyncer,
@@ -101,13 +113,38 @@ export function WorkspaceRuntime() {
   useUnsavedChangesGuard();
   const [secondaryPanelView, setSecondaryPanelView] =
     useState<SecondaryPanelView>("assistant");
-  const {
-    tabs,
-    activeTabId,
-    setActiveResultIndex,
-    setQueryOutputView,
-    closeResultAt,
-  } = useTabStore();
+  const activeTab = useTabStore(
+    useShallow((state) => {
+      const tab = state.tabs.find((item) => item.id === state.activeTabId);
+      if (!tab) return null;
+      return {
+        id: tab.id,
+        type: tab.type,
+        title: tab.title,
+        connectionId: tab.connectionId,
+        schemaName: tab.schemaName,
+        error: tab.error,
+        queryError: tab.queryError,
+        results: tab.results,
+        activeResultIndex: tab.activeResultIndex,
+        queryOutputView: tab.queryOutputView,
+        explainPlan: tab.explainPlan,
+        isExecuting: tab.isExecuting,
+      };
+    }),
+  );
+  const tabCount = useTabStore((state) => state.tabs.length);
+  const queryTabSignature = useTabStore((state) =>
+    state.tabs
+      .filter((tab) => tab.type === "query")
+      .map((tab) => tab.id)
+      .join("\u0000"),
+  );
+  const setActiveResultIndex = useTabStore(
+    (state) => state.setActiveResultIndex,
+  );
+  const setQueryOutputView = useTabStore((state) => state.setQueryOutputView);
+  const closeResultAt = useTabStore((state) => state.closeResultAt);
   const connections = useConnectionStore((state) => state.connections);
   const activeConnectionId = useConnectionStore(
     (state) => state.activeConnectionId,
@@ -131,8 +168,7 @@ export function WorkspaceRuntime() {
   const isFunctionsLoading = useSchemaStore(
     (state) => state.isFunctionsLoading,
   );
-  const activeTab = tabs.find((tab) => tab.id === activeTabId);
-  const hasQueryEditor = tabs.some((tab) => tab.type === "query");
+  const hasQueryEditor = Boolean(queryTabSignature);
   const splitDirection = useEditorGroupStore((state) => state.splitDirection);
   const resetEditorGroups = useEditorGroupStore((state) => state.reset);
   const activeConnection = connections.find(
@@ -142,7 +178,11 @@ export function WorkspaceRuntime() {
     (connection) => connection.id === activeTab?.connectionId,
   );
   const queryErrorPresentation = activeTab?.error
-    ? presentQueryError(activeTab.error, queryConnection?.name)
+    ? presentQueryError(
+        activeTab.error,
+        queryConnection?.name,
+        activeTab.queryError,
+      )
     : null;
   const queryResults = activeTab?.results ?? [];
   const activeResultIndex = Math.min(
@@ -178,10 +218,10 @@ export function WorkspaceRuntime() {
   const activePanelClass = "wb-panel-active";
 
   useEffect(() => {
-    if (!tabs.some((tab) => tab.type === "query") && splitDirection) {
+    if (!queryTabSignature && splitDirection) {
       resetEditorGroups();
     }
-  }, [resetEditorGroups, splitDirection, tabs]);
+  }, [queryTabSignature, resetEditorGroups, splitDirection]);
 
   useEffect(() => {
     if (hasQueryResultSurface && toolWindows.results.enabled) {
@@ -205,6 +245,17 @@ export function WorkspaceRuntime() {
         APP_EVENT_OPEN_PROJECT_FILES,
         openProjectFiles,
       );
+  }, [setActiveToolWindow, setToolWindowVisible]);
+
+  useEffect(() => {
+    const openAssistant = () => {
+      setSecondaryPanelView("assistant");
+      setToolWindowVisible("assistant", true);
+      setActiveToolWindow("assistant");
+    };
+    window.addEventListener(APP_EVENT_OPEN_ASSISTANT, openAssistant);
+    return () =>
+      window.removeEventListener(APP_EVENT_OPEN_ASSISTANT, openAssistant);
   }, [setActiveToolWindow, setToolWindowVisible]);
 
   useEffect(
@@ -405,7 +456,7 @@ export function WorkspaceRuntime() {
         <div className="wb-work-surface relative z-10 flex min-w-0 flex-1 flex-col overflow-hidden rounded-[6px]">
           <div className="flex min-h-0 flex-1">
             <div className="flex min-w-0 flex-1 flex-col">
-              {tabs.length === 0 ? (
+              {tabCount === 0 ? (
                 <QueryShortcuts />
               ) : (
                 <div className="z-10 flex h-full min-w-0 flex-col gap-1 bg-[hsl(var(--wb-editor))]">
@@ -426,6 +477,10 @@ export function WorkspaceRuntime() {
                       />
                     ) : activeTab?.type === "schema_diff" ? (
                       <SchemaDiffView />
+                    ) : activeTab?.type === "schema_diagram" ? (
+                      <SchemaDiagramView />
+                    ) : activeTab?.type === "data_compare" ? (
+                      <DataCompareView />
                     ) : (
                       <div className="relative flex h-full min-h-0 flex-col gap-1">
                         <div

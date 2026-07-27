@@ -1,6 +1,7 @@
 import { supportsProjectFilePreview } from "@/services/tauri/project-files.service";
 import { useProjectFilesStore } from "@/store/useProjectFilesStore";
 import { useTabStore } from "@/store/useTabStore";
+import type { AssistantProjectFileProposal } from "@/ai/assistant/turns";
 
 export async function openProjectFileInEditor(relativePath: string) {
   useProjectFilesStore.getState().syncActiveProject();
@@ -28,4 +29,18 @@ export async function openProjectFileInEditor(relativePath: string) {
     document.revision,
     files.rootPath
   );
+}
+
+export function openProjectFileProposalInEditor(
+  projectId: string,
+  turnId: string,
+  proposal: AssistantProjectFileProposal,
+  expectedRoot?: string | null,
+) {
+  return useTabStore.getState().openAgentFileDiffTab({
+    ...proposal,
+    projectId,
+    turnId,
+    expectedRoot,
+  });
 }

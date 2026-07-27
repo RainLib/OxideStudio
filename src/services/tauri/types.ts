@@ -77,6 +77,8 @@ export interface ColumnDef {
 export interface QueryResult {
   columns: ColumnDef[];
   rows: any[][];
+  truncated?: boolean;
+  rowLimit?: number;
   rowsAffected?: number;
   statementType?: string;
   message?: string;
@@ -190,6 +192,28 @@ export interface SqlScriptImportResult {
   filePath: string;
   statementsExecuted: number;
   rowsAffected: number;
+}
+
+export interface SqlStatementSelection {
+  sql: string;
+  startOffset: number;
+  endOffset: number;
+  statementIndex: number;
+  statementCount: number;
+}
+
+export interface SqlSyntaxDiagnostic {
+  severity: "error";
+  message: string;
+  line?: number;
+  column?: number;
+}
+
+export interface SqlSyntaxValidation {
+  valid: boolean;
+  driver: DatabaseDriver;
+  statementCount: number;
+  diagnostics: SqlSyntaxDiagnostic[];
 }
 
 export interface TableRowUpdate {
@@ -439,6 +463,8 @@ export interface SchemaPreflightCheck {
   label: string;
   sql: string;
   expectation: string;
+  assertion: "advisory" | "emptyRows" | "zeroValue";
+  resultColumn?: string | null;
 }
 
 export interface SchemaDiffSummary {
@@ -465,6 +491,79 @@ export interface SchemaDiffPlan {
   preflightChecks: SchemaPreflightCheck[];
   preflightSql: string;
   warnings: string[];
+}
+
+export type SchemaMigrationStatus =
+  | "running"
+  | "blocked"
+  | "failed"
+  | "verificationFailed"
+  | "succeeded";
+
+export type SchemaMigrationPreflightStatus =
+  | "passed"
+  | "warning"
+  | "blocked"
+  | "error";
+
+export interface SchemaMigrationPreflightResult {
+  checkId: string;
+  changeId: string;
+  label: string;
+  expectation: string;
+  status: SchemaMigrationPreflightStatus;
+  observed: string;
+  blocksExecution: boolean;
+  error?: string | null;
+}
+
+export interface SchemaRollbackArtifact {
+  available: boolean;
+  reason?: string | null;
+  planId?: string | null;
+  changeCount: number;
+  requiresManualReview: boolean;
+  sql?: string | null;
+}
+
+export interface SchemaMigrationVerification {
+  matchesSource: boolean;
+  targetFingerprintAfter: string;
+  remainingPlanId: string;
+  remainingSummary: SchemaDiffSummary;
+  warnings: string[];
+}
+
+export interface SchemaMigrationJournalEntry {
+  id: string;
+  projectId: string;
+  connectionId: string;
+  connectionName: string;
+  databaseName?: string | null;
+  schemaName: string;
+  planId: string;
+  sourceFingerprint: string;
+  targetFingerprintBefore: string;
+  status: SchemaMigrationStatus;
+  startedAt: number;
+  finishedAt?: number | null;
+  statementCount: number;
+  committedStatements: number;
+  preflightResults: SchemaMigrationPreflightResult[];
+  rollback: SchemaRollbackArtifact;
+  verification?: SchemaMigrationVerification | null;
+  error?: string | null;
+  warnings: string[];
+}
+
+export interface ExecuteSchemaMigrationRequest {
+  source: SchemaSnapshot;
+  expectedTarget: SchemaSnapshot;
+  expectedPlanId: string;
+  expectedTargetFingerprint: string;
+  confirmationTarget: string;
+  allowReview: boolean;
+  allowDestructive: boolean;
 }
 
 export interface FunctionParameterInfo {

@@ -17,6 +17,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
+import { useEffect, useRef } from "react";
 import type {
   AssistantContextPreview,
   AssistantContextSettings,
@@ -38,12 +39,14 @@ import {
   Layers3,
   ListTree,
   MessageSquare,
+  Paperclip,
   SendHorizontal,
   ShieldCheck,
   Sparkles,
   Square,
   TextSelect,
   Wrench,
+  X,
   type LucideIcon,
 } from "lucide-react";
 
@@ -71,6 +74,11 @@ interface AssistantPromptBoxProps {
   onOpenAiSettings: () => void;
   onRetryModel: () => void;
   submissionBlockReason: string | null;
+  attachments: Array<{ id: string; fileName: string; byteCount: number }>;
+  attachmentError: string | null;
+  isAddingAttachment: boolean;
+  onAddAttachment: () => void;
+  onRemoveAttachment: (attachmentId: string) => void;
 }
 
 const MODE_ICONS: Record<AssistantMode, LucideIcon> = {
@@ -104,8 +112,14 @@ export function AssistantPromptBox({
   onOpenAiSettings,
   onRetryModel,
   submissionBlockReason,
+  attachments,
+  attachmentError,
+  isAddingAttachment,
+  onAddAttachment,
+  onRemoveAttachment,
 }: AssistantPromptBoxProps) {
   const { t } = useI18n();
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const currentMode = assistantModeOption(mode);
   const CurrentModeIcon = MODE_ICONS[mode];
   const canSubmit =
@@ -125,10 +139,44 @@ export function AssistantPromptBox({
     checked: boolean,
   ) => onContextSettingChange(key, checked);
 
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    const nextHeight = Math.min(Math.max(textarea.scrollHeight, 52), 180);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > 180 ? "auto" : "hidden";
+  }, [message]);
+
   return (
     <div className="shrink-0 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] p-2">
       <div className="rounded-[8px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] transition-colors focus-within:border-[hsl(var(--wb-accent))]">
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-2 pt-2" aria-label="Attached files">
+            {attachments.map((attachment) => (
+              <span
+                key={attachment.id}
+                className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-[5px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised))] px-1.5 py-1 text-[9px] text-[hsl(var(--wb-text-muted))]"
+                title={`${attachment.fileName} · ${attachment.byteCount.toLocaleString()} bytes`}
+              >
+                <FileText size={10} className="shrink-0" aria-hidden="true" />
+                <span className="truncate">{attachment.fileName}</span>
+                <button
+                  type="button"
+                  className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]"
+                  onClick={() => onRemoveAttachment(attachment.id)}
+                  disabled={contextLocked}
+                  aria-label={`Remove ${attachment.fileName}`}
+                >
+                  <X size={9} aria-hidden="true" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <textarea
+          ref={textareaRef}
+          data-assistant-prompt="true"
           value={message}
           onChange={(event) => onMessageChange(event.target.value)}
           onKeyDown={(event) => {
@@ -142,12 +190,27 @@ export function AssistantPromptBox({
             }
           }}
           placeholder={t("assistant.prompt")}
-          className="min-h-[72px] w-full resize-none bg-transparent px-2.5 pb-1 pt-2.5 text-[11px] leading-5 text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))]"
+          rows={1}
+          className="custom-scrollbar min-h-[52px] max-h-[180px] w-full resize-none bg-transparent px-2.5 pb-1 pt-2.5 text-[11px] leading-5 text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))]"
           aria-label={t("assistant.messageAria")}
         />
 
         <div className="flex items-center justify-between gap-2 px-1.5 pb-1.5">
           <div className="flex min-w-0 items-center gap-0.5">
+            <button
+              type="button"
+              className="wb-icon-button relative h-6 w-6"
+              onClick={onAddAttachment}
+              disabled={contextLocked || isAddingAttachment || attachments.length >= 4}
+              title={
+                attachments.length >= 4
+                  ? "Up to 4 text attachments per request"
+                  : "Attach a text or data file (64 KiB each)"
+              }
+              aria-label="Attach file"
+            >
+              <Paperclip size={11} aria-hidden="true" />
+            </button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button
@@ -445,6 +508,14 @@ export function AssistantPromptBox({
             className="border-t border-[hsl(var(--wb-border-subtle))] px-2.5 py-1.5 text-[9px] leading-4 text-amber-400"
           >
             {submissionBlockReason}
+          </div>
+        )}
+        {attachmentError && !contextLocked && (
+          <div
+            role="alert"
+            className="border-t border-[hsl(var(--wb-border-subtle))] px-2.5 py-1.5 text-[9px] leading-4 text-[hsl(var(--destructive))]"
+          >
+            {attachmentError}
           </div>
         )}
       </div>

@@ -84,6 +84,64 @@ describe("agent host contract", () => {
     ).toThrow();
   });
 
+  it("retains project-relative file paths on tool activity", () => {
+    const event = agentEventSchema.parse({
+      type: "tool.started",
+      threadId: "thread",
+      turnId: "turn",
+      sequence: 2,
+      occurredAt: Date.now(),
+      callId: "call-read",
+      toolName: "project.readFile",
+      label: "Read project file",
+      relativePath: "sql/report.sql",
+    });
+
+    expect(event).toMatchObject({
+      type: "tool.started",
+      relativePath: "sql/report.sql",
+    });
+  });
+
+  it("accepts bounded trusted citations on final answers", () => {
+    const event = agentEventSchema.parse({
+      type: "final.answer",
+      threadId: "thread",
+      turnId: "turn",
+      sequence: 4,
+      occurredAt: Date.now(),
+      content: "users has an id column [1].",
+      artifacts: [],
+      citations: [
+        {
+          id: "cite-object-users",
+          kind: "databaseObject",
+          label: "users",
+          detail: "app.public.users",
+          toolName: "metadata.describeObject",
+          projectId: "project",
+          connectionId: "postgres-1",
+          databaseName: "app",
+          schemaName: "public",
+          objectName: "users",
+          objectType: "table",
+        },
+      ],
+    });
+
+    expect(event).toMatchObject({
+      type: "final.answer",
+      citations: [{ id: "cite-object-users" }],
+    });
+    if (event.type !== "final.answer") throw new Error("expected final answer");
+    expect(() =>
+      agentEventSchema.parse({
+        ...event,
+        citations: Array.from({ length: 9 }, () => event.citations[0]),
+      }),
+    ).toThrow();
+  });
+
   it("validates provider-reported model usage without message content", () => {
     expect(() =>
       agentEventSchema.parse({

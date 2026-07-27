@@ -59,7 +59,19 @@ export interface ElasticsearchSchemaCompletion {
   sortText?: string;
 }
 
+export interface ElasticsearchMappingField {
+  name: string;
+  dataType?: string;
+}
+
 export const ELASTICSEARCH_CONSOLE_LANGUAGE_ID = "elasticsearch-console";
+export const ELASTICSEARCH_COMPLETION_TRIGGER_CHARACTERS = Array.from(
+  new Set(
+    ' /{[,\".:_@$-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'.split(
+      "",
+    ),
+  ),
+);
 
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] as const;
 type ElasticsearchHttpMethod = (typeof HTTP_METHODS)[number];
@@ -805,7 +817,7 @@ export function registerElasticsearchConsoleLanguage(monaco: any) {
     | { version: number; disposables: Array<{ dispose: () => void }> }
     | Array<{ dispose: () => void }>
     | undefined;
-  const registrationVersion = 2;
+  const registrationVersion = 3;
   if (
     !Array.isArray(previousRegistration) &&
     previousRegistration?.version === registrationVersion
@@ -873,7 +885,7 @@ export function registerElasticsearchConsoleLanguage(monaco: any) {
   disposables.push(monaco.languages.registerCompletionItemProvider(
     ELASTICSEARCH_CONSOLE_LANGUAGE_ID,
     {
-      triggerCharacters: [" ", "/", "{", ",", '"', ":"],
+      triggerCharacters: ELASTICSEARCH_COMPLETION_TRIGGER_CHARACTERS,
       provideCompletionItems(model: any, position: any) {
         const offset = model.getOffsetAt(position);
         const word = model.getWordUntilPosition(position);
@@ -925,6 +937,7 @@ export function registerElasticsearchConsoleLanguage(monaco: any) {
         );
 
         return {
+          incomplete: true,
           suggestions: completions.map((completion, index) => ({
             ...completion,
             kind: kindMap[completion.kind],
@@ -950,6 +963,10 @@ export function registerElasticsearchConsoleLanguage(monaco: any) {
                   }
                 : defaultRange,
             sortText: String(index).padStart(3, "0"),
+            filterText:
+              completionContext.area === "path"
+                ? `${pathText}${completion.label}`
+                : completion.label,
             insertTextRules:
               monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
           })),
@@ -1204,12 +1221,75 @@ export function elasticsearchRequestAtOffset(
   );
 }
 
+/**
+ * Finds the request around the cursor without tokenizing every request in the
+ * document. Completion and ghost-text providers run on every key stroke, so a
+ * full Console parse here makes large scratch files block the WebView.
+ *
+ * The public `elasticsearchRequestAtOffset` intentionally keeps its exhaustive
+ * behaviour for execution/selection. This local variant is only used by
+ * cursor-local editor assistance.
+ */
+function elasticsearchRequestNearOffset(
+  source: string,
+  cursorOffset: number,
+): ElasticsearchConsoleRequest | null {
+  if (!source.trim()) return null;
+
+  const boundedOffset = Math.max(0, Math.min(cursorOffset, source.length));
+  let lineStart = source.lastIndexOf("\n", Math.max(0, boundedOffset - 1)) + 1;
+  let requestStart = -1;
+
+  while (lineStart >= 0) {
+    const lineEnd = source.indexOf("\n", lineStart);
+    const effectiveLineEnd = lineEnd === -1 ? source.length : lineEnd;
+    const line = source.slice(lineStart, effectiveLineEnd).replace(/\r$/, "");
+    if (REQUEST_LINE.test(line)) {
+      const lastBlockOpen = source.lastIndexOf("/*", lineStart);
+      const lastBlockClose = source.lastIndexOf("*/", lineStart);
+      if (lastBlockOpen <= lastBlockClose) {
+        requestStart = lineStart;
+        break;
+      }
+    }
+    if (lineStart === 0) break;
+    lineStart = source.lastIndexOf("\n", Math.max(0, lineStart - 2)) + 1;
+  }
+
+  if (requestStart === -1) {
+    const leadingWhitespace = source.match(/^\s+/)?.[0].length ?? 0;
+    return trimRequestSpan(source, leadingWhitespace, source.length);
+  }
+
+  let requestEnd = source.length;
+  let nextLineStart = source.indexOf("\n", requestStart);
+  nextLineStart = nextLineStart === -1 ? source.length : nextLineStart + 1;
+  while (nextLineStart < source.length) {
+    const lineEnd = source.indexOf("\n", nextLineStart);
+    const effectiveLineEnd = lineEnd === -1 ? source.length : lineEnd;
+    const line = source
+      .slice(nextLineStart, effectiveLineEnd)
+      .replace(/\r$/, "");
+    if (REQUEST_LINE.test(line)) {
+      const lastBlockOpen = source.lastIndexOf("/*", nextLineStart);
+      const lastBlockClose = source.lastIndexOf("*/", nextLineStart);
+      if (lastBlockOpen <= lastBlockClose) {
+        requestEnd = nextLineStart;
+        break;
+      }
+    }
+    nextLineStart = lineEnd === -1 ? source.length : lineEnd + 1;
+  }
+
+  return trimRequestSpan(source, requestStart, requestEnd);
+}
+
 export function elasticsearchConsoleRequestContext(
   source: string,
   cursorOffset: number,
   preferredIndex?: string,
 ): ElasticsearchConsoleRequestContext {
-  const request = elasticsearchRequestAtOffset(source, cursorOffset);
+  const request = elasticsearchRequestNearOffset(source, cursorOffset);
   if (!request) return { request: "", index: preferredIndex };
   const requestLine = request.text.split("\n", 1)[0]?.trim() || "";
   const match = requestLine.match(
@@ -1732,7 +1812,7 @@ export function elasticsearchConsoleCompletionContext(
     };
   }
 
-  const request = elasticsearchRequestAtOffset(source, boundedOffset);
+  const request = elasticsearchRequestNearOffset(source, boundedOffset);
   const requestHeaderEnd = request
     ? source.indexOf("\n", request.startOffset)
     : -1;
@@ -1848,6 +1928,59 @@ export function elasticsearchConsoleCompletions(
   cursorOffset: number,
 ): ElasticsearchConsoleCompletion[] {
   const context = elasticsearchConsoleCompletionContext(source, cursorOffset);
+  return elasticsearchConsoleCompletionsForContext(
+    source,
+    cursorOffset,
+    context,
+  );
+}
+
+const ELASTICSEARCH_COMPLETION_AREAS = new Set<
+  ElasticsearchConsoleCompletionArea
+>([
+  "method",
+  "path",
+  "operation",
+  "body-start",
+  "top-level",
+  "query-clause",
+  "bool-clause",
+  "aggregation-name",
+  "aggregation-type",
+  "field-name",
+  "value",
+]);
+
+export function shouldOfferElasticsearchCompletions(
+  source: string,
+  cursorOffset: number,
+) {
+  const context = elasticsearchConsoleCompletionContext(source, cursorOffset);
+  return (
+    ELASTICSEARCH_COMPLETION_AREAS.has(context.area) &&
+    (context.area !== "value" ||
+      ["field", "fields", "_source"].includes(context.valueKey || ""))
+  );
+}
+
+export function shouldTriggerElasticsearchCompletions(
+  source: string,
+  cursorOffset: number,
+  insertedText: string,
+) {
+  const lastCharacter = insertedText[insertedText.length - 1];
+  return Boolean(
+    lastCharacter &&
+      ELASTICSEARCH_COMPLETION_TRIGGER_CHARACTERS.includes(lastCharacter) &&
+      shouldOfferElasticsearchCompletions(source, cursorOffset),
+  );
+}
+
+function elasticsearchConsoleCompletionsForContext(
+  source: string,
+  cursorOffset: number,
+  context: ElasticsearchConsoleCompletionContext,
+): ElasticsearchConsoleCompletion[] {
   if (context.area === "method") {
     return HTTP_METHODS.map((method) => ({
       label: method,
@@ -1888,7 +2021,7 @@ export function elasticsearchConsoleCompletions(
     return AGGREGATION_TYPE_COMPLETIONS;
   }
   if (context.area === "top-level") {
-    const request = elasticsearchRequestAtOffset(source, cursorOffset);
+    const request = elasticsearchRequestNearOffset(source, cursorOffset);
     const requestLine = request?.text.slice(
       0,
       request.text.indexOf("\n") === -1
@@ -1971,9 +2104,10 @@ export function elasticsearchConsoleInlineSuggestion(
   }
 
   if (context.area === "operation") {
-    const candidate = elasticsearchConsoleCompletions(
+    const candidate = elasticsearchConsoleCompletionsForContext(
       source,
       cursorOffset,
+      context,
     )[0];
     if (!candidate) return "";
     const insertion = plainElasticsearchSnippet(candidate.insertText);
@@ -1982,7 +2116,11 @@ export function elasticsearchConsoleInlineSuggestion(
       : "";
   }
 
-  const completions = elasticsearchConsoleCompletions(source, cursorOffset);
+  const completions = elasticsearchConsoleCompletionsForContext(
+    source,
+    cursorOffset,
+    context,
+  );
   const candidate = completions.find((item) =>
     item.label.toLowerCase().startsWith(context.typed.toLowerCase()),
   );
@@ -2062,26 +2200,23 @@ export function elasticsearchSchemaCompletionsForContext<
       ["field", "fields", "_source"].includes(context.valueKey || ""));
   if (!expectsMappingField) return [];
 
-  return items
-    .filter((item) => /elasticsearch field in /i.test(item.detail || ""))
+  const mappingItems = items.filter((item) =>
+    /elasticsearch field in /i.test(item.detail || ""),
+  );
+  const scopedItems = normalizedPreferred
+    ? mappingItems.filter((item) => {
+        const detail = item.detail?.toLowerCase() || "";
+        const indexPrefix = `elasticsearch field in ${normalizedPreferred}`;
+        return detail === indexPrefix || detail.startsWith(`${indexPrefix}:`);
+      })
+    : mappingItems;
+
+  return scopedItems
     .sort((left, right) => {
-      const leftCurrent = normalizedPreferred
-        ? left.detail?.toLowerCase().endsWith(` ${normalizedPreferred}`)
-          ? 0
-          : 1
-        : 0;
-      const rightCurrent = normalizedPreferred
-        ? right.detail?.toLowerCase().endsWith(` ${normalizedPreferred}`)
-          ? 0
-          : 1
-        : 0;
-      return (
-        leftCurrent - rightCurrent ||
-        left.label.localeCompare(right.label, undefined, {
-          sensitivity: "base",
-          numeric: true,
-        })
-      );
+      return left.label.localeCompare(right.label, undefined, {
+        sensitivity: "base",
+        numeric: true,
+      });
     })
     .filter(
       (item, index, rows) =>
@@ -2093,6 +2228,41 @@ export function elasticsearchSchemaCompletionsForContext<
     .map((item, index) => ({
       ...item,
       sortText: String(index).padStart(3, "0"),
+    }));
+}
+
+export function elasticsearchMappingFieldCompletions(
+  fields: ElasticsearchMappingField[],
+  context: ElasticsearchConsoleCompletionContext,
+  indexName: string,
+): ElasticsearchSchemaCompletion[] {
+  const expectsMappingField =
+    context.area === "field-name" ||
+    (context.area === "value" &&
+      ["field", "fields", "_source"].includes(context.valueKey || ""));
+  if (!expectsMappingField) return [];
+
+  const normalizedTyped = context.typed.toLowerCase();
+  const uniqueNames = new Set<string>();
+  return fields
+    .filter((field) => {
+      const normalizedName = field.name.toLowerCase();
+      if (uniqueNames.has(normalizedName)) return false;
+      uniqueNames.add(normalizedName);
+      return !normalizedTyped || normalizedName.startsWith(normalizedTyped);
+    })
+    .sort((left, right) =>
+      left.name.localeCompare(right.name, undefined, {
+        sensitivity: "base",
+        numeric: true,
+      }),
+    )
+    .map((field, index) => ({
+      label: field.name,
+      insertText: JSON.stringify(field.name),
+      detail: `${field.dataType || "field"} · Elasticsearch field in ${indexName}`,
+      insertTextFormat: 1,
+      sortText: String(index).padStart(4, "0"),
     }));
 }
 

@@ -1,9 +1,19 @@
 use serde::{Deserialize, Serialize};
 
+/// Query result sets are intentionally bounded at the driver boundary. This
+/// keeps an accidental unfiltered SELECT from materializing an entire table in
+/// the desktop process while still fetching one sentinel row to report that
+/// the visible result is incomplete.
+pub const DEFAULT_QUERY_RESULT_ROW_LIMIT: usize = 1_000;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct QueryResult {
     pub columns: Vec<ColumnDef>,
     pub rows: Vec<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, rename = "rowLimit", skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<usize>,
     #[serde(
         default,
         rename = "rowsAffected",
@@ -41,6 +51,30 @@ impl QueryResult {
         Self {
             columns,
             rows,
+            truncated: false,
+            row_limit: None,
+            rows_affected: None,
+            statement_type: None,
+            message: None,
+            response_meta: None,
+        }
+    }
+
+    pub fn rows_limited(
+        columns: Vec<ColumnDef>,
+        mut rows: Vec<Vec<serde_json::Value>>,
+        row_limit: usize,
+    ) -> Self {
+        let truncated = rows.len() > row_limit;
+        if truncated {
+            rows.truncate(row_limit);
+        }
+
+        Self {
+            columns,
+            rows,
+            truncated,
+            row_limit: truncated.then_some(row_limit),
             rows_affected: None,
             statement_type: None,
             message: None,
@@ -58,11 +92,37 @@ impl QueryResult {
         Self {
             columns: Vec::new(),
             rows: Vec::new(),
+            truncated: false,
+            row_limit: None,
             rows_affected: Some(rows_affected),
             statement_type: Some(statement_type.to_string()),
             message: Some(message),
             response_meta: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod query_result_tests {
+    use super::{ColumnDef, QueryResult};
+
+    #[test]
+    fn limited_rows_keep_a_complete_result_unmarked() {
+        let result = QueryResult::rows_limited(Vec::<ColumnDef>::new(), vec![vec![]], 2);
+
+        assert_eq!(result.rows.len(), 1);
+        assert!(!result.truncated);
+        assert_eq!(result.row_limit, None);
+    }
+
+    #[test]
+    fn limited_rows_drop_the_sentinel_and_report_the_limit() {
+        let result =
+            QueryResult::rows_limited(Vec::<ColumnDef>::new(), vec![vec![], vec![], vec![]], 2);
+
+        assert_eq!(result.rows.len(), 2);
+        assert!(result.truncated);
+        assert_eq!(result.row_limit, Some(2));
     }
 }
 
@@ -354,6 +414,7 @@ fn error_category(code: &str) -> &'static str {
     } else if code.ends_with("_LIST_FAILED")
         || code == "COLLECTION_PAGE_FAILED"
         || code == "SET_CURRENT_SCHEMA_FAILED"
+        || code.contains("SCHEMA_")
         || code.contains("METADATA")
     {
         "schema"

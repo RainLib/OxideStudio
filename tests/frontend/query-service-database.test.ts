@@ -50,6 +50,57 @@ describe("query service database scope", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("explain_query", { request });
   });
 
+  it("resolves the current statement using Monaco's UTF-16 cursor offset", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: {
+        sql: "SELECT 2",
+        startOffset: 10,
+        endOffset: 18,
+        statementIndex: 1,
+        statementCount: 2,
+      },
+    });
+
+    await queryService.resolveSqlStatementAtCursor(
+      "postgres-1",
+      "SELECT 1; SELECT 2",
+      15,
+    );
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "resolve_sql_statement_at_cursor",
+      {
+        connectionId: "postgres-1",
+        sql: "SELECT 1; SELECT 2",
+        cursorOffset: 15,
+      },
+    );
+  });
+
+  it("validates SQL syntax locally without a connection or execution command", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: {
+        valid: true,
+        driver: "postgres",
+        statementCount: 1,
+        diagnostics: [],
+      },
+    });
+
+    await queryService.validateSqlSyntax("postgres", "SELECT 1");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("validate_sql_syntax", {
+      driver: "postgres",
+      sql: "SELECT 1",
+    });
+    expect(mocks.invoke).not.toHaveBeenCalledWith(
+      "execute_query",
+      expect.anything(),
+    );
+  });
+
   it("imports a SQL script in the selected database and schema", async () => {
     mocks.invoke.mockResolvedValueOnce({
       success: true,

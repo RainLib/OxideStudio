@@ -9,7 +9,7 @@ export type LspTableDefinition = {
   name: string;
   object_type: string | null;
   comment: string | null;
-  source_location: null;
+  source_location: LspSourceLocation;
   indexes: Array<{
     name: string;
     columns: string[];
@@ -37,7 +37,7 @@ export type LspTableDefinition = {
     default_value?: string | null;
     auto_increment?: boolean;
     comment: string | null;
-    source_location: null;
+    source_location: LspSourceLocation;
   }>;
 };
 
@@ -58,19 +58,40 @@ export type LspSchemaDefinition = {
   id: string;
   catalog?: string | null;
   database: string;
-  source_uri: null;
+  source_uri: string | null;
   tables: LspTableDefinition[];
   functions: LspFunctionDefinition[];
 };
 
-export function emptyLspTableDetails(): Pick<
+export type LspSourceLocation = [uri: string, line: number] | null;
+
+export function emptyLspTableDetails(
+  sourceLocation: LspSourceLocation = null
+): Pick<
   LspTableDefinition,
   "source_location" | "indexes" | "constraints"
 > {
   return {
-    source_location: null,
+    source_location: sourceLocation,
     indexes: [],
     constraints: [],
+  };
+}
+
+export function assignLspObjectSourceLocations(
+  definition: LspTableDefinition,
+  options: {
+    tableUri: string;
+    columnUri: (columnName: string) => string;
+  }
+): LspTableDefinition {
+  return {
+    ...definition,
+    source_location: [options.tableUri, 1],
+    columns: definition.columns.map((column) => ({
+      ...column,
+      source_location: [options.columnUri(column.name), 1],
+    })),
   };
 }
 

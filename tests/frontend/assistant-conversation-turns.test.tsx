@@ -98,13 +98,19 @@ describe("AssistantConversation turns", () => {
     expect(container.textContent).not.toContain("Which data source should I use?");
     expect(container.textContent).not.toContain("Which region should I inspect?");
     expect(container.textContent).not.toContain("Warehouse");
-    expect(container.textContent).toContain(
+    expect(container.textContent).not.toContain(
       "I will inspect the selected source after your answer.",
     );
   });
 
   it("returns a digest-bound approval decision without exposing an approved flag", async () => {
-    const onDecideApproval = vi.fn(async () => undefined);
+    let resolveDecision: (() => void) | undefined;
+    const onDecideApproval = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDecision = resolve;
+        }),
+    );
     const turn: AssistantTurn = {
       ...createAssistantTurn({
         id: "turn-2",
@@ -161,6 +167,87 @@ describe("AssistantConversation turns", () => {
       "approve",
       "ctx-1",
     );
+    const approvalPrompt = container.querySelector<HTMLElement>(
+      'section[aria-busy="true"]',
+    );
+    expect(approvalPrompt?.textContent).toContain("Approving…");
+    expect(
+      Array.from(approvalPrompt?.querySelectorAll("button") ?? []).every(
+        (button) => button.disabled,
+      ),
+    ).toBe(true);
+
+    await act(async () => {
+      resolveDecision?.();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Approve once");
+  });
+
+  it("links only trusted Agent file changes to the project editor", async () => {
+    const onOpenProjectFile = vi.fn(async () => "project-file-tab");
+    const turn: AssistantTurn = {
+      ...createAssistantTurn({
+        id: "turn-file-link",
+        requestId: "request-file-link",
+        projectId: "project-1",
+        requestedMode: "agent",
+        mode: "agent",
+        userMessage: "Create a reusable SQL file",
+        now: 1,
+      }),
+      status: "completed",
+      fileChanges: [
+        {
+          callId: "call-write-1",
+          relativePath: "sql/ai_model_select.sql",
+          operation: "created",
+          revision: "a".repeat(64),
+          occurredAt: 2,
+        },
+      ],
+      final: {
+        content:
+          "已为你创建文件：**sql/ai_model_select.sql**\n\n未验证路径：sql/not_created.sql",
+        attachments: [],
+        createdAt: 3,
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        <AssistantConversation
+          turns={[turn]}
+          isResponding={false}
+          pendingLabel="Working"
+          onUsePrompt={vi.fn()}
+          onExecuteAttachment={vi.fn(async (request) => ({
+            actionId: request.id,
+            status: "success" as const,
+            code: "OK" as const,
+          }))}
+          onOpenProjectFile={onOpenProjectFile}
+        />,
+      );
+    });
+
+    const fileLink = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open sql/ai_model_select.sql in editor"]',
+    );
+    expect(fileLink).not.toBeNull();
+    expect(
+      container.querySelector(
+        'button[aria-label="Open sql/not_created.sql in editor"]',
+      ),
+    ).toBeNull();
+
+    await act(async () => {
+      fileLink?.click();
+      await Promise.resolve();
+    });
+    expect(onOpenProjectFile).toHaveBeenCalledWith(
+      "sql/ai_model_select.sql",
+    );
   });
 
   it("collapses all Agent activity into one Codex-style disclosure", async () => {
@@ -175,6 +262,7 @@ describe("AssistantConversation turns", () => {
         now: 1,
       }),
       status: "completed",
+      updatedAt: 65_001,
       process: [
         {
           id: "status:planning",
@@ -244,13 +332,17 @@ describe("AssistantConversation turns", () => {
     expect(
       container.querySelectorAll("[data-assistant-process-disclosure]"),
     ).toHaveLength(1);
-    expect(disclosure?.textContent).toContain("Read schema metadata");
-    expect(disclosure?.textContent).toContain("Ran query analysis");
-    expect(disclosure?.textContent).toContain("1 more");
-    expect(disclosure?.textContent).not.toContain("Preparing the response");
+    expect(disclosure?.textContent).toContain("Worked for 1m 5s");
+    expect(disclosure?.textContent).not.toContain("Read schema metadata");
+    expect(disclosure?.textContent).not.toContain("Ran query analysis");
     expect(
       disclosure?.querySelectorAll("[data-assistant-process-item]"),
     ).toHaveLength(0);
+    expect(
+      disclosure
+        ?.querySelector("[data-assistant-process-chevron]")
+        ?.getAttribute("class"),
+    ).toContain("opacity-0");
 
     await act(async () => {
       disclosure?.querySelector<HTMLButtonElement>("button")?.click();
@@ -259,10 +351,92 @@ describe("AssistantConversation turns", () => {
     expect(
       disclosure?.querySelectorAll("[data-assistant-process-item]"),
     ).toHaveLength(4);
-    expect(disclosure?.textContent).toContain("query.runReadOnly · 10 rows");
-    expect(disclosure?.querySelector("pre")?.textContent).toContain(
-      '{ "id": 1 }',
+    expect(disclosure?.textContent).toContain("Read schema metadata");
+    expect(disclosure?.textContent).toContain("Ran query analysis");
+    const toolActivity = disclosure?.querySelector<HTMLElement>(
+      '[data-assistant-process-item="tool:query"]',
     );
+    const toolToggle = toolActivity?.querySelector<HTMLButtonElement>(
+      '[data-assistant-process-item-toggle="tool:query"]',
+    );
+    expect(toolToggle?.getAttribute("aria-expanded")).toBe("false");
+    expect(
+      toolToggle
+        ?.querySelector("[data-assistant-process-chevron]")
+        ?.getAttribute("class"),
+    ).toContain("opacity-0");
+    expect(toolActivity?.textContent).not.toContain("query.runReadOnly · 10 rows");
+    expect(toolActivity?.querySelector("pre")).toBeNull();
+
+    await act(async () => {
+      toolToggle?.click();
+    });
+
+    expect(toolToggle?.getAttribute("aria-expanded")).toBe("true");
+    expect(toolActivity?.textContent).toContain("query.runReadOnly · 10 rows");
+    const outputPreview = toolActivity?.querySelector("pre");
+    expect(outputPreview?.textContent).toContain('{ "id": 1 }');
+    expect(outputPreview?.className).toContain("overflow-x-hidden");
+    expect(outputPreview?.className).toContain("whitespace-pre-wrap");
+    expect(outputPreview?.className).not.toContain("custom-scrollbar");
+  });
+
+  it("keeps live stage descriptions in the Working timeline until completion", async () => {
+    const turn: AssistantTurn = {
+      ...createAssistantTurn({
+        id: "turn-live-process",
+        requestId: "request-live-process",
+        projectId: "project-1",
+        requestedMode: "agent",
+        mode: "agent",
+        userMessage: "Inspect and update the SQL file",
+        now: Date.now() - 2_000,
+      }),
+      status: "running",
+      process: [
+        {
+          id: "commentary:1",
+          sequence: 1,
+          kind: "commentary",
+          title: "I’ll inspect the existing query before changing it.",
+          status: "completed",
+          startedAt: Date.now() - 1_500,
+          finishedAt: Date.now() - 1_400,
+        },
+      ],
+      draft: "Next I’ll verify the generated file against the request.",
+    };
+
+    await act(async () => {
+      root.render(
+        <AssistantConversation
+          turns={[turn]}
+          isResponding
+          pendingLabel="Working"
+          onUsePrompt={vi.fn()}
+          onExecuteAttachment={vi.fn(async (request) => ({
+            actionId: request.id,
+            status: "success" as const,
+            code: "OK" as const,
+          }))}
+        />,
+      );
+    });
+
+    const disclosure = container.querySelector<HTMLElement>(
+      '[data-assistant-process-disclosure="turn-live-process"]',
+    );
+    expect(disclosure?.textContent).toContain("Working for");
+    expect(disclosure?.textContent).toContain(
+      "I’ll inspect the existing query before changing it.",
+    );
+    expect(
+      disclosure?.querySelector("[data-assistant-live-process-description]")
+        ?.textContent,
+    ).toContain("verify the generated file");
+    expect(
+      container.querySelector("[data-assistant-final-response]"),
+    ).toBeNull();
   });
 
   it("shows an actionable error and keeps technical detail collapsed", async () => {

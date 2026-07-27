@@ -20,6 +20,7 @@ import { AssistantPromptBox } from "./assistant/AssistantPromptBox";
 import type { AssistantModelStatus } from "./assistant/AssistantModelControl";
 import { AssistantConversationMinimap } from "./assistant/AssistantConversationMinimap";
 import { AssistantClarificationDock } from "./assistant/AssistantClarificationDock";
+import { AssistantChangesPanel } from "./assistant/AssistantChangesPanel";
 import { createWorkspaceUiActionRegistry } from "@/ai/ui-actions";
 import type { UiActionRequest } from "@/ai/ui-actions/types";
 import { useProjectStore } from "@/store/useProjectStore";
@@ -32,6 +33,46 @@ import { cn } from "@/lib/utils";
 import { useAssistantAgentSession } from "@/hooks/useAssistantAgentSession";
 import { assistantConversationHistoryFromTurns } from "@/ai/assistant/turns";
 import { APP_EVENT_OPEN_SETTINGS } from "@/lib/actionEvents";
+import { createAssistantSqlPatchPreview } from "@/lib/assistantSqlPatch";
+import {
+  openProjectFileInEditor,
+  openProjectFileProposalInEditor,
+} from "@/lib/projectFileOpen";
+import { useAssistantComposerStore } from "@/store/useAssistantComposerStore";
+import {
+  agentHostService,
+  type AgentProfile,
+  type AgentTextAttachment,
+  type AgentToolManifestEntry,
+} from "@/services/tauri/agent-host.service";
+import { ArrowDown, Sparkles, X } from "lucide-react";
+import {
+  AssistantPendingChangesPanel,
+  pendingAssistantFileProposals,
+  type PendingAssistantFileProposal,
+} from "./assistant/AssistantPendingChangesPanel";
+import {
+  APP_EVENT_AGENT_FILE_REVIEW,
+  type AgentFileReviewDecisionDetail,
+} from "@/lib/agentFileReview";
+
+type PendingTextAttachment = AgentTextAttachment & { id: string };
+
+export function assistantToolManifestForProfile(
+  profile: AgentProfile,
+  tools: readonly AgentToolManifestEntry[],
+) {
+  if (profile === "chat") {
+    return tools.filter((tool) => tool.name === "workspace.getActiveTab");
+  }
+  if (profile === "plan") {
+    return tools.filter((tool) =>
+      tool.name !== "project.writeFile" &&
+      tool.permissions.every((permission) => permission === "read"),
+    );
+  }
+  return [...tools];
+}
 
 export function AssistantSidebar() {
   return <AgentHostAssistantSidebar />;
@@ -55,6 +96,11 @@ function AgentHostAssistantSidebar() {
   const assistantMode = useAiSettingsStore((state) => state.assistantMode);
   const updateAiSettings = useAiSettingsStore((state) => state.updateSettings);
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
+  const activeProjectRoot = useProjectStore(
+    (state) =>
+      state.projects.find((project) => project.id === state.activeProjectId)
+        ?.root_path ?? null,
+  );
   const activeConnectionId = useConnectionStore(
     (state) => {
       const connection = state.connections.find(
@@ -90,12 +136,20 @@ function AgentHostAssistantSidebar() {
   const activeNamespace = useSchemaStore((state) => state.currentSchema);
   const { tabs, activeTabId } = useTabStore();
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
+  const composeRequest = useAssistantComposerStore((state) => state.request);
+  const consumeComposeRequest = useAssistantComposerStore(
+    (state) => state.consumeRequest,
+  );
   const selectedText = activeTab?.editorSelection?.text || null;
   const providerConfigured = Boolean(
     aiEnabled && aiBaseUrl.trim() && aiModel.trim(),
   );
   const session = useAssistantAgentSession(activeProjectId, providerConfigured);
   const [message, setMessage] = useState("");
+  const [attachments, setAttachments] = useState<PendingTextAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [isAddingAttachment, setIsAddingAttachment] = useState(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [contextSettings, setContextSettings] =
     useState<AssistantContextSettings>(DEFAULT_ASSISTANT_CONTEXT_SETTINGS);
   const [dismissedAuthIssueId, setDismissedAuthIssueId] = useState<
@@ -107,7 +161,7 @@ function AgentHostAssistantSidebar() {
     `${aiEnabled}:${aiBaseUrl}:${aiModel}:${aiApiKey}`,
   );
   const uiActionRegistry = useMemo(() => createWorkspaceUiActionRegistry(), []);
-  const agentToolManifest = useMemo(
+  const workspaceToolManifest = useMemo(
     () =>
       createWorkspaceAiToolRegistry()
         .list()
@@ -121,6 +175,10 @@ function AgentHostAssistantSidebar() {
         })),
     [],
   );
+  const agentToolManifest = useMemo(() => {
+    const installedTools = new Set(session.hostStatus?.installedTools ?? []);
+    return workspaceToolManifest.filter((tool) => installedTools.has(tool.name));
+  }, [session.hostStatus?.installedTools, workspaceToolManifest]);
   const modelConfig = useMemo(() => {
     const baseUrl = aiBaseUrl.trim();
     const model = aiModel.trim();
@@ -193,10 +251,14 @@ function AgentHostAssistantSidebar() {
   const contextProviderLabel = modelConfig
     ? providerDestinationLabel(modelConfig.model, modelConfig.baseUrl)
     : null;
+  const modelPrompt = useMemo(
+    () => promptWithTextAttachments(message, attachments),
+    [attachments, message],
+  );
   const contextPreview = useMemo(
     () =>
       createAssistantContextPreview({
-        message,
+        message: modelPrompt,
         mode: assistantMode,
         providerLabel: contextProviderLabel,
         context: previewContext,
@@ -215,7 +277,7 @@ function AgentHostAssistantSidebar() {
       contextProviderLabel,
       contextSettings,
       conversationHistory,
-      message,
+      modelPrompt,
       previousCompaction,
       previousModelUsage,
       previewContext,
@@ -255,6 +317,7 @@ function AgentHostAssistantSidebar() {
     toolCalling: aiToolCalling,
     availability: session.availability,
     hostCapabilities: session.hostStatus?.capabilities ?? null,
+    hostInstalledTools: session.hostStatus?.installedTools ?? null,
     authenticationError: activeAuthIssueId ? providerError : null,
   });
 
@@ -270,6 +333,7 @@ function AgentHostAssistantSidebar() {
     if (!element || !autoFollowConversationRef.current) return;
     const frame = window.requestAnimationFrame(() => {
       element.scrollTop = element.scrollHeight;
+      setShowScrollToBottom(false);
     });
     return () => window.cancelAnimationFrame(frame);
   }, [turnsContentVersion]);
@@ -278,13 +342,24 @@ function AgentHostAssistantSidebar() {
     const prompt = message.trim();
     if (!prompt || session.isBusy || submissionBlockReason) return;
     const mode = resolveAssistantMode(assistantMode, prompt);
+    const submittedAttachments = attachments;
+    const submittedPrompt = promptWithTextAttachments(
+      prompt,
+      submittedAttachments,
+    );
+    if (submittedPrompt.length > 200_000) {
+      setAttachmentError(
+        "Prompt and attachment text must stay under 200,000 characters.",
+      );
+      return;
+    }
     const contextSettingsSnapshot = { ...contextSettings };
     const scopedContext = applyAssistantContextSettings(
       createWorkspaceAiToolContext(),
       contextSettingsSnapshot,
     );
     const turnInput = createAssistantTurnInput(
-      prompt,
+      submittedPrompt,
       assistantMode,
       selectedText,
       conversationHistory,
@@ -293,6 +368,8 @@ function AgentHostAssistantSidebar() {
     const turnId = createAgentTurnId();
     const binding = scopedContext.workspaceContext!;
     setMessage("");
+    setAttachments([]);
+    setAttachmentError(null);
     autoFollowConversationRef.current = true;
     await session.startTurn({
       requestId: `request:${turnId}`,
@@ -301,7 +378,13 @@ function AgentHostAssistantSidebar() {
       requestedMode: assistantMode,
       profile: mode,
       messages: boundedConversationHistory(turnInput.history),
-      prompt,
+      prompt: submittedPrompt,
+      displayMessage: prompt,
+      inputAttachments: submittedAttachments.map((attachment) => ({
+        id: attachment.id,
+        fileName: attachment.fileName,
+        byteCount: attachment.byteCount,
+      })),
       provider: modelConfig
         ? {
             ...modelConfig,
@@ -330,20 +413,173 @@ function AgentHostAssistantSidebar() {
           activeTab: scopedContext.activeTab ?? null,
           selectedText: turnInput.selectedText ?? null,
           contextPolicy: contextSettingsSnapshot,
+          attachments: submittedAttachments.map((attachment) => ({
+            fileName: attachment.fileName,
+            byteCount: attachment.byteCount,
+          })),
         },
       },
-      tools: agentToolManifest,
+      tools: assistantToolManifestForProfile(mode, agentToolManifest),
       contextVersion: binding.fingerprint,
     });
+  };
+
+  const handleAddAttachment = async () => {
+    if (session.isBusy || attachments.length >= 4 || isAddingAttachment) return;
+    setIsAddingAttachment(true);
+    setAttachmentError(null);
+    try {
+      const attachment = await agentHostService.importTextAttachment();
+      if (!attachment) return;
+      const nextTotal =
+        attachments.reduce((total, item) => total + item.byteCount, 0) +
+        attachment.byteCount;
+      if (nextTotal > 128 * 1024) {
+        setAttachmentError("Attachments are limited to 128 KiB per request.");
+        return;
+      }
+      setAttachments((current) => [
+        ...current,
+        {
+          ...attachment,
+          id: `attachment:${globalThis.crypto?.randomUUID?.() || Date.now().toString(36)}`,
+        },
+      ]);
+    } catch (error) {
+      setAttachmentError(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setIsAddingAttachment(false);
+    }
   };
 
   const handleExecuteAttachment = async (request: UiActionRequest) => {
     return await uiActionRegistry.execute(request);
   };
+  const handleUsePrompt = (prompt: string) => {
+    setMessage(prompt);
+    window.requestAnimationFrame(() => {
+      const composer = document.querySelector<HTMLTextAreaElement>(
+        '[data-assistant-prompt="true"]',
+      );
+      composer?.focus();
+      composer?.setSelectionRange(prompt.length, prompt.length);
+    });
+  };
+  const handleUseComposeRequest = () => {
+    if (!composeRequest) return;
+    const targetExists = useTabStore
+      .getState()
+      .tabs.some((tab) => tab.id === composeRequest.tabId);
+    if (targetExists) {
+      useTabStore.getState().setActiveTab(composeRequest.tabId);
+    }
+    handleUsePrompt(composeRequest.prompt);
+    consumeComposeRequest(composeRequest.id);
+  };
+  const handlePreviewSqlPatch = (replacement: string) => {
+    const tabState = useTabStore.getState();
+    const tab = tabState.tabs.find(
+      (candidate) => candidate.id === tabState.activeTabId,
+    );
+    if (!tab) return;
+    const patch = createAssistantSqlPatchPreview(
+      tab,
+      replacement,
+      `assistant-patch:${globalThis.crypto?.randomUUID?.() || Date.now().toString(36)}`,
+      tab.queryError?.database?.documentExecutionRange,
+    );
+    if (!patch) {
+      setAttachmentError(
+        "This SQL block cannot be previewed in the active editor.",
+      );
+      return;
+    }
+    setAttachmentError(null);
+    tabState.previewEditorPatch(tab.id, patch);
+  };
+
+  useEffect(() => {
+    if (!composeRequest || session.isBusy || message.trim()) return;
+    handleUseComposeRequest();
+  }, [composeRequest, message, session.isBusy]);
+
   const activeContextLabel = activeTab?.title || "No active editor";
   const pendingLabel = session.activeTurn
     ? agentTurnPendingLabel(session.activeTurn.status)
     : "Thinking...";
+
+  const openPendingFileProposal = (item: PendingAssistantFileProposal) => {
+    openProjectFileProposalInEditor(
+      item.projectId,
+      item.turnId,
+      item.proposal,
+      activeProjectRoot,
+    );
+  };
+
+  const acceptPendingFileProposal = (item: PendingAssistantFileProposal) =>
+    session.applyFileProposal(
+      item.turnId,
+      item.proposal.callId,
+      activeProjectRoot,
+    );
+
+  const rejectPendingFileProposal = (item: PendingAssistantFileProposal) => {
+    session.rejectFileProposal(item.turnId, item.proposal.callId);
+  };
+
+  useEffect(() => {
+    const listener = (rawEvent: Event) => {
+      const event = rawEvent as CustomEvent<AgentFileReviewDecisionDetail>;
+      const detail = event.detail;
+      if (!detail) return;
+      const item = pendingAssistantFileProposals(session.turns).find(
+        (candidate) =>
+          candidate.turnId === detail.turnId &&
+          candidate.proposal.callId === detail.callId,
+      );
+      if (!item) return;
+      if (detail.action === "accept-file") {
+        void acceptPendingFileProposal(item).catch(() => undefined);
+      } else if (detail.action === "reject-file") {
+        rejectPendingFileProposal(item);
+      } else if (detail.action === "accept-hunk" && detail.hunk) {
+        void session
+          .acceptFileProposalHunk(
+            item.turnId,
+            item.proposal.callId,
+            detail.hunk,
+            activeProjectRoot,
+          )
+          .catch(() => undefined);
+      } else if (detail.action === "reject-hunk" && detail.hunk) {
+        session.rejectFileProposalHunk(
+          item.turnId,
+          item.proposal.callId,
+          detail.hunk,
+        );
+      }
+    };
+    window.addEventListener(APP_EVENT_AGENT_FILE_REVIEW, listener);
+    return () =>
+      window.removeEventListener(APP_EVENT_AGENT_FILE_REVIEW, listener);
+  }, [activeProjectRoot, session]);
+
+  useEffect(() => {
+    const tabs = useTabStore.getState();
+    for (const turn of session.turns) {
+      for (const proposal of turn.fileProposals ?? []) {
+        tabs.syncAgentFileDiffPreview({
+          ...proposal,
+          turnId: turn.id,
+          projectId: turn.projectId,
+          expectedRoot: activeProjectRoot,
+        });
+      }
+    }
+  }, [activeProjectRoot, session.turns]);
 
   return (
     <div className="wb-assistant-shell flex h-full flex-col wb-panel">
@@ -353,7 +589,16 @@ function AgentHostAssistantSidebar() {
           autoFollowConversationRef.current = true;
           setMessage("");
           session.clear();
+          setAttachments([]);
+          setAttachmentError(null);
         }}
+      />
+
+      <AssistantChangesPanel
+        projectId={activeProjectId}
+        expectedRoot={activeProjectRoot}
+        refreshKey={turnsContentVersion}
+        turns={session.turns}
       />
 
       <div className="relative min-h-0 flex-1 overflow-hidden bg-[hsl(var(--wb-editor))]">
@@ -364,6 +609,7 @@ function AgentHostAssistantSidebar() {
             autoFollowConversationRef.current =
               element.scrollHeight - element.scrollTop - element.clientHeight <
               72;
+            setShowScrollToBottom(!autoFollowConversationRef.current);
           }}
           className={cn(
             "custom-scrollbar h-full overflow-auto",
@@ -387,8 +633,19 @@ function AgentHostAssistantSidebar() {
             turns={session.turns}
             isResponding={false}
             pendingLabel={pendingLabel}
-            onUsePrompt={setMessage}
+            onUsePrompt={handleUsePrompt}
+            onPreviewSqlPatch={handlePreviewSqlPatch}
             onExecuteAttachment={handleExecuteAttachment}
+            onOpenProjectFile={openProjectFileInEditor}
+            onOpenProjectFileProposal={(turnId, callId) => {
+              const item = pendingAssistantFileProposals(session.turns).find(
+                (candidate) =>
+                  candidate.turnId === turnId &&
+                  candidate.proposal.callId === callId,
+              );
+              if (item) openPendingFileProposal(item);
+            }}
+            expectedProjectRoot={activeProjectRoot}
             contextFingerprint={contextFingerprint}
             onDecideApproval={session.decideApproval}
             onResumeTurn={session.resumeTurn}
@@ -400,6 +657,29 @@ function AgentHostAssistantSidebar() {
           scrollContainerRef={scrollContainerRef}
           contentVersion={turnsContentVersion}
         />
+        {showScrollToBottom && (
+          <button
+            type="button"
+            className="absolute bottom-3 right-3 z-10 inline-flex h-7 w-7 items-center justify-center rounded-full border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text-muted))] shadow-md hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]"
+            onClick={() => {
+              const element = scrollContainerRef.current;
+              if (!element) return;
+              element.scrollTo({
+                top: element.scrollHeight,
+                behavior: window.matchMedia("(prefers-reduced-motion: reduce)")
+                  .matches
+                  ? "auto"
+                  : "smooth",
+              });
+              autoFollowConversationRef.current = true;
+              setShowScrollToBottom(false);
+            }}
+            title="Scroll to latest response"
+            aria-label="Scroll to latest response"
+          >
+            <ArrowDown size={12} aria-hidden="true" />
+          </button>
+        )}
       </div>
 
       <div className="relative shrink-0">
@@ -412,6 +692,45 @@ function AgentHostAssistantSidebar() {
           contextFingerprint={contextFingerprint}
           onAnswer={session.answerClarification}
         />
+
+        <AssistantPendingChangesPanel
+          turns={session.turns}
+          onOpen={openPendingFileProposal}
+          onAccept={acceptPendingFileProposal}
+          onReject={rejectPendingFileProposal}
+        />
+
+        {composeRequest && message.trim() && (
+          <div
+            className="flex items-center gap-2 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-2.5 py-1.5 text-[10px]"
+            data-assistant-compose-suggestion
+          >
+            <Sparkles
+              size={11}
+              className="shrink-0 text-[hsl(var(--wb-accent))]"
+              aria-hidden="true"
+            />
+            <span className="min-w-0 flex-1 truncate text-[hsl(var(--wb-text-muted))]">
+              Query error fix prompt ready
+            </span>
+            <button
+              type="button"
+              className="wb-text-button h-6 px-1.5 text-[10px]"
+              onClick={handleUseComposeRequest}
+            >
+              Use prompt
+            </button>
+            <button
+              type="button"
+              className="wb-icon-button h-6 w-6"
+              onClick={() => consumeComposeRequest(composeRequest.id)}
+              title="Dismiss suggested prompt"
+              aria-label="Dismiss suggested prompt"
+            >
+              <X size={10} aria-hidden="true" />
+            </button>
+          </div>
+        )}
 
         <AssistantPromptBox
           message={message}
@@ -452,10 +771,31 @@ function AgentHostAssistantSidebar() {
             void session.refreshStatus();
           }}
           submissionBlockReason={submissionBlockReason}
+          attachments={attachments}
+          attachmentError={attachmentError}
+          isAddingAttachment={isAddingAttachment}
+          onAddAttachment={() => void handleAddAttachment()}
+          onRemoveAttachment={(attachmentId) =>
+            setAttachments((current) =>
+              current.filter((attachment) => attachment.id !== attachmentId),
+            )
+          }
         />
       </div>
     </div>
   );
+}
+
+function promptWithTextAttachments(
+  message: string,
+  attachments: readonly PendingTextAttachment[],
+) {
+  if (attachments.length === 0) return message;
+  const blocks = attachments.map(
+    (attachment) =>
+      `\n\n--- Attached file: ${attachment.fileName} (${attachment.byteCount} bytes) ---\n${attachment.content}\n--- End attached file: ${attachment.fileName} ---`,
+  );
+  return `${message}${blocks.join("")}`;
 }
 
 function resolveModelUiState({
@@ -466,6 +806,7 @@ function resolveModelUiState({
   toolCalling,
   availability,
   hostCapabilities,
+  hostInstalledTools,
   authenticationError,
 }: {
   enabled: boolean;
@@ -475,6 +816,7 @@ function resolveModelUiState({
   toolCalling: boolean;
   availability: "checking" | "available" | "unavailable";
   hostCapabilities: string[] | null;
+  hostInstalledTools: string[] | null;
   authenticationError: string | null;
 }): {
   modelStatus: AssistantModelStatus;
@@ -531,6 +873,19 @@ function resolveModelUiState({
         label: "Mode unavailable",
         detail,
       },
+      submissionBlockReason: detail,
+    };
+  }
+
+  if (
+    availability === "available" &&
+    resolvedMode !== "chat" &&
+    (!hostInstalledTools || hostInstalledTools.length === 0)
+  ) {
+    const detail =
+      "The AI runtime has not published its installed tool catalog. Tool modes stay paused to avoid advertising actions that cannot run.";
+    return {
+      modelStatus: { kind: "checking", label: "Checking AI tools", detail },
       submissionBlockReason: detail,
     };
   }

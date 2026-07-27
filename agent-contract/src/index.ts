@@ -223,6 +223,24 @@ export const boundedObservationSchema = z.object({
 });
 export type BoundedObservation = z.infer<typeof boundedObservationSchema>;
 
+export const agentCitationSchema = z.object({
+  id: z.string().min(1).max(80),
+  kind: z.enum(["databaseSchema", "databaseObject", "planNode"]),
+  label: z.string().min(1).max(200),
+  detail: z.string().max(500).optional(),
+  toolName: z.string().min(1).max(120),
+  projectId: z.string().min(1).max(240),
+  connectionId: z.string().min(1).max(240).optional(),
+  databaseName: z.string().min(1).max(240).optional(),
+  schemaName: z.string().min(1).max(240).optional(),
+  objectName: z.string().min(1).max(240).optional(),
+  objectType: z.string().min(1).max(120).optional(),
+  tabId: z.string().min(1).max(240).optional(),
+  planId: z.string().min(1).max(240).optional(),
+  nodeId: z.string().min(1).max(240).optional(),
+});
+export type AgentCitation = z.infer<typeof agentCitationSchema>;
+
 export const artifactReadRequestSchema = requestMetadataSchema.extend({
   projectId: z.string().min(1),
   artifactId: z.string().min(1).max(240),
@@ -442,6 +460,7 @@ export const agentEventSchema = z.discriminatedUnion("type", [
     callId: z.string(),
     toolName: z.string(),
     label: z.string(),
+    relativePath: z.string().optional(),
     success: z.boolean().optional(),
     detail: z.string().optional(),
   }),
@@ -489,6 +508,7 @@ export const agentEventSchema = z.discriminatedUnion("type", [
     type: z.literal("final.answer"),
     content: z.string(),
     artifacts: z.array(z.string()).default([]),
+    citations: z.array(agentCitationSchema).max(8).default([]),
   }),
   eventBaseSchema.extend({
     type: z.literal("failure"),

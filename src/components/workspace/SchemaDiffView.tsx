@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -6,14 +6,25 @@ import {
   Clipboard,
   Code2,
   GitCompareArrows,
+  History,
   ListChecks,
+  Loader2,
   OctagonX,
+  Play,
+  RotateCcw,
   ShieldAlert,
   TerminalSquare,
+  X,
 } from "lucide-react";
 import { requestDatabaseObjectReveal } from "@/lib/databaseNavigation";
 import { cn } from "@/lib/utils";
-import type { SchemaChange, SchemaChangeRisk } from "@/services/tauri/types";
+import { schemaService } from "@/services/tauri/schema.service";
+import type {
+  SchemaChange,
+  SchemaChangeRisk,
+  SchemaMigrationJournalEntry,
+  SchemaMigrationStatus,
+} from "@/services/tauri/types";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useTabStore } from "@/store/useTabStore";
@@ -50,17 +61,55 @@ export function SchemaDiffView() {
     (state) => state.setActiveToolWindow,
   );
   const [copied, setCopied] = useState(false);
-  const [previewSurface, setPreviewSurface] = useState<"migration" | "preflight">(
-    "migration",
-  );
+  const [previewSurface, setPreviewSurface] = useState<
+    "migration" | "preflight" | "rollback" | "run"
+  >("migration");
+  const [confirmationOpen, setConfirmationOpen] = useState(false);
+  const [confirmationTarget, setConfirmationTarget] = useState("");
+  const [allowReview, setAllowReview] = useState(false);
+  const [allowDestructive, setAllowDestructive] = useState(false);
+  const [isApplying, setIsApplying] = useState(false);
+  const [execution, setExecution] = useState<SchemaMigrationJournalEntry | null>(null);
+  const [executionError, setExecutionError] = useState<string | null>(null);
+  const [recentExecutions, setRecentExecutions] = useState<SchemaMigrationJournalEntry[]>([]);
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
   const plan = activeTab?.schemaDiffPlan;
   const source = activeTab?.schemaDiffSource;
   const target = activeTab?.schemaDiffTarget;
   const previewSql = previewSurface === "migration"
     ? plan?.migrationSql || ""
-    : plan?.preflightSql || "";
+    : previewSurface === "preflight"
+      ? plan?.preflightSql || ""
+      : previewSurface === "rollback"
+        ? execution?.rollback.sql || recentExecutions[0]?.rollback.sql || ""
+        : "";
   const sqlLines = useMemo(() => previewSql.split("\n"), [previewSql]);
+
+  useEffect(() => {
+    if (!plan) return;
+    let active = true;
+    void schemaService
+      .listSchemaMigrationJournal(activeProjectId, plan.targetConnectionId, 12)
+      .then((entries) => {
+        if (active) setRecentExecutions(entries);
+      })
+      .catch(() => {
+        if (active) setRecentExecutions([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeProjectId, plan?.id, plan?.targetConnectionId]);
+
+  useEffect(() => {
+    setConfirmationOpen(false);
+    setConfirmationTarget("");
+    setAllowReview(false);
+    setAllowDestructive(false);
+    setExecution(null);
+    setExecutionError(null);
+    setPreviewSurface("migration");
+  }, [plan?.id]);
 
   if (!activeTab || activeTab.type !== "schema_diff" || !plan || !source || !target) {
     return null;
@@ -69,17 +118,47 @@ export function SchemaDiffView() {
   const selectedChange = plan.changes.find(
     (change) => change.id === activeTab.selectedSchemaChangeId,
   );
+  const requiresReview = plan.changes.some(
+    (change) => change.manualReview || change.risk === "review",
+  );
+  const reviewChangeCount = plan.changes.filter(
+    (change) => change.manualReview || change.risk === "review",
+  ).length;
+  const requiresDestructive = plan.changes.some(
+    (change) => change.risk === "destructive" || !change.reversible,
+  );
+  const destructiveChangeCount = plan.changes.filter(
+    (change) => change.risk === "destructive" || !change.reversible,
+  ).length;
+  const supportsSafeApply = plan.driver === "postgres" && plan.transactional;
+  const currentJournal = execution || recentExecutions[0] || null;
+  const requiredConfirmationTarget = [
+    target.connectionName,
+    plan.targetDatabaseName || null,
+    plan.targetSchemaName,
+  ].filter(Boolean).join(" / ");
+  const confirmationReady =
+    confirmationTarget.trim() === requiredConfirmationTarget &&
+    (!requiresReview || allowReview) &&
+    (!requiresDestructive || allowDestructive);
 
   const copySql = async () => {
+    if (!previewSql) return;
     await navigator.clipboard.writeText(previewSql);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1_500);
   };
 
   const openInConsole = () => {
+    if (!previewSql || previewSurface === "run") return;
+    const surfaceName = previewSurface === "migration"
+      ? "migration"
+      : previewSurface === "preflight"
+        ? "preflight"
+        : "rollback";
     createTab(
       "query",
-      `${previewSurface === "migration" ? "migration" : "preflight"} [${plan.targetSchemaName}]`,
+      `${surfaceName} [${plan.targetSchemaName}]`,
       previewSql,
       {
         connectionId: plan.targetConnectionId,
@@ -88,6 +167,36 @@ export function SchemaDiffView() {
       },
     );
     setActiveToolWindow("editor");
+  };
+
+  const applyMigration = async () => {
+    if (!confirmationReady || !supportsSafeApply || isApplying) return;
+    setIsApplying(true);
+    setExecutionError(null);
+    try {
+      const connectionError = await setActiveConnection(plan.targetConnectionId);
+      if (connectionError) throw new Error(connectionError);
+      const entry = await schemaService.executeSchemaMigration({
+        source,
+        expectedTarget: target,
+        expectedPlanId: plan.id,
+        expectedTargetFingerprint: target.fingerprint,
+        confirmationTarget: confirmationTarget.trim(),
+        allowReview,
+        allowDestructive,
+      });
+      setExecution(entry);
+      setRecentExecutions((entries) => [
+        entry,
+        ...entries.filter((candidate) => candidate.id !== entry.id),
+      ].slice(0, 12));
+      setConfirmationOpen(false);
+      setPreviewSurface("run");
+    } catch (error) {
+      setExecutionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsApplying(false);
+    }
   };
 
   const revealChange = async (change: SchemaChange) => {
@@ -136,13 +245,20 @@ export function SchemaDiffView() {
             type="button"
             className="wb-text-button h-7 gap-1.5 px-2.5 text-[10px]"
             onClick={() => void copySql()}
+            disabled={!previewSql || previewSurface === "run"}
           >
             {copied ? <Check size={12} /> : <Clipboard size={12} />}
-            {copied ? "Copied" : `Copy ${previewSurface === "migration" ? "SQL" : "checks"}`}
+            {copied
+              ? "Copied"
+              : previewSurface === "preflight"
+                ? "Copy checks"
+                : previewSurface === "rollback"
+                  ? "Copy rollback"
+                  : "Copy SQL"}
           </button>
           <button
             type="button"
-            className="wb-primary-button h-7 gap-1.5 px-2.5 text-[10px]"
+            className="wb-text-button h-7 gap-1.5 px-2.5 text-[10px]"
             onClick={openInConsole}
             title={
               previewSurface === "migration" && plan.summary.blocked > 0
@@ -150,7 +266,9 @@ export function SchemaDiffView() {
                 : undefined
             }
             disabled={
-              previewSurface === "migration"
+              previewSurface === "run" || previewSurface === "rollback"
+                ? !previewSql
+                : previewSurface === "migration"
                 ? plan.changes.length === 0 || plan.summary.blocked > 0
                 : plan.preflightChecks.length === 0
             }
@@ -158,8 +276,109 @@ export function SchemaDiffView() {
             <TerminalSquare size={12} />
             Open in console
           </button>
+          <button
+            type="button"
+            className="wb-primary-button h-7 gap-1.5 px-2.5 text-[10px]"
+            onClick={() => {
+              setExecutionError(null);
+              setConfirmationOpen(true);
+            }}
+            disabled={
+              isApplying ||
+              !supportsSafeApply ||
+              plan.changes.length === 0 ||
+              plan.summary.blocked > 0
+            }
+            title={
+              !supportsSafeApply
+                ? "Safe automatic apply currently requires PostgreSQL transactional DDL"
+                : plan.summary.blocked > 0
+                  ? "Resolve blocked changes before applying"
+                  : "Refresh the live target, run preflight, apply atomically, then verify"
+            }
+          >
+            {isApplying ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+            {isApplying ? "Applying…" : "Apply safely"}
+          </button>
         </div>
       </header>
+
+      {confirmationOpen && (
+        <section className="shrink-0 border-b border-amber-400/25 bg-amber-400/[0.045] px-4 py-3">
+          <div className="flex items-start justify-between gap-6">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-[11px] font-semibold text-amber-200">
+                <ShieldAlert size={13} /> Confirm transactional migration
+              </div>
+              <p className="mt-1 max-w-3xl text-[9px] leading-4 wb-muted">
+                OxideStudio will recapture the live target and reject stale plans, run every
+                generated preflight check, commit all {plan.changes.flatMap((change) => change.sql).length} statement(s)
+                in one PostgreSQL transaction, then recapture and compare the schema again.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="wb-icon-button h-6 w-6 shrink-0"
+              onClick={() => setConfirmationOpen(false)}
+              aria-label="Close migration confirmation"
+            >
+              <X size={12} />
+            </button>
+          </div>
+          <div className="mt-2.5 flex flex-wrap items-end gap-x-4 gap-y-2">
+            <label className="text-[9px] wb-muted">
+              Type exact target <span className="font-mono text-[hsl(var(--wb-text))]">{requiredConfirmationTarget}</span>
+              <input
+                type="text"
+                value={confirmationTarget}
+                onChange={(event) => setConfirmationTarget(event.target.value)}
+                className="mt-1 block h-7 w-72 rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 font-mono text-[10px] text-[hsl(var(--wb-text))] outline-none focus:border-[hsl(var(--wb-accent)/0.65)]"
+                autoComplete="off"
+                spellCheck={false}
+                disabled={isApplying}
+              />
+            </label>
+            {requiresReview && (
+              <label className="flex h-7 items-center gap-2 text-[9px] text-amber-100/85">
+                <input
+                  type="checkbox"
+                  checked={allowReview}
+                  onChange={(event) => setAllowReview(event.target.checked)}
+                  disabled={isApplying}
+                  className="accent-[hsl(var(--wb-accent))]"
+                />
+                I reviewed {reviewChangeCount} manual-review change(s)
+              </label>
+            )}
+            {requiresDestructive && (
+              <label className="flex h-7 items-center gap-2 text-[9px] text-red-200/90">
+                <input
+                  type="checkbox"
+                  checked={allowDestructive}
+                  onChange={(event) => setAllowDestructive(event.target.checked)}
+                  disabled={isApplying}
+                  className="accent-red-400"
+                />
+                I approve {destructiveChangeCount} destructive/non-reversible change(s)
+              </label>
+            )}
+            <button
+              type="button"
+              className="wb-primary-button h-7 gap-1.5 px-3 text-[10px]"
+              disabled={!confirmationReady || isApplying}
+              onClick={() => void applyMigration()}
+            >
+              {isApplying ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+              Run preflight & apply
+            </button>
+          </div>
+          {executionError && (
+            <div className="mt-2 flex items-start gap-1.5 text-[9px] leading-4 text-red-300">
+              <OctagonX size={11} className="mt-0.5 shrink-0" /> {executionError}
+            </div>
+          )}
+        </section>
+      )}
 
       <div className="grid min-h-0 flex-1 grid-cols-[330px_minmax(0,1fr)]">
         <aside className="flex min-h-0 flex-col border-r border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))]">
@@ -254,10 +473,34 @@ export function SchemaDiffView() {
                 icon={ListChecks}
                 onClick={() => setPreviewSurface("preflight")}
               />
+              {currentJournal && (
+                <PreviewSwitch
+                  active={previewSurface === "run"}
+                  label="Run log"
+                  icon={History}
+                  onClick={() => setPreviewSurface("run")}
+                />
+              )}
+              {currentJournal?.rollback.available && currentJournal.rollback.sql && (
+                <PreviewSwitch
+                  active={previewSurface === "rollback"}
+                  label={`Rollback ${currentJournal.rollback.changeCount}`}
+                  icon={RotateCcw}
+                  onClick={() => setPreviewSurface("rollback")}
+                />
+              )}
             </span>
             <span className="flex items-center gap-1.5 wb-muted">
               {previewSurface === "preflight"
                 ? "Read-only validation queries"
+                : previewSurface === "run"
+                  ? currentJournal
+                    ? formatMigrationStatus(currentJournal.status)
+                    : "No execution journal"
+                  : previewSurface === "rollback"
+                    ? currentJournal?.rollback.requiresManualReview
+                      ? "Generated reverse plan · manual review required"
+                      : "Generated reverse plan · review before use"
                 : plan.transactional
                   ? "PostgreSQL · ROLLBACK guard"
                   : "MySQL · DDL may auto-commit"}
@@ -275,35 +518,278 @@ export function SchemaDiffView() {
             </div>
           )}
 
-          <div className="min-h-0 flex-1 overflow-auto font-mono text-[10px] leading-5">
-            <table className="w-full border-collapse">
-              <tbody>
-                {sqlLines.map((line, index) => (
-                  <tr key={index} className="hover:bg-[hsl(var(--wb-hover)/0.45)]">
-                    <td className="w-12 select-none border-r border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.35)] px-2 text-right align-top text-[hsl(var(--wb-text-muted)/0.52)]">
-                      {index + 1}
-                    </td>
-                    <td className={cn(
-                      "whitespace-pre px-3 align-top",
-                      line.startsWith("-- WARNING")
-                        ? "text-amber-300"
-                        : line.startsWith("-- BLOCKED") || line.startsWith("-- PLAN BLOCKED")
-                          ? "text-red-300"
-                        : line.startsWith("--")
-                          ? "text-[hsl(var(--wb-text-muted))]"
-                          : "text-[hsl(var(--wb-text))]",
-                    )}>
-                      {line || " "}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          {previewSurface === "run" ? (
+            <MigrationRunLog
+              current={currentJournal}
+              entries={recentExecutions}
+              onSelect={(entry) => {
+                setExecution(entry);
+                setPreviewSurface("run");
+              }}
+            />
+          ) : (
+            <div className="min-h-0 flex-1 overflow-auto font-mono text-[10px] leading-5">
+              <table className="w-full border-collapse">
+                <tbody>
+                  {sqlLines.map((line, index) => (
+                    <tr key={index} className="hover:bg-[hsl(var(--wb-hover)/0.45)]">
+                      <td className="w-12 select-none border-r border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.35)] px-2 text-right align-top text-[hsl(var(--wb-text-muted)/0.52)]">
+                        {index + 1}
+                      </td>
+                      <td className={cn(
+                        "whitespace-pre px-3 align-top",
+                        line.startsWith("-- WARNING")
+                          ? "text-amber-300"
+                          : line.startsWith("-- BLOCKED") || line.startsWith("-- PLAN BLOCKED")
+                            ? "text-red-300"
+                          : line.startsWith("--")
+                            ? "text-[hsl(var(--wb-text-muted))]"
+                            : "text-[hsl(var(--wb-text))]",
+                      )}>
+                        {line || " "}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </main>
       </div>
     </div>
   );
+}
+
+function MigrationRunLog({
+  current,
+  entries,
+  onSelect,
+}: {
+  current: SchemaMigrationJournalEntry | null;
+  entries: SchemaMigrationJournalEntry[];
+  onSelect: (entry: SchemaMigrationJournalEntry) => void;
+}) {
+  if (!current) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center text-[10px] wb-muted">
+        No migration execution has been recorded for this connection.
+      </div>
+    );
+  }
+  const preflightPassed = current.preflightResults.filter(
+    (result) => result.status === "passed",
+  ).length;
+  const preflightWarnings = current.preflightResults.filter(
+    (result) => result.status === "warning",
+  ).length;
+  const preflightBlocked = current.preflightResults.filter(
+    (result) => result.blocksExecution,
+  ).length;
+
+  return (
+    <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_240px]">
+      <div className="min-h-0 overflow-auto">
+        <div className="flex items-start justify-between border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className={cn(
+                "rounded-[3px] border px-1.5 py-0.5 text-[8px] font-semibold uppercase tracking-[0.1em]",
+                migrationStatusStyle(current.status),
+              )}>
+                {formatMigrationStatus(current.status)}
+              </span>
+              <span className="font-mono text-[10px]">{current.schemaName}</span>
+            </div>
+            <div className="mt-1.5 font-mono text-[8px] wb-muted">
+              {current.id} · {formatTimestamp(current.startedAt)}
+            </div>
+          </div>
+          <div className="text-right text-[9px] wb-muted">
+            <div>{current.committedStatements}/{current.statementCount} committed</div>
+            <div className="mt-1 font-mono">{current.targetFingerprintBefore.slice(0, 12)}</div>
+          </div>
+        </div>
+
+        {current.error && (
+          <div className="flex items-start gap-2 border-b border-red-400/20 bg-red-400/5 px-4 py-2.5 text-[9px] leading-4 text-red-200">
+            <OctagonX size={12} className="mt-0.5 shrink-0" /> {current.error}
+          </div>
+        )}
+
+        <div className="grid grid-cols-4 border-b border-[hsl(var(--wb-border-subtle))]">
+          <RunStage
+            label="Freshness"
+            detail="Fingerprint matched"
+            state="passed"
+          />
+          <RunStage
+            label="Preflight"
+            detail={`${preflightPassed} pass · ${preflightWarnings} warn`}
+            state={preflightBlocked > 0 ? "failed" : "passed"}
+          />
+          <RunStage
+            label="Atomic apply"
+            detail={`${current.committedStatements}/${current.statementCount} committed`}
+            state={
+              current.committedStatements === current.statementCount && current.statementCount > 0
+                ? "passed"
+                : current.status === "blocked"
+                  ? "skipped"
+                  : "failed"
+            }
+          />
+          <RunStage
+            label="Post-verify"
+            detail={
+              current.verification?.matchesSource
+                ? "Schemas match"
+                : current.verification
+                  ? `${current.verification.remainingSummary.total} remaining`
+                  : "Not completed"
+            }
+            state={
+              current.verification?.matchesSource
+                ? "passed"
+                : current.verification
+                  ? "failed"
+                  : "skipped"
+            }
+          />
+        </div>
+
+        <div className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-2 text-[9px] font-medium">
+          Preflight results
+        </div>
+        {current.preflightResults.length === 0 ? (
+          <div className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3 text-[9px] wb-muted">
+            This plan had no generated data preflight checks.
+          </div>
+        ) : (
+          current.preflightResults.map((result) => (
+            <div
+              key={result.checkId}
+              className="grid grid-cols-[80px_minmax(0,1fr)_180px] items-start border-b border-[hsl(var(--wb-border-subtle))] px-4 py-2 text-[9px]"
+            >
+              <span className={cn(
+                "w-fit rounded-[3px] border px-1.5 py-0.5 text-[8px] uppercase tracking-wide",
+                result.status === "passed"
+                  ? "border-emerald-400/25 text-emerald-300"
+                  : result.status === "warning"
+                    ? "border-amber-400/25 text-amber-300"
+                    : "border-red-400/25 text-red-300",
+              )}>
+                {result.status}
+              </span>
+              <span className="min-w-0 pr-4">
+                <span className="block text-[hsl(var(--wb-text))]">{result.label}</span>
+                <span className="mt-0.5 block leading-4 wb-muted">
+                  {result.error || result.expectation}
+                </span>
+              </span>
+              <span className="font-mono text-[8px] wb-muted">{result.observed}</span>
+            </div>
+          ))
+        )}
+
+        <div className="px-4 py-3 text-[9px]">
+          <div className="flex items-center gap-2 font-medium">
+            <RotateCcw size={11} /> Rollback package
+          </div>
+          <div className="mt-1 leading-4 wb-muted">
+            {current.rollback.available
+              ? `${current.rollback.changeCount} reverse change(s) generated${current.rollback.requiresManualReview ? "; manual review is required" : ""}. The artifact remains a ROLLBACK-guarded preview until opened explicitly.`
+              : current.rollback.reason || "No rollback package is available."}
+          </div>
+        </div>
+      </div>
+
+      <aside className="min-h-0 overflow-auto border-l border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel)/0.55)]">
+        <div className="sticky top-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 py-2 text-[9px] font-medium">
+          Recent journal
+        </div>
+        {entries.length === 0 ? (
+          <div className="px-3 py-3 text-[9px] wb-muted">No persisted entries.</div>
+        ) : (
+          entries.map((entry) => (
+            <button
+              type="button"
+              key={entry.id}
+              className={cn(
+                "w-full border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2 text-left hover:bg-[hsl(var(--wb-hover))]",
+                current.id === entry.id && "bg-[hsl(var(--wb-active-strong))]",
+              )}
+              onClick={() => onSelect(entry)}
+            >
+              <span className="flex items-center justify-between gap-2 text-[9px]">
+                <span className="truncate font-mono">{entry.schemaName}</span>
+                <span className={cn("shrink-0 text-[8px]", statusTextStyle(entry.status))}>
+                  {formatMigrationStatus(entry.status)}
+                </span>
+              </span>
+              <span className="mt-1 block text-[8px] wb-muted">
+                {formatTimestamp(entry.startedAt)} · {entry.committedStatements}/{entry.statementCount}
+              </span>
+            </button>
+          ))
+        )}
+      </aside>
+    </div>
+  );
+}
+
+function RunStage({
+  label,
+  detail,
+  state,
+}: {
+  label: string;
+  detail: string;
+  state: "passed" | "failed" | "skipped";
+}) {
+  return (
+    <div className="border-r border-[hsl(var(--wb-border-subtle))] px-3 py-2.5 last:border-r-0">
+      <div className={cn(
+        "text-[9px] font-medium",
+        state === "passed"
+          ? "text-emerald-300"
+          : state === "failed"
+            ? "text-red-300"
+            : "wb-muted",
+      )}>
+        {state === "passed" ? "✓" : state === "failed" ? "×" : "—"} {label}
+      </div>
+      <div className="mt-1 text-[8px] wb-muted">{detail}</div>
+    </div>
+  );
+}
+
+function formatMigrationStatus(status: SchemaMigrationStatus) {
+  switch (status) {
+    case "verificationFailed":
+      return "Verification failed";
+    case "succeeded":
+      return "Succeeded";
+    case "blocked":
+      return "Blocked";
+    case "failed":
+      return "Rolled back";
+    case "running":
+      return "Running";
+  }
+}
+
+function migrationStatusStyle(status: SchemaMigrationStatus) {
+  if (status === "succeeded") return "border-emerald-400/25 text-emerald-300";
+  if (status === "running") return "border-sky-400/25 text-sky-300";
+  if (status === "blocked") return "border-amber-400/25 text-amber-300";
+  return "border-red-400/25 text-red-300";
+}
+
+function statusTextStyle(status: SchemaMigrationStatus) {
+  if (status === "succeeded") return "text-emerald-300";
+  if (status === "running") return "text-sky-300";
+  if (status === "blocked") return "text-amber-300";
+  return "text-red-300";
 }
 
 function RiskMetric({

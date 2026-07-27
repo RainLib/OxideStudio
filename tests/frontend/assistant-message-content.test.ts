@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { parseAssistantMessage } from "@/components/workspace/assistant/AssistantMessageContent";
 
 describe("assistant message content", () => {
+  it("treats missing restored content as an empty response", () => {
+    expect(parseAssistantMessage(undefined)).toEqual([]);
+    expect(parseAssistantMessage(null)).toEqual([]);
+    expect(parseAssistantMessage("")).toEqual([]);
+  });
+
   it("separates fenced SQL from surrounding explanation", () => {
     expect(
       parseAssistantMessage(

@@ -1,4 +1,5 @@
 import {
+  canCreateDataCompareSource,
   hasUnsavedTabChanges,
   useTabStore,
   TabType,
@@ -19,6 +20,8 @@ import {
   PanelTop,
   PanelBottom,
   GitCompareArrows,
+  Network,
+  Rows3,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -32,7 +35,7 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import {
@@ -52,6 +55,12 @@ const TabIcon = ({
   if (type === "table") return <TableIcon size={12} className="wb-muted" />;
   if (type === "schema_diff") {
     return <GitCompareArrows size={12} className="text-amber-300" />;
+  }
+  if (type === "schema_diagram") {
+    return <Network size={12} className="text-violet-300" />;
+  }
+  if (type === "data_compare") {
+    return <Rows3 size={12} className="text-cyan-300" />;
   }
   if (isImage) return <ImageIcon size={12} className="text-violet-400" />;
   if (isFile) return <FileCode2 size={12} className="text-sky-400" />;
@@ -73,19 +82,41 @@ export function TabBar({
   onSelectTab,
   onCloseGroup,
 }: TabBarProps = {}) {
-  const {
-    tabs,
-    activeTabId,
-    setActiveTab,
-    closeTab,
-    forceCloseTab,
-    closeOtherTabs,
-    closeAllTabs,
-    closeTabsToLeft,
-    closeTabsToRight,
-    togglePinTab,
-    createTab,
-  } = useTabStore();
+  const tabPresentationSignature = useTabStore((state) =>
+    state.tabs
+      .map((tab) =>
+        [
+          tab.id,
+          tab.type,
+          tab.title,
+          tab.isPinned ? "1" : "0",
+          tab.fileRelativePath || "",
+          tab.filePreview ? "preview" : "",
+          tab.isDirty ? "dirty" : "",
+          tab.pendingEdits?.size || 0,
+          tab.newRowsCount || 0,
+          tab.schemaName || "",
+          tab.results?.[tab.activeResultIndex || 0]?.rows.length || 0,
+          tab.results?.[tab.activeResultIndex || 0]?.columns.length || 0,
+        ].join("\u001f"),
+      )
+      .join("\u001e"),
+  );
+  const tabs = useMemo(
+    () => useTabStore.getState().tabs,
+    [tabPresentationSignature],
+  );
+  const activeTabId = useTabStore((state) => state.activeTabId);
+  const setActiveTab = useTabStore((state) => state.setActiveTab);
+  const closeTab = useTabStore((state) => state.closeTab);
+  const forceCloseTab = useTabStore((state) => state.forceCloseTab);
+  const closeOtherTabs = useTabStore((state) => state.closeOtherTabs);
+  const closeAllTabs = useTabStore((state) => state.closeAllTabs);
+  const closeTabsToLeft = useTabStore((state) => state.closeTabsToLeft);
+  const closeTabsToRight = useTabStore((state) => state.closeTabsToRight);
+  const togglePinTab = useTabStore((state) => state.togglePinTab);
+  const createTab = useTabStore((state) => state.createTab);
+  const openDataCompareTab = useTabStore((state) => state.openDataCompareTab);
   const { activeConnectionId, connections } = useConnectionStore();
   const currentSchema = useSchemaStore((state) => state.currentSchema);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -173,6 +204,12 @@ export function TabBar({
             tabIndex < visibleTabs.length - 1 &&
             visibleTabs.slice(tabIndex + 1).some((t) => !t.isPinned);
           const isContextMenuOpen = contextMenuTabId === tab.id;
+          const compareTargets = tabs.filter(
+            (candidate) =>
+              candidate.id !== tab.id &&
+              canCreateDataCompareSource(candidate),
+          );
+          const canCompareSource = canCreateDataCompareSource(tab);
 
           return (
             <DropdownMenu
@@ -259,6 +296,36 @@ export function TabBar({
                   </DropdownMenuSubContent>
                 </DropdownMenuSub>}
                 {allowSplit && tab.type === "query" && <DropdownMenuSeparator className="bg-border" />}
+                {canCompareSource && compareTargets.length > 0 && (
+                  <>
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger className="text-[11px] cursor-pointer focus:bg-background-tertiary">
+                        <Rows3 size={12} className="mr-2" />
+                        Compare Data With
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent className="max-h-72 w-56 overflow-y-auto bg-background-elevated border-border text-foreground">
+                        {compareTargets.map((candidate) => (
+                          <DropdownMenuItem
+                            key={candidate.id}
+                            className="text-[11px] cursor-pointer focus:bg-background-tertiary"
+                            onClick={() => {
+                              openDataCompareTab(tab.id, candidate.id);
+                              setContextMenuTabId(null);
+                            }}
+                          >
+                            <TabIcon
+                              type={candidate.type}
+                              isFile={Boolean(candidate.fileRelativePath)}
+                              isImage={Boolean(candidate.filePreview)}
+                            />
+                            <span className="ml-2 truncate">{candidate.title}</span>
+                          </DropdownMenuItem>
+                        ))}
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                    <DropdownMenuSeparator className="bg-border" />
+                  </>
+                )}
                 <DropdownMenuItem
                   onClick={() => {
                     togglePinTab(tab.id);

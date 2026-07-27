@@ -14,6 +14,7 @@ import type {
 } from "@/services/tauri/types";
 import type { CompletionItem, Diagnostic } from "@/services/lsp/types";
 import type { EditorTextRange } from "@/lib/editorPatch";
+import type { QueryExecutionErrorDetail } from "@/lib/queryErrorPresentation";
 import type { WorkspaceContextBinding } from "@/ai/workspaceContext";
 
 export type AiToolPermission = "read" | "write" | "destructive" | "external";
@@ -112,6 +113,8 @@ export type AiWorkspaceTabSummary = {
   fileRelativePath?: string | null;
   resultSetCount?: number;
   activeResultIndex?: number;
+  queryError?: QueryExecutionErrorDetail | null;
+  explainPlan?: AiExplainPlanSummary | null;
   schemaDiffId?: string | null;
   selectedSchemaChange?: {
     id: string;
@@ -132,6 +135,34 @@ export type AiWorkspaceTabSummary = {
   } | null;
   schemaPreflightCheckCount?: number;
   selection?: AiWorkspaceSelection | null;
+};
+
+export type AiExplainPlanSummary = {
+  id: string;
+  driver: DatabaseDriver;
+  mode: "estimate" | "analyze";
+  generatedInMs: number;
+  planningTimeMs?: number | null;
+  executionTimeMs?: number | null;
+  totalCost?: number | null;
+  estimatedRows?: number | null;
+  rootNodeId: string;
+  nodes: AiExplainPlanNodeSummary[];
+  truncated: boolean;
+  warnings: string[];
+};
+
+export type AiExplainPlanNodeSummary = {
+  id: string;
+  parentId?: string | null;
+  nodeType: string;
+  relation?: string | null;
+  index?: string | null;
+  totalCost?: number | null;
+  estimatedRows?: number | null;
+  actualTotalTimeMs?: number | null;
+  actualRows?: number | null;
+  loops?: number | null;
 };
 
 export type AiWorkspaceSelection = {
@@ -310,6 +341,14 @@ export type AiToolAdapters = {
   getConnectionCapabilities: (
     driver: DatabaseDriver,
   ) => Promise<DatabaseCapabilities> | DatabaseCapabilities;
+  listProjectFiles?: (input: { directory?: string | null }) => Promise<unknown[]> | unknown[];
+  readProjectFile?: (input: { path: string }) => Promise<unknown> | unknown;
+  writeProjectFile?: (input: {
+    path: string;
+    content: string;
+    expectedRevision?: string | null;
+    create?: boolean;
+  }) => Promise<unknown> | unknown;
   getActiveTab?: () =>
     Promise<AiWorkspaceTabSummary | null> | AiWorkspaceTabSummary | null;
   getWorkspaceSelection?: () =>

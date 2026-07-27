@@ -7,10 +7,11 @@ use crate::{
             AgentApproveActionRequest, AgentArtifactExportRequest, AgentArtifactExportResult,
             AgentArtifactReadRequest, AgentArtifactReadResult, AgentArtifactSearchMatch,
             AgentArtifactSearchRequest, AgentArtifactSearchResult, AgentCancelTurnRequest,
-            AgentContextCompactionMetrics, AgentContextMetrics, AgentHostStatus,
-            AgentModelUsageMetrics, AgentProjectStateCleared, AgentProviderConfig,
-            AgentToolManifestEntry, AgentTurnAccepted, AgentTurnRequest, ApprovalDecision,
-            ArtifactReadRequest, ArtifactSearchRequest, BoundedObservation, CheckpointRequest,
+            AgentContextCompactionMetrics, AgentContextMetrics, AgentConversationSnapshot,
+            AgentConversationSnapshotSaveRequest, AgentHostStatus, AgentModelUsageMetrics,
+            AgentProfile, AgentProjectStateCleared, AgentProviderConfig, AgentToolManifestEntry,
+            AgentTurnAccepted, AgentTurnRequest, ApprovalDecision, ArtifactReadRequest,
+            ArtifactSearchRequest, BoundedObservation, CheckpointRequest,
             GraphCheckpointDeleteThreadRequest, GraphCheckpointGetRequest,
             GraphCheckpointListRequest, GraphCheckpointPutRequest, GraphCheckpointPutWritesRequest,
             GraphTypedBlob, ModelCompleteRequest, ModelStreamRequest, RequestMetadata,
@@ -75,6 +76,10 @@ const MAX_ARTIFACT_READ_BYTES: usize = 64 * 1024;
 const MAX_ARTIFACT_SEARCH_MATCHES: usize = 20;
 const MAX_ARTIFACT_SEARCH_CONTEXT_BYTES: usize = 512;
 const CONTEXT_METRICS_THREAD_ID: &str = "__oxide_context_metrics_v1__";
+const CONVERSATION_SNAPSHOT_THREAD_ID: &str = "__oxide_ui_conversation_v1__";
+const MAX_CONVERSATION_TURNS: usize = 100;
+const MAX_CONVERSATION_RESUME_REQUESTS: usize = 8;
+const MAX_CONVERSATION_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
 
 const REQUIRED_CAPABILITIES: &[&str] = &[
     "chat",
@@ -89,6 +94,115 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "subagents",
     "context-compaction",
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RustHostTool {
+    ProjectListFiles,
+    ProjectReadFile,
+    ProjectWriteFile,
+    ConnectionList,
+    ConnectionCapabilities,
+    ProviderList,
+    WorkspaceGetActiveTab,
+    MetadataListCollections,
+    MetadataListObjects,
+    MetadataDescribeObject,
+    QueryRunReadOnly,
+    QueryExplain,
+}
+
+impl RustHostTool {
+    const ALL: [Self; 12] = [
+        Self::ProjectListFiles,
+        Self::ProjectReadFile,
+        Self::ProjectWriteFile,
+        Self::ConnectionList,
+        Self::ConnectionCapabilities,
+        Self::ProviderList,
+        Self::WorkspaceGetActiveTab,
+        Self::MetadataListCollections,
+        Self::MetadataListObjects,
+        Self::MetadataDescribeObject,
+        Self::QueryRunReadOnly,
+        Self::QueryExplain,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::ProjectListFiles => "project.listFiles",
+            Self::ProjectReadFile => "project.readFile",
+            Self::ProjectWriteFile => "project.writeFile",
+            Self::ConnectionList => "connection.list",
+            Self::ConnectionCapabilities => "connection.capabilities",
+            Self::ProviderList => "provider.list",
+            Self::WorkspaceGetActiveTab => "workspace.getActiveTab",
+            Self::MetadataListCollections => "metadata.listCollections",
+            Self::MetadataListObjects => "metadata.listObjects",
+            Self::MetadataDescribeObject => "metadata.describeObject",
+            Self::QueryRunReadOnly => "query.runReadOnly",
+            Self::QueryExplain => "query.explain",
+        }
+    }
+
+    const fn permissions(self) -> &'static [&'static str] {
+        &["read"]
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tool| tool.name() == name)
+    }
+}
+
+fn installed_host_tool_names() -> Vec<String> {
+    RustHostTool::ALL
+        .into_iter()
+        .map(|tool| tool.name().to_string())
+        .collect()
+}
+
+fn validate_host_tool_manifest(
+    profile: AgentProfile,
+    tools: &[AgentToolManifestEntry],
+) -> Result<()> {
+    for tool in tools {
+        let Some(installed) = RustHostTool::from_name(&tool.name) else {
+            return Err(anyhow!(
+                "tool {} is not installed in the Rust Agent Host",
+                bounded_text(&tool.name, 200)
+            ));
+        };
+        if tool.permissions.len() != installed.permissions().len()
+            || !installed
+                .permissions()
+                .iter()
+                .all(|permission| tool.permissions.iter().any(|value| value == permission))
+        {
+            return Err(anyhow!(
+                "tool {} permissions do not match the Rust Agent Host policy",
+                bounded_text(&tool.name, 200)
+            ));
+        }
+        if profile == AgentProfile::Chat && installed != RustHostTool::WorkspaceGetActiveTab {
+            return Err(anyhow!(
+                "tool {} is unavailable in Chat mode",
+                bounded_text(&tool.name, 200)
+            ));
+        }
+        if profile == AgentProfile::Plan
+            && (installed == RustHostTool::ProjectWriteFile
+                || tool
+                    .permissions
+                    .iter()
+                    .any(|permission| permission != "read"))
+        {
+            return Err(anyhow!(
+                "tool {} is not read-only and is unavailable in Plan mode",
+                bounded_text(&tool.name, 200)
+            ));
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone)]
 pub struct AgentHostManager {
@@ -185,6 +299,7 @@ struct ActiveTurn {
     checkpoint_thread_id: String,
     context_version: String,
     prompt: String,
+    active_tab: Option<Value>,
     tab_connection_id: Option<String>,
     tab_namespace: Option<String>,
     connection_id: Option<String>,
@@ -349,6 +464,20 @@ impl AgentHostManager {
         self.inner.load_context_metrics(project_id).await
     }
 
+    pub async fn save_conversation_snapshot(
+        &self,
+        request: AgentConversationSnapshotSaveRequest,
+    ) -> Result<AgentConversationSnapshot> {
+        self.inner.save_conversation_snapshot(request).await
+    }
+
+    pub async fn load_conversation_snapshot(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<AgentConversationSnapshot>> {
+        self.inner.load_conversation_snapshot(project_id).await
+    }
+
     pub async fn read_artifact(
         &self,
         request: AgentArtifactReadRequest,
@@ -377,6 +506,7 @@ impl AgentHostManager {
                 available: false,
                 protocol_version: AGENT_HOST_PROTOCOL_VERSION,
                 capabilities: Vec::new(),
+                installed_tools: installed_host_tool_names(),
                 binary_path: None,
                 storage_mode: "not-initialized".to_string(),
                 last_error: None,
@@ -394,6 +524,7 @@ impl AgentHostInner {
         resume: bool,
     ) -> Result<AgentTurnAccepted> {
         request.validate().map_err(anyhow::Error::msg)?;
+        validate_host_tool_manifest(request.profile, &request.tools)?;
         ensure_not_expired(request.metadata.deadline)?;
         self.start_cleanup_task();
         let key = TurnKey::from_metadata(&request.metadata);
@@ -622,6 +753,7 @@ impl AgentHostInner {
             available: lifecycle.state == LifecycleState::Ready,
             protocol_version: AGENT_HOST_PROTOCOL_VERSION,
             capabilities: lifecycle.capabilities,
+            installed_tools: installed_host_tool_names(),
             binary_path: discovered.map(|path| path.to_string_lossy().into_owned()),
             storage_mode,
             last_error: lifecycle.last_error,
@@ -710,6 +842,92 @@ impl AgentHostInner {
         validate_project_id(project_id)?;
         let _guard = self.context_metrics_lock.lock().await;
         self.load_context_metrics_unlocked(project_id).await
+    }
+
+    async fn save_conversation_snapshot(
+        &self,
+        request: AgentConversationSnapshotSaveRequest,
+    ) -> Result<AgentConversationSnapshot> {
+        validate_project_id(&request.project_id)?;
+        if request.thread_id.trim().is_empty() || request.thread_id.chars().count() > 240 {
+            return Err(anyhow!("threadId must contain 1 to 240 characters"));
+        }
+        let turns = request
+            .turns
+            .as_array()
+            .ok_or_else(|| anyhow!("turns must be an array"))?;
+        if turns.len() > MAX_CONVERSATION_TURNS {
+            return Err(anyhow!(
+                "conversation snapshots are limited to {MAX_CONVERSATION_TURNS} turns"
+            ));
+        }
+        if request.resume_requests.len() > MAX_CONVERSATION_RESUME_REQUESTS {
+            return Err(anyhow!(
+                "conversation snapshots are limited to {MAX_CONVERSATION_RESUME_REQUESTS} resumable turns"
+            ));
+        }
+        for resume_request in &request.resume_requests {
+            resume_request.validate().map_err(anyhow::Error::msg)?;
+            if resume_request.project_id != request.project_id
+                || resume_request.metadata.thread_id != request.thread_id
+            {
+                return Err(anyhow!(
+                    "resumable turn scope must match the conversation snapshot"
+                ));
+            }
+        }
+
+        let snapshot = AgentConversationSnapshot {
+            project_id: request.project_id,
+            thread_id: request.thread_id,
+            turns: request.turns,
+            resume_requests: Value::Array(
+                request
+                    .resume_requests
+                    .iter()
+                    .map(AgentTurnRequest::resumable_value)
+                    .collect(),
+            ),
+            updated_at: now_millis(),
+        };
+        let value = serde_json::to_value(&snapshot)?;
+        if serde_json::to_vec(&value)?.len() > MAX_CONVERSATION_SNAPSHOT_BYTES {
+            return Err(anyhow!(
+                "conversation snapshot exceeds the {} byte limit",
+                MAX_CONVERSATION_SNAPSHOT_BYTES
+            ));
+        }
+        self.store
+            .save_thread(
+                &snapshot.project_id,
+                CONVERSATION_SNAPSHOT_THREAD_ID,
+                &value,
+            )
+            .await
+            .context("failed to persist encrypted AI conversation snapshot")?;
+        Ok(snapshot)
+    }
+
+    async fn load_conversation_snapshot(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<AgentConversationSnapshot>> {
+        validate_project_id(project_id)?;
+        let Some(value) = self
+            .store
+            .load_thread(project_id, CONVERSATION_SNAPSHOT_THREAD_ID)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let snapshot: AgentConversationSnapshot = serde_json::from_value(value)
+            .context("persisted AI conversation snapshot is malformed")?;
+        if snapshot.project_id != project_id {
+            return Err(anyhow!(
+                "persisted AI conversation snapshot does not match the requested project"
+            ));
+        }
+        Ok(Some(snapshot))
     }
 
     async fn load_context_metrics_unlocked(&self, project_id: &str) -> Result<AgentContextMetrics> {
@@ -1453,6 +1671,33 @@ impl AgentHostInner {
         .await;
     }
 
+    async fn emit_trusted_project_file_proposal(
+        &self,
+        metadata: &RequestMetadata,
+        call_id: &str,
+        proposal: &crate::commands::project_files::ProjectFileProposal,
+        created: bool,
+    ) {
+        let key = TurnKey::from_metadata(metadata);
+        let sequence = {
+            let mut sequences = self.event_sequences.write().await;
+            let sequence = sequences.entry(key).or_insert(0);
+            *sequence = sequence.saturating_add(1);
+            *sequence
+        };
+        let event = trusted_project_file_proposal_event(
+            metadata,
+            call_id,
+            proposal,
+            created,
+            sequence,
+            now_millis(),
+        );
+        if let Err(error) = self.app.emit(AGENT_HOST_EVENT_CHANNEL, event) {
+            tracing::warn!("failed to emit trusted project file change: {error}");
+        }
+    }
+
     async fn handle_tool_invoke(
         &self,
         params: Value,
@@ -1517,8 +1762,102 @@ impl AgentHostInner {
         turn: &ActiveTurn,
         request: &ToolInvokeRequest,
     ) -> std::result::Result<Value, SidecarRequestError> {
-        match request.tool_name.as_str() {
-            "connection.list" => {
+        let Some(tool) = RustHostTool::from_name(&request.tool_name) else {
+            return Err(SidecarRequestError {
+                code: -32_061,
+                message: format!(
+                    "tool {} requires a Rust host bridge that is not installed",
+                    bounded_text(&request.tool_name, 200)
+                ),
+                data: Some(json!({
+                    "kind": "host_tool_bridge_required",
+                    "recoverable": true,
+                    "toolName": request.tool_name,
+                })),
+            });
+        };
+
+        match tool {
+            RustHostTool::ProjectListFiles => {
+                let store = self.app.try_state::<MetaStore>().ok_or_else(|| {
+                    SidecarRequestError::tool("project metadata store is unavailable")
+                })?;
+                let directory = request
+                    .input
+                    .get("directory")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let entries = crate::commands::project_files::agent_list_project_entries(
+                    &store,
+                    &turn.project_id,
+                    directory,
+                )
+                .await
+                .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+                serde_json::to_value(entries).map_err(SidecarRequestError::from_json)
+            }
+            RustHostTool::ProjectReadFile => {
+                let store = self.app.try_state::<MetaStore>().ok_or_else(|| {
+                    SidecarRequestError::tool("project metadata store is unavailable")
+                })?;
+                let path = required_input_text(&request.input, "path", 2_000)?;
+                let file = crate::commands::project_files::agent_read_project_file(
+                    &store,
+                    &turn.project_id,
+                    &path,
+                )
+                .await
+                .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+                serde_json::to_value(file).map_err(SidecarRequestError::from_json)
+            }
+            RustHostTool::ProjectWriteFile => {
+                let store = self.app.try_state::<MetaStore>().ok_or_else(|| {
+                    SidecarRequestError::tool("project metadata store is unavailable")
+                })?;
+                let path = required_input_text(&request.input, "path", 2_000)?;
+                let content = request
+                    .input
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| SidecarRequestError::invalid_params("content is required"))?;
+                let expected_revision = request
+                    .input
+                    .get("expectedRevision")
+                    .and_then(Value::as_str);
+                let create = request
+                    .input
+                    .get("create")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let proposal = crate::commands::project_files::agent_prepare_project_file_change(
+                    &store,
+                    &turn.project_id,
+                    &path,
+                    content,
+                    expected_revision,
+                    create,
+                )
+                .await
+                .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+                self.emit_trusted_project_file_proposal(
+                    &request.metadata,
+                    &request.call_id,
+                    &proposal,
+                    create,
+                )
+                .await;
+                Ok(json!({
+                    "relativePath": proposal.relative_path,
+                    "operation": if create { "created" } else { "updated" },
+                    "proposedRevision": proposal.proposed_revision,
+                    "baseRevision": proposal.base_revision,
+                    "additions": proposal.additions,
+                    "deletions": proposal.deletions,
+                    "pendingReview": true,
+                }))
+            }
+            RustHostTool::ConnectionList => {
                 let store =
                     self.app
                         .try_state::<MetaStore>()
@@ -1545,7 +1884,7 @@ impl AgentHostInner {
                         .collect(),
                 ))
             }
-            "connection.capabilities" => {
+            RustHostTool::ConnectionCapabilities => {
                 let driver = self.resolve_driver(turn, &request.input).await?;
                 serde_json::to_value(
                     database_capabilities_for_driver(&driver)
@@ -1553,26 +1892,19 @@ impl AgentHostInner {
                 )
                 .map_err(SidecarRequestError::from_json)
             }
-            "provider.list" => serde_json::to_value(all_database_capabilities())
+            RustHostTool::ProviderList => serde_json::to_value(all_database_capabilities())
                 .map_err(SidecarRequestError::from_json),
-            "metadata.listCollections" | "metadata.listObjects" => {
+            RustHostTool::WorkspaceGetActiveTab => {
+                Ok(turn.active_tab.clone().unwrap_or(Value::Null))
+            }
+            RustHostTool::MetadataListCollections | RustHostTool::MetadataListObjects => {
                 self.execute_metadata_list(turn, request).await
             }
-            "metadata.describeObject" => self.execute_metadata_describe(turn, request).await,
-            "query.runReadOnly" => self.execute_read_only_query(turn, request).await,
-            "query.explain" => self.execute_explain_query(turn, request).await,
-            _ => Err(SidecarRequestError {
-                code: -32_061,
-                message: format!(
-                    "tool {} requires a Rust host bridge that is not installed",
-                    bounded_text(&request.tool_name, 200)
-                ),
-                data: Some(json!({
-                    "kind": "host_tool_bridge_required",
-                    "recoverable": true,
-                    "toolName": request.tool_name,
-                })),
-            }),
+            RustHostTool::MetadataDescribeObject => {
+                self.execute_metadata_describe(turn, request).await
+            }
+            RustHostTool::QueryRunReadOnly => self.execute_read_only_query(turn, request).await,
+            RustHostTool::QueryExplain => self.execute_explain_query(turn, request).await,
         }
     }
 
@@ -2117,6 +2449,7 @@ impl AgentHostInner {
         }
         let bytes = serde_json::to_vec(&value)?;
         let byte_count = bytes.len();
+        let citation_preview = bounded_tool_citation_preview(&tool.name, &value);
         let max_bytes = tool
             .result_limit
             .as_ref()
@@ -2143,7 +2476,7 @@ impl AgentHostInner {
                 "{} result exceeded {} bytes and was offloaded",
                 tool.name, max_bytes
             ),
-            data: None,
+            data: citation_preview,
             row_count,
             byte_count,
             truncated: true,
@@ -2740,6 +3073,12 @@ impl ActiveTurn {
             checkpoint_thread_id: expected_graph_thread_id(request),
             context_version: request.metadata.context_version.clone(),
             prompt: request.prompt.clone(),
+            active_tab: request
+                .workspace
+                .summary
+                .get("activeTab")
+                .filter(|tab| !tab.is_null())
+                .cloned(),
             tab_connection_id: request
                 .workspace
                 .summary
@@ -3611,6 +3950,161 @@ fn non_empty(value: &str) -> Option<&str> {
     (!value.trim().is_empty()).then_some(value)
 }
 
+fn trusted_project_file_proposal_event(
+    metadata: &RequestMetadata,
+    call_id: &str,
+    proposal: &crate::commands::project_files::ProjectFileProposal,
+    created: bool,
+    sequence: u64,
+    occurred_at: i64,
+) -> Value {
+    json!({
+        "type": "file.proposed",
+        "threadId": metadata.thread_id,
+        "turnId": metadata.turn_id,
+        "sequence": sequence,
+        "occurredAt": occurred_at,
+        "callId": call_id,
+        "relativePath": proposal.relative_path,
+        "operation": if created { "created" } else { "updated" },
+        "proposedRevision": proposal.proposed_revision,
+        "baseRevision": proposal.base_revision,
+        "originalContent": proposal.original_content,
+        "proposedContent": proposal.proposed_content,
+        "additions": proposal.additions,
+        "deletions": proposal.deletions,
+    })
+}
+
+fn bounded_tool_citation_preview(tool_name: &str, value: &Value) -> Option<Value> {
+    const OBJECT_FIELDS: [&str; 4] = ["name", "namespace", "kind", "type"];
+    const DESCRIPTION_FIELDS: [&str; 5] = ["connectionId", "namespace", "name", "driver", "kind"];
+    const PLAN_FIELDS: [&str; 3] = ["id", "driver", "mode"];
+    const PLAN_NODE_FIELDS: [&str; 5] = ["id", "nodeType", "relation", "alias", "index"];
+    const ACTIVE_TAB_FIELDS: [&str; 6] = [
+        "id",
+        "type",
+        "title",
+        "connectionId",
+        "databaseName",
+        "schemaName",
+    ];
+
+    match tool_name {
+        "metadata.listObjects" | "metadata.listCollections" => {
+            let items = value.as_array()?;
+            Some(Value::Array(
+                items
+                    .iter()
+                    .take(8)
+                    .filter_map(|item| bounded_object_fields(item, &OBJECT_FIELDS))
+                    .map(Value::Object)
+                    .collect(),
+            ))
+        }
+        "metadata.describeObject" => {
+            bounded_object_fields(value, &DESCRIPTION_FIELDS).map(Value::Object)
+        }
+        "query.explain" => {
+            let source = value.as_object()?;
+            let mut preview = bounded_object_fields(value, &PLAN_FIELDS)?;
+            if let Some(root) = source
+                .get("root")
+                .and_then(|root| bounded_object_fields(root, &PLAN_NODE_FIELDS))
+            {
+                preview.insert("root".to_string(), Value::Object(root));
+            }
+            Some(Value::Object(preview))
+        }
+        "workspace.getActiveTab" => {
+            let source = value.as_object()?;
+            let mut preview = bounded_object_fields(value, &ACTIVE_TAB_FIELDS)?;
+            if let Some(plan) = source
+                .get("explainPlan")
+                .and_then(bounded_active_plan_preview)
+            {
+                preview.insert("explainPlan".to_string(), plan);
+            }
+            Some(Value::Object(preview))
+        }
+        _ => None,
+    }
+}
+
+fn bounded_active_plan_preview(value: &Value) -> Option<Value> {
+    const PLAN_TEXT_FIELDS: [&str; 4] = ["id", "driver", "mode", "rootNodeId"];
+    const PLAN_NUMBER_FIELDS: [&str; 5] = [
+        "generatedInMs",
+        "planningTimeMs",
+        "executionTimeMs",
+        "totalCost",
+        "estimatedRows",
+    ];
+    const NODE_TEXT_FIELDS: [&str; 6] = [
+        "id",
+        "parentId",
+        "nodeType",
+        "relation",
+        "index",
+        "accessType",
+    ];
+    const NODE_NUMBER_FIELDS: [&str; 5] = [
+        "totalCost",
+        "estimatedRows",
+        "actualTotalTimeMs",
+        "actualRows",
+        "loops",
+    ];
+    let source = value.as_object()?;
+    let mut preview = bounded_object_fields(value, &PLAN_TEXT_FIELDS)?;
+    copy_finite_number_fields(source, &mut preview, &PLAN_NUMBER_FIELDS);
+    if let Some(Value::Bool(truncated)) = source.get("truncated") {
+        preview.insert("truncated".to_string(), Value::Bool(*truncated));
+    }
+    if let Some(nodes) = source.get("nodes").and_then(Value::as_array) {
+        let bounded_nodes = nodes
+            .iter()
+            .take(12)
+            .filter_map(|node| {
+                let source = node.as_object()?;
+                let mut bounded = bounded_object_fields(node, &NODE_TEXT_FIELDS)?;
+                copy_finite_number_fields(source, &mut bounded, &NODE_NUMBER_FIELDS);
+                Some(Value::Object(bounded))
+            })
+            .collect::<Vec<_>>();
+        preview.insert("nodes".to_string(), Value::Array(bounded_nodes));
+    }
+    Some(Value::Object(preview))
+}
+
+fn copy_finite_number_fields(
+    source: &Map<String, Value>,
+    target: &mut Map<String, Value>,
+    fields: &[&str],
+) {
+    for field in fields {
+        if let Some(value @ Value::Number(number)) = source.get(*field) {
+            if number.as_f64().is_some_and(f64::is_finite) {
+                target.insert((*field).to_string(), value.clone());
+            }
+        }
+    }
+}
+
+fn bounded_object_fields(value: &Value, fields: &[&str]) -> Option<Map<String, Value>> {
+    let source = value.as_object()?;
+    let mut bounded = Map::new();
+    for field in fields {
+        if let Some(Value::String(text)) = source.get(*field) {
+            bounded.insert(
+                (*field).to_string(),
+                Value::String(text.chars().take(512).collect()),
+            );
+        }
+    }
+    Some(bounded)
+}
+
 fn valid_agent_event_shape(event_type: &str, object: &Map<String, Value>) -> bool {
     match event_type {
         "turn.status" => {
@@ -3649,6 +4143,7 @@ fn valid_agent_event_shape(event_type: &str, object: &Map<String, Value>) -> boo
             has_string_field(object, "callId")
                 && has_string_field(object, "toolName")
                 && has_string_field(object, "label")
+                && optional_agent_relative_path(object, "relativePath")
                 && optional_bool_field(object, "success")
                 && optional_string_field(object, "detail")
         }
@@ -3701,13 +4196,63 @@ fn valid_agent_event_shape(event_type: &str, object: &Map<String, Value>) -> boo
             has_string_field(object, "content") && optional_bool_field(object, "reset")
         }
         "final.answer" => {
-            has_string_field(object, "content") && optional_string_array_field(object, "artifacts")
+            has_string_field(object, "content")
+                && optional_string_array_field(object, "artifacts")
+                && valid_optional_agent_citations(object)
         }
         "failure" => {
             has_string_field(object, "code")
                 && has_string_field(object, "message")
                 && object.get("retryable").and_then(Value::as_bool).is_some()
         }
+        _ => false,
+    }
+}
+
+fn valid_optional_agent_citations(object: &Map<String, Value>) -> bool {
+    let Some(value) = object.get("citations") else {
+        return true;
+    };
+    value
+        .as_array()
+        .filter(|citations| citations.len() <= 8)
+        .is_some_and(|citations| citations.iter().all(valid_agent_citation))
+}
+
+fn valid_agent_citation(value: &Value) -> bool {
+    let Some(citation) = value.as_object() else {
+        return false;
+    };
+    if !bounded_non_empty_string_field(citation, "id", 80)
+        || !bounded_non_empty_string_field(citation, "label", 200)
+        || !bounded_non_empty_string_field(citation, "toolName", 120)
+        || !bounded_non_empty_string_field(citation, "projectId", 240)
+        || !bounded_optional_string_field(citation, "detail", 500)
+        || ![
+            "connectionId",
+            "databaseName",
+            "schemaName",
+            "objectName",
+            "tabId",
+            "planId",
+            "nodeId",
+        ]
+        .iter()
+        .all(|key| bounded_optional_string_field(citation, key, 240))
+        || !bounded_optional_string_field(citation, "objectType", 120)
+    {
+        return false;
+    }
+    match citation.get("kind").and_then(Value::as_str) {
+        Some("databaseSchema") => ["connectionId", "schemaName"]
+            .iter()
+            .all(|key| non_empty_string_field(citation, key)),
+        Some("databaseObject") => ["connectionId", "schemaName", "objectName"]
+            .iter()
+            .all(|key| non_empty_string_field(citation, key)),
+        Some("planNode") => ["tabId", "planId", "nodeId"]
+            .iter()
+            .all(|key| non_empty_string_field(citation, key)),
         _ => false,
     }
 }
@@ -3812,8 +4357,48 @@ fn non_empty_string_field(object: &Map<String, Value>, key: &str) -> bool {
         .is_some_and(|value| !value.is_empty())
 }
 
+fn bounded_non_empty_string_field(
+    object: &Map<String, Value>,
+    key: &str,
+    max_chars: usize,
+) -> bool {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.is_empty() && value.chars().count() <= max_chars)
+}
+
+fn bounded_optional_string_field(object: &Map<String, Value>, key: &str, max_chars: usize) -> bool {
+    object.get(key).is_none()
+        || object
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty() && value.chars().count() <= max_chars)
+}
+
 fn optional_string_field(object: &Map<String, Value>, key: &str) -> bool {
     object.get(key).is_none() || has_string_field(object, key)
+}
+
+fn optional_agent_relative_path(object: &Map<String, Value>, key: &str) -> bool {
+    let Some(value) = object.get(key) else {
+        return true;
+    };
+    let Some(path) = value.as_str() else {
+        return false;
+    };
+    if path.is_empty()
+        || path.chars().count() > 2_000
+        || path.contains('\0')
+        || path.starts_with('/')
+        || path.starts_with('\\')
+        || (path.len() >= 2
+            && path.as_bytes()[0].is_ascii_alphabetic()
+            && path.as_bytes()[1] == b':')
+    {
+        return false;
+    }
+    !path.split(['/', '\\']).any(|segment| segment == "..")
 }
 
 fn optional_bool_field(object: &Map<String, Value>, key: &str) -> bool {
@@ -4134,6 +4719,17 @@ fn sanitize_log_line(line: &str) -> String {
 mod tests {
     use super::*;
 
+    fn tool_manifest(name: &str) -> AgentToolManifestEntry {
+        AgentToolManifestEntry {
+            name: name.to_string(),
+            description: "test tool".to_string(),
+            input_schema: json!({"type":"object"}),
+            permissions: vec!["read".to_string()],
+            timeout_ms: None,
+            result_limit: None,
+        }
+    }
+
     fn stored_connection(id: &str, name: &str, driver: &str) -> StoreSavedConnection {
         StoreSavedConnection {
             id: id.to_string(),
@@ -4152,6 +4748,46 @@ mod tests {
         let second = json!({"a":{"x":0,"z":1},"b":2});
         assert_eq!(input_digest(&first), input_digest(&second));
         assert_eq!(input_digest(&first).len(), 64);
+    }
+
+    #[test]
+    fn installed_tool_catalog_and_manifest_validation_share_one_dispatch_enum() {
+        let advertised = installed_host_tool_names();
+        assert_eq!(advertised.len(), RustHostTool::ALL.len());
+        assert!(advertised.windows(2).all(|pair| pair[0] != pair[1]));
+        assert!(advertised
+            .iter()
+            .all(|name| RustHostTool::from_name(name).is_some()));
+
+        let supported = advertised
+            .iter()
+            .map(|name| tool_manifest(name))
+            .collect::<Vec<_>>();
+        assert!(validate_host_tool_manifest(AgentProfile::Agent, &supported).is_ok());
+        assert!(validate_host_tool_manifest(
+            AgentProfile::Agent,
+            &[tool_manifest("editor.proposePatch")]
+        )
+        .is_err());
+
+        let mut escalated_proposal = tool_manifest("project.writeFile");
+        escalated_proposal.permissions = vec!["write".to_string()];
+        assert!(validate_host_tool_manifest(AgentProfile::Agent, &[escalated_proposal]).is_err());
+        assert!(validate_host_tool_manifest(
+            AgentProfile::Chat,
+            &[tool_manifest("workspace.getActiveTab")]
+        )
+        .is_ok());
+        assert!(validate_host_tool_manifest(
+            AgentProfile::Chat,
+            &[tool_manifest("query.runReadOnly")]
+        )
+        .is_err());
+        assert!(validate_host_tool_manifest(
+            AgentProfile::Plan,
+            &[tool_manifest("project.writeFile")]
+        )
+        .is_err());
     }
 
     #[test]
@@ -4320,6 +4956,202 @@ mod tests {
         assert!(!valid_agent_event_shape(
             "unknown.event",
             valid.as_object().unwrap()
+        ));
+    }
+
+    #[test]
+    fn tool_activity_accepts_only_safe_project_relative_paths() {
+        let valid = json!({
+            "callId": "call-read",
+            "toolName": "project.readFile",
+            "label": "Read project file",
+            "relativePath": "sql/reports/daily.sql"
+        });
+        assert!(valid_agent_event_shape(
+            "tool.started",
+            valid.as_object().unwrap()
+        ));
+
+        let traversal = json!({
+            "callId": "call-read",
+            "toolName": "project.readFile",
+            "label": "Read project file",
+            "relativePath": "../outside.sql"
+        });
+        assert!(!valid_agent_event_shape(
+            "tool.started",
+            traversal.as_object().unwrap()
+        ));
+    }
+
+    #[test]
+    fn final_answer_citations_require_stable_navigation_targets() {
+        let valid = json!({
+            "content": "users exists [1].",
+            "artifacts": [],
+            "citations": [{
+                "id": "cite-object-users",
+                "kind": "databaseObject",
+                "label": "users",
+                "detail": "app.public.users",
+                "toolName": "metadata.describeObject",
+                "projectId": "project",
+                "connectionId": "postgres-1",
+                "databaseName": "app",
+                "schemaName": "public",
+                "objectName": "users",
+                "objectType": "table"
+            }]
+        });
+        assert!(valid_agent_event_shape(
+            "final.answer",
+            valid.as_object().unwrap()
+        ));
+
+        let invalid = json!({
+            "content": "missing target",
+            "citations": [{
+                "id": "cite-invalid",
+                "kind": "planNode",
+                "label": "Plan",
+                "toolName": "query.explain",
+                "projectId": "project",
+                "planId": "plan-1"
+            }]
+        });
+        assert!(!valid_agent_event_shape(
+            "final.answer",
+            invalid.as_object().unwrap()
+        ));
+    }
+
+    #[test]
+    fn offloaded_metadata_and_plan_results_keep_only_navigation_identity() {
+        let metadata = json!([{
+            "name": "users",
+            "namespace": "public",
+            "kind": "relation",
+            "type": "table",
+            "comment": "must not cross the compact citation boundary"
+        }]);
+        assert_eq!(
+            bounded_tool_citation_preview("metadata.listObjects", &metadata),
+            Some(json!([{
+                "name": "users",
+                "namespace": "public",
+                "kind": "relation",
+                "type": "table"
+            }]))
+        );
+
+        let plan = json!({
+            "id": "plan-1",
+            "driver": "postgres",
+            "mode": "estimate",
+            "rawPlan": {"secretlyLarge": [1, 2, 3]},
+            "root": {
+                "id": "plan-1:root",
+                "nodeType": "Seq Scan",
+                "relation": "users",
+                "condition": "email = 'sensitive@example.test'"
+            }
+        });
+        assert_eq!(
+            bounded_tool_citation_preview("query.explain", &plan),
+            Some(json!({
+                "id": "plan-1",
+                "driver": "postgres",
+                "mode": "estimate",
+                "root": {
+                    "id": "plan-1:root",
+                    "nodeType": "Seq Scan",
+                    "relation": "users"
+                }
+            }))
+        );
+
+        let active_tab = json!({
+            "id": "query-1",
+            "type": "query",
+            "title": "Revenue query",
+            "sql": "SELECT secret_column FROM revenue",
+            "explainPlan": {
+                "id": "plan-runtime-1",
+                "driver": "postgres",
+                "mode": "analyze",
+                "rootNodeId": "node-0",
+                "executionTimeMs": 18.5,
+                "truncated": false,
+                "nodes": [{
+                    "id": "node-0",
+                    "nodeType": "Index Scan",
+                    "relation": "revenue",
+                    "actualTotalTimeMs": 17.2,
+                    "actualRows": 42,
+                    "condition": "tenant_id = 'sensitive'"
+                }],
+                "rawPlan": {"mustNotCross": true}
+            }
+        });
+        assert_eq!(
+            bounded_tool_citation_preview("workspace.getActiveTab", &active_tab),
+            Some(json!({
+                "id": "query-1",
+                "type": "query",
+                "title": "Revenue query",
+                "explainPlan": {
+                    "id": "plan-runtime-1",
+                    "driver": "postgres",
+                    "mode": "analyze",
+                    "rootNodeId": "node-0",
+                    "executionTimeMs": 18.5,
+                    "truncated": false,
+                    "nodes": [{
+                        "id": "node-0",
+                        "nodeType": "Index Scan",
+                        "relation": "revenue",
+                        "actualTotalTimeMs": 17.2,
+                        "actualRows": 42
+                    }]
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn trusted_file_proposal_events_include_review_content_without_writing() {
+        let metadata = RequestMetadata {
+            request_id: "request".to_string(),
+            thread_id: "thread".to_string(),
+            turn_id: "turn".to_string(),
+            context_version: "context".to_string(),
+            deadline: now_millis() + 10_000,
+        };
+        let proposal = crate::commands::project_files::ProjectFileProposal {
+            relative_path: "queries/report.sql".to_string(),
+            proposed_revision: "a".repeat(64),
+            base_revision: None,
+            original_content: String::new(),
+            proposed_content: "select 1;\nselect 2;".to_string(),
+            additions: 2,
+            deletions: 0,
+        };
+        let event =
+            trusted_project_file_proposal_event(&metadata, "call-1", &proposal, true, 4, 100);
+
+        assert_eq!(event["type"], "file.proposed");
+        assert_eq!(event["relativePath"], "queries/report.sql");
+        assert_eq!(event["operation"], "created");
+        assert_eq!(event["proposedRevision"], "a".repeat(64));
+        assert_eq!(event["baseRevision"], Value::Null);
+        assert_eq!(event["originalContent"], "");
+        assert_eq!(event["proposedContent"], "select 1;\nselect 2;");
+        assert_eq!(event["additions"], 2);
+        assert_eq!(event["deletions"], 0);
+        assert!(event.get("absolutePath").is_none());
+        assert!(!valid_agent_event_shape(
+            "file.proposed",
+            event.as_object().unwrap()
         ));
     }
 

@@ -7,11 +7,16 @@ import {
 } from "@/lib/databaseDialect";
 import { getLspDocumentUri } from "@/services/lsp/document";
 import {
+  assignLspObjectSourceLocations,
   collectionToLspTableDefinition,
   lspSchemaSignature,
   selectLspTablesForSchema,
   type LspSchemaDefinition,
 } from "@/services/lsp/schemaConfig";
+import {
+  getLspDatabaseObjectUri,
+  parseLspDatabaseObjectUri,
+} from "@/services/lsp/objectUri";
 import type { ColumnInfo, IndexInfo } from "@/services/tauri/types";
 
 function column(name: string, dataType: string): ColumnInfo {
@@ -153,6 +158,49 @@ describe("LSP schema config", () => {
       ["type", "hash"],
       ["value", "json"],
     ]);
+  });
+
+  it("round-trips credential-free database object navigation URIs", () => {
+    const uri = getLspDatabaseObjectUri({
+      connectionId: "postgres/primary",
+      databaseName: "analytics db",
+      schemaName: "业务",
+      objectName: "orders",
+      objectType: "BASE TABLE",
+      columnName: "customer id",
+    });
+
+    expect(uri).not.toContain("postgres://");
+    expect(parseLspDatabaseObjectUri(uri)).toEqual({
+      connectionId: "postgres/primary",
+      databaseName: "analytics db",
+      schemaName: "业务",
+      objectName: "orders",
+      objectType: "BASE TABLE",
+      columnName: "customer id",
+    });
+    expect(parseLspDatabaseObjectUri("file:///schema.sql")).toBeNull();
+  });
+
+  it("assigns table and column definition targets to schema metadata", () => {
+    const table = assignLspObjectSourceLocations(
+      collectionToLspTableDefinition(
+        defaultDatabaseCapabilities("redis"),
+        { name: "user:1", type: "hash" }
+      ),
+      {
+        tableUri: "oxide://database-object/object?object=user%3A1",
+        columnUri: (columnName) =>
+          `oxide://database-object/object?object=user%3A1&column=${columnName}`,
+      }
+    );
+
+    expect(table.source_location).toEqual([
+      "oxide://database-object/object?object=user%3A1",
+      1,
+    ]);
+    expect(table.columns.every((column) => column.source_location?.[0]))
+      .toBe(true);
   });
 
   it("maps MongoDB collection fields and indexes for schema-aware LSP", () => {

@@ -7,6 +7,8 @@ import type {
   ElasticsearchConsoleFileExportResult,
   ElasticsearchConsoleFileImportResult,
   SqlScriptImportResult,
+  SqlStatementSelection,
+  SqlSyntaxValidation,
 } from "./types";
 
 /**
@@ -42,6 +44,27 @@ export async function executeQuery(
 export async function cancelQuery(queryId: string): Promise<string> {
   return invokeWithInterceptors<string>("cancel_query", {
     queryId,
+  });
+}
+
+export async function resolveSqlStatementAtCursor(
+  connectionId: string,
+  sql: string,
+  cursorOffset: number,
+): Promise<SqlStatementSelection | null> {
+  return invokeWithInterceptors<SqlStatementSelection | null>(
+    "resolve_sql_statement_at_cursor",
+    { connectionId, sql, cursorOffset },
+  );
+}
+
+export async function validateSqlSyntax(
+  driver: string,
+  sql: string,
+): Promise<SqlSyntaxValidation> {
+  return invokeWithInterceptors<SqlSyntaxValidation>("validate_sql_syntax", {
+    driver,
+    sql,
   });
 }
 
@@ -121,5 +144,7 @@ export const queryService = {
   exportElasticsearchConsoleFile,
   explainQuery,
   cancelQuery,
+  resolveSqlStatementAtCursor,
+  validateSqlSyntax,
   getSqlCompletion,
 };

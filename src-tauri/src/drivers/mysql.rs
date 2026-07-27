@@ -2,7 +2,7 @@ use crate::core::driver::DatabaseDriver;
 use crate::core::protocol::{
     ColumnDef, ColumnInfo, ConstraintInfo, ForeignKeyReferenceInfo, FunctionInfo,
     FunctionParameterInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult,
-    TableInfo,
+    TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
 };
 use crate::core::statement::{
     classify_statement, execution_mode, execution_statement_kind, has_multiple_statements,
@@ -10,6 +10,7 @@ use crate::core::statement::{
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use futures::{StreamExt, TryStreamExt};
 use sqlx::mysql::types::MySqlTime;
 use sqlx::mysql::{MySqlArguments, MySqlConnectOptions, MySqlPoolOptions, MySqlRow};
 use sqlx::pool::PoolConnection;
@@ -204,7 +205,11 @@ impl MysqlDriver {
             data_rows.push(row_values);
         }
 
-        Ok(vec![QueryResult::rows(columns, data_rows)])
+        Ok(vec![QueryResult::rows_limited(
+            columns,
+            data_rows,
+            DEFAULT_QUERY_RESULT_ROW_LIMIT,
+        )])
     }
 
     async fn process_pool_rows(
@@ -284,7 +289,11 @@ impl MysqlDriver {
 
         match execution_mode(sql) {
             QueryExecutionMode::ReturnsRows => {
-                let rows = sqlx::raw_sql(sql).fetch_all(pool).await?;
+                let rows = sqlx::raw_sql(sql)
+                    .fetch(pool)
+                    .take(DEFAULT_QUERY_RESULT_ROW_LIMIT + 1)
+                    .try_collect::<Vec<_>>()
+                    .await?;
                 self.process_pool_rows(sql, rows, pool).await
             }
             QueryExecutionMode::AffectsRows => {
@@ -305,7 +314,13 @@ impl MysqlDriver {
         if mysql_requires_unprepared(sql) {
             return match execution_mode(sql) {
                 QueryExecutionMode::ReturnsRows => {
-                    let rows = (&mut *conn).fetch_all(sql).await?;
+                    let rows = {
+                        let stream = (&mut *conn).fetch(sql);
+                        stream
+                            .take(DEFAULT_QUERY_RESULT_ROW_LIMIT + 1)
+                            .try_collect::<Vec<_>>()
+                            .await?
+                    };
                     self.process_connection_rows(sql, rows, conn).await
                 }
                 QueryExecutionMode::AffectsRows => {
@@ -320,10 +335,13 @@ impl MysqlDriver {
 
         match execution_mode(sql) {
             QueryExecutionMode::ReturnsRows => {
-                let rows = sqlx::query(sql)
-                    .persistent(false)
-                    .fetch_all(&mut *conn)
-                    .await?;
+                let rows = {
+                    let stream = sqlx::query(sql).persistent(false).fetch(&mut *conn);
+                    stream
+                        .take(DEFAULT_QUERY_RESULT_ROW_LIMIT + 1)
+                        .try_collect::<Vec<_>>()
+                        .await?
+                };
                 self.process_connection_rows(sql, rows, conn).await
             }
             QueryExecutionMode::AffectsRows => {
@@ -566,7 +584,11 @@ impl DatabaseDriver for MysqlDriver {
                 for param in params {
                     query = bind_mysql_parameter(query, param)?;
                 }
-                let rows = query.fetch_all(&pool).await?;
+                let rows = query
+                    .fetch(&pool)
+                    .take(DEFAULT_QUERY_RESULT_ROW_LIMIT + 1)
+                    .try_collect::<Vec<_>>()
+                    .await?;
                 self.process_pool_rows(sql, rows, &pool).await
             }
             QueryExecutionMode::AffectsRows => {

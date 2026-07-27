@@ -4,6 +4,7 @@ import {
   ensureLspSession,
   getLspSessionDescriptor,
   lspClient,
+  retainLspSession,
   type LspSessionDescriptor,
 } from "@/services/lsp";
 
@@ -56,36 +57,47 @@ export function useLspClient(options: UseLspClientOptions = {}) {
       return;
     }
 
-    if (descriptor.client.isInitialized()) {
-      setIsReady(true);
-      setError(null);
-      setStatus("ready");
-      return;
-    }
+    const releaseSession = retainLspSession(descriptor.key);
+    let healthTimer: ReturnType<typeof setInterval> | null = null;
 
-    setIsReady(false);
+    setIsReady(descriptor.client.isInitialized());
     setError(null);
-    setStatus("starting");
+    setStatus(descriptor.client.isInitialized() ? "ready" : "starting");
 
-    ensureLspSession({
-      connectionId: options.connectionId,
-      driver: options.driver,
-    })
-      .then((nextDescriptor) => {
-        if (!mounted) return;
-        setIsReady(Boolean(nextDescriptor?.client.isInitialized()));
-        setStatus(nextDescriptor?.client.isInitialized() ? "ready" : "disabled");
-        setError(null);
+    const startOrRecover = () =>
+      ensureLspSession({
+        connectionId: options.connectionId!,
+        driver: options.driver!,
       })
-      .catch((err) => {
-        if (!mounted) return;
-        setIsReady(false);
-        setStatus("error");
-        setError(err instanceof Error ? err.message : String(err));
-      });
+        .then((nextDescriptor) => {
+          if (!mounted) return;
+          setIsReady(Boolean(nextDescriptor?.client.isInitialized()));
+          setStatus(nextDescriptor?.client.isInitialized() ? "ready" : "disabled");
+          setError(null);
+        })
+        .catch((err) => {
+          if (!mounted) return;
+          setIsReady(false);
+          setStatus("error");
+          setError(err instanceof Error ? err.message : String(err));
+        });
+
+    void startOrRecover().then(() => {
+      if (!mounted) return;
+      healthTimer = setInterval(() => {
+        void descriptor.client.isRunning().then((running) => {
+          if (!mounted || running) return;
+          setIsReady(false);
+          setStatus("starting");
+          void startOrRecover();
+        });
+      }, 15_000);
+    });
 
     return () => {
       mounted = false;
+      if (healthTimer) clearInterval(healthTimer);
+      releaseSession();
     };
   }, [descriptor, options.connectionId, options.driver]);
 

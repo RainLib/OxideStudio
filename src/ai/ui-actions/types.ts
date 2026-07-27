@@ -4,6 +4,7 @@ export const UI_ACTION_NAMES = [
   "workspace.openTab",
   "workspace.focusPanel",
   "database.selectConnection",
+  "database.revealSchema",
   "database.revealObject",
   "database.openObjectData",
   "database.openObjectDdl",

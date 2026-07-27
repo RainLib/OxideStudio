@@ -3,7 +3,7 @@ use crate::core::driver::DatabaseDriver;
 use crate::core::protocol::{
     ColumnDef, ColumnInfo, ConstraintInfo, ForeignKeyReferenceInfo, FunctionInfo,
     FunctionParameterInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult,
-    TableInfo,
+    TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
 };
 use crate::core::statement::{
     execution_mode, execution_statement_kind, split_sql_statements, QueryExecutionMode,
@@ -11,6 +11,7 @@ use crate::core::statement::{
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use futures::{StreamExt, TryStreamExt};
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::types::{Oid, PgInterval, PgTimeTz};
 use sqlx::postgres::{
@@ -520,7 +521,11 @@ impl PostgresDriver {
             data_rows.push(row_values);
         }
 
-        Ok(vec![QueryResult::rows(columns, data_rows)])
+        Ok(vec![QueryResult::rows_limited(
+            columns,
+            data_rows,
+            DEFAULT_QUERY_RESULT_ROW_LIMIT,
+        )])
     }
 
     async fn process_pool_rows(
@@ -583,7 +588,12 @@ impl PostgresDriver {
     ) -> Result<Vec<QueryResult>> {
         match execution_mode(sql) {
             QueryExecutionMode::ReturnsRows => {
-                let rows = sqlx::query(sql).persistent(false).fetch_all(pool).await?;
+                let rows = sqlx::query(sql)
+                    .persistent(false)
+                    .fetch(pool)
+                    .take(DEFAULT_QUERY_RESULT_ROW_LIMIT + 1)
+                    .try_collect::<Vec<_>>()
+                    .await?;
                 self.process_pool_rows(sql, rows, pool).await
             }
             QueryExecutionMode::AffectsRows => {
@@ -632,7 +642,11 @@ impl PostgresDriver {
                 for param in params {
                     query = bind_pg_parameter(query, param)?;
                 }
-                let rows = query.fetch_all(pool).await?;
+                let rows = query
+                    .fetch(pool)
+                    .take(DEFAULT_QUERY_RESULT_ROW_LIMIT + 1)
+                    .try_collect::<Vec<_>>()
+                    .await?;
                 self.process_pool_rows(sql, rows, pool).await
             }
             QueryExecutionMode::AffectsRows => {
@@ -656,10 +670,13 @@ impl PostgresDriver {
     ) -> Result<Vec<QueryResult>> {
         match execution_mode(sql) {
             QueryExecutionMode::ReturnsRows => {
-                let rows = sqlx::query(sql)
-                    .persistent(false)
-                    .fetch_all(&mut *conn)
-                    .await?;
+                let rows = {
+                    let stream = sqlx::query(sql).persistent(false).fetch(&mut *conn);
+                    stream
+                        .take(DEFAULT_QUERY_RESULT_ROW_LIMIT + 1)
+                        .try_collect::<Vec<_>>()
+                        .await?
+                };
                 self.process_connection_rows(sql, rows, conn).await
             }
             QueryExecutionMode::AffectsRows => {

@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 pub struct LspState(pub Arc<Mutex<HashMap<String, Arc<LspServerManager>>>>);
 
 const DEFAULT_LSP_SESSION_KEY: &str = "default";
+const MAX_LSP_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 
 fn normalize_session_key(session_key: Option<&str>) -> String {
     let trimmed = session_key.unwrap_or(DEFAULT_LSP_SESSION_KEY).trim();
@@ -61,6 +62,14 @@ pub struct FormatDocumentRequest {
     pub uri: String,
     pub tab_size: u32,
     pub insert_spaces: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GenericLspRequest {
+    #[serde(default)]
+    pub session_key: Option<String>,
+    pub method: String,
+    pub params: Value,
 }
 
 /// Completion response
@@ -503,6 +512,41 @@ pub async fn lsp_formatting(
         .map_err(|e| format!("LSP error: {}", e))
 }
 
+#[tauri::command]
+pub async fn lsp_request(
+    request: GenericLspRequest,
+    state: State<'_, LspState>,
+) -> Result<Value, String> {
+    if !is_allowed_generic_lsp_method(&request.method) {
+        return Err(format!(
+            "Unsupported LSP request method: {}",
+            request.method
+        ));
+    }
+    let manager = current_manager(&state, request.session_key.as_deref()).await?;
+    manager
+        .send_request(request.method, request.params)
+        .await
+        .map_err(|error| format!("LSP error: {error}"))
+}
+
+fn is_allowed_generic_lsp_method(method: &str) -> bool {
+    matches!(
+        method,
+        "textDocument/signatureHelp"
+            | "textDocument/prepareRename"
+            | "textDocument/rename"
+            | "textDocument/codeAction"
+            | "textDocument/rangeFormatting"
+            | "textDocument/documentSymbol"
+            | "textDocument/foldingRange"
+            | "textDocument/selectionRange"
+            | "textDocument/semanticTokens/full"
+            | "textDocument/inlayHint"
+            | "workspace/symbol"
+    )
+}
+
 /// LSP configuration (sqls settings)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LspSqlsConfig {
@@ -551,6 +595,7 @@ pub async fn lsp_did_open(
     session_key: Option<String>,
     state: State<'_, LspState>,
 ) -> Result<(), String> {
+    validate_lsp_document_size(&text)?;
     tracing::info!(
         "📄 LSP didOpen command called: uri={}, version={}",
         uri,
@@ -594,6 +639,7 @@ pub async fn lsp_did_change(
     session_key: Option<String>,
     state: State<'_, LspState>,
 ) -> Result<(), String> {
+    validate_lsp_document_size(&text)?;
     if let Ok(manager) = current_manager(&state, session_key.as_deref()).await {
         // sending full text sync for simplicity
         let params = serde_json::json!({
@@ -616,6 +662,34 @@ pub async fn lsp_did_change(
         Ok(())
     } else {
         Ok(())
+    }
+}
+
+fn validate_lsp_document_size(text: &str) -> Result<(), String> {
+    if text.len() > MAX_LSP_DOCUMENT_BYTES {
+        return Err(format!(
+            "LSP document exceeds the {} byte synchronization limit",
+            MAX_LSP_DOCUMENT_BYTES
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod document_size_tests {
+    use super::{validate_lsp_document_size, MAX_LSP_DOCUMENT_BYTES};
+
+    #[test]
+    fn accepts_bounded_lsp_documents() {
+        assert!(validate_lsp_document_size("SELECT 1").is_ok());
+    }
+
+    #[test]
+    fn rejects_oversized_lsp_documents() {
+        let text = "x".repeat(MAX_LSP_DOCUMENT_BYTES + 1);
+        assert!(validate_lsp_document_size(&text)
+            .unwrap_err()
+            .contains("synchronization limit"));
     }
 }
 
@@ -711,5 +785,18 @@ mod tests {
             })
         );
         assert_eq!(parsed.preselect, Some(true));
+    }
+
+    #[test]
+    fn generic_lsp_requests_are_strictly_allowlisted() {
+        assert!(is_allowed_generic_lsp_method("textDocument/signatureHelp"));
+        assert!(is_allowed_generic_lsp_method("textDocument/rename"));
+        assert!(is_allowed_generic_lsp_method(
+            "textDocument/semanticTokens/full"
+        ));
+        assert!(is_allowed_generic_lsp_method("textDocument/inlayHint"));
+        assert!(is_allowed_generic_lsp_method("workspace/symbol"));
+        assert!(!is_allowed_generic_lsp_method("shutdown"));
+        assert!(!is_allowed_generic_lsp_method("workspace/executeCommand"));
     }
 }

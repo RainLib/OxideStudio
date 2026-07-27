@@ -15,8 +15,12 @@ import {
   AgentRuntime,
   modelUsage,
   splitPromptAtBoundaries,
+  systemPrompt,
 } from "../src/runtime.js";
-import { toolObservationDetail } from "../src/tools.js";
+import {
+  citationCandidatesFromObservation,
+  toolObservationDetail,
+} from "../src/tools.js";
 
 describe("long prompt segmentation", () => {
   it("preserves every character and does not split surrogate pairs", () => {
@@ -28,6 +32,15 @@ describe("long prompt segmentation", () => {
     for (let index = 1; index < chunks.length; index += 1) {
       expect(chunks[index]?.start).toBe(chunks[index - 1]?.end);
     }
+  });
+});
+
+describe("Agent process narration", () => {
+  it("requires a concise public description before each work phase", () => {
+    const prompt = systemPrompt("agent");
+    expect(prompt).toContain("Before each distinct work phase");
+    expect(prompt).toContain("then perform that phase's tool calls");
+    expect(prompt).toContain("never reveal hidden reasoning");
   });
 });
 
@@ -346,7 +359,8 @@ describe("AgentRuntime", () => {
       resolveAwaiting = resolve;
     });
 
-    host.register(SIDECAR_METHODS.modelComplete, () => {
+    host.register(SIDECAR_METHODS.modelComplete, (raw) => {
+      const request = raw as ModelRequest;
       modelCalls += 1;
       if (modelCalls === 1) {
         return {
@@ -488,6 +502,29 @@ describe("AgentRuntime", () => {
     const runtime = new AgentRuntime(sidecar);
     let modelCalls = 0;
     let selectedConnectionId: unknown;
+    const expectedCitation = citationCandidatesFromObservation(
+      "metadata.listObjects",
+      { connectionId: "es-1" },
+      {
+        summary: "2 indexes",
+        data: [
+          { name: "events", namespace: "default", kind: "index" },
+          { name: "archive", namespace: "default", kind: "index" },
+        ],
+        rowCount: 2,
+        byteCount: 42,
+        truncated: true,
+        artifactRef: "tool-result-indexes",
+      },
+      {
+        projectId: "project",
+        connectionId: null,
+        database: null,
+        namespace: null,
+        activeTabId: null,
+      },
+    ).find((citation) => citation.kind === "databaseObject");
+    if (!expectedCitation) throw new Error("expected test citation");
     let resolveClarification!: (event: AgentEvent) => void;
     let resolveFinal!: (event: AgentEvent) => void;
     let resolveAwaiting!: () => void;
@@ -519,7 +556,7 @@ describe("AgentRuntime", () => {
         };
       }
       return {
-        content: "The Elasticsearch connection has two indexes.",
+        content: `The Elasticsearch connection includes events. [[cite:${expectedCitation.id}]]`,
         model: "test-model",
         finishReason: "stop",
         usage: { inputTokens: 18, outputTokens: 7, totalTokens: 25 },
@@ -544,7 +581,11 @@ describe("AgentRuntime", () => {
       }
       return {
         summary: "2 indexes",
-        data: null,
+        data: [
+          { name: "events", namespace: "default", kind: "index" },
+          { name: "archive", namespace: "default", kind: "index" },
+        ],
+        rowCount: 2,
         byteCount: 42,
         truncated: true,
         artifactRef: "tool-result-indexes",
@@ -641,8 +682,17 @@ describe("AgentRuntime", () => {
     });
     await expect(final).resolves.toMatchObject({
       type: "final.answer",
-      content: "The Elasticsearch connection has two indexes.",
+      content: "The Elasticsearch connection includes events. [1]",
       artifacts: ["tool-result-indexes"],
+      citations: [
+        expect.objectContaining({
+          kind: "databaseObject",
+          label: "events",
+          connectionId: "es-1",
+          schemaName: "default",
+          objectName: "events",
+        }),
+      ],
     });
     expect(selectedConnectionId).toBe("es-1");
     expect(modelCalls).toBe(2);

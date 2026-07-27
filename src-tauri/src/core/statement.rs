@@ -11,6 +11,13 @@ pub enum StatementScanDialect {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SqlStatementSpan<'a> {
+    pub text: &'a str,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatementKind {
     Select,
     Insert,
@@ -638,7 +645,32 @@ fn mysql_delimiter_directive_at(sql: &str, index: usize) -> Option<(&str, usize)
     Some((delimiter, next_line))
 }
 
-pub fn split_sql_statements(sql: &str, dialect: StatementScanDialect) -> Vec<&str> {
+fn push_statement_span<'a>(
+    statements: &mut Vec<SqlStatementSpan<'a>>,
+    sql: &'a str,
+    start: usize,
+    end: usize,
+    dialect: StatementScanDialect,
+) {
+    let raw = &sql[start..end];
+    if !segment_has_sql(raw, dialect) {
+        return;
+    }
+
+    let text = raw.trim();
+    let leading_whitespace = raw.find(text).unwrap_or(0);
+    let span_start = start + leading_whitespace;
+    statements.push(SqlStatementSpan {
+        text,
+        start: span_start,
+        end: span_start + text.len(),
+    });
+}
+
+pub fn split_sql_statement_spans(
+    sql: &str,
+    dialect: StatementScanDialect,
+) -> Vec<SqlStatementSpan<'_>> {
     let mut statements = Vec::new();
     let mut statement_start = 0;
     let mut index = 0;
@@ -692,9 +724,7 @@ pub fn split_sql_statements(sql: &str, dialect: StatementScanDialect) -> Vec<&st
         }
 
         if sql[index..].starts_with(delimiter) {
-            if segment_has_sql(&sql[statement_start..index], dialect) {
-                statements.push(sql[statement_start..index].trim());
-            }
+            push_statement_span(&mut statements, sql, statement_start, index, dialect);
             index += delimiter.len();
             statement_start = index;
             continue;
@@ -703,11 +733,16 @@ pub fn split_sql_statements(sql: &str, dialect: StatementScanDialect) -> Vec<&st
         index += ch.len_utf8();
     }
 
-    if segment_has_sql(&sql[statement_start..], dialect) {
-        statements.push(sql[statement_start..].trim());
-    }
+    push_statement_span(&mut statements, sql, statement_start, sql.len(), dialect);
 
     statements
+}
+
+pub fn split_sql_statements(sql: &str, dialect: StatementScanDialect) -> Vec<&str> {
+    split_sql_statement_spans(sql, dialect)
+        .into_iter()
+        .map(|statement| statement.text)
+        .collect()
 }
 
 pub fn has_multiple_statements(sql: &str, dialect: StatementScanDialect) -> bool {
@@ -1200,8 +1235,8 @@ pub fn validate_sql_filter_expression(
 mod tests {
     use super::{
         classify_statement, execution_mode, execution_statement_kind, has_multiple_statements,
-        split_sql_statements, validate_read_only_sql, validate_sql_filter_expression,
-        QueryExecutionMode, StatementKind, StatementScanDialect,
+        split_sql_statement_spans, split_sql_statements, validate_read_only_sql,
+        validate_sql_filter_expression, QueryExecutionMode, StatementKind, StatementScanDialect,
     };
 
     #[test]
@@ -1464,6 +1499,24 @@ mod tests {
                 StatementScanDialect::Mysql,
             ),
             vec!["SELECT `semi;colon` FROM t", "SELECT \"also;one\""]
+        );
+    }
+
+    #[test]
+    fn statement_spans_preserve_utf8_byte_boundaries_and_trimmed_offsets() {
+        let sql = "  SELECT '中文';\n\n  UPDATE users SET name = 'x';  ";
+        let statements = split_sql_statement_spans(sql, StatementScanDialect::Postgres);
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].text, "SELECT '中文'");
+        assert_eq!(
+            &sql[statements[0].start..statements[0].end],
+            statements[0].text
+        );
+        assert_eq!(statements[1].text, "UPDATE users SET name = 'x'");
+        assert_eq!(
+            &sql[statements[1].start..statements[1].end],
+            statements[1].text
         );
     }
 

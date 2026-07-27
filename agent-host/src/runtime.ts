@@ -11,6 +11,7 @@ import {
   AGENT_HOST_PROTOCOL_VERSION,
   HOST_METHODS,
   SIDECAR_METHODS,
+  agentCitationSchema,
   agentCapabilitySchema,
   answerClarificationParamsSchema,
   cancelTurnParamsSchema,
@@ -20,6 +21,7 @@ import {
   resumeTurnParamsSchema,
   startTurnParamsSchema,
   type AgentEvent,
+  type AgentCitation,
   type InitializeAgentHostResult,
   type RequestMetadata,
   type ResumeInterrupt,
@@ -34,7 +36,7 @@ import {
   createProxyTools,
 } from "./tools.js";
 
-const RUNTIME_VERSION = "1.10.8";
+const RUNTIME_VERSION = "1.10.9";
 const FILESYSTEM_TOOLS = [
   "ls",
   "read_file",
@@ -80,6 +82,7 @@ export class TurnExecution {
   private readonly approvalLeases = new Map<string, string>();
   private readonly modelUsageByMessage = new Map<string, ModelUsage>();
   private readonly artifactReferences = new Set<string>();
+  private readonly citationEvidence = new Map<string, AgentCitation>();
   private resumeConsumed = false;
   private modelUsageEmitted = false;
   private activeReadOnlyCalls = 0;
@@ -91,10 +94,12 @@ export class TurnExecution {
     readonly resume: ResumeInterrupt | null = null,
     transientApprovalLease?: { approvalId: string; lease: string } | null,
     initialArtifactReferences: readonly string[] = [],
+    initialCitations: readonly AgentCitation[] = [],
   ) {
     for (const artifactRef of initialArtifactReferences) {
       this.recordArtifactReference(artifactRef);
     }
+    this.recordCitations(initialCitations);
     if (transientApprovalLease) {
       this.approvalLeases.set(
         transientApprovalLease.approvalId,
@@ -179,6 +184,19 @@ export class TurnExecution {
     return [...this.artifactReferences];
   }
 
+  recordCitations(citations: readonly AgentCitation[]): void {
+    for (const citation of citations) {
+      if (this.citationEvidence.size >= 64 && !this.citationEvidence.has(citation.id)) {
+        break;
+      }
+      this.citationEvidence.set(citation.id, citation);
+    }
+  }
+
+  citations(): AgentCitation[] {
+    return [...this.citationEvidence.values()];
+  }
+
   markSuspended(value: ResumeInterrupt, event: EventPayload | null): void {
     this.suspension = value;
     this.suspensionEvent = event;
@@ -244,7 +262,7 @@ export class AgentRuntime {
   private readonly threads = new Map<string, { projectId: string }>();
   private readonly suspendedTurns = new Map<
     string,
-    { params: StartTurnParams; artifacts: string[] }
+    { params: StartTurnParams; artifacts: string[]; citations: AgentCitation[] }
   >();
 
   constructor(private readonly peer: JsonRpcPeer) {
@@ -302,14 +320,14 @@ export class AgentRuntime {
   private startTurn(params: unknown): { accepted: true } {
     this.assertInitialized();
     const request = startTurnParamsSchema.parse(params);
-    return this.startExecution(request, null, null, []);
+    return this.startExecution(request, null, null, [], []);
   }
 
   private resumeTurn(params: unknown): { accepted: true; resumed: true } {
     this.assertInitialized();
     const parsed = resumeTurnParamsSchema.safeParse(params);
     if (!parsed.success) {
-      this.startExecution(startTurnParamsSchema.parse(params), null, null, []);
+      this.startExecution(startTurnParamsSchema.parse(params), null, null, [], []);
       return { accepted: true, resumed: true };
     }
     const request = parsed.data;
@@ -317,6 +335,7 @@ export class AgentRuntime {
       request,
       request.resume,
       request.transientApprovalLease,
+      [],
       [],
     );
     return { accepted: true, resumed: true };
@@ -330,6 +349,7 @@ export class AgentRuntime {
       | null
       | undefined,
     initialArtifactReferences: readonly string[],
+    initialCitations: readonly AgentCitation[],
   ): { accepted: true } {
     if (request.workspace.projectId !== request.projectId) {
       throw new AgentProtocolError("WORKSPACE_PROJECT_MISMATCH");
@@ -355,6 +375,7 @@ export class AgentRuntime {
       resume,
       transientApprovalLease,
       initialArtifactReferences,
+      initialCitations,
     );
     this.suspendedTurns.delete(key);
     this.turns.set(key, execution);
@@ -387,6 +408,7 @@ export class AgentRuntime {
       },
       null,
       suspended.artifacts,
+      suspended.citations,
     );
     return { resumed: true };
   }
@@ -407,6 +429,7 @@ export class AgentRuntime {
         ? { approvalId: request.approvalId, lease: request.lease }
         : null,
       suspended.artifacts,
+      suspended.citations,
     );
     return { resumed: true };
   }
@@ -528,6 +551,14 @@ export class AgentRuntime {
         if (messageHasToolCallChunk(messageFrame.message)) {
           if (!streamedToolCall) {
             streamedToolCall = true;
+            const phaseDescription = messageText(messageFrame.message);
+            if (phaseDescription) {
+              await execution.emit({
+                type: "answer.delta",
+                content: phaseDescription,
+                reset: false,
+              });
+            }
             await execution.emit({
               type: "answer.delta",
               content: "",
@@ -555,6 +586,7 @@ export class AgentRuntime {
           {
             params: execution.params,
             artifacts: execution.artifacts(),
+            citations: execution.citations(),
           },
         );
         if (execution.suspensionEvent) {
@@ -576,15 +608,20 @@ export class AgentRuntime {
       await emitTodoPlan(execution, result);
       await emitCompaction(execution, result);
       await execution.emitModelUsage();
+      for (const citation of citationEvidenceInResult(result)) {
+        execution.recordCitations([citation]);
+      }
       const answer = finalAnswer(result);
+      const citedAnswer = resolveCitedAnswer(answer, execution.citations());
       for (const artifactRef of artifactReferencesInResult(result)) {
         execution.recordArtifactReference(artifactRef);
       }
       await saveCheckpoint(execution, result);
       await execution.emit({
         type: "final.answer",
-        content: answer,
+        content: citedAnswer.content,
         artifacts: execution.artifacts(),
+        citations: citedAnswer.citations,
       });
       await execution.emit({ type: "turn.status", status: "completed" });
       this.suspendedTurns.delete(
@@ -703,16 +740,19 @@ function createSubagents(
   return candidates;
 }
 
-function systemPrompt(profile: StartTurnParams["profile"]): string {
+export function systemPrompt(profile: StartTurnParams["profile"]): string {
   const shared = [
     "You are the OxideStudio database assistant.",
     "Never claim a tool succeeded unless its returned observation says it succeeded.",
-    "Do not reveal hidden reasoning. Show only concise process labels and the final answer.",
+    "Do not reveal hidden reasoning. Show only concise user-visible process descriptions and the final answer.",
     "Use ask_user only for material ambiguity; at most two clarification rounds are available.",
     "For ask_user, provide 1-3 questions with 2-3 concrete options each. Never add an Other, Custom, or free-text option because the UI always provides a separate free-text answer.",
     "Filesystem and shell access are forbidden. Database access is only through the supplied tools.",
+    "project.writeFile only stages a reviewable file proposal and never changes the project on disk. Describe its result as proposed or pending review; never say the file was created, updated, or applied until the user accepts it in the OxideStudio review UI.",
     "query.runReadOnly is driver-aware: use SQL SELECT for relational databases, MongoDB read-command JSON for MongoDB, Redis read commands for Redis, and Elasticsearch DSL as JSON or Kibana syntax such as POST index/_search followed by the JSON body. Never send SQL to a non-SQL connection.",
     "When a tool observation contains artifactRef, use context_search_artifact to find relevant JSON ranges and context_read_artifact to read only those ranges. Do not guess omitted data.",
+    "Metadata and Explain Plan observations may include trusted citations. Append the exact token [[cite:citation-id]] to each factual sentence that relies on that evidence. Use a databaseSchema citation for aggregate/list claims and a databaseObject citation for object details. Use only citation ids present in the observation, never invent or alter one. Do not cite claims that are only suggestions or inference.",
+    "Use workspace.getActiveTab to inspect a plan already opened by the user. Only an analyzed plan is runtime evidence; query.explain and estimate-mode plans are optimizer estimates and must not be described as measured performance.",
   ];
   if (profile === "chat") {
     shared.push(
@@ -721,10 +761,12 @@ function systemPrompt(profile: StartTurnParams["profile"]): string {
   } else if (profile === "plan") {
     shared.push(
       "This is Plan mode. You may inspect with read-only tools and produce an executable plan, but never perform a write or destructive action.",
+      "Before each distinct tool phase, write one concise user-visible sentence describing what you will inspect and why, then call the tools. Keep these stage updates factual and never reveal hidden reasoning.",
     );
   } else {
     shared.push(
       "This is Agent mode. Prefer bounded read-only discovery. Risky tools require exact one-time approval. Keep mutations serial and verify context immediately before use.",
+      "Before each distinct work phase, write one concise user-visible sentence describing what you will inspect or change and why, then perform that phase's tool calls. Add a new update when the objective changes, avoid narrating trivial calls, and never reveal hidden reasoning.",
       "Use no more than two subagents at a time.",
     );
   }
@@ -765,6 +807,68 @@ function finalAnswer(result: unknown): string {
     }
   }
   throw new AgentProtocolError("FINAL_ANSWER_MISSING");
+}
+
+export function resolveCitedAnswer(
+  answer: string,
+  availableCitations: readonly AgentCitation[],
+): { content: string; citations: AgentCitation[] } {
+  const available = new Map(
+    availableCitations.slice(0, 64).map((citation) => [citation.id, citation]),
+  );
+  const cited: AgentCitation[] = [];
+  const citationNumbers = new Map<string, number>();
+  const content = answer.replace(
+    /\[\[cite:([A-Za-z0-9:_-]{1,80})\]\]/gu,
+    (_token, id: string) => {
+      const citation = available.get(id);
+      if (!citation) return "";
+      let number = citationNumbers.get(id);
+      if (number === undefined) {
+        if (cited.length >= 8) return "";
+        cited.push(citation);
+        number = cited.length;
+        citationNumbers.set(id, number);
+      }
+      return `[${number}]`;
+    },
+  );
+  return { content: content.trim(), citations: cited };
+}
+
+function citationEvidenceInResult(result: unknown): AgentCitation[] {
+  const citations = new Map<string, AgentCitation>();
+  const pending: unknown[] = [result];
+  const visited = new Set<object>();
+  let inspected = 0;
+  while (pending.length > 0 && inspected < 20_000 && citations.size < 64) {
+    inspected += 1;
+    const value = pending.pop();
+    if (typeof value === "string") {
+      if (
+        value.length <= 300_000 &&
+        value.includes('"citations"') &&
+        (value.trimStart().startsWith("{") || value.trimStart().startsWith("["))
+      ) {
+        try {
+          pending.push(JSON.parse(value));
+        } catch {
+          // A normal model message can contain citation prose without being JSON.
+        }
+      }
+      continue;
+    }
+    if (!value || typeof value !== "object" || visited.has(value)) continue;
+    visited.add(value);
+    if (Array.isArray(value)) {
+      pending.push(...value);
+      continue;
+    }
+    const parsed = agentCitationSchema.safeParse(value);
+    if (parsed.success) citations.set(parsed.data.id, parsed.data);
+    pending.push(...Object.values(value as Record<string, unknown>));
+  }
+  return [...citations.values()];
 }
 
 function artifactReferencesInResult(result: unknown): string[] {

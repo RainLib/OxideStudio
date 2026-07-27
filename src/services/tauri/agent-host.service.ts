@@ -16,6 +16,7 @@ export type AgentHostStatus = {
   available: boolean;
   protocolVersion: number;
   capabilities: string[];
+  installedTools: string[];
   binaryPath?: string | null;
   storageMode: string;
   lastError?: string | null;
@@ -133,6 +134,20 @@ export type AgentContextMetrics = {
   updatedAt: number;
 };
 
+export type AgentConversationSnapshot = {
+  projectId: string;
+  threadId: string;
+  turns: unknown;
+  resumeRequests: unknown;
+  updatedAt: number;
+};
+
+export type AgentTextAttachment = {
+  fileName: string;
+  content: string;
+  byteCount: number;
+};
+
 export type AgentArtifactReadResult = {
   artifactId: string;
   found: boolean;
@@ -163,6 +178,23 @@ export type AgentArtifactExportResult = {
   exported: boolean;
   filePath: string | null;
   byteCount: number;
+};
+
+export type AgentCitation = {
+  id: string;
+  kind: "databaseSchema" | "databaseObject" | "planNode";
+  label: string;
+  detail?: string;
+  toolName: string;
+  projectId: string;
+  connectionId?: string;
+  databaseName?: string;
+  schemaName?: string;
+  objectName?: string;
+  objectType?: string;
+  tabId?: string;
+  planId?: string;
+  nodeId?: string;
 };
 
 type AgentEventBase<TType extends string> = {
@@ -209,8 +241,29 @@ export type AgentHostEvent =
       callId: string;
       toolName: string;
       label: string;
+      relativePath?: string;
       success?: boolean;
       detail?: string;
+    })
+  | (AgentEventBase<"file.changed"> & {
+      callId: string;
+      relativePath: string;
+      operation: "created" | "updated";
+      revision: string;
+      previousRevision?: string | null;
+      introducedLines?: number[];
+      lineEvidenceTruncated?: boolean;
+    })
+  | (AgentEventBase<"file.proposed"> & {
+      callId: string;
+      relativePath: string;
+      operation: "created" | "updated";
+      proposedRevision: string;
+      baseRevision?: string | null;
+      originalContent: string;
+      proposedContent: string;
+      additions: number;
+      deletions: number;
     })
   | (AgentEventBase<"subagent"> & {
       name: string;
@@ -249,6 +302,7 @@ export type AgentHostEvent =
   | (AgentEventBase<"final.answer"> & {
       content: string;
       artifacts: string[];
+      citations?: AgentCitation[];
     })
   | (AgentEventBase<"failure"> & {
       code: string;
@@ -273,6 +327,33 @@ export const agentHostService = {
     return await invokeRawCommand<AgentContextMetrics>(
       "agent_get_context_metrics",
       { projectId },
+    );
+  },
+
+  saveConversationSnapshot: async (request: {
+    projectId: string;
+    threadId: string;
+    turns: unknown[];
+    resumeRequests: AgentStartTurnRequest[];
+  }): Promise<AgentConversationSnapshot> => {
+    return await invokeRawCommand<AgentConversationSnapshot>(
+      "agent_save_conversation_snapshot",
+      { request },
+    );
+  },
+
+  loadConversationSnapshot: async (
+    projectId: string,
+  ): Promise<AgentConversationSnapshot | null> => {
+    return await invokeRawCommand<AgentConversationSnapshot | null>(
+      "agent_load_conversation_snapshot",
+      { projectId },
+    );
+  },
+
+  importTextAttachment: async (): Promise<AgentTextAttachment | null> => {
+    return await invokeRawCommand<AgentTextAttachment | null>(
+      "agent_import_text_attachment",
     );
   },
 
@@ -383,15 +464,22 @@ export function isAgentHostUnavailableError(error: unknown) {
 }
 
 function normalizeAgentHostStatus(status: AgentHostStatus): AgentHostStatus {
+  const normalized = {
+    ...status,
+    capabilities: Array.isArray(status.capabilities) ? status.capabilities : [],
+    installedTools: Array.isArray(status.installedTools)
+      ? status.installedTools
+      : [],
+  };
   if (status.protocolVersion !== AGENT_HOST_PROTOCOL_VERSION) {
     return {
-      ...status,
+      ...normalized,
       available: false,
       state: "failed",
       lastError: `Unsupported agent host protocol ${status.protocolVersion}; expected ${AGENT_HOST_PROTOCOL_VERSION}.`,
     };
   }
-  return status;
+  return normalized;
 }
 
 function isAgentHostEvent(value: unknown): value is AgentHostEvent {
@@ -445,7 +533,54 @@ function isAgentHostEvent(value: unknown): value is AgentHostEvent {
       return (
         typeof event.callId === "string" &&
         typeof event.toolName === "string" &&
-        typeof event.label === "string"
+        typeof event.label === "string" &&
+        (event.relativePath === undefined ||
+          isSafeAgentRelativePath(event.relativePath))
+      );
+    case "file.changed":
+      return (
+        typeof event.callId === "string" &&
+        isSafeAgentRelativePath(event.relativePath) &&
+        (event.operation === "created" || event.operation === "updated") &&
+        typeof event.revision === "string" &&
+        /^[a-f0-9]{64}$/u.test(event.revision) &&
+        (event.previousRevision === undefined ||
+          event.previousRevision === null ||
+          (typeof event.previousRevision === "string" &&
+            /^[a-f0-9]{64}$/u.test(event.previousRevision))) &&
+        (event.introducedLines === undefined ||
+          (Array.isArray(event.introducedLines) &&
+            event.introducedLines.length <= 2_048 &&
+            event.introducedLines.every(
+              (line, index, lines) =>
+                Number.isInteger(line) &&
+                line > 0 &&
+                (index === 0 || line > lines[index - 1]!),
+            ))) &&
+        (event.lineEvidenceTruncated === undefined ||
+          typeof event.lineEvidenceTruncated === "boolean")
+      );
+    case "file.proposed":
+      return (
+        typeof event.callId === "string" &&
+        isSafeAgentRelativePath(event.relativePath) &&
+        (event.operation === "created" || event.operation === "updated") &&
+        typeof event.proposedRevision === "string" &&
+        /^[a-f0-9]{64}$/u.test(event.proposedRevision) &&
+        (event.baseRevision === undefined ||
+          event.baseRevision === null ||
+          (typeof event.baseRevision === "string" &&
+            /^[a-f0-9]{64}$/u.test(event.baseRevision))) &&
+        typeof event.originalContent === "string" &&
+        event.originalContent.length <= 256 * 1024 &&
+        typeof event.proposedContent === "string" &&
+        event.proposedContent.length <= 256 * 1024 &&
+        typeof event.additions === "number" &&
+        Number.isInteger(event.additions) &&
+        event.additions >= 0 &&
+        typeof event.deletions === "number" &&
+        Number.isInteger(event.deletions) &&
+        event.deletions >= 0
       );
     case "subagent":
       return (
@@ -503,7 +638,11 @@ function isAgentHostEvent(value: unknown): value is AgentHostEvent {
       return (
         typeof event.content === "string" &&
         Array.isArray(event.artifacts) &&
-        event.artifacts.every((artifact) => typeof artifact === "string")
+        event.artifacts.every((artifact) => typeof artifact === "string") &&
+        (event.citations === undefined ||
+          (Array.isArray(event.citations) &&
+            event.citations.length <= 8 &&
+            event.citations.every(isAgentCitation)))
       );
     case "failure":
       return (
@@ -514,6 +653,68 @@ function isAgentHostEvent(value: unknown): value is AgentHostEvent {
     default:
       return false;
   }
+}
+
+export function isAgentCitation(value: unknown): value is AgentCitation {
+  if (!isRecord(value)) return false;
+  const optionalStrings = [
+    ["detail", 500],
+    ["connectionId", 240],
+    ["databaseName", 240],
+    ["schemaName", 240],
+    ["objectName", 240],
+    ["objectType", 120],
+    ["tabId", 240],
+    ["planId", 240],
+    ["nodeId", 240],
+  ] as const;
+  if (
+    typeof value.id !== "string" ||
+    !value.id ||
+    value.id.length > 80 ||
+    typeof value.label !== "string" ||
+    !value.label ||
+    value.label.length > 200 ||
+    typeof value.toolName !== "string" ||
+    !value.toolName ||
+    value.toolName.length > 120 ||
+    typeof value.projectId !== "string" ||
+    !value.projectId ||
+    value.projectId.length > 240 ||
+    optionalStrings.some(
+      ([key, max]) =>
+        value[key] !== undefined &&
+        (typeof value[key] !== "string" ||
+          value[key].length === 0 ||
+          value[key].length > max),
+    )
+  ) {
+    return false;
+  }
+  if (value.kind === "databaseSchema") {
+    return [value.connectionId, value.schemaName].every(
+      (entry) => typeof entry === "string" && entry.length > 0,
+    );
+  }
+  if (value.kind === "databaseObject") {
+    return [value.connectionId, value.schemaName, value.objectName].every(
+      (entry) => typeof entry === "string" && entry.length > 0,
+    );
+  }
+  if (value.kind === "planNode") {
+    return [value.tabId, value.planId, value.nodeId].every(
+      (entry) => typeof entry === "string" && entry.length > 0,
+    );
+  }
+  return false;
+}
+
+function isSafeAgentRelativePath(value: unknown): value is string {
+  if (typeof value !== "string" || !value || value.length > 2_000) return false;
+  if (value.includes("\0") || /^[\\/]/u.test(value) || /^[a-z]:/iu.test(value)) {
+    return false;
+  }
+  return !value.split(/[\\/]/u).some((segment) => segment === "..");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

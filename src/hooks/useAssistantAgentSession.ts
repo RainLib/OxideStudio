@@ -6,6 +6,7 @@ import {
   type AssistantClarification,
   type AssistantProcessItem,
   type AssistantProcessStatus,
+  type AssistantProjectFileProposal,
   type AssistantTurn,
   type AssistantTurnStatus,
 } from "@/ai/assistant/turns";
@@ -13,6 +14,7 @@ import type { AssistantMode } from "@/ai/assistant/modes";
 import { presentAssistantError } from "@/ai/assistant/errorPresentation";
 import {
   agentHostService,
+  isAgentCitation,
   isAgentHostUnavailableError,
   type AgentApprovalDecision,
   type AgentContextMetrics,
@@ -24,6 +26,17 @@ import {
   type AgentStartTurnRequest,
 } from "@/services/tauri/agent-host.service";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  projectFilesService,
+  type ProjectFileWriteResult,
+} from "@/services/tauri/project-files.service";
+import {
+  applyLineDiffHunk,
+  lineDiffCounts,
+  type LineDiffHunk,
+} from "@/lib/lineDiff";
+import { useTabStore } from "@/store/useTabStore";
+import { useProjectFilesStore } from "@/store/useProjectFilesStore";
 
 const AGENT_UNAVAILABLE_MESSAGE =
   "AI agent is unavailable. The database workspace remains fully usable; configure or restart the Agent Host and try again.";
@@ -41,6 +54,12 @@ export type AssistantAgentStartTurnRequest = Omit<
   contextVersion: string;
   deadline?: number;
   provider: AgentProviderConfig | null;
+  displayMessage?: string;
+  inputAttachments?: Array<{
+    id: string;
+    fileName: string;
+    byteCount: number;
+  }>;
 };
 
 export type AssistantAgentSession = {
@@ -66,6 +85,23 @@ export type AssistantAgentSession = {
   ) => Promise<void>;
   cancelTurn: (turnId: string) => Promise<void>;
   resumeTurn: (turnId: string, contextFingerprint: string) => Promise<void>;
+  applyFileProposal: (
+    turnId: string,
+    callId: string,
+    expectedRoot?: string | null,
+  ) => Promise<void>;
+  rejectFileProposal: (turnId: string, callId: string) => void;
+  acceptFileProposalHunk: (
+    turnId: string,
+    callId: string,
+    hunk: LineDiffHunk,
+    expectedRoot?: string | null,
+  ) => Promise<void>;
+  rejectFileProposalHunk: (
+    turnId: string,
+    callId: string,
+    hunk: LineDiffHunk,
+  ) => void;
   clear: () => void;
   refreshStatus: () => Promise<void>;
 };
@@ -86,6 +122,9 @@ export function useAssistantAgentSession(
   const turnsRef = useRef<AssistantTurn[]>([]);
   const threadIdRef = useRef(createAgentId(`thread:${projectId}`));
   const resumeRequestsRef = useRef(new Map<string, AgentStartTurnRequest>());
+  const hydratedProjectRef = useRef<string | null>(null);
+  const persistTimerRef = useRef<number | null>(null);
+  const fileProposalWritesRef = useRef(new Set<string>());
 
   const mutateTurns = useCallback(
     (update: (current: AssistantTurn[]) => AssistantTurn[]) => {
@@ -195,6 +234,11 @@ export function useAssistantAgentSession(
 
     projectIdRef.current = projectId;
     threadIdRef.current = createAgentId(`thread:${projectId}`);
+    hydratedProjectRef.current = null;
+    if (persistTimerRef.current !== null) {
+      window.clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
     resumeRequestsRef.current.clear();
     turnsRef.current = [];
     setTurns([]);
@@ -228,11 +272,102 @@ export function useAssistantAgentSession(
       .catch((error) => {
         if (!disposed) handleCommandError(error);
       });
+
+    void agentHostService
+      .loadConversationSnapshot(projectId)
+      .then((snapshot) => {
+        if (disposed || projectIdRef.current !== projectId) return;
+        const restoredTurns = restoreConversationTurns(snapshot?.turns);
+        const restoredRequests = restoreConversationRequests(
+          snapshot?.resumeRequests,
+        );
+        const requestByTurn = new Map(
+          restoredRequests.map((request) => [request.turnId, request]),
+        );
+        const resumableTurns = restoredTurns.map((turn) => {
+          if (!assistantTurnIsActive(turn)) return turn;
+          const canResume = requestByTurn.has(turn.id);
+          return {
+            ...turn,
+            status: "paused" as const,
+            error: canResume
+              ? "OxideStudio restarted while this task was running. Resume from its encrypted checkpoint when you are ready."
+              : "OxideStudio restarted while this task was running. Start the request again to continue safely.",
+            errorDetail: null,
+            updatedAt: Date.now(),
+          };
+        });
+        const liveTurns = turnsRef.current;
+        const liveTurnIds = new Set(liveTurns.map((turn) => turn.id));
+        const mergedTurns = liveTurns.length
+          ? [
+              ...resumableTurns.filter((turn) => !liveTurnIds.has(turn.id)),
+              ...liveTurns,
+            ]
+          : resumableTurns;
+        if (liveTurns.length === 0) {
+          threadIdRef.current = snapshot?.threadId || threadIdRef.current;
+          resumeRequestsRef.current = requestByTurn;
+        } else {
+          for (const [turnId, request] of requestByTurn) {
+            if (!resumeRequestsRef.current.has(turnId)) {
+              resumeRequestsRef.current.set(turnId, request);
+            }
+          }
+        }
+        turnsRef.current = mergedTurns;
+        setTurns(turnsRef.current);
+        hydratedProjectRef.current = projectId;
+      })
+      .catch((error) => {
+        if (disposed || projectIdRef.current !== projectId) return;
+        console.warn("Failed to restore encrypted AI conversation", error);
+        hydratedProjectRef.current = projectId;
+      });
     return () => {
       disposed = true;
       unlisten?.();
     };
   }, [handleCommandError, mutateTurns, projectId, refreshStatus]);
+
+  useEffect(() => {
+    if (hydratedProjectRef.current !== projectId) return;
+    if (persistTimerRef.current !== null) {
+      window.clearTimeout(persistTimerRef.current);
+    }
+    persistTimerRef.current = window.setTimeout(() => {
+      persistTimerRef.current = null;
+      if (hydratedProjectRef.current !== projectId) return;
+      const persistedTurns = turnsRef.current.slice(-100);
+      const resumableTurnIds = new Set(
+        persistedTurns
+          .filter(
+            (turn) => assistantTurnIsActive(turn) || turn.status === "paused",
+          )
+          .map((turn) => turn.id),
+      );
+      const resumeRequests = Array.from(resumeRequestsRef.current.entries())
+        .filter(([turnId]) => resumableTurnIds.has(turnId))
+        .map(([, request]) => request)
+        .slice(-8);
+      void agentHostService
+        .saveConversationSnapshot({
+          projectId,
+          threadId: threadIdRef.current,
+          turns: persistedTurns,
+          resumeRequests,
+        })
+        .catch((error) => {
+          console.warn("Failed to persist encrypted AI conversation", error);
+        });
+    }, 250);
+    return () => {
+      if (persistTimerRef.current !== null) {
+        window.clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+      }
+    };
+  }, [projectId, turns]);
 
   useEffect(() => {
     void refreshStatus();
@@ -281,8 +416,15 @@ export function useAssistantAgentSession(
 
   const startTurn = useCallback(
     async (request: AssistantAgentStartTurnRequest) => {
-      const { requestedMode, contextVersion, deadline, provider, ...payload } =
-        request;
+      const {
+        requestedMode,
+        contextVersion,
+        deadline,
+        provider,
+        displayMessage,
+        inputAttachments,
+        ...payload
+      } = request;
       const threadId = threadIdRef.current;
       const turn: AssistantTurn = {
         ...createAssistantTurn({
@@ -291,9 +433,10 @@ export function useAssistantAgentSession(
           projectId: request.projectId,
           requestedMode,
           mode: request.profile,
-          userMessage: request.prompt,
+          userMessage: displayMessage ?? request.prompt,
         }),
         threadId,
+        userAttachments: inputAttachments,
       };
       mutateTurns((current) => [...current, turn]);
       setHostError(null);
@@ -435,16 +578,35 @@ export function useAssistantAgentSession(
       turnId: string,
       approvalId: string,
       decision: AgentApprovalDecision,
-      contextFingerprint: string,
+      _contextFingerprint: string,
     ) => {
       const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
+      const source = resumeRequestsRef.current.get(turnId);
       const approval = turn?.approvals.find(
         (candidate) => candidate.approvalId === approvalId,
       );
       if (!turn?.threadId || !approval || approval.decision) return;
+      if (!source) {
+        handleCommandError(
+          new Error(
+            "The saved workspace snapshot for this approval is unavailable. Resume or restart the task safely.",
+          ),
+          turnId,
+          true,
+        );
+        return;
+      }
       try {
         const acknowledgement = await agentHostService.approveAction({
-          ...requestMetadata(turn, contextFingerprint),
+          // The approval was issued for the turn's frozen workspace snapshot.
+          // Using the live UI fingerprint makes harmless tab/schema refreshes
+          // fail the Rust context gate even though the digest-bound approval
+          // still belongs to this exact active turn.
+          ...requestMetadata(
+            turn,
+            source.contextVersion,
+            source.provider.timeoutMs,
+          ),
           approvalId,
           decision,
         });
@@ -519,6 +681,7 @@ export function useAssistantAgentSession(
       updateTurn(turnId, (current) => ({
         ...current,
         status: "planning",
+        lastEventSequence: undefined,
         error: null,
         errorDetail: null,
         updatedAt: Date.now(),
@@ -539,6 +702,251 @@ export function useAssistantAgentSession(
       }
     },
     [handleCommandError, updateTurn],
+  );
+
+  const updateFileProposal = useCallback(
+    (
+      turnId: string,
+      callId: string,
+      update: (proposal: AssistantProjectFileProposal) => AssistantProjectFileProposal,
+    ) => {
+      updateTurn(turnId, (turn) => ({
+        ...turn,
+        fileProposals: (turn.fileProposals ?? []).map((proposal) =>
+          proposal.callId === callId ? update(proposal) : proposal,
+        ),
+        updatedAt: Date.now(),
+      }));
+    },
+    [updateTurn],
+  );
+
+  const commitProposalContent = useCallback(
+    async (
+      turnId: string,
+      callId: string,
+      content: string,
+      expectedRoot?: string | null,
+    ): Promise<ProjectFileWriteResult> => {
+      const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
+      const proposal = turn?.fileProposals?.find(
+        (candidate) => candidate.callId === callId,
+      );
+      if (!turn || !proposal || proposal.status !== "pending") {
+        throw new Error("This file change is no longer pending review.");
+      }
+      if (!expectedRoot) {
+        throw new Error("The active project directory is unavailable.");
+      }
+      const writeKey = `${turnId}:${callId}`;
+      if (fileProposalWritesRef.current.has(writeKey)) {
+        throw new Error("This file change is already being applied.");
+      }
+      fileProposalWritesRef.current.add(writeKey);
+
+      updateFileProposal(turnId, callId, (current) => ({
+        ...current,
+        isApplying: true,
+        error: null,
+      }));
+      try {
+        const result =
+          proposal.operation === "created" && !proposal.baseRevision
+            ? await projectFilesService.createProjectFile(
+                turn.projectId,
+                proposal.relativePath,
+                content,
+                expectedRoot,
+              )
+            : await projectFilesService.writeProjectFile(
+                turn.projectId,
+                proposal.relativePath,
+                content,
+                proposal.baseRevision || "",
+                expectedRoot,
+              );
+        const tabs = useTabStore.getState();
+        const openTab = tabs.tabs.find(
+          (tab) =>
+            !tab.agentFileDiffPreview &&
+            tab.fileProjectId === turn.projectId &&
+            tab.fileRelativePath === proposal.relativePath,
+        );
+        if (openTab && !openTab.isDirty) {
+          tabs.updateTabSql(openTab.id, content);
+          tabs.markProjectFileSaved(openTab.id, result.revision, content);
+        }
+        useProjectFilesStore.getState().syncActiveProject();
+        void useProjectFilesStore
+          .getState()
+          .refreshDirectory(parentProjectPath(proposal.relativePath))
+          .catch(() => undefined);
+        fileProposalWritesRef.current.delete(writeKey);
+        return result;
+      } catch (error) {
+        fileProposalWritesRef.current.delete(writeKey);
+        updateFileProposal(turnId, callId, (current) => ({
+          ...current,
+          isApplying: false,
+          error: errorMessage(error),
+        }));
+        throw error;
+      }
+    },
+    [updateFileProposal],
+  );
+
+  const applyFileProposal = useCallback(
+    async (
+      turnId: string,
+      callId: string,
+      expectedRoot?: string | null,
+    ) => {
+      const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
+      const proposal = turn?.fileProposals?.find(
+        (candidate) => candidate.callId === callId,
+      );
+      if (!turn || !proposal || proposal.status !== "pending") return;
+      const result = await commitProposalContent(
+        turnId,
+        callId,
+        proposal.proposedContent,
+        expectedRoot,
+      );
+      updateTurn(turnId, (current) => ({
+        ...current,
+        fileProposals: (current.fileProposals ?? []).map((candidate) =>
+          candidate.callId === callId
+            ? {
+                ...candidate,
+                status: "accepted" as const,
+                isApplying: false,
+                error: null,
+                baseRevision: result.revision,
+                proposedRevision: result.revision,
+                originalContent: proposal.proposedContent,
+                additions: 0,
+                deletions: 0,
+                resolvedAt: Date.now(),
+              }
+            : candidate,
+        ),
+        fileChanges: upsertProjectFileChange(current.fileChanges, {
+          callId,
+          relativePath: proposal.relativePath,
+          operation: proposal.operation,
+          revision: result.revision,
+          previousRevision: result.previousRevision,
+          introducedLines: result.introducedLines,
+          lineEvidenceTruncated: result.lineEvidenceTruncated,
+          occurredAt: Date.now(),
+        }),
+        updatedAt: Date.now(),
+      }));
+    },
+    [commitProposalContent, updateTurn],
+  );
+
+  const rejectFileProposal = useCallback(
+    (turnId: string, callId: string) => {
+      updateFileProposal(turnId, callId, (proposal) => ({
+        ...proposal,
+        status: "rejected",
+        isApplying: false,
+        error: null,
+        resolvedAt: Date.now(),
+      }));
+    },
+    [updateFileProposal],
+  );
+
+  const acceptFileProposalHunk = useCallback(
+    async (
+      turnId: string,
+      callId: string,
+      hunk: LineDiffHunk,
+      expectedRoot?: string | null,
+    ) => {
+      const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
+      const proposal = turn?.fileProposals?.find(
+        (candidate) => candidate.callId === callId,
+      );
+      if (!turn || !proposal || proposal.status !== "pending") return;
+      const acceptedContent = applyLineDiffHunk(
+        proposal.originalContent,
+        proposal.proposedContent,
+        hunk,
+        "accept",
+      );
+      const result = await commitProposalContent(
+        turnId,
+        callId,
+        acceptedContent,
+        expectedRoot,
+      );
+      const counts = lineDiffCounts(
+        acceptedContent,
+        proposal.proposedContent,
+      );
+      const completed = counts.additions === 0 && counts.deletions === 0;
+      updateTurn(turnId, (current) => ({
+        ...current,
+        fileProposals: (current.fileProposals ?? []).map((candidate) =>
+          candidate.callId === callId
+            ? {
+                ...candidate,
+                operation: "updated" as const,
+                baseRevision: result.revision,
+                originalContent: acceptedContent,
+                additions: counts.additions,
+                deletions: counts.deletions,
+                status: completed ? ("accepted" as const) : candidate.status,
+                isApplying: false,
+                error: null,
+                resolvedAt: completed ? Date.now() : null,
+              }
+            : candidate,
+        ),
+        fileChanges: upsertProjectFileChange(current.fileChanges, {
+          callId: `${callId}:hunk:${hunk.id}`,
+          relativePath: proposal.relativePath,
+          operation: proposal.operation,
+          revision: result.revision,
+          previousRevision: result.previousRevision,
+          introducedLines: result.introducedLines,
+          lineEvidenceTruncated: result.lineEvidenceTruncated,
+          occurredAt: Date.now(),
+        }),
+        updatedAt: Date.now(),
+      }));
+    },
+    [commitProposalContent, updateTurn],
+  );
+
+  const rejectFileProposalHunk = useCallback(
+    (turnId: string, callId: string, hunk: LineDiffHunk) => {
+      updateFileProposal(turnId, callId, (proposal) => {
+        const proposedContent = applyLineDiffHunk(
+          proposal.originalContent,
+          proposal.proposedContent,
+          hunk,
+          "reject",
+        );
+        const counts = lineDiffCounts(proposal.originalContent, proposedContent);
+        const completed = counts.additions === 0 && counts.deletions === 0;
+        return {
+          ...proposal,
+          proposedContent,
+          additions: counts.additions,
+          deletions: counts.deletions,
+          status: completed ? "rejected" : proposal.status,
+          isApplying: false,
+          error: null,
+          resolvedAt: completed ? Date.now() : null,
+        };
+      });
+    },
+    [updateFileProposal],
   );
 
   const activeTurn = useMemo(
@@ -567,6 +975,10 @@ export function useAssistantAgentSession(
     decideApproval,
     cancelTurn,
     resumeTurn,
+    applyFileProposal,
+    rejectFileProposal,
+    acceptFileProposalHunk,
+    rejectFileProposalHunk,
     clear,
     refreshStatus,
   };
@@ -619,22 +1031,72 @@ export function reduceAgentHostEvent(
           : event.success === false
             ? "failed"
             : "completed";
+      const process =
+        event.type === "tool.started" &&
+        !hasRecentProcessDescription(turn.process, event.occurredAt)
+          ? upsertAssistantProcessItem(
+              turn.process,
+              processItem(event, "commentary", {
+                id: `commentary:tool:${event.callId}`,
+                title: fallbackToolPhaseDescription(
+                  event.toolName,
+                  event.label || event.toolName,
+                ),
+                status: "completed",
+              }),
+            )
+          : turn.process;
       return {
         ...turn,
         ...common,
         status: event.type === "tool.started" ? "running" : turn.status,
         process: upsertAssistantProcessItem(
-          turn.process,
+          process,
           processItem(event, "tool", {
             id: `tool:${event.callId}`,
             title: event.label || event.toolName,
             detail: event.detail,
             toolName: event.toolName,
+            relativePath: event.relativePath,
             status,
           }),
         ),
       };
     }
+    case "file.changed":
+      return {
+        ...turn,
+        ...common,
+        fileChanges: upsertProjectFileChange(turn.fileChanges, {
+          callId: event.callId,
+          relativePath: event.relativePath,
+          operation: event.operation,
+          revision: event.revision,
+          previousRevision: event.previousRevision,
+          introducedLines: event.introducedLines,
+          lineEvidenceTruncated: event.lineEvidenceTruncated,
+          occurredAt: event.occurredAt,
+        }),
+      };
+    case "file.proposed":
+      return {
+        ...turn,
+        ...common,
+        fileProposals: upsertProjectFileProposal(turn.fileProposals, {
+          callId: event.callId,
+          relativePath: event.relativePath,
+          operation: event.operation,
+          proposedRevision: event.proposedRevision,
+          baseRevision: event.baseRevision,
+          originalContent: event.originalContent,
+          proposedContent: event.proposedContent,
+          additions: event.additions,
+          deletions: event.deletions,
+          status: "pending",
+          error: null,
+          occurredAt: event.occurredAt,
+        }),
+      };
     case "subagent":
       return {
         ...turn,
@@ -756,6 +1218,7 @@ export function reduceAgentHostEvent(
           content: event.content,
           attachments: [],
           artifactRefs: event.artifacts,
+          citations: event.citations ?? [],
           createdAt: event.occurredAt,
         },
       };
@@ -779,6 +1242,45 @@ export function reduceAgentHostEvent(
       };
     }
   }
+}
+
+function hasRecentProcessDescription(
+  process: readonly AssistantProcessItem[],
+  occurredAt: number,
+) {
+  const latest = [...process]
+    .reverse()
+    .find((item) => item.kind === "commentary");
+  return Boolean(
+    latest &&
+      latest.startedAt <= occurredAt &&
+      occurredAt - latest.startedAt <= 15_000,
+  );
+}
+
+function fallbackToolPhaseDescription(toolName: string, label: string) {
+  if (toolName === "project.listFiles") {
+    return "I’ll review the project structure to locate the relevant files.";
+  }
+  if (toolName === "project.readFile") {
+    return "I’ll read the relevant project file before deciding what needs to change.";
+  }
+  if (toolName === "project.writeFile") {
+    return "I’ll prepare the requested file change for review without writing it to disk.";
+  }
+  if (toolName.startsWith("metadata.")) {
+    return "I’ll inspect the relevant database metadata before continuing.";
+  }
+  if (toolName.startsWith("query.")) {
+    return "I’ll check the query with a bounded, read-only database operation.";
+  }
+  if (toolName.startsWith("lsp.")) {
+    return "I’ll inspect the editor diagnostics before proposing the next change.";
+  }
+  if (toolName.startsWith("editor.")) {
+    return "I’ll prepare a reviewable editor change without applying it automatically.";
+  }
+  return `I’ll ${label.toLocaleLowerCase()} for this stage.`;
 }
 
 function reduceTurnStatus(
@@ -921,6 +1423,28 @@ function upsertApproval(
     : [...approvals, approval];
 }
 
+function upsertProjectFileChange(
+  changes: AssistantTurn["fileChanges"],
+  change: NonNullable<AssistantTurn["fileChanges"]>[number],
+) {
+  const current = changes ?? [];
+  const withoutDuplicate = current.filter(
+    (candidate) => candidate.callId !== change.callId,
+  );
+  return [...withoutDuplicate, change].slice(-128);
+}
+
+function upsertProjectFileProposal(
+  proposals: AssistantTurn["fileProposals"],
+  proposal: NonNullable<AssistantTurn["fileProposals"]>[number],
+) {
+  const current = proposals ?? [];
+  const withoutDuplicate = current.filter(
+    (candidate) => candidate.callId !== proposal.callId,
+  );
+  return [...withoutDuplicate, proposal].slice(-128);
+}
+
 function requestMetadata(
   turn: AssistantTurn,
   contextVersion: string,
@@ -1005,4 +1529,223 @@ function errorMessage(error: unknown) {
   if (error instanceof Error && error.message.trim()) return error.message;
   if (typeof error === "string" && error.trim()) return error;
   return "Agent Host command failed.";
+}
+
+function parentProjectPath(relativePath: string) {
+  const separator = relativePath.lastIndexOf("/");
+  return separator < 0 ? "" : relativePath.slice(0, separator);
+}
+
+function restoreConversationTurns(value: unknown): AssistantTurn[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((candidate): candidate is AssistantTurn => {
+      if (!candidate || typeof candidate !== "object") return false;
+      const turn = candidate as Partial<AssistantTurn>;
+      return (
+        typeof turn.id === "string" &&
+        typeof turn.projectId === "string" &&
+        typeof turn.userMessage === "string" &&
+        typeof turn.status === "string" &&
+        Array.isArray(turn.process) &&
+        Array.isArray(turn.approvals) &&
+        Array.isArray(turn.clarifications)
+      );
+    })
+    .map((turn) => ({
+      ...turn,
+      draft: typeof turn.draft === "string" ? turn.draft : "",
+      error:
+        typeof turn.error === "string" || turn.error === null
+          ? turn.error
+          : null,
+      errorDetail:
+        typeof turn.errorDetail === "string" || turn.errorDetail === null
+          ? turn.errorDetail
+          : null,
+      final: restoreAssistantFinal(turn.final, turn.updatedAt),
+      fileChanges: restoreProjectFileChanges(turn.fileChanges),
+      fileProposals: restoreProjectFileProposals(turn.fileProposals),
+    }))
+    .slice(-100);
+}
+
+function restoreAssistantFinal(
+  value: unknown,
+  fallbackCreatedAt: number,
+): AssistantTurn["final"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const final = value as Record<string, unknown>;
+  const artifactRefs = Array.isArray(final.artifactRefs)
+    ? final.artifactRefs
+        .filter(
+          (reference): reference is string =>
+            typeof reference === "string" && reference.length <= 2_000,
+        )
+        .slice(0, 128)
+    : [];
+  return {
+    content: typeof final.content === "string" ? final.content : "",
+    attachments: Array.isArray(final.attachments)
+      ? final.attachments.filter(isRestoredAssistantAttachment).slice(0, 32)
+      : [],
+    ...(artifactRefs.length > 0 ? { artifactRefs } : {}),
+    citations: Array.isArray(final.citations)
+      ? final.citations.filter(isAgentCitation).slice(0, 8)
+      : [],
+    createdAt:
+      typeof final.createdAt === "number" && Number.isFinite(final.createdAt)
+        ? final.createdAt
+        : Number.isFinite(fallbackCreatedAt)
+          ? fallbackCreatedAt
+          : Date.now(),
+  };
+}
+
+function isRestoredAssistantAttachment(
+  value: unknown,
+): value is NonNullable<AssistantTurn["final"]>["attachments"][number] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const attachment = value as Record<string, unknown>;
+  return (
+    typeof attachment.id === "string" &&
+    typeof attachment.kind === "string" &&
+    typeof attachment.label === "string" &&
+    isRestoredUiAction(attachment.action) &&
+    (attachment.secondaryActions === undefined ||
+      (Array.isArray(attachment.secondaryActions) &&
+        attachment.secondaryActions.every(isRestoredUiAction)))
+  );
+}
+
+function isRestoredUiAction(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const action = value as Record<string, unknown>;
+  const target = action.target;
+  const issuedAgainst = action.issuedAgainst;
+  const presentation = action.presentation;
+  return (
+    typeof action.id === "string" &&
+    typeof action.action === "string" &&
+    Boolean(target && typeof target === "object" && !Array.isArray(target)) &&
+    Boolean(
+      issuedAgainst &&
+        typeof issuedAgainst === "object" &&
+        !Array.isArray(issuedAgainst),
+    ) &&
+    Boolean(
+      presentation &&
+        typeof presentation === "object" &&
+        !Array.isArray(presentation) &&
+        typeof (presentation as Record<string, unknown>).label === "string",
+    )
+  );
+}
+
+function restoreProjectFileChanges(
+  value: unknown,
+): NonNullable<AssistantTurn["fileChanges"]> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(
+      (
+        candidate,
+      ): candidate is NonNullable<AssistantTurn["fileChanges"]>[number] => {
+        if (!candidate || typeof candidate !== "object") return false;
+        const change = candidate as Record<string, unknown>;
+        return (
+          typeof change.callId === "string" &&
+          safeRestoredProjectPath(change.relativePath) &&
+          (change.operation === "created" || change.operation === "updated") &&
+          typeof change.revision === "string" &&
+          /^[a-f0-9]{64}$/u.test(change.revision) &&
+          (change.previousRevision === undefined ||
+            change.previousRevision === null ||
+            (typeof change.previousRevision === "string" &&
+              /^[a-f0-9]{64}$/u.test(change.previousRevision))) &&
+          (change.introducedLines === undefined ||
+            (Array.isArray(change.introducedLines) &&
+              change.introducedLines.length <= 2_048 &&
+              change.introducedLines.every(
+                (line, index, lines) =>
+                  Number.isInteger(line) &&
+                  Number(line) > 0 &&
+                  (index === 0 || Number(line) > Number(lines[index - 1])),
+              ))) &&
+          (change.lineEvidenceTruncated === undefined ||
+            typeof change.lineEvidenceTruncated === "boolean") &&
+          typeof change.occurredAt === "number" &&
+          Number.isFinite(change.occurredAt)
+        );
+      },
+    )
+    .slice(-128);
+}
+
+function restoreProjectFileProposals(
+  value: unknown,
+): NonNullable<AssistantTurn["fileProposals"]> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(
+      (
+        candidate,
+      ): candidate is NonNullable<AssistantTurn["fileProposals"]>[number] => {
+        if (!candidate || typeof candidate !== "object") return false;
+        const proposal = candidate as Record<string, unknown>;
+        return (
+          typeof proposal.callId === "string" &&
+          safeRestoredProjectPath(proposal.relativePath) &&
+          (proposal.operation === "created" ||
+            proposal.operation === "updated") &&
+          typeof proposal.proposedRevision === "string" &&
+          /^[a-f0-9]{64}$/u.test(proposal.proposedRevision) &&
+          (proposal.baseRevision === undefined ||
+            proposal.baseRevision === null ||
+            (typeof proposal.baseRevision === "string" &&
+              /^[a-f0-9]{64}$/u.test(proposal.baseRevision))) &&
+          typeof proposal.originalContent === "string" &&
+          proposal.originalContent.length <= 256 * 1024 &&
+          typeof proposal.proposedContent === "string" &&
+          proposal.proposedContent.length <= 256 * 1024 &&
+          typeof proposal.additions === "number" &&
+          Number.isInteger(proposal.additions) &&
+          proposal.additions >= 0 &&
+          typeof proposal.deletions === "number" &&
+          Number.isInteger(proposal.deletions) &&
+          proposal.deletions >= 0 &&
+          (proposal.status === "pending" ||
+            proposal.status === "accepted" ||
+            proposal.status === "rejected") &&
+          typeof proposal.occurredAt === "number" &&
+          Number.isFinite(proposal.occurredAt)
+        );
+      },
+    )
+    .slice(-128);
+}
+
+function safeRestoredProjectPath(value: unknown): value is string {
+  if (typeof value !== "string" || !value || value.length > 2_000) return false;
+  if (value.includes("\0") || /^[\\/]/u.test(value) || /^[a-z]:/iu.test(value)) {
+    return false;
+  }
+  return !value.split(/[\\/]/u).some((segment) => segment === "..");
+}
+
+function restoreConversationRequests(value: unknown): AgentStartTurnRequest[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((candidate): candidate is AgentStartTurnRequest => {
+    if (!candidate || typeof candidate !== "object") return false;
+    const request = candidate as Partial<AgentStartTurnRequest>;
+    return (
+      typeof request.requestId === "string" &&
+      typeof request.threadId === "string" &&
+      typeof request.turnId === "string" &&
+      typeof request.projectId === "string" &&
+      typeof request.prompt === "string" &&
+      Boolean(request.provider) &&
+      Boolean(request.workspace)
+    );
+  });
 }

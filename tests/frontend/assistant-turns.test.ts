@@ -217,6 +217,115 @@ describe("assistant turn projection", () => {
     );
     expect(turn.errorDetail).toBe("MODEL_TIMEOUT: The model timed out.");
   });
+
+  it("adds a public fallback description before a tool when the model omitted one", () => {
+    const base = createAssistantTurn({
+      id: "turn-tool-description",
+      requestId: "request-tool-description",
+      projectId: "project-1",
+      requestedMode: "agent",
+      mode: "agent",
+      userMessage: "Create a SQL file",
+      now: 1_000,
+    });
+
+    const turn = reduceAgentHostEvent(
+      base,
+      event("tool.started", 1, {
+        callId: "call-write",
+        toolName: "project.writeFile",
+        label: "Write project file",
+        relativePath: "queries/report.sql",
+      }),
+    );
+
+    expect(turn.process).toEqual([
+      expect.objectContaining({
+        id: "commentary:tool:call-write",
+        kind: "commentary",
+        title:
+          "I’ll prepare the requested file change for review without writing it to disk.",
+      }),
+      expect.objectContaining({
+        id: "tool:call-write",
+        kind: "tool",
+        title: "Write project file",
+        relativePath: "queries/report.sql",
+        status: "running",
+      }),
+    ]);
+  });
+
+  it("records trusted project writes once per tool call without entering chat history", () => {
+    let turn = createAssistantTurn({
+      id: "turn-1",
+      requestId: "request-1",
+      projectId: "project-1",
+      requestedMode: "agent",
+      mode: "agent",
+      userMessage: "Update the report query",
+      now: 10,
+    });
+    const change = {
+      callId: "write-1",
+      relativePath: "queries/report.sql",
+      operation: "updated" as const,
+      revision: "a".repeat(64),
+      previousRevision: "b".repeat(64),
+      introducedLines: [2, 5],
+      lineEvidenceTruncated: false,
+    };
+
+    turn = reduceAgentHostEvent(turn, event("file.changed", 1, change));
+    turn = reduceAgentHostEvent(turn, event("file.changed", 2, change));
+
+    expect(turn.fileChanges).toEqual([
+      expect.objectContaining({
+        callId: "write-1",
+        relativePath: "queries/report.sql",
+        previousRevision: "b".repeat(64),
+        introducedLines: [2, 5],
+        occurredAt: 1_002,
+      }),
+    ]);
+    expect(assistantConversationHistoryFromTurns([turn])).toEqual([]);
+  });
+
+  it("stores a file proposal as pending review without claiming a disk change", () => {
+    let turn = createAssistantTurn({
+      id: "turn-1",
+      requestId: "request-1",
+      projectId: "project-1",
+      requestedMode: "agent",
+      mode: "agent",
+      userMessage: "Create a query",
+      now: 10,
+    });
+
+    turn = reduceAgentHostEvent(
+      turn,
+      event("file.proposed", 1, {
+        callId: "write-1",
+        relativePath: "queries/pending.sql",
+        operation: "created",
+        proposedRevision: "a".repeat(64),
+        baseRevision: null,
+        originalContent: "",
+        proposedContent: "select 1;\n",
+        additions: 1,
+        deletions: 0,
+      }),
+    );
+
+    expect(turn.fileProposals).toEqual([
+      expect.objectContaining({
+        callId: "write-1",
+        status: "pending",
+        proposedContent: "select 1;\n",
+      }),
+    ]);
+    expect(turn.fileChanges).toBeUndefined();
+  });
 });
 
 function event<TType extends AgentHostEvent["type"]>(

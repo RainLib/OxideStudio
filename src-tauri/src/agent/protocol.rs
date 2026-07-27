@@ -179,6 +179,23 @@ impl AgentTurnRequest {
         {
             return Err("workspace.fingerprint must contain 1 to 240 characters".to_string());
         }
+        if let Some(active_tab) = self
+            .workspace
+            .summary
+            .get("activeTab")
+            .filter(|value| !value.is_null())
+        {
+            let active_tab_id = active_tab
+                .as_object()
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| "workspace.summary.activeTab.id is required".to_string())?;
+            if self.workspace.active_tab_id.as_deref() != Some(active_tab_id) {
+                return Err(
+                    "workspace.summary.activeTab.id must match workspace.activeTabId".to_string(),
+                );
+            }
+        }
         if self.prompt.trim().is_empty() || self.prompt.chars().count() > 200_000 {
             return Err("prompt must contain 1 to 200,000 characters".to_string());
         }
@@ -229,6 +246,32 @@ impl AgentTurnRequest {
 
     pub fn persistable_value(&self) -> Value {
         self.sidecar_params()
+    }
+
+    /// Persist enough provider routing information for an app-process restart
+    /// without ever serializing the provider credential. Rust reloads the key
+    /// from the credential manager when the turn is resumed.
+    pub fn resumable_value(&self) -> Value {
+        json!({
+            "requestId": self.metadata.request_id,
+            "threadId": self.metadata.thread_id,
+            "turnId": self.metadata.turn_id,
+            "contextVersion": self.metadata.context_version,
+            "deadline": self.metadata.deadline,
+            "projectId": self.project_id,
+            "profile": self.profile,
+            "messages": self.messages,
+            "prompt": self.prompt,
+            "provider": {
+                "baseUrl": self.provider.base_url,
+                "model": self.provider.model,
+                "timeoutMs": self.provider.timeout_ms,
+                "capabilities": self.provider.capabilities,
+            },
+            "workspace": self.workspace,
+            "tools": self.tools,
+            "resumeCheckpoint": self.resume_checkpoint,
+        })
     }
 }
 
@@ -286,6 +329,35 @@ pub struct AgentProjectStateCleared {
     pub cleared_records: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConversationSnapshotSaveRequest {
+    pub project_id: String,
+    pub thread_id: String,
+    pub turns: Value,
+    #[serde(default)]
+    pub resume_requests: Vec<AgentTurnRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConversationSnapshot {
+    pub project_id: String,
+    pub thread_id: String,
+    pub turns: Value,
+    #[serde(default)]
+    pub resume_requests: Value,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTextAttachment {
+    pub file_name: String,
+    pub content: String,
+    pub byte_count: usize,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentContextCompactionMetrics {
@@ -320,6 +392,7 @@ pub struct AgentHostStatus {
     pub available: bool,
     pub protocol_version: u32,
     pub capabilities: Vec<String>,
+    pub installed_tools: Vec<String>,
     pub binary_path: Option<String>,
     pub storage_mode: String,
     pub last_error: Option<String>,
@@ -818,5 +891,14 @@ mod tests {
         let tool = params["tools"][0].as_object().unwrap();
         assert!(!tool.contains_key("timeoutMs"));
         assert!(!tool.contains_key("resultLimit"));
+
+        let resumable = request.resumable_value();
+        let resumable_serialized = resumable.to_string();
+        assert_eq!(
+            resumable["provider"]["baseUrl"],
+            json!("https://example.com/v1")
+        );
+        assert!(!resumable_serialized.contains("super-secret"));
+        assert!(resumable["provider"].get("apiKey").is_none());
     }
 }

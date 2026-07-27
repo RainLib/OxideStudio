@@ -38,7 +38,8 @@
         ],
         "resources": {
             "binaries/sql-lsp": "sql-lsp",
-            "binaries/sql-lsp.exe": "sql-lsp.exe"
+            "binaries/sql-lsp.exe": "sql-lsp.exe",
+            "binaries/sql-lsp.manifest.json": "sql-lsp.manifest.json"
         },
         "externalBin": [
             "binaries/oxide-agent-host",

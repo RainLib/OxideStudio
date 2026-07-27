@@ -34,7 +34,7 @@ For supported risks, the planner emits a separate read-only preflight script:
 - duplicate-key sample before UNIQUE;
 - orphan-row count before FOREIGN KEY.
 
-Migration and preflight remain separate artifact surfaces. A plan with any blocked change cannot be opened as a runnable migration console; its copied script also carries a `PLAN BLOCKED` banner. Opening preflight in a console does not grant migration approval. Migration execution is still outside this workflow.
+Migration and preflight remain separate artifact surfaces. A plan with any blocked change cannot be opened as a runnable migration console; its copied script also carries a `PLAN BLOCKED` banner. Opening preflight in a console does not grant migration approval. [ADR-0013](0013-schema-migration-execution.md) later added a separate PostgreSQL-only execution command that reruns these checks and binds approval to a fresh fingerprint; this preview action still grants no execution authority.
 
 ## Consequences
 
@@ -42,4 +42,4 @@ Migration and preflight remain separate artifact surfaces. A plan with any block
 - The artifact clearly distinguishes risk from executability: a destructive change can be ordered but still require review, while a blocked change has no runnable SQL.
 - Referential actions missing from MySQL metadata are not guessed; affected foreign keys stay blocked until exact source capture is added.
 - Preflight queries are generated from quoted stable identities and contain no mutation.
-- The graph currently covers relations, columns, indexes, and constraints represented by snapshot v1. Views, routines, triggers, sequences, grants, rename inference, cross-schema mapping, server-side dry-run, apply journal, verification queries, and rollback packages remain P1 work.
+- The graph currently covers relations, columns, indexes, and constraints represented by snapshot v1. Views, routines, triggers, sequences, grants, rename inference, cross-schema mapping, independent server-side dry-run, interrupted-journal reconciliation, and MySQL-safe apply remain P1 work.

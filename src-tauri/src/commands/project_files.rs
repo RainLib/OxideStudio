@@ -6,15 +6,18 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, Metadata, Permissions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 use tauri::State;
 use tempfile::NamedTempFile;
+use tokio::io::AsyncReadExt as TokioAsyncReadExt;
+use tokio::process::Command as TokioCommand;
 
 const REVISION_CONFLICT_PREFIX: &str = "REVISION_CONFLICT:";
 const PROJECT_ROOT_CHANGED_PREFIX: &str = "PROJECT_ROOT_CHANGED:";
@@ -26,6 +29,14 @@ const COMPLETION_FILE_SIZE_LIMIT: u64 = 256 * 1024;
 const COMPLETION_INDEX_SIZE_LIMIT: usize = 20 * 1024 * 1024;
 const COMPLETION_CONTEXT_SIZE_LIMIT: usize = 8 * 1024;
 const PROJECT_FILE_PREVIEW_SIZE_LIMIT: u64 = 25 * 1024 * 1024;
+const PROJECT_GIT_STATUS_SIZE_LIMIT: usize = 4 * 1024 * 1024;
+const PROJECT_GIT_DIFF_SIZE_LIMIT: usize = 1024 * 1024;
+const PROJECT_GIT_UNTRACKED_PREVIEW_LIMIT: u64 = 512 * 1024;
+const PROJECT_GIT_FILE_LIMIT: usize = 500;
+const PROJECT_GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
+const AGENT_PROJECT_FILE_LIMIT: u64 = 256 * 1024;
+const AGENT_PROJECT_ENTRY_LIMIT: usize = 500;
+const PROJECT_FILE_LINE_EVIDENCE_LIMIT: usize = 2_048;
 
 fn project_command_error(
     fallback_code: &str,
@@ -90,6 +101,172 @@ pub struct ProjectFilePreview {
 pub struct ProjectFileWrite {
     pub relative_path: String,
     pub revision: String,
+    pub previous_revision: Option<String>,
+    pub introduced_lines: Vec<u32>,
+    pub line_evidence_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFileProposal {
+    pub relative_path: String,
+    pub proposed_revision: String,
+    pub base_revision: Option<String>,
+    pub original_content: String,
+    pub proposed_content: String,
+    pub additions: usize,
+    pub deletions: usize,
+}
+
+fn project_file_line_evidence(previous: &str, next: &str) -> (Vec<u32>, bool) {
+    let previous_lines = previous.lines().collect::<HashSet<_>>();
+    let mut introduced_lines = Vec::new();
+    let mut truncated = false;
+
+    for (index, line) in next.lines().enumerate() {
+        if previous_lines.contains(line) {
+            continue;
+        }
+        if introduced_lines.len() == PROJECT_FILE_LINE_EVIDENCE_LIMIT {
+            truncated = true;
+            break;
+        }
+        introduced_lines.push((index + 1) as u32);
+    }
+
+    (introduced_lines, truncated)
+}
+
+fn project_file_line_change_counts(previous: &str, next: &str) -> (usize, usize) {
+    if previous == next {
+        return (0, 0);
+    }
+
+    let previous_lines = previous.lines().collect::<Vec<_>>();
+    let next_lines = next.lines().collect::<Vec<_>>();
+    let previous_len = previous_lines.len() as isize;
+    let next_len = next_lines.len() as isize;
+    let max_distance = previous_len + next_len;
+    let offset = max_distance + 1;
+    let mut frontier = vec![-1isize; (max_distance * 2 + 3) as usize];
+    frontier[(offset + 1) as usize] = 0;
+
+    for distance in 0..=max_distance {
+        let mut diagonal = -distance;
+        while diagonal <= distance {
+            let index = (offset + diagonal) as usize;
+            let mut x = if diagonal == -distance
+                || (diagonal != distance && frontier[index - 1] < frontier[index + 1])
+            {
+                frontier[index + 1]
+            } else {
+                frontier[index - 1] + 1
+            };
+            let mut y = x - diagonal;
+            while x < previous_len
+                && y < next_len
+                && previous_lines[x as usize] == next_lines[y as usize]
+            {
+                x += 1;
+                y += 1;
+            }
+            frontier[index] = x;
+            if x >= previous_len && y >= next_len {
+                let length_delta = next_len - previous_len;
+                let additions = (distance + length_delta) / 2;
+                let deletions = distance - additions;
+                return (additions as usize, deletions as usize);
+            }
+            diagonal += 2;
+        }
+    }
+
+    (next_lines.len(), previous_lines.len())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectGitFileChange {
+    pub relative_path: String,
+    pub previous_path: Option<String>,
+    pub status: String,
+    pub staged: bool,
+    pub unstaged: bool,
+    pub untracked: bool,
+    pub conflicted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectGitChangeSet {
+    pub is_repository: bool,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub files: Vec<ProjectGitFileChange>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectGitFileDiff {
+    pub relative_path: String,
+    pub patch: String,
+    pub additions: usize,
+    pub deletions: usize,
+    pub binary: bool,
+    pub truncated: bool,
+    pub current_side_revision: Option<String>,
+    pub current_side_revision_status: ProjectGitRevisionStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectGitRevisionStatus {
+    Available,
+    Missing,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectGitDiffScope {
+    All,
+    Staged,
+    Working,
+}
+
+impl ProjectGitDiffScope {
+    fn parse(value: Option<&str>) -> Option<Self> {
+        match value.unwrap_or("all") {
+            "all" => Some(Self::All),
+            "staged" => Some(Self::Staged),
+            "working" => Some(Self::Working),
+            _ => None,
+        }
+    }
+
+    fn arguments(self, relative_path: &str) -> Vec<&str> {
+        let mut arguments = vec!["diff"];
+        if self == Self::Staged {
+            arguments.push("--cached");
+        }
+        arguments.extend(["--no-ext-diff", "--no-textconv", "--no-color"]);
+        if self == Self::All {
+            arguments.push("HEAD");
+        }
+        arguments.extend(["--", relative_path]);
+        arguments
+    }
+
+    fn includes_untracked(self) -> bool {
+        matches!(self, Self::All | Self::Working)
+    }
+}
+
+struct GitCommandOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -250,9 +427,53 @@ impl ProjectRoot {
         persist_new_file(&target, bytes)
             .with_context(|| format!("failed to create project file: {}", relative.wire_path))?;
 
+        let (introduced_lines, line_evidence_truncated) = project_file_line_evidence("", content);
         Ok(ProjectFileWrite {
             relative_path: relative.wire_path,
             revision: content_revision(bytes),
+            previous_revision: None,
+            introduced_lines,
+            line_evidence_truncated,
+        })
+    }
+
+    fn prepare_file_change(
+        &self,
+        relative_path: &str,
+        content: &str,
+        expected_revision: Option<&str>,
+        create: bool,
+    ) -> Result<ProjectFileProposal> {
+        let relative = validate_relative_path(relative_path, false)?;
+        let (original_content, base_revision) = if create {
+            if expected_revision.is_some() {
+                bail!("expectedRevision must be omitted when creating a file");
+            }
+            self.validate_new_target_without_mutation(&relative)?;
+            (String::new(), None)
+        } else {
+            let expected_revision = expected_revision
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| anyhow!("expectedRevision is required when replacing a file"))?;
+            let file = self.read_file(&relative.wire_path)?;
+            if file.revision != expected_revision {
+                bail!(
+                    "{REVISION_CONFLICT_PREFIX} expected {expected_revision}, current {}",
+                    file.revision
+                );
+            }
+            (file.content, Some(file.revision))
+        };
+        let (additions, deletions) = project_file_line_change_counts(&original_content, content);
+
+        Ok(ProjectFileProposal {
+            relative_path: relative.wire_path,
+            proposed_revision: content_revision(content.as_bytes()),
+            base_revision,
+            original_content,
+            proposed_content: content.to_string(),
+            additions,
+            deletions,
         })
     }
 
@@ -281,6 +502,15 @@ impl ProjectRoot {
         }
 
         self.assert_revision(&relative, expected_revision)?;
+        let previous_bytes = fs::read(&path)
+            .with_context(|| format!("failed to read project file: {}", relative.wire_path))?;
+        if content_revision(&previous_bytes) != expected_revision {
+            bail!(
+                "{REVISION_CONFLICT_PREFIX} file changed before replacement: {}",
+                relative.wire_path
+            );
+        }
+        let previous_content = String::from_utf8_lossy(&previous_bytes);
         let permissions = metadata.permissions();
         let bytes = content.as_bytes();
         let temp = prepare_temp_file(
@@ -301,9 +531,14 @@ impl ProjectRoot {
         persist_replacement(temp, &path)
             .with_context(|| format!("failed to replace project file: {}", relative.wire_path))?;
 
+        let (introduced_lines, line_evidence_truncated) =
+            project_file_line_evidence(&previous_content, content);
         Ok(ProjectFileWrite {
             relative_path: relative.wire_path,
             revision: content_revision(bytes),
+            previous_revision: Some(expected_revision.to_string()),
+            introduced_lines,
+            line_evidence_truncated,
         })
     }
 
@@ -399,38 +634,118 @@ impl ProjectRoot {
 
     fn resolve_new_target(&self, relative: &ValidatedRelativePath) -> Result<PathBuf> {
         let lexical_target = self.path.join(&relative.path);
-        match fs::symlink_metadata(&lexical_target) {
-            Ok(_) => bail!("project path already exists: {}", relative.wire_path),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("failed to inspect project path: {}", relative.wire_path)
-                })
-            }
-        }
-
-        let parent = lexical_target
+        let lexical_parent = lexical_target
             .parent()
             .context("project path does not have a parent directory")?;
-        let resolved_parent = fs::canonicalize(parent).with_context(|| {
-            format!(
-                "failed to resolve parent directory for: {}",
-                relative.wire_path
-            )
-        })?;
-        self.ensure_inside_root(&resolved_parent)?;
-        if !fs::metadata(&resolved_parent)?.is_dir() {
-            bail!(
-                "project path parent is not a directory: {}",
-                relative.wire_path
-            );
+        let relative_parent = lexical_parent
+            .strip_prefix(&self.path)
+            .context("project path parent is outside the configured root")?;
+        let mut resolved_parent = self.path.clone();
+
+        // Walk one component at a time so a nested Agent path such as
+        // `sql/report.sql` can create missing project directories without
+        // turning `create_dir_all` into a symlink traversal escape.
+        for component in relative_parent.components() {
+            let Component::Normal(name) = component else {
+                bail!("project path contains an invalid parent component");
+            };
+            let candidate = resolved_parent.join(name);
+            match fs::symlink_metadata(&candidate) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    fs::create_dir(&candidate).with_context(|| {
+                        format!(
+                            "failed to create parent directory for: {}",
+                            relative.wire_path
+                        )
+                    })?;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to inspect parent directory for: {}",
+                            relative.wire_path
+                        )
+                    })
+                }
+            }
+
+            let resolved = fs::canonicalize(&candidate).with_context(|| {
+                format!(
+                    "failed to resolve parent directory for: {}",
+                    relative.wire_path
+                )
+            })?;
+            self.ensure_inside_root(&resolved)?;
+            if !fs::metadata(&resolved)?.is_dir() {
+                bail!(
+                    "project path parent is not a directory: {}",
+                    relative.wire_path
+                );
+            }
+            resolved_parent = resolved;
         }
 
         let name = relative
             .path
             .file_name()
             .context("project path does not have a file name")?;
-        Ok(resolved_parent.join(name))
+        let target = resolved_parent.join(name);
+        match fs::symlink_metadata(&target) {
+            Ok(_) => bail!("project path already exists: {}", relative.wire_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(target),
+            Err(error) => Err(error)
+                .with_context(|| format!("failed to inspect project path: {}", relative.wire_path)),
+        }
+    }
+
+    fn validate_new_target_without_mutation(&self, relative: &ValidatedRelativePath) -> Result<()> {
+        let components = relative.path.components().collect::<Vec<_>>();
+        let mut resolved_parent = self.path.clone();
+        for (index, component) in components.iter().enumerate() {
+            let Component::Normal(name) = component else {
+                bail!("project path contains an invalid component");
+            };
+            let candidate = resolved_parent.join(name);
+            let is_target = index + 1 == components.len();
+            match fs::symlink_metadata(&candidate) {
+                Ok(_) if is_target => {
+                    bail!("project path already exists: {}", relative.wire_path)
+                }
+                Ok(metadata) => {
+                    if is_link_or_reparse(&metadata) {
+                        let resolved = fs::canonicalize(&candidate).with_context(|| {
+                            format!(
+                                "failed to resolve parent directory for: {}",
+                                relative.wire_path
+                            )
+                        })?;
+                        self.ensure_inside_root(&resolved)?;
+                        if !fs::metadata(&resolved)?.is_dir() {
+                            bail!(
+                                "project path parent is not a directory: {}",
+                                relative.wire_path
+                            );
+                        }
+                        resolved_parent = resolved;
+                    } else if !metadata.is_dir() {
+                        bail!(
+                            "project path parent is not a directory: {}",
+                            relative.wire_path
+                        );
+                    } else {
+                        resolved_parent = candidate;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to inspect project path: {}", relative.wire_path)
+                    })
+                }
+            }
+        }
+        Ok(())
     }
 
     fn ensure_inside_root(&self, path: &Path) -> Result<()> {
@@ -876,6 +1191,62 @@ async fn project_root(
     Ok(root)
 }
 
+pub(crate) async fn agent_list_project_entries(
+    meta_store: &MetaStore,
+    project_id: &str,
+    relative_path: Option<&str>,
+) -> Result<Vec<ProjectEntry>> {
+    let root = project_root(meta_store, project_id, None)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let mut entries = root.list_entries(relative_path)?;
+    entries.truncate(AGENT_PROJECT_ENTRY_LIMIT);
+    Ok(entries)
+}
+
+pub(crate) async fn agent_read_project_file(
+    meta_store: &MetaStore,
+    project_id: &str,
+    relative_path: &str,
+) -> Result<ProjectFileRead> {
+    let root = project_root(meta_store, project_id, None)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let relative = validate_relative_path(relative_path, false)?;
+    let path = root.resolve_existing(&relative)?;
+    let metadata = fs::metadata(&path)?;
+    if !metadata.is_file() {
+        bail!("project path is not a file: {}", relative.wire_path);
+    }
+    if metadata.len() > AGENT_PROJECT_FILE_LIMIT {
+        bail!(
+            "Agent project files are limited to {} KiB",
+            AGENT_PROJECT_FILE_LIMIT / 1024
+        );
+    }
+    root.read_file(&relative.wire_path)
+}
+
+pub(crate) async fn agent_prepare_project_file_change(
+    meta_store: &MetaStore,
+    project_id: &str,
+    relative_path: &str,
+    content: &str,
+    expected_revision: Option<&str>,
+    create: bool,
+) -> Result<ProjectFileProposal> {
+    if content.len() as u64 > AGENT_PROJECT_FILE_LIMIT {
+        bail!(
+            "Agent project files are limited to {} KiB",
+            AGENT_PROJECT_FILE_LIMIT / 1024
+        );
+    }
+    let root = project_root(meta_store, project_id, None)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    root.prepare_file_change(relative_path, content, expected_revision, create)
+}
+
 fn assert_expected_project_root(
     root: &ProjectRoot,
     expected_root: Option<&str>,
@@ -977,6 +1348,545 @@ pub async fn get_project_completion_context(
         )
     })?;
     Ok(ranked_project_snippets(&index, &request))
+}
+
+async fn run_git_bounded(
+    root: &ProjectRoot,
+    args: &[&str],
+    limit: usize,
+) -> Result<GitCommandOutput> {
+    let mut child = TokioCommand::new("git")
+        .arg("-c")
+        .arg("core.fsmonitor=false")
+        .arg("-C")
+        .arg(&root.path)
+        .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("failed to start git")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture git stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture git stderr"))?;
+    let stdout_read = async {
+        let mut bytes = Vec::new();
+        stdout
+            .take((limit + 1) as u64)
+            .read_to_end(&mut bytes)
+            .await?;
+        Ok::<Vec<u8>, std::io::Error>(bytes)
+    };
+    let stderr_read = async {
+        let mut bytes = Vec::new();
+        stderr.take(8_193).read_to_end(&mut bytes).await?;
+        Ok::<Vec<u8>, std::io::Error>(bytes)
+    };
+    let (status, stdout, stderr) = tokio::time::timeout(PROJECT_GIT_COMMAND_TIMEOUT, async {
+        tokio::join!(child.wait(), stdout_read, stderr_read)
+    })
+    .await
+    .context("git command timed out")?;
+    let status = status.context("failed to wait for git")?;
+    let mut stdout = stdout.context("failed to read git stdout")?;
+    let stderr = stderr.context("failed to read git stderr")?;
+    let truncated = stdout.len() > limit;
+    stdout.truncate(limit);
+    Ok(GitCommandOutput {
+        success: status.success(),
+        stdout,
+        stderr,
+        truncated,
+    })
+}
+
+fn git_output_text(output: &GitCommandOutput) -> String {
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn parse_git_status(output: &[u8]) -> Vec<ProjectGitFileChange> {
+    let mut entries = output
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty());
+    let mut changes = Vec::new();
+    while let Some(entry) = entries.next() {
+        if entry.len() < 4 || entry[2] != b' ' {
+            continue;
+        }
+        let index_status = entry[0] as char;
+        let worktree_status = entry[1] as char;
+        let relative_path = String::from_utf8_lossy(&entry[3..]).to_string();
+        let renamed = matches!(index_status, 'R' | 'C') || matches!(worktree_status, 'R' | 'C');
+        let previous_path = renamed
+            .then(|| entries.next())
+            .flatten()
+            .map(|path| String::from_utf8_lossy(path).to_string());
+        let Ok(relative_path) = validate_relative_path(&relative_path, false) else {
+            continue;
+        };
+        let previous_path = previous_path.and_then(|path| {
+            validate_relative_path(&path, false)
+                .ok()
+                .map(|validated| validated.wire_path)
+        });
+        let untracked = index_status == '?' && worktree_status == '?';
+        let conflicted = matches!(
+            (index_status, worktree_status),
+            ('D', 'D')
+                | ('A', 'U')
+                | ('U', 'D')
+                | ('U', 'A')
+                | ('D', 'U')
+                | ('A', 'A')
+                | ('U', 'U')
+        );
+        let status = if untracked {
+            "untracked"
+        } else if conflicted {
+            "conflicted"
+        } else if renamed {
+            "renamed"
+        } else if index_status == 'A' {
+            "added"
+        } else if index_status == 'D' || worktree_status == 'D' {
+            "deleted"
+        } else {
+            "modified"
+        };
+        changes.push(ProjectGitFileChange {
+            relative_path: relative_path.wire_path,
+            previous_path,
+            status: status.to_string(),
+            staged: !matches!(index_status, ' ' | '?'),
+            unstaged: !matches!(worktree_status, ' ' | '?'),
+            untracked,
+            conflicted,
+        });
+    }
+    changes.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    changes
+}
+
+fn diff_line_counts(patch: &str) -> (usize, usize) {
+    patch.lines().fold((0, 0), |(additions, deletions), line| {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            (additions + 1, deletions)
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            (additions, deletions + 1)
+        } else {
+            (additions, deletions)
+        }
+    })
+}
+
+fn untracked_file_patch(root: &ProjectRoot, relative_path: &str) -> Result<(String, bool, bool)> {
+    let relative = validate_relative_path(relative_path, false)?;
+    let path = root.resolve_existing(&relative)?;
+    let metadata = fs::metadata(&path)?;
+    if !metadata.is_file() {
+        return Ok((String::new(), false, false));
+    }
+    if metadata.len() > PROJECT_GIT_UNTRACKED_PREVIEW_LIMIT {
+        return Ok((String::new(), false, true));
+    }
+    let bytes = fs::read(&path)?;
+    if bytes.contains(&0) {
+        return Ok((String::new(), true, false));
+    }
+    let content = String::from_utf8_lossy(&bytes);
+    let safe_path = relative.wire_path.replace('\n', "\\n").replace('\r', "\\r");
+    let line_count = content.lines().count();
+    let mut patch = format!(
+        "diff --git a/{safe_path} b/{safe_path}\nnew file mode 100644\n--- /dev/null\n+++ b/{safe_path}\n@@ -0,0 +1,{line_count} @@\n"
+    );
+    for line in content.lines() {
+        patch.push('+');
+        patch.push_str(line);
+        patch.push('\n');
+    }
+    Ok((patch, false, false))
+}
+
+async fn git_path_is_untracked(root: &ProjectRoot, relative_path: &str) -> Result<bool> {
+    let output = run_git_bounded(
+        root,
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            relative_path,
+        ],
+        64 * 1024,
+    )
+    .await?;
+    if !output.success {
+        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .any(|candidate| candidate == relative_path.as_bytes()))
+}
+
+fn working_tree_content_revision(
+    root: &ProjectRoot,
+    relative_path: &str,
+) -> Result<(Option<String>, ProjectGitRevisionStatus)> {
+    let relative = validate_relative_path(relative_path, false)?;
+    let lexical_path = root.path.join(&relative.path);
+    let lexical_metadata = match fs::symlink_metadata(&lexical_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((None, ProjectGitRevisionStatus::Missing));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if lexical_metadata.file_type().is_symlink() {
+        return Ok((None, ProjectGitRevisionStatus::Unavailable));
+    }
+    let path = root.resolve_existing(&relative)?;
+    let metadata = fs::metadata(&path)?;
+    if !metadata.is_file() || metadata.len() > AGENT_PROJECT_FILE_LIMIT {
+        return Ok((None, ProjectGitRevisionStatus::Unavailable));
+    }
+    let bytes = fs::read(path)?;
+    Ok((
+        Some(content_revision(&bytes)),
+        ProjectGitRevisionStatus::Available,
+    ))
+}
+
+async fn staged_content_revision(
+    root: &ProjectRoot,
+    relative_path: &str,
+) -> Result<(Option<String>, ProjectGitRevisionStatus)> {
+    let object = format!(":{relative_path}");
+    let content = run_git_bounded(
+        root,
+        &["cat-file", "blob", object.as_str()],
+        AGENT_PROJECT_FILE_LIMIT as usize,
+    )
+    .await?;
+    if content.success {
+        if content.truncated {
+            return Ok((None, ProjectGitRevisionStatus::Unavailable));
+        }
+        return Ok((
+            Some(content_revision(&content.stdout)),
+            ProjectGitRevisionStatus::Available,
+        ));
+    }
+
+    let index_entries = run_git_bounded(
+        root,
+        &["ls-files", "--stage", "-z", "--", relative_path],
+        64 * 1024,
+    )
+    .await?;
+    if !index_entries.success {
+        bail!("{}", String::from_utf8_lossy(&index_entries.stderr).trim());
+    }
+    if index_entries.stdout.is_empty() {
+        Ok((None, ProjectGitRevisionStatus::Missing))
+    } else {
+        Ok((None, ProjectGitRevisionStatus::Unavailable))
+    }
+}
+
+async fn git_current_side_revision(
+    root: &ProjectRoot,
+    relative_path: &str,
+    scope: ProjectGitDiffScope,
+) -> Result<(Option<String>, ProjectGitRevisionStatus)> {
+    match scope {
+        ProjectGitDiffScope::Staged => staged_content_revision(root, relative_path).await,
+        ProjectGitDiffScope::All | ProjectGitDiffScope::Working => {
+            working_tree_content_revision(root, relative_path)
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn get_project_git_changes(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+    expected_root: Option<String>,
+) -> Result<ProjectGitChangeSet, CommandError> {
+    let error_context = serde_json::json!({ "projectId": project_id });
+    let root = project_root(&meta_store, &project_id, expected_root.as_deref())
+        .await
+        .map_err(|error| {
+            project_command_error(
+                "PROJECT_ROOT_RESOLUTION_FAILED",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?;
+    let repository = run_git_bounded(&root, &["rev-parse", "--is-inside-work-tree"], 64)
+        .await
+        .map_err(|error| {
+            project_command_error(
+                "PROJECT_GIT_UNAVAILABLE",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?;
+    if !repository.success || git_output_text(&repository) != "true" {
+        return Ok(ProjectGitChangeSet {
+            is_repository: false,
+            branch: None,
+            head: None,
+            files: Vec::new(),
+            truncated: false,
+        });
+    }
+    let (branch, head, status) = tokio::join!(
+        run_git_bounded(&root, &["branch", "--show-current"], 512),
+        run_git_bounded(&root, &["rev-parse", "--short", "HEAD"], 128),
+        run_git_bounded(
+            &root,
+            &[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--",
+                ".",
+            ],
+            PROJECT_GIT_STATUS_SIZE_LIMIT,
+        ),
+    );
+    let branch = branch.map_err(|error| {
+        project_command_error(
+            "PROJECT_GIT_STATUS_FAILED",
+            error,
+            true,
+            error_context.clone(),
+        )
+    })?;
+    let head = head.map_err(|error| {
+        project_command_error(
+            "PROJECT_GIT_STATUS_FAILED",
+            error,
+            true,
+            error_context.clone(),
+        )
+    })?;
+    let status = status.map_err(|error| {
+        project_command_error("PROJECT_GIT_STATUS_FAILED", error, true, error_context)
+    })?;
+    if !status.success {
+        return Err(project_command_error(
+            "PROJECT_GIT_STATUS_FAILED",
+            String::from_utf8_lossy(&status.stderr),
+            true,
+            serde_json::json!({ "projectId": project_id }),
+        ));
+    }
+    let mut files = parse_git_status(&status.stdout);
+    let files_truncated = files.len() > PROJECT_GIT_FILE_LIMIT;
+    files.truncate(PROJECT_GIT_FILE_LIMIT);
+    Ok(ProjectGitChangeSet {
+        is_repository: true,
+        branch: branch
+            .success
+            .then(|| git_output_text(&branch))
+            .filter(|value| !value.is_empty()),
+        head: head
+            .success
+            .then(|| git_output_text(&head))
+            .filter(|value| !value.is_empty()),
+        files,
+        truncated: status.truncated || files_truncated,
+    })
+}
+
+#[tauri::command]
+pub async fn get_project_git_file_diff(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+    relative_path: String,
+    scope: Option<String>,
+    expected_root: Option<String>,
+) -> Result<ProjectGitFileDiff, CommandError> {
+    let error_context = serde_json::json!({
+        "projectId": project_id,
+        "relativePath": relative_path,
+        "scope": scope.as_deref().unwrap_or("all"),
+    });
+    let diff_scope = ProjectGitDiffScope::parse(scope.as_deref()).ok_or_else(|| {
+        project_command_error(
+            "PROJECT_GIT_DIFF_SCOPE_INVALID",
+            format!(
+                "unsupported Git diff scope: {}",
+                scope.as_deref().unwrap_or_default()
+            ),
+            false,
+            error_context.clone(),
+        )
+    })?;
+    let root = project_root(&meta_store, &project_id, expected_root.as_deref())
+        .await
+        .map_err(|error| {
+            project_command_error(
+                "PROJECT_ROOT_RESOLUTION_FAILED",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?;
+    let relative = validate_relative_path(&relative_path, false).map_err(|error| {
+        project_command_error(
+            "PROJECT_GIT_PATH_INVALID",
+            error,
+            false,
+            error_context.clone(),
+        )
+    })?;
+    let primary_arguments = diff_scope.arguments(&relative.wire_path);
+    let primary = run_git_bounded(&root, &primary_arguments, PROJECT_GIT_DIFF_SIZE_LIMIT)
+        .await
+        .map_err(|error| {
+            project_command_error(
+                "PROJECT_GIT_DIFF_FAILED",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?;
+    let (mut patch, mut truncated) = if primary.success {
+        (
+            String::from_utf8_lossy(&primary.stdout).to_string(),
+            primary.truncated,
+        )
+    } else if diff_scope == ProjectGitDiffScope::All {
+        let staged_args = [
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--",
+            relative.wire_path.as_str(),
+        ];
+        let unstaged_args = [
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--",
+            relative.wire_path.as_str(),
+        ];
+        let (staged, unstaged) = tokio::join!(
+            run_git_bounded(&root, &staged_args, PROJECT_GIT_DIFF_SIZE_LIMIT / 2,),
+            run_git_bounded(&root, &unstaged_args, PROJECT_GIT_DIFF_SIZE_LIMIT / 2,),
+        );
+        let staged = staged.map_err(|error| {
+            project_command_error(
+                "PROJECT_GIT_DIFF_FAILED",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?;
+        let unstaged = unstaged.map_err(|error| {
+            project_command_error(
+                "PROJECT_GIT_DIFF_FAILED",
+                error,
+                true,
+                error_context.clone(),
+            )
+        })?;
+        if !staged.success || !unstaged.success {
+            let stderr = format!(
+                "{}{}",
+                String::from_utf8_lossy(&staged.stderr),
+                String::from_utf8_lossy(&unstaged.stderr)
+            );
+            return Err(project_command_error(
+                "PROJECT_GIT_DIFF_FAILED",
+                stderr,
+                true,
+                error_context.clone(),
+            ));
+        }
+        (
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&staged.stdout),
+                String::from_utf8_lossy(&unstaged.stdout)
+            ),
+            staged.truncated || unstaged.truncated,
+        )
+    } else {
+        return Err(project_command_error(
+            "PROJECT_GIT_DIFF_FAILED",
+            String::from_utf8_lossy(&primary.stderr),
+            true,
+            error_context.clone(),
+        ));
+    };
+    let mut binary = patch.contains("Binary files ") || patch.contains("GIT binary patch");
+    if patch.trim().is_empty()
+        && diff_scope.includes_untracked()
+        && git_path_is_untracked(&root, &relative.wire_path)
+            .await
+            .map_err(|error| {
+                project_command_error(
+                    "PROJECT_GIT_DIFF_FAILED",
+                    error,
+                    true,
+                    error_context.clone(),
+                )
+            })?
+    {
+        let (untracked_patch, untracked_binary, untracked_truncated) =
+            untracked_file_patch(&root, &relative.wire_path).map_err(|error| {
+                project_command_error(
+                    "PROJECT_GIT_DIFF_FAILED",
+                    error,
+                    true,
+                    error_context.clone(),
+                )
+            })?;
+        patch = untracked_patch;
+        binary = untracked_binary;
+        truncated |= untracked_truncated;
+    }
+    let (additions, deletions) = diff_line_counts(&patch);
+    let (current_side_revision, current_side_revision_status) =
+        git_current_side_revision(&root, &relative.wire_path, diff_scope)
+            .await
+            .map_err(|error| {
+                project_command_error(
+                    "PROJECT_GIT_DIFF_REVISION_FAILED",
+                    error,
+                    true,
+                    error_context,
+                )
+            })?;
+    Ok(ProjectGitFileDiff {
+        relative_path: relative.wire_path,
+        patch,
+        additions,
+        deletions,
+        binary,
+        truncated,
+        current_side_revision,
+        current_side_revision_status,
+    })
 }
 
 #[tauri::command]
@@ -1225,6 +2135,185 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn parses_git_porcelain_status_without_losing_rename_scope() {
+        let changes = parse_git_status(
+            b" M src/query.ts\0A  src/new.ts\0?? notes.txt\0R  src/renamed.ts\0src/old.ts\0 M ../outside.sql\0",
+        );
+
+        assert_eq!(changes.len(), 4);
+        assert!(changes.iter().any(|change| {
+            change.relative_path == "src/query.ts" && change.unstaged && !change.staged
+        }));
+        assert!(changes.iter().any(|change| {
+            change.relative_path == "src/new.ts" && change.status == "added" && change.staged
+        }));
+        assert!(changes.iter().any(|change| change.untracked));
+        let renamed = changes
+            .iter()
+            .find(|change| change.status == "renamed")
+            .unwrap();
+        assert_eq!(renamed.relative_path, "src/renamed.ts");
+        assert_eq!(renamed.previous_path.as_deref(), Some("src/old.ts"));
+        assert!(changes
+            .iter()
+            .all(|change| !change.relative_path.contains("..")));
+    }
+
+    #[test]
+    fn counts_only_real_added_and_removed_diff_lines() {
+        let patch = "--- a/file\n+++ b/file\n@@ -1,2 +1,2 @@\n-old\n+new\n same";
+        assert_eq!(diff_line_counts(patch), (1, 1));
+    }
+
+    #[test]
+    fn builds_git_diff_arguments_for_each_supported_scope() {
+        assert_eq!(
+            ProjectGitDiffScope::All.arguments("queries/report.sql"),
+            vec![
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "HEAD",
+                "--",
+                "queries/report.sql",
+            ]
+        );
+        assert_eq!(
+            ProjectGitDiffScope::Staged.arguments("queries/report.sql"),
+            vec![
+                "diff",
+                "--cached",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--",
+                "queries/report.sql",
+            ]
+        );
+        assert_eq!(
+            ProjectGitDiffScope::Working.arguments("queries/report.sql"),
+            vec![
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--",
+                "queries/report.sql",
+            ]
+        );
+        assert!(ProjectGitDiffScope::parse(Some("unknown")).is_none());
+    }
+
+    #[test]
+    fn builds_a_bounded_untracked_text_diff_without_leaving_the_project() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("queries")).unwrap();
+        fs::write(temp.path().join("queries/new.sql"), "select 1;\n").unwrap();
+        let root = ProjectRoot::new(temp.path()).unwrap();
+
+        let (patch, binary, truncated) = untracked_file_patch(&root, "queries/new.sql").unwrap();
+        assert!(!binary);
+        assert!(!truncated);
+        assert!(patch.contains("--- /dev/null"));
+        assert!(patch.contains("+++ b/queries/new.sql"));
+        assert!(patch.contains("+select 1;"));
+        assert!(untracked_file_patch(&root, "../outside.sql").is_err());
+    }
+
+    #[tokio::test]
+    async fn identifies_only_untracked_paths_for_synthetic_diff_fallback() {
+        let temp = TempDir::new().unwrap();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(temp.path())
+            .status()
+            .unwrap();
+        assert!(initialized.success());
+        fs::write(temp.path().join("new.sql"), "select 1;\n").unwrap();
+        let root = ProjectRoot::new(temp.path()).unwrap();
+
+        assert!(git_path_is_untracked(&root, "new.sql").await.unwrap());
+
+        let staged = std::process::Command::new("git")
+            .args(["add", "--", "new.sql"])
+            .current_dir(temp.path())
+            .status()
+            .unwrap();
+        assert!(staged.success());
+        assert!(!git_path_is_untracked(&root, "new.sql").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn resolves_scope_content_revisions_without_confusing_index_and_worktree() {
+        let temp = TempDir::new().unwrap();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(temp.path())
+            .status()
+            .unwrap();
+        assert!(initialized.success());
+        let path = temp.path().join("report.sql");
+        fs::write(&path, "select 'staged';\n").unwrap();
+        let staged = std::process::Command::new("git")
+            .args(["add", "--", "report.sql"])
+            .current_dir(temp.path())
+            .status()
+            .unwrap();
+        assert!(staged.success());
+        fs::write(&path, "select 'working';\n").unwrap();
+        let root = ProjectRoot::new(temp.path()).unwrap();
+
+        let (index_revision, index_status) =
+            git_current_side_revision(&root, "report.sql", ProjectGitDiffScope::Staged)
+                .await
+                .unwrap();
+        let (working_revision, working_status) =
+            git_current_side_revision(&root, "report.sql", ProjectGitDiffScope::Working)
+                .await
+                .unwrap();
+        let (all_revision, all_status) =
+            git_current_side_revision(&root, "report.sql", ProjectGitDiffScope::All)
+                .await
+                .unwrap();
+        let expected_index_revision = content_revision(b"select 'staged';\n");
+        let expected_working_revision = content_revision(b"select 'working';\n");
+
+        assert_eq!(index_status, ProjectGitRevisionStatus::Available);
+        assert_eq!(
+            index_revision.as_deref(),
+            Some(expected_index_revision.as_str())
+        );
+        assert_eq!(working_status, ProjectGitRevisionStatus::Available);
+        assert_eq!(
+            working_revision.as_deref(),
+            Some(expected_working_revision.as_str())
+        );
+        assert_eq!(all_status, ProjectGitRevisionStatus::Available);
+        assert_eq!(all_revision, working_revision);
+
+        fs::remove_file(path).unwrap();
+        let (missing_revision, missing_status) =
+            git_current_side_revision(&root, "report.sql", ProjectGitDiffScope::Working)
+                .await
+                .unwrap();
+        assert_eq!(missing_revision, None);
+        assert_eq!(missing_status, ProjectGitRevisionStatus::Missing);
+
+        fs::write(
+            temp.path().join("large.sql"),
+            vec![b'x'; AGENT_PROJECT_FILE_LIMIT as usize + 1],
+        )
+        .unwrap();
+        let (large_revision, large_status) =
+            git_current_side_revision(&root, "large.sql", ProjectGitDiffScope::Working)
+                .await
+                .unwrap();
+        assert_eq!(large_revision, None);
+        assert_eq!(large_status, ProjectGitRevisionStatus::Unavailable);
+    }
+
+    #[test]
     fn rejects_absolute_and_parent_paths() {
         let temp = TempDir::new().unwrap();
         let root = ProjectRoot::new(temp.path()).unwrap();
@@ -1319,6 +2408,9 @@ mod tests {
         let created = root
             .create_file("queries/report.sql", "select 1;\n")
             .unwrap();
+        assert_eq!(created.previous_revision, None);
+        assert_eq!(created.introduced_lines, vec![1]);
+        assert!(!created.line_evidence_truncated);
         assert!(root
             .create_file("queries/report.sql", "select 2;\n")
             .is_err());
@@ -1337,6 +2429,11 @@ mod tests {
             .unwrap();
         assert_ne!(written.revision, read.revision);
         assert_eq!(
+            written.previous_revision.as_deref(),
+            Some(read.revision.as_str())
+        );
+        assert_eq!(written.introduced_lines, vec![1]);
+        assert_eq!(
             fs::read_to_string(temp.path().join("queries/report.sql")).unwrap(),
             "select 2;\n"
         );
@@ -1350,6 +2447,108 @@ mod tests {
         root.delete_entry("queries/final.sql", false).unwrap();
         root.delete_entry("queries", false).unwrap();
         assert!(!temp.path().join("queries").exists());
+    }
+
+    #[test]
+    fn preparing_file_changes_never_mutates_the_project() {
+        let temp = TempDir::new().unwrap();
+        let root = ProjectRoot::new(temp.path()).unwrap();
+        fs::write(temp.path().join("existing.sql"), "select 1;\n").unwrap();
+        let existing = root.read_file("existing.sql").unwrap();
+
+        let updated = root
+            .prepare_file_change(
+                "existing.sql",
+                "select 1;\nselect 2;\n",
+                Some(&existing.revision),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            updated.base_revision.as_deref(),
+            Some(existing.revision.as_str())
+        );
+        assert_eq!(updated.additions, 1);
+        assert_eq!(updated.deletions, 0);
+        assert_eq!(
+            fs::read_to_string(temp.path().join("existing.sql")).unwrap(),
+            "select 1;\n"
+        );
+
+        let created = root
+            .prepare_file_change("sql/generated/new.sql", "select 3;\n", None, true)
+            .unwrap();
+        assert_eq!(created.base_revision, None);
+        assert!(!temp.path().join("sql").exists());
+        assert!(!temp.path().join("sql/generated/new.sql").exists());
+    }
+
+    #[test]
+    fn file_change_counts_match_insertions_deletions_and_replacements() {
+        assert_eq!(
+            project_file_line_change_counts("a\nb\nc", "a\nx\nc\nd"),
+            (2, 1)
+        );
+        assert_eq!(project_file_line_change_counts("a\nb", "a\nb"), (0, 0));
+        assert_eq!(project_file_line_change_counts("", "first\nsecond"), (2, 0));
+    }
+
+    #[test]
+    fn create_file_creates_missing_parent_directories_inside_project_root() {
+        let temp = TempDir::new().unwrap();
+        let root = ProjectRoot::new(temp.path()).unwrap();
+
+        let created = root
+            .create_file(
+                "sql/generated/ai_model_select.sql",
+                "SELECT model_name FROM ai_models;\n",
+            )
+            .unwrap();
+
+        assert_eq!(created.relative_path, "sql/generated/ai_model_select.sql");
+        assert_eq!(created.previous_revision, None);
+        assert_eq!(
+            fs::read_to_string(temp.path().join("sql/generated/ai_model_select.sql")).unwrap(),
+            "SELECT model_name FROM ai_models;\n"
+        );
+        assert!(temp.path().join("sql/generated").is_dir());
+    }
+
+    #[test]
+    fn create_file_rejects_a_non_directory_parent_component() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("sql"), "not a directory").unwrap();
+        let root = ProjectRoot::new(temp.path()).unwrap();
+
+        let error = root
+            .create_file("sql/ai_model_select.sql", "SELECT 1;\n")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("parent is not a directory"), "{error}");
+        assert!(!temp.path().join("ai_model_select.sql").exists());
+    }
+
+    #[test]
+    fn line_evidence_only_claims_content_absent_from_the_pre_write_file() {
+        let (lines, truncated) = project_file_line_evidence(
+            "SELECT id\nFROM users\nORDER BY id\n",
+            "SELECT id\nFROM active_users\nORDER BY id\nLIMIT 20\n",
+        );
+
+        assert_eq!(lines, vec![2, 4]);
+        assert!(!truncated);
+
+        let repeated = project_file_line_evidence("same\n", "same\nsame\nnew\n");
+        assert_eq!(repeated, (vec![3], false));
+
+        let oversized = (0..=PROJECT_FILE_LINE_EVIDENCE_LIMIT)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (bounded, truncated) = project_file_line_evidence("", &oversized);
+        assert_eq!(bounded.len(), PROJECT_FILE_LINE_EVIDENCE_LIMIT);
+        assert!(truncated);
     }
 
     #[test]

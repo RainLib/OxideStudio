@@ -108,6 +108,7 @@ function setWorkspaceConnection(options: {
     schemaName?: string | null;
     tableName?: string | null;
     objectType?: string | null;
+    explainPlan?: ExplainPlan | null;
   };
 }) {
   const tabId = options.tab?.id ?? "tab-1";
@@ -145,6 +146,7 @@ function setWorkspaceConnection(options: {
         schemaName: options.tab?.schemaName ?? options.namespace,
         tableName: options.tab?.tableName ?? null,
         objectType: options.tab?.objectType ?? null,
+        explainPlan: options.tab?.explainPlan ?? null,
         results: null,
         isExecuting: false,
         error: null,
@@ -198,6 +200,57 @@ describe("workspace AI tools", () => {
         objectType: "index",
       },
     });
+  });
+
+  it("grounds the active tab context in a bounded analyzed plan", () => {
+    setWorkspaceConnection({
+      id: "postgres-1",
+      driver: "postgres",
+      namespace: "public",
+      tab: {
+        sql: "SELECT * FROM users",
+        explainPlan: {
+          ...EXPLAIN_PLAN,
+          id: "runtime-plan-1",
+          mode: "analyze",
+          planningTimeMs: 0.7,
+          executionTimeMs: 12.4,
+          root: {
+            ...EXPLAIN_PLAN.root,
+            id: "runtime-node-0",
+            actualTotalTimeMs: 11.9,
+            actualRows: 2,
+            loops: 1,
+            condition: "email = 'must-not-enter-ai-plan-summary'",
+          },
+          rawPlan: { secret: "must-not-enter-ai-plan-summary" },
+          warnings: ["Analyzed plan executed once."],
+        },
+      },
+    });
+
+    const plan = createWorkspaceAiToolContext("runtime-plan-context").activeTab
+      ?.explainPlan;
+
+    expect(plan).toMatchObject({
+      id: "runtime-plan-1",
+      mode: "analyze",
+      executionTimeMs: 12.4,
+      rootNodeId: "runtime-node-0",
+      nodes: [
+        expect.objectContaining({
+          id: "runtime-node-0",
+          nodeType: "Index Scan",
+          actualTotalTimeMs: 11.9,
+          actualRows: 2,
+          loops: 1,
+        }),
+      ],
+      truncated: false,
+    });
+    expect(JSON.stringify(plan)).not.toContain("must-not-enter-ai-plan-summary");
+    expect(JSON.stringify(plan)).not.toContain("rawPlan");
+    expect(JSON.stringify(plan)).not.toContain("condition");
   });
 
   it("proposes a bounded editor patch without mutating the document", async () => {
@@ -447,6 +500,47 @@ describe("workspace AI tools", () => {
         objectType: "index",
       },
     });
+  });
+
+  it("exposes structured query diagnostics to assistant planners without adding SQL or credentials to the error", () => {
+    useTabStore.setState((state) => ({
+      tabs: state.tabs.map((tab) => ({
+        ...tab,
+        error: "syntax error at or near FROM",
+        queryError: {
+          code: "QUERY_EXECUTION_FAILED",
+          message: "syntax error at or near FROM",
+          retryable: false,
+          database: {
+            driver: "postgres",
+            sqlState: "42601",
+            position: 8,
+            documentLine: 2,
+            documentColumn: 8,
+            documentOffset: 17,
+          },
+        },
+      })),
+    }));
+
+    const queryError =
+      createWorkspaceAiToolContext("query-error-context").activeTab?.queryError;
+
+    expect(queryError).toEqual({
+      code: "QUERY_EXECUTION_FAILED",
+      message: "syntax error at or near FROM",
+      retryable: false,
+      database: {
+        driver: "postgres",
+        sqlState: "42601",
+        position: 8,
+        documentLine: 2,
+        documentColumn: 8,
+        documentOffset: 17,
+      },
+    });
+    expect(queryError).not.toHaveProperty("sql");
+    expect(queryError).not.toHaveProperty("connectionString");
   });
 
   it("describes relational objects through workspace schema services", async () => {

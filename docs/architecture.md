@@ -1,6 +1,6 @@
 # OxideStudio 当前架构
 
-> 文档基线：2026-07-15。本文描述当前仓库已经存在的实现；仍在发布接线中的能力会明确标注。
+> 文档基线：2026-07-26。本文描述当前仓库已经存在的实现；仍在发布接线中的能力会明确标注。
 
 ## 1. 架构目标
 
@@ -126,12 +126,12 @@ WebView 与 Rust 之间仍使用 `@tauri-apps/api/core` 的 `invoke()` 和 Tauri
 - `MetaStore`：本地 metadata SQLite；
 - `ConfigManager` 与 `CacheManager`：设置和遗留 JSON 缓存；
 - `ParserState`、查询取消状态、AI 取消状态；
-- 每个连接/语言会话的 LSP 状态。
+- 每个连接/语言会话的 LSP 状态；会话有引用计数、空闲回收、健康恢复和标准 JSON-RPC 取消。同步 metadata 使用不含凭据的 `oxide://database-object` URI，内置 binary 由相邻 manifest 做 SHA-256 与 source revision 校验。
 - `AgentHostManager`：无副作用装配的 sidecar supervisor、模型/工具代理、批准 lease 与加密 AgentStore。
 
 ### 4.2 Command 边界
 
-`src-tauri/src/commands/` 按领域组织 IPC：`connection`、`query`、`schema`、`schema_diff`、`table`、`transaction`、`project_files`、`store`、`settings`、`lsp`、`ai`、`window`。
+`src-tauri/src/commands/` 按领域组织 IPC：`connection`、`query`、`schema`、`schema_diff`、`table`、`transaction`、`project_files`、`store`、`settings`、`lsp`、`ai`、`agent`、`window`。
 
 Command 的职责是：
 
@@ -164,7 +164,12 @@ SQL 拼接、标识符引用、只读判断、修订冲突和路径穿越防护�
 Elasticsearch Query DSL 使用独立的 Kibana Console 文档模型。编辑器按
 `METHOD index/_endpoint` 请求行切分文档，光标执行只运行当前请求，选区执行运行选区，
 整页执行运行全部请求；本地 Console provider 提供方法、端点、Query DSL 片段和逐请求
-格式化，schema-aware LSP 继续补充当前 index mapping 字段。关系型数据交换复用 Rust
+格式化；METHOD、path、operation、DSL key 和 mapping field 输入会触发同一个 Monaco suggest
+surface，schema-aware LSP 继续补充当前 index mapping 字段，接受候选后 provider 保持可继续
+刷新。为了避免大 Console 文件阻塞
+WebView，全文诊断和 gutter 请求索引在专用 Web Worker 中 debounce 执行；Smart Tab/补全只扫描
+光标附近的当前 request，编辑内容以短批次写回 workspace store，执行和切换文档前仍会同步
+提交最新 Monaco model。关系型数据交换复用 Rust
 后端：表数据通过参数化事务批次导入，CSV、
 JSON 和 SQL `INSERT` 导出采用有界分页写盘，SQL dump 导入保留脚本自身的事务语义。
 
@@ -185,7 +190,11 @@ Deep Agents 状态不写入上述 metadata resource。`AgentStore` 使用独立�
 
 ### 4.5 Project Files 安全边界
 
-`commands/project_files.rs` 将所有路径规范化为项目根目录内的相对路径，并通过 canonical path 防止 `..`、绝对路径和 symlink 越界。文本文件使用 SHA-256 revision 做乐观并发控制；图片预览走独立的只读二进制接口，限制格式和 25 MiB 最大读取量，避免图片进入 UTF-8、Monaco、LSP 或保存链路。
+`commands/project_files.rs` 将所有路径规范化为项目根目录内的相对路径，并通过 canonical path 防止 `..`、绝对路径和 symlink 越界。文本文件使用 SHA-256 revision 做乐观并发控制；Agent 文件读取/写入沿用同一边界并额外限制 256 KiB，替换必须提交精确 expected revision，创建与替换语义分开。图片预览走独立的只读二进制接口，限制格式和 25 MiB 最大读取量，避免图片进入 UTF-8、Monaco、LSP 或保存链路。
+
+项目 Git 视图不开放 shell 字符串。Rust 以参数数组启动 `git -C <canonical-root>`，关闭 optional locks/fsmonitor 与 external diff/textconv，命令 8 秒超时，并分别限制 status、diff 与 stderr 输出；status 使用 `-- .` 只扫描配置的项目根范围，再过滤越界路径并最多展示 500 个文件。逐文件 diff scope 只映射为固定参数数组：All 使用相对 `HEAD` 的最终变化，Staged 使用 `--cached`，Working 只读取未暂存变化；仅当 `git ls-files --others --exclude-standard -z` 精确确认目标未跟踪时才生成有界的 synthetic new-file patch。当前能力只读：branch/head、porcelain status、staged/unstaged/untracked/conflict 与逐文件 unified diff，不包含 stage、commit、checkout 或 push。
+
+Agent 文件归因不从模型回答或 Git 时间戳猜测。`project.writeFile` 在 Rust 项目文件边界成功提交后，由 Rust 直接向 WebView 发出 `file.changed`，只含 project-relative path、created/updated、写入前后 SHA-256 revision、Turn/Call ID，以及最多 2,048 个不含内容的保守新侧行号；同名 sidecar 事件不在允许列表中，会被丢弃。行证据只收录“写入前全文不存在、写入后出现”的文本行，因此重复/移动内容可能少标，但不会仅凭时间戳扩大归属。Turn 将证据纳入加密 conversation snapshot，Changes 可筛选全部变更、全部 Agent 文件或单个 Turn。选中文件时，All/Working 对项目根当前文件、Staged 对 index blob 计算与 Agent 写入相同的有界 SHA-256；界面只有在 revision 完全相等时才显示 `AI match` 并标出与 Git 新增行相交的可信行/hunk，否则明确显示 differs、missing 或 unverified。该核验不等同于完整 blame，未被保守证据覆盖的行不声称作者。
 
 ## 5. 关键运行链路
 
@@ -215,11 +224,13 @@ sequenceDiagram
 
 ### 5.2 查询执行
 
-1. `QueryEditor` 根据选区、当前 statement 或整页 SQL 生成执行请求。
+1. `QueryEditor` 根据选区、当前 statement 或整页 SQL 生成执行请求；当前 statement 由 Rust 使用 driver-aware scanner 解析，Monaco UTF-16 光标 offset 会先安全转换为 Rust UTF-8 byte offset。
 2. `useTabStore.runTabQuery` 创建 query id 和后台 task。
 3. `query.service.ts` 调用 `execute_query`。
 4. Rust 根据 database、schema、transaction 和 query id 路由到 driver。
-5. 结果进入 Tab；DDL/DML 触发有界元数据刷新；取消操作通过 query id 下发。
+5. PostgreSQL/MySQL 普通查询在 driver stream 读取 1,001 条 sentinel 后只返回前 1,000 条，并在结果协议写入 `truncated/rowLimit`；结果进入 Tab，DDL/DML 触发有界元数据刷新，取消操作通过 query id 下发。
+6. 查询失败时，Query Command 从 `anyhow` 链中的 `sqlx::DatabaseError` 提取白名单诊断：PostgreSQL 保留 SQLSTATE、severity、original character position 与 schema/table/column/constraint/type，MySQL 保留 SQLSTATE 与 vendor error number。响应 context 不包含 SQL、URL、凭据、PostgreSQL detail 或 internal query。
+7. `useTabStore` 校验诊断结构，并把 PostgreSQL 1-based Unicode character position 换算为执行文本的 UTF-16 offset；执行整篇、选区或光标 statement 时再叠加来源 offset 得到 Monaco 文档行列。`QueryEditor` 使用独立 marker owner 展示位置，DataGrid 错误卡展示 code/object metadata，active-tab AI context 复用同一有界对象。
 
 ### 5.3 表数据编辑
 
@@ -229,17 +240,23 @@ Foreign-key row navigation 不扫描 Explorer 树。当前表的 outgoing constr
 
 Table 与 Query grid 共用 selection aggregate：Glide range/row/column selection 先去重并限制为 50,000 cells，`useDeferredValue` 避免拖选重算阻塞 canvas。聚合层区分 SQL NULL 与新行 DEFAULT，只有元数据标记的数值列参与 sum/avg/min/max；`bigint`/`numeric` 使用 `BigInt coefficient + scale` 定点累计。跨 tab/result 的旧 selection 会被拒绝。详细性能与精度边界见 [ADR-0008](decisions/0008-selection-aggregate-budget.md)。
 
+Data Compare 从两个 idle、无 table draft 的 tab 捕获不可变 loaded-result snapshot。共同 primary key、`id` 或用户选择的复合列用于 type-aware key 对齐；不同结果列顺序按名称映射，重复列名 fail closed，重复 key 标记 ambiguous 而不静默覆盖。绝对/相对 tolerance 只作用于严格数值。Artifact 明确继承 source 的 truncated/current-page 边界，每侧最多比较 5,000 个 loaded rows，并限制前端 diff line 数量；它不执行隐式全表扫描或数据同步。详细边界见 [ADR-0015](decisions/0015-loaded-data-compare.md)。
+
 ### 5.4 Explain Plan
 
 编辑器只提交原始 SQL、target identity、mode 和 query id；不允许前端拼接 `EXPLAIN`。Rust 先复用 dialect-aware statement scanner，要求恰好一条只读源查询并拒绝已有 `EXPLAIN`，再生成 PostgreSQL/MySQL 的 estimate/analyze 语句，并通过既有 query cancellation 与 database/schema 路由在只读事务内执行。
 
-驱动结果先保留为 `rawPlan`，再规范化成稳定的 `ExplainPlanNode` 树。UI 只消费规范模型来展示 node type、relation/index、cost、estimated/actual rows、time 和 loops，同时保留 Raw 视图便于诊断。Analyze 会真实执行源查询，必须由编辑器显式确认；`query.explain` AI 工具只允许 estimate。计划 attachment 使用 `tabId + planId + nodeId`，旧计划或不存在节点由 `UiActionRegistry` 拒绝，不能退化为 DOM selector 查找。详细决策见 [ADR-0003](decisions/0003-explain-plan-safety.md)。
+驱动结果先保留为 `rawPlan`，再规范化成稳定的 `ExplainPlanNode` 树。UI 只消费规范模型来展示 node type、relation/index、cost、estimated/actual rows、time 和 loops，同时保留 Raw 视图便于诊断。Analyze 会真实执行源查询，必须由编辑器显式确认；`query.explain` AI 工具只允许 estimate。用户已打开的 active-tab plan 会以最多 100 个节点的规范摘要进入 `workspace.getActiveTab`，只保留节点身份、关系/索引和有限数值指标，排除 `rawPlan`、condition 与 SQL；只有 mode 为 `analyze` 的摘要可作为实际耗时/行数证据。计划 attachment 使用 `tabId + planId + nodeId`，旧计划或不存在节点由 `UiActionRegistry` 拒绝，不能退化为 DOM selector 查找。详细决策见 [ADR-0003](decisions/0003-explain-plan-safety.md)。
 
 ### 5.5 Schema Snapshot 与 Diff
 
 Schema baseline 不读取可变的 Explorer 展示树，而是调用 Rust `capture_schema_snapshot` 对指定 `project + connection + database + schema` 进行一次完整 introspection。表级 columns/indexes/constraints 并行获取，表间以六个 permit 限流；任一失败都会中止，避免把部分结构保存为有效 snapshot。版本化 snapshot 与 fingerprint 作为 project-scoped MetaStore resource 持久化。
 
-`compare_schema_snapshots` 把 source 定义为 desired、fresh live target 定义为 actual，并在 Rust 纯领域层生成稳定 change、风险、可逆性、warning 和 dialect SQL。支持对象通过 dependency graph 拓扑排序并携带 phase/order/dependsOn；外键脱离 `CREATE TABLE`，changed index/constraint 拆为 drop/recreate。无法完整重建、依赖被阻断或出现 cycle 时清除 runnable SQL，而不是猜测或添加 `CASCADE`。artifact 另有 NOT NULL/UNIQUE/FK/drop 等只读 preflight surface。PostgreSQL migration preview 以 `ROLLBACK` 结束，MySQL 明示 DDL auto-commit。AI action 通过 `tabId + schemaDiffId + schemaChangeId` 定位精确 change。完整边界见 [ADR-0005](decisions/0005-schema-snapshot-diff.md) 与 [ADR-0006](decisions/0006-migration-dependency-preflight.md)。
+`compare_schema_snapshots` 把 source 定义为 desired、fresh live target 定义为 actual，并在 Rust 纯领域层生成稳定 change、风险、可逆性、warning 和 dialect SQL。支持对象通过 dependency graph 拓扑排序并携带 phase/order/dependsOn；外键脱离 `CREATE TABLE`，changed index/constraint 拆为 drop/recreate。无法完整重建、依赖被阻断或出现 cycle 时清除 runnable SQL，而不是猜测或添加 `CASCADE`。artifact 另有 NOT NULL/UNIQUE/FK/drop 等只读 preflight surface。PostgreSQL migration preview 以 `ROLLBACK` 结束，MySQL 明示 DDL auto-commit。AI action 通过 `tabId + schemaDiffId + schemaChangeId` 定位精确 change。
+
+PostgreSQL 的显式 Apply 不接收前端 SQL：Rust 校验 snapshot 内容与 fingerprint、approved plan id、typed schema 和分级批准，再重新抓取 live target 并重算计划。机器可判定的 preflight 失败会阻断；通过后复用 driver 的 database-scoped 原子 batch，失败自动回滚。提交后再次抓取并 diff，区分 succeeded 与 committed-but-verification-failed；执行前生成的 reverse plan 只有在全量可逆且无 blocked change 时才作为 ROLLBACK-guarded artifact 发布。运行中、阻断、失败、复验失败和成功状态写入项目/连接级 MetaStore journal，结果不保存业务行值。MySQL 自动 Apply 因 DDL auto-commit 继续由后端拒绝。完整边界见 [ADR-0005](decisions/0005-schema-snapshot-diff.md)、[ADR-0006](decisions/0006-migration-dependency-preflight.md) 与 [ADR-0013](decisions/0013-schema-migration-execution.md)。
+
+Schema Diagram 复用同一完整 snapshot，不从可变 Explorer tree 重建结构。前端领域层把 in-schema FK 规范化为保留复合列映射的 edge，以 parent → child 做确定性分层布局；cycle 不会导致节点丢失。每个 connection/database/schema 复用一个 artifact tab，刷新 snapshot 时只保留仍存在的选中 relation。搜索、keys-only、列数上限、zoom/Fit 是视图投影；跨 schema/快照外 FK 只计入 external 数量，不伪造目标节点。双击 relation 通过稳定身份联动 Explorer。边界见 [ADR-0014](decisions/0014-schema-diagram-artifact.md)。
 
 ### 5.6 AI 工具链
 
@@ -247,13 +264,15 @@ Schema baseline 不读取可变的 Explorer 展示树，而是调用 Rust `captu
 
 Rust `AgentHostManager` 在 setup 时不启动进程，首次已配置 AI 请求才懒启动 sidecar。双方先通过 protocol/version/capability handshake，再使用 4 MiB 上限的 `Content-Length` JSON-RPC。request/thread/turn/context/deadline 贯穿 model、tool、checkpoint 和 artifact 回调；sidecar 缺失或崩溃只让 Assistant unavailable，不影响工作台首屏。
 
-`agent-contract` 把前端工具 manifest、provider capability、workspace identity 和 typed `AgentEvent` 固化为 Zod schema。Chat 不获得数据库或 subagent 工具；Plan 只接收只读工具；Agent 接收 Rust 过滤后的 manifest。同步 schema/query/verification subagent 默认只读且无文件系统。sidecar 禁用 FilesystemBackend、LocalShellBackend、shell 与通用子代理。
+`agent-contract` 把前端工具 manifest、provider capability、workspace identity、trusted database/schema/object/plan citation 和 typed `AgentEvent` 固化为 Zod schema。Chat 不获得数据库或 subagent 工具；Plan 只接收只读工具；Agent 只接收 Rust `installedTools` 与前端 registry 的交集。Rust host 的单一枚举同时生成 installed catalog、dispatch 和权限要求，防止界面广告不存在的工具或把 write 降级伪装为 read。同步 schema/query/verification subagent 默认只读且无文件系统；coordinator 可使用 `project.listFiles`、`project.readFile` 与需批准的 `project.writeFile`。sidecar 禁用 FilesystemBackend、LocalShellBackend、shell 与通用子代理。
 
-模型 API key 存在 OxideStudio 用户配置目录的独立 credential file；文件名仅含 normalized endpoint 的 hash，不进入项目、Zustand/localStorage、checkpoint 或 sidecar。Unix 使用 `0700` 目录与 `0600` 文件，Windows 继承当前用户 profile ACL；设置页保存后重新打开文件验证，测试请求与 Agent `ModelGateway` 只走同一文件路径。Rust 完成 OpenAI-compatible complete/SSE streaming、取消、deadline、usage 与 tool call 归一化。工具实际执行也回到 Rust；Rust重新校验 project/connection/config revision/context、canonical input digest、SQL risk 和一次性 approval lease。大结果成为有界 observation 与项目级 artifact reference，不能以 raw rows 穿过 IPC。Agent checkpoint 的 AES-GCM 主密钥仍独立保存在 OS credential manager。
+模型 API key 存在 OxideStudio 用户配置目录的独立 credential file；文件名仅含 normalized endpoint 的 hash，不进入项目、Zustand/localStorage、checkpoint 或 sidecar。Unix 使用 `0700` 目录与 `0600` 文件，Windows 继承当前用户 profile ACL；设置页保存后重新打开文件验证，测试请求与 Agent `ModelGateway` 只走同一文件路径。Rust 完成 OpenAI-compatible complete/SSE streaming、取消、deadline、usage 与 tool call 归一化。工具实际执行也回到 Rust；Rust 重新校验 project/connection/config revision/context、canonical input digest、SQL risk 和一次性 approval lease。大结果成为有界 observation 与项目级 artifact reference，不能以 raw rows 穿过 IPC。Agent checkpoint 的 AES-GCM 主密钥使用另一份用户私有 credential file，与 provider secret 分离。
 
-上下文层使用真实 provider token profile、长问题切块/digest 和 Deep Agents summarization/offload。内部 summarization stream 不显示成最终回答；持久 `OxideCheckpointSaver` 通过 Rust RPC 保存 LangGraph checkpoint/pending writes，后续 Turn 只追加新 prompt，不重复注入全量历史。`ask_user` 与 approval 使用 LangGraph `interrupt()`，回答通过 `Command({ resume })` 恢复；sidecar 重启后可从加密 graph checkpoint 继续。approval lease 只存在 Rust/当前 sidecar 内存和单次 RPC 中，绝不写入 checkpoint；丢失 lease 时 mutation fail-closed。数据库 mutation receipt/exactly-once 与完整应用进程崩溃后的恢复 UX 仍不作完成承诺，任何不确定 mutation 都不得自动重放。
+上下文层使用真实 provider token profile、长问题切块/digest 和 Deep Agents summarization/offload。内部 summarization stream 不显示成最终回答；持久 `OxideCheckpointSaver` 通过 Rust RPC 保存 LangGraph checkpoint/pending writes，后续 Turn 只追加新 prompt，不重复注入全量历史。`ask_user` 与 approval 使用 LangGraph `interrupt()`，回答通过 `Command({ resume })` 恢复；sidecar 重启后可从加密 graph checkpoint 继续。应用进程重启时，项目级对话快照恢复最后 100 个 Turn 与最多 8 个 resumable request，之前活动的 Turn 一律变为 paused，只有用户显式 Resume 才会从 checkpoint 继续；provider API key 不进入快照。approval lease 只存在 Rust/当前 sidecar 内存和单次 RPC 中，绝不写入 checkpoint；丢失 lease 时 mutation fail-closed。数据库 mutation receipt/exactly-once 仍不作完成承诺，任何不确定 mutation 都不得自动重放。
 
-Assistant view model 固定为“问题 → 紧凑过程 → 最终答案”。tool/todo/subagent 合并到当前 Turn 的默认折叠单行 disclosure，只有 coordinator final answer 是普通 Assistant 正文。宽面板且真实溢出时，minimap 每个完整问答只生成一个灰色 marker；过程不产生独立历史记录。页面联动继续由 `src/ai/ui-actions` 提供 stable target 和 stale-context 校验。
+Assistant view model 固定为“问题 → 紧凑过程 → 最终答案”。tool/todo/subagent 合并到当前 Turn 的默认折叠单行 disclosure，只有 coordinator final answer 是普通 Assistant 正文。metadata list/describe、`query.explain` 与 `workspace.getActiveTab` 中用户已打开的规范计划摘要会附带 Host 生成的稳定 citation id；聚合列表产生 database/schema 级证据，对象明细产生 object 级证据，active analyzed plan 可产生实际计划节点证据。模型只能用 `[[cite:id]]` 标记依赖该证据的事实句，Host 删除未知 id、把有效标记替换为编号，并在 `final.answer` 中只发布实际引用的最多八条证据。Sources 证据轨可通过 stable target 跳到精确 schema、对象或计划节点。composer 自动增高并使用 Enter 发送/Shift+Enter 换行；文本附件只能经 Rust 原生对话框导入，限制扩展名、UTF-8、64 KiB 单文件、4 个文件/128 KiB 总量。回答以安全 React Markdown 子集展示，提供代码块/全文复制、prompt 编辑/重用/重试、停止和滚动回最新。查询错误卡把不含 SQL 的 vendor diagnostic fix prompt 放入一次性 composer queue；若已有用户草稿则显示 Use/Dismiss 而不覆盖。Assistant fenced `sql/postgres/mysql` 代码块的 Preview in editor 是用户动作，点击后才对当前可写 SQL tab 建立优先覆盖失败语句、其次选区、最后全文且受 50,000 字符上限和 document revision 保护的 Patch Preview，既不应用也不执行。Preview 的 Validate 对虚拟修改后全文调用 Rust `sqlparser` 做 PostgreSQL/MySQL 方言解析，只返回有界结构化诊断，不打开连接；Apply 后由 LSP 继续重检。只要完整虚拟修改后文档是单条只读查询，用户就可显式触发 Plans：服务比较当前完整文档与完整虚拟文档，而不是错误地解释局部 replacement；前后两次请求固定为 `EXPLAIN estimate`，面板比较 planner cost、estimated rows 和节点数，并最多展示三条结构变化与三条确定性 estimate signal。Actual 使用另一条内联二次确认路径，确认后才对完整虚拟文档执行一次 `EXPLAIN ANALYZE`；后端继续强制单条只读 SQL、只读事务和取消，面板显示 actual time/rows/loops、最多三个最慢节点与估算偏差信号，并提示缓存/负载会影响结果。关闭预览或文档 stale 会取消活动请求。宽面板且真实溢出时，minimap 每个完整问答只生成一个 marker；过程不产生独立历史记录。页面联动继续由 `src/ai/ui-actions` 提供 stable target 和 stale-context 校验，Assistant 顶部 Changes 面板提供 Agent 文件变化的只读审阅和 Turn 级路径筛选；unified diff 的新增/上下文行号可打开当前文件并精确 reveal，删除行不映射到不存在的 current-side 坐标。revision 完全匹配时，可信新侧行证据会为对应新增行加左侧标记，并在 hunk header 汇总 `AI n`。应用重启后 Resume 会重置 WebView 的 event sequence cursor，再接受新 Host 从 1 开始的事件序列，避免把恢复后的早期增量误判为重复事件。
+
+Changes 的逐文件审阅可切换 All、Staged、Working；不可用范围明确禁用，切换时先清空旧 patch 以免范围标签与内容短暂错配。该面板保持只读，不执行 Git mutation。
 
 外部 MCP/CLI 不经过 Deep Agents sidecar。Rust 原生 `oxide-agent mcp stdio` 与 tools list/inspect/call 首版只读，严格限定 MCP 2025-11-25、project grant、可选 connection grant 和结果上限，并作为 target-specific `externalBin` 随包发布。现存 TypeScript adapter 仅保留为迁移/契约资产；两条路径都不允许调用者通过 `_meta.approved`、`approved:true` 或 `--approve` 自我授权。
 
@@ -275,7 +294,7 @@ Assistant view model 固定为“问题 → 紧凑过程 → 最终答案”。t
 3. `tauri::generate_handler!` 是手工总表，新增命令容易漏注册，应增加命令契约测试或代码生成。
 4. Search Everywhere 目前只索引内存中已知范围，还没有覆盖 MetaStore 的全项目对象索引。
 5. provider capability 同时存在前端默认值和后端运行时值，需要持续用契约测试防止漂移。
-6. Deep Agents host、协议、模型/tool proxy、加密 LangGraph checkpoint/pending writes 与 sidecar-restart interrupt resume 已落地；剩余债务是数据库级 idempotency/receipt、完整应用进程恢复 UX、完整 provider tool bridge、Context Vault range/search、长期 trace/eval 与四平台 production-bundle smoke。页面 action 已有 stale-context 防护，生产旧 runtime 只保留开发 feature flag。
+6. Deep Agents host、协议、模型/tool proxy、加密 LangGraph checkpoint/pending writes、conversation snapshot 与 sidecar/app restart 显式 resume 已落地；剩余债务是数据库级 idempotency/receipt、普通后台任务恢复、完整 provider tool bridge、Context Vault range/search、长期 trace/eval 与四平台 production-bundle smoke。页面 action 已有 stale-context 防护，生产旧 runtime 只保留开发 feature flag。
 7. Rust 原生 `oxide-agent` 的只读 stdio/CLI 首版已接入 Cargo 和发布矩阵；后续若开放 mutation，必须先加入 GUI 签发的 60 秒单次 input-hash lease，不能复用调用者自报批准。
 
 DataGrip 对标差距、优先级和验收标准见 [datagrip-gap-analysis.md](datagrip-gap-analysis.md)。

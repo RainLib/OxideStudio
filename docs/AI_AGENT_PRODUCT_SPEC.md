@@ -169,7 +169,7 @@ type AgentToolContract = {
 | DB-06 | 只读查询 | 后端重新分类 SQL；限制 row/time/bytes；多语句只要含 mutation 即拒绝 read path | R1 |
 | DB-07 | DML 生成与执行 | 明确表、WHERE、预计行数；先 preview 或 transaction；无 WHERE 默认升级风险 | R2/R3 |
 | DB-08 | DDL / destructive | 生成 migration preview、依赖影响和 rollback 可能性；drop/truncate 逐目标批准 | R4 |
-| DB-09 | Schema diff/migration | 比较版本化 snapshot，不直接拿 display tree；已生成 phase/order/dependsOn、风险/可逆/blocked migration artifact 与只读 preflight；后续补 server dry-run、post-verify、apply journal 与 rollback 包 | R1-R4 |
+| DB-09 | Schema diff/migration | 比较版本化 snapshot，不直接拿 display tree；已生成 phase/order/dependsOn、风险/可逆/blocked artifact 与机器可判定 preflight；PostgreSQL 支持指纹绑定的显式批准、原子 apply、持久 journal、post-verify 与有条件 rollback artifact，MySQL 自动 apply 因 DDL auto-commit 保持阻断 | R1-R4 |
 | DB-10 | 数据分析 | 对结果做统计/分组/异常解释，优先在 DB 聚合而不是搬运原始数据 | R1 |
 | DB-11 | 导入/导出 | 映射预览、编码/格式/错误策略、目标路径与敏感信息确认 | R2/R3 |
 | DB-12 | 运维诊断 | 查看 session、lock、slow query、容量和权限；kill/cancel session 单独批准 | R1/R3 |
@@ -249,6 +249,7 @@ type UiAction = {
 | `workspace.openTab` | 打开/激活指定 tab | 不存在时返回 `TARGET_NOT_FOUND` |
 | `workspace.focusPanel` | 聚焦 editor/explorer/results/assistant/tasks | panel 隐藏时先显示再聚焦 |
 | `database.selectConnection` | 激活数据源 | 只选择，不自动连接或发送凭据 |
+| `database.revealSchema` | 展开到精确 database/schema；schema 聚合证据不伪造对象 | 使用 connection + database + schema 稳定 identity，禁止仅按同名匹配 |
 | `database.revealObject` | 展开到 catalog/schema/object 并选中 | 精确 stable id 优先，禁止仅按同名匹配 |
 | `database.openObjectData` | 打开表/collection data tab | 使用 object 所属 connection，不使用全局旧连接 |
 | `database.openObjectDdl` | 打开对象 DDL/source tab | provider 不支持时显示 capability 原因 |
@@ -290,6 +291,7 @@ type UiAction = {
 - Rust 已建立项目级 `agent_threads`、`agent_checkpoints`、`agent_artifacts`、`agent_graph_checkpoints`、`agent_graph_writes`，使用 AES-256-GCM、独立 nonce/AAD、用户私有 credential file 主密钥和七天过期。最终答案在 checkpoint 保存后发出；不确定 mutation 不自动重放。
 - Deep Agents 使用真实 provider token profile并过滤 summarization stream；长问题可切块/digest，tool 大结果以 bounded observation + artifact reference 返回。Context Preview 的完整 token/省略来源和 100+ Turn 质量仍需加固。
 - 对话固定为“问题 → 默认收起的单行过程 → 最终答案”；tool/todo/subagent 不成为独立聊天消息。minimap 每个完整问答一个灰色 marker，只在宽面板且溢出时展示，支持键盘和 reduced motion。
+- Changes 审阅以当前 Git 状态为事实源：可按全部/Agent/Turn 做路径归因筛选，并在单文件 All、Staged、Working diff 间切换；范围切换不会写入索引区或工作区，未跟踪文件 preview 只有在 Git 精确确认后才生成。路径 badge 只表示历史 Agent 写入；详情仅在 scope current-side SHA-256 与可信事件 revision 完全一致时显示 `AI match`。在此前提下，Rust 写入证据还可保守标出“写入前全文不存在、写入后出现”的新侧行及其 hunk；未被证实的行不可暗示属于 Agent。
 - Rust 原生 `oxide-agent` 的首版限定 stdio/CLI 和只读能力，严格接受 MCP 2025-11-25，以不可扩大的 project/connection grant 运行，并作为 target-specific external binary 随包发布。Rust 与现有 TypeScript 契约层都拒绝 `_meta.approved`、`approved:true` 或 `--approve` 自我授权。
 
 ### 5.5 结构化错误基线（2026-07-15）
@@ -377,21 +379,24 @@ outside normal scope      excluded
 
 ### 7.4 后续增强与测试要求
 
-已完成 catalog identity、Rust source-aware dedupe/ranking、alias insertion 以及当前 statement、CTE、DML 和 active object 回归。后续增强保留：
+已完成 catalog identity、Rust source-aware dedupe/ranking、alias insertion、当前 statement/CTE/DML/active object、CTE/派生表输出列、当前 console 临时表生命周期和 routine overload 签名模型。继续保持以下回归：
 
-1. 将 invocation mode 显式加入 completion context，支持“再次手动触发”扩展作用域。
-2. 增加派生表、CTE 输出列推导、临时表生命周期和 routine overload 的语义模型。
-3. 继续保持以下回归：
-   - 同 schema 两表同 `id`，FROM 前不出现两个相同 label；
-   - `FROM users u JOIN orders o` 返回 `u.id/o.id`；
-   - `u.` 只返回 users 列；
-   - 当前 schema 与其他 schema 同名表不串入普通补全；
-   - 同 connection 的两个 PostgreSQL database 不串 metadata；
-   - CTE 列高于基础表同名列；
-   - DML target 列最高；
-   - 重新手动触发才展示扩展作用域。
+1. 同 schema 两表同 `id`，FROM 前不出现两个相同 label；
+2. `FROM users u JOIN orders o` 返回 `u.id/o.id`；
+3. `u.` 只返回 users 列；
+4. 当前 schema 与其他 schema 同名表不串入普通补全；
+5. 同 connection 的两个 PostgreSQL database 不串 metadata；
+6. CTE/派生表列可经 alias 补全且高于无关基础表列；
+7. 临时表只在当前 console 的创建到 drop 区间可见；
+8. DML target 列最高；
+9. routine overload 同时进入 signature help，只有重载参数名一致时才显示 inlay hint。
 
-P0 正确性问题已经关闭；上述高级 SQL 语义增强转入 P1。
+保留的边界：
+
+1. 普通补全继续严格限制当前 catalog/schema；跨 catalog 的“再次手动触发扩展作用域”在 schema 协议拥有无歧义 catalog display identity 前不启用，避免把便利功能变成 metadata 串库。
+2. 未打开项目文件不由 LSP 进程直接读取；跨文件 usage index 由未来的项目索引层提供。
+
+P0 正确性和本轮高级编辑协议已关闭；剩余项属于项目级持久索引或完整 DataGrip inspection 规则库，不是当前 LSP 进程声明但未实现的 handler。
 
 ## 8. 相对 DataGrip 的 AI 差距
 
@@ -399,18 +404,18 @@ DataGrip 当前 AI 基线包含 schema-aware chat、自然语言生成 SQL、SQL
 
 | 能力 | DataGrip 基线 | OxideStudio 当前 | 结论 |
 | --- | --- | --- | --- |
-| Schema-aware AI | 对象可附加、可导航 | 已有带 provenance 的对象/文件/结果/diagnostic/patch attachment 与 stable navigation；metadata citation 仍缺 | P1 补 citation |
-| Text-to-SQL | 成熟编辑器入口 | 已有模型 planner/inline 基础与 revision-bound patch preview/Apply | P0 补 metadata grounding、parse/LSP/EXPLAIN 验证 |
-| Error fix | 执行错误可 Explain/Fix | LSP diagnostic 可精确跳转且已有通用 patch preview；vendor error 的 SQLSTATE/position/object 统一与自动生成修复仍缺 | P0 |
-| Query optimization | 可基于查询与计划解释优化 | 已有真实 estimate plan 工具与 artifact，缺热点规则、建议引用、前后 plan 对比和自动验证 | P1 完成优化闭环 |
-| Plan explanation | 支持 query plan AI explanation | 规范化 plan tree/raw artifact 和精确节点联动已完成；模型解释质量评测与索引/schema citation 尚缺 | P1 |
+| Schema-aware AI | 对象可附加、可导航 | metadata list/describe 的真实 observation 会生成不可伪造的 database/schema/object citation id；只有最终回答显式引用的 id 才进入 Sources，并可跳到精确 schema 或对象 | P1 补质量评测 |
+| Text-to-SQL | 成熟编辑器入口 | 已有模型 planner/inline、revision-bound Patch Preview/Apply、离线 dialect parse、Apply 后 LSP、显式前后 estimate plan 对比和对象 metadata citation | P1 补统计信息 grounding |
+| Error fix | 执行错误可 Explain/Fix | LSP 与 vendor diagnostic 均可精确定位；PostgreSQL/MySQL 的 SQLSTATE/code/object/position 已结构化，修复只进入 revision-bound review/validate/apply，不会自动执行 | 已完成 review-only 主路径 |
+| Query optimization | 可基于查询与计划解释优化 | 已有完整虚拟 SQL 的 estimate 前后对比；用户可经二次确认对提议 SQL 执行一次只读 `EXPLAIN ANALYZE`，查看 actual time/rows/loops、最慢节点与行数估算偏差；仍不把单次测量宣称为稳定提升 | P1 补长期 workload statistics、自动优化与解释质量评测 |
+| Plan explanation | 支持 query plan AI explanation | 规范化 plan tree/raw artifact、精确节点联动和 trusted citation 已完成；active tab 中用户已打开的 analyzed plan 以排除 SQL/raw/condition 的有界摘要进入 AI，模型必须使用 observation 提供的 citation id，未知 id 会被 Host 剔除 | P1 补黄金任务评测 |
 | 页面交互 | attachment 可回到对象/代码/任务 | `UiActionRegistry` 已支持稳定对象、文件、tab、结果、diagnostic、plan、schema diff change、patch preview 和 durable task summary | 继续覆盖新增 artifact |
 | 长任务代理 | 以 IDE AI 工作流为主 | 独立 Deep Agents host、加密 LangGraph checkpoint/writes、跨 sidecar interrupt resume、同步只读 subagent、澄清/批准和 cancel 已落地；完整应用进程恢复、长期评测与数据库 idempotency 仍需加固 | P0/P1 硬化 |
 | 多数据模型 | 重点是 SQL/database IDE | 已覆盖 Mongo/Redis/ES 的结构化工具方向 | Oxide 的差异化优势 |
 | 外部生态 | JetBrains 生态 | Rust `oxide-agent` 首版只读 stdio/CLI 已接入；调用者自批准已删除，project/connection grant 后端强制执行 | 持续发布 smoke；写能力后置 |
 | 数据隐私 | 默认不把原始数据库数据提供给 AI | provider secret 与 Agent Store 主密钥分别使用应用用户级 credential file；thread/checkpoint/artifact 项目级 AES-GCM 保存七天；运行时不访问系统 Keychain；仍缺 attachment 敏感分级、字段级 masking 和企业 policy | 基础治理已完成；细粒度治理 P1 |
 
-AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV Import Mapping、双向复合外键 row navigation、precision-safe Aggregate View，以及 schema diff 的 snapshot + dependency-ordered review/preflight 已完成；migration apply/verify、diagram、data compare、semantic refactor/find usages、native streaming import、session/lock 等仍需按 [DataGrip 能力差距](datagrip-gap-analysis.md) 路线推进。
+AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV Import Mapping、双向复合外键 row navigation、precision-safe Aggregate View、snapshot-based ER diagram、loaded-result Data Compare，以及 schema diff 的 snapshot + dependency-ordered review/preflight 和 PostgreSQL 安全 apply/verify 已完成；MySQL 原子 migration、diagram 的持久布局/导出、服务端全量 compare/sync、semantic refactor/find usages、native streaming import、session/lock 等仍需按 [DataGrip 能力差距](datagrip-gap-analysis.md) 路线推进。
 
 ## 9. 分阶段路线图
 
@@ -418,8 +423,8 @@ AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV
 
 1. `UiActionRegistry`、稳定 target identity、可点击 attachment。
 2. 发送内容预览、database catalog identity、可持久验证的 context snapshot/version 与旧批准失效已完成。
-3. LSP duplicate/ranking、跨 database catalog 隔离、随包 binary 与回归测试已完成；继续扩展派生表、临时表和 routine overload 语义。
-4. revision-bound Patch Preview/Apply 已完成；继续统一 vendor error 的 SQLSTATE/position/object，并把 Jump/Explain/Preview Fix/Validate 串为诊断闭环。
+3. LSP duplicate/ranking、跨 database catalog 隔离、CTE/派生表/当前 console 临时表语义、routine overload、随包 binary 与回归测试已完成；未打开文件的 usage index 由项目级索引层承接。
+4. revision-bound Patch Preview/Apply、vendor SQLSTATE/position/object、Jump/Preview Fix/离线 Validate、完整虚拟 SQL 的 estimate plan compare 与显式 Actual review 已串为诊断闭环；Actual 需内联二次确认，后端强制单条只读 SQL/只读事务，并显示 actual time/rows/loops、最慢节点和估算偏差。database/schema/object 与用户已打开的 analyzed plan citation 已进入 Host 协议和 Sources UI，可回到精确 schema、对象或计划节点；后续补长期 workload statistics、自动优化和解释质量评测。
 5. sidecar 事件已成为 Turn view model 的来源，Sidebar 不再拥有 tool loop；Context Preview 已显示完整可见 payload 的 token 估算、模型预算占比、逐来源省略原因/数量和长 prompt 预压缩提示；provider 实际 token 与 compaction/offload 统计使用项目级加密摘要跨重启恢复；大 observation 支持模型侧有界 artifact search/range read，并在最终回答中提供按需预览、搜索定位和 Rust 原生保存对话框控制的 JSON 导出。
 
 完成定义：AI 回答中的对象/错误/结果可以准确跳转；旧上下文和旧批准不能作用于新项目/数据库；重复列补全不再不可区分。
@@ -436,7 +441,7 @@ AI 不能掩盖数据库 IDE 主能力差距。Value Editor、Explain Plan、CSV
 
 ### Phase C：专业数据库 AI（P1）
 
-1. 在已有 Explain Plan artifact/节点导航上增加热点规则、AI explanation、索引/schema citation 和优化前后验证。
+1. 在已有 Explain Plan artifact/节点导航、完整虚拟 SQL 的 estimate 对比、用户确认的 Actual review、active analyzed-plan grounding 和 trusted database/schema/object/plan citation 上增加长期 workload statistics、自动优化与 AI explanation 黄金任务评测。
 2. 在已有 schema snapshot/diff、支持对象 dependency DAG 与 preflight 上增加完整 source/dependency capture、schema mapping、server dry-run、post-verify、apply journal 与 rollback 包。
 3. result analysis、data compare、导入映射和报告 artifact。
 4. session/lock/slow-query 诊断工具。

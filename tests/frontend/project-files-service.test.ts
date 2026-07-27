@@ -229,6 +229,51 @@ describe("project files service", () => {
     );
   });
 
+  it("binds Git status and diff requests to the configured project root", async () => {
+    mocks.invoke
+      .mockResolvedValueOnce({
+        isRepository: true,
+        branch: "feature/agent",
+        head: "abc1234",
+        files: [],
+        truncated: false,
+      })
+      .mockResolvedValueOnce({
+        relativePath: "queries/report.sql",
+        patch: "@@ -1 +1 @@\n-old\n+new",
+        additions: 1,
+        deletions: 1,
+        binary: false,
+        truncated: false,
+        currentSideRevision: "a".repeat(64),
+        currentSideRevisionStatus: "available",
+      });
+
+    await projectFilesService.getGitChanges("project-1", "C:\\workspace");
+    await projectFilesService.getGitFileDiff(
+      "project-1",
+      "queries\\report.sql",
+      "C:\\workspace",
+      "staged",
+    );
+
+    expect(mocks.invoke.mock.calls).toEqual([
+      [
+        "get_project_git_changes",
+        { projectId: "project-1", expectedRoot: "C:\\workspace" },
+      ],
+      [
+        "get_project_git_file_diff",
+        {
+          projectId: "project-1",
+          relativePath: "queries/report.sql",
+          scope: "staged",
+          expectedRoot: "C:\\workspace",
+        },
+      ],
+    ]);
+  });
+
   it("turns revision conflict rejections into a typed error", async () => {
     mocks.invoke.mockRejectedValueOnce({
       code: "REVISION_CONFLICT",

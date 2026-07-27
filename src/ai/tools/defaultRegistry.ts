@@ -1,5 +1,6 @@
 import {
   databaseService,
+  projectFilesService,
   queryService,
   schemaService,
   tableService,
@@ -10,13 +11,18 @@ import {
   getLspDocumentUri,
 } from "@/services/lsp";
 import type { Diagnostic } from "@/services/lsp/types";
-import type { DatabaseDriver, QueryResult } from "@/services/tauri/types";
+import type {
+  DatabaseDriver,
+  ExplainPlan,
+  QueryResult,
+} from "@/services/tauri/types";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
 import {
   isManagedConnection,
   useConnectionStore,
 } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
+import { useProjectStore } from "@/store/useProjectStore";
 import {
   querySchemaContextForTab,
   useTabStore,
@@ -116,6 +122,42 @@ export function createWorkspaceAiToolContext(
 
 export function createWorkspaceAiToolAdapters(): AiToolAdapters {
   return {
+    listProjectFiles: async (input) => {
+      const project = activeLocalProject();
+      return projectFilesService.listProjectEntries(
+        project.id,
+        input.directory || "",
+        project.root_path,
+      );
+    },
+
+    readProjectFile: async (input) => {
+      const project = activeLocalProject();
+      return projectFilesService.readProjectFile(
+        project.id,
+        input.path,
+        project.root_path,
+      );
+    },
+
+    writeProjectFile: async (input) => {
+      const project = activeLocalProject();
+      return input.create
+        ? projectFilesService.createProjectFile(
+            project.id,
+            input.path,
+            input.content,
+            project.root_path,
+          )
+        : projectFilesService.writeProjectFile(
+            project.id,
+            input.path,
+            input.content,
+            input.expectedRevision || "",
+            project.root_path,
+          );
+    },
+
     listConnections: () =>
       useConnectionStore
         .getState()
@@ -221,6 +263,17 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
   };
 }
 
+function activeLocalProject() {
+  const state = useProjectStore.getState();
+  const project = state.projects.find(
+    (candidate) => candidate.id === state.activeProjectId,
+  );
+  if (!project?.root_path || project.origin === "managed") {
+    throw new Error("The active project does not have a writable local root");
+  }
+  return project;
+}
+
 const MAX_EDITOR_PATCH_TEXT = 50_000;
 
 function proposeEditorPatch(input: AiEditorPatchInput): AiEditorPatchArtifact {
@@ -306,6 +359,8 @@ function workspaceTabSummaryFromTab(tab: {
   fileRelativePath?: string | null;
   results?: unknown[] | null;
   activeResultIndex?: number;
+  queryError?: import("@/lib/queryErrorPresentation").QueryExecutionErrorDetail | null;
+  explainPlan?: ExplainPlan | null;
   schemaDiffPlan?: {
     id: string;
     summary: {
@@ -351,6 +406,10 @@ function workspaceTabSummaryFromTab(tab: {
     fileRelativePath: tab.fileRelativePath ?? null,
     resultSetCount: tab.results?.length ?? 0,
     activeResultIndex: tab.activeResultIndex ?? 0,
+    queryError: tab.queryError ?? null,
+    explainPlan: tab.explainPlan
+      ? boundedAiExplainPlanSummary(tab.explainPlan)
+      : null,
     schemaDiffId: tab.schemaDiffPlan?.id ?? null,
     schemaDiffSummary: tab.schemaDiffPlan?.summary ?? null,
     schemaPreflightCheckCount: tab.schemaDiffPlan?.preflightChecks.length ?? 0,
@@ -360,6 +419,71 @@ function workspaceTabSummaryFromTab(tab: {
       ) ?? null,
     selection: workspaceSelectionFromTab(tab),
   };
+}
+
+const MAX_AI_EXPLAIN_NODES = 100;
+const MAX_AI_EXPLAIN_WARNINGS = 3;
+
+function boundedAiExplainPlanSummary(
+  plan: ExplainPlan,
+): NonNullable<AiWorkspaceTabSummary["explainPlan"]> {
+  const nodes: NonNullable<
+    AiWorkspaceTabSummary["explainPlan"]
+  >["nodes"] = [];
+  const pending = [{ node: plan.root, parentId: null as string | null }];
+  while (pending.length > 0 && nodes.length < MAX_AI_EXPLAIN_NODES) {
+    const current = pending.shift()!;
+    nodes.push({
+      id: boundedPlanText(current.node.id, 240),
+      parentId: current.parentId,
+      nodeType: boundedPlanText(current.node.nodeType, 160),
+      relation: boundedNullablePlanText(current.node.relation, 240),
+      index: boundedNullablePlanText(current.node.index, 240),
+      totalCost: finitePlanMetric(current.node.totalCost),
+      estimatedRows: finitePlanMetric(current.node.estimatedRows),
+      actualTotalTimeMs: finitePlanMetric(current.node.actualTotalTimeMs),
+      actualRows: finitePlanMetric(current.node.actualRows),
+      loops: finitePlanMetric(current.node.loops),
+    });
+    pending.push(
+      ...current.node.children.map((node) => ({
+        node,
+        parentId: current.node.id,
+      })),
+    );
+  }
+  return {
+    id: boundedPlanText(plan.id, 240),
+    driver: plan.driver,
+    mode: plan.mode,
+    generatedInMs: finitePlanMetric(plan.generatedInMs) ?? 0,
+    planningTimeMs: finitePlanMetric(plan.planningTimeMs),
+    executionTimeMs: finitePlanMetric(plan.executionTimeMs),
+    totalCost: finitePlanMetric(plan.totalCost),
+    estimatedRows: finitePlanMetric(plan.estimatedRows),
+    rootNodeId: boundedPlanText(plan.root.id, 240),
+    nodes,
+    truncated: pending.length > 0,
+    warnings: plan.warnings
+      .slice(0, MAX_AI_EXPLAIN_WARNINGS)
+      .map((warning) => boundedPlanText(warning, 240)),
+  };
+}
+
+function boundedPlanText(value: string, maxCharacters: number) {
+  return value.trim().slice(0, maxCharacters);
+}
+
+function boundedNullablePlanText(
+  value: string | null | undefined,
+  maxCharacters: number,
+) {
+  const bounded = value ? boundedPlanText(value, maxCharacters) : "";
+  return bounded || null;
+}
+
+function finitePlanMetric(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 async function mutateTableRows(

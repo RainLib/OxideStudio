@@ -4,7 +4,12 @@ import {
   CheckCircle2,
   ChevronRight,
   CircleAlert,
+  FileText,
+  Check,
+  Copy,
   Loader2,
+  Pencil,
+  RotateCcw,
   Sparkles,
 } from "lucide-react";
 import { AssistantMessageContent } from "./AssistantMessageContent";
@@ -14,10 +19,11 @@ import type {
   UiActionResult,
 } from "@/ai/ui-actions/types";
 import { AssistantAttachmentList } from "./AssistantAttachmentList";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import type { AssistantTurn } from "@/ai/assistant/turns";
 import { AssistantTurnProcess } from "./AssistantTurnProcess";
 import { AssistantArtifactList } from "./AssistantArtifactList";
+import { AssistantCitationList } from "./AssistantCitationList";
 
 export interface AssistantConversationEntry {
   id: string;
@@ -34,7 +40,11 @@ interface AssistantConversationProps {
   isResponding: boolean;
   pendingLabel: string;
   onUsePrompt: (prompt: string) => void;
+  onPreviewSqlPatch?: (replacement: string) => void;
   onExecuteAttachment: (request: UiActionRequest) => Promise<UiActionResult>;
+  onOpenProjectFile?: (relativePath: string) => Promise<unknown>;
+  onOpenProjectFileProposal?: (turnId: string, callId: string) => void;
+  expectedProjectRoot?: string | null;
   renderProcess?: (entry: AssistantConversationEntry) => ReactNode;
   contextFingerprint?: string;
   onDecideApproval?: (
@@ -61,7 +71,11 @@ export function AssistantConversation({
   isResponding,
   pendingLabel,
   onUsePrompt,
+  onPreviewSqlPatch,
   onExecuteAttachment,
+  onOpenProjectFile,
+  onOpenProjectFileProposal,
+  expectedProjectRoot,
   renderProcess,
   contextFingerprint = "",
   onDecideApproval = async () => undefined,
@@ -72,7 +86,11 @@ export function AssistantConversation({
       <TurnConversation
         turns={turns}
         onUsePrompt={onUsePrompt}
+        onPreviewSqlPatch={onPreviewSqlPatch}
         onExecuteAttachment={onExecuteAttachment}
+        onOpenProjectFile={onOpenProjectFile}
+        onOpenProjectFileProposal={onOpenProjectFileProposal}
+        expectedProjectRoot={expectedProjectRoot}
         contextFingerprint={contextFingerprint}
         onDecideApproval={onDecideApproval}
         onResumeTurn={onResumeTurn}
@@ -138,7 +156,10 @@ export function AssistantConversation({
             )}
             {entry.role === "assistant" ? (
               <div className="min-w-0 flex-1">
-                <AssistantMessageContent content={entry.content} />
+                <AssistantMessageContent
+                  content={entry.content}
+                  onPreviewSqlPatch={onPreviewSqlPatch}
+                />
                 <AssistantAttachmentList
                   attachments={entry.attachments || []}
                   onExecute={onExecuteAttachment}
@@ -169,20 +190,42 @@ export function AssistantConversation({
 function TurnConversation({
   turns,
   onUsePrompt,
+  onPreviewSqlPatch,
   onExecuteAttachment,
+  onOpenProjectFile,
+  onOpenProjectFileProposal,
+  expectedProjectRoot,
   contextFingerprint,
   onDecideApproval,
   onResumeTurn,
 }: {
   turns: AssistantTurn[];
   onUsePrompt: (prompt: string) => void;
+  onPreviewSqlPatch?: (replacement: string) => void;
   onExecuteAttachment: (request: UiActionRequest) => Promise<UiActionResult>;
+  onOpenProjectFile?: (relativePath: string) => Promise<unknown>;
+  onOpenProjectFileProposal?: (turnId: string, callId: string) => void;
+  expectedProjectRoot?: string | null;
   contextFingerprint: string;
   onDecideApproval: NonNullable<
     AssistantConversationProps["onDecideApproval"]
   >;
   onResumeTurn: NonNullable<AssistantConversationProps["onResumeTurn"]>;
 }) {
+  const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null);
+
+  const copyAnswer = async (turn: AssistantTurn) => {
+    const content = turn.final?.content || turn.draft;
+    if (!content.trim()) return;
+    await navigator.clipboard.writeText(content);
+    setCopiedTurnId(turn.id);
+    window.setTimeout(
+      () =>
+        setCopiedTurnId((current) => (current === turn.id ? null : current)),
+      1_500,
+    );
+  };
+
   if (turns.length === 0) {
     return <AssistantWelcome onUsePrompt={onUsePrompt} />;
   }
@@ -197,10 +240,38 @@ function TurnConversation({
           data-assistant-entry-id={turn.id}
           data-assistant-entry-kind="turn"
         >
-          <div className="ml-auto max-w-[88%] rounded-[8px] bg-[hsl(var(--wb-active)/0.72)] px-2.5 py-2 text-[11px] leading-[1.6] text-[hsl(var(--wb-text))]">
-            <span className="sr-only">You</span>
-            <div className="min-w-0 whitespace-pre-wrap break-words">
-              {turn.userMessage}
+          <div className="group/user ml-auto max-w-[88%]">
+            <div className="rounded-[8px] bg-[hsl(var(--wb-active)/0.72)] px-2.5 py-2 text-[11px] leading-[1.6] text-[hsl(var(--wb-text))]">
+              <span className="sr-only">You</span>
+              <div className="min-w-0 whitespace-pre-wrap break-words">
+                {turn.userMessage}
+              </div>
+              {turn.userAttachments && turn.userAttachments.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1" aria-label="Attached files">
+                  {turn.userAttachments.map((attachment) => (
+                    <span
+                      key={attachment.id}
+                      className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised)/0.72)] px-1.5 py-0.5 text-[9px] text-[hsl(var(--wb-text-muted))]"
+                      title={`${attachment.fileName} · ${attachment.byteCount.toLocaleString()} bytes`}
+                    >
+                      <FileText size={9} className="shrink-0" aria-hidden="true" />
+                      <span className="truncate">{attachment.fileName}</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="mt-1 flex justify-end opacity-0 transition-opacity group-hover/user:opacity-100 group-focus-within/user:opacity-100">
+              <button
+                type="button"
+                className="wb-icon-button h-6 w-6"
+                onClick={() => onUsePrompt(turn.userMessage)}
+                disabled={turn.status === "planning" || turn.status === "running"}
+                title="Edit this prompt in the composer"
+                aria-label="Edit prompt"
+              >
+                <Pencil size={10} aria-hidden="true" />
+              </button>
             </div>
           </div>
 
@@ -209,12 +280,19 @@ function TurnConversation({
             contextFingerprint={contextFingerprint}
             onDecideApproval={onDecideApproval}
             onResume={onResumeTurn}
+            expectedProjectRoot={expectedProjectRoot}
+            onOpenProjectFile={onOpenProjectFile}
+            onOpenProjectFileProposal={onOpenProjectFileProposal}
           />
 
-          {(turn.final?.content ||
-            turn.draft ||
-            (turn.final?.artifactRefs?.length ?? 0) > 0) && (
-            <div className="flex max-w-full items-start gap-2 text-[11px] leading-[1.6] text-[hsl(var(--wb-text))]">
+          {turn.status === "completed" &&
+            (turn.final?.content ||
+              turn.draft ||
+              (turn.final?.artifactRefs?.length ?? 0) > 0) && (
+            <div
+              className="flex max-w-full items-start gap-2 text-[11px] leading-[1.6] text-[hsl(var(--wb-text))]"
+              data-assistant-final-response
+            >
               <Sparkles
                 size={12}
                 className="mt-0.5 shrink-0 text-[hsl(var(--wb-accent))]"
@@ -222,6 +300,11 @@ function TurnConversation({
               <div className="min-w-0 flex-1">
                 <AssistantMessageContent
                   content={turn.final?.content || turn.draft}
+                  onPreviewSqlPatch={onPreviewSqlPatch}
+                  trustedProjectFilePaths={(turn.fileChanges ?? []).map(
+                    (change) => change.relativePath,
+                  )}
+                  onOpenProjectFile={onOpenProjectFile}
                 />
                 {turn.final && (
                   <>
@@ -229,11 +312,41 @@ function TurnConversation({
                       attachments={turn.final.attachments}
                       onExecute={onExecuteAttachment}
                     />
+                    <AssistantCitationList
+                      citations={turn.final.citations ?? []}
+                      onExecute={onExecuteAttachment}
+                    />
                     <AssistantArtifactList
                       projectId={turn.projectId}
                       artifactRefs={turn.final.artifactRefs ?? []}
                     />
                   </>
+                )}
+                {turn.final?.content && (
+                  <div className="mt-1.5 flex items-center gap-0.5 text-[hsl(var(--wb-text-muted))]">
+                    <button
+                      type="button"
+                      className="wb-icon-button h-6 w-6"
+                      onClick={() => void copyAnswer(turn)}
+                      title="Copy response"
+                      aria-label="Copy response"
+                    >
+                      {copiedTurnId === turn.id ? (
+                        <Check size={10} aria-hidden="true" />
+                      ) : (
+                        <Copy size={10} aria-hidden="true" />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      className="wb-icon-button h-6 w-6"
+                      onClick={() => onUsePrompt(turn.userMessage)}
+                      title="Use this prompt again"
+                      aria-label="Use prompt again"
+                    >
+                      <RotateCcw size={10} aria-hidden="true" />
+                    </button>
+                  </div>
                 )}
               </div>
             </div>
@@ -260,6 +373,16 @@ function TurnConversation({
                 )}
               </div>
             </div>
+          )}
+          {turn.error && !turn.final?.content && turn.status !== "paused" && (
+            <button
+              type="button"
+              className="wb-text-button ml-5 h-6 gap-1 px-1.5 text-[9px]"
+              onClick={() => onUsePrompt(turn.userMessage)}
+            >
+              <RotateCcw size={10} aria-hidden="true" />
+              Try again
+            </button>
           )}
         </article>
       ))}

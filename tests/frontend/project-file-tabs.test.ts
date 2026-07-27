@@ -70,6 +70,49 @@ describe("project file tab lifecycle", () => {
     });
   });
 
+  it("keeps Agent diff review separate from the editable project file tab", () => {
+    const diffId = useTabStore.getState().openAgentFileDiffTab({
+      turnId: "turn-1",
+      callId: "write-1",
+      projectId: "project-1",
+      expectedRoot: "C:/workspace/root-a",
+      relativePath: "queries/daily.sql",
+      operation: "updated",
+      proposedRevision: "proposal-revision",
+      baseRevision: "revision-1",
+      originalContent: "SELECT 1;",
+      proposedContent: "SELECT 2;",
+      additions: 1,
+      deletions: 1,
+      status: "pending",
+      occurredAt: 1,
+    });
+    const fileId = useTabStore.getState().openProjectFileTab(
+      "project-1",
+      "queries/daily.sql",
+      "SELECT 1;",
+      "revision-1",
+      "C:/workspace/root-a",
+    );
+
+    expect(fileId).not.toBe(diffId);
+    expect(useTabStore.getState().tabs).toHaveLength(2);
+    expect(
+      useTabStore.getState().tabs.find((tab) => tab.id === diffId),
+    ).toMatchObject({
+      title: "daily.sql (Diff)",
+      agentFileDiffPreview: {
+        callId: "write-1",
+        proposedContent: "SELECT 2;",
+      },
+    });
+    const fileTab = useTabStore
+      .getState()
+      .tabs.find((tab) => tab.id === fileId);
+    expect(fileTab?.title).toBe("daily.sql");
+    expect(fileTab?.agentFileDiffPreview).toBeUndefined();
+  });
+
   it("opens image previews as reusable read-only project tabs", async () => {
     const firstId = useTabStore
       .getState()

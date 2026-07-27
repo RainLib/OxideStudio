@@ -8,7 +8,9 @@ import type {
   ForeignKeyReferenceInfo,
   FunctionInfo,
   IndexInfo,
+  ExecuteSchemaMigrationRequest,
   SchemaDiffPlan,
+  SchemaMigrationJournalEntry,
   SchemaSnapshot,
 } from "./types";
 
@@ -283,6 +285,26 @@ export async function compareSchemaSnapshots(
   });
 }
 
+export async function executeSchemaMigration(
+  request: ExecuteSchemaMigrationRequest,
+): Promise<SchemaMigrationJournalEntry> {
+  return invokeWithInterceptors<SchemaMigrationJournalEntry>(
+    "execute_schema_migration",
+    { request },
+  );
+}
+
+export async function listSchemaMigrationJournal(
+  projectId: string,
+  connectionId: string,
+  limit = 20,
+): Promise<SchemaMigrationJournalEntry[]> {
+  return invokeWithInterceptors<SchemaMigrationJournalEntry[]>(
+    "list_schema_migration_journal",
+    { projectId, connectionId, limit },
+  );
+}
+
 /**
  * 获取缓存的 schema 列表
  * @param connectionId - 连接 ID
@@ -363,6 +385,8 @@ export const schemaService = {
   setCurrentSchema,
   captureSchemaSnapshot,
   compareSchemaSnapshots,
+  executeSchemaMigration,
+  listSchemaMigrationJournal,
   getCachedSchemas,
   refreshSchemas,
   getCachedTables,

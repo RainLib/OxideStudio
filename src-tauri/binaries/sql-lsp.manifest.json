@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "sourceRevision": "f8c238784faeb7b109adf9aa2706d6a26e4315af",
+  "sourceDirty": true,
+  "sha256": "3cdb8e9adc91c90eef8606715e69f24066fcaa3ecd99f40ec7bafee2eccd1a23",
+  "platform": "darwin",
+  "architecture": "x64",
+  "profile": "release"
+}

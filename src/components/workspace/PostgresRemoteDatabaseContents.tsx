@@ -9,11 +9,13 @@ import {
   RefreshCw,
   Table,
   TableProperties,
+  Upload,
 } from "lucide-react";
 import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
@@ -22,6 +24,7 @@ import { schemaService } from "@/services/tauri";
 import type { TableInfo } from "@/services/tauri/types";
 import {
   databaseObjectNavigationKey,
+  databaseSchemaNavigationKey,
   useDatabaseNavigationStore,
 } from "@/lib/databaseNavigation";
 
@@ -41,6 +44,7 @@ interface PostgresRemoteDatabaseContentsProps {
   filterText?: string;
   onTablesLoaded?: (schema: string, tables: TableInfo[]) => void;
   onOpenSchemaSnapshots?: (database: string, schema: string) => void;
+  onImportSqlScript?: (database: string, schema: string) => void;
   onOpenTable: (
     database: string,
     schema: string,
@@ -61,6 +65,7 @@ export function PostgresRemoteDatabaseContents({
   filterText = "",
   onTablesLoaded,
   onOpenSchemaSnapshots,
+  onImportSqlScript,
   onOpenTable,
 }: PostgresRemoteDatabaseContentsProps) {
   const databaseRevealRequest = useDatabaseNavigationStore(
@@ -189,7 +194,11 @@ export function PostgresRemoteDatabaseContents({
         : new Set([...current, target.schemaName])
     );
     const loadState = schemaLoads[target.schemaName];
-    if (loadState?.status !== "loading" && loadState?.status !== "success") {
+    if (
+      target.objectName &&
+      loadState?.status !== "loading" &&
+      loadState?.status !== "success"
+    ) {
       void loadTables(target.schemaName);
     }
   }, [databaseRevealRequest?.id, schemas]);
@@ -200,14 +209,19 @@ export function PostgresRemoteDatabaseContents({
     if (
       target.connectionId !== connectionId ||
       target.databaseName !== database ||
-      schemaLoads[target.schemaName]?.status !== "success"
+      (target.objectName &&
+        schemaLoads[target.schemaName]?.status !== "success")
     ) {
       return;
     }
     window.requestAnimationFrame(() => {
-      const key = databaseObjectNavigationKey(target);
+      const key = target.objectName
+        ? databaseObjectNavigationKey({ ...target, objectName: target.objectName })
+        : databaseSchemaNavigationKey(target);
       const element = document.querySelector<HTMLElement>(
-        `[data-database-object-key="${key}"]`
+        target.objectName
+          ? `[data-database-object-key="${key}"]`
+          : `[data-database-schema-key="${key}"]`,
       );
       element?.scrollIntoView({ block: "nearest" });
       element?.focus();
@@ -274,6 +288,11 @@ export function PostgresRemoteDatabaseContents({
                   type="button"
                   aria-expanded={isExpanded}
                   aria-busy={loadState.status === "loading" || undefined}
+                  data-database-schema-key={databaseSchemaNavigationKey({
+                    connectionId,
+                    databaseName: database,
+                    schemaName: schema,
+                  })}
                   onClick={() => toggleSchema(schema)}
                   className="flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))]"
                   title={`${isExpanded ? "Collapse" : "Expand"} ${database}.${schema}`}
@@ -299,6 +318,15 @@ export function PostgresRemoteDatabaseContents({
                 >
                   <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
                   Schema Snapshots / Diff...
+                </ContextMenuItem>
+                <ContextMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
+                <ContextMenuItem
+                  className="text-[12px] focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]"
+                  disabled={!onImportSqlScript}
+                  onClick={() => onImportSqlScript?.(database, schema)}
+                >
+                  <Upload className="mr-2 h-3.5 w-3.5" />
+                  Import SQL Script...
                 </ContextMenuItem>
               </ContextMenuContent>
             </ContextMenu>
@@ -355,27 +383,49 @@ export function PostgresRemoteDatabaseContents({
                     const isView = isViewObject(table.type);
                     const ObjectIcon = isView ? TableProperties : Table;
                     return (
-                      <button
-                        type="button"
-                        key={table.name}
-                        data-database-object-key={databaseObjectNavigationKey({
-                          connectionId,
-                          databaseName: database,
-                          schemaName: schema,
-                          objectName: table.name,
-                        })}
-                        data-postgres-remote-table={`${database}.${schema}.${table.name}`}
-                        onClick={() => void onOpenTable(database, schema, table)}
-                        className={cn(
-                          "flex h-6 w-full min-w-0 cursor-pointer items-center gap-2 rounded-[3px] px-2 text-left text-[11px]",
-                          "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
-                          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))]"
-                        )}
-                        title={`Open ${database}.${schema}.${table.name} data (read-only)`}
-                      >
-                        <ObjectIcon size={12} className="shrink-0 opacity-75" />
-                        <span className="truncate">{table.name}</span>
-                      </button>
+                      <ContextMenu key={table.name}>
+                        <ContextMenuTrigger asChild>
+                          <button
+                            type="button"
+                            data-database-object-key={databaseObjectNavigationKey(
+                              {
+                                connectionId,
+                                databaseName: database,
+                                schemaName: schema,
+                                objectName: table.name,
+                              },
+                            )}
+                            data-postgres-remote-table={`${database}.${schema}.${table.name}`}
+                            onClick={() =>
+                              void onOpenTable(database, schema, table)
+                            }
+                            className={cn(
+                              "flex h-6 w-full min-w-0 cursor-pointer items-center gap-2 rounded-[3px] px-2 text-left text-[11px]",
+                              "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
+                              "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))]",
+                            )}
+                            title={`Open ${database}.${schema}.${table.name} data (read-only)`}
+                          >
+                            <ObjectIcon
+                              size={12}
+                              className="shrink-0 opacity-75"
+                            />
+                            <span className="truncate">{table.name}</span>
+                          </button>
+                        </ContextMenuTrigger>
+                        <ContextMenuContent className="w-56 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.35)]">
+                          <ContextMenuItem
+                            className="text-[12px] focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]"
+                            disabled={!onImportSqlScript}
+                            onClick={() =>
+                              onImportSqlScript?.(database, schema)
+                            }
+                          >
+                            <Upload className="mr-2 h-3.5 w-3.5" />
+                            Import SQL Script...
+                          </ContextMenuItem>
+                        </ContextMenuContent>
+                      </ContextMenu>
                     );
                   })}
               </div>

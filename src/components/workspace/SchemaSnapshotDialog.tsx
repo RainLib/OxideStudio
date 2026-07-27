@@ -5,6 +5,7 @@ import {
   Database,
   GitCompareArrows,
   Loader2,
+  Network,
   Trash2,
 } from "lucide-react";
 import {
@@ -46,6 +47,9 @@ export function SchemaSnapshotDialog({
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const openSchemaDiffTab = useTabStore((state) => state.openSchemaDiffTab);
+  const openSchemaDiagramTab = useTabStore(
+    (state) => state.openSchemaDiagramTab,
+  );
   const { startTask, finishTask, failTask } = useTaskStore();
   const selected = useMemo(
     () => snapshots.find((snapshot) => snapshot.id === selectedId) || null,
@@ -158,6 +162,12 @@ export function SchemaSnapshotDialog({
   };
 
   const busy = Boolean(operation || deletingId);
+
+  const openDiagram = () => {
+    if (!selected || busy) return;
+    openSchemaDiagramTab(selected);
+    onClose();
+  };
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !busy && onClose()}>
@@ -320,6 +330,14 @@ export function SchemaSnapshotDialog({
           <div className="flex gap-2">
             <button type="button" className="wb-text-button h-7 px-3 text-[10px]" disabled={busy} onClick={onClose}>
               Cancel
+            </button>
+            <button
+              type="button"
+              className="wb-text-button h-7 gap-1.5 px-3 text-[10px]"
+              disabled={!selected || busy}
+              onClick={openDiagram}
+            >
+              <Network size={12} /> Open diagram
             </button>
             <button
               type="button"
