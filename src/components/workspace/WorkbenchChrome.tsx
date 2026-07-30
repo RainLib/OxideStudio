@@ -8,6 +8,15 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { formatKeybinding } from "@/lib/keybindings";
+import type { WorkbenchActionId } from "@/lib/actions";
+import { useSettingsStore } from "@/store/useSettingsStore";
 import { useStartupProgress } from "@/startup/startupProgress";
 import {
   Bell,
@@ -25,7 +34,17 @@ import {
   SquareTerminal,
   type LucideIcon,
 } from "lucide-react";
-import { lazy, Suspense, useEffect, useState } from "react";
+import {
+  cloneElement,
+  lazy,
+  Suspense,
+  useEffect,
+  useState,
+  type ComponentPropsWithoutRef,
+  type FocusEvent,
+  type PointerEvent,
+  type ReactElement,
+} from "react";
 
 const TaskStatusCenter = lazy(() =>
   import("./TaskStatusCenter").then((module) => ({
@@ -89,109 +108,237 @@ export function WorkbenchTitleTools({
     }
   }, [activeProject?.origin, activeProject?.root_path, activeProjectId, ensureGitSession, refreshGit]);
   return (
-    <div className="flex h-7 items-center gap-0.5" aria-label="Tool windows">
-      <button
-        type="button"
-        className="wb-title-tool-button"
-        data-active={databaseExplorerOpen}
-        aria-pressed={databaseExplorerOpen}
-        onClick={onToggleDatabaseExplorer}
-        title={`Toggle Database Explorer (${databaseExplorerSide})`}
-      >
-        <Database size={15} />
-      </button>
-      <button
-        type="button"
-        className="wb-title-tool-button"
-        data-active={assistantOpen}
-        aria-pressed={assistantOpen}
-        onClick={onToggleAssistant}
-        title={`Toggle AI Assistant (${assistantSide})`}
-      >
-        <Sparkles size={15} />
-      </button>
-      <button
-        type="button"
-        className="wb-title-tool-button"
-        data-active={projectFilesOpen}
-        aria-pressed={projectFilesOpen}
-        onClick={onToggleFiles}
-        title={`Toggle Project Files (${projectFilesSide})`}
-      >
-        <FolderTree size={15} />
-      </button>
-      {commitPinned && (
-        <PinnedTitleTool
-          label="Commit"
-          Icon={GitCommitHorizontal}
-          open={commitOpen}
-          status={`${repository?.files.length ?? 0} changes`}
-          onToggle={onToggleCommit}
-          onUnpin={() => onSetCommitPinned(false)}
-        />
-      )}
-      {versionControlPinned && (
-        <PinnedTitleTool
-          label="Version Control"
-          Icon={GitBranch}
-          open={versionControlOpen}
-          status={repositoryStatus(repository)}
-          onToggle={onToggleVersionControl}
-          onUnpin={() => onSetVersionControlPinned(false)}
-        />
-      )}
-      {(!commitPinned || !versionControlPinned) && <Popover
-        open={moreToolsOpen}
-        onOpenChange={setMoreToolsOpen}
-      >
-        <PopoverTrigger asChild>
+    <TooltipProvider
+      delayDuration={350}
+      skipDelayDuration={120}
+      disableHoverableContent
+    >
+      <div className="flex h-7 items-center gap-0.5" aria-label="Tool windows">
+        <WorkbenchToolTooltip
+          label="Database Explorer"
+          detail={`${sideLabel(databaseExplorerSide)} tool window`}
+          actionId="workbench.toggleDatabaseExplorer"
+        >
           <button
             type="button"
             className="wb-title-tool-button"
-            data-active={
-              (commitOpen && !commitPinned) ||
-              (versionControlOpen && !versionControlPinned)
-            }
-            aria-label="More tool windows"
-            title="More tool windows"
+            data-active={databaseExplorerOpen}
+            aria-pressed={databaseExplorerOpen}
+            aria-label="Toggle Database Explorer"
+            onClick={onToggleDatabaseExplorer}
           >
-            <MoreHorizontal size={15} />
+            <Database size={15} />
           </button>
-        </PopoverTrigger>
-        <PopoverContent
-          align="center"
-          sideOffset={6}
-          className="w-[260px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[11px] shadow-[0_16px_38px_rgba(0,0,0,0.42)]"
+        </WorkbenchToolTooltip>
+        <WorkbenchToolTooltip
+          label="AI Assistant"
+          detail={`${sideLabel(assistantSide)} tool window`}
+          actionId="workbench.toggleAssistant"
         >
-          {!commitPinned && (
-            <MoreTitleTool
-              label="Commit"
-              Icon={GitCommitHorizontal}
-              open={commitOpen}
-              status={`${repository?.files.length ?? 0}`}
-              onToggle={onToggleCommit}
-              onPin={() => {
-                onSetCommitPinned(true);
-                setMoreToolsOpen(false);
-              }}
-            />
-          )}
-          {!versionControlPinned && (
-            <MoreTitleTool
-              label="Version Control"
-              Icon={GitBranch}
-              open={versionControlOpen}
-              status={repositoryStatus(repository)}
-              onToggle={onToggleVersionControl}
-              onPin={() => {
-                onSetVersionControlPinned(true);
-                setMoreToolsOpen(false);
-              }}
-            />
-          )}
-        </PopoverContent>
-      </Popover>}
-    </div>
+          <button
+            type="button"
+            className="wb-title-tool-button"
+            data-active={assistantOpen}
+            aria-pressed={assistantOpen}
+            aria-label="Toggle AI Assistant"
+            onClick={onToggleAssistant}
+          >
+            <Sparkles size={15} />
+          </button>
+        </WorkbenchToolTooltip>
+        <WorkbenchToolTooltip
+          label="Project Files"
+          detail={`${sideLabel(projectFilesSide)} tool window`}
+          actionId="workbench.openProjectFiles"
+        >
+          <button
+            type="button"
+            className="wb-title-tool-button"
+            data-active={projectFilesOpen}
+            aria-pressed={projectFilesOpen}
+            aria-label="Toggle Project Files"
+            onClick={onToggleFiles}
+          >
+            <FolderTree size={15} />
+          </button>
+        </WorkbenchToolTooltip>
+        {commitPinned && (
+          <PinnedTitleTool
+            label="Commit"
+            Icon={GitCommitHorizontal}
+            open={commitOpen}
+            status={`${repository?.files.length ?? 0} changes`}
+            shortcutActionId="workbench.toggleCommit"
+            onToggle={onToggleCommit}
+            onUnpin={() => onSetCommitPinned(false)}
+          />
+        )}
+        {versionControlPinned && (
+          <PinnedTitleTool
+            label="Version Control"
+            Icon={GitBranch}
+            open={versionControlOpen}
+            status={repositoryStatus(repository)}
+            shortcutActionId="workbench.toggleVersionControl"
+            onToggle={onToggleVersionControl}
+            onUnpin={() => onSetVersionControlPinned(false)}
+          />
+        )}
+        {(!commitPinned || !versionControlPinned) && (
+          <Popover open={moreToolsOpen} onOpenChange={setMoreToolsOpen}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    className="wb-title-tool-button"
+                    data-active={
+                      (commitOpen && !commitPinned) ||
+                      (versionControlOpen && !versionControlPinned)
+                    }
+                    aria-label="More tool windows"
+                  >
+                    <MoreHorizontal size={15} />
+                  </button>
+                </PopoverTrigger>
+              </TooltipTrigger>
+              <TooltipContent
+                side="bottom"
+                sideOffset={7}
+                className="rounded-[4px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] px-2.5 py-2 text-[11px] text-[hsl(var(--wb-text))] shadow-[0_10px_28px_rgba(0,0,0,0.34)]"
+              >
+                <div className="font-medium leading-none">More tool windows</div>
+                <div className="mt-1 text-[9px] leading-none text-[hsl(var(--wb-text-muted))]">
+                  Open or pin additional tools
+                </div>
+              </TooltipContent>
+            </Tooltip>
+            <PopoverContent
+              align="center"
+              sideOffset={6}
+              className="w-[260px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[11px] shadow-[0_16px_38px_rgba(0,0,0,0.42)]"
+            >
+              {!commitPinned && (
+                <MoreTitleTool
+                  label="Commit"
+                  Icon={GitCommitHorizontal}
+                  open={commitOpen}
+                  status={`${repository?.files.length ?? 0}`}
+                  shortcutActionId="workbench.toggleCommit"
+                  onToggle={onToggleCommit}
+                  onPin={() => {
+                    onSetCommitPinned(true);
+                    setMoreToolsOpen(false);
+                  }}
+                />
+              )}
+              {!versionControlPinned && (
+                <MoreTitleTool
+                  label="Version Control"
+                  Icon={GitBranch}
+                  open={versionControlOpen}
+                  status={repositoryStatus(repository)}
+                  shortcutActionId="workbench.toggleVersionControl"
+                  onToggle={onToggleVersionControl}
+                  onPin={() => {
+                    onSetVersionControlPinned(true);
+                    setMoreToolsOpen(false);
+                  }}
+                />
+              )}
+            </PopoverContent>
+          </Popover>
+        )}
+      </div>
+    </TooltipProvider>
+  );
+}
+
+function sideLabel(side: WorkbenchSide) {
+  return side === "left" ? "Left" : "Right";
+}
+
+function platformShortcut(binding: string) {
+  const isMac =
+    typeof navigator !== "undefined" &&
+    /Mac|iPhone|iPad|iPod/iu.test(navigator.platform);
+  return formatKeybinding(binding).replace("⌘/Ctrl", isMac ? "⌘" : "Ctrl");
+}
+
+function ShortcutBadge({
+  actionId,
+  showUnassigned = false,
+}: {
+  actionId?: WorkbenchActionId;
+  showUnassigned?: boolean;
+}) {
+  const binding = useSettingsStore((state) =>
+    actionId ? state.settings.keymap[actionId]?.[0] || null : null,
+  );
+  if (!binding && !showUnassigned) return null;
+  return (
+    <kbd
+      className={cn(
+        "inline-flex h-[19px] shrink-0 items-center rounded-[3px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-active))] px-1.5 font-mono text-[9px] font-medium leading-none tracking-[0.02em] text-[hsl(var(--wb-text-muted))] shadow-[inset_0_1px_0_hsl(var(--wb-text)/0.04)]",
+        !binding && "font-sans tracking-normal",
+      )}
+      data-workbench-shortcut={actionId}
+    >
+      {binding ? platformShortcut(binding) : "Unassigned"}
+    </kbd>
+  );
+}
+
+function WorkbenchToolTooltip({
+  label,
+  detail,
+  actionId,
+  children,
+}: {
+  label: string;
+  detail: string;
+  actionId?: WorkbenchActionId;
+  children: ReactElement<ComponentPropsWithoutRef<"button">>;
+}) {
+  const [open, setOpen] = useState(false);
+  const trigger = cloneElement(children, {
+    onPointerLeave: (event: PointerEvent<HTMLButtonElement>) => {
+      children.props.onPointerLeave?.(event);
+      setOpen(false);
+    },
+    onPointerDown: (event: PointerEvent<HTMLButtonElement>) => {
+      children.props.onPointerDown?.(event);
+      setOpen(false);
+    },
+    onBlur: (event: FocusEvent<HTMLButtonElement>) => {
+      children.props.onBlur?.(event);
+      setOpen(false);
+    },
+  });
+
+  return (
+    <Tooltip open={open} onOpenChange={setOpen}>
+      <TooltipTrigger asChild>{trigger}</TooltipTrigger>
+      <TooltipContent
+        key={label}
+        side="bottom"
+        align="center"
+        sideOffset={7}
+        collisionPadding={8}
+        className="min-w-[180px] rounded-[4px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] px-2.5 py-2 text-[11px] text-[hsl(var(--wb-text))] shadow-[0_10px_28px_rgba(0,0,0,0.34)]"
+      >
+        <div className="flex items-center justify-between gap-4">
+          <span className="font-medium leading-none">{label}</span>
+          <ShortcutBadge
+            actionId={actionId}
+            showUnassigned={Boolean(actionId)}
+          />
+        </div>
+        <div className="mt-1 text-[9px] leading-none text-[hsl(var(--wb-text-muted))]">
+          {detail}
+        </div>
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -200,6 +347,7 @@ function MoreTitleTool({
   Icon,
   open,
   status,
+  shortcutActionId,
   onToggle,
   onPin,
 }: {
@@ -207,6 +355,7 @@ function MoreTitleTool({
   Icon: LucideIcon;
   open: boolean;
   status: string;
+  shortcutActionId: WorkbenchActionId;
   onToggle: () => void;
   onPin: () => void;
 }) {
@@ -224,9 +373,10 @@ function MoreTitleTool({
       >
         <Icon size={12} />
         <span className="min-w-0 flex-1">{label}</span>
-        <span className="max-w-28 truncate font-mono text-[9px] tabular-nums text-[hsl(var(--wb-text-muted))]">
+        <span className="max-w-20 truncate font-mono text-[9px] tabular-nums text-[hsl(var(--wb-text-muted))]">
           {status}
         </span>
+        <ShortcutBadge actionId={shortcutActionId} />
       </button>
       <button
         type="button"
@@ -246,6 +396,7 @@ function PinnedTitleTool({
   Icon,
   open,
   status,
+  shortcutActionId,
   onToggle,
   onUnpin,
 }: {
@@ -253,22 +404,28 @@ function PinnedTitleTool({
   Icon: LucideIcon;
   open: boolean;
   status: string;
+  shortcutActionId: WorkbenchActionId;
   onToggle: () => void;
   onUnpin: () => void;
 }) {
   return (
     <div className="group relative flex h-7 items-center">
-      <button
-        type="button"
-        className="wb-title-tool-button"
-        data-active={open}
-        aria-pressed={open}
-        aria-label={`Toggle ${label}`}
-        title={`Toggle ${label} · ${status}`}
-        onClick={onToggle}
+      <WorkbenchToolTooltip
+        label={label}
+        detail={status}
+        actionId={shortcutActionId}
       >
-        <Icon size={15} />
-      </button>
+        <button
+          type="button"
+          className="wb-title-tool-button"
+          data-active={open}
+          aria-pressed={open}
+          aria-label={`Toggle ${label}`}
+          onClick={onToggle}
+        >
+          <Icon size={15} />
+        </button>
+      </WorkbenchToolTooltip>
       <button
         type="button"
         className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text-muted))] opacity-0 shadow-sm hover:text-[hsl(var(--wb-text))] focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
@@ -299,17 +456,28 @@ function repositoryStatus(
 
 export function WorkbenchGlobalTools() {
   return (
-    <button
-      type="button"
-      className="wb-icon-button"
-      onClick={() =>
-        window.dispatchEvent(new CustomEvent(APP_EVENT_OPEN_COMMAND_PALETTE))
-      }
-      title="Search Everywhere"
-      aria-label="Search Everywhere"
+    <TooltipProvider
+      delayDuration={350}
+      skipDelayDuration={120}
+      disableHoverableContent
     >
-      <Search size={15} />
-    </button>
+      <WorkbenchToolTooltip
+        label="Search Everywhere"
+        detail="Open the command palette"
+        actionId="commandPalette.open"
+      >
+        <button
+          type="button"
+          className="wb-icon-button"
+          onClick={() =>
+            window.dispatchEvent(new CustomEvent(APP_EVENT_OPEN_COMMAND_PALETTE))
+          }
+          aria-label="Search Everywhere"
+        >
+          <Search size={15} />
+        </button>
+      </WorkbenchToolTooltip>
+    </TooltipProvider>
   );
 }
 

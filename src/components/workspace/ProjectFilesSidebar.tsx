@@ -535,7 +535,7 @@ export function ProjectFilesSidebar() {
         ) : (
           <span />
         )}
-        <div className="flex items-center gap-0.5">
+        <div className="wb-tool-header-actions flex items-center gap-0.5">
           <button
             type="button"
             className="wb-icon-button h-6 w-6"

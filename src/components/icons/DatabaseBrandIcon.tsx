@@ -11,6 +11,7 @@ import {
   SiSqlite,
 } from "react-icons/si";
 import type { IconType } from "react-icons";
+import type { CSSProperties } from "react";
 
 type DatabaseBrand = {
   icon: IconType;
@@ -34,6 +35,7 @@ interface DatabaseBrandIconProps {
   driver: string | null | undefined;
   size?: number;
   className?: string;
+  style?: CSSProperties;
   title?: string;
 }
 
@@ -41,6 +43,7 @@ export function DatabaseBrandIcon({
   driver,
   size = 14,
   className,
+  style,
   title,
 }: DatabaseBrandIconProps) {
   const normalizedDriver = String(driver || "").trim().toLowerCase();
@@ -51,6 +54,8 @@ export function DatabaseBrandIcon({
       <Database
         size={size}
         className={className}
+        style={style}
+        data-database-brand={normalizedDriver || "generic"}
         aria-hidden={title ? undefined : true}
         aria-label={title}
       />
@@ -62,7 +67,9 @@ export function DatabaseBrandIcon({
     <Icon
       size={size}
       className={className}
-      color={brand.color}
+      color={typeof style?.color === "string" ? style.color : brand.color}
+      style={style}
+      data-database-brand={normalizedDriver}
       title={title}
       aria-hidden={title ? undefined : true}
     />

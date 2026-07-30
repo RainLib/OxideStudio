@@ -5,12 +5,14 @@ import {
   Eye,
   EyeOff,
   Loader2,
+  Palette,
   RotateCcw,
 } from "lucide-react";
 import {
   CONNECTION_ICON_OPTIONS,
   ConnectionGlyph,
 } from "@/components/icons/ConnectionGlyph";
+import { DatabaseBrandIcon } from "@/components/icons/DatabaseBrandIcon";
 import { useEffect, useMemo, useState } from "react";
 import { DataSourceList } from "./DataSourceList";
 import {
@@ -21,6 +23,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   buildConnectionUrl,
   parseConnectionUrl,
@@ -78,6 +85,162 @@ function uniqueConnections(
     );
   }
   return [selectedConnection, ...connections];
+}
+
+function ConnectionAppearancePicker({
+  connection,
+  defaultIcon,
+  onUpdate,
+}: {
+  connection: ConnectionConfig;
+  defaultIcon: string;
+  onUpdate: (
+    field: keyof ConnectionConfig,
+    value: ConnectionConfig[keyof ConnectionConfig],
+    invalidateUrl?: boolean,
+  ) => void;
+}) {
+  const usesDatabaseIcon =
+    !connection.icon || connection.icon === defaultIcon;
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="wb-text-button h-7 gap-1.5 border border-transparent px-2 hover:border-[hsl(var(--wb-border-subtle))]"
+          aria-label="Customize connection appearance"
+          title="Connection color and icon"
+        >
+          <span
+            className="flex h-5 w-5 items-center justify-center rounded-[3px]"
+            style={{
+              color: connection.color || undefined,
+              backgroundColor: connection.color
+                ? `${connection.color}18`
+                : undefined,
+            }}
+          >
+            <ConnectionGlyph
+              driver={connection.driver}
+              icon={connection.icon}
+              size={12}
+              style={{ color: connection.color || undefined }}
+            />
+          </span>
+          <span>Appearance</span>
+          <Palette size={11} />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        sideOffset={5}
+        className="w-[316px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.4)]"
+      >
+        <div className="border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2">
+          <div className="text-[11px] font-semibold">Connection appearance</div>
+          <div className="mt-0.5 text-[9px] text-[hsl(var(--wb-text-muted))]">
+            The database icon is used until you choose a custom one.
+          </div>
+        </div>
+
+        <div className="space-y-3 p-3">
+          <div>
+            <div className="mb-1.5 text-[10px] text-[hsl(var(--wb-text-muted))]">
+              Icon
+            </div>
+            <div
+              className="flex min-h-7 flex-wrap items-center gap-1"
+              role="radiogroup"
+              aria-label="Connection icon"
+            >
+              <button
+                type="button"
+                role="radio"
+                aria-checked={usesDatabaseIcon}
+                className={cn(
+                  "flex h-7 w-7 items-center justify-center rounded-[4px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]",
+                  usesDatabaseIcon &&
+                    "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]",
+                )}
+                onClick={() => onUpdate("icon", undefined)}
+                title="Database default"
+              >
+                <DatabaseBrandIcon driver={connection.driver} size={14} />
+              </button>
+              {CONNECTION_ICON_OPTIONS.map((icon) => {
+                const isSelected = !usesDatabaseIcon && connection.icon === icon;
+                return (
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={isSelected}
+                    key={icon}
+                    className={cn(
+                      "flex h-7 w-7 items-center justify-center rounded-[4px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]",
+                      isSelected &&
+                        "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]",
+                    )}
+                    onClick={() => onUpdate("icon", icon)}
+                    title={icon}
+                  >
+                    <ConnectionGlyph
+                      driver={connection.driver}
+                      icon={icon}
+                      size={14}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
+            <div className="mb-1.5 text-[10px] text-[hsl(var(--wb-text-muted))]">
+              Color
+            </div>
+            <div
+              className="flex h-7 items-center gap-2"
+              role="radiogroup"
+              aria-label="Connection background color"
+            >
+              <button
+                type="button"
+                role="radio"
+                aria-checked={!connection.color}
+                className={cn(
+                  "relative h-4 w-4 rounded-full border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))]",
+                  !connection.color &&
+                    "ring-2 ring-[hsl(var(--wb-accent))] ring-offset-2 ring-offset-[hsl(var(--wb-panel-raised))]",
+                )}
+                onClick={() => onUpdate("color", undefined)}
+                aria-label="No connection background color"
+                title="No background color"
+              >
+                <span className="absolute left-[2px] top-[7px] h-px w-[10px] -rotate-45 bg-[hsl(var(--wb-text-muted))]" />
+              </button>
+              {CONNECTION_COLORS.map((color) => (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={connection.color === color}
+                  key={color}
+                  className={cn(
+                    "h-4 w-4 rounded-full border border-white/10",
+                    connection.color === color &&
+                      "ring-2 ring-[hsl(var(--wb-accent))] ring-offset-2 ring-offset-[hsl(var(--wb-panel-raised))]",
+                  )}
+                  style={{ backgroundColor: color }}
+                  onClick={() => onUpdate("color", color)}
+                  aria-label={`Connection color ${color}`}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 export function ConnectionForm({
@@ -188,8 +351,6 @@ export function ConnectionForm({
     const previousDefaultPort = defaultDatabasePort(previousDriver);
     const previousDefaultDatabase = defaultDatabaseName(previousDriver);
     const previousDefaultIcon = defaultConnectionIcon(previousDriver);
-    const nextProfile = databaseDriverProfile(driver);
-
     updateConnectionConfig({
       driver,
       port:
@@ -205,7 +366,7 @@ export function ConnectionForm({
       icon:
         !selectedConnection.icon ||
         selectedConnection.icon === previousDefaultIcon
-          ? nextProfile.defaultIcon
+          ? undefined
           : selectedConnection.icon,
       connectionUrl: "",
     });
@@ -220,7 +381,7 @@ export function ConnectionForm({
       name: `New ${nextProfile.menuLabel} Connection`,
       port: defaultDatabasePort(driver) || undefined,
       database: defaultDatabaseName(driver),
-      icon: nextProfile.defaultIcon,
+      icon: undefined,
       connectionUrl: "",
     });
   };
@@ -321,6 +482,7 @@ export function ConnectionForm({
               driver={selectedConnection.driver}
               icon={selectedConnection.icon}
               size={15}
+              style={{ color: selectedConnection.color || undefined }}
               className={
                 !selectedConnection.color ? profile.iconClassName : undefined
               }
@@ -363,7 +525,15 @@ export function ConnectionForm({
 
         <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
           {section === "general" && (
-            <div className="mx-auto grid w-full max-w-[720px] grid-cols-[132px_minmax(0,1fr)] gap-y-2 px-6 py-5">
+            <div className="mx-auto w-full max-w-[720px] px-6 py-4">
+              <div className="mb-3 flex h-7 items-center justify-end">
+                <ConnectionAppearancePicker
+                  connection={selectedConnection}
+                  defaultIcon={profile.defaultIcon}
+                  onUpdate={updateField}
+                />
+              </div>
+              <div className="grid grid-cols-[132px_minmax(0,1fr)] gap-y-2">
               <label className={labelClass} htmlFor="connection-host">
                 Host
               </label>
@@ -479,6 +649,7 @@ export function ConnectionForm({
                   Choose an SSL mode to use HTTPS.
                 </p>
               )}
+              </div>
             </div>
           )}
 
@@ -726,78 +897,6 @@ export function ConnectionForm({
                   ))}
                 </SelectContent>
               </Select>
-
-              <span className={labelClass}>Color</span>
-              <div
-                className="flex h-7 items-center gap-2"
-                role="radiogroup"
-                aria-label="Connection background color"
-              >
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={!selectedConnection.color}
-                  className={cn(
-                    "relative h-4 w-4 rounded-full border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))]",
-                    !selectedConnection.color &&
-                      "ring-2 ring-[hsl(var(--wb-accent))] ring-offset-2 ring-offset-[hsl(var(--wb-editor))]",
-                  )}
-                  onClick={() => updateField("color", undefined)}
-                  aria-label="No connection background color"
-                  title="No background color"
-                >
-                  <span className="absolute left-[2px] top-[7px] h-px w-[10px] -rotate-45 bg-[hsl(var(--wb-text-muted))]" />
-                </button>
-                {CONNECTION_COLORS.map((color) => (
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={selectedConnection.color === color}
-                    key={color}
-                    className={cn(
-                      "h-4 w-4 rounded-full border border-white/10 transition-transform hover:scale-110",
-                      selectedConnection.color === color &&
-                        "ring-2 ring-[hsl(var(--wb-accent))] ring-offset-2 ring-offset-[hsl(var(--wb-editor))]",
-                    )}
-                    style={{ backgroundColor: color }}
-                    onClick={() => updateField("color", color)}
-                    aria-label={`Connection color ${color}`}
-                  />
-                ))}
-              </div>
-
-              <span className={labelClass}>Icon</span>
-              <div
-                className="flex min-h-7 flex-wrap items-center gap-1"
-                role="radiogroup"
-                aria-label="Connection icon"
-              >
-                {CONNECTION_ICON_OPTIONS.map((icon) => {
-                  const isSelected =
-                    (selectedConnection.icon || profile.defaultIcon) === icon;
-                  return (
-                    <button
-                      type="button"
-                      role="radio"
-                      aria-checked={isSelected}
-                      key={icon}
-                      className={cn(
-                        "flex h-7 w-7 items-center justify-center rounded-[4px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]",
-                        isSelected &&
-                          "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]",
-                      )}
-                      onClick={() => updateField("icon", icon)}
-                      title={icon}
-                    >
-                      <ConnectionGlyph
-                        driver={selectedConnection.driver}
-                        icon={icon}
-                        size={14}
-                      />
-                    </button>
-                  );
-                })}
-              </div>
 
               <label className={labelClass} htmlFor="connection-tags">
                 Tags

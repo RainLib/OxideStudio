@@ -55,7 +55,7 @@ export function DatabaseExplorerHeader({
   return (
     <header className="wb-tool-header gap-2">
       <span className="truncate">{t("databaseExplorer.title")}</span>
-      <div className="flex items-center gap-0.5">
+      <div className="wb-tool-header-actions flex items-center gap-0.5">
         <button
           type="button"
           className="wb-icon-button h-5 w-5"

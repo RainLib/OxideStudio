@@ -158,20 +158,17 @@ describe("database workspace entry", () => {
     ).toBeNull();
     expect(
       Array.from(container.querySelectorAll("button")).some(
-        (button) =>
-          button.getAttribute("title") === "Toggle AI Assistant (right)",
+        (button) => button.getAttribute("aria-label") === "Toggle AI Assistant",
       ),
     ).toBe(true);
     expect(
       Array.from(container.querySelectorAll("button")).some(
-        (button) =>
-          button.getAttribute("title") === "Toggle Project Files (right)",
+        (button) => button.getAttribute("aria-label") === "Toggle Project Files",
       ),
     ).toBe(true);
 
     const filesButton = Array.from(container.querySelectorAll("button")).find(
-      (button) =>
-        button.getAttribute("title") === "Toggle Project Files (right)",
+      (button) => button.getAttribute("aria-label") === "Toggle Project Files",
     );
     await act(async () => filesButton?.click());
     expect(

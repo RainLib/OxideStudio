@@ -25,7 +25,7 @@ export function AssistantHeader({
 
       <button
         type="button"
-        className="wb-icon-button h-6 w-6"
+        className="wb-tool-header-actions wb-icon-button h-6 w-6"
         onClick={onNewChat}
         disabled={isRunning}
         title={t("assistant.newChat")}

@@ -127,12 +127,14 @@ export function CommitPanel() {
             {repository.branch}
           </span>
         )}
-        <button type="button" className="wb-icon-button h-6 w-6" disabled={session?.loading} onClick={() => void refresh(activeProjectId, rootPath)} title="Refresh changes">
-          <RefreshCw size={11} className={session?.loading ? "animate-spin motion-reduce:animate-none" : ""} />
-        </button>
-        <button type="button" className="wb-icon-button h-6 w-6" onClick={() => setToolWindowVisible("commit", false)} title="Hide Commit">
-          <X size={11} />
-        </button>
+        <div className="wb-tool-header-actions flex items-center gap-0.5">
+          <button type="button" className="wb-icon-button h-6 w-6" disabled={session?.loading} onClick={() => void refresh(activeProjectId, rootPath)} title="Refresh changes">
+            <RefreshCw size={11} className={session?.loading ? "animate-spin motion-reduce:animate-none" : ""} />
+          </button>
+          <button type="button" className="wb-icon-button h-6 w-6" onClick={() => setToolWindowVisible("commit", false)} title="Hide Commit">
+            <X size={11} />
+          </button>
+        </div>
       </header>
 
       {session?.error && (

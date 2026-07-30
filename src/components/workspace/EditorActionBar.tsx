@@ -1,6 +1,6 @@
-import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogFooter,
   DialogHeader,
@@ -524,16 +524,24 @@ export function EditorActionBar({
               <BookmarkPlus size={13} />
             </button>
           </DialogTrigger>
-          <DialogContent className="w-[420px] max-w-[calc(100vw-32px)] gap-0 rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
-            <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
-              <DialogTitle className="text-[13px]">
+          <DialogContent className="w-[360px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.44)] [&>button.absolute]:right-2 [&>button.absolute]:top-2 [&>button.absolute]:flex [&>button.absolute]:h-5 [&>button.absolute]:w-5 [&>button.absolute]:items-center [&>button.absolute]:justify-center">
+            <DialogHeader className="flex h-9 flex-row items-center gap-2 space-y-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.72)] px-3">
+              <BookmarkPlus size={12} className="text-[hsl(var(--wb-accent))]" />
+              <DialogTitle className="text-[12px]">
                 Add to Saved Queries
               </DialogTitle>
             </DialogHeader>
-            <div className="px-4 py-4">
-              <Input
+            <div className="px-3 py-3">
+              <label
+                htmlFor="saved-query-name"
+                className="mb-1.5 block text-[10px] text-[hsl(var(--wb-text-muted))]"
+              >
+                Query name
+              </label>
+              <input
+                id="saved-query-name"
                 autoFocus
-                placeholder="Query name"
+                placeholder="For example, Active customers"
                 value={saveName}
                 onChange={(event) => setSaveName(event.target.value)}
                 onKeyDown={(event) => {
@@ -542,10 +550,20 @@ export function EditorActionBar({
                 className="wb-field w-full"
               />
             </div>
-            <DialogFooter className="border-t border-[hsl(var(--wb-border-subtle))] px-4 py-3">
-              <Button className="wb-primary-button" onClick={handleSave}>
+            <DialogFooter className="flex h-11 flex-row items-center justify-end gap-1 space-x-0 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.42)] px-3 py-0">
+              <DialogClose asChild>
+                <button type="button" className="wb-text-button h-7 px-3">
+                  Cancel
+                </button>
+              </DialogClose>
+              <button
+                type="button"
+                className="wb-primary-button"
+                onClick={handleSave}
+                disabled={!saveName.trim()}
+              >
                 Add
-              </Button>
+              </button>
             </DialogFooter>
           </DialogContent>
         </Dialog>

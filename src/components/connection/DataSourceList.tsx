@@ -8,8 +8,9 @@ import type { DatabaseDriverProfile } from "@/lib/databaseDialect";
 import { cn } from "@/lib/utils";
 import type { DatabaseDriver } from "@/services/tauri";
 import type { ConnectionConfig } from "@/store/useConnectionStore";
-import { Database, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
 import { ConnectionGlyph } from "@/components/icons/ConnectionGlyph";
+import { DatabaseBrandIcon } from "@/components/icons/DatabaseBrandIcon";
 
 interface DataSourceListProps {
   dataSources: ConnectionConfig[];
@@ -49,9 +50,10 @@ export function DataSourceList({
                 className="h-7 cursor-default rounded-[3px] px-2 text-[12px] focus:bg-[hsl(var(--wb-active-strong))]"
                 onClick={() => onCreate(profile.driver)}
               >
-                <Database
+                <DatabaseBrandIcon
+                  driver={profile.driver}
                   size={13}
-                  className={cn("mr-2", profile.iconClassName)}
+                  className="mr-2 shrink-0"
                 />
                 {profile.menuLabel}
               </DropdownMenuItem>

@@ -251,7 +251,7 @@ describe("ConnectionForm", () => {
     );
   });
 
-  it("shows the driver default icon and allows icon and color editing", async () => {
+  it("shows the database brand by default and edits appearance from General", async () => {
     const updateConnectionConfig = vi.fn();
     useConnectionStore.setState({ updateConnectionConfig });
 
@@ -261,21 +261,25 @@ describe("ConnectionForm", () => {
       await flushAsyncWork();
     });
 
-    await act(async () => {
-      buttonWithText(container, "Advanced")?.click();
-    });
-
     expect(
-      container
-        .querySelector('button[title="Database"]')
+      container.querySelectorAll('[data-database-brand="postgres"]').length,
+    ).toBeGreaterThanOrEqual(2);
+
+    await act(async () => {
+      buttonWithText(container, "Appearance")?.click();
+      await flushAsyncWork();
+    });
+    expect(
+      document.body
+        .querySelector('button[title="Database default"]')
         ?.getAttribute("aria-checked"),
     ).toBe("true");
 
     await act(async () => {
-      container
+      document.body
         .querySelector<HTMLButtonElement>('button[title="KeyRound"]')
         ?.click();
-      container
+      document.body
         .querySelector<HTMLButtonElement>(
           'button[aria-label="Connection color #d95b5b"]',
         )
@@ -297,11 +301,11 @@ describe("ConnectionForm", () => {
     });
 
     await act(async () => {
-      buttonWithText(container, "Advanced")?.click();
+      buttonWithText(container, "Appearance")?.click();
       await flushAsyncWork();
     });
 
-    const noColor = container.querySelector<HTMLButtonElement>(
+    const noColor = document.body.querySelector<HTMLButtonElement>(
       'button[aria-label="No connection background color"]',
     );
     expect(noColor?.getAttribute("aria-checked")).toBe("true");

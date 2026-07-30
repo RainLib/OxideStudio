@@ -27,6 +27,16 @@ describe("app settings workbench layout", () => {
     expect(DEFAULT_APP_SETTINGS.workbench.layout.pinnedTitleTools).toEqual([]);
   });
 
+  it("assigns discoverable shortcuts to every title-bar tool", () => {
+    expect(DEFAULT_APP_SETTINGS.keymap).toMatchObject({
+      "workbench.toggleDatabaseExplorer": ["mod+1"],
+      "workbench.toggleAssistant": ["mod+2"],
+      "workbench.openProjectFiles": ["mod+4"],
+      "workbench.toggleCommit": ["mod+5"],
+      "workbench.toggleVersionControl": ["mod+6"],
+    });
+  });
+
   it("normalizes pinned title tools and drops unsupported or disabled entries", () => {
     const settings = normalizeAppSettings({
       workbench: {

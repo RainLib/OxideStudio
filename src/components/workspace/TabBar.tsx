@@ -229,9 +229,9 @@ export function TabBar({
                     }
                   }}
                   className={cn(
-                    "group -mb-px mt-[3px] flex h-[calc(100%-2px)] min-w-[118px] max-w-[220px] shrink-0 cursor-pointer select-none items-center gap-1.5 rounded-t-[4px] border px-3 text-[11px] transition-colors",
+                    "group my-[3px] flex h-[calc(100%-6px)] min-w-[118px] max-w-[220px] shrink-0 cursor-pointer select-none items-center gap-1.5 rounded-[4px] border px-3 text-[11px] transition-colors",
                     displayedActiveTabId === tab.id
-                      ? "border-[hsl(var(--wb-border))] border-t-[hsl(var(--wb-accent)/0.8)] border-b-[hsl(var(--wb-editor))] bg-[hsl(var(--wb-editor))] font-semibold text-[hsl(var(--wb-text))]"
+                      ? "border-[hsl(var(--wb-accent)/0.55)] bg-[hsl(var(--wb-editor))] font-semibold text-[hsl(var(--wb-text))] shadow-[inset_0_1px_0_hsl(var(--wb-accent)/0.18)]"
                       : "border-transparent bg-transparent text-[hsl(var(--wb-text-muted))] hover:border-[hsl(var(--wb-border-subtle))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
                   )}
                   onClick={() => activateTab(tab.id)}

@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { defaultConnectionIcon } from "@/lib/databaseDialect";
 import type { CSSProperties } from "react";
+import { DatabaseBrandIcon } from "./DatabaseBrandIcon";
 
 export const CONNECTION_ICON_OPTIONS = [
   "Database",
@@ -54,7 +55,19 @@ export function ConnectionGlyph({
   style,
   title,
 }: ConnectionGlyphProps) {
-  const iconName = icon || defaultConnectionIcon(driver);
+  const defaultIcon = defaultConnectionIcon(driver);
+  const iconName = icon || defaultIcon;
+  if (!icon || icon === defaultIcon) {
+    return (
+      <DatabaseBrandIcon
+        driver={driver}
+        size={size}
+        className={className}
+        style={style}
+        title={title}
+      />
+    );
+  }
   const Icon = CONNECTION_ICONS[iconName] || Database;
   return (
     <Icon

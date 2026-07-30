@@ -72,10 +72,12 @@ export function VersionControlPanel() {
         {repository?.branch && (
           <span className="max-w-28 truncate font-mono text-[9px]" title={repository.branch}>{repository.branch}</span>
         )}
-        <button type="button" className="wb-icon-button h-6 w-6" disabled={session?.loading} onClick={() => void refresh(activeProjectId, rootPath)} title="Refresh repository">
-          <RefreshCw size={11} className={session?.loading ? "animate-spin" : ""} />
-        </button>
-        <button type="button" className="wb-icon-button h-6 w-6" onClick={() => setToolWindowVisible("versionControl", false)} title="Hide Version Control"><X size={11} /></button>
+        <div className="wb-tool-header-actions flex items-center gap-0.5">
+          <button type="button" className="wb-icon-button h-6 w-6" disabled={session?.loading} onClick={() => void refresh(activeProjectId, rootPath)} title="Refresh repository">
+            <RefreshCw size={11} className={session?.loading ? "animate-spin" : ""} />
+          </button>
+          <button type="button" className="wb-icon-button h-6 w-6" onClick={() => setToolWindowVisible("versionControl", false)} title="Hide Version Control"><X size={11} /></button>
+        </div>
       </header>
 
       {repository?.isRepository && (

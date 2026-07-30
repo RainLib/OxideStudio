@@ -12,6 +12,8 @@ import {
 import { APP_EVENT_OPEN_COMMAND_PALETTE } from "@/lib/actions";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useTaskStore } from "@/store/useTaskStore";
+import { useSettingsStore } from "@/store/useSettingsStore";
+import { DEFAULT_APP_SETTINGS } from "@/lib/appSettings";
 import {
   requestTaskReveal,
   useTaskNavigationStore,
@@ -39,6 +41,7 @@ describe("WorkbenchChrome", () => {
     document.body.appendChild(container);
     useProjectStore.setState({ activeProjectName: "sqls" });
     useTaskStore.setState({ tasks: [] });
+    useSettingsStore.setState({ settings: DEFAULT_APP_SETTINGS });
     useTaskNavigationStore.setState({ request: null });
   });
 
@@ -157,6 +160,47 @@ describe("WorkbenchChrome", () => {
     });
     expect(onToggleCommit).toHaveBeenCalledOnce();
     expect(onToggleVersionControl).toHaveBeenCalledOnce();
+  });
+
+  it("shows the configured shortcut in the title tool hover treatment", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <WorkbenchTitleTools
+          databaseExplorerOpen
+          databaseExplorerSide="left"
+          assistantOpen={false}
+          assistantSide="right"
+          projectFilesOpen={false}
+          projectFilesSide="right"
+          commitOpen={false}
+          commitPinned={false}
+          versionControlOpen={false}
+          versionControlPinned={false}
+          onToggleDatabaseExplorer={vi.fn()}
+          onToggleAssistant={vi.fn()}
+          onToggleFiles={vi.fn()}
+          onToggleCommit={vi.fn()}
+          onToggleVersionControl={vi.fn()}
+          onSetCommitPinned={vi.fn()}
+          onSetVersionControlPinned={vi.fn()}
+        />,
+      );
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Toggle Database Explorer"]',
+    );
+    expect(trigger?.hasAttribute("title")).toBe(false);
+    await act(async () => {
+      trigger?.focus();
+      await Promise.resolve();
+    });
+    const shortcut = document.body.querySelector<HTMLElement>(
+      '[data-workbench-shortcut="workbench.toggleDatabaseExplorer"]',
+    );
+    expect(shortcut?.textContent).toMatch(/^(?:⌘|Ctrl) 1$/u);
+    expect(document.body.textContent).toContain("Left tool window");
   });
 
   it("pins menu tools into the title bar and exposes unpin on the pinned tool", async () => {
