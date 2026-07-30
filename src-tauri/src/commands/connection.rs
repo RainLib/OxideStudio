@@ -245,6 +245,22 @@ pub async fn disconnect_db(
     }
 }
 
+#[tauri::command]
+pub async fn get_connection_server_version(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+) -> Result<Response<Option<String>>, String> {
+    match manager.server_version(&connection_id).await {
+        Ok(version) => Ok(Response::ok(version)),
+        Err(error) => Ok(Response::err_with_details(
+            "CONNECTION_VERSION_ERROR",
+            &error.to_string(),
+            true,
+            Some(serde_json::json!({ "connectionId": connection_id })),
+        )),
+    }
+}
+
 /// 保存连接配置
 #[tauri::command]
 pub async fn save_connections(

@@ -15,20 +15,25 @@ use crate::{
             GraphCheckpointDeleteThreadRequest, GraphCheckpointGetRequest,
             GraphCheckpointListRequest, GraphCheckpointPutRequest, GraphCheckpointPutWritesRequest,
             GraphTypedBlob, ModelCompleteRequest, ModelStreamRequest, RequestMetadata,
-            ToolInvokeRequest, AGENT_HOST_EVENT_CHANNEL, AGENT_HOST_MAX_FRAME_BYTES,
-            AGENT_HOST_PROTOCOL_VERSION, HOST_CANCEL_TURN_METHOD, HOST_INITIALIZE_METHOD,
-            HOST_MODEL_CHUNK_METHOD, HOST_RESUME_TURN_METHOD, HOST_START_TURN_METHOD,
-            SIDECAR_ARTIFACT_READ_METHOD, SIDECAR_ARTIFACT_SEARCH_METHOD,
+            ToolInvokeRequest, ToolPreflightRequest, AGENT_HOST_EVENT_CHANNEL,
+            AGENT_HOST_MAX_FRAME_BYTES, AGENT_HOST_PROTOCOL_VERSION, HOST_CANCEL_TURN_METHOD,
+            HOST_INITIALIZE_METHOD, HOST_MODEL_CHUNK_METHOD, HOST_RESUME_TURN_METHOD,
+            HOST_START_TURN_METHOD, SIDECAR_ARTIFACT_READ_METHOD, SIDECAR_ARTIFACT_SEARCH_METHOD,
             SIDECAR_CHECKPOINT_LOAD_METHOD, SIDECAR_CHECKPOINT_SAVE_METHOD, SIDECAR_EVENT_METHOD,
             SIDECAR_GRAPH_CHECKPOINT_DELETE_THREAD_METHOD, SIDECAR_GRAPH_CHECKPOINT_GET_METHOD,
             SIDECAR_GRAPH_CHECKPOINT_LIST_METHOD, SIDECAR_GRAPH_CHECKPOINT_PUT_METHOD,
             SIDECAR_GRAPH_CHECKPOINT_PUT_WRITES_METHOD, SIDECAR_MODEL_COMPLETE_METHOD,
-            SIDECAR_MODEL_STREAM_METHOD, SIDECAR_TOOL_INVOKE_METHOD,
+            SIDECAR_MODEL_STREAM_METHOD, SIDECAR_TOOL_INVOKE_METHOD, SIDECAR_TOOL_PREFLIGHT_METHOD,
+        },
+        shell::{
+            evaluate_shell_command_policy, execute_shell_command, CommandPolicyDecision,
+            CommandPreflightResult, ShellSandboxMode, DEFAULT_SHELL_TIMEOUT_MS,
+            MAX_SHELL_TIMEOUT_MS,
         },
         store::{AgentStore, StoredGraphCheckpoint, StoredGraphWrite},
     },
     core::{
-        config::SavedConnection as ConfigSavedConnection,
+        config::{ConfigManager, SavedConnection as ConfigSavedConnection},
         dialect::{all_database_capabilities, database_capabilities_for_driver, DatabaseKind},
         explain::{build_explain_statement, parse_explain_results},
         manager::ConnectionManager,
@@ -56,7 +61,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Weak,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
@@ -109,10 +114,11 @@ enum RustHostTool {
     MetadataDescribeObject,
     QueryRunReadOnly,
     QueryExplain,
+    ShellExecute,
 }
 
 impl RustHostTool {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::ProjectListFiles,
         Self::ProjectReadFile,
         Self::ProjectWriteFile,
@@ -125,6 +131,7 @@ impl RustHostTool {
         Self::MetadataDescribeObject,
         Self::QueryRunReadOnly,
         Self::QueryExplain,
+        Self::ShellExecute,
     ];
 
     const fn name(self) -> &'static str {
@@ -141,12 +148,14 @@ impl RustHostTool {
             Self::MetadataDescribeObject => "metadata.describeObject",
             Self::QueryRunReadOnly => "query.runReadOnly",
             Self::QueryExplain => "query.explain",
+            Self::ShellExecute => "shell.execute",
         }
     }
 
     const fn permissions(self) -> &'static [&'static str] {
         match self {
             Self::ProjectWriteFile => &["write"],
+            Self::ShellExecute => &["external"],
             _ => &["read"],
         }
     }
@@ -227,6 +236,7 @@ struct AgentHostInner {
     clarifications: RwLock<HashMap<String, PendingClarification>>,
     approvals: RwLock<HashMap<String, PendingApproval>>,
     leases: RwLock<HashMap<String, ApprovalGrant>>,
+    command_preflights: RwLock<HashMap<String, PendingCommandPreflight>>,
     agent_connections: ConnectionManager,
     connected_targets: RwLock<HashMap<String, ConnectedAgentTarget>>,
     connection_lock: Mutex<()>,
@@ -322,6 +332,8 @@ struct PendingApproval {
     call_id: String,
     input_digest: String,
     tool_name: String,
+    policy_digest: Option<String>,
+    confirmation_phrase: Option<String>,
     expires_at: i64,
 }
 
@@ -330,6 +342,17 @@ struct ApprovalGrant {
     call_id: String,
     input_digest: String,
     tool_name: String,
+    policy_digest: Option<String>,
+    expires_at: i64,
+}
+
+#[derive(Clone)]
+struct PendingCommandPreflight {
+    key: TurnKey,
+    call_id: String,
+    input_digest: String,
+    tool_name: String,
+    result: CommandPreflightResult,
     expires_at: i64,
 }
 
@@ -419,6 +442,7 @@ impl AgentHostManager {
                 clarifications: RwLock::new(HashMap::new()),
                 approvals: RwLock::new(HashMap::new()),
                 leases: RwLock::new(HashMap::new()),
+                command_preflights: RwLock::new(HashMap::new()),
                 agent_connections: ConnectionManager::new(),
                 connected_targets: RwLock::new(HashMap::new()),
                 connection_lock: Mutex::new(()),
@@ -678,11 +702,33 @@ impl AgentHostInner {
                     call_id: pending.call_id.clone(),
                     input_digest: pending.input_digest.clone(),
                     tool_name: pending.tool_name.clone(),
+                    policy_digest: pending.policy_digest.clone(),
+                    confirmation_phrase: pending.confirmation_phrase.clone(),
                     expires_at: pending.expires_at,
                 })
         }
         .ok_or_else(|| anyhow!("approval is no longer pending for this turn"))?;
         let active = self.extend_active_deadline(&request.metadata).await?;
+
+        if request.decision == ApprovalDecision::Approve {
+            if let Some(expected) = pending.confirmation_phrase.as_deref() {
+                let supplied = request.confirmation_text.as_deref();
+                if supplied != Some(expected) {
+                    return Err(anyhow!(
+                        "the high-risk confirmation phrase does not match this command"
+                    ));
+                }
+            }
+        }
+        let consumed = self
+            .approvals
+            .write()
+            .await
+            .remove(&request.approval_id)
+            .is_some_and(|value| value.key == pending.key);
+        if !consumed {
+            return Err(anyhow!("approval is no longer pending for this turn"));
+        }
 
         let lease = match request.decision {
             ApprovalDecision::Reject => None,
@@ -695,6 +741,7 @@ impl AgentHostInner {
                         call_id: pending.call_id,
                         input_digest: pending.input_digest,
                         tool_name: pending.tool_name,
+                        policy_digest: pending.policy_digest,
                         expires_at: request.metadata.deadline,
                     },
                 );
@@ -730,9 +777,6 @@ impl AgentHostInner {
             return Err(anyhow!(
                 "the AI runtime could not resume this approval; the action was not executed"
             ));
-        }
-        if resumed {
-            self.approvals.write().await.remove(&request.approval_id);
         }
         result.map_err(|error| anyhow!(error.safe_message()))?;
         Ok(AgentActionAccepted { accepted: true })
@@ -1481,6 +1525,7 @@ impl AgentHostInner {
                 self.handle_model_stream(generation, params, cancellation)
                     .await
             }
+            SIDECAR_TOOL_PREFLIGHT_METHOD => self.handle_tool_preflight(params).await,
             SIDECAR_TOOL_INVOKE_METHOD => self.handle_tool_invoke(params).await,
             SIDECAR_CHECKPOINT_LOAD_METHOD => self.handle_checkpoint_load(params).await,
             SIDECAR_CHECKPOINT_SAVE_METHOD => self.handle_checkpoint_save(params).await,
@@ -1701,6 +1746,92 @@ impl AgentHostInner {
         }
     }
 
+    async fn handle_tool_preflight(
+        &self,
+        params: Value,
+    ) -> std::result::Result<Value, SidecarRequestError> {
+        let request: ToolPreflightRequest = serde_json::from_value(params)
+            .map_err(|error| SidecarRequestError::invalid_params(error.to_string()))?;
+        let turn = self
+            .validate_active(&request.metadata)
+            .await
+            .map_err(SidecarRequestError::security)?;
+        let expected_digest = input_digest(&request.input);
+        if !constant_time_text_eq(&normalized_digest(&request.input_digest), &expected_digest) {
+            return Err(SidecarRequestError::security(anyhow!(
+                "tool preflight input digest does not match the canonical input"
+            )));
+        }
+        let tool = turn.tools.get(&request.tool_name).ok_or_else(|| {
+            SidecarRequestError::security(anyhow!("tool is not present in the turn manifest"))
+        })?;
+        if request.tool_name != RustHostTool::ShellExecute.name()
+            || !tool
+                .permissions
+                .iter()
+                .any(|permission| permission == "external")
+        {
+            return Err(SidecarRequestError::invalid_params(
+                "command preflight is only available for shell.execute",
+            ));
+        }
+        let result = self.shell_policy_for_input(&turn, &request.input).await?;
+        let key = TurnKey::from_metadata(&request.metadata);
+        let cache_key = command_preflight_cache_key(&key, &request.call_id, &result.policy_digest);
+        self.command_preflights.write().await.insert(
+            cache_key,
+            PendingCommandPreflight {
+                key,
+                call_id: request.call_id,
+                input_digest: expected_digest,
+                tool_name: request.tool_name,
+                result: result.clone(),
+                expires_at: turn.deadline,
+            },
+        );
+        serde_json::to_value(result).map_err(SidecarRequestError::from_json)
+    }
+
+    async fn shell_policy_for_input(
+        &self,
+        turn: &ActiveTurn,
+        input: &Value,
+    ) -> std::result::Result<CommandPreflightResult, SidecarRequestError> {
+        let store = self
+            .app
+            .try_state::<MetaStore>()
+            .ok_or_else(|| SidecarRequestError::tool("project metadata store is unavailable"))?;
+        let config = self
+            .app
+            .try_state::<ConfigManager>()
+            .ok_or_else(|| SidecarRequestError::tool("application settings are unavailable"))?;
+        let command = required_input_text(input, "command", 32_000)?;
+        let relative_directory = input
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let sandbox_mode =
+            ShellSandboxMode::parse(input.get("sandboxMode").and_then(Value::as_str))
+                .map_err(|error| SidecarRequestError::invalid_params(error.to_string()))?;
+        let (project_root, working_directory) =
+            crate::commands::project_files::agent_project_directory(
+                &store,
+                &turn.project_id,
+                relative_directory,
+            )
+            .await
+            .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+        let settings = config.load_settings().map_err(SidecarRequestError::tool)?;
+        Ok(evaluate_shell_command_policy(
+            &project_root,
+            &working_directory,
+            &command,
+            sandbox_mode,
+            &settings,
+        ))
+    }
+
     async fn handle_tool_invoke(
         &self,
         params: Value,
@@ -1721,6 +1852,39 @@ impl AgentHostInner {
             SidecarRequestError::security(anyhow!("tool is not present in the turn manifest"))
         })?;
 
+        let command_preflight = if request.tool_name == RustHostTool::ShellExecute.name() {
+            let result = self.shell_policy_for_input(&turn, &request.input).await?;
+            let requested_digest = request.policy_digest.as_deref().ok_or_else(|| {
+                SidecarRequestError::security(anyhow!(
+                    "shell execution requires a command policy digest"
+                ))
+            })?;
+            if !constant_time_text_eq(requested_digest, &result.policy_digest) {
+                return Err(SidecarRequestError::security(anyhow!(
+                    "command policy changed after approval; review the command again"
+                )));
+            }
+            if result.decision == CommandPolicyDecision::Block {
+                return Err(SidecarRequestError {
+                    code: -32_053,
+                    message: "command policy blocked shell execution".to_string(),
+                    data: Some(json!({
+                        "kind": "command_policy_block",
+                        "recoverable": false,
+                        "preflight": result,
+                    })),
+                });
+            }
+            Some(result)
+        } else {
+            if request.policy_digest.is_some() {
+                return Err(SidecarRequestError::security(anyhow!(
+                    "this tool must not receive a command policy digest"
+                )));
+            }
+            None
+        };
+
         let high_risk = tool_requires_approval(&request.tool_name, &tool.permissions);
         if high_risk {
             let lease = request
@@ -1737,6 +1901,9 @@ impl AgentHostInner {
                 &request.call_id,
                 &expected_digest,
                 &request.tool_name,
+                command_preflight
+                    .as_ref()
+                    .map(|result| result.policy_digest.as_str()),
             )
             .await
             .map_err(SidecarRequestError::security)?;
@@ -1746,7 +1913,62 @@ impl AgentHostInner {
             )));
         }
 
-        let value = self.execute_rust_tool(&turn, &request).await?;
+        let execution_started = Instant::now();
+        let value = match self.execute_rust_tool(&turn, &request).await {
+            Ok(value) => value,
+            Err(error) => {
+                if let Some(preflight) = command_preflight.as_ref() {
+                    tracing::warn!(
+                        target: "oxide_agent_shell_audit",
+                        project_id = %turn.project_id,
+                        turn_id = %request.metadata.turn_id,
+                        call_id = %request.call_id,
+                        policy_digest = %preflight.policy_digest,
+                        decision = ?preflight.decision,
+                        rule_ids = ?preflight
+                            .findings
+                            .iter()
+                            .map(|finding| finding.rule_id.as_str())
+                            .collect::<Vec<_>>(),
+                        executables = ?preflight.executables,
+                        sandbox_mode = request
+                            .input
+                            .get("sandboxMode")
+                            .and_then(|entry| entry.as_str())
+                            .unwrap_or("workspace-write"),
+                        host_error_code = error.code,
+                        duration_ms = execution_started.elapsed().as_millis() as u64,
+                        "agent shell command failed before a result was produced"
+                    );
+                }
+                return Err(error);
+            }
+        };
+        if let Some(preflight) = command_preflight.as_ref() {
+            tracing::info!(
+                target: "oxide_agent_shell_audit",
+                project_id = %turn.project_id,
+                turn_id = %request.metadata.turn_id,
+                call_id = %request.call_id,
+                policy_digest = %preflight.policy_digest,
+                decision = ?preflight.decision,
+                rule_ids = ?preflight
+                    .findings
+                    .iter()
+                    .map(|finding| finding.rule_id.as_str())
+                    .collect::<Vec<_>>(),
+                executables = ?preflight.executables,
+                sandbox_mode = value
+                    .get("sandboxMode")
+                    .and_then(|entry| entry.as_str())
+                    .unwrap_or("unknown"),
+                exit_code = value.get("exitCode").and_then(|entry| entry.as_i64()),
+                success = value.get("success").and_then(|entry| entry.as_bool()).unwrap_or(false),
+                timed_out = value.get("timedOut").and_then(|entry| entry.as_bool()).unwrap_or(false),
+                duration_ms = value.get("durationMs").and_then(|entry| entry.as_u64()),
+                "agent shell command completed"
+            );
+        }
         self.bound_tool_result(&turn.project_id, tool, value)
             .await
             .map_err(|error| SidecarRequestError {
@@ -1906,6 +2128,49 @@ impl AgentHostInner {
             }
             RustHostTool::QueryRunReadOnly => self.execute_read_only_query(turn, request).await,
             RustHostTool::QueryExplain => self.execute_explain_query(turn, request).await,
+            RustHostTool::ShellExecute => {
+                let store = self.app.try_state::<MetaStore>().ok_or_else(|| {
+                    SidecarRequestError::tool("project metadata store is unavailable")
+                })?;
+                let command = required_input_text(&request.input, "command", 32_000)?;
+                let relative_directory = request
+                    .input
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let sandbox_mode = ShellSandboxMode::parse(
+                    request.input.get("sandboxMode").and_then(Value::as_str),
+                )
+                .map_err(|error| SidecarRequestError::invalid_params(error.to_string()))?;
+                let requested_timeout = request
+                    .input
+                    .get("timeoutMs")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(DEFAULT_SHELL_TIMEOUT_MS)
+                    .clamp(1_000, MAX_SHELL_TIMEOUT_MS);
+                let deadline =
+                    tool_deadline_duration(turn, &request.tool_name, request.metadata.deadline)?;
+                let timeout_ms = requested_timeout.min(deadline.as_millis().max(100) as u64);
+                let (project_root, working_directory) =
+                    crate::commands::project_files::agent_project_directory(
+                        &store,
+                        &turn.project_id,
+                        relative_directory,
+                    )
+                    .await
+                    .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+                let result = execute_shell_command(
+                    &project_root,
+                    &working_directory,
+                    &command,
+                    sandbox_mode,
+                    timeout_ms,
+                )
+                .await
+                .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+                serde_json::to_value(result).map_err(SidecarRequestError::from_json)
+            }
         }
     }
 
@@ -2884,17 +3149,29 @@ impl AgentHostInner {
             }
             "approval" => {
                 let fields = (
-                    object.get("approvalId").and_then(Value::as_str),
-                    object.get("callId").and_then(Value::as_str),
-                    object.get("inputDigest").and_then(Value::as_str),
-                    object.get("toolName").and_then(Value::as_str),
+                    object
+                        .get("approvalId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    object
+                        .get("callId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    object
+                        .get("inputDigest")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    object
+                        .get("toolName")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                 );
                 let (Some(approval_id), Some(call_id), Some(input_digest_value), Some(tool_name)) =
                     fields
                 else {
                     return;
                 };
-                let Some(tool) = active.tools.get(tool_name) else {
+                let Some(tool) = active.tools.get(&tool_name) else {
                     return;
                 };
                 if !tool.permissions.iter().any(|permission| {
@@ -2903,13 +3180,75 @@ impl AgentHostInner {
                 {
                     return;
                 }
+                let (policy_digest, confirmation_phrase) =
+                    if tool_name == RustHostTool::ShellExecute.name() {
+                        let Some(requested_policy_digest) = object
+                            .get("policyDigest")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                        else {
+                            return;
+                        };
+                        let preflight = self
+                            .command_preflights
+                            .read()
+                            .await
+                            .get(&command_preflight_cache_key(
+                                &key,
+                                &call_id,
+                                &requested_policy_digest,
+                            ))
+                            .filter(|preflight| {
+                                preflight.key == key
+                                    && preflight.call_id == call_id
+                                    && constant_time_text_eq(
+                                        &preflight.input_digest,
+                                        &normalized_digest(&input_digest_value),
+                                    )
+                                    && preflight.tool_name == tool_name
+                                    && preflight.expires_at >= now_millis()
+                                    && preflight.result.decision != CommandPolicyDecision::Block
+                            })
+                            .cloned();
+                        let Some(preflight) = preflight else {
+                            return;
+                        };
+                        object.insert(
+                            "findings".to_string(),
+                            serde_json::to_value(&preflight.result.findings)
+                                .unwrap_or_else(|_| Value::Array(Vec::new())),
+                        );
+                        object.insert(
+                            "summary".to_string(),
+                            Value::String(preflight.result.summary.clone()),
+                        );
+                        if let Some(confirmation) = preflight.result.confirmation.as_ref() {
+                            object.insert(
+                                "confirmation".to_string(),
+                                serde_json::to_value(confirmation).unwrap_or(Value::Null),
+                            );
+                        } else {
+                            object.remove("confirmation");
+                        }
+                        (
+                            Some(preflight.result.policy_digest),
+                            preflight.result.confirmation.map(|value| value.phrase),
+                        )
+                    } else {
+                        object.remove("policyDigest");
+                        object.remove("findings");
+                        object.remove("confirmation");
+                        (None, None)
+                    };
                 self.approvals.write().await.insert(
-                    approval_id.to_string(),
+                    approval_id,
                     PendingApproval {
                         key: key.clone(),
-                        call_id: call_id.to_string(),
-                        input_digest: normalized_digest(input_digest_value),
-                        tool_name: tool_name.to_string(),
+                        call_id,
+                        input_digest: normalized_digest(&input_digest_value),
+                        tool_name,
+                        policy_digest,
+                        confirmation_phrase,
                         expires_at: active.deadline,
                     },
                 );
@@ -2958,6 +3297,7 @@ impl AgentHostInner {
         call_id: &str,
         input_digest_value: &str,
         tool_name: &str,
+        policy_digest: Option<&str>,
     ) -> Result<()> {
         let mut leases = self.leases.write().await;
         leases.retain(|_, grant| grant.expires_at >= now_millis());
@@ -2968,6 +3308,11 @@ impl AgentHostInner {
             || grant.call_id != call_id
             || !constant_time_text_eq(&grant.input_digest, input_digest_value)
             || grant.tool_name != tool_name
+            || match (grant.policy_digest.as_deref(), policy_digest) {
+                (Some(granted), Some(requested)) => !constant_time_text_eq(granted, requested),
+                (None, None) => false,
+                _ => true,
+            }
         {
             return Err(anyhow!("approval lease does not authorize this tool input"));
         }
@@ -2990,6 +3335,10 @@ impl AgentHostInner {
             .write()
             .await
             .retain(|_, grant| grant.key != *key);
+        self.command_preflights
+            .write()
+            .await
+            .retain(|_, preflight| preflight.key != *key);
     }
 
     async fn reset_failed_generation(&self, generation: Option<u64>, message: &str) {
@@ -3065,6 +3414,13 @@ impl TurnKey {
             turn_id: metadata.turn_id.clone(),
         }
     }
+}
+
+fn command_preflight_cache_key(key: &TurnKey, call_id: &str, policy_digest: &str) -> String {
+    format!(
+        "{}\0{}\0{}\0{}",
+        key.thread_id, key.turn_id, call_id, policy_digest
+    )
 }
 
 impl ActiveTurn {

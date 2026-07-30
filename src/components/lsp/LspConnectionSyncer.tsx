@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
+import { useSettingsStore } from "@/store/useSettingsStore";
 import { useLspClient } from "@/hooks/useLspClient";
 import {
   databaseService,
@@ -102,11 +103,18 @@ export function LspConnectionSyncer() {
   const metadataVersion = useSchemaStore((state) => state.metadataVersion);
   const tabs = useTabStore((state) => state.tabs);
   const activeTabId = useTabStore((state) => state.activeTabId);
+  const keywordCase = useSettingsStore(
+    (state) => state.settings.editor.sqlCompletion.keywordCase
+  );
+  const tableAlias = useSettingsStore(
+    (state) => state.settings.editor.sqlCompletion.tableAlias
+  );
+  const completionPreferences = { keywordCase, tableAlias } as const;
   const activeConnection = connections.find((c) => c.id === activeConnectionId);
   const supportsMetadataSync = Boolean(activeConnection);
-  const hasConnectionQueryTab = tabs.some(
+  const hasConnectionLspTab = tabs.some(
     (tab) =>
-      tab.type === "query" &&
+      (tab.type === "query" || tab.type === "table") &&
       (tab.connectionId || activeConnectionId) === activeConnectionId
   );
   const {
@@ -119,7 +127,7 @@ export function LspConnectionSyncer() {
       activeConnectionId &&
         activeConnection &&
         supportsMetadataSync &&
-        hasConnectionQueryTab &&
+        hasConnectionLspTab &&
         supportsLspLanguageId(activeConnection.driver)
     ),
   });
@@ -572,6 +580,7 @@ export function LspConnectionSyncer() {
                 lspDialect,
                 config: {
                   defaultDialect: lspDialect,
+                  completionPreferences,
                   schemas: schemaDefinitions.map((schema) => ({
                     ...schema,
                     tables: [...schema.tables],
@@ -649,6 +658,7 @@ export function LspConnectionSyncer() {
           // Build configuration matching Python script format
           const config = {
             defaultDialect: lspDialect,
+            completionPreferences,
             schemas: schemaDefinitions,
             // Map document URIs to schema ID
             fileSchemas,
@@ -724,6 +734,8 @@ export function LspConnectionSyncer() {
     currentSchema,
     metadataVersion,
     supportsMetadataSync,
+    keywordCase,
+    tableAlias,
   ]);
 
   return null;

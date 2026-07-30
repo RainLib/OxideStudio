@@ -210,8 +210,46 @@ export const toolInvokeRequestSchema = requestMetadataSchema.extend({
   input: z.unknown(),
   inputDigest: z.string().min(1),
   approvalLease: z.string().min(1).optional(),
+  policyDigest: z.string().min(1).optional(),
 });
 export type ToolInvokeRequest = z.infer<typeof toolInvokeRequestSchema>;
+
+export const commandPolicyDecisionSchema = z.enum(["allow", "confirm", "block"]);
+export type CommandPolicyDecision = z.infer<typeof commandPolicyDecisionSchema>;
+
+export const commandPolicyFindingSchema = z.object({
+  ruleId: z.string().min(1).max(240),
+  decision: commandPolicyDecisionSchema,
+  title: z.string().min(1).max(500),
+  detail: z.string().min(1).max(2_000),
+  evidence: z.string().max(500).optional(),
+});
+export type CommandPolicyFinding = z.infer<typeof commandPolicyFindingSchema>;
+
+export const commandConfirmationSchema = z.object({
+  kind: z.literal("phrase"),
+  phrase: z.string().min(1).max(80),
+  prompt: z.string().min(1).max(500),
+});
+export type CommandConfirmation = z.infer<typeof commandConfirmationSchema>;
+
+export const commandPreflightResultSchema = z.object({
+  decision: commandPolicyDecisionSchema,
+  policyDigest: z.string().min(1),
+  summary: z.string().min(1).max(4_000),
+  findings: z.array(commandPolicyFindingSchema).max(100),
+  executables: z.array(z.string().min(1).max(500)).max(100),
+  confirmation: commandConfirmationSchema.optional(),
+});
+export type CommandPreflightResult = z.infer<typeof commandPreflightResultSchema>;
+
+export const toolPreflightRequestSchema = requestMetadataSchema.extend({
+  callId: z.string().min(1),
+  toolName: z.string().min(1),
+  input: z.unknown(),
+  inputDigest: z.string().min(1),
+});
+export type ToolPreflightRequest = z.infer<typeof toolPreflightRequestSchema>;
 
 export const boundedObservationSchema = z.object({
   summary: z.string(),
@@ -485,6 +523,9 @@ export const agentEventSchema = z.discriminatedUnion("type", [
     title: z.string(),
     risk: z.enum(["write", "destructive", "external"]),
     summary: z.string(),
+    policyDigest: z.string().min(1).optional(),
+    findings: z.array(commandPolicyFindingSchema).max(100).optional(),
+    confirmation: commandConfirmationSchema.optional(),
   }),
   eventBaseSchema.extend({
     type: z.literal("context.compacted"),
@@ -566,6 +607,7 @@ export const SIDECAR_METHODS = {
   modelComplete: "model.complete",
   modelStream: "model.stream",
   modelChunk: "model.chunk",
+  toolPreflight: "tool.preflight",
   toolInvoke: "tool.invoke",
   checkpointLoad: "checkpoint.load",
   checkpointSave: "checkpoint.save",

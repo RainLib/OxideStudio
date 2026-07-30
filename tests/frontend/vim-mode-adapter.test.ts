@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   noremap: vi.fn(),
   unmap: vi.fn(),
   defineEx: vi.fn(),
+  defineAction: vi.fn(),
+  mapCommand: vi.fn(),
 }));
 
 vi.mock("monaco-vim", () => ({
@@ -25,6 +27,8 @@ vi.mock("monaco-vim", () => ({
       noremap: mocks.noremap,
       unmap: mocks.unmap,
       defineEx: mocks.defineEx,
+      defineAction: mocks.defineAction,
+      mapCommand: mocks.mapCommand,
     },
   },
 }));
@@ -39,6 +43,7 @@ describe("Vim mode adapter", () => {
     const onModeChange = vi.fn();
     const onWrite = vi.fn();
     const onEdit = vi.fn();
+    const onWindowNavigate = vi.fn();
     const statusNode = document.createElement("span");
     const editor = {
       updateOptions: vi.fn(),
@@ -64,6 +69,7 @@ describe("Vim mode adapter", () => {
       onModeChange,
       onWrite,
       onEdit,
+      onWindowNavigate,
     });
 
     expect(mocks.initVimMode).toHaveBeenCalledWith(editor, statusNode);
@@ -89,10 +95,26 @@ describe("Vim mode adapter", () => {
     )?.[2];
     editCommand?.({}, { argString: " queries/report.sql " });
     expect(onEdit).toHaveBeenCalledWith("queries/report.sql");
+    expect(mocks.mapCommand).toHaveBeenCalledWith(
+      "<C-w>h",
+      "action",
+      expect.any(String),
+      {},
+      { context: "normal" },
+    );
+    const leftActionName = mocks.mapCommand.mock.calls.find(
+      ([keys]) => keys === "<C-w>h",
+    )?.[2];
+    const leftAction = mocks.defineAction.mock.calls.find(
+      ([name]) => name === leftActionName,
+    )?.[1];
+    leftAction?.({}, {});
+    expect(onWindowNavigate).toHaveBeenCalledWith("left");
 
     controller.dispose();
     expect(mocks.unmap).toHaveBeenCalledWith("<Space>f", "normal");
     expect(mocks.unmap).toHaveBeenCalledWith("jj", "insert");
+    expect(mocks.unmap).toHaveBeenCalledWith("<C-w>h", "normal");
     expect(mocks.adapter.dispose).toHaveBeenCalledTimes(1);
     expect(editor.updateOptions).toHaveBeenCalledWith({
       cursorBlinking: "blink",

@@ -2,9 +2,14 @@
  * @vitest-environment happy-dom
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { openProjectFileInEditor } from "@/lib/projectFileOpen";
+import {
+  openProjectFileInEditor,
+  openProjectGitDiffInEditor,
+} from "@/lib/projectFileOpen";
 import { useProjectFilesStore } from "@/store/useProjectFilesStore";
 import { useTabStore } from "@/store/useTabStore";
+import { projectGitService } from "@/services/tauri/project-git.service";
+import { projectFilesService } from "@/services/tauri/project-files.service";
 
 describe("openProjectFileInEditor", () => {
   beforeEach(() => {
@@ -60,6 +65,48 @@ describe("openProjectFileInEditor", () => {
         }),
         isDirty: false,
       })
+    );
+  });
+
+  it("opens working tree changes in a dedicated Git diff editor tab", async () => {
+    vi.spyOn(projectGitService, "getFileVersions").mockResolvedValue({
+      relativePath: "queries/report.sql",
+      scope: "working",
+      originalContent: "select 1;",
+      modifiedContent: "select 2;",
+      originalMissing: false,
+      modifiedMissing: false,
+      binary: false,
+    });
+    vi.spyOn(projectFilesService, "getGitFileDiff").mockResolvedValue({
+      relativePath: "queries/report.sql",
+      patch: "@@ -1 +1 @@\n-select 1;\n+select 2;",
+      additions: 1,
+      deletions: 1,
+      binary: false,
+      truncated: false,
+      currentSideRevision: null,
+      currentSideRevisionStatus: "available",
+    });
+
+    const tabId = await openProjectGitDiffInEditor(
+      "project-1",
+      "queries/report.sql",
+      "/workspace/project",
+      "working",
+    );
+
+    expect(useTabStore.getState().tabs).toContainEqual(
+      expect.objectContaining({
+        id: tabId,
+        title: "report.sql (Git Diff)",
+        gitFileDiffPreview: expect.objectContaining({
+          originalContent: "select 1;",
+          modifiedContent: "select 2;",
+          additions: 1,
+          deletions: 1,
+        }),
+      }),
     );
   });
 });

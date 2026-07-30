@@ -64,6 +64,7 @@ import { documentTextRevision } from "@/lib/documentRevision";
 import { compileElasticsearchConsoleExecution } from "@/lib/elasticsearchConsole";
 import type { DataCompareSource } from "@/lib/dataCompare";
 import type { AgentFileDiffPreview } from "@/lib/agentFileReview";
+import type { GitFileDiffPreview } from "@/lib/projectGitDiff";
 
 async function refreshMetadataAfterQuery(
   connectionId: string,
@@ -249,6 +250,7 @@ export interface TabData {
   editorSelection?: EditorSelectionState | null;
   editorPatchPreview?: EditorPatchPreview | null;
   agentFileDiffPreview?: AgentFileDiffPreview | null;
+  gitFileDiffPreview?: GitFileDiffPreview | null;
   lspDiagnostics?: Diagnostic[];
   fileProjectId?: string;
   fileRootPath?: string;
@@ -671,6 +673,7 @@ interface TabState {
         | "filePreview"
         | "isDirty"
         | "agentFileDiffPreview"
+        | "gitFileDiffPreview"
       >
     >,
   ) => string;
@@ -736,6 +739,7 @@ interface TabState {
     rootPath?: string | null,
   ) => string;
   openAgentFileDiffTab: (preview: AgentFileDiffPreview) => string;
+  openGitFileDiffTab: (preview: GitFileDiffPreview) => string;
   syncAgentFileDiffPreview: (preview: AgentFileDiffPreview) => void;
   dismissAgentFileDiffPreview: (turnId: string, callId: string) => void;
   markProjectFileSaved: (
@@ -1269,6 +1273,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     const existing = get().tabs.find(
       (tab) =>
         !tab.agentFileDiffPreview &&
+        !tab.gitFileDiffPreview &&
         tab.fileProjectId === projectId &&
         tab.fileRelativePath === relativePath &&
         (!rootPath || !tab.fileRootPath || tab.fileRootPath === rootPath),
@@ -1299,6 +1304,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     const existing = get().tabs.find(
       (tab) =>
         !tab.agentFileDiffPreview &&
+        !tab.gitFileDiffPreview &&
         tab.fileProjectId === projectId &&
         tab.fileRelativePath === relativePath &&
         (!rootPath || !tab.fileRootPath || tab.fileRootPath === rootPath),
@@ -1373,6 +1379,43 @@ export const useTabStore = create<TabState>((set, get) => ({
         fileRevision: preview.baseRevision || undefined,
         isDirty: false,
         agentFileDiffPreview: preview,
+      },
+    );
+  },
+
+  openGitFileDiffTab: (preview) => {
+    const existing = get().tabs.find(
+      (tab) =>
+        tab.gitFileDiffPreview?.projectId === preview.projectId &&
+        tab.gitFileDiffPreview.relativePath === preview.relativePath &&
+        tab.gitFileDiffPreview.scope === preview.scope,
+    );
+    if (existing) {
+      set((state) => ({
+        activeTabId: existing.id,
+        tabs: state.tabs.map((tab) =>
+          tab.id === existing.id
+            ? {
+                ...tab,
+                sql: preview.originalContent,
+                gitFileDiffPreview: preview,
+                fileError: null,
+              }
+            : tab,
+        ),
+      }));
+      return existing.id;
+    }
+    return get().createTab(
+      "query",
+      `${fileNameFromPath(preview.relativePath)} (Git Diff)`,
+      preview.originalContent,
+      {
+        fileProjectId: preview.projectId,
+        fileRootPath: preview.expectedRoot || undefined,
+        fileRelativePath: preview.relativePath,
+        isDirty: false,
+        gitFileDiffPreview: preview,
       },
     );
   },

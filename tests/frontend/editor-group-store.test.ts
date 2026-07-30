@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  adjacentEditorGroup,
+  editorGroupInDirection,
   editorGroups,
   useEditorGroupStore,
 } from "@/store/useEditorGroupStore";
@@ -50,5 +52,28 @@ describe("editor group store", () => {
     const state = useEditorGroupStore.getState();
     expect(editorGroups(state.root)).toHaveLength(5);
     expect(editorGroups(state.root).some((group) => group.id === state.activeGroup)).toBe(true);
+  });
+
+  it("finds spatial and cyclic Vim window targets", () => {
+    useEditorGroupStore.getState().split("right", "tab-right");
+    let state = useEditorGroupStore.getState();
+    const [left, right] = editorGroups(state.root);
+    expect(editorGroupInDirection(state.root, right!.id, "left")?.id).toBe(
+      left!.id,
+    );
+    expect(editorGroupInDirection(state.root, left!.id, "right")?.id).toBe(
+      right!.id,
+    );
+
+    useEditorGroupStore.getState().split("down", "tab-bottom");
+    state = useEditorGroupStore.getState();
+    const bottom = editorGroups(state.root).find(
+      (group) => group.id === state.activeGroup,
+    )!;
+    expect(editorGroupInDirection(state.root, bottom.id, "up")?.id).toBe(
+      right!.id,
+    );
+    expect(adjacentEditorGroup(state.root, bottom.id)?.id).toBe(left!.id);
+    expect(adjacentEditorGroup(state.root, left!.id, true)?.id).toBe(bottom.id);
   });
 });

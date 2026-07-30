@@ -61,6 +61,7 @@ export function TableDataView() {
     setFilterMode,
     setVisualFilters,
     setSqlFilter,
+    setGridSort,
     loadTablePage,
     runTabQuery,
     addNewRow,
@@ -395,7 +396,7 @@ export function TableDataView() {
     })) || [];
 
   // Get filter state from active tab
-  const filterMode = activeTab.filterMode || "visual";
+  const filterMode = activeTab.filterMode || "sql";
   const visualFilters = activeTab.visualFilters || [];
   const sqlFilter = activeTab.sqlFilter || "";
 
@@ -1035,6 +1036,16 @@ export function TableDataView() {
             }
             onSqlFilterChange={(sql) => setSqlFilter(activeTab.id, sql)}
             onSearch={handleSearch}
+            connectionId={tabConnectionId}
+            driver={driver}
+            tabId={activeTab.id}
+            schemaName={activeTab.schemaName}
+            tableName={activeTab.tableName}
+            sortColumn={activeTab.gridState?.sortColumn}
+            sortDirection={activeTab.gridState?.sortDirection}
+            onSortChange={(column, direction) =>
+              void setGridSort(activeTab.id, column, direction)
+            }
           />
         )}
 

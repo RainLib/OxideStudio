@@ -9,6 +9,7 @@ import {
   artifactSearchRequestSchema,
   artifactSearchResultSchema,
   boundedObservationSchema,
+  commandPreflightResultSchema,
   clarificationOptionSchema,
   clarificationQuestionSchema,
   type AgentToolManifestEntry,
@@ -17,6 +18,7 @@ import {
   type BoundedObservation,
   type ClarificationQuestion,
   type ResolveApprovalParams,
+  type ToolPreflightRequest,
   type ToolInvokeRequest,
 } from "@oxide/agent-contract";
 import type { TurnExecution } from "./runtime.js";
@@ -273,9 +275,44 @@ async function invokeProxyTool(
   });
 
   let approvalLease: string | undefined;
+  let policyDigest: string | undefined;
+  let commandPreflight:
+    | ReturnType<typeof commandPreflightResultSchema.parse>
+    | undefined;
   const mutation = manifest.permissions.some(
     (permission) => permission !== "read",
   );
+  if (manifest.name === "shell.execute") {
+    const preflightRequest: ToolPreflightRequest = {
+      ...execution.metadataFor(`tool:${callId}:preflight`),
+      callId,
+      toolName: manifest.name,
+      input,
+      inputDigest,
+    };
+    const raw = await execution.withReadOnlyLimit(() =>
+      execution.peer.call<unknown>(
+        SIDECAR_METHODS.toolPreflight,
+        preflightRequest,
+        execution.remainingMs(),
+      ),
+    );
+    commandPreflight = commandPreflightResultSchema.parse(raw);
+    policyDigest = commandPreflight.policyDigest;
+    if (commandPreflight.decision === "block") {
+      const detail = commandPreflight.findings[0]?.detail ??
+        "OxideStudio command policy blocked this shell command.";
+      await execution.emit({
+        type: "tool.finished",
+        callId,
+        toolName: manifest.name,
+        label,
+        success: false,
+        detail,
+      });
+      throw new Error(`Command blocked: ${detail}`);
+    }
+  }
   if (toolRequiresApproval(manifest)) {
     const approvalResume = execution.matchingResume("approval");
     const approvalId =
@@ -299,7 +336,14 @@ async function invokeProxyTool(
             toolName: manifest.name,
             title: `Approve ${manifest.name}`,
             risk: approvalRisk(manifest),
-            summary: approvalSummary(manifest.name, input),
+            summary: commandPreflight?.summary ?? approvalSummary(manifest.name, input),
+            ...(policyDigest ? { policyDigest } : {}),
+            ...(commandPreflight?.findings.length
+              ? { findings: commandPreflight.findings }
+              : {}),
+            ...(commandPreflight?.confirmation
+              ? { confirmation: commandPreflight.confirmation }
+              : {}),
           },
     );
     const resumed = interrupt(payload);
@@ -333,6 +377,7 @@ async function invokeProxyTool(
     input,
     inputDigest,
     approvalLease,
+    policyDigest,
   };
   try {
     const invoke = () =>
@@ -680,6 +725,7 @@ function processLabel(toolName: string): string {
   if (toolName === "project.listFiles") return "Listed project files";
   if (toolName === "project.readFile") return "Read project file";
   if (toolName === "project.writeFile") return "Edited project file";
+  if (toolName === "shell.execute") return "Ran shell command";
   if (toolName.startsWith("metadata.")) return "Read schema";
   if (toolName.startsWith("query.")) return "Ran query analysis";
   if (toolName.startsWith("lsp.")) return "Read editor diagnostics";
@@ -727,6 +773,23 @@ export function approvalSummary(toolName: string, input: unknown): string {
     const action = input.create === true ? "Create" : "Replace";
     const characters = typeof input.content === "string" ? input.content.length : 0;
     return `${action} ${path} with ${characters.toLocaleString("en-US")} characters. File contents are omitted from this approval summary.`;
+  }
+  if (toolName === "shell.execute" && isRecord(input)) {
+    const command =
+      typeof input.command === "string"
+        ? input.command
+            .replace(/[\u0000-\u001f\u007f]+/gu, " ")
+            .replace(/\s+/gu, " ")
+            .trim()
+            .slice(0, 600)
+        : "unknown command";
+    const sandbox =
+      input.sandboxMode === "unrestricted" ? "unrestricted" : "workspace-write";
+    const cwd =
+      typeof input.cwd === "string" && input.cwd.trim()
+        ? input.cwd.trim().slice(0, 200)
+        : "project root";
+    return `Run once in ${sandbox} mode from ${cwd}: ${command || "unknown command"}`;
   }
   return `Allow this exact ${toolName} call once.`;
 }

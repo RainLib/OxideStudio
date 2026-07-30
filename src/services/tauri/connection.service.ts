@@ -64,6 +64,15 @@ export async function disconnect(connectionId: string): Promise<string> {
   });
 }
 
+export async function getServerVersion(
+  connectionId: string,
+): Promise<string | null> {
+  return invokeWithInterceptors<string | null>(
+    "get_connection_server_version",
+    { connectionId },
+  );
+}
+
 /**
  * 加载保存的连接列表
  * @returns Promise<SavedConnection[]> - 连接列表
@@ -112,6 +121,7 @@ export const connectionService = {
   connect,
   testConnection,
   disconnect,
+  getServerVersion,
   loadConnections,
   saveConnections,
   deleteConnection,

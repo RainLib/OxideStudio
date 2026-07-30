@@ -120,6 +120,7 @@ export function AssistantPromptBox({
 }: AssistantPromptBoxProps) {
   const { t } = useI18n();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const isComposingRef = useRef(false);
   const currentMode = assistantModeOption(mode);
   const CurrentModeIcon = MODE_ICONS[mode];
   const canSubmit =
@@ -142,6 +143,12 @@ export function AssistantPromptBox({
   useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
+    // Keep the textarea DOM-owned while an IME is composing. Re-applying the
+    // controlled value on every pinyin/English composition update makes some
+    // WebKit input methods move the composition range and insert spaces.
+    if (!isComposingRef.current && textarea.value !== message) {
+      textarea.value = message;
+    }
     textarea.style.height = "auto";
     const nextHeight = Math.min(Math.max(textarea.scrollHeight, 52), 180);
     textarea.style.height = `${nextHeight}px`;
@@ -177,19 +184,33 @@ export function AssistantPromptBox({
         <textarea
           ref={textareaRef}
           data-assistant-prompt="true"
-          value={message}
+          defaultValue={message}
           onChange={(event) => onMessageChange(event.target.value)}
+          onCompositionStart={() => {
+            isComposingRef.current = true;
+          }}
+          onCompositionEnd={(event) => {
+            isComposingRef.current = false;
+            onMessageChange(event.currentTarget.value);
+          }}
           onKeyDown={(event) => {
             if (
               event.key === "Enter" &&
               !event.shiftKey &&
-              !event.nativeEvent.isComposing
+              !isComposingRef.current &&
+              !event.nativeEvent.isComposing &&
+              // WebKit reports keyCode 229 for the Enter event that commits an
+              // IME candidate, even when isComposing has already flipped.
+              event.keyCode !== 229
             ) {
               event.preventDefault();
               if (canSubmit) onSubmit();
             }
           }}
           placeholder={t("assistant.prompt")}
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
           rows={1}
           className="custom-scrollbar min-h-[52px] max-h-[180px] w-full resize-none bg-transparent px-2.5 pb-1 pt-2.5 text-[11px] leading-5 text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))]"
           aria-label={t("assistant.messageAria")}

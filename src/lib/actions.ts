@@ -47,13 +47,21 @@ export type WorkbenchActionId =
   | "workbench.toggleDatabaseExplorer"
   | "workbench.openProjectFiles"
   | "workbench.toggleAssistant"
+  | "workbench.toggleCommit"
+  | "workbench.toggleVersionControl"
   | "workbench.toggleResults"
   | "workbench.focusEditor"
   | "workbench.focusDatabaseExplorer"
   | "workbench.focusAssistant"
+  | "workbench.focusCommit"
+  | "workbench.focusVersionControl"
   | "workbench.focusResults"
   | "workbench.moveActiveToolWindowLeft"
   | "workbench.moveActiveToolWindowRight"
+  | "workbench.moveCommitLeft"
+  | "workbench.moveCommitRight"
+  | "workbench.moveVersionControlLeft"
+  | "workbench.moveVersionControlRight"
   | "workbench.resizeActiveToolWindowLeft"
   | "workbench.resizeActiveToolWindowRight"
   | "workbench.resizeActiveToolWindowUp"
@@ -233,10 +241,23 @@ export function workbenchActions(): WorkbenchAction[] {
     },
     {
       id: "workbench.toggleAssistant",
-      title: "Toggle Secondary Panel",
+      title: "Toggle AI Assistant",
       group: "Workbench",
       run: () =>
         useWorkbenchLayoutStore.getState().toggleToolWindow("assistant"),
+    },
+    {
+      id: "workbench.toggleCommit",
+      title: "Toggle Commit",
+      group: "Workbench",
+      run: () => useWorkbenchLayoutStore.getState().toggleToolWindow("commit"),
+    },
+    {
+      id: "workbench.toggleVersionControl",
+      title: "Toggle Version Control",
+      group: "Workbench",
+      run: () =>
+        useWorkbenchLayoutStore.getState().toggleToolWindow("versionControl"),
     },
     {
       id: "workbench.toggleResults",
@@ -262,10 +283,26 @@ export function workbenchActions(): WorkbenchAction[] {
     },
     {
       id: "workbench.focusAssistant",
-      title: "Focus Secondary Panel",
+      title: "Focus AI Assistant",
       group: "Workbench",
       run: () =>
         useWorkbenchLayoutStore.getState().setActiveToolWindow("assistant"),
+    },
+    {
+      id: "workbench.focusCommit",
+      title: "Focus Commit",
+      group: "Workbench",
+      run: () =>
+        useWorkbenchLayoutStore.getState().setActiveToolWindow("commit"),
+    },
+    {
+      id: "workbench.focusVersionControl",
+      title: "Focus Version Control",
+      group: "Workbench",
+      run: () =>
+        useWorkbenchLayoutStore
+          .getState()
+          .setActiveToolWindow("versionControl"),
     },
     {
       id: "workbench.focusResults",
@@ -288,6 +325,19 @@ export function workbenchActions(): WorkbenchAction[] {
       run: () =>
         useWorkbenchLayoutStore.getState().moveActiveToolWindow("right"),
     },
+    ...(
+      [
+        ["workbench.moveCommitLeft", "Move Commit to Left", "commit", "left"],
+        ["workbench.moveCommitRight", "Move Commit to Right", "commit", "right"],
+        ["workbench.moveVersionControlLeft", "Move Version Control to Left", "versionControl", "left"],
+        ["workbench.moveVersionControlRight", "Move Version Control to Right", "versionControl", "right"],
+      ] as const
+    ).map(([id, title, toolWindow, side]) => ({
+      id,
+      title,
+      group: "Workbench" as const,
+      run: () => useWorkbenchLayoutStore.getState().moveToolWindow(toolWindow, side),
+    })),
     {
       id: "workbench.resizeActiveToolWindowLeft",
       title: "Resize Active Tool Window Left",

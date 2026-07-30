@@ -1,5 +1,9 @@
 import { invokeWithInterceptors } from "./client";
-import type { DatabaseCapabilities, DatabaseDriver } from "./types";
+import type {
+  DatabaseCapabilities,
+  DatabaseDriver,
+  DatabaseDriverInstallation,
+} from "./types";
 import {
   registerDatabaseCapabilities,
   registerRuntimeDatabaseCatalog,
@@ -57,6 +61,14 @@ export async function listDatabaseCapabilities(): Promise<
   return capabilities;
 }
 
+export async function listDatabaseDriverInstallations(): Promise<
+  DatabaseDriverInstallation[]
+> {
+  return invokeWithInterceptors<DatabaseDriverInstallation[]>(
+    "list_database_driver_installations",
+  );
+}
+
 export async function createDatabase(
   connectionId: string,
   driver: DatabaseDriver,
@@ -106,6 +118,7 @@ export async function renameDatabase(
 export const databaseService = {
   getDatabaseCapabilities,
   listDatabaseCapabilities,
+  listDatabaseDriverInstallations,
   createDatabase,
   dropDatabase,
   renameDatabase,

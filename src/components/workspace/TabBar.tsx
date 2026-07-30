@@ -186,11 +186,11 @@ export function TabBar({
   }, [displayedActiveTabId]);
 
   return (
-    <div className="flex items-center h-8 w-full overflow-visible border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] shadow-[inset_0_-1px_0_hsl(var(--wb-accent)/0.08)]">
+    <div className="flex h-8 w-full items-center overflow-visible border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))]">
       {/* Scrollable tabs container*/}
       <div
         ref={scrollContainerRef}
-        className="flex-1 flex overflow-x-auto h-full items-stretch scrollbar-hide"
+        className="scrollbar-hide flex h-full flex-1 items-end overflow-x-auto"
         style={{
           scrollbarWidth: "none",
           msOverflowStyle: "none",
@@ -229,10 +229,10 @@ export function TabBar({
                     }
                   }}
                   className={cn(
-                    "flex items-center gap-1.5 px-3 h-full min-w-[118px] max-w-[220px] text-[11px] cursor-pointer select-none group transition-colors shrink-0 border-r border-[hsl(var(--wb-border-subtle))]",
+                    "group -mb-px mt-[3px] flex h-[calc(100%-2px)] min-w-[118px] max-w-[220px] shrink-0 cursor-pointer select-none items-center gap-1.5 rounded-t-[4px] border px-3 text-[11px] transition-colors",
                     displayedActiveTabId === tab.id
-                      ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))] font-semibold shadow-[inset_0_1px_0_hsl(var(--wb-accent)/0.34)]"
-                      : "bg-transparent text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                      ? "border-[hsl(var(--wb-border))] border-t-[hsl(var(--wb-accent)/0.8)] border-b-[hsl(var(--wb-editor))] bg-[hsl(var(--wb-editor))] font-semibold text-[hsl(var(--wb-text))]"
+                      : "border-transparent bg-transparent text-[hsl(var(--wb-text-muted))] hover:border-[hsl(var(--wb-border-subtle))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
                   )}
                   onClick={() => activateTab(tab.id)}
                   onContextMenu={(e) => {
@@ -260,7 +260,7 @@ export function TabBar({
                   )}
                   {!tab.isPinned && (
                     <div
-                      className="opacity-0 group-hover:opacity-100 hover:bg-[hsl(var(--wb-hover))] rounded-[3px] p-0.5 transition-opacity"
+                      className="rounded-[3px] p-0.5 opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] group-hover:opacity-100 group-focus-within:opacity-100"
                       onClick={(e) => {
                         e.stopPropagation();
                         closeTab(tab.id);
@@ -451,7 +451,7 @@ export function TabBar({
                           <DropdownMenuItem
                             key={tab.id}
                             className={cn(
-                              "flex items-center gap-2 text-[11px] cursor-pointer",
+                              "group/overflow flex items-center gap-2 text-[11px] cursor-pointer",
                               displayedActiveTabId === tab.id
                                 ? "bg-background-tertiary text-foreground"
                                 : "text-muted-foreground hover:text-foreground focus:bg-background-tertiary"
@@ -475,7 +475,7 @@ export function TabBar({
                                 e.stopPropagation();
                                 closeTab(tab.id);
                               }}
-                              className="opacity-60 hover:opacity-100 hover:bg-border rounded p-0.5"
+                              className="rounded p-0.5 opacity-0 transition-opacity hover:bg-border group-hover/overflow:opacity-100 focus-visible:opacity-100"
                             >
                               <X size={10} />
                             </button>
@@ -503,7 +503,7 @@ export function TabBar({
                             <DropdownMenuItem
                               key={tab.id}
                               className={cn(
-                                "flex items-center gap-2 text-[11px] cursor-pointer pl-4",
+                                "group/overflow flex items-center gap-2 text-[11px] cursor-pointer pl-4",
                                 displayedActiveTabId === tab.id
                                   ? "bg-background-tertiary text-foreground"
                                   : "text-muted-foreground hover:text-foreground focus:bg-background-tertiary"
@@ -529,7 +529,7 @@ export function TabBar({
                                   e.stopPropagation();
                                   closeTab(tab.id);
                                 }}
-                                className="opacity-60 hover:opacity-100 hover:bg-background-elevated rounded p-0.5"
+                                className="rounded p-0.5 opacity-0 transition-opacity hover:bg-background-elevated group-hover/overflow:opacity-100 focus-visible:opacity-100"
                               >
                                 <X size={10} />
                               </button>

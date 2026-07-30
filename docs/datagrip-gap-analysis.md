@@ -1,6 +1,6 @@
 # OxideStudio 与 DataGrip 能力差距
 
-> 评估日期：2026-07-26。DataGrip 基线采用 JetBrains DataGrip 2026.2 官方文档与发布说明；OxideStudio 基线采用当前仓库代码与测试，而不是 README 宣称能力。AI Agent 的完整逻辑要求见 [AI_AGENT_PRODUCT_SPEC.md](AI_AGENT_PRODUCT_SPEC.md)。
+> 评估日期：2026-07-29。DataGrip 基线采用 JetBrains DataGrip 2026.2 官方文档与发布说明；OxideStudio 基线采用当前仓库代码与测试，而不是 README 宣称能力。AI Agent 的完整逻辑要求见 [AI_AGENT_PRODUCT_SPEC.md](AI_AGENT_PRODUCT_SPEC.md)。
 
 ## 1. 评估方法
 
@@ -19,6 +19,9 @@ DataGrip 的官方能力基线主要来自：
 - [Run queries and query history](https://www.jetbrains.com/help/datagrip/run-a-query.html)
 - [Code completion](https://www.jetbrains.com/help/datagrip/auto-completing-code.html)
 - [Data editor and viewer](https://www.jetbrains.com/help/datagrip/data-editor-and-viewer.html)
+- [Filter data](https://www.jetbrains.com/help/datagrip/tables-filter.html)
+- [MongoDB support](https://www.jetbrains.com/datagrip/features/mongodb/)
+- [Elasticsearch Console completion](https://www.elastic.co/docs/explore-analyze/query-filter/tools/console)
 - [Search in DataGrip](https://www.jetbrains.com/help/datagrip/search-in-ide.html)
 - [Import](https://www.jetbrains.com/help/datagrip/import-data.html) / [Export](https://www.jetbrains.com/help/datagrip/export-data.html)
 - [Schema comparison and migration](https://www.jetbrains.com/help/datagrip/schema-comparison-and-migration.html)
@@ -35,10 +38,10 @@ DataGrip 的官方能力基线主要来自：
 OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 → 查看/编辑表数据”的骨架，并在多数据模型、Tauri 安全边界、项目文件和 AI 工具一致性上形成了自己的方向。与 DataGrip 的主要差距不在单个按钮，而在五条专业闭环尚未形成：
 
 1. **发现闭环**：Search Everywhere、对象导航、find usages、数据库全文搜索仍不完整。
-2. **变更闭环**：schema diff/migration review、机器可判定 preflight 与 PostgreSQL 指纹绑定的原子 apply/post-verify/journal 已形成首条安全闭环；项目 Git status/unified diff 已能审阅 Agent 文件变化，loaded-result Data Compare 也已形成只读主路径，但 MySQL 安全 apply、服务端全量 compare/sync、commit/changelist 和 DDL data source 仍缺失。
+2. **变更闭环**：schema diff/migration review、机器可判定 preflight 与 PostgreSQL 指纹绑定的原子 apply/post-verify/journal 已形成首条安全闭环；项目 Git 已覆盖 clone/init/status/diff/stage/unstage/hunk/commit/history/branch/remote/fetch/pull/push/patch，Agent 文件变化也可直接在主编辑器审阅，loaded-result Data Compare 已形成只读主路径；仍缺 MySQL 安全 apply、服务端全量 compare/sync、changelist/blame 与 DDL data source mapping。
 3. **数据工作闭环**：Value Editor 已有类型感知主路径，但外键导航、聚合视图、多视图模式和导入映射不足。
 4. **诊断闭环**：Explain Plan 与 PostgreSQL/MySQL 原生错误诊断已有主路径，但自动 Fix → Validate、会话/锁/运行监控仍不足。
-5. **智能协作闭环**：Chat/Plan/Agent 已统一进入独立 TypeScript Deep Agents host，并具备 Rust 模型/工具/审批边界、加密 LangGraph checkpoint/pending writes、应用重启后的对话恢复与手动 checkpoint resume、文本附件、项目文件 revision-safe 写入、Changes 审阅、trusted metadata/plan citation、optimizer-estimate 热点信号和 vendor error 到 review-only patch 的修复路径；仍缺运行时统计驱动的自动优化、通用后台任务恢复和全部 provider tool bridge。LSP 的 catalog 隔离、同名列排序、CTE/派生表输出、当前 console 临时表生命周期和 routine overload 语义已经关闭；未打开文件的持久 usage index 仍属于项目索引层缺口。
+5. **智能协作闭环**：Chat/Plan/Agent 已统一进入独立 TypeScript Deep Agents host，并具备 Rust 模型/工具/审批边界、加密 LangGraph checkpoint/pending writes、应用重启后的对话恢复与手动 checkpoint resume、文本附件、项目文件 revision-safe 写入、Changes 审阅、trusted metadata/plan citation、optimizer-estimate 热点信号和 vendor error 到 review-only patch 的修复路径；仍缺运行时统计驱动的自动优化、通用后台任务恢复和全部 provider tool bridge。LSP 已补齐 catalog 隔离、同名列排序、CTE/派生表输出、当前 console 临时表生命周期、routine overload、MongoDB collection-aware 自动补全、ES 引号内 mapping 字段与 6/7/8 版本路径、Table WHERE 补全、FK JOIN、静态 domain 值、偏好/usage 排序和大 catalog 性能基线；未打开文件的全项目 usage index 与需显式治理的 live value-frequency sampling 仍属于后续缺口。
 
 按日常数据库开发主路径估算，当前完成度约为 **58%–68%**；按 DataGrip 2026.2 全功能面估算约为 **38%–48%**。这是工程规划区间，不是营销评分。
 
@@ -61,7 +64,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | DataGrip 基线 | OxideStudio 状态 | 当前证据与差距 | 优先级 |
 | --- | --- | --- | --- |
 | 绑定数据源的多个 query console | 部分具备 | 支持多 Tab、连接/schema 上下文、split editor；无选区时会按 driver lexer 只执行光标所在 statement，选区与 Run All 保持显式；console 生命周期、执行范围模式和 session 模式仍不够完整 | P0 |
-| schema-aware completion | 已具备 | query tab 按 `(connection, database, schema)` 隔离 metadata/schema id/cache；同名列、alias、当前 statement/DML/active object 有稳定优先级，并已推导 CTE/派生表输出、当前 console 临时表生命周期和 routine overload | — |
+| schema-aware completion | 已具备/持续细化 | query/table tab 按 `(connection, database, schema)` 隔离 metadata/schema id/cache；无 FROM 时使用 `table.column`，单表时使用短字段，多表时使用 alias；PostgreSQL/MySQL/Hive/ClickHouse 有共同矩阵、FK JOIN 片段、静态 `ENUM`/`SET` domain 值、可配置大小写/alias 及本地 usage 排序。MongoDB 按当前 collection 隔离字段并自动弹出 key/collection 候选；ES 支持引号内 mapping 字段且 REST 路径按 6/7/8 变化。2,500 表冷目录有跨方言回归预算；仍缺未打开文件的持久 usage index 与需显式授权的 live value-frequency sampling | P1 |
 | inspections、quick-fix、错误高亮 | 已具备/部分 | parser 与 pull/push diagnostics、全文/范围格式化、无 WHERE mutation、无条件 JOIN、歧义列、`SELECT *`、明显 dialect 风险及逐项 `noinspection` 已接入；提供安全 guard 与 `*` 展开 quick-fix。仍未达到 DataGrip 的全部数据库规则与设置 UI | P1 |
 | refactor / find usages / navigation | 已具备/部分 | Definition 可从 SQL 跳到真实 Explorer 对象，References/安全 Rename 覆盖同 schema 的全部已打开文档，document/workspace symbols 已提供；尚缺未打开项目文件的持久 usage index 和完整依赖图 | P1 |
 | 参数化查询 | 部分具备 | 已有参数面板与后端参数化执行；自定义参数 pattern、历史和值配置不足 | P0 |
@@ -73,7 +76,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 
 | DataGrip 基线 | OxideStudio 状态 | 当前证据与差距 | 优先级 |
 | --- | --- | --- | --- |
-| 服务端分页、排序、过滤 | 已具备/部分 | Table Tab 支持分页、filter、sort 和布局；多列排序历史与 query preview 细节不足 | P0 |
+| 服务端分页、排序、过滤 | 已具备/部分 | Table Tab 支持分页、filter、sort 和布局；WHERE 输入以当前表构造虚拟 SQL 文档，立即给出本地列候选并异步合并 LSP，支持 Ctrl/Cmd+Space、方向键、Enter/Tab。多列排序历史与 query preview 细节仍不足 | P0 |
 | 行增删改、提交/回滚 | 已具备/部分 | 参数化 mutation、批量提交、草稿保护已存在；冲突展示和 generated key 反馈不足 | P0 |
 | 单元格 SQL expression | 缺失 | 目前 cell/Value Editor 只提交 literal、NULL 或 DEFAULT，不能像 DataGrip 2026.2 那样明确切换 expression mode 后提交 `NOW()`、计算式等未转义 SQL 表达式 | P1 |
 | Value Editor | 已具备/部分 | `Shift+Enter`/cell menu 打开独立大视图；text/JSON/date/binary/boolean/number 有类型校验，明确区分默认未加载、NULL、空串和值，修改复用 table draft/mutation gate；超大 LOB 的独立按需拉取仍待增强 | P1 |
@@ -120,7 +123,7 @@ SQL script import 是库/schema 级执行能力：即使入口来自 table 右�
 | 项目关联本地目录 | 已具备 | 自动目录名、别名、删除、路径约束和项目内数据源隔离已具备 | — |
 | SQL/文本文件编辑 | 已具备/部分 | Monaco、保存、revision conflict 已有；缺少自动保存策略与 local history | P1 |
 | 图片等文件预览 | 已具备/部分 | 常见图片只读预览已具备；PDF、CSV table view、hex/binary viewer 尚缺 | P2 |
-| VCS 集成 | 部分具备 | Assistant 顶部 Changes 面板通过 Rust 有界 Git 子进程展示 branch、项目根范围内最多 500 个 changed files、staged/unstaged/untracked/conflict 与逐文件 unified diff；每个文件可在 All（相对 HEAD）、Staged（索引区）和 Working（未暂存/未跟踪）间切换，未跟踪预览仅在 Git 精确确认后生成。Rust 在 `project.writeFile` 成功后直接生成可信 path/revision 与保守新侧行证据，面板可按全部 Agent 或具体 Turn 筛选；所选 scope 当前侧内容只有在有界 SHA-256 与可信写入 revision 完全一致时才标记 `AI match`，并在相交新增行与 hunk header 显示 AI 证据，否则显示 differs/missing/unverified。新增行与上下文行的 current-side 行号可直接打开文件并跳到 Monaco 精确位置；删除行保持只读，不伪造当前文件坐标。尚无完整 blame/ownership、stage/commit/push、changelist、history、branch 操作和数据库对象到 DDL 文件的映射 | P1/P2 |
+| VCS 集成 | 已具备/部分 | New Project 支持本地目录、Git URL clone 和经官方 `gh` CLI 认证后的 GitHub 搜索/clone。独立 Version Control 面板提供 init、branch/upstream/ahead/behind、status、All/Staged/Working diff、主 Monaco DiffEditor、逐 hunk stage/unstage、文件 stage/unstage、commit、100 条 log、branch create/checkout、remote、fetch/fast-forward-only pull/push、patch generate/check/apply/reverse；所有路径/URL有界校验、无 shell 拼接、无交互 prompt。Agent Changes 继续保留 Turn 归因和 revision-safe Keep/Undo。尚缺 changelist/stash、blame/ownership、merge/rebase 冲突工作台、托管平台 PR UI 和数据库对象到 DDL 文件 mapping | P1/P2 |
 | DDL 文件与真实数据源 mapping | 缺失 | 项目上下文可参与 AI/LSP，但不能做 schema mapping 与 migration | P1 |
 
 ### 3.7 搜索、工作台与可配置性
@@ -175,7 +178,7 @@ SQL script import 是库/schema 级执行能力：即使入口来自 table 右�
 | DG-P0-05 | Driver 与文档一致性 | 增加 SQLite driver，或从发布文档移除未实现支持；能力列表由 runtime registry 生成 | 已完成：SQLite/SQL Server 明确为规划项；后端 capability list 驱动连接 UI、Explorer 与 AI，失败仅降级不阻塞启动 |
 | DG-P0-06 | 结构化错误协议 | connection/query/schema/table/file command 返回稳定 code、message、context、retryable；UI 不再解析字符串前缀 | 已完成 |
 | DG-P0-07 | CSV Import Mapping | 导入前预览、编码/delimiter/header、列映射、类型错误摘要和事务性提交 | 已完成：支持 BOM/UTF-8/UTF-16/GB18030、delimiter 自动识别、表头/位置映射、类型预检和 PostgreSQL/MySQL 原子 batch；32 MiB/10 万行以上明确转入 native streaming P1 |
-| DG-P0-08 | LSP catalog scope 与候选排序 | `(connection, database, schema)` 严格隔离；显式 qualifier/当前 statement/DML target/active table 排序；同名列以 alias/table 区分；同 source 去重；覆盖跨 PostgreSQL database 回归 | 已完成：bundled binary 与 submodule revision 同步，集成测试锁定无 FROM 歧义列为 `table.column`、有 statement target 时当前表列优先 |
+| DG-P0-08 | LSP catalog scope 与候选排序 | `(connection, database, schema)` 严格隔离；显式 qualifier/当前 statement/DML target/active table 排序；同名列以 alias/table 区分；同 source 去重；覆盖跨 PostgreSQL database 回归 | 已完成并扩展：关系型矩阵锁定无 FROM 为 `table.column`、单表短字段、多表 alias；MongoDB 锁定 collection 字段隔离、operator/pipeline；ES 锁定引号内 mapping 字段与 6/7/8 REST 差异；Table WHERE 使用同一 schema-bound LSP session |
 | DG-P0-09 | AI attachment 与页面动作 | 对象、错误、结果、执行计划引用可点击并准确跳转；stable target、stale context 和同名对象有测试；导航不与数据库 mutation 混为一个动作 | 已完成：对象/文件/结果/LSP error/plan/schema diff/patch 均有精确跳转或 artifact surface 与 stale target 测试；patch 仅由用户 Apply |
 | DG-P0-10 | AI 发送上下文预览 | 发送前显示 provider、database identity、token/截断、tool manifest 和 post-tool 范围；关闭项必须从真实请求删除 | 已完成：显示完整 prompt/编辑器/选择/历史/tool manifest 的发送前 token 估算、模型预算占比、逐来源 excluded/bounded 省略量和 55% 长 prompt 预压缩提示；`model.usage`/`context.compacted` 项目级加密累计并跨重启恢复；大 observation 支持模型侧及聊天 UI 的有界 search/range read、匹配定位和由 Rust 原生保存对话框控制的 JSON 导出 |
 | DG-P0-11 | AI 对话过程与长文导航 | 一个 Turn 固定为问题→运行时间线→终态折叠过程→最终答案；宽面板 minimap 每个完整问答一个灰色 marker，中间 tool/subagent 不单列 | 已完成：活动过程直接平铺、当前步骤高亮，终态过程为紧凑 disclosure；minimap 仅在真实溢出时显示，支持 hover、键盘和 reduced motion |
@@ -184,7 +187,7 @@ SQL script import 是库/schema 级执行能力：即使入口来自 table 右�
 | DG-P0-14 | 外部 MCP/CLI 安全边界 | Rust 原生 stdio/CLI 首版只读；调用者不能自报 approval，缺少目标二进制时打包 fail closed | 已完成：Cargo、target-specific externalBin、四平台构建签名均已接线；project/connection grant、只读事务、超时和结果上限由 Rust 强制执行 |
 | DG-P0-15 | 查询范围与结果内存边界 | 无选区时执行光标 statement；普通关系型查询不得先全量读取，达到硬上限必须明确标记 | 已完成：Monaco UTF-16 offset 在 Rust 转 UTF-8 byte offset，并复用 driver lexer；PostgreSQL/MySQL 读取至 1,001 条 sentinel 后仅返回前 1,000 条，结果协议携带 truncated/rowLimit |
 | DG-P0-16 | ChatGPT 式对话与应用恢复 | 输入、Markdown、复制/重试/编辑、附件和滚动行为形成一致主路径；应用重启不丢对话且不持久化 API key | 已完成首版：对话快照通过 AgentStore AES-GCM 保存，恢复中的任务 fail-closed 为 paused；文本附件经 Rust 原生选择、UTF-8/扩展名/64 KiB 单文件与 128 KiB 总量限制 |
-| DG-P0-17 | Agent 文件修改与 Git review | Agent 只能在项目根内以 revision 原子写文件；写入即时生效并可 Keep/Undo，数据库与外部 mutation 仍需批准；用户可查看 branch/status、按 Turn 归因与逐文件 unified diff | 已完成第四阶段：Rust host 直接写入并发出不可由 sidecar 伪造、包含有界 before/after 内容的 `file.changed` 审阅事件；连续写同一文件合并为净 Diff，整文件与逐 hunk Keep/Undo 使用 applied revision 防止覆盖后续编辑，新建文件撤回同样受 revision 保护。Changes 继续支持 all/Agent/Turn 归因、All/Staged/Working diff、current-side revision 核验、保守新侧 line/hunk 证据及精确行跳转；Git stage/commit/push 仍不在此审阅动作中 |
+| DG-P0-17 | Agent 文件修改与 Git review | Agent 只能在项目根内以 revision 原子写文件；写入即时生效并可 Keep/Undo，数据库与外部 mutation 仍需批准；用户可查看 branch/status、按 Turn 归因与逐文件 unified diff | 已完成第五阶段：Rust host 直接写入并发出不可由 sidecar 伪造、包含有界 before/after 内容的 `file.changed` 审阅事件；连续写同一文件合并为净 Diff，整文件与逐 hunk Keep/Undo 使用 applied revision 防止覆盖后续编辑。Changes 支持 all/Agent/Turn 归因与精确行跳转；项目 Version Control 另行提供真实 Git stage/unstage/hunk/commit/history/branch/remote/sync/patch，主编辑器复用 Monaco DiffEditor |
 | DG-P0-18 | Vendor query error diagnostics | PostgreSQL/MySQL 原生错误保留安全的 vendor code/object/position；执行 statement/selection 时能映射到编辑器位置；结果面板和 AI 使用同一结构化对象且不泄露 SQL/凭据 | 已完成诊断与 review-only fix：Rust 从 `sqlx::DatabaseError` 白名单提取字段；PostgreSQL original position 映射到 Monaco marker，internal query 永不透出；MySQL 保留 SQLSTATE/error number；错误卡可打开 AI fix draft，fenced SQL 只能经用户点击生成 revision-bound Patch Preview，不自动改写/执行 |
 
 ### P1：形成 schema 工程能力
@@ -201,7 +204,7 @@ SQL script import 是库/schema 级执行能力：即使入口来自 table 右�
 ### P2：平台化与长尾能力
 
 1. 第三方 provider/plugin 的发现、版本、签名和隔离。
-2. VCS 深度集成和数据库对象文件化工作流。
+2. VCS 继续补 changelist/stash、blame、merge/rebase 冲突工作台、PR surface 和数据库对象文件化工作流。
 3. 多语言、主题导入和更完整的 accessibility 偏好。
 4. PDF、CSV table view、hex/binary 等通用文件预览。
 5. 会话、锁、运行日志和数据库运维面板。

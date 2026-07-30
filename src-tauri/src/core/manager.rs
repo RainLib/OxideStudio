@@ -137,6 +137,10 @@ impl ConnectionManager {
         driver.ping().await
     }
 
+    pub async fn server_version(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.get_driver(id).await?.server_version().await)
+    }
+
     pub async fn statement_scan_dialect(
         &self,
         id: &str,

@@ -16,6 +16,8 @@ import {
 } from "@/components/ui/dialog";
 import { aiService } from "@/services/tauri/ai.service";
 import { agentHostService } from "@/services/tauri/agent-host.service";
+import { databaseService } from "@/services/tauri/database.service";
+import type { DatabaseDriverInstallation } from "@/services/tauri/types";
 import { useAiSettingsStore } from "@/store/useAiSettingsStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
@@ -33,7 +35,11 @@ import type {
   AppSettings,
   WorkbenchSide,
 } from "@/lib/appSettings";
-import { moveSideToolWindow } from "@/lib/workbenchLayout";
+import {
+  closeSideToolWindow,
+  moveSideToolWindow,
+  openSideToolWindow,
+} from "@/lib/workbenchLayout";
 import { parseVimMappings, serializeVimMappings } from "@/lib/vimMappings";
 import {
   Bot,
@@ -60,6 +66,7 @@ export type SettingsSection =
   | "editor"
   | "dataEditor"
   | "databaseExplorer"
+  | "drivers"
   | "ai";
 
 type SettingsTreeGroup = {
@@ -126,6 +133,11 @@ function createSettingsTree(t: Translate): SettingsTreeGroup[] {
         label: t("settings.section.databaseExplorer"),
         section: "databaseExplorer",
       },
+      {
+        id: "drivers",
+        label: t("settings.section.drivers"),
+        section: "drivers",
+      },
     ],
   },
   {
@@ -170,6 +182,10 @@ function createSectionMeta(
     databaseExplorer: {
       group: t("settings.group.database"),
       title: t("settings.section.databaseExplorer"),
+    },
+    drivers: {
+      group: t("settings.group.database"),
+      title: t("settings.section.drivers"),
     },
     ai: {
       group: t("settings.group.tools"),
@@ -522,6 +538,7 @@ export function SettingsDialog({
                   onUpdate={updateAppSettings}
                 />
               )}
+              {activeSection === "drivers" && <DriverManagementSettings />}
               {activeSection === "ai" && (
                 <AiSettings
                   aiEnabled={aiEnabled}
@@ -737,88 +754,74 @@ function WorkbenchSettings({
     onUpdate({
       workbench: {
         ...settings.workbench,
+        layout: {
+          ...layout,
+          pinnedTitleTools: enabled
+            ? layout.pinnedTitleTools
+            : layout.pinnedTitleTools.filter((candidate) => candidate !== id),
+        },
         toolWindows: {
           ...toolWindows,
           [id]: { ...toolWindows[id], enabled },
         },
       },
     });
+  const updateSideToolOpen = (
+    id: "databaseExplorer" | "projectFiles" | "assistant" | "commit" | "versionControl",
+    visible: boolean,
+  ) => onUpdate({
+    workbench: visible
+      ? openSideToolWindow(settings.workbench, id)
+      : closeSideToolWindow(settings.workbench, id),
+  });
   const updateVisibility = (
     id: keyof AppSettings["workbench"]["layout"]["visibility"],
-    visible: boolean
-  ) =>
-    updateLayout({
-      visibility: {
-        ...layout.visibility,
-        [id]: visible,
-      },
-    });
+    visible: boolean,
+  ) => updateLayout({
+    visibility: { ...layout.visibility, [id]: visible },
+  });
   const updateSide = (
-    id: "databaseExplorer" | "assistant",
+    id: "databaseExplorer" | "projectFiles" | "assistant" | "commit" | "versionControl",
     side: WorkbenchSide
   ) => onUpdate({ workbench: moveSideToolWindow(settings.workbench, id, side) });
 
   return (
-    <SettingsPanel>
+      <SettingsPanel>
       <SettingsDivider title="Tool Windows" first />
-      <SettingRow label="Database Explorer:">
-        <CheckboxLabel
-          label="Enabled"
-          checked={toolWindows.databaseExplorer.enabled}
-          onChange={() =>
-            updateToolWindowEnabled(
-              "databaseExplorer",
-              !toolWindows.databaseExplorer.enabled
-            )
-          }
-        />
-        <CheckboxLabel
-          label="Open"
-          checked={layout.visibility.databaseExplorer}
-          onChange={() =>
-            updateVisibility(
-              "databaseExplorer",
-              !layout.visibility.databaseExplorer
-            )
-          }
-        />
-        <select
-          className={cn(selectClass, "w-[120px]")}
-          value={toolWindows.databaseExplorer.side}
-          onChange={(event) =>
-            updateSide("databaseExplorer", event.target.value as WorkbenchSide)
-          }
-        >
-          <option value="left">Left</option>
-          <option value="right">Right</option>
-        </select>
-      </SettingRow>
-      <SettingRow label="Secondary Panel:">
-        <CheckboxLabel
-          label="Enabled"
-          checked={toolWindows.assistant.enabled}
-          onChange={() =>
-            updateToolWindowEnabled("assistant", !toolWindows.assistant.enabled)
-          }
-        />
-        <CheckboxLabel
-          label="Open"
-          checked={layout.visibility.assistant}
-          onChange={() =>
-            updateVisibility("assistant", !layout.visibility.assistant)
-          }
-        />
-        <select
-          className={cn(selectClass, "w-[120px]")}
-          value={toolWindows.assistant.side}
-          onChange={(event) =>
-            updateSide("assistant", event.target.value as WorkbenchSide)
-          }
-        >
-          <option value="left">Left</option>
-          <option value="right">Right</option>
-        </select>
-      </SettingRow>
+      {(
+        [
+          ["databaseExplorer", "Database Explorer"],
+          ["projectFiles", "Project Files"],
+          ["assistant", "AI Assistant"],
+          ["commit", "Commit"],
+          ["versionControl", "Version Control"],
+        ] as const
+      ).map(([id, label]) => (
+        <SettingRow key={id} label={`${label}:`}>
+          <CheckboxLabel
+            label="Enabled"
+            checked={toolWindows[id].enabled}
+            onChange={() =>
+              updateToolWindowEnabled(id, !toolWindows[id].enabled)
+            }
+          />
+          <CheckboxLabel
+            label="Open"
+            checked={layout.visibility[id]}
+            onChange={() => updateSideToolOpen(id, !layout.visibility[id])}
+          />
+          <select
+            className={cn(selectClass, "w-[120px]")}
+            value={toolWindows[id].side}
+            onChange={(event) =>
+              updateSide(id, event.target.value as WorkbenchSide)
+            }
+          >
+            <option value="left">Left</option>
+            <option value="right">Right</option>
+          </select>
+        </SettingRow>
+      ))}
       <SettingRow label="Query Results:">
         <CheckboxLabel
           label="Enabled"
@@ -1000,6 +1003,55 @@ function EditorSettings({
         checked={editor.confirmDestructiveSql}
         onChange={() =>
           updateEditor({ confirmDestructiveSql: !editor.confirmDestructiveSql })
+        }
+      />
+      <SettingsDivider title="SQL completion" />
+      <SettingRow label="Keyword case:">
+        <select
+          className={selectClass}
+          value={editor.sqlCompletion.keywordCase}
+          onChange={(event) =>
+            updateEditor({
+              sqlCompletion: {
+                ...editor.sqlCompletion,
+                keywordCase: event.target.value as AppSettings["editor"]["sqlCompletion"]["keywordCase"],
+              },
+            })
+          }
+        >
+          <option value="upper">UPPER CASE</option>
+          <option value="lower">lower case</option>
+          <option value="preserve">Dialect default</option>
+        </select>
+      </SettingRow>
+      <SettingRow label="Table alias:">
+        <select
+          className={selectClass}
+          value={editor.sqlCompletion.tableAlias}
+          onChange={(event) =>
+            updateEditor({
+              sqlCompletion: {
+                ...editor.sqlCompletion,
+                tableAlias: event.target.value as AppSettings["editor"]["sqlCompletion"]["tableAlias"],
+              },
+            })
+          }
+        >
+          <option value="none">Do not generate</option>
+          <option value="initials">Generate initials</option>
+        </select>
+      </SettingRow>
+      <CheckboxLabel
+        label="Rank suggestions by recent usage"
+        detail="Completion choices are stored locally and never sent to the database"
+        checked={editor.sqlCompletion.rankByUsage}
+        onChange={() =>
+          updateEditor({
+            sqlCompletion: {
+              ...editor.sqlCompletion,
+              rankByUsage: !editor.sqlCompletion.rankByUsage,
+            },
+          })
         }
       />
       <SettingsDivider title="Vim" />
@@ -1197,6 +1249,101 @@ function DatabaseExplorerSettings({
           })
         }
       />
+    </SettingsPanel>
+  );
+}
+
+function DriverManagementSettings() {
+  const [installations, setInstallations] = useState<
+    DatabaseDriverInstallation[] | null
+  >(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void databaseService
+      .listDatabaseDriverInstallations()
+      .then((result) => {
+        if (active) setInstallations(result);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setLoadError(
+            error instanceof Error ? error.message : "Unable to inspect drivers.",
+          );
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return (
+    <SettingsPanel>
+      <SettingsDivider title="Installed database clients" first />
+      <p className="mb-3 max-w-[72ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
+        This inventory reports the exact client libraries compiled into the current
+        application build. Database server versions are detected separately when a
+        connection is opened.
+      </p>
+      {loadError && (
+        <p role="alert" className="py-2 text-[12px] text-[hsl(var(--destructive))]">
+          {loadError}
+        </p>
+      )}
+      {!installations && !loadError && (
+        <div aria-label="Loading database drivers" className="border-y border-[hsl(var(--wb-border-subtle))]">
+          {Array.from({ length: 5 }, (_, index) => (
+            <div
+              key={index}
+              className="flex h-14 animate-pulse items-center gap-4 border-b border-[hsl(var(--wb-border-subtle))] last:border-b-0 motion-reduce:animate-none"
+            >
+              <span className="h-3 w-28 rounded-[3px] bg-[hsl(var(--wb-hover))]" />
+              <span className="h-3 w-40 rounded-[3px] bg-[hsl(var(--wb-hover))]" />
+            </div>
+          ))}
+        </div>
+      )}
+      {installations && (
+        <div className="border-y border-[hsl(var(--wb-border-subtle))]">
+          {installations.map((installation) => (
+            <div
+              key={installation.driver}
+              className="grid min-h-14 grid-cols-[minmax(120px,0.8fr)_minmax(170px,1fr)_minmax(150px,1fr)] items-center gap-4 border-b border-[hsl(var(--wb-border-subtle))] py-2 last:border-b-0"
+            >
+              <div className="min-w-0">
+                <div className="truncate text-[12px] font-medium text-[hsl(var(--wb-text))]">
+                  {installation.displayName}
+                </div>
+                <div className="truncate text-[11px] text-[hsl(var(--wb-text-muted))]">
+                  {installation.driver}
+                </div>
+              </div>
+              <div className="min-w-0 font-mono text-[11px] text-[hsl(var(--wb-text))]">
+                <span className="break-all">{installation.clientLibrary}</span>{" "}
+                <span className="text-[hsl(var(--wb-text-muted))]">
+                  {installation.clientVersion}
+                </span>
+              </div>
+              <div className="min-w-0 text-[11px] leading-4 text-[hsl(var(--wb-text-muted))]">
+                <div>{installation.implementation}</div>
+                <div>Bundled · updates with OxideStudio</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <SettingsDivider title="Update boundary" />
+      <SettingRow label="Independent updates:">
+        <span className="text-[12px] text-amber-400">Not available for bundled drivers</span>
+      </SettingRow>
+      <p className="max-w-[72ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
+        The current clients are linked into the Rust application, so a client-library
+        security or compatibility update still requires an OxideStudio release. This
+        page exposes that boundary explicitly; it does not claim that bundled clients
+        can already be updated independently.
+      </p>
     </SettingsPanel>
   );
 }
@@ -1471,6 +1618,29 @@ function AiSettings({
       <p className="mt-2 max-w-[68ch] text-[11px] leading-5 text-[hsl(var(--wb-text-muted))]">
         Automatic requests use a 4 second timeout and never include connection
         strings, API keys, query results, or database row data.
+      </p>
+
+      <SettingsDivider title="Shell Safety" />
+      <p className="mb-3 max-w-[68ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
+        Every Agent shell command is inspected before approval and rechecked in
+        the Rust host before execution. Destructive commands are blocked or
+        require an exact one-time confirmation phrase.
+      </p>
+      <SettingRow label="Global rules:">
+        <div className="flex items-center gap-2">
+          <span className="settings-hint">
+            {settings.ai.shell.commandPolicy.rules.length} configured
+          </span>
+          <SettingsButton
+            onClick={() => void findWorkbenchAction("settings.openJson")?.run()}
+          >
+            Open settings JSON
+          </SettingsButton>
+        </div>
+      </SettingRow>
+      <p className="-mt-1 mb-3 ml-[148px] max-w-[68ch] text-[11px] leading-5 text-[hsl(var(--wb-text-muted))]">
+        Project-specific rules may be added at .oxide/command-policy.json. Rules
+        may only increase protection with confirm or block actions.
       </p>
 
       <SettingsDivider title="Conversation Data" />

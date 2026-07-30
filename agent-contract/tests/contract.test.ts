@@ -3,6 +3,7 @@ import {
   AGENT_HOST_MAX_FRAME_BYTES,
   AGENT_HOST_PROTOCOL_VERSION,
   agentEventSchema,
+  commandPreflightResultSchema,
   artifactReadRequestSchema,
   artifactSearchRequestSchema,
   graphCheckpointPutRequestSchema,
@@ -225,6 +226,36 @@ describe("agent host contract", () => {
           lease: "must-not-be-persisted",
         }),
     ).toBe(false);
+  });
+
+  it("carries command policy findings and exact confirmation phrases", () => {
+    const result = commandPreflightResultSchema.parse({
+      decision: "confirm",
+      policyDigest: "a".repeat(64),
+      summary: "Run once in workspace-write mode from .: git reset --hard",
+      findings: [
+        {
+          ruleId: "builtin.git.destructive-worktree",
+          decision: "confirm",
+          title: "Destructive Git operation",
+          detail: "The command can discard local changes.",
+        },
+      ],
+      executables: ["git"],
+      confirmation: {
+        kind: "phrase",
+        phrase: "RUN AAAAAA",
+        prompt: "Type the phrase exactly.",
+      },
+    });
+    expect(result.confirmation?.phrase).toBe("RUN AAAAAA");
+    expect(() =>
+      commandPreflightResultSchema.parse({
+        ...result,
+        decision: "block",
+        findings: Array.from({ length: 101 }, () => result.findings[0]),
+      }),
+    ).toThrow();
   });
 
   expect(AGENT_HOST_PROTOCOL_VERSION).toBe(1);

@@ -134,6 +134,7 @@ describe("AssistantSidebar Agent Host path", () => {
         "metadata.describeObject",
         "query.runReadOnly",
         "query.explain",
+        "shell.execute",
       ],
       storageMode: "project",
       binaryPath: "/tmp/oxide-agent-host",
@@ -287,6 +288,7 @@ describe("AssistantSidebar Agent Host path", () => {
       "query.explain",
       "query.runReadOnly",
       "workspace.getActiveTab",
+      "shell.execute",
     ]);
     expect(
       firstRequest.tools.some(
@@ -411,6 +413,58 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(textarea.value).toContain("SQLSTATE 42601");
     expect(textarea.value).toContain("Do not run the SQL");
     expect(useAssistantComposerStore.getState().request).toBeNull();
+  });
+
+  it("keeps mixed Chinese and English IME composition intact and does not submit its Enter", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value",
+    )?.set;
+
+    await act(async () => {
+      textarea.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      setter?.call(textarea, "查询userProfile数据");
+      textarea.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          data: "查询userProfile数据",
+          inputType: "insertCompositionText",
+          isComposing: true,
+        }),
+      );
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          keyCode: 229,
+          bubbles: true,
+        }),
+      );
+    });
+
+    expect(mocks.startTurn).not.toHaveBeenCalled();
+    expect(textarea.value).toBe("查询userProfile数据");
+
+    await act(async () => {
+      textarea.dispatchEvent(
+        new CompositionEvent("compositionend", {
+          bubbles: true,
+          data: "查询userProfile数据",
+        }),
+      );
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+      await flushAsyncWork();
+    });
+
+    expect(mocks.startTurn).toHaveBeenCalledOnce();
+    expect(mocks.startTurn.mock.calls[0]?.[0].prompt).toBe("查询userProfile数据");
   });
 
   it("restores completed project conversations from the encrypted host snapshot", async () => {

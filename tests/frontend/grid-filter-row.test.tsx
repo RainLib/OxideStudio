@@ -71,11 +71,63 @@ describe("GridFilterRow", () => {
       );
     });
 
+    expect(container.textContent).toContain("SORT");
+
     await act(async () => {
       Array.from(container.querySelectorAll("button"))
         .find((button) => button.textContent?.includes("WHERE"))
         ?.click();
     });
     expect(onModeChange).toHaveBeenCalledWith("visual");
+  });
+
+  it("opens table-column completion with Ctrl+Space and accepts it", async () => {
+    const onSqlFilterChange = vi.fn();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <GridFilterRow
+          columns={[
+            { id: "status", title: "status", width: 120 },
+            { id: "created_at", title: "created_at", width: 120 },
+          ]}
+          mode="sql"
+          visualFilters={[]}
+          sqlFilter=""
+          onModeChange={vi.fn()}
+          onVisualFiltersChange={vi.fn()}
+          onSqlFilterChange={onSqlFilterChange}
+          onSearch={vi.fn()}
+          driver="postgres"
+          tabId="table-users"
+          schemaName="public"
+          tableName="users"
+        />,
+      );
+    });
+
+    const input = container.querySelector("input")!;
+    await act(async () => {
+      input.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          code: "Space",
+          key: " ",
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(container.querySelector('[role="listbox"]')).not.toBeNull();
+
+    await act(async () => {
+      Array.from(container.querySelectorAll('[role="option"]'))
+        .find((option) => option.textContent?.includes("status"))
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(onSqlFilterChange).toHaveBeenCalledWith("status = ");
+    expect(container.querySelector('[role="listbox"]')).not.toBeNull();
   });
 });

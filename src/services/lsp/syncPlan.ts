@@ -51,10 +51,16 @@ export type LspFileMappings = {
   fileDialects: Record<string, string>;
 };
 
+export type LspCompletionPreferences = {
+  keywordCase: "upper" | "lower" | "preserve";
+  tableAlias: "none" | "initials";
+};
+
 export type LspConfigKeyInput = LspFileMappings & {
   connectionId: string;
   driver: DatabaseDriver;
   lspDialect: string;
+  completionPreferences?: LspCompletionPreferences;
   schemaDefinitions: LspSchemaDefinition[];
 };
 
@@ -89,7 +95,12 @@ export function createLspSyncPlan(options: {
   const connectionTabs = tabs.filter(
     (tab) => (tab.connectionId || activeConnectionId) === activeConnectionId
   );
-  const queryTabs = connectionTabs.filter((tab) => tab.type === "query");
+  // Table tabs own a virtual SELECT document for the compact WHERE editor.
+  // Including them here gives that document the same schema binding as a full
+  // query console without opening a hidden query tab.
+  const queryTabs = connectionTabs.filter(
+    (tab) => tab.type === "query" || tab.type === "table",
+  );
   const preferredTablesBySchema = new Map<string, Set<string>>();
   const preferredTablesByCatalog = new Map<string, Set<string>>();
   const targetCatalogsByKey = new Map<string, LspCatalogTarget>();
@@ -223,6 +234,10 @@ export function createLspConfigKey(input: LspConfigKeyInput) {
     connectionId: input.connectionId,
     driver: input.driver,
     lspDialect: input.lspDialect,
+    completionPreferences: input.completionPreferences || {
+      keywordCase: "upper",
+      tableAlias: "none",
+    },
     fileSchemas: input.fileSchemas,
     fileDialects: input.fileDialects,
     schemaSignature: lspSchemaSignature(input.schemaDefinitions),

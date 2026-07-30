@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_APP_SETTINGS, normalizeAppSettings } from "@/lib/appSettings";
-import { moveSideToolWindow, toolWindowAtSide } from "@/lib/workbenchLayout";
+import {
+  closeSideToolWindow,
+  moveSideToolWindow,
+  openSideToolWindow,
+  toolWindowAtSide,
+} from "@/lib/workbenchLayout";
 
 describe("app settings workbench layout", () => {
   it("keeps UI, editor, and data grid typography aligned by default", () => {
@@ -13,9 +18,33 @@ describe("app settings workbench layout", () => {
   it("opens only Database Explorer in the default workspace", () => {
     expect(DEFAULT_APP_SETTINGS.workbench.layout.visibility).toEqual({
       databaseExplorer: true,
+      projectFiles: false,
       assistant: false,
+      commit: false,
+      versionControl: false,
       results: false,
     });
+    expect(DEFAULT_APP_SETTINGS.workbench.layout.pinnedTitleTools).toEqual([]);
+  });
+
+  it("normalizes pinned title tools and drops unsupported or disabled entries", () => {
+    const settings = normalizeAppSettings({
+      workbench: {
+        layout: {
+          pinnedTitleTools: [
+            "commit",
+            "commit",
+            "assistant",
+            "versionControl",
+          ],
+        },
+        toolWindows: {
+          versionControl: { enabled: false, side: "right" },
+        },
+      },
+    });
+
+    expect(settings.workbench.layout.pinnedTitleTools).toEqual(["commit"]);
   });
 
   it("normalizes typography and data grid zoom bounds", () => {
@@ -104,6 +133,40 @@ describe("app settings workbench layout", () => {
     });
   });
 
+  it("normalizes SQL completion casing, aliases, and local usage ranking", () => {
+    expect(DEFAULT_APP_SETTINGS.editor.sqlCompletion).toEqual({
+      keywordCase: "upper",
+      tableAlias: "none",
+      rankByUsage: true,
+    });
+    expect(
+      normalizeAppSettings({
+        editor: {
+          sqlCompletion: {
+            keywordCase: "lower",
+            tableAlias: "initials",
+            rankByUsage: false,
+          },
+        },
+      }).editor.sqlCompletion,
+    ).toEqual({
+      keywordCase: "lower",
+      tableAlias: "initials",
+      rankByUsage: false,
+    });
+    expect(
+      normalizeAppSettings({
+        editor: {
+          sqlCompletion: {
+            keywordCase: "invalid",
+            tableAlias: "verbose",
+            rankByUsage: "yes",
+          },
+        },
+      }).editor.sqlCompletion,
+    ).toEqual(DEFAULT_APP_SETTINGS.editor.sqlCompletion);
+  });
+
   it("migrates legacy side visibility into tool window visibility", () => {
     const settings = normalizeAppSettings({
       workbench: {
@@ -117,12 +180,15 @@ describe("app settings workbench layout", () => {
 
     expect(settings.workbench.layout.visibility).toEqual({
       databaseExplorer: false,
+      projectFiles: false,
       assistant: true,
+      commit: false,
+      versionControl: false,
       results: false,
     });
   });
 
-  it("keeps side tool windows in distinct dock positions", () => {
+  it("allows side tool windows to share a dock and keeps one active", () => {
     const settings = normalizeAppSettings({
       workbench: {
         toolWindows: {
@@ -134,14 +200,12 @@ describe("app settings workbench layout", () => {
     });
 
     expect(settings.workbench.toolWindows.databaseExplorer.side).toBe("right");
-    expect(settings.workbench.toolWindows.assistant.side).toBe("left");
+    expect(settings.workbench.toolWindows.assistant.side).toBe("right");
     expect(settings.workbench.toolWindows.results.side).toBe("bottom");
-    expect(toolWindowAtSide(settings.workbench.toolWindows, "left")).toBe(
-      "assistant",
-    );
+    expect(toolWindowAtSide(settings.workbench, "right")).toBeNull();
   });
 
-  it("moves a side tool window by swapping the occupied dock", () => {
+  it("moves a side tool window without moving other windows on that dock", () => {
     const moved = moveSideToolWindow(
       DEFAULT_APP_SETTINGS.workbench,
       "databaseExplorer",
@@ -149,9 +213,27 @@ describe("app settings workbench layout", () => {
     );
 
     expect(moved.toolWindows.databaseExplorer.side).toBe("right");
-    expect(moved.toolWindows.assistant.side).toBe("left");
+    expect(moved.toolWindows.assistant.side).toBe("right");
+    expect(toolWindowAtSide(moved, "right")).toBe("databaseExplorer");
+    expect(moved.layout.visibility.assistant).toBe(false);
     expect(
       DEFAULT_APP_SETTINGS.workbench.toolWindows.databaseExplorer.side,
     ).toBe("left");
+  });
+
+  it("keeps same-side tools mutually exclusive and restores recent state", () => {
+    const assistant = openSideToolWindow(
+      DEFAULT_APP_SETTINGS.workbench,
+      "assistant",
+    );
+    const commit = openSideToolWindow(assistant, "commit");
+
+    expect(toolWindowAtSide(commit, "right")).toBe("commit");
+    expect(commit.layout.visibility.assistant).toBe(false);
+    expect(commit.layout.visibility.commit).toBe(true);
+
+    const restored = closeSideToolWindow(commit, "commit");
+    expect(toolWindowAtSide(restored, "right")).toBe("assistant");
+    expect(restored.layout.visibility.assistant).toBe(true);
   });
 });

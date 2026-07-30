@@ -79,6 +79,19 @@ export type AssistantApproval = {
   toolName?: string | null;
   risk: AssistantApprovalRisk;
   inputDigest: string;
+  policyDigest?: string | null;
+  findings?: Array<{
+    ruleId: string;
+    decision: "allow" | "confirm" | "block";
+    title: string;
+    detail: string;
+    evidence?: string;
+  }>;
+  confirmation?: {
+    kind: "phrase";
+    phrase: string;
+    prompt: string;
+  } | null;
   decision?: "approved" | "rejected" | null;
   decidedAt?: number | null;
 };

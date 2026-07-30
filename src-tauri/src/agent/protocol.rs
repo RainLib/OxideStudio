@@ -19,6 +19,7 @@ pub const HOST_RESOLVE_APPROVAL_METHOD: &str = "turn.resolveApproval";
 pub const SIDECAR_MODEL_COMPLETE_METHOD: &str = "model.complete";
 pub const SIDECAR_MODEL_STREAM_METHOD: &str = "model.stream";
 pub const HOST_MODEL_CHUNK_METHOD: &str = "model.chunk";
+pub const SIDECAR_TOOL_PREFLIGHT_METHOD: &str = "tool.preflight";
 pub const SIDECAR_TOOL_INVOKE_METHOD: &str = "tool.invoke";
 pub const SIDECAR_CHECKPOINT_LOAD_METHOD: &str = "checkpoint.load";
 pub const SIDECAR_CHECKPOINT_SAVE_METHOD: &str = "checkpoint.save";
@@ -305,6 +306,8 @@ pub struct AgentApproveActionRequest {
     pub metadata: RequestMetadata,
     pub approval_id: String,
     pub decision: ApprovalDecision,
+    #[serde(default)]
+    pub confirmation_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,6 +432,19 @@ pub struct ToolInvokeRequest {
     pub input: Value,
     pub input_digest: String,
     pub approval_lease: Option<String>,
+    #[serde(default)]
+    pub policy_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPreflightRequest {
+    #[serde(flatten)]
+    pub metadata: RequestMetadata,
+    pub call_id: String,
+    pub tool_name: String,
+    pub input: Value,
+    pub input_digest: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

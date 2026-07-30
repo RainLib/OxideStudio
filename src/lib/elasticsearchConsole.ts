@@ -64,6 +64,8 @@ export interface ElasticsearchMappingField {
   dataType?: string;
 }
 
+export type ElasticsearchMajorVersion = 6 | 7 | 8;
+
 export const ELASTICSEARCH_CONSOLE_LANGUAGE_ID = "elasticsearch-console";
 export const ELASTICSEARCH_COMPLETION_TRIGGER_CHARACTERS = Array.from(
   new Set(
@@ -398,12 +400,47 @@ function operationCompletions(
 function indexOperationCompletions(
   method: string | undefined,
   typedOperation: string,
+  majorVersion?: ElasticsearchMajorVersion,
 ) {
   return operationCompletions(
-    INDEX_OPERATION_COMPLETIONS,
+    elasticsearchIndexOperationsForVersion(majorVersion),
     method,
     typedOperation,
   );
+}
+
+function elasticsearchIndexOperationsForVersion(
+  majorVersion?: ElasticsearchMajorVersion,
+) {
+  if (majorVersion !== 6) return INDEX_OPERATION_COMPLETIONS;
+  return INDEX_OPERATION_COMPLETIONS.map((completion) => {
+    if (completion.label === "_doc/{id}") {
+      return {
+        ...completion,
+        label: "{type}/{id}",
+        insertText: "${1:type}/${2:id}",
+        detail: "Read, index, or delete an Elasticsearch 6 typed document",
+      };
+    }
+    if (completion.label === "_update/{id}") {
+      return {
+        ...completion,
+        label: "{type}/{id}/_update",
+        insertText:
+          '${1:type}/${2:id}/_update\n{\n  "doc": {\n    "${3:field}": "${4:value}"\n  }\n}',
+        detail: "Update one Elasticsearch 6 typed document",
+      };
+    }
+    if (completion.label === "_explain/{id}") {
+      return {
+        ...completion,
+        label: "{type}/{id}/_explain",
+        insertText: `\${1:type}/\${2:id}/_explain\n${SEARCH_REQUEST_BODY}`,
+        detail: "Explain an Elasticsearch 6 typed document match",
+      };
+    }
+    return completion;
+  });
 }
 
 function globalOperationCompletions(
@@ -934,6 +971,8 @@ export function registerElasticsearchConsoleLanguage(monaco: any) {
         const completions = elasticsearchConsoleCompletions(
           model.getValue(),
           offset,
+          (model as { __oxideElasticsearchMajorVersion?: ElasticsearchMajorVersion })
+            .__oxideElasticsearchMajorVersion,
         );
 
         return {
@@ -1767,6 +1806,25 @@ const FIELD_OBJECT_KEYS = new Set([
   "sort",
 ]);
 const QUERY_ARRAY_KEYS = new Set(["filter", "must", "must_not", "should"]);
+const ELASTICSEARCH_MAPPING_FIELD_VALUE_KEYS = new Set([
+  "field",
+  "fields",
+  "_source",
+  "docvalue_fields",
+  "stored_fields",
+  "path",
+  "default_field",
+]);
+
+export function elasticsearchCompletionExpectsMappingField(
+  context: ElasticsearchConsoleCompletionContext,
+) {
+  return (
+    context.area === "field-name" ||
+    (context.area === "value" &&
+      ELASTICSEARCH_MAPPING_FIELD_VALUE_KEYS.has(context.valueKey || ""))
+  );
+}
 
 /**
  * Classifies the cursor with Console semantics before any completion source is
@@ -1926,12 +1984,14 @@ export function elasticsearchConsoleCompletionContext(
 export function elasticsearchConsoleCompletions(
   source: string,
   cursorOffset: number,
+  majorVersion?: ElasticsearchMajorVersion,
 ): ElasticsearchConsoleCompletion[] {
   const context = elasticsearchConsoleCompletionContext(source, cursorOffset);
   return elasticsearchConsoleCompletionsForContext(
     source,
     cursorOffset,
     context,
+    majorVersion,
   );
 }
 
@@ -1959,7 +2019,7 @@ export function shouldOfferElasticsearchCompletions(
   return (
     ELASTICSEARCH_COMPLETION_AREAS.has(context.area) &&
     (context.area !== "value" ||
-      ["field", "fields", "_source"].includes(context.valueKey || ""))
+      ELASTICSEARCH_MAPPING_FIELD_VALUE_KEYS.has(context.valueKey || ""))
   );
 }
 
@@ -1980,6 +2040,7 @@ function elasticsearchConsoleCompletionsForContext(
   source: string,
   cursorOffset: number,
   context: ElasticsearchConsoleCompletionContext,
+  majorVersion?: ElasticsearchMajorVersion,
 ): ElasticsearchConsoleCompletion[] {
   if (context.area === "method") {
     return HTTP_METHODS.map((method) => ({
@@ -1992,7 +2053,11 @@ function elasticsearchConsoleCompletionsForContext(
 
   if (context.area === "operation") {
     return context.index
-      ? indexOperationCompletions(context.method, context.typed)
+      ? indexOperationCompletions(
+          context.method,
+          context.typed,
+          majorVersion,
+        )
       : globalOperationCompletions(context.method, context.typed);
   }
   if (context.area === "path") {
@@ -2081,6 +2146,7 @@ export function elasticsearchConsoleInlineSuggestion(
   source: string,
   cursorOffset: number,
   preferredIndex?: string,
+  majorVersion?: ElasticsearchMajorVersion,
 ) {
   const context = elasticsearchConsoleCompletionContext(source, cursorOffset);
   if (context.area === "method") {
@@ -2108,6 +2174,7 @@ export function elasticsearchConsoleInlineSuggestion(
       source,
       cursorOffset,
       context,
+      majorVersion,
     )[0];
     if (!candidate) return "";
     const insertion = plainElasticsearchSnippet(candidate.insertText);
@@ -2120,6 +2187,7 @@ export function elasticsearchConsoleInlineSuggestion(
     source,
     cursorOffset,
     context,
+    majorVersion,
   );
   const candidate = completions.find((item) =>
     item.label.toLowerCase().startsWith(context.typed.toLowerCase()),
@@ -2195,9 +2263,7 @@ export function elasticsearchSchemaCompletionsForContext<
   }
 
   const expectsMappingField =
-    context.area === "field-name" ||
-    (context.area === "value" &&
-      ["field", "fields", "_source"].includes(context.valueKey || ""));
+    elasticsearchCompletionExpectsMappingField(context);
   if (!expectsMappingField) return [];
 
   const mappingItems = items.filter((item) =>
@@ -2237,9 +2303,7 @@ export function elasticsearchMappingFieldCompletions(
   indexName: string,
 ): ElasticsearchSchemaCompletion[] {
   const expectsMappingField =
-    context.area === "field-name" ||
-    (context.area === "value" &&
-      ["field", "fields", "_source"].includes(context.valueKey || ""));
+    elasticsearchCompletionExpectsMappingField(context);
   if (!expectsMappingField) return [];
 
   const normalizedTyped = context.typed.toLowerCase();

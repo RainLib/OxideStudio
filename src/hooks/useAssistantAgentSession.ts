@@ -83,6 +83,7 @@ export type AssistantAgentSession = {
     approvalId: string,
     decision: AgentApprovalDecision,
     contextFingerprint: string,
+    confirmationText?: string,
   ) => Promise<void>;
   cancelTurn: (turnId: string) => Promise<void>;
   resumeTurn: (turnId: string, contextFingerprint: string) => Promise<void>;
@@ -600,6 +601,7 @@ export function useAssistantAgentSession(
       approvalId: string,
       decision: AgentApprovalDecision,
       _contextFingerprint: string,
+      confirmationText?: string,
     ) => {
       const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
       const source = resumeRequestsRef.current.get(turnId);
@@ -630,6 +632,7 @@ export function useAssistantAgentSession(
           ),
           approvalId,
           decision,
+          ...(confirmationText ? { confirmationText } : {}),
         });
         if (!acknowledgement.accepted) {
           throw new Error("Agent Host rejected the approval decision.");
@@ -1227,6 +1230,9 @@ export function reduceAgentHostEvent(
           toolName: event.toolName,
           risk: event.risk,
           inputDigest: event.inputDigest,
+          policyDigest: event.policyDigest,
+          findings: event.findings,
+          confirmation: event.confirmation,
         }),
       };
     case "context.compacted":
@@ -1343,6 +1349,9 @@ function fallbackToolPhaseDescription(toolName: string, label: string) {
   }
   if (toolName === "project.writeFile") {
     return "I’ll update the requested project file and leave the change available for review or undo.";
+  }
+  if (toolName === "shell.execute") {
+    return "I’ll run the approved command in the active project and report its bounded output.";
   }
   if (toolName.startsWith("metadata.")) {
     return "I’ll inspect the relevant database metadata before continuing.";

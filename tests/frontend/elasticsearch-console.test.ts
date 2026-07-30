@@ -101,6 +101,58 @@ describe("Elasticsearch Kibana Console requests", () => {
     ).toEqual(expect.arrayContaining(["query", "aggs", "_source", "sort"]));
   });
 
+  it.each([
+    [6, "{type}/{id}", "_doc/{id}"],
+    [7, "_doc/{id}", "{type}/{id}"],
+    [8, "_doc/{id}", "{type}/{id}"],
+  ] as const)(
+    "uses Elasticsearch %i document endpoint syntax",
+    (majorVersion, expected, rejected) => {
+      const source = "GET /products/";
+      const labels = elasticsearchConsoleCompletions(
+        source,
+        source.length,
+        majorVersion,
+      ).map((item) => item.label);
+
+      expect(labels).toContain(expected);
+      expect(labels).not.toContain(rejected);
+    },
+  );
+
+  it("uses typed update and explain paths only for Elasticsearch 6", () => {
+    const postSource = "POST /products/";
+    const getSource = "GET /products/";
+    const elasticsearchSixPost = elasticsearchConsoleCompletions(
+      postSource,
+      postSource.length,
+      6,
+    );
+    const elasticsearchSixGet = elasticsearchConsoleCompletions(
+      getSource,
+      getSource.length,
+      6,
+    );
+
+    expect(elasticsearchSixPost).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "{type}/{id}/_update" }),
+      ]),
+    );
+    expect(elasticsearchSixGet).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "{type}/{id}/_explain" }),
+      ]),
+    );
+    expect(
+      elasticsearchConsoleCompletions(
+        postSource,
+        postSource.length,
+        8,
+      ).map((item) => item.label),
+    ).toContain("_update/{id}");
+  });
+
   it("separates HTTP method, index, operation, and request-body completion", () => {
     expect(
       elasticsearchConsoleCompletions("", 0).map((item) => item.label),
@@ -270,6 +322,24 @@ describe("Elasticsearch Kibana Console requests", () => {
     expect(result.suggestions.map((item: any) => item.label)).toEqual(
       expect.arrayContaining(["_search", "_count", "_bulk"]),
     );
+
+    const elasticsearchSixSource = "GET /anocs_test/";
+    const elasticsearchSixResult = completionProvider.provideCompletionItems(
+      {
+        __oxideElasticsearchMajorVersion: 6,
+        getOffsetAt: () => elasticsearchSixSource.length,
+        getWordUntilPosition: (position: any) => ({
+          startColumn: position.column,
+          endColumn: position.column,
+        }),
+        getLineContent: () => elasticsearchSixSource,
+        getValue: () => elasticsearchSixSource,
+      },
+      { lineNumber: 1, column: elasticsearchSixSource.length + 1 },
+    );
+    expect(
+      elasticsearchSixResult.suggestions.map((item: any) => item.label),
+    ).toContain("{type}/{id}");
   });
 
   it("continues with Query DSL inside an auto-closed search body", () => {
@@ -367,6 +437,37 @@ describe("Elasticsearch Kibana Console requests", () => {
       }),
     ]);
   });
+
+  it.each(["fields", "_source", "docvalue_fields", "stored_fields"])(
+    "offers mapping fields inside an empty %s string",
+    (property) => {
+      const source = `POST /qikan_summary/_search
+{
+  "${property}": [""]
+}`;
+      const offset = source.indexOf('""]') + 1;
+      const context = elasticsearchConsoleCompletionContext(source, offset);
+
+      expect(context).toMatchObject({
+        area: "value",
+        typed: "",
+        valueKey: property,
+      });
+      expect(shouldOfferElasticsearchCompletions(source, offset)).toBe(true);
+      expect(
+        elasticsearchMappingFieldCompletions(
+          [{ name: "published_at", dataType: "date" }],
+          context,
+          "qikan_summary",
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          label: "published_at",
+          insertText: '"published_at"',
+        }),
+      ]);
+    },
+  );
 
   it("binds completion context to the request under the cursor", () => {
     const source = `POST /current-index/_search

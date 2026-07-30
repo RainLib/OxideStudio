@@ -103,9 +103,24 @@ export type AgentAnswerClarificationRequest = AgentRequestMetadata & {
 
 export type AgentApprovalDecision = "approve" | "reject";
 
+export type CommandPolicyFinding = {
+  ruleId: string;
+  decision: "allow" | "confirm" | "block";
+  title: string;
+  detail: string;
+  evidence?: string;
+};
+
+export type CommandConfirmation = {
+  kind: "phrase";
+  phrase: string;
+  prompt: string;
+};
+
 export type AgentApproveActionRequest = AgentRequestMetadata & {
   approvalId: string;
   decision: AgentApprovalDecision;
+  confirmationText?: string;
 };
 
 export type AgentActionAccepted = {
@@ -288,6 +303,9 @@ export type AgentHostEvent =
       title: string;
       risk: "write" | "destructive" | "external";
       summary: string;
+      policyDigest?: string;
+      findings?: CommandPolicyFinding[];
+      confirmation?: CommandConfirmation;
     })
   | (AgentEventBase<"context.compacted"> & {
       inputTokens: number;
@@ -642,7 +660,26 @@ function isAgentHostEvent(value: unknown): value is AgentHostEvent {
         typeof event.title === "string" &&
         typeof event.summary === "string" &&
         typeof event.risk === "string" &&
-        ["write", "destructive", "external"].includes(event.risk)
+        ["write", "destructive", "external"].includes(event.risk) &&
+        (event.policyDigest === undefined ||
+          typeof event.policyDigest === "string") &&
+        (event.findings === undefined ||
+          (Array.isArray(event.findings) &&
+            event.findings.every(
+              (finding) =>
+                isRecord(finding) &&
+                typeof finding.ruleId === "string" &&
+                typeof finding.title === "string" &&
+                typeof finding.detail === "string" &&
+                ["allow", "confirm", "block"].includes(
+                  String(finding.decision),
+                ),
+            ))) &&
+        (event.confirmation === undefined ||
+          (isRecord(event.confirmation) &&
+            event.confirmation.kind === "phrase" &&
+            typeof event.confirmation.phrase === "string" &&
+            typeof event.confirmation.prompt === "string"))
       );
     case "context.compacted":
       return (

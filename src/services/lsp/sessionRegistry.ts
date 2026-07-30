@@ -77,6 +77,11 @@ export async function ensureLspSession(options: {
 
   const binaryInfo = await getBundledLspBinaryInfo();
   if (!binaryInfo.exists) {
+    if (binaryInfo.integrity_verified === false) {
+      throw new Error(
+        `LSP binary integrity check failed at: ${binaryInfo.path}. Rebuild it with: make lsp-build`,
+      );
+    }
     throw new Error(`LSP binary not found at: ${binaryInfo.path}`);
   }
 
@@ -140,5 +145,18 @@ async function getBundledLspBinaryInfo() {
   if (!binaryInfoPromise) {
     binaryInfoPromise = invoke<LspBinaryInfo>("check_lsp_binary");
   }
-  return binaryInfoPromise;
+  try {
+    const info = await binaryInfoPromise;
+    // A missing or invalid binary can be repaired by the development build
+    // task while the application remains open. Do not cache that failure for
+    // the rest of the renderer lifetime; the existing health retry can then
+    // recover the session without reloading the whole workspace.
+    if (!info.exists || info.integrity_verified === false) {
+      binaryInfoPromise = null;
+    }
+    return info;
+  } catch (error) {
+    binaryInfoPromise = null;
+    throw error;
+  }
 }

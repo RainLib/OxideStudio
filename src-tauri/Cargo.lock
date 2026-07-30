@@ -4372,12 +4372,14 @@ dependencies = [
  "flate2",
  "futures",
  "keyring",
+ "libc",
  "mongodb",
  "oxide-enterprise-contracts",
  "percent-encoding",
  "prost",
  "rand 0.8.5",
  "redis",
+ "regex",
  "reqwest 0.12.28",
  "rmcp",
  "russh",
@@ -4404,6 +4406,7 @@ dependencies = [
  "tonic-prost-build",
  "tracing",
  "tree-sitter",
+ "tree-sitter-bash",
  "url",
  "uuid",
  "zeroize",
@@ -8005,6 +8008,16 @@ checksum = "705bf7c0958d0171dd7d3a6542f2f4f21d87ed5f1dc8db52919d3a6bed9a359a"
 dependencies = [
  "cc",
  "regex",
+]
+
+[[package]]
+name = "tree-sitter-bash"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5244703ad2e08a616d859a0557d7aa290adcd5e0990188a692e628ffe9dce40"
+dependencies = [
+ "cc",
+ "tree-sitter",
 ]
 
 [[package]]

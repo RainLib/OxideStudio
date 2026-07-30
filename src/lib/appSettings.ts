@@ -16,8 +16,26 @@ export type InlineCompletionSettings = {
   includeProjectContext: boolean;
 };
 
+export type SqlCompletionSettings = {
+  keywordCase: "upper" | "lower" | "preserve";
+  tableAlias: "none" | "initials";
+  rankByUsage: boolean;
+};
+
 export type WorkbenchToolWindowId =
-  "databaseExplorer" | "assistant" | "results";
+  | "databaseExplorer"
+  | "projectFiles"
+  | "assistant"
+  | "commit"
+  | "versionControl"
+  | "results";
+
+export type SideToolWindowId = Exclude<WorkbenchToolWindowId, "results">;
+
+export type PinnableTitleToolId = Extract<
+  SideToolWindowId,
+  "commit" | "versionControl"
+>;
 
 export type WorkbenchSide = "left" | "right";
 
@@ -29,6 +47,18 @@ export type WorkbenchToolWindows = {
     side: WorkbenchSide;
   };
   assistant: {
+    enabled: boolean;
+    side: WorkbenchSide;
+  };
+  projectFiles: {
+    enabled: boolean;
+    side: WorkbenchSide;
+  };
+  commit: {
+    enabled: boolean;
+    side: WorkbenchSide;
+  };
+  versionControl: {
     enabled: boolean;
     side: WorkbenchSide;
   };
@@ -50,6 +80,9 @@ export type AppSettings = {
       rightWidth: number;
       bottomHeight: number;
       activeToolWindow: WorkbenchToolWindowId | "editor";
+      activeSideToolWindows: Record<WorkbenchSide, SideToolWindowId | null>;
+      sideHistory: Record<WorkbenchSide, SideToolWindowId[]>;
+      pinnedTitleTools: PinnableTitleToolId[];
     };
     toolWindows: WorkbenchToolWindows;
   };
@@ -60,6 +93,7 @@ export type AppSettings = {
     wordWrap: "off" | "on" | "wordWrapColumn" | "bounded";
     minimap: boolean;
     confirmDestructiveSql: boolean;
+    sqlCompletion: SqlCompletionSettings;
     inlineCompletion: InlineCompletionSettings;
     keybindingMode: "standard" | "vim";
     vim: {
@@ -84,6 +118,20 @@ export type AppSettings = {
   };
   ai: {
     plannerKind: AiPlannerKind;
+    shell: {
+      commandPolicy: {
+        version: 1;
+        rules: Array<{
+          id: string;
+          action: "confirm" | "block";
+          executables?: string[];
+          argumentRegex?: string;
+          cwdGlob?: string;
+          sandboxModes?: Array<"workspace-write" | "unrestricted">;
+          message?: string;
+        }>;
+      };
+    };
   };
 };
 
@@ -96,13 +144,25 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     layout: {
       visibility: {
         databaseExplorer: true,
+        projectFiles: false,
         assistant: false,
+        commit: false,
+        versionControl: false,
         results: false,
       },
       leftWidth: 400,
       rightWidth: 360,
       bottomHeight: 320,
       activeToolWindow: "editor",
+      activeSideToolWindows: {
+        left: "databaseExplorer",
+        right: "assistant",
+      },
+      sideHistory: {
+        left: [],
+        right: [],
+      },
+      pinnedTitleTools: [],
     },
     toolWindows: {
       databaseExplorer: {
@@ -110,6 +170,18 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
         side: "left",
       },
       assistant: {
+        enabled: true,
+        side: "right",
+      },
+      projectFiles: {
+        enabled: true,
+        side: "right",
+      },
+      commit: {
+        enabled: true,
+        side: "right",
+      },
+      versionControl: {
         enabled: true,
         side: "right",
       },
@@ -151,6 +223,11 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     wordWrap: "off",
     minimap: false,
     confirmDestructiveSql: true,
+    sqlCompletion: {
+      keywordCase: "upper",
+      tableAlias: "none",
+      rankByUsage: true,
+    },
     inlineCompletion: {
       enabled: false,
       automaticSuggestions: true,
@@ -180,6 +257,12 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   },
   ai: {
     plannerKind: "model",
+    shell: {
+      commandPolicy: {
+        version: 1,
+        rules: [],
+      },
+    },
   },
 };
 
@@ -246,6 +329,11 @@ export function normalizeAppSettings(value: unknown): AppSettings {
               defaults.workbench.layout.visibility.databaseExplorer,
             ),
           ),
+          projectFiles: boolAt(
+            raw,
+            ["workbench", "layout", "visibility", "projectFiles"],
+            defaults.workbench.layout.visibility.projectFiles,
+          ),
           assistant: boolAt(
             raw,
             ["workbench", "layout", "visibility", "assistant"],
@@ -254,6 +342,16 @@ export function normalizeAppSettings(value: unknown): AppSettings {
               ["workbench", "layout", "rightVisible"],
               defaults.workbench.layout.visibility.assistant,
             ),
+          ),
+          commit: boolAt(
+            raw,
+            ["workbench", "layout", "visibility", "commit"],
+            defaults.workbench.layout.visibility.commit,
+          ),
+          versionControl: boolAt(
+            raw,
+            ["workbench", "layout", "visibility", "versionControl"],
+            defaults.workbench.layout.visibility.versionControl,
           ),
           results: boolAt(
             raw,
@@ -289,9 +387,26 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         activeToolWindow: enumAt(
           raw,
           ["workbench", "layout", "activeToolWindow"],
-          ["databaseExplorer", "assistant", "results", "editor"],
+          [
+            "databaseExplorer",
+            "projectFiles",
+            "assistant",
+            "commit",
+            "versionControl",
+            "results",
+            "editor",
+          ],
           defaults.workbench.layout.activeToolWindow,
         ),
+        activeSideToolWindows: {
+          left: normalizedActiveSideToolWindow(raw, toolWindows, "left"),
+          right: normalizedActiveSideToolWindow(raw, toolWindows, "right"),
+        },
+        sideHistory: {
+          left: normalizedSideHistory(raw, toolWindows, "left"),
+          right: normalizedSideHistory(raw, toolWindows, "right"),
+        },
+        pinnedTitleTools: normalizedPinnedTitleTools(raw, toolWindows),
       },
       toolWindows,
     },
@@ -323,6 +438,25 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         ["editor", "confirmDestructiveSql"],
         defaults.editor.confirmDestructiveSql,
       ),
+      sqlCompletion: {
+        keywordCase: enumAt(
+          raw,
+          ["editor", "sqlCompletion", "keywordCase"],
+          ["upper", "lower", "preserve"],
+          defaults.editor.sqlCompletion.keywordCase,
+        ),
+        tableAlias: enumAt(
+          raw,
+          ["editor", "sqlCompletion", "tableAlias"],
+          ["none", "initials"],
+          defaults.editor.sqlCompletion.tableAlias,
+        ),
+        rankByUsage: boolAt(
+          raw,
+          ["editor", "sqlCompletion", "rankByUsage"],
+          defaults.editor.sqlCompletion.rankByUsage,
+        ),
+      },
       inlineCompletion: {
         enabled: boolAt(
           raw,
@@ -436,6 +570,9 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         ["model", "langgraph", "local"],
         defaults.ai.plannerKind,
       ),
+      shell: {
+        commandPolicy: normalizedCommandPolicy(raw),
+      },
     },
   };
 }
@@ -444,23 +581,6 @@ function normalizedToolWindows(
   raw: Record<string, unknown>,
   defaults: AppSettings,
 ): WorkbenchToolWindows {
-  const databaseExplorerSide = enumAt(
-    raw,
-    ["workbench", "toolWindows", "databaseExplorer", "side"],
-    ["left", "right"],
-    defaults.workbench.toolWindows.databaseExplorer.side,
-  );
-  const requestedAssistantSide = enumAt(
-    raw,
-    ["workbench", "toolWindows", "assistant", "side"],
-    ["left", "right"],
-    defaults.workbench.toolWindows.assistant.side,
-  );
-  const assistantSide =
-    requestedAssistantSide === databaseExplorerSide
-      ? oppositeSide(databaseExplorerSide)
-      : requestedAssistantSide;
-
   return {
     databaseExplorer: {
       enabled: boolAt(
@@ -468,7 +588,7 @@ function normalizedToolWindows(
         ["workbench", "toolWindows", "databaseExplorer", "enabled"],
         defaults.workbench.toolWindows.databaseExplorer.enabled,
       ),
-      side: databaseExplorerSide,
+      side: toolWindowSide(raw, defaults, "databaseExplorer"),
     },
     assistant: {
       enabled: boolAt(
@@ -476,7 +596,31 @@ function normalizedToolWindows(
         ["workbench", "toolWindows", "assistant", "enabled"],
         defaults.workbench.toolWindows.assistant.enabled,
       ),
-      side: assistantSide,
+      side: toolWindowSide(raw, defaults, "assistant"),
+    },
+    projectFiles: {
+      enabled: boolAt(
+        raw,
+        ["workbench", "toolWindows", "projectFiles", "enabled"],
+        defaults.workbench.toolWindows.projectFiles.enabled,
+      ),
+      side: toolWindowSide(raw, defaults, "projectFiles"),
+    },
+    commit: {
+      enabled: boolAt(
+        raw,
+        ["workbench", "toolWindows", "commit", "enabled"],
+        defaults.workbench.toolWindows.commit.enabled,
+      ),
+      side: toolWindowSide(raw, defaults, "commit"),
+    },
+    versionControl: {
+      enabled: boolAt(
+        raw,
+        ["workbench", "toolWindows", "versionControl", "enabled"],
+        defaults.workbench.toolWindows.versionControl.enabled,
+      ),
+      side: toolWindowSide(raw, defaults, "versionControl"),
     },
     results: {
       enabled: boolAt(
@@ -489,8 +633,130 @@ function normalizedToolWindows(
   };
 }
 
-function oppositeSide(side: WorkbenchSide): WorkbenchSide {
-  return side === "left" ? "right" : "left";
+function toolWindowSide(
+  raw: Record<string, unknown>,
+  defaults: AppSettings,
+  id: SideToolWindowId,
+): WorkbenchSide {
+  return enumAt(
+    raw,
+    ["workbench", "toolWindows", id, "side"],
+    ["left", "right"],
+    defaults.workbench.toolWindows[id].side,
+  );
+}
+
+const SIDE_TOOL_WINDOW_IDS: SideToolWindowId[] = [
+  "databaseExplorer",
+  "projectFiles",
+  "assistant",
+  "commit",
+  "versionControl",
+];
+
+const PINNABLE_TITLE_TOOL_IDS: PinnableTitleToolId[] = [
+  "commit",
+  "versionControl",
+];
+
+function normalizedPinnedTitleTools(
+  raw: Record<string, unknown>,
+  toolWindows: WorkbenchToolWindows,
+): PinnableTitleToolId[] {
+  const value = getAt(raw, ["workbench", "layout", "pinnedTitleTools"]);
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value)]
+    .filter(
+      (id): id is PinnableTitleToolId =>
+        typeof id === "string" &&
+        PINNABLE_TITLE_TOOL_IDS.includes(id as PinnableTitleToolId) &&
+        toolWindows[id as PinnableTitleToolId].enabled,
+    )
+    .slice(0, PINNABLE_TITLE_TOOL_IDS.length);
+}
+
+function normalizedActiveSideToolWindow(
+  raw: Record<string, unknown>,
+  toolWindows: WorkbenchToolWindows,
+  side: WorkbenchSide,
+): SideToolWindowId | null {
+  const requested = enumAt(
+    raw,
+    ["workbench", "layout", "activeSideToolWindows", side],
+    SIDE_TOOL_WINDOW_IDS,
+    side === "left" ? "databaseExplorer" : "assistant",
+  );
+  if (toolWindows[requested].enabled && toolWindows[requested].side === side) {
+    return requested;
+  }
+  return (
+    SIDE_TOOL_WINDOW_IDS.find(
+      (id) => toolWindows[id].enabled && toolWindows[id].side === side,
+    ) ?? null
+  );
+}
+
+function normalizedSideHistory(
+  raw: Record<string, unknown>,
+  toolWindows: WorkbenchToolWindows,
+  side: WorkbenchSide,
+): SideToolWindowId[] {
+  const value = getAt(raw, ["workbench", "layout", "sideHistory", side]);
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value)]
+    .filter(
+      (id): id is SideToolWindowId =>
+        typeof id === "string" &&
+        SIDE_TOOL_WINDOW_IDS.includes(id as SideToolWindowId) &&
+        toolWindows[id as SideToolWindowId].side === side,
+    )
+    .slice(0, SIDE_TOOL_WINDOW_IDS.length);
+}
+
+function normalizedCommandPolicy(
+  raw: Record<string, unknown>,
+): AppSettings["ai"]["shell"]["commandPolicy"] {
+  const policy = recordAt(raw, ["ai", "shell", "commandPolicy"]);
+  const sourceRules = Array.isArray(policy.rules) ? policy.rules : [];
+  const rules = sourceRules
+    .filter(isRecord)
+    .slice(0, 100)
+    .flatMap((rule) => {
+      const id = typeof rule.id === "string" ? rule.id.trim().slice(0, 120) : "";
+      const action: "confirm" | "block" | null = rule.action === "block" || rule.action === "confirm"
+        ? rule.action
+        : null;
+      if (!id || !action) return [];
+      const executables = Array.isArray(rule.executables)
+        ? rule.executables
+            .filter((value): value is string => typeof value === "string")
+            .slice(0, 100)
+            .map((value) => value.trim().slice(0, 512))
+            .filter(Boolean)
+        : undefined;
+      const sandboxModes = Array.isArray(rule.sandboxModes)
+        ? rule.sandboxModes.filter(
+            (value): value is "workspace-write" | "unrestricted" =>
+              value === "workspace-write" || value === "unrestricted",
+          )
+        : undefined;
+      return [{
+        id,
+        action,
+        ...(executables?.length ? { executables } : {}),
+        ...(typeof rule.argumentRegex === "string"
+          ? { argumentRegex: rule.argumentRegex.slice(0, 512) }
+          : {}),
+        ...(typeof rule.cwdGlob === "string"
+          ? { cwdGlob: rule.cwdGlob.slice(0, 512) }
+          : {}),
+        ...(sandboxModes?.length ? { sandboxModes } : {}),
+        ...(typeof rule.message === "string"
+          ? { message: rule.message.slice(0, 500) }
+          : {}),
+      }];
+    });
+  return { version: 1, rules };
 }
 
 function normalizeKeymap(

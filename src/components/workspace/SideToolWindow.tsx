@@ -33,6 +33,7 @@ export function SideToolWindow({
       style={{ width: `${isOpen ? width : 0}px` }}
       onFocus={onFocus}
       data-tool-window-side={side}
+      tabIndex={isOpen ? -1 : undefined}
     >
       <div
         className={cn(

@@ -48,9 +48,15 @@ describe("LSP sync plan", () => {
       "query-users",
       "audit-table",
     ]);
-    expect(plan?.queryTabs.map((tab) => tab.id)).toEqual(["query-users"]);
+    expect(plan?.queryTabs.map((tab) => tab.id)).toEqual([
+      "query-users",
+      "audit-table",
+    ]);
     expect(plan?.targetSchemas).toEqual(["app", "audit"]);
-    expect(plan?.schemaByTabId).toEqual({ "query-users": "app" });
+    expect(plan?.schemaByTabId).toEqual({
+      "query-users": "app",
+      "audit-table": "audit",
+    });
     expect(
       Array.from(plan?.preferredTablesBySchema.get("audit") ?? [])
     ).toEqual(["events"]);

@@ -17,7 +17,30 @@ type VimApi = {
     prefix: string,
     callback: (_editor: unknown, params: { args?: string[]; argString?: string }) => void
   ) => void;
+  defineAction: (
+    name: string,
+    callback: (_editor: unknown, args?: { repeat?: number }) => void,
+  ) => void;
+  mapCommand: (
+    keys: string,
+    type: "action",
+    name: string,
+    args?: Record<string, unknown>,
+    extra?: Record<string, unknown>,
+  ) => void;
 };
+
+export type VimWindowNavigation =
+  | "left"
+  | "right"
+  | "up"
+  | "down"
+  | "next"
+  | "previous"
+  | "close";
+
+export const APP_EVENT_VIM_WINDOW_NAVIGATE =
+  "oxide:vim-window-navigate";
 
 export type VimModeController = {
   dispose: () => void;
@@ -40,6 +63,7 @@ export async function attachVimMode(options: {
   onQuit?: () => void | Promise<unknown>;
   onWriteQuit?: () => void | Promise<unknown>;
   onEdit?: (relativePath: string) => void | Promise<unknown>;
+  onWindowNavigate?: (direction: VimWindowNavigation) => void;
 }): Promise<VimModeController> {
   const { initVimMode, VimMode } = await import("monaco-vim");
   const adapter = initVimMode(options.editor, options.statusNode);
@@ -48,6 +72,31 @@ export async function attachVimMode(options: {
     lhs: string;
     mode?: Exclude<VimMappingMode, "all">;
   }> = [];
+
+  if (options.onWindowNavigate) {
+    const actionPrefix = `oxideWindow${Math.random().toString(36).slice(2)}`;
+    const windowMappings: Array<[string, VimWindowNavigation]> = [
+      ["<C-w>h", "left"],
+      ["<C-w><Left>", "left"],
+      ["<C-w>l", "right"],
+      ["<C-w><Right>", "right"],
+      ["<C-w>k", "up"],
+      ["<C-w><Up>", "up"],
+      ["<C-w>j", "down"],
+      ["<C-w><Down>", "down"],
+      ["<C-w>w", "next"],
+      ["<C-w><C-w>", "next"],
+      ["<C-w>W", "previous"],
+      ["<C-w>q", "close"],
+      ["<C-w>c", "close"],
+    ];
+    windowMappings.forEach(([lhs, direction], index) => {
+      const actionName = `${actionPrefix}${index}`;
+      vim.defineAction(actionName, () => options.onWindowNavigate?.(direction));
+      vim.mapCommand(lhs, "action", actionName, {}, { context: "normal" });
+      appliedMappings.push({ lhs, mode: "normal" });
+    });
+  }
 
   if (options.onWrite) {
     vim.defineEx("write", "w", () => void options.onWrite?.());

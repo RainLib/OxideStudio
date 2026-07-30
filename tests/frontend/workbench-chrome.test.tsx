@@ -97,6 +97,8 @@ describe("WorkbenchChrome", () => {
     const onToggleDatabaseExplorer = vi.fn();
     const onToggleAssistant = vi.fn();
     const onToggleFiles = vi.fn();
+    const onToggleCommit = vi.fn();
+    const onToggleVersionControl = vi.fn();
 
     await act(async () => {
       root = createRoot(container);
@@ -104,12 +106,21 @@ describe("WorkbenchChrome", () => {
         <WorkbenchTitleTools
           databaseExplorerOpen
           databaseExplorerSide="left"
-          secondaryPanelOpen={false}
-          secondaryPanelView="assistant"
+          assistantOpen={false}
           assistantSide="right"
+          projectFilesOpen={false}
+          projectFilesSide="right"
+          commitOpen={false}
+          commitPinned={false}
+          versionControlOpen={false}
+          versionControlPinned={false}
           onToggleDatabaseExplorer={onToggleDatabaseExplorer}
           onToggleAssistant={onToggleAssistant}
           onToggleFiles={onToggleFiles}
+          onToggleCommit={onToggleCommit}
+          onToggleVersionControl={onToggleVersionControl}
+          onSetCommitPinned={vi.fn()}
+          onSetVersionControlPinned={vi.fn()}
         />,
       );
     });
@@ -128,6 +139,106 @@ describe("WorkbenchChrome", () => {
     expect(onToggleDatabaseExplorer).toHaveBeenCalledOnce();
     expect(onToggleAssistant).toHaveBeenCalledOnce();
     expect(onToggleFiles).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="More tool windows"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).toContain("Commit");
+    expect(document.body.textContent).toContain("Version Control");
+    const menuButtons = Array.from(document.body.querySelectorAll("button"));
+    await act(async () => {
+      menuButtons.find((button) => button.textContent?.includes("Commit"))?.click();
+      menuButtons
+        .find((button) => button.textContent?.includes("Version Control"))
+        ?.click();
+    });
+    expect(onToggleCommit).toHaveBeenCalledOnce();
+    expect(onToggleVersionControl).toHaveBeenCalledOnce();
+  });
+
+  it("pins menu tools into the title bar and exposes unpin on the pinned tool", async () => {
+    const onSetCommitPinned = vi.fn();
+    const onSetVersionControlPinned = vi.fn();
+    const commonProps = {
+      databaseExplorerOpen: true,
+      databaseExplorerSide: "left" as const,
+      assistantOpen: false,
+      assistantSide: "right" as const,
+      projectFilesOpen: false,
+      projectFilesSide: "right" as const,
+      commitOpen: false,
+      versionControlOpen: false,
+      onToggleDatabaseExplorer: vi.fn(),
+      onToggleAssistant: vi.fn(),
+      onToggleFiles: vi.fn(),
+      onToggleCommit: vi.fn(),
+      onToggleVersionControl: vi.fn(),
+      onSetCommitPinned,
+      onSetVersionControlPinned,
+    };
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <WorkbenchTitleTools
+          {...commonProps}
+          commitPinned={false}
+          versionControlPinned={false}
+        />,
+      );
+    });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="More tool windows"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    const pinCommit = document.body.querySelector<HTMLButtonElement>(
+      'button[aria-label="Pin Commit to title bar"]',
+    );
+    expect(pinCommit).not.toBeNull();
+    await act(async () => {
+      pinCommit?.click();
+    });
+    expect(onSetCommitPinned).toHaveBeenCalledWith(true);
+
+    await act(async () => {
+      root?.render(
+        <WorkbenchTitleTools
+          {...commonProps}
+          commitPinned
+          versionControlPinned={false}
+        />,
+      );
+    });
+    expect(
+      container.querySelector('button[aria-label="Toggle Commit"]'),
+    ).not.toBeNull();
+    const unpinCommit = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Unpin Commit from title bar"]',
+    );
+    expect(unpinCommit).not.toBeNull();
+    await act(async () => {
+      unpinCommit?.click();
+    });
+    expect(onSetCommitPinned).toHaveBeenCalledWith(false);
+
+    await act(async () => {
+      root?.render(
+        <WorkbenchTitleTools
+          {...commonProps}
+          commitPinned
+          versionControlPinned
+        />,
+      );
+    });
+    expect(
+      container.querySelector('button[aria-label="More tool windows"]'),
+    ).toBeNull();
   });
 
   it("opens the command palette from the global search control", async () => {

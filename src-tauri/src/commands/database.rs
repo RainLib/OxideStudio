@@ -6,8 +6,81 @@ use crate::core::{
     manager::ConnectionManager,
     protocol::Response,
 };
+use serde::Serialize;
 use std::str::FromStr;
 use tauri::State;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseDriverInstallation {
+    pub driver: &'static str,
+    pub display_name: &'static str,
+    pub client_library: &'static str,
+    pub client_version: &'static str,
+    pub distribution: &'static str,
+    pub update_policy: &'static str,
+    pub independently_updatable: bool,
+    pub server_version_policy: &'static str,
+    pub implementation: &'static str,
+}
+
+fn bundled_database_driver_installations() -> Vec<DatabaseDriverInstallation> {
+    let sqlx_version = env!("OXIDE_DRIVER_SQLX_VERSION");
+    [
+        (
+            "postgres",
+            "PostgreSQL",
+            "sqlx-postgres",
+            sqlx_version,
+            "native Rust client",
+        ),
+        (
+            "mysql",
+            "MySQL",
+            "sqlx-mysql",
+            sqlx_version,
+            "native Rust client",
+        ),
+        (
+            "mongodb",
+            "MongoDB",
+            "mongodb",
+            env!("OXIDE_DRIVER_MONGODB_VERSION"),
+            "native Rust client",
+        ),
+        (
+            "redis",
+            "Redis",
+            "redis",
+            env!("OXIDE_DRIVER_REDIS_VERSION"),
+            "native Rust client",
+        ),
+        (
+            "elasticsearch",
+            "Elasticsearch",
+            "reqwest",
+            env!("OXIDE_DRIVER_REQWEST_VERSION"),
+            "OxideStudio HTTP adapter",
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(driver, display_name, client_library, client_version, implementation)| {
+            DatabaseDriverInstallation {
+                driver,
+                display_name,
+                client_library,
+                client_version,
+                distribution: "bundled",
+                update_policy: "application-update",
+                independently_updatable: false,
+                server_version_policy: "detected-at-connection",
+                implementation,
+            }
+        },
+    )
+    .collect()
+}
 
 fn validate_token(value: &str, field: &str) -> Result<(), String> {
     if value
@@ -157,6 +230,12 @@ pub async fn get_database_capabilities(
 #[tauri::command]
 pub async fn list_database_capabilities() -> Result<Response<Vec<DatabaseCapabilities>>, String> {
     Ok(Response::ok(all_database_capabilities()))
+}
+
+#[tauri::command]
+pub async fn list_database_driver_installations(
+) -> Result<Response<Vec<DatabaseDriverInstallation>>, String> {
+    Ok(Response::ok(bundled_database_driver_installations()))
 }
 
 #[tauri::command]
@@ -331,5 +410,24 @@ mod tests {
     fn rejects_protected_namespaces() {
         assert!(drop_database_sql(DatabaseKind::Postgres, "pg_catalog", true).is_err());
         assert!(drop_database_sql(DatabaseKind::Mysql, "mysql", true).is_err());
+    }
+
+    #[test]
+    fn reports_the_real_bundled_driver_update_boundary() {
+        let installations = bundled_database_driver_installations();
+        assert_eq!(installations.len(), 5);
+        assert!(installations.iter().all(|driver| {
+            driver.distribution == "bundled"
+                && driver.update_policy == "application-update"
+                && !driver.independently_updatable
+                && !driver.client_version.is_empty()
+        }));
+        assert_eq!(
+            installations
+                .iter()
+                .find(|driver| driver.driver == "elasticsearch")
+                .map(|driver| driver.client_library),
+            Some("reqwest")
+        );
     }
 }

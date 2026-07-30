@@ -15,6 +15,8 @@ import {
   FileJson2,
   FolderOpen,
   FolderPlus,
+  GitBranch,
+  Github,
   LoaderCircle,
   Plus,
   RefreshCw,
@@ -41,10 +43,20 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { APP_EVENT_OPEN_SETTINGS } from "@/lib/actionEvents";
+import {
+  APP_EVENT_OPEN_SETTINGS,
+  APP_EVENT_OPEN_VERSION_CONTROL,
+} from "@/lib/actionEvents";
 import type { Project } from "@/services/tauri/store.service";
 import type { SettingsSection } from "@/components/settings/SettingsDialog";
 import { EnterpriseAccountMenu } from "@/components/EnterpriseAccountMenu";
+import {
+  projectGitService,
+  type GitHubCliStatus,
+  type GitHubRepository,
+} from "@/services/tauri/project-git.service";
+
+type ProjectSourceMode = "local" | "git" | "github";
 
 const SettingsDialog = lazy(() =>
   import("@/components/settings/SettingsDialog").then((module) => ({
@@ -118,8 +130,20 @@ export function AppBar({ center, right }: AppBarProps) {
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  const [projectSourceMode, setProjectSourceMode] =
+    useState<ProjectSourceMode>("local");
   const [projectAlias, setProjectAlias] = useState("");
   const [projectRootPath, setProjectRootPath] = useState("");
+  const [gitRepositoryUrl, setGitRepositoryUrl] = useState("");
+  const [shallowClone, setShallowClone] = useState(false);
+  const [githubStatus, setGithubStatus] = useState<GitHubCliStatus | null>(null);
+  const [githubToken, setGithubToken] = useState("");
+  const [githubQuery, setGithubQuery] = useState("");
+  const [githubRepositories, setGithubRepositories] = useState<GitHubRepository[]>([]);
+  const [selectedGithubRepository, setSelectedGithubRepository] =
+    useState<GitHubRepository | null>(null);
+  const [githubLoading, setGithubLoading] = useState(false);
+  const [githubStatusRequested, setGithubStatusRequested] = useState(false);
   const [projectError, setProjectError] = useState<string | null>(null);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
@@ -198,13 +222,91 @@ export function AppBar({ center, right }: AppBarProps) {
     }
     return [...groups.entries()];
   }, [projects]);
+  const activeProject = useMemo(
+    () => projects.find((project) => project.id === activeProjectId) || null,
+    [activeProjectId, projects],
+  );
 
   const openProjectDialog = () => {
     setProjectAlias("");
     setProjectRootPath("");
+    setProjectSourceMode("local");
+    setGitRepositoryUrl("");
+    setShallowClone(false);
+    setGithubStatus(null);
+    setGithubStatusRequested(false);
+    setGithubToken("");
+    setGithubQuery("");
+    setGithubRepositories([]);
+    setSelectedGithubRepository(null);
     setProjectError(null);
     setProjectMenuOpen(false);
     setProjectDialogOpen(true);
+  };
+
+  const chooseCloneDestination = async () => {
+    setProjectError(null);
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose an Empty Clone Destination",
+      });
+      if (typeof selected === "string") setProjectRootPath(selected);
+    } catch (error) {
+      setProjectError(
+        error instanceof Error
+          ? error.message
+          : "Failed to choose a clone destination.",
+      );
+    }
+  };
+
+  const refreshGithubStatus = async () => {
+    setGithubStatusRequested(true);
+    setGithubLoading(true);
+    setProjectError(null);
+    try {
+      setGithubStatus(await projectGitService.getGitHubStatus());
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGithubLoading(false);
+    }
+  };
+
+  const authenticateGithub = async () => {
+    if (!githubToken.trim()) return;
+    setGithubLoading(true);
+    setProjectError(null);
+    try {
+      setGithubStatus(await projectGitService.authenticateGitHub(githubToken));
+      setGithubToken("");
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGithubLoading(false);
+    }
+  };
+
+  const searchGithub = async () => {
+    if (!githubQuery.trim()) return;
+    setGithubLoading(true);
+    setProjectError(null);
+    try {
+      const repositories = await projectGitService.searchGitHub(githubQuery);
+      setGithubRepositories(repositories);
+      setSelectedGithubRepository((current) =>
+        current && repositories.some((repo) => repo.fullName === current.fullName)
+          ? current
+          : repositories[0] || null,
+      );
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGithubLoading(false);
+    }
   };
 
   const chooseProjectDirectory = async () => {
@@ -278,10 +380,29 @@ export function AppBar({ center, right }: AppBarProps) {
       setProjectError("A project with this name already exists.");
       return;
     }
+    if (projectSourceMode === "git" && !gitRepositoryUrl.trim()) {
+      setProjectError("Enter a Git repository URL.");
+      return;
+    }
+    if (projectSourceMode === "github" && !selectedGithubRepository) {
+      setProjectError("Select a GitHub repository.");
+      return;
+    }
 
     setIsCreatingProject(true);
     setProjectError(null);
     try {
+      if (projectSourceMode !== "local") {
+        await projectGitService.clone({
+          source:
+            projectSourceMode === "github"
+              ? selectedGithubRepository!.fullName
+              : gitRepositoryUrl,
+          destination: projectRootPath,
+          github: projectSourceMode === "github",
+          shallowDepth: shallowClone ? 1 : null,
+        });
+      }
       await createProject(normalizedProjectName, projectRootPath);
       setProjectDialogOpen(false);
       setProjectAlias("");
@@ -294,6 +415,24 @@ export function AppBar({ center, right }: AppBarProps) {
       setIsCreatingProject(false);
     }
   };
+
+  useEffect(() => {
+    if (
+      projectDialogOpen &&
+      projectSourceMode === "github" &&
+      githubStatus === null &&
+      !githubStatusRequested &&
+      !githubLoading
+    ) {
+      void refreshGithubStatus();
+    }
+  }, [
+    githubLoading,
+    githubStatus,
+    githubStatusRequested,
+    projectDialogOpen,
+    projectSourceMode,
+  ]);
 
   const handleDeleteProject = async () => {
     if (!projectToDelete || isDeletingProject) return;
@@ -436,6 +575,20 @@ export function AppBar({ center, right }: AppBarProps) {
               <div className="my-1 h-px bg-[hsl(var(--wb-border-subtle))]" />
               <button
                 type="button"
+                className="flex h-7 w-full items-center gap-2 rounded-[3px] px-2 text-left text-[12px] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-45"
+                disabled={!activeProject || activeProject.origin === "managed"}
+                onClick={() => {
+                  setProjectMenuOpen(false);
+                  window.dispatchEvent(
+                    new CustomEvent(APP_EVENT_OPEN_VERSION_CONTROL),
+                  );
+                }}
+              >
+                <GitBranch size={13} />
+                <span>Version Control…</span>
+              </button>
+              <button
+                type="button"
                 className="flex h-7 w-full items-center gap-2 rounded-[3px] px-2 text-left text-[12px] hover:bg-[hsl(var(--wb-hover))]"
                 onClick={openProjectDialog}
               >
@@ -544,8 +697,11 @@ export function AppBar({ center, right }: AppBarProps) {
       </div>
 
       <Dialog open={projectDialogOpen} onOpenChange={setProjectDialogOpen}>
-        <DialogContent className="w-[500px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_4px_8px_rgba(0,0,0,0.42)]">
-          <form onSubmit={handleCreateProject}>
+        <DialogContent className="max-h-[calc(100vh-32px)] w-[640px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_4px_8px_rgba(0,0,0,0.42)]">
+          <form
+            onSubmit={handleCreateProject}
+            className="flex min-h-0 flex-col overflow-hidden"
+          >
             <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3 text-left">
               <div className="flex items-center gap-2">
                 <span className="flex h-7 w-7 items-center justify-center rounded-[5px] bg-[hsl(var(--wb-active))] text-[hsl(var(--wb-accent))]">
@@ -556,23 +712,101 @@ export function AppBar({ center, right }: AppBarProps) {
                     New Project
                   </DialogTitle>
                   <DialogDescription className="text-[11px] leading-4 text-[hsl(var(--wb-text-muted))]">
-                    Link a folder to a separate database workspace.
+                    Open a local folder or clone a repository into a new database workspace.
                   </DialogDescription>
                 </div>
               </div>
             </DialogHeader>
 
-            <div className="space-y-4 px-4 py-4">
+            <div className="custom-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
+              <div className="grid grid-cols-3 gap-1 rounded-[4px] bg-[hsl(var(--wb-panel))] p-1">
+                {(
+                  [
+                    ["local", FolderOpen, "Local folder"],
+                    ["git", GitBranch, "Git URL"],
+                    ["github", Github, "GitHub"],
+                  ] as const
+                ).map(([mode, Icon, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    autoFocus={mode === "local"}
+                    className={`flex h-8 items-center justify-center gap-1.5 rounded-[3px] text-[11px] transition-colors ${
+                      projectSourceMode === mode
+                        ? "bg-[hsl(var(--wb-active))] text-[hsl(var(--wb-text))] shadow-sm"
+                        : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                    }`}
+                    onClick={() => {
+                      setProjectSourceMode(mode);
+                      setProjectError(null);
+                    }}
+                    disabled={isCreatingProject}
+                  >
+                    <Icon size={13} />
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {projectSourceMode === "git" && (
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="git-repository-url"
+                    className="block text-[11px] font-medium text-[hsl(var(--wb-text-muted))]"
+                  >
+                    Repository URL
+                  </label>
+                  <input
+                    id="git-repository-url"
+                    value={gitRepositoryUrl}
+                    onChange={(event) => {
+                      setGitRepositoryUrl(event.target.value);
+                      setProjectError(null);
+                    }}
+                    placeholder="https://github.com/owner/repository.git"
+                    className="h-8 w-full rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 font-mono text-[11px] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
+                    disabled={isCreatingProject}
+                  />
+                  <p className="text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
+                    HTTPS, SSH and Git protocol URLs are supported. Credentials embedded in URLs are rejected.
+                  </p>
+                </div>
+              )}
+
+              {projectSourceMode === "github" && (
+                <GithubProjectSource
+                  status={githubStatus}
+                  token={githubToken}
+                  query={githubQuery}
+                  repositories={githubRepositories}
+                  selectedRepository={selectedGithubRepository}
+                  loading={githubLoading}
+                  disabled={isCreatingProject}
+                  onTokenChange={setGithubToken}
+                  onQueryChange={setGithubQuery}
+                  onAuthenticate={() => void authenticateGithub()}
+                  onRefresh={() => void refreshGithubStatus()}
+                  onSearch={() => void searchGithub()}
+                  onSelect={setSelectedGithubRepository}
+                />
+              )}
+
               <div className="space-y-1.5">
                 <label className="block text-[11px] font-medium text-[hsl(var(--wb-text-muted))]">
-                  Project directory
+                  {projectSourceMode === "local"
+                    ? "Project directory"
+                    : "Empty clone destination"}
                 </label>
                 <div className="flex gap-2">
                   <button
                     type="button"
                     autoFocus
                     className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 text-left text-[12px] outline-none transition-colors hover:border-[hsl(var(--wb-border-strong))] focus-visible:border-[hsl(var(--wb-accent))] focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent)/0.35)]"
-                    onClick={() => void chooseProjectDirectory()}
+                    onClick={() =>
+                      void (projectSourceMode === "local"
+                        ? chooseProjectDirectory()
+                        : chooseCloneDestination())
+                    }
                     disabled={isCreatingProject}
                   >
                     <FolderOpen
@@ -587,22 +821,43 @@ export function AppBar({ center, right }: AppBarProps) {
                       }`}
                       title={projectRootPath || undefined}
                     >
-                      {projectRootPath || "Choose a folder…"}
+                      {projectRootPath ||
+                        (projectSourceMode === "local"
+                          ? "Choose a folder…"
+                          : "Choose an empty folder…")}
                     </span>
                   </button>
                   <button
                     type="button"
                     className="wb-text-button h-8 shrink-0 border border-[hsl(var(--wb-border))] px-3"
-                    onClick={() => void chooseProjectDirectory()}
+                    onClick={() =>
+                      void (projectSourceMode === "local"
+                        ? chooseProjectDirectory()
+                        : chooseCloneDestination())
+                    }
                     disabled={isCreatingProject}
                   >
                     Browse…
                   </button>
                 </div>
                 <p className="text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
-                  The folder name becomes the project name automatically.
+                  {projectSourceMode === "local"
+                    ? "The folder name becomes the project name automatically."
+                    : "The repository is cloned here before the project is linked."}
                 </p>
               </div>
+
+              {projectSourceMode !== "local" && (
+                <label className="flex items-center gap-2 text-[10px] text-[hsl(var(--wb-text-muted))]">
+                  <input
+                    type="checkbox"
+                    checked={shallowClone}
+                    onChange={(event) => setShallowClone(event.target.checked)}
+                    disabled={isCreatingProject}
+                  />
+                  Shallow clone (latest commit only)
+                </label>
+              )}
 
               <div className="space-y-1.5">
                 <label
@@ -644,8 +899,9 @@ export function AppBar({ center, right }: AppBarProps) {
                   </span>
                 ) : (
                   <span className="text-[hsl(var(--wb-text-muted))]">
-                    The selected folder is only linked; existing files are not
-                    modified.
+                    {projectSourceMode === "local"
+                      ? "The selected folder is only linked; existing files are not modified."
+                      : "Remote authentication uses your existing Git/SSH credentials; GitHub authentication is managed by the GitHub CLI."}
                   </span>
                 )}
               </div>
@@ -668,11 +924,19 @@ export function AppBar({ center, right }: AppBarProps) {
                   !projectRootPath ||
                   !normalizedProjectName ||
                   projectNameExists ||
-                  projectPathExists
+                  projectPathExists ||
+                  (projectSourceMode === "git" && !gitRepositoryUrl.trim()) ||
+                  (projectSourceMode === "github" && !selectedGithubRepository)
                 }
               >
                 <Check size={13} />
-                {isCreatingProject ? "Creating..." : "Create"}
+                {isCreatingProject
+                  ? projectSourceMode === "local"
+                    ? "Creating..."
+                    : "Cloning..."
+                  : projectSourceMode === "local"
+                    ? "Create"
+                    : "Clone and create"}
               </button>
             </DialogFooter>
           </form>
@@ -733,6 +997,184 @@ export function AppBar({ center, right }: AppBarProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function GithubProjectSource({
+  status,
+  token,
+  query,
+  repositories,
+  selectedRepository,
+  loading,
+  disabled,
+  onTokenChange,
+  onQueryChange,
+  onAuthenticate,
+  onRefresh,
+  onSearch,
+  onSelect,
+}: {
+  status: GitHubCliStatus | null;
+  token: string;
+  query: string;
+  repositories: GitHubRepository[];
+  selectedRepository: GitHubRepository | null;
+  loading: boolean;
+  disabled: boolean;
+  onTokenChange: (value: string) => void;
+  onQueryChange: (value: string) => void;
+  onAuthenticate: () => void;
+  onRefresh: () => void;
+  onSearch: () => void;
+  onSelect: (repository: GitHubRepository) => void;
+}) {
+  if (!status) {
+    return (
+      <div className="flex h-16 items-center justify-center rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] text-[10px] text-[hsl(var(--wb-text-muted))]">
+        {loading ? (
+          <>
+            <LoaderCircle size={13} className="mr-2 animate-spin" />
+            Checking GitHub CLI…
+          </>
+        ) : (
+          <button type="button" className="wb-text-button h-7 px-3" onClick={onRefresh}>
+            Check GitHub CLI
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (!status.installed) {
+    return (
+      <div className="rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] px-3 py-2 text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
+        GitHub CLI (`gh`) was not found. Install it from cli.github.com, then
+        refresh this check. Git URL cloning remains available without `gh`.
+        <button
+          type="button"
+          className="ml-2 text-[hsl(var(--wb-accent))] hover:underline"
+          onClick={onRefresh}
+        >
+          Refresh
+        </button>
+      </div>
+    );
+  }
+
+  if (!status.authenticated) {
+    return (
+      <div className="space-y-2 rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] p-3">
+        <div className="text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
+          Authenticate `gh` with a GitHub token. OxideStudio sends it once on
+          standard input and never stores it; credential storage is owned by `gh`.
+        </div>
+        <div className="flex gap-2">
+          <input
+            type="password"
+            value={token}
+            onChange={(event) => onTokenChange(event.target.value)}
+            placeholder="GitHub personal access token"
+            autoComplete="off"
+            className="h-8 min-w-0 flex-1 rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 text-[11px] outline-none focus:border-[hsl(var(--wb-accent))]"
+            disabled={disabled || loading}
+          />
+          <button
+            type="button"
+            className="wb-text-button h-8 px-3"
+            disabled={!token.trim() || disabled || loading}
+            onClick={onAuthenticate}
+          >
+            {loading && <LoaderCircle size={12} className="mr-1 animate-spin" />}
+            Authenticate
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 text-[10px] text-[hsl(var(--wb-text-muted))]">
+        <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+          <Check size={11} />
+          Signed in{status.account ? ` as ${status.account}` : ""}
+        </span>
+        {status.version && <span className="truncate">· {status.version}</span>}
+      </div>
+      <div className="flex gap-2">
+        <input
+          value={query}
+          onChange={(event) => onQueryChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              onSearch();
+            }
+          }}
+          placeholder="Search repositories by name, owner, or topic"
+          className="h-8 min-w-0 flex-1 rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 text-[11px] outline-none focus:border-[hsl(var(--wb-accent))]"
+          disabled={disabled || loading}
+        />
+        <button
+          type="button"
+          className="wb-text-button h-8 px-3"
+          disabled={!query.trim() || disabled || loading}
+          onClick={onSearch}
+        >
+          {loading && <LoaderCircle size={12} className="mr-1 animate-spin" />}
+          Search
+        </button>
+      </div>
+      {repositories.length > 0 && (
+        <div className="max-h-36 overflow-y-auto rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))]">
+          {repositories.map((repository) => {
+            const selected = selectedRepository?.fullName === repository.fullName;
+            return (
+              <button
+                key={repository.fullName}
+                type="button"
+                className={`flex w-full items-start gap-2 border-b border-[hsl(var(--wb-border-subtle))] px-2.5 py-2 text-left last:border-b-0 ${
+                  selected
+                    ? "bg-[hsl(var(--wb-active))]"
+                    : "hover:bg-[hsl(var(--wb-hover))]"
+                }`}
+                onClick={() => onSelect(repository)}
+              >
+                <Github
+                  size={13}
+                  className={
+                    selected
+                      ? "mt-0.5 shrink-0 text-[hsl(var(--wb-accent))]"
+                      : "mt-0.5 shrink-0 text-[hsl(var(--wb-text-muted))]"
+                  }
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-2 text-[11px]">
+                    <strong className="truncate font-medium">
+                      {repository.fullName}
+                    </strong>
+                    {repository.isPrivate && (
+                      <span className="text-[8px] uppercase text-[hsl(var(--wb-text-muted))]">
+                        private
+                      </span>
+                    )}
+                  </span>
+                  {repository.description && (
+                    <span className="block truncate text-[9px] leading-4 text-[hsl(var(--wb-text-muted))]">
+                      {repository.description}
+                    </span>
+                  )}
+                </span>
+                <span className="shrink-0 font-mono text-[9px] text-[hsl(var(--wb-text-muted))]">
+                  ★ {repository.stargazersCount}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -1,11 +1,15 @@
 import { create } from "zustand";
 import type {
   AppSettings,
+  PinnableTitleToolId,
   WorkbenchSide,
   WorkbenchToolWindowId,
 } from "@/lib/appSettings";
 import {
+  closeSideToolWindow,
   moveSideToolWindow,
+  openSideToolWindow,
+  toggleSideToolWindow,
   type SideToolWindowId,
 } from "@/lib/workbenchLayout";
 import { useSettingsStore } from "@/store/useSettingsStore";
@@ -22,12 +26,19 @@ type WorkbenchLayoutState = {
   setBottomHeight: (height: number) => void;
   moveToolWindow: (id: SideToolWindowId, side: WorkbenchSide) => void;
   moveActiveToolWindow: (side: WorkbenchSide) => void;
+  setTitleToolPinned: (id: PinnableTitleToolId, pinned: boolean) => void;
   resizeActiveToolWindow: (direction: ResizeDirection) => void;
 };
 
 export const useWorkbenchLayoutStore = create<WorkbenchLayoutState>(() => ({
   toggleToolWindow: (id) => {
     const settingsStore = useSettingsStore.getState();
+    if (id !== "results") {
+      void settingsStore.updateSettings({
+        workbench: toggleSideToolWindow(settingsStore.settings.workbench, id),
+      });
+      return;
+    }
     const layout = settingsStore.settings.workbench.layout;
     const visible = visibilityForToolWindow(layout, id);
     void settingsStore.updateSettings({
@@ -47,6 +58,14 @@ export const useWorkbenchLayoutStore = create<WorkbenchLayoutState>(() => ({
 
   setToolWindowVisible: (id, visible) => {
     const settingsStore = useSettingsStore.getState();
+    if (id !== "results") {
+      void settingsStore.updateSettings({
+        workbench: visible
+          ? openSideToolWindow(settingsStore.settings.workbench, id)
+          : closeSideToolWindow(settingsStore.settings.workbench, id),
+      });
+      return;
+    }
     const layout = settingsStore.settings.workbench.layout;
     void settingsStore.updateSettings({
       workbench: {
@@ -65,6 +84,12 @@ export const useWorkbenchLayoutStore = create<WorkbenchLayoutState>(() => ({
 
   setActiveToolWindow: (id) => {
     const settingsStore = useSettingsStore.getState();
+    if (id !== "editor" && id !== "results") {
+      void settingsStore.updateSettings({
+        workbench: openSideToolWindow(settingsStore.settings.workbench, id),
+      });
+      return;
+    }
     const layout = settingsStore.settings.workbench.layout;
     void settingsStore.updateSettings({
       workbench: {
@@ -104,8 +129,7 @@ export const useWorkbenchLayoutStore = create<WorkbenchLayoutState>(() => ({
     const activeToolWindow =
       settingsStore.settings.workbench.layout.activeToolWindow;
     if (
-      activeToolWindow !== "databaseExplorer" &&
-      activeToolWindow !== "assistant"
+      activeToolWindow === "editor" || activeToolWindow === "results"
     ) {
       return;
     }
@@ -117,14 +141,29 @@ export const useWorkbenchLayoutStore = create<WorkbenchLayoutState>(() => ({
     void settingsStore.updateSettings({ workbench });
   },
 
+  setTitleToolPinned: (id, pinned) => {
+    const settingsStore = useSettingsStore.getState();
+    const layout = settingsStore.settings.workbench.layout;
+    const pinnedTitleTools = layout.pinnedTitleTools.filter(
+      (candidate) => candidate !== id,
+    );
+    if (pinned) pinnedTitleTools.push(id);
+    void settingsStore.updateSettings({
+      workbench: {
+        ...settingsStore.settings.workbench,
+        layout: {
+          ...layout,
+          pinnedTitleTools,
+        },
+      },
+    });
+  },
+
   resizeActiveToolWindow: (direction) => {
     const settingsStore = useSettingsStore.getState();
     const layout = settingsStore.settings.workbench.layout;
     const delta = 24;
-    if (
-      layout.activeToolWindow === "databaseExplorer" ||
-      layout.activeToolWindow === "assistant"
-    ) {
+    if (layout.activeToolWindow !== "editor" && layout.activeToolWindow !== "results") {
       const side =
         settingsStore.settings.workbench.toolWindows[layout.activeToolWindow].side;
       if (side === "left") {

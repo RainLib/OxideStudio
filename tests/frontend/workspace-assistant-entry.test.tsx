@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LeftPanel } from "@/components/workspace/LeftPanel";
 import { WorkspaceRuntime as WorkspacePage } from "@/pages/workspaceRuntime";
 import { DEFAULT_APP_SETTINGS } from "@/lib/appSettings";
-import { moveSideToolWindow } from "@/lib/workbenchLayout";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
 import { APP_EVENT_OPEN_ASSISTANT } from "@/store/useAssistantComposerStore";
@@ -61,6 +60,10 @@ vi.mock("@/components/workspace/CreateTableTab", () => ({
 
 vi.mock("@/components/workspace/CommandPalette", () => ({
   CommandPalette: () => <div data-testid="command-palette" />,
+}));
+
+vi.mock("@/components/lsp/LspConnectionSyncer", () => ({
+  LspConnectionSyncer: () => <div data-testid="lsp-connection-syncer" />,
 }));
 
 vi.mock("@/components/workspace/AssistantSidebar", () => ({
@@ -173,21 +176,55 @@ describe("database workspace entry", () => {
     await act(async () => filesButton?.click());
     expect(
       container
-        .querySelector("#secondary-panel-files")
-        ?.classList.contains("hidden"),
-    ).toBe(false);
-    expect(container.querySelector("#secondary-panel-assistant")).toBeNull();
+        .querySelector("[data-tool-window-content='projectFiles']"),
+    ).not.toBeNull();
+    expect(
+      container.querySelector("[data-tool-window-content='assistant']"),
+    ).toBeNull();
+  });
+
+  it("keeps LSP schema synchronization mounted for table WHERE editors", async () => {
+    await act(async () => {
+      useTabStore.getState().createTab("table", "users", "", {
+        connectionId: "connection-table-lsp",
+        schemaName: "public",
+        tableName: "users",
+      });
+      root = createRoot(container);
+      root.render(<WorkspacePage />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector("[data-testid='lsp-connection-syncer']"),
+    ).not.toBeNull();
   });
 
   it("renders side tool windows in their configured dock positions", async () => {
     useSettingsStore.setState({
       settings: {
         ...DEFAULT_APP_SETTINGS,
-        workbench: moveSideToolWindow(
-          DEFAULT_APP_SETTINGS.workbench,
-          "databaseExplorer",
-          "right",
-        ),
+        workbench: {
+          ...DEFAULT_APP_SETTINGS.workbench,
+          toolWindows: {
+            ...DEFAULT_APP_SETTINGS.workbench.toolWindows,
+            databaseExplorer: { enabled: true, side: "right" },
+            assistant: { enabled: true, side: "left" },
+          },
+          layout: {
+            ...DEFAULT_APP_SETTINGS.workbench.layout,
+            visibility: {
+              ...DEFAULT_APP_SETTINGS.workbench.layout.visibility,
+              databaseExplorer: true,
+              assistant: true,
+            },
+            activeSideToolWindows: {
+              left: "assistant",
+              right: "databaseExplorer",
+            },
+          },
+        },
       },
     });
 
@@ -195,13 +232,6 @@ describe("database workspace entry", () => {
       root = createRoot(container);
       root.render(<WorkspacePage />);
     });
-
-    const assistantButton = Array.from(
-      container.querySelectorAll("button"),
-    ).find(
-      (button) => button.getAttribute("title") === "Toggle AI Assistant (left)",
-    );
-    await act(async () => assistantButton?.click());
 
     const explorerDock = container
       .querySelector("[data-testid='schema-sidebar']")
@@ -227,6 +257,8 @@ describe("database workspace entry", () => {
     expect(
       container.querySelector("[data-testid='assistant-sidebar']"),
     ).not.toBeNull();
-    expect(container.querySelector("#secondary-panel-files")).toBeNull();
+    expect(
+      container.querySelector("[data-tool-window-content='projectFiles']"),
+    ).toBeNull();
   });
 });

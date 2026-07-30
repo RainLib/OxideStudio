@@ -63,6 +63,18 @@ export interface DatabaseCapabilities {
   commonDataTypes: string[];
 }
 
+export interface DatabaseDriverInstallation {
+  driver: DatabaseDriver;
+  displayName: string;
+  clientLibrary: string;
+  clientVersion: string;
+  distribution: "bundled" | "external";
+  updatePolicy: "application-update" | "independent";
+  independentlyUpdatable: boolean;
+  serverVersionPolicy: "detected-at-connection" | string;
+  implementation: string;
+}
+
 /**
  * 列定义
  */

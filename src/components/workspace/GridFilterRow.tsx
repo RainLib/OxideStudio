@@ -1,7 +1,9 @@
 import { useCallback, useEffect } from "react";
 import type { GridColumn } from "@glideapps/glide-data-grid";
-import { Code2, Filter, Plus, Search, X } from "lucide-react";
+import { ArrowUpDown, Code2, Filter, Plus, Search, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import type { DatabaseDriver } from "@/services/tauri/types";
+import { WhereCompletionInput } from "./WhereCompletionInput";
 import {
   Select,
   SelectContent,
@@ -36,6 +38,17 @@ interface GridFilterRowProps {
   onVisualFiltersChange: (filters: ColumnFilter[]) => void;
   onSqlFilterChange: (sql: string) => void;
   onSearch?: () => void;
+  connectionId?: string | null;
+  driver?: DatabaseDriver | null;
+  tabId?: string | null;
+  schemaName?: string | null;
+  tableName?: string | null;
+  sortColumn?: string | null;
+  sortDirection?: "asc" | "desc" | null;
+  onSortChange?: (
+    column: string | null,
+    direction: "asc" | "desc" | null,
+  ) => void;
 }
 
 const operatorLabels: Record<FilterOperator, string> = {
@@ -61,6 +74,14 @@ export function GridFilterRow({
   onVisualFiltersChange,
   onSqlFilterChange,
   onSearch,
+  connectionId,
+  driver,
+  tabId,
+  schemaName,
+  tableName,
+  sortColumn,
+  sortDirection,
+  onSortChange,
 }: GridFilterRowProps) {
   useEffect(() => {
     if (mode !== "visual" || columns.length === 0) return;
@@ -120,16 +141,16 @@ export function GridFilterRow({
           <Code2 size={12} />
           WHERE
         </button>
-        <Input
+        <WhereCompletionInput
           value={sqlFilter}
-          onChange={(event) => onSqlFilterChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") onSearch?.();
-          }}
-          placeholder="SQL condition, for example: status = 'active'"
-          aria-label="SQL WHERE condition"
-          spellCheck={false}
-          className="h-6 min-w-0 flex-1 border-transparent bg-transparent px-2 font-mono text-[11px] focus-visible:border-[hsl(var(--wb-border))] focus-visible:ring-0"
+          columns={columns}
+          onChange={onSqlFilterChange}
+          onApply={onSearch}
+          connectionId={connectionId}
+          driver={driver}
+          tabId={tabId}
+          schemaName={schemaName}
+          tableName={tableName}
         />
         {sqlFilter && (
           <button
@@ -151,6 +172,64 @@ export function GridFilterRow({
           <Search size={12} />
           Apply
         </button>
+        <div
+          className="mx-0.5 h-4 w-px shrink-0 bg-[hsl(var(--wb-border-subtle))]"
+          aria-hidden="true"
+        />
+        <div className="flex shrink-0 items-center gap-1" aria-label="Table sort">
+          <ArrowUpDown size={12} className="wb-muted" aria-hidden="true" />
+          <span className="text-[10px] wb-muted">SORT</span>
+          <Select
+            value={sortColumn || "__none__"}
+            onValueChange={(column) => {
+              if (column === "__none__") {
+                onSortChange?.(null, null);
+                return;
+              }
+              onSortChange?.(column, sortDirection || "asc");
+            }}
+          >
+            <SelectTrigger
+              aria-label="Sort column"
+              className="h-6 w-[118px] border-transparent bg-transparent px-1.5 text-[11px] hover:bg-[hsl(var(--wb-hover))]"
+            >
+              <SelectValue placeholder="Column" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__">No sort</SelectItem>
+              {columns.map((column) => {
+                const id = String(column.id || column.title);
+                return (
+                  <SelectItem key={id} value={id}>
+                    {column.title}
+                  </SelectItem>
+                );
+              })}
+            </SelectContent>
+          </Select>
+          {sortColumn && (
+            <Select
+              value={sortDirection || "asc"}
+              onValueChange={(direction) =>
+                onSortChange?.(
+                  sortColumn,
+                  direction as "asc" | "desc",
+                )
+              }
+            >
+              <SelectTrigger
+                aria-label="Sort direction"
+                className="h-6 w-[68px] border-transparent bg-transparent px-1.5 text-[11px] hover:bg-[hsl(var(--wb-hover))]"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="asc">ASC</SelectItem>
+                <SelectItem value="desc">DESC</SelectItem>
+              </SelectContent>
+            </Select>
+          )}
+        </div>
       </div>
     );
   }

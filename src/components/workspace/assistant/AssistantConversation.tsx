@@ -52,6 +52,7 @@ interface AssistantConversationProps {
     approvalId: string,
     decision: "approve" | "reject",
     contextFingerprint: string,
+    confirmationText?: string,
   ) => Promise<void>;
   onResumeTurn?: (
     turnId: string,

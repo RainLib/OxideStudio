@@ -166,6 +166,7 @@ describe("AssistantConversation turns", () => {
       "approval-1",
       "approve",
       "ctx-1",
+      undefined,
     );
     const approvalPrompt = container.querySelector<HTMLElement>(
       'section[aria-busy="true"]',
@@ -182,6 +183,125 @@ describe("AssistantConversation turns", () => {
       await Promise.resolve();
     });
     expect(container.textContent).toContain("Approve once");
+  });
+
+  it("requires the exact dynamic phrase before approving a high-risk shell command", async () => {
+    const onDecideApproval = vi.fn(async () => undefined);
+    const turn: AssistantTurn = {
+      ...createAssistantTurn({
+        id: "turn-shell-confirm",
+        requestId: "request-shell-confirm",
+        projectId: "project-1",
+        requestedMode: "agent",
+        mode: "agent",
+        userMessage: "Reset the repository",
+        now: 1,
+      }),
+      status: "awaiting_approval",
+      approvals: [
+        {
+          approvalId: "approval-shell",
+          callId: "call-shell",
+          title: "Approve shell.execute",
+          summary: "Run once: git reset --hard",
+          toolName: "shell.execute",
+          risk: "destructive",
+          inputDigest: "sha256:shell",
+          policyDigest: "sha256:policy",
+          findings: [
+            {
+              ruleId: "builtin.git-hard-reset",
+              decision: "confirm",
+              title: "Destructive Git operation",
+              detail: "This discards uncommitted working tree changes.",
+            },
+          ],
+          confirmation: {
+            kind: "phrase",
+            phrase: "RUN A13F9C",
+            prompt: "Type the confirmation phrase",
+          },
+        },
+      ],
+    };
+
+    await act(async () => {
+      root.render(
+        <AssistantConversation
+          turns={[turn]}
+          isResponding={false}
+          pendingLabel="Working"
+          onUsePrompt={vi.fn()}
+          onExecuteAttachment={vi.fn(async (request) => ({
+            actionId: request.id,
+            status: "success" as const,
+            code: "OK" as const,
+          }))}
+          contextFingerprint="ctx-shell"
+          onDecideApproval={onDecideApproval}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Destructive Git operation");
+    const input = container.querySelector<HTMLInputElement>(
+      '[aria-label="High-risk command confirmation phrase"]',
+    );
+    const approve = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Approve once"),
+    ) as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
+
+    const valueSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    await act(async () => {
+      if (input) {
+        valueSetter?.call(input, "RUN A13F9C ");
+        input.dispatchEvent(
+          new InputEvent("input", { bubbles: true, data: "RUN A13F9C " }),
+        );
+      }
+    });
+    expect(approve.disabled).toBe(true);
+
+    await act(async () => {
+      if (input) {
+        valueSetter?.call(input, "RUN A13F9C");
+        input.dispatchEvent(
+          new InputEvent("input", { bubbles: true, data: "RUN A13F9C" }),
+        );
+      }
+    });
+    expect(approve.disabled).toBe(false);
+    await act(async () => {
+      input?.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      input?.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          isComposing: true,
+        }),
+      );
+    });
+    expect(onDecideApproval).not.toHaveBeenCalled();
+    await act(async () => {
+      input?.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    });
+    await act(async () => {
+      input?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(onDecideApproval).toHaveBeenCalledWith(
+      "turn-shell-confirm",
+      "approval-shell",
+      "approve",
+      "ctx-shell",
+      "RUN A13F9C",
+    );
   });
 
   it("links only trusted Agent file changes to the project editor", async () => {

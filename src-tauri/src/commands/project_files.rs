@@ -1274,6 +1274,25 @@ pub(crate) async fn agent_read_project_file(
     root.read_file(&relative.wire_path)
 }
 
+pub(crate) async fn agent_project_directory(
+    meta_store: &MetaStore,
+    project_id: &str,
+    relative_directory: Option<&str>,
+) -> Result<(PathBuf, PathBuf)> {
+    let root = project_root(meta_store, project_id, None)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let relative = validate_relative_path(relative_directory.unwrap_or_default(), true)?;
+    let directory = root.resolve_existing(&relative)?;
+    if !fs::metadata(&directory)?.is_dir() {
+        bail!(
+            "project shell working directory is not a directory: {}",
+            relative.wire_path
+        );
+    }
+    Ok((root.path.clone(), directory))
+}
+
 pub(crate) async fn agent_apply_project_file_change(
     meta_store: &MetaStore,
     project_id: &str,

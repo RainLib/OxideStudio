@@ -639,6 +639,27 @@
   }
 }
 
+.monaco-editor .oxide-current-statement-line {
+  box-sizing: border-box;
+  border-left: 1px solid hsl(var(--wb-accent) / 0.55);
+  border-right: 1px solid hsl(var(--wb-accent) / 0.55);
+  background: hsl(var(--wb-accent) / 0.035);
+}
+
+.monaco-editor .oxide-current-statement-start {
+  box-shadow: inset 0 1px 0 hsl(var(--wb-accent) / 0.55);
+}
+
+.monaco-editor .oxide-current-statement-end {
+  box-shadow: inset 0 -1px 0 hsl(var(--wb-accent) / 0.55);
+}
+
+.monaco-editor .oxide-current-statement-start.oxide-current-statement-end {
+  box-shadow:
+    inset 0 1px 0 hsl(var(--wb-accent) / 0.55),
+    inset 0 -1px 0 hsl(var(--wb-accent) / 0.55);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

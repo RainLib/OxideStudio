@@ -5,7 +5,7 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LeftPanel } from "@/components/workspace/LeftPanel";
-import { SecondaryPanel } from "@/components/workspace/SecondaryPanel";
+import { ToolWindowPanel } from "@/components/workspace/ToolWindowPanel";
 
 vi.mock("@/components/workspace/SchemaSidebar", () => ({
   SchemaSidebar: () => <div>database-content</div>,
@@ -31,7 +31,7 @@ const props = {
   onDragStart: vi.fn(),
 };
 
-describe("secondary panel project files navigation", () => {
+describe("independent project and assistant tool windows", () => {
   let container: HTMLDivElement;
   let root: Root | null = null;
 
@@ -58,25 +58,27 @@ describe("secondary panel project files navigation", () => {
     document.body.appendChild(container);
     await act(async () => {
       root = createRoot(container);
-      root.render(<SecondaryPanel view="assistant" />);
+      root.render(<ToolWindowPanel id="assistant" />);
     });
 
     expect(container.querySelector('[role="tablist"]')).toBeFalsy();
     expect(
       container
-        .querySelector("#secondary-panel-assistant")
-        ?.classList.contains("hidden"),
-    ).toBe(false);
-    expect(container.querySelector("#secondary-panel-files")).toBeNull();
+        .querySelector("[data-tool-window-content='assistant']"),
+    ).not.toBeNull();
+    expect(
+      container.querySelector("[data-tool-window-content='projectFiles']"),
+    ).toBeNull();
 
     await act(async () => {
-      root?.render(<SecondaryPanel view="files" />);
+      root?.render(<ToolWindowPanel id="projectFiles" />);
     });
     expect(
       container
-        .querySelector("#secondary-panel-files")
-        ?.classList.contains("hidden"),
-    ).toBe(false);
-    expect(container.querySelector("#secondary-panel-assistant")).toBeNull();
+        .querySelector("[data-tool-window-content='projectFiles']"),
+    ).not.toBeNull();
+    expect(
+      container.querySelector("[data-tool-window-content='assistant']"),
+    ).toBeNull();
   });
 });

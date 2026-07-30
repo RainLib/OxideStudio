@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oxidestudio.dev/schemas/command-policy.v1.json",
+  "title": "OxideStudio command policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "rules"],
+  "properties": {
+    "version": { "const": 1 },
+    "rules": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/rule" }
+    }
+  },
+  "$defs": {
+    "boundedString": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "action"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "action": { "enum": ["confirm", "block"] },
+        "executables": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/boundedString" }
+        },
+        "argumentRegex": { "$ref": "#/$defs/boundedString" },
+        "cwdGlob": { "$ref": "#/$defs/boundedString" },
+        "sandboxModes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["workspace-write", "unrestricted"] }
+        },
+        "message": { "type": "string", "maxLength": 500 }
+      },
+      "anyOf": [
+        { "required": ["executables"] },
+        { "required": ["argumentRegex"] },
+        { "required": ["cwdGlob"] },
+        { "required": ["sandboxModes"] }
+      ]
+    }
+  }
+}

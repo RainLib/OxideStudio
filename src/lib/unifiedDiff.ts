@@ -61,3 +61,22 @@ export function unifiedDiffLines(patch: string): DiffLine[] {
     };
   });
 }
+
+export function unifiedDiffHunkPatch(
+  patch: string,
+  requestedHunkIndex: number,
+): string | null {
+  if (!Number.isInteger(requestedHunkIndex) || requestedHunkIndex < 0) {
+    return null;
+  }
+  const lines = patch.split("\n");
+  const firstHunk = lines.findIndex((line) => line.startsWith("@@ "));
+  if (firstHunk < 0) return null;
+  const hunkStarts = lines
+    .map((line, index) => (line.startsWith("@@ ") ? index : -1))
+    .filter((index) => index >= 0);
+  const start = hunkStarts[requestedHunkIndex];
+  if (start === undefined) return null;
+  const end = hunkStarts[requestedHunkIndex + 1] ?? lines.length;
+  return [...lines.slice(0, firstHunk), ...lines.slice(start, end)].join("\n");
+}

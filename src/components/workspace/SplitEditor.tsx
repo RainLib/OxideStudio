@@ -1,5 +1,7 @@
 import {
+  useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
@@ -8,6 +10,8 @@ import {
 import { cn } from "@/lib/utils";
 import { useTabStore } from "@/store/useTabStore";
 import {
+  adjacentEditorGroup,
+  editorGroupInDirection,
   editorGroups,
   useEditorGroupStore,
   type EditorGroupId,
@@ -15,6 +19,10 @@ import {
   type EditorLayoutNode,
   type EditorSplitNode,
 } from "@/store/useEditorGroupStore";
+import {
+  APP_EVENT_VIM_WINDOW_NAVIGATE,
+  type VimWindowNavigation,
+} from "@/lib/vimMode";
 import { QueryEditor } from "./QueryEditor";
 import { TabBar } from "./TabBar";
 
@@ -122,6 +130,48 @@ export function SplitEditor() {
     if (remaining?.tabId) setActiveTab(remaining.tabId);
   };
 
+  const navigateFromGroup = useCallback(
+    (groupId: EditorGroupId, direction: VimWindowNavigation) => {
+      if (direction === "close") {
+        useEditorGroupStore.getState().closeGroup(groupId);
+        const nextState = useEditorGroupStore.getState();
+        const remaining = editorGroups(nextState.root).find(
+          (item) => item.id === nextState.activeGroup,
+        );
+        if (remaining?.tabId) setActiveTab(remaining.tabId);
+        return;
+      }
+
+      const state = useEditorGroupStore.getState();
+      const target =
+        direction === "next" || direction === "previous"
+          ? adjacentEditorGroup(state.root, groupId, direction === "previous")
+          : editorGroupInDirection(state.root, groupId, direction);
+      if (!target?.tabId || target.id === groupId) {
+        window.dispatchEvent(
+          new CustomEvent(APP_EVENT_VIM_WINDOW_NAVIGATE, {
+            detail: { direction, source: "editor" },
+          }),
+        );
+        return;
+      }
+      useEditorGroupStore.getState().setActiveGroup(target.id);
+      setActiveTab(target.tabId);
+    },
+    [setActiveTab],
+  );
+  const vimNavigationHandlers = useMemo(
+    () =>
+      new Map(
+        editorGroups(root).map((group) => [
+          group.id,
+          (direction: VimWindowNavigation) =>
+            navigateFromGroup(group.id, direction),
+        ]),
+      ),
+    [navigateFromGroup, root],
+  );
+
   const renderGroup = (group: EditorGroupNode) => {
     const tabId =
       group.tabId && queryTabIds.has(group.tabId) ? group.tabId : fallbackTabId;
@@ -135,6 +185,7 @@ export function SplitEditor() {
           isActive && "shadow-[inset_0_0_0_1px_hsl(var(--wb-accent)/0.42)]"
         )}
         onPointerDown={() => activate(group.id, tabId)}
+        data-editor-group={group.id}
       >
         <TabBar
           activeTabIdOverride={tabId}
@@ -146,7 +197,9 @@ export function SplitEditor() {
           <QueryEditor
             tabId={tabId}
             isActivePane={isActive}
+            editorGroupId={group.id}
             onActivate={() => activate(group.id, tabId)}
+            onVimWindowNavigate={vimNavigationHandlers.get(group.id)}
           />
         </div>
       </section>

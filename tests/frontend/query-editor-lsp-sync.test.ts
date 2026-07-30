@@ -15,6 +15,7 @@ describe("QueryEditor LSP document sync", () => {
     const uri = "oxide://query/query-1.postgres.postgres";
     const openedDocuments = new Set<string>();
     const documentVersions = new Map<string, number>();
+    const documentTexts = new Map<string, string>();
     const client = {
       didOpen: vi.fn().mockResolvedValue(undefined),
       didChange: vi.fn().mockResolvedValue(undefined),
@@ -30,6 +31,7 @@ describe("QueryEditor LSP document sync", () => {
       client,
       openedDocuments,
       documentVersions,
+      documentTexts,
     });
 
     expect(client.didOpen).toHaveBeenCalledWith(
@@ -51,6 +53,7 @@ describe("QueryEditor LSP document sync", () => {
       client,
       openedDocuments,
       documentVersions,
+      documentTexts,
     });
 
     expect(client.didChange).toHaveBeenCalledWith(
@@ -59,6 +62,18 @@ describe("QueryEditor LSP document sync", () => {
       2
     );
     expect(client.didOpen).toHaveBeenCalledTimes(1);
+    expect(documentVersions.get(uri)).toBe(2);
+
+    await syncLspModelBeforeCompletion({
+      uri,
+      model,
+      languageId: "postgres",
+      client,
+      openedDocuments,
+      documentVersions,
+      documentTexts,
+    });
+    expect(client.didChange).toHaveBeenCalledTimes(1);
     expect(documentVersions.get(uri)).toBe(2);
   });
 });

@@ -2,12 +2,14 @@ import type { DatabaseDriver } from "@/services/tauri/types";
 import {
   createLspConfigKey,
   type LspConfigKeyInput,
+  type LspCompletionPreferences,
   type LspFileMappings,
 } from "./syncPlan";
 import type { LspSchemaDefinition } from "./schemaConfig";
 
 export type LspConfigurationPayload = LspFileMappings & {
   defaultDialect: string;
+  completionPreferences: LspCompletionPreferences;
   schemas: LspSchemaDefinition[];
 };
 
@@ -49,6 +51,7 @@ export async function dispatchLspConfiguration(options: {
     connectionId: options.connectionId,
     driver: options.driver,
     lspDialect: options.lspDialect,
+    completionPreferences: options.config.completionPreferences,
     fileSchemas: options.config.fileSchemas,
     fileDialects: options.config.fileDialects,
     schemaDefinitions: options.config.schemas,

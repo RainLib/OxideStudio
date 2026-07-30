@@ -42,6 +42,18 @@ describe("approvalSummary", () => {
     expect(summary).toContain("31 characters");
     expect(summary).not.toContain("SELECT secret");
   });
+
+  it("shows the exact bounded shell command and sandbox mode", () => {
+    const summary = approvalSummary("shell.execute", {
+      command: "npm test\n-- --run assistant",
+      cwd: "agent-host",
+      sandboxMode: "workspace-write",
+    });
+
+    expect(summary).toBe(
+      "Run once in workspace-write mode from agent-host: npm test -- --run assistant",
+    );
+  });
 });
 
 describe("toolRequiresApproval", () => {

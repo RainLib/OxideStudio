@@ -1,9 +1,6 @@
 import { AppBar } from "@/components/AppBar";
 import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
-import {
-  SecondaryPanel,
-  type SecondaryPanelView,
-} from "@/components/workspace/SecondaryPanel";
+import { ToolWindowPanel } from "@/components/workspace/ToolWindowPanel";
 import { TabBar } from "@/components/workspace/TabBar";
 import { SideToolWindow } from "@/components/workspace/SideToolWindow";
 import { ElasticsearchResponseView } from "@/components/workspace/ElasticsearchResponseView";
@@ -24,7 +21,11 @@ import { useProjectStore } from "@/store/useProjectStore";
 import { useUnsavedChangesGuard } from "@/hooks/useUnsavedChangesGuard";
 import { useShortcuts } from "@/hooks/useShortcuts";
 import { APP_EVENT_OPEN_PROJECT_FILES } from "@/lib/projectFilesNavigation";
-import { APP_EVENT_OPEN_COMMAND_PALETTE } from "@/lib/actionEvents";
+import {
+  APP_EVENT_OPEN_COMMAND_PALETTE,
+  APP_EVENT_OPEN_COMMIT,
+  APP_EVENT_OPEN_VERSION_CONTROL,
+} from "@/lib/actionEvents";
 import { APP_EVENT_OPEN_ASSISTANT } from "@/store/useAssistantComposerStore";
 import { subscribeStartupIntents } from "@/startup/startupIntents";
 import { startWorkspaceHydration } from "@/startup/startupProgress";
@@ -32,11 +33,16 @@ import { cn } from "@/lib/utils";
 import { presentQueryError } from "@/lib/queryErrorPresentation";
 import type { WorkbenchSide } from "@/lib/appSettings";
 import { toolWindowAtSide, type SideToolWindowId } from "@/lib/workbenchLayout";
+import {
+  APP_EVENT_VIM_WINDOW_NAVIGATE,
+  type VimWindowNavigation,
+} from "@/lib/vimMode";
 import { ChevronDown, ChevronRight, LineChart, X } from "lucide-react";
 import {
   lazy,
   Suspense,
   useEffect,
+  useLayoutEffect,
   useState,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
@@ -111,8 +117,6 @@ const QueryHistorySync = lazy(() =>
 export function WorkspaceRuntime() {
   useShortcuts();
   useUnsavedChangesGuard();
-  const [secondaryPanelView, setSecondaryPanelView] =
-    useState<SecondaryPanelView>("assistant");
   const activeTab = useTabStore(
     useShallow((state) => {
       const tab = state.tabs.find((item) => item.id === state.activeTabId);
@@ -140,6 +144,12 @@ export function WorkspaceRuntime() {
       .map((tab) => tab.id)
       .join("\u0000"),
   );
+  const lspTabSignature = useTabStore((state) =>
+    state.tabs
+      .filter((tab) => tab.type === "query" || tab.type === "table")
+      .map((tab) => `${tab.type}:${tab.id}`)
+      .join("\u0000"),
+  );
   const setActiveResultIndex = useTabStore(
     (state) => state.setActiveResultIndex,
   );
@@ -159,6 +169,8 @@ export function WorkspaceRuntime() {
     setRightWidth,
     setBottomHeight,
     setActiveToolWindow,
+    setTitleToolPinned,
+    toggleToolWindow,
   } = useWorkbenchLayoutStore();
   const currentSchema = useSchemaStore((state) => state.currentSchema);
   const isSchemaLoading = useSchemaStore((state) => state.isLoading);
@@ -168,7 +180,7 @@ export function WorkspaceRuntime() {
   const isFunctionsLoading = useSchemaStore(
     (state) => state.isFunctionsLoading,
   );
-  const hasQueryEditor = Boolean(queryTabSignature);
+  const hasLspSurface = Boolean(lspTabSignature);
   const splitDirection = useEditorGroupStore((state) => state.splitDirection);
   const resetEditorGroups = useEditorGroupStore((state) => state.reset);
   const activeConnection = connections.find(
@@ -201,10 +213,13 @@ export function WorkspaceRuntime() {
     );
   const isIntrospecting =
     isSchemaLoading || isCollectionsLoading || isFunctionsLoading;
-  const isDatabaseExplorerOpen =
-    toolWindows.databaseExplorer.enabled && layout.visibility.databaseExplorer;
-  const isSecondaryPanelOpen =
-    toolWindows.assistant.enabled && layout.visibility.assistant;
+  const leftToolWindow = toolWindowAtSide(workbenchSettings, "left");
+  const rightToolWindow = toolWindowAtSide(workbenchSettings, "right");
+  const isDatabaseExplorerOpen = leftToolWindow === "databaseExplorer" || rightToolWindow === "databaseExplorer";
+  const isAssistantOpen = leftToolWindow === "assistant" || rightToolWindow === "assistant";
+  const isProjectFilesOpen = leftToolWindow === "projectFiles" || rightToolWindow === "projectFiles";
+  const isCommitOpen = leftToolWindow === "commit" || rightToolWindow === "commit";
+  const isVersionControlOpen = leftToolWindow === "versionControl" || rightToolWindow === "versionControl";
   const showQueryResultPanel =
     toolWindows.results.enabled &&
     hasQueryResultSurface &&
@@ -213,8 +228,6 @@ export function WorkspaceRuntime() {
     toolWindows.results.enabled &&
     hasQueryResultSurface &&
     !layout.visibility.results;
-  const leftToolWindow = toolWindowAtSide(toolWindows, "left");
-  const rightToolWindow = toolWindowAtSide(toolWindows, "right");
   const activePanelClass = "wb-panel-active";
 
   useEffect(() => {
@@ -223,7 +236,7 @@ export function WorkspaceRuntime() {
     }
   }, [queryTabSignature, resetEditorGroups, splitDirection]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (hasQueryResultSurface && toolWindows.results.enabled) {
       setToolWindowVisible("results", true);
     }
@@ -234,10 +247,159 @@ export function WorkspaceRuntime() {
   ]);
 
   useEffect(() => {
+    const focusSurface = (
+      selector: string,
+      surface: "editor" | "results" | SideToolWindowId,
+    ) => {
+      const container = document.querySelector<HTMLElement>(selector);
+      if (!container) return false;
+      setActiveToolWindow(surface);
+      window.requestAnimationFrame(() => {
+        const focusTarget = container.querySelector<HTMLElement>(
+          'textarea:not([disabled]), input:not([disabled]), button:not([disabled]), [tabindex="0"]',
+        );
+        (focusTarget || container).focus();
+      });
+      return true;
+    };
+    const handleVimWindowNavigation = (event: Event) => {
+      const direction = (event as CustomEvent<{ direction?: VimWindowNavigation }>)
+        .detail?.direction;
+      if (!direction) return;
+      if (direction === "close") {
+        const tabId = useTabStore.getState().activeTabId;
+        if (tabId) useTabStore.getState().closeTab(tabId);
+        return;
+      }
+      if (
+        direction === "left" &&
+        leftToolWindow &&
+        focusSurface('[data-tool-window-side="left"]', leftToolWindow)
+      ) {
+        return;
+      }
+      if (
+        direction === "right" &&
+        rightToolWindow &&
+        focusSurface('[data-tool-window-side="right"]', rightToolWindow)
+      ) {
+        return;
+      }
+      if (
+        direction === "down" &&
+        showQueryResultPanel &&
+        focusSurface("[data-workbench-results]", "results")
+      ) {
+        return;
+      }
+      if (direction === "next") {
+        if (
+          rightToolWindow &&
+          focusSurface('[data-tool-window-side="right"]', rightToolWindow)
+        ) {
+          return;
+        }
+        if (showQueryResultPanel) {
+          focusSurface("[data-workbench-results]", "results");
+        }
+      }
+    };
+    let awaitingWindowKey = false;
+    let prefixTimer: number | null = null;
+    const clearPrefix = () => {
+      awaitingWindowKey = false;
+      if (prefixTimer !== null) window.clearTimeout(prefixTimer);
+      prefixTimer = null;
+    };
+    const handleWorkbenchVimKey = (event: KeyboardEvent) => {
+      if (appSettings.editor.keybindingMode !== "vim") return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".monaco-editor")) return;
+      const editingText =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        Boolean(target?.isContentEditable);
+      if (!awaitingWindowKey) {
+        if (editingText || !event.ctrlKey || event.key.toLowerCase() !== "w") {
+          return;
+        }
+        event.preventDefault();
+        awaitingWindowKey = true;
+        prefixTimer = window.setTimeout(clearPrefix, 900);
+        return;
+      }
+
+      const key = event.key;
+      const direction =
+        key === "h" || key === "ArrowLeft"
+          ? "left"
+          : key === "l" || key === "ArrowRight"
+            ? "right"
+            : key === "k" || key === "ArrowUp"
+              ? "up"
+              : key === "j" || key === "ArrowDown"
+                ? "down"
+                : key === "w"
+                  ? "next"
+                  : key === "W"
+                    ? "previous"
+                    : key === "q" || key === "c"
+                      ? "close"
+                      : null;
+      clearPrefix();
+      if (!direction) return;
+      event.preventDefault();
+      const activeSurface = layout.activeToolWindow;
+      if (direction === "close") {
+        if (activeSurface === "results") {
+          setToolWindowVisible("results", false);
+        } else if (activeSurface !== "editor") {
+          setToolWindowVisible(activeSurface, false);
+        }
+        return;
+      }
+      if (
+        (activeSurface === leftToolWindow &&
+          (direction === "right" || direction === "next")) ||
+        (activeSurface === rightToolWindow && direction === "left") ||
+        (activeSurface === "results" && direction === "up")
+      ) {
+        focusSurface(".wb-query-editor", "editor");
+        return;
+      }
+      handleVimWindowNavigation(
+        new CustomEvent(APP_EVENT_VIM_WINDOW_NAVIGATE, {
+          detail: { direction, source: activeSurface },
+        }),
+      );
+    };
+    window.addEventListener(
+      APP_EVENT_VIM_WINDOW_NAVIGATE,
+      handleVimWindowNavigation,
+    );
+    window.addEventListener("keydown", handleWorkbenchVimKey, true);
+    return () => {
+      clearPrefix();
+      window.removeEventListener(
+        APP_EVENT_VIM_WINDOW_NAVIGATE,
+        handleVimWindowNavigation,
+      );
+      window.removeEventListener("keydown", handleWorkbenchVimKey, true);
+    };
+  }, [
+    appSettings.editor.keybindingMode,
+    layout.activeToolWindow,
+    leftToolWindow,
+    rightToolWindow,
+    setActiveToolWindow,
+    setToolWindowVisible,
+    showQueryResultPanel,
+  ]);
+
+  useEffect(() => {
     const openProjectFiles = () => {
-      setSecondaryPanelView("files");
-      setToolWindowVisible("assistant", true);
-      setActiveToolWindow("assistant");
+      setToolWindowVisible("projectFiles", true);
+      setActiveToolWindow("projectFiles");
     };
     window.addEventListener(APP_EVENT_OPEN_PROJECT_FILES, openProjectFiles);
     return () =>
@@ -249,7 +411,6 @@ export function WorkspaceRuntime() {
 
   useEffect(() => {
     const openAssistant = () => {
-      setSecondaryPanelView("assistant");
       setToolWindowVisible("assistant", true);
       setActiveToolWindow("assistant");
     };
@@ -291,9 +452,8 @@ export function WorkspaceRuntime() {
           return;
         }
         if (intent === "project-files") {
-          setSecondaryPanelView("files");
-          setToolWindowVisible("assistant", true);
-          setActiveToolWindow("assistant");
+          setToolWindowVisible("projectFiles", true);
+          setActiveToolWindow("projectFiles");
           return;
         }
         window.queueMicrotask(() => {
@@ -309,15 +469,16 @@ export function WorkspaceRuntime() {
     ],
   );
 
-  const toggleSecondaryPanelView = (nextView: SecondaryPanelView) => {
-    if (isSecondaryPanelOpen && secondaryPanelView === nextView) {
-      setToolWindowVisible("assistant", false);
-      return;
-    }
-    setSecondaryPanelView(nextView);
-    setToolWindowVisible("assistant", true);
-    setActiveToolWindow("assistant");
-  };
+  useEffect(() => {
+    const openCommit = () => setToolWindowVisible("commit", true);
+    const openVersionControl = () => setToolWindowVisible("versionControl", true);
+    window.addEventListener(APP_EVENT_OPEN_COMMIT, openCommit);
+    window.addEventListener(APP_EVENT_OPEN_VERSION_CONTROL, openVersionControl);
+    return () => {
+      window.removeEventListener(APP_EVENT_OPEN_COMMIT, openCommit);
+      window.removeEventListener(APP_EVENT_OPEN_VERSION_CONTROL, openVersionControl);
+    };
+  }, [setToolWindowVisible]);
 
   const handleSideDragStart = (
     event: ReactMouseEvent,
@@ -373,10 +534,12 @@ export function WorkspaceRuntime() {
     document.body.style.cursor = "row-resize";
   };
 
-  const renderSideToolWindow = (id: SideToolWindowId, side: WorkbenchSide) => {
+  const renderSideToolWindow = (id: SideToolWindowId | null, side: WorkbenchSide) => {
     const width = side === "left" ? layout.leftWidth : layout.rightWidth;
-    const isOpen =
-      id === "databaseExplorer" ? isDatabaseExplorerOpen : isSecondaryPanelOpen;
+    const isOpen = id !== null;
+    if (!id) {
+      return <ToolWindowFallback side={side} isOpen={false} width={width} />;
+    }
     const isActive = layout.activeToolWindow === id;
     const handleDragStart = (event: ReactMouseEvent) =>
       handleSideDragStart(event, side, id);
@@ -411,7 +574,7 @@ export function WorkspaceRuntime() {
         onFocus={() => setActiveToolWindow(id)}
         onDragStart={handleDragStart}
       >
-        {isOpen ? <SecondaryPanel view={secondaryPanelView} /> : null}
+        {isOpen ? <ToolWindowPanel id={id} /> : null}
       </SideToolWindow>
     );
   };
@@ -427,7 +590,7 @@ export function WorkspaceRuntime() {
     >
       <WorkspaceStartupHydration />
       <DeferredQueryHistorySync />
-      {hasQueryEditor && (
+      {hasLspSurface && (
         <Suspense fallback={null}>
           <LspConnectionSyncer />
         </Suspense>
@@ -437,14 +600,32 @@ export function WorkspaceRuntime() {
           <WorkbenchTitleTools
             databaseExplorerOpen={isDatabaseExplorerOpen}
             databaseExplorerSide={toolWindows.databaseExplorer.side}
-            secondaryPanelOpen={isSecondaryPanelOpen}
-            secondaryPanelView={secondaryPanelView}
+            assistantOpen={isAssistantOpen}
             assistantSide={toolWindows.assistant.side}
-            onToggleDatabaseExplorer={() =>
-              setToolWindowVisible("databaseExplorer", !isDatabaseExplorerOpen)
+            projectFilesOpen={isProjectFilesOpen}
+            projectFilesSide={toolWindows.projectFiles.side}
+            commitOpen={isCommitOpen}
+            commitPinned={
+              toolWindows.commit.enabled &&
+              layout.pinnedTitleTools.includes("commit")
             }
-            onToggleAssistant={() => toggleSecondaryPanelView("assistant")}
-            onToggleFiles={() => toggleSecondaryPanelView("files")}
+            versionControlOpen={isVersionControlOpen}
+            versionControlPinned={layout.pinnedTitleTools.includes(
+              "versionControl",
+            ) && toolWindows.versionControl.enabled}
+            onToggleDatabaseExplorer={() =>
+              toggleToolWindow("databaseExplorer")
+            }
+            onToggleAssistant={() => toggleToolWindow("assistant")}
+            onToggleFiles={() => toggleToolWindow("projectFiles")}
+            onToggleCommit={() => toggleToolWindow("commit")}
+            onToggleVersionControl={() => toggleToolWindow("versionControl")}
+            onSetCommitPinned={(pinned) =>
+              setTitleToolPinned("commit", pinned)
+            }
+            onSetVersionControlPinned={(pinned) =>
+              setTitleToolPinned("versionControl", pinned)
+            }
           />
         }
         right={<WorkbenchGlobalTools />}
@@ -508,6 +689,8 @@ export function WorkspaceRuntime() {
                               )}
                               style={{ height: `${layout.bottomHeight}px` }}
                               onFocus={() => setActiveToolWindow("results")}
+                              data-workbench-results
+                              tabIndex={-1}
                             >
                               <div className="flex h-8 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-2 text-[11px] text-[hsl(var(--wb-text-muted))]">
                                 <div className="flex min-w-0 items-center gap-1.5">
@@ -577,7 +760,7 @@ export function WorkspaceRuntime() {
                                           <span
                                             role="button"
                                             tabIndex={0}
-                                            className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[2px] opacity-60 hover:bg-[hsl(var(--wb-hover))] hover:opacity-100"
+                                          className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] hover:opacity-100 group-hover/result:opacity-100 focus-visible:opacity-100"
                                             title="Close result"
                                             onClick={(event) => {
                                               event.stopPropagation();
@@ -624,7 +807,7 @@ export function WorkspaceRuntime() {
                                         <span
                                           role="button"
                                           tabIndex={0}
-                                          className="flex h-3.5 w-3.5 items-center justify-center rounded-[2px] opacity-60 hover:bg-[hsl(var(--wb-hover))] hover:opacity-100"
+                                          className="flex h-3.5 w-3.5 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] hover:opacity-100 group-hover/result:opacity-100 focus-visible:opacity-100"
                                           title="Close result"
                                           onClick={(event) => {
                                             event.stopPropagation();
@@ -690,31 +873,33 @@ export function WorkspaceRuntime() {
                                 </button>
                               </div>
                               <div className="h-[calc(100%-2rem)] min-h-0">
-                                {isPlanView ? (
-                                  activeTab?.explainPlan ? (
-                                    <ExplainPlanView
-                                      tabId={activeTab.id}
-                                      plan={activeTab.explainPlan}
-                                    />
+                                <Suspense fallback={<QueryResultsFallback />}>
+                                  {isPlanView ? (
+                                    activeTab?.explainPlan ? (
+                                      <ExplainPlanView
+                                        tabId={activeTab.id}
+                                        plan={activeTab.explainPlan}
+                                      />
+                                    ) : (
+                                      <div className="flex h-full items-center justify-center px-6 text-center text-[11px] text-[hsl(var(--wb-text-muted))]">
+                                        {activeTab?.isExecuting
+                                          ? "Generating Explain Plan…"
+                                          : activeTab?.error ||
+                                            "No Explain Plan is available."}
+                                      </div>
+                                    )
                                   ) : (
-                                    <div className="flex h-full items-center justify-center px-6 text-center text-[11px] text-[hsl(var(--wb-text-muted))]">
-                                      {activeTab?.isExecuting
-                                        ? "Generating Explain Plan…"
-                                        : activeTab?.error ||
-                                          "No Explain Plan is available."}
-                                    </div>
-                                  )
-                                ) : (
-                                  currentResult ? (
-                                    <ElasticsearchResponseView
-                                      result={currentResult}
-                                    >
+                                    currentResult ? (
+                                      <ElasticsearchResponseView
+                                        result={currentResult}
+                                      >
+                                        <DataGrid readOnly />
+                                      </ElasticsearchResponseView>
+                                    ) : (
                                       <DataGrid readOnly />
-                                    </ElasticsearchResponseView>
-                                  ) : (
-                                    <DataGrid readOnly />
-                                  )
-                                )}
+                                    )
+                                  )}
+                                </Suspense>
                               </div>
                             </div>
                           </>
@@ -758,9 +943,11 @@ export function WorkspaceRuntime() {
         currentSchema={currentSchema}
         activeTabTitle={activeTab?.title}
         isIntrospecting={isIntrospecting}
-        secondaryPanelOpen={isSecondaryPanelOpen}
+        secondaryPanelOpen={Boolean(rightToolWindow)}
         onToggleSecondaryPanel={() =>
-          setToolWindowVisible("assistant", !isSecondaryPanelOpen)
+          rightToolWindow
+            ? setToolWindowVisible(rightToolWindow, false)
+            : setToolWindowVisible("assistant", true)
         }
       />
 
@@ -917,6 +1104,15 @@ function ToolWindowFallback({
     >
       <div className="h-8 border-b border-[hsl(var(--wb-border-subtle))]" />
     </div>
+  );
+}
+
+function QueryResultsFallback() {
+  return (
+    <div
+      className="h-full bg-[linear-gradient(to_right,hsl(var(--wb-border-subtle))_1px,transparent_1px),linear-gradient(to_bottom,hsl(var(--wb-border-subtle))_1px,transparent_1px)] bg-[size:160px_28px] opacity-45"
+      aria-label="Loading query results"
+    />
   );
 }
 

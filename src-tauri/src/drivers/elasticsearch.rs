@@ -1099,6 +1099,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn prepares_document_paths_for_elasticsearch_six_seven_and_eight() {
+        for (version, major, expected_path) in [
+            ("6.8.23", 6, "/events/event/42"),
+            ("7.17.29", 7, "/events/_doc/42"),
+            ("8.19.4", 8, "/events/_doc/42"),
+        ] {
+            let driver = ElasticsearchDriver::new("http://localhost:9200").unwrap();
+            *driver.server_info.lock().await = Some(ElasticsearchServerInfo {
+                version: version.to_string(),
+                major,
+            });
+            driver
+                .mapping_types
+                .lock()
+                .await
+                .insert("events".to_string(), "event".to_string());
+
+            let prepared = driver
+                .prepare_request_for_server(ElasticsearchRequest {
+                    method: Method::GET,
+                    path: "/events/_doc/42".to_string(),
+                    body: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(prepared.path, expected_path, "Elasticsearch {version}");
+        }
+    }
+
     #[test]
     fn validates_index_context_without_treating_default_as_index() {
         assert_eq!(validate_elasticsearch_index_context("").unwrap(), None);

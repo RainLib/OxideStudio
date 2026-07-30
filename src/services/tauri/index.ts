@@ -24,6 +24,7 @@ export * from "./database.service";
 export * from "./query.service";
 export * from "./query-history.service";
 export * from "./project-files.service";
+export * from "./project-git.service";
 export * from "./schema.service";
 export * from "./settings.service";
 export * from "./store.service";

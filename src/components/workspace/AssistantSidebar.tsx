@@ -2,6 +2,7 @@ import {
   createWorkspaceAiToolContext,
   createWorkspaceAiToolRegistry,
 } from "@/ai/tools/defaultRegistry";
+import { AGENT_HOST_ONLY_TOOLS } from "@/ai/tools/agentHostTools";
 import { useAiSettingsStore } from "@/store/useAiSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
 import { resolveAssistantMode } from "@/ai/assistant/modes";
@@ -20,7 +21,6 @@ import { AssistantPromptBox } from "./assistant/AssistantPromptBox";
 import type { AssistantModelStatus } from "./assistant/AssistantModelControl";
 import { AssistantConversationMinimap } from "./assistant/AssistantConversationMinimap";
 import { AssistantClarificationDock } from "./assistant/AssistantClarificationDock";
-import { AssistantChangesPanel } from "./assistant/AssistantChangesPanel";
 import { createWorkspaceUiActionRegistry } from "@/ai/ui-actions";
 import type { UiActionRequest } from "@/ai/ui-actions/types";
 import { useProjectStore } from "@/store/useProjectStore";
@@ -39,6 +39,7 @@ import {
   openProjectFileProposalInEditor,
 } from "@/lib/projectFileOpen";
 import { useAssistantComposerStore } from "@/store/useAssistantComposerStore";
+import { useAssistantChangeStore } from "@/store/useAssistantChangeStore";
 import {
   agentHostService,
   type AgentProfile,
@@ -96,6 +97,7 @@ function AgentHostAssistantSidebar() {
   const assistantMode = useAiSettingsStore((state) => state.assistantMode);
   const updateAiSettings = useAiSettingsStore((state) => state.updateSettings);
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
+  const setProjectTurns = useAssistantChangeStore((state) => state.setProjectTurns);
   const activeProjectRoot = useProjectStore(
     (state) =>
       state.projects.find((project) => project.id === state.activeProjectId)
@@ -163,16 +165,19 @@ function AgentHostAssistantSidebar() {
   const uiActionRegistry = useMemo(() => createWorkspaceUiActionRegistry(), []);
   const workspaceToolManifest = useMemo(
     () =>
-      createWorkspaceAiToolRegistry()
-        .list()
-        .map((tool) => ({
-          name: tool.name,
-          description: tool.description,
-          inputSchema: tool.inputSchema,
-          permissions: tool.permissions,
-          timeoutMs: tool.timeoutMs,
-          resultLimit: tool.resultLimit,
-        })),
+      [
+        ...createWorkspaceAiToolRegistry()
+          .list()
+          .map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            inputSchema: tool.inputSchema,
+            permissions: tool.permissions,
+            timeoutMs: tool.timeoutMs,
+            resultLimit: tool.resultLimit,
+          })),
+        ...AGENT_HOST_ONLY_TOOLS,
+      ],
     [],
   );
   const agentToolManifest = useMemo(() => {
@@ -568,6 +573,10 @@ function AgentHostAssistantSidebar() {
   }, [activeProjectRoot, session]);
 
   useEffect(() => {
+    setProjectTurns(activeProjectId, session.turns);
+  }, [activeProjectId, session.turns, setProjectTurns]);
+
+  useEffect(() => {
     const tabs = useTabStore.getState();
     for (const turn of session.turns) {
       for (const proposal of turn.fileProposals ?? []) {
@@ -592,13 +601,6 @@ function AgentHostAssistantSidebar() {
           setAttachments([]);
           setAttachmentError(null);
         }}
-      />
-
-      <AssistantChangesPanel
-        projectId={activeProjectId}
-        expectedRoot={activeProjectRoot}
-        refreshKey={turnsContentVersion}
-        turns={session.turns}
       />
 
       <div className="relative min-h-0 flex-1 overflow-hidden bg-[hsl(var(--wb-editor))]">

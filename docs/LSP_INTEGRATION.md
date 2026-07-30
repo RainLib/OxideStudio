@@ -77,8 +77,20 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 67: SQL inspections cover parser errors, mutation without `WHERE`, unconditioned joins, ambiguous unqualified columns, `SELECT *`, and obvious cross-dialect syntax risks. Quick fixes provide a non-matching mutation safety guard and schema-backed `*` expansion; `-- noinspection OXIDE###` suppresses a specific inspection.
 - Phase 68: Completion models CTE output columns, derived-table aliases, current-console temporary table creation/drop lifecycle, and routine overload signatures.
 - Phase 69: The bundled binary is rebuilt from the checked-out submodule worktree and accompanied by `sql-lsp.manifest.json`; startup verifies its SHA-256 and exposes the source revision/dirty state.
+- Phase 70: MongoDB completion is cursor-context aware: collection-valued command properties suggest collections, filter/document objects suggest only the active collection's fields, field values stay quiet, and operator/pipeline positions suggest MongoDB operators and aggregation stages.
+- Phase 71: MongoDB Monaco documents automatically open completion for key and collection positions while avoiding value-literal popups; stale and cancelled requests are discarded and didChange is deduplicated when the model text is already synchronized.
+- Phase 72: Elasticsearch Console completion covers mapping-field positions inside quoted `field`, `fields`, `_source`, `docvalue_fields`, and `stored_fields` values, with current-index metadata isolation and automatic popup behavior.
+- Phase 73: Elasticsearch REST path completion is server-version aware: ES 6 uses typed document/update/explain paths while ES 7/8 uses typeless `_doc`, `_update`, and `_explain` paths. Driver execution keeps the same ES 6/7/8 rewrite contract.
+- Phase 74: Table data tabs expose a compact DataGrip-style WHERE completion input. It builds a virtual dialect-aware `SELECT ... WHERE` document, returns current-table columns immediately, then merges authoritative LSP candidates without blocking filtering during a cold/restarting LSP session.
+- Phase 75: Relational scope completion is tested consistently across PostgreSQL, MySQL, Hive, and ClickHouse: before a FROM target is bound candidates retain `table.column`, one bound table uses short column names, and multi-table JOIN/WHERE contexts use aliases to remain unambiguous. Prefix, middle, subsequence, and camel-case abbreviation matching are covered.
+- Phase 76: PostgreSQL, MySQL, Hive, and ClickHouse generate relationship-aware JOIN snippets from single or composite foreign-key metadata, including aliases and dialect-specific schema qualification.
+- Phase 77: SQL completion preferences are user-configurable: keyword casing and table-alias initials are applied by the LSP, while accepted candidates receive a bounded, per-project/database local usage score without crossing semantic sort groups.
+- Phase 78: Predicate value completion reads bounded metadata domains such as MySQL `ENUM`/`SET` definitions, filters them as the user types, and inserts correctly escaped literals without running sampling queries.
+- Phase 79: A shared large-catalog regression test measures cold relation completion across PostgreSQL, MySQL, Hive, and ClickHouse with 2,500 tables and enforces a five-second debug-build ceiling. The current local run completed each dialect in under 7 ms after construction.
 
 The shipped editor/LSP path has no known unimplemented protocol handler that it advertises. Closed, unopened project files are intentionally not read by the LSP process; project-wide code usage outside open documents remains an application indexing concern rather than hidden filesystem access by the language server.
+
+DataGrip-level parity is not the same as protocol completeness. Remaining completion gaps are project-wide symbol/usage indexing for unopened files, opt-in live value-frequency sampling, and production telemetry for genuinely large remote catalogs. Static domain values, configurable casing/aliases, local usage ranking, foreign-key JOIN generation, and a reproducible cold-catalog baseline are implemented. Live sampling stays out of automatic metadata sync because it can expose data values and make completion issue database queries without an explicit policy.
 
 ## Setup Instructions
 
@@ -91,7 +103,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked commit is `f8c238784faeb7b109adf9aa2706d6a26e4315af`. A locally rebuilt binary may report the same revision with `sourceDirty: true` while the reviewed submodule changes are still uncommitted; the adjacent manifest is the authoritative build evidence.
+Current tracked commit is `8ebc2cb17ce1853a83e492b9652db9a47d1cca57`. A locally rebuilt binary may report the same revision with `sourceDirty: true` while the reviewed submodule changes are still uncommitted; the adjacent manifest is the authoritative build evidence.
 
 ### 2. Prepare the Binary
 
@@ -184,9 +196,9 @@ function QueryEditor() {
 
 ## Schema Synchronization
 
-`LspConnectionSyncer` sends bounded schema snapshots when the active connection, schema, metadata version, or open query tabs change. Relational databases sync tables, columns, indexes, constraints, and functions. Redis keys sync as LSP table objects with lightweight synthetic columns and type-specific length/cardinality when available. Elasticsearch indices sync mapping fields when available, falling back to `id`, `score`, and `source`. MongoDB collections sync sampled top-level document fields and collection indexes when available, falling back to `_id` and `document`.
+`LspConnectionSyncer` sends bounded schema snapshots when the active connection, schema, metadata version, or open query/table tabs change. Table tabs are included because their compact WHERE field owns a virtual, schema-bound query document. Relational databases sync tables, columns, indexes, constraints, and functions. Redis keys sync as LSP table objects with lightweight synthetic columns and type-specific length/cardinality when available. Elasticsearch indices sync mapping fields when available, falling back to `id`, `score`, and `source`. MongoDB collections sync sampled top-level document fields and collection indexes when available, falling back to `_id` and `document`.
 
-The bundled LSP accepts both pure Elasticsearch JSON DSL and HTTP-style Elasticsearch requests such as `GET /index/_search` followed by a JSON body; diagnostics are applied to the body instead of treating request lines as JSON syntax errors. MongoDB completions include collection CRUD commands plus administrative command names such as `create`, `drop`, `dropDatabase`, `dropIndexes`, `renameCollection`, and `collMod`.
+The bundled LSP accepts both pure Elasticsearch JSON DSL and HTTP-style Elasticsearch requests such as `GET /index/_search` followed by a JSON body; diagnostics are applied to the body instead of treating request lines as JSON syntax errors. Console field completion is restricted to the request's current index and includes quoted field-list/value positions. REST operation snippets follow the connected server's ES 6 typed or ES 7/8 typeless API. MongoDB completions include collection CRUD commands plus administrative command names such as `create`, `drop`, `dropDatabase`, `dropIndexes`, `renameCollection`, and `collMod`; field suggestions are restricted to the collection named by `collection`, `find`, `aggregate`, or another collection-valued command property.
 
 ```typescript
 await lspClient.updateConfiguration({
@@ -207,6 +219,14 @@ scripts/test-live-databases.sh
 The script starts PostgreSQL, MySQL, Redis, MongoDB, and Elasticsearch, exports the corresponding `TEST_*_URL` variables, and runs `src-tauri/tests/live_database.rs`. To use existing services instead, set `OXIDE_LIVE_USE_EXISTING=1` plus `TEST_POSTGRES_URL`, `TEST_MYSQL_URL`, and optionally `TEST_REDIS_URL`, `TEST_MONGODB_URL`, and `TEST_ELASTICSEARCH_URL`.
 
 ## Bundled LSP Tests
+
+Run the dialect scope and document-database unit matrices directly against the source server:
+
+```bash
+cargo test --manifest-path vendor/sql-lsp/Cargo.toml --test completion_scope_matrix_tests --test dialect_tests
+```
+
+Frontend tests cover MongoDB automatic-trigger classification, Elasticsearch quoted-field and ES 6/7/8 REST completion, WHERE virtual documents/fuzzy ranking/keyboard acceptance, table-tab schema mappings, stale completion rejection, and didChange deduplication.
 
 Run the protocol-level bundled LSP test after rebuilding `src-tauri/binaries/sql-lsp`:
 

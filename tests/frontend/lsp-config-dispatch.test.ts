@@ -8,6 +8,10 @@ import { createLspConfigKey } from "@/services/lsp/syncPlan";
 function config(): LspConfigurationPayload {
   return {
     defaultDialect: "postgres",
+    completionPreferences: {
+      keywordCase: "upper",
+      tableAlias: "none",
+    },
     fileSchemas: {
       "oxide://query/q.postgres.postgres": "schema-public",
     },
