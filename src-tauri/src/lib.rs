@@ -188,6 +188,7 @@ pub fn run() {
             commands::database::rename_database,
             commands::database_admin::list_database_admin_sessions,
             commands::database_admin::list_database_admin_metrics,
+            commands::database_admin::list_database_admin_lock_waits,
             commands::database_admin::terminate_database_admin_session,
             commands::database_admin::list_database_admin_users,
             commands::database_admin::create_database_admin_user,

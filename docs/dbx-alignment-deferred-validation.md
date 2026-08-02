@@ -108,3 +108,12 @@ database target until its relevant queue entries pass.
 - Confirm that metrics are only available for native PostgreSQL/MySQL/MariaDB
   connections, refresh without retaining historical server values, and never
   expose SQL text, credentials, connection URLs, or process stderr.
+
+## PostgreSQL lock waits
+
+- Create a controlled blocking transaction and verify each visible wait edge
+  correctly links waiting and blocking backend IDs, users, database, wait
+  event, and elapsed time without returning either query's SQL text.
+- Verify no-edge, multiple blockers, permission-restricted roles, reconnects,
+  and refreshes; unsupported MySQL/MariaDB installations must keep the lock
+  view unavailable rather than approximating it from host-generated SQL.

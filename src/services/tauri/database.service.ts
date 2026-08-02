@@ -4,6 +4,7 @@ import type {
   DatabaseDriverActivationState,
   DatabaseAdminSession,
   DatabaseAdminMetric,
+  DatabaseAdminLockWait,
   DatabaseAdminUser,
   CreateDatabaseAdminUserRequest,
   ConnectionDatabaseCapabilityContext,
@@ -263,6 +264,16 @@ export async function listDatabaseAdminMetrics(
   );
 }
 
+export async function listDatabaseAdminLockWaits(
+  connectionId: string,
+  driver: DatabaseDriver,
+): Promise<DatabaseAdminLockWait[]> {
+  return invokeWithInterceptors<DatabaseAdminLockWait[]>(
+    "list_database_admin_lock_waits",
+    { connectionId, driver },
+  );
+}
+
 export async function terminateDatabaseAdminSession(
   connectionId: string,
   driver: DatabaseDriver,
@@ -398,6 +409,7 @@ export const databaseService = {
   rollbackExternalDatabaseDriver,
   listDatabaseAdminSessions,
   listDatabaseAdminMetrics,
+  listDatabaseAdminLockWaits,
   terminateDatabaseAdminSession,
   listDatabaseAdminUsers,
   createDatabaseAdminUser,

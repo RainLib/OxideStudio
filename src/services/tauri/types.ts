@@ -518,6 +518,17 @@ export interface DatabaseAdminMetric {
   available: boolean;
 }
 
+/** A read-only PostgreSQL blocking edge; intentionally contains no SQL text. */
+export interface DatabaseAdminLockWait {
+  waitingSessionId: string;
+  blockingSessionId: string;
+  waitingUser?: string | null;
+  blockingUser?: string | null;
+  database?: string | null;
+  wait?: string | null;
+  durationSeconds?: number | null;
+}
+
 /**
  * Read-only multi-table copy review. The returned confirmation token binds
  * FK order and per-table mappings before the native batch executor writes.

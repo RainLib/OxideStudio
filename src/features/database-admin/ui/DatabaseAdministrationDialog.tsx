@@ -10,15 +10,16 @@ import {
 import { cn } from "@/lib/utils";
 import { databaseService } from "@/services/tauri";
 import type {
+  DatabaseAdminLockWait,
   DatabaseAdminMetric,
   DatabaseAdminSession,
   DatabaseAdminUser,
   DatabaseDriver,
 } from "@/services/tauri/types";
-import { Activity, BarChart3, Lock, RefreshCw, Shield, Trash2, Unlock, UserPlus, Users } from "lucide-react";
+import { Activity, BarChart3, GitFork, Lock, RefreshCw, Shield, Trash2, Unlock, UserPlus, Users } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-type AdminView = "sessions" | "metrics" | "users";
+type AdminView = "sessions" | "metrics" | "locks" | "users";
 type AccountForm = "create" | "password" | null;
 
 interface DatabaseAdministrationDialogProps {
@@ -72,6 +73,7 @@ export function DatabaseAdministrationDialog({
   const [view, setView] = useState<AdminView>("sessions");
   const [sessions, setSessions] = useState<DatabaseAdminSession[]>([]);
   const [metrics, setMetrics] = useState<DatabaseAdminMetric[]>([]);
+  const [lockWaits, setLockWaits] = useState<DatabaseAdminLockWait[]>([]);
   const [users, setUsers] = useState<DatabaseAdminUser[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isMutating, setIsMutating] = useState(false);
@@ -84,6 +86,7 @@ export function DatabaseAdministrationDialog({
   const [canLogin, setCanLogin] = useState(true);
 
   const supportsAccounts = driver === "postgres" || isMysqlFamily(driver);
+  const supportsLockWaits = driver === "postgres";
   const titleSuffix = connectionName ? ` — ${connectionName}` : "";
 
   const resetForm = useCallback(() => {
@@ -104,6 +107,8 @@ export function DatabaseAdministrationDialog({
         setSessions(await databaseService.listDatabaseAdminSessions(connectionId, driver));
       } else if (view === "metrics") {
         setMetrics(await databaseService.listDatabaseAdminMetrics(connectionId, driver));
+      } else if (view === "locks") {
+        setLockWaits(await databaseService.listDatabaseAdminLockWaits(connectionId, driver));
       } else {
         setUsers(await databaseService.listDatabaseAdminUsers(connectionId, driver));
       }
@@ -113,6 +118,10 @@ export function DatabaseAdministrationDialog({
       setIsLoading(false);
     }
   }, [connectionId, driver, supportsAccounts, view]);
+
+  useEffect(() => {
+    if (!supportsLockWaits && view === "locks") setView("sessions");
+  }, [supportsLockWaits, view]);
 
   useEffect(() => {
     if (open) void load();
@@ -315,6 +324,15 @@ export function DatabaseAdministrationDialog({
               >
                 <BarChart3 size={13} /> Metrics
               </button>
+              {supportsLockWaits && (
+                <button
+                  type="button"
+                  className={cn("wb-toolbar-button h-7 gap-1.5 px-2 text-[11px]", view === "locks" && "wb-toolbar-button-active")}
+                  onClick={() => setView("locks")}
+                >
+                  <GitFork size={13} /> Locks
+                </button>
+              )}
               <button
                 type="button"
                 className={cn("wb-toolbar-button h-7 gap-1.5 px-2 text-[11px]", view === "users" && "wb-toolbar-button-active")}
@@ -340,6 +358,8 @@ export function DatabaseAdministrationDialog({
                 sessions.length === 0 ? <EmptyState label="No other active sessions" /> : <SessionRows sessions={sessions} onTerminate={handleTerminate} disabled={isMutating} />
               ) : view === "metrics" ? (
                 metrics.length === 0 ? <EmptyState label="No read-only server metrics returned" /> : <MetricCards metrics={metrics} />
+              ) : view === "locks" ? (
+                lockWaits.length === 0 ? <EmptyState label="No visible blocking lock waits" /> : <LockWaitRows waits={lockWaits} />
               ) : (
                 users.length === 0 ? <EmptyState label="No database accounts returned" /> : <UserRows users={users} onPassword={openPassword} onLogin={handleLogin} onDelete={handleDeleteUser} disabled={isMutating} />
               )}
@@ -348,6 +368,27 @@ export function DatabaseAdministrationDialog({
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function LockWaitRows({ waits }: { waits: DatabaseAdminLockWait[] }) {
+  return (
+    <div className="divide-y divide-[hsl(var(--wb-border-subtle))]">
+      {waits.map((wait) => (
+        <div key={`${wait.waitingSessionId}:${wait.blockingSessionId}`} className="flex min-w-0 items-start gap-2 px-3 py-2 text-[11px]">
+          <GitFork size={13} className="mt-0.5 shrink-0 text-amber-400/80" />
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-medium text-[hsl(var(--wb-text))]">
+              {wait.waitingSessionId} waiting for {wait.blockingSessionId}
+            </div>
+            <div className="mt-0.5 truncate text-[10px] wb-muted">
+              {[wait.waitingUser && `waiting: ${wait.waitingUser}`, wait.blockingUser && `blocking: ${wait.blockingUser}`, wait.database, wait.wait].filter(Boolean).join(" · ") || "Visible PostgreSQL blocking edge"}
+            </div>
+          </div>
+          <span className="shrink-0 wb-muted">{formatDuration(wait.durationSeconds)}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 

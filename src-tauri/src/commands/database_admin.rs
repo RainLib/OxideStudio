@@ -55,6 +55,21 @@ pub struct DatabaseAdminMetric {
     pub available: bool,
 }
 
+/// One edge in the PostgreSQL server's visible blocking graph. Query text is
+/// intentionally omitted: the Sessions view remains the explicit place to
+/// inspect a statement, while this endpoint is safe to refresh frequently.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseAdminLockWait {
+    pub waiting_session_id: String,
+    pub blocking_session_id: String,
+    pub waiting_user: Option<String>,
+    pub blocking_user: Option<String>,
+    pub database: Option<String>,
+    pub wait: Option<String>,
+    pub duration_seconds: Option<u64>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateDatabaseAdminUserRequest {
@@ -275,6 +290,62 @@ fn metrics_sql(kind: DatabaseKind) -> &'static str {
                 'Allocated data and index bytes for the current database' \
              FROM information_schema.TABLES WHERE table_schema = DATABASE()"
         }
+    }
+}
+
+const POSTGRES_LOCK_WAITS_SQL: &str = "SELECT \
+    waiting.pid::text AS waiting_session_id, \
+    blocking.pid::text AS blocking_session_id, \
+    waiting.usename AS waiting_user, \
+    blocking.usename AS blocking_user, \
+    waiting.datname AS database_name, \
+    NULLIF(CONCAT_WS(':', waiting.wait_event_type, waiting.wait_event), '') AS wait, \
+    EXTRACT(EPOCH FROM (clock_timestamp() - waiting.query_start))::bigint AS duration_seconds \
+    FROM pg_stat_activity waiting \
+    CROSS JOIN LATERAL unnest(pg_blocking_pids(waiting.pid)) AS blocking_pid(pid) \
+    JOIN pg_stat_activity blocking ON blocking.pid = blocking_pid.pid \
+    WHERE waiting.pid <> pg_backend_pid() \
+    ORDER BY waiting.query_start NULLS LAST \
+    LIMIT 200";
+
+#[tauri::command]
+pub async fn list_database_admin_lock_waits(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    driver: String,
+) -> Result<Response<Vec<DatabaseAdminLockWait>>, String> {
+    let result: Result<Vec<DatabaseAdminLockWait>, String> = async {
+        ensure_host_database_admin_allowed(&manager, &connection_id).await?;
+        if admin_kind(&driver)? != DatabaseKind::Postgres {
+            return Err("Lock waits are currently available for PostgreSQL only".to_string());
+        }
+        let result = primary_result(
+            manager
+                .query(&connection_id, POSTGRES_LOCK_WAITS_SQL, None, None, None)
+                .await
+                .map_err(|error| error.to_string())?,
+        )?;
+        Ok(result
+            .rows
+            .iter()
+            .take(ADMIN_RESULT_LIMIT)
+            .filter_map(|row| {
+                Some(DatabaseAdminLockWait {
+                    waiting_session_id: value_string(result_row(&result, row, "waiting_session_id"))?,
+                    blocking_session_id: value_string(result_row(&result, row, "blocking_session_id"))?,
+                    waiting_user: value_string(result_row(&result, row, "waiting_user")),
+                    blocking_user: value_string(result_row(&result, row, "blocking_user")),
+                    database: value_string(result_row(&result, row, "database_name")),
+                    wait: value_string(result_row(&result, row, "wait")),
+                    duration_seconds: value_u64(result_row(&result, row, "duration_seconds")),
+                })
+            })
+            .collect())
+    }
+    .await;
+    match result {
+        Ok(waits) => Ok(Response::ok(waits)),
+        Err(error) => Ok(Response::err("DATABASE_ADMIN_LOCK_WAITS_ERROR", &error)),
     }
 }
 
