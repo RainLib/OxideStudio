@@ -121,11 +121,16 @@ database target until its relevant queue entries pass.
   connections, refresh without retaining historical server values, and never
   expose SQL text, credentials, connection URLs, or process stderr.
 
-## PostgreSQL lock waits
+## Database lock waits
 
 - Create a controlled blocking transaction and verify each visible wait edge
   correctly links waiting and blocking backend IDs, users, database, wait
   event, and elapsed time without returning either query's SQL text.
-- Verify no-edge, multiple blockers, permission-restricted roles, reconnects,
-  and refreshes; unsupported MySQL/MariaDB installations must keep the lock
-  view unavailable rather than approximating it from host-generated SQL.
+- Verify PostgreSQL no-edge, multiple blockers, permission-restricted roles,
+  reconnects, and refreshes.
+- Create controlled InnoDB blocking transactions for MySQL 8 and a supported
+  MariaDB/legacy MySQL version. Verify the modern `performance_schema`
+  protocol is preferred, the legacy `information_schema` fallback is used only
+  when needed, each edge has stable waiting/blocking IDs, and neither path
+  returns SQL text or lock payloads. Verify missing privilege/system views are
+  surfaced as capability errors rather than an empty result.

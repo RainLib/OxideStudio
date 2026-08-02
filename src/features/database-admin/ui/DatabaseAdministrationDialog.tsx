@@ -86,7 +86,7 @@ export function DatabaseAdministrationDialog({
   const [canLogin, setCanLogin] = useState(true);
 
   const supportsAccounts = driver === "postgres" || isMysqlFamily(driver);
-  const supportsLockWaits = driver === "postgres";
+  const supportsLockWaits = driver === "postgres" || isMysqlFamily(driver);
   const titleSuffix = connectionName ? ` — ${connectionName}` : "";
 
   const resetForm = useCallback(() => {
@@ -382,7 +382,7 @@ function LockWaitRows({ waits }: { waits: DatabaseAdminLockWait[] }) {
               {wait.waitingSessionId} waiting for {wait.blockingSessionId}
             </div>
             <div className="mt-0.5 truncate text-[10px] wb-muted">
-              {[wait.waitingUser && `waiting: ${wait.waitingUser}`, wait.blockingUser && `blocking: ${wait.blockingUser}`, wait.database, wait.wait].filter(Boolean).join(" · ") || "Visible PostgreSQL blocking edge"}
+              {[wait.waitingUser && `waiting: ${wait.waitingUser}`, wait.blockingUser && `blocking: ${wait.blockingUser}`, wait.database, wait.wait].filter(Boolean).join(" · ") || "Visible database blocking edge"}
             </div>
           </div>
           <span className="shrink-0 wb-muted">{formatDuration(wait.durationSeconds)}</span>

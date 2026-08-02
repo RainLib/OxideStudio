@@ -55,9 +55,9 @@ pub struct DatabaseAdminMetric {
     pub available: bool,
 }
 
-/// One edge in the PostgreSQL server's visible blocking graph. Query text is
-/// intentionally omitted: the Sessions view remains the explicit place to
-/// inspect a statement, while this endpoint is safe to refresh frequently.
+/// One edge in a server's visible blocking graph. Query text is intentionally
+/// omitted: the Sessions view remains the explicit place to inspect a
+/// statement, while this endpoint is safe to refresh frequently.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseAdminLockWait {
@@ -308,6 +308,81 @@ const POSTGRES_LOCK_WAITS_SQL: &str = "SELECT \
     ORDER BY waiting.query_start NULLS LAST \
     LIMIT 200";
 
+// MySQL 8.0 exposes current InnoDB waits from performance_schema. Join the
+// transaction and process views only to obtain stable connection identifiers
+// and non-sensitive display metadata; never select SQL text or lock payloads.
+const MYSQL_8_LOCK_WAITS_SQL: &str = "SELECT \
+    waiting.trx_mysql_thread_id AS waiting_session_id, \
+    blocking.trx_mysql_thread_id AS blocking_session_id, \
+    waiting_process.USER AS waiting_user, \
+    blocking_process.USER AS blocking_user, \
+    waiting_process.DB AS database_name, \
+    'InnoDB row lock' AS wait, \
+    TIMESTAMPDIFF(SECOND, waiting.trx_wait_started, NOW()) AS duration_seconds \
+    FROM performance_schema.data_lock_waits lock_wait \
+    JOIN information_schema.innodb_trx waiting \
+      ON waiting.trx_id = lock_wait.REQUESTING_ENGINE_TRANSACTION_ID \
+    JOIN information_schema.innodb_trx blocking \
+      ON blocking.trx_id = lock_wait.BLOCKING_ENGINE_TRANSACTION_ID \
+    LEFT JOIN information_schema.processlist waiting_process \
+      ON waiting_process.ID = waiting.trx_mysql_thread_id \
+    LEFT JOIN information_schema.processlist blocking_process \
+      ON blocking_process.ID = blocking.trx_mysql_thread_id \
+    ORDER BY waiting.trx_wait_started ASC \
+    LIMIT 200";
+
+// MariaDB and older MySQL versions expose the same bounded blocking graph
+// through INFORMATION_SCHEMA. This is a read-only compatibility fallback for
+// the fixed MySQL 8 query above, not a frontend-generated vendor SQL path.
+const MYSQL_LEGACY_LOCK_WAITS_SQL: &str = "SELECT \
+    waiting.trx_mysql_thread_id AS waiting_session_id, \
+    blocking.trx_mysql_thread_id AS blocking_session_id, \
+    waiting_process.USER AS waiting_user, \
+    blocking_process.USER AS blocking_user, \
+    waiting_process.DB AS database_name, \
+    'InnoDB row lock' AS wait, \
+    TIMESTAMPDIFF(SECOND, waiting.trx_wait_started, NOW()) AS duration_seconds \
+    FROM information_schema.innodb_lock_waits lock_wait \
+    JOIN information_schema.innodb_trx waiting \
+      ON waiting.trx_id = lock_wait.requesting_trx_id \
+    JOIN information_schema.innodb_trx blocking \
+      ON blocking.trx_id = lock_wait.blocking_trx_id \
+    LEFT JOIN information_schema.processlist waiting_process \
+      ON waiting_process.ID = waiting.trx_mysql_thread_id \
+    LEFT JOIN information_schema.processlist blocking_process \
+      ON blocking_process.ID = blocking.trx_mysql_thread_id \
+    ORDER BY waiting.trx_wait_started ASC \
+    LIMIT 200";
+
+async fn query_database_admin_lock_waits(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    sql: &str,
+) -> Result<Vec<DatabaseAdminLockWait>, String> {
+    let result = primary_result(
+        manager
+            .query(connection_id, sql, None, None, None)
+            .await
+            .map_err(|error| error.to_string())?,
+    )?;
+    Ok(result
+        .rows
+        .iter()
+        .take(ADMIN_RESULT_LIMIT)
+        .filter_map(|row| {
+            Some(DatabaseAdminLockWait {
+                waiting_session_id: value_string(result_row(&result, row, "waiting_session_id"))?,
+                blocking_session_id: value_string(result_row(&result, row, "blocking_session_id"))?,
+                waiting_user: value_string(result_row(&result, row, "waiting_user")),
+                blocking_user: value_string(result_row(&result, row, "blocking_user")),
+                database: value_string(result_row(&result, row, "database_name")),
+                wait: value_string(result_row(&result, row, "wait")),
+                duration_seconds: value_u64(result_row(&result, row, "duration_seconds")),
+            })
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub async fn list_database_admin_lock_waits(
     manager: State<'_, ConnectionManager>,
@@ -316,31 +391,25 @@ pub async fn list_database_admin_lock_waits(
 ) -> Result<Response<Vec<DatabaseAdminLockWait>>, String> {
     let result: Result<Vec<DatabaseAdminLockWait>, String> = async {
         ensure_host_database_admin_allowed(&manager, &connection_id).await?;
-        if admin_kind(&driver)? != DatabaseKind::Postgres {
-            return Err("Lock waits are currently available for PostgreSQL only".to_string());
+        match admin_kind(&driver)? {
+            DatabaseKind::Postgres => {
+                query_database_admin_lock_waits(&manager, &connection_id, POSTGRES_LOCK_WAITS_SQL).await
+            }
+            DatabaseKind::Mysql => {
+                match query_database_admin_lock_waits(&manager, &connection_id, MYSQL_8_LOCK_WAITS_SQL).await {
+                    Ok(waits) => Ok(waits),
+                    Err(modern_error) => query_database_admin_lock_waits(
+                        &manager,
+                        &connection_id,
+                        MYSQL_LEGACY_LOCK_WAITS_SQL,
+                    )
+                    .await
+                    .map_err(|legacy_error| format!(
+                        "MySQL/MariaDB lock-wait metadata is unavailable (modern view: {modern_error}; legacy view: {legacy_error})"
+                    )),
+                }
+            }
         }
-        let result = primary_result(
-            manager
-                .query(&connection_id, POSTGRES_LOCK_WAITS_SQL, None, None, None)
-                .await
-                .map_err(|error| error.to_string())?,
-        )?;
-        Ok(result
-            .rows
-            .iter()
-            .take(ADMIN_RESULT_LIMIT)
-            .filter_map(|row| {
-                Some(DatabaseAdminLockWait {
-                    waiting_session_id: value_string(result_row(&result, row, "waiting_session_id"))?,
-                    blocking_session_id: value_string(result_row(&result, row, "blocking_session_id"))?,
-                    waiting_user: value_string(result_row(&result, row, "waiting_user")),
-                    blocking_user: value_string(result_row(&result, row, "blocking_user")),
-                    database: value_string(result_row(&result, row, "database_name")),
-                    wait: value_string(result_row(&result, row, "wait")),
-                    duration_seconds: value_u64(result_row(&result, row, "duration_seconds")),
-                })
-            })
-            .collect())
     }
     .await;
     match result {

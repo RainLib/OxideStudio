@@ -518,7 +518,7 @@ export interface DatabaseAdminMetric {
   available: boolean;
 }
 
-/** A read-only PostgreSQL blocking edge; intentionally contains no SQL text. */
+/** A read-only database blocking edge; intentionally contains no SQL text. */
 export interface DatabaseAdminLockWait {
   waitingSessionId: string;
   blockingSessionId: string;
