@@ -42,6 +42,26 @@ function uniqueName(name: string, existingNames: Set<string>) {
   return `${base} (${suffix})`;
 }
 
+/** A non-secret identity used only to avoid duplicating a saved connection. */
+function connectionIdentity(input: {
+  driver?: string | null;
+  host?: string | null;
+  port?: number | null;
+  database?: string | null;
+  user?: string | null;
+}) {
+  const driver = input.driver?.trim().toLocaleLowerCase();
+  const host = input.host?.trim().toLocaleLowerCase();
+  if (!driver || !host) return null;
+  return [
+    driver,
+    host,
+    input.port || "",
+    input.database?.trim().toLocaleLowerCase() || "",
+    input.user?.trim().toLocaleLowerCase() || "",
+  ].join("\u0000");
+}
+
 function asConnection(candidate: ConnectionImportCandidate, name: string): ConnectionConfig {
   if (!candidate.driver) throw new Error("A recognized driver is required.");
   return {
@@ -74,6 +94,22 @@ export function ConnectionImportDialog({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const candidates = useMemo(() => result?.candidates || [], [result]);
+  const duplicateCandidateIds = useMemo(() => {
+    const existing = new Set(
+      connections
+        .map((connection) => connectionIdentity(connection))
+        .filter((identity): identity is string => Boolean(identity)),
+    );
+    return new Set(
+      candidates
+        .filter((candidate) => {
+          const identity = connectionIdentity(candidate);
+          return identity !== null && existing.has(identity);
+        })
+        .map((candidate) => candidate.id),
+    );
+  }, [candidates, connections]);
 
   useEffect(() => {
     if (!open) return;
@@ -95,10 +131,12 @@ export function ConnectionImportDialog({
         setAvailableDrivers(drivers);
         setSelectedIds(
           new Set(
-            (result?.candidates || [])
+            candidates
               .filter(
                 (candidate) =>
-                  candidate.driver && drivers.has(candidate.driver.toLocaleLowerCase()),
+                  candidate.driver &&
+                  drivers.has(candidate.driver.toLocaleLowerCase()) &&
+                  !duplicateCandidateIds.has(candidate.id),
               )
               .map((candidate) => candidate.id),
           ),
@@ -110,9 +148,8 @@ export function ConnectionImportDialog({
     return () => {
       active = false;
     };
-  }, [open, result]);
+  }, [candidates, duplicateCandidateIds, open]);
 
-  const candidates = result?.candidates || [];
   const importable = useMemo(
     () =>
       candidates.filter(
@@ -122,7 +159,11 @@ export function ConnectionImportDialog({
       ),
     [availableDrivers, candidates],
   );
-  const selectableCount = importable.filter((candidate) => selectedIds.has(candidate.id)).length;
+  const selectable = useMemo(
+    () => importable.filter((candidate) => !duplicateCandidateIds.has(candidate.id)),
+    [duplicateCandidateIds, importable],
+  );
+  const selectableCount = selectable.filter((candidate) => selectedIds.has(candidate.id)).length;
 
   const toggleCandidate = (candidate: ConnectionImportCandidate, checked: boolean) => {
     setSelectedIds((previous) => {
@@ -134,7 +175,7 @@ export function ConnectionImportDialog({
   };
 
   const saveSelected = async () => {
-    const selected = importable.filter((candidate) => selectedIds.has(candidate.id));
+    const selected = selectable.filter((candidate) => selectedIds.has(candidate.id));
     if (!selected.length) return;
     setIsSaving(true);
     setError(null);
@@ -178,15 +219,17 @@ export function ConnectionImportDialog({
           <div className="divide-y divide-[hsl(var(--wb-border-subtle))]">
             {candidates.map((candidate) => {
               const available = Boolean(candidate.driver && availableDrivers?.has(candidate.driver.toLocaleLowerCase()));
+              const duplicate = duplicateCandidateIds.has(candidate.id);
+              const selectableCandidate = available && !duplicate;
               return (
                 <label key={candidate.id} className="flex min-h-12 cursor-pointer items-center gap-2.5 px-4 py-2 hover:bg-[hsl(var(--wb-hover))]">
-                  <Checkbox checked={selectedIds.has(candidate.id)} disabled={!available || isSaving} onCheckedChange={(checked) => toggleCandidate(candidate, checked === true)} aria-label={`Import ${candidate.name}`} />
+                  <Checkbox checked={selectedIds.has(candidate.id)} disabled={!selectableCandidate || isSaving} onCheckedChange={(checked) => toggleCandidate(candidate, checked === true)} aria-label={`Import ${candidate.name}`} />
                   <DatabaseBrandIcon driver={candidate.driver || "generic"} size={15} className="shrink-0" />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-[11px] font-medium">{candidate.name}</span>
                     <span className="block truncate font-mono text-[10px] wb-muted">{[candidate.host, candidate.port, candidate.database].filter(Boolean).join(" : ") || candidate.connectionUrl || "No endpoint detected"}</span>
                   </span>
-                  <span className={available ? "text-[10px] text-[hsl(var(--wb-accent))]" : "text-[10px] text-amber-300"}>{available ? candidate.driver : candidate.driver ? "Driver package required" : "Unknown driver"}</span>
+                  <span className={selectableCandidate ? "text-[10px] text-[hsl(var(--wb-accent))]" : "text-[10px] text-amber-300"}>{duplicate ? "Existing connection preserved" : available ? candidate.driver : candidate.driver ? "Driver package required" : "Unknown driver"}</span>
                 </label>
               );
             })}

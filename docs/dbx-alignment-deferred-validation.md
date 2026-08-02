@@ -44,8 +44,10 @@ database target until its relevant queue entries pass.
   parameters. Imported objects must contain no credential, token, SSH-key, or
   local-driver-path material.
 - Define and verify an explicit duplicate-connection merge policy before
-  enabling automatic merge; until then imported candidates must remain a
-  user-reviewed set with deterministic renamed local entries.
+  enabling overwrite/field merge. Current policy preserves an existing local
+  connection and excludes an incoming candidate with the same non-secret
+  driver/host/port/database/user identity; verify unknown/incomplete endpoint
+  metadata stays selectable and imported names remain deterministic.
 
 ## External driver runtime telemetry
 
