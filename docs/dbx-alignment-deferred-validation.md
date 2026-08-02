@@ -72,6 +72,17 @@ database target until its relevant queue entries pass.
   connection/schema switches, and refreshes. Descriptors must remain read-only
   and must not enable table data editing, generated DDL, or migration actions.
 
+## Schema snapshot descriptor drift
+
+- Capture two PostgreSQL snapshots containing sequence, non-internal trigger,
+  domain, enum type, extension and partition descriptors. Verify additions,
+  removals, parent/comment changes, deterministic fingerprints, and old
+  snapshots without `schemaObjects` remain readable.
+- Verify descriptor catalog permission failure is retained as a snapshot
+  warning while relation/routine capture continues. Descriptor drift must
+  always be manual-review, contain no SQL/preflight commands, and block
+  automatic migration execution.
+
 ## Database administration metrics
 
 - Verify the fixed read-only PostgreSQL metric query against ordinary and

@@ -957,6 +957,17 @@ export interface SchemaRoutineSnapshot {
   description?: string | null;
 }
 
+/**
+ * Descriptor-only schema metadata. It intentionally excludes source and DDL,
+ * therefore its diff entries are always review-only.
+ */
+export interface SchemaObjectSnapshot {
+  name: string;
+  objectType: string;
+  parentName?: string | null;
+  description?: string | null;
+}
+
 export interface SchemaSnapshot {
   version: number;
   id: string;
@@ -971,6 +982,8 @@ export interface SchemaSnapshot {
   relations: SchemaRelationSnapshot[];
   /** Absent on snapshots saved before routine signatures were introduced. */
   routines?: SchemaRoutineSnapshot[];
+  /** Absent on snapshots captured before descriptor-only object coverage. */
+  schemaObjects?: SchemaObjectSnapshot[];
   warnings: string[];
 }
 
@@ -990,7 +1003,10 @@ export type SchemaChangeKind =
   | "constraintModify"
   | "routineCreate"
   | "routineDrop"
-  | "routineModify";
+  | "routineModify"
+  | "schemaObjectCreate"
+  | "schemaObjectDrop"
+  | "schemaObjectModify";
 export type SchemaChangePhase =
   | "dropDependencies"
   | "dropRelations"

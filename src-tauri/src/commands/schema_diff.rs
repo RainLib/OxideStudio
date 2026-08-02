@@ -5,7 +5,8 @@ use crate::core::{
     schema_diff::{
         compare_schema_snapshots as build_schema_diff, finalize_schema_snapshot, SchemaChangeRisk,
         SchemaDiffPlan, SchemaDiffSummary, SchemaPreflightAssertion, SchemaPreflightCheck,
-        SchemaRelationSnapshot, SchemaRoutineSnapshot, SchemaSnapshot, SCHEMA_SNAPSHOT_VERSION,
+        SchemaObjectSnapshot, SchemaRelationSnapshot, SchemaRoutineSnapshot, SchemaSnapshot,
+        SCHEMA_SNAPSHOT_VERSION,
     },
     store::{MetaStore, Resource},
 };
@@ -415,6 +416,37 @@ async fn capture_schema_snapshot_inner(
         Vec::new()
     };
 
+    // Descriptor discovery is deliberately best-effort. A role that can read
+    // relations may still lack catalog visibility for extensions, triggers or
+    // types; that must not make an otherwise usable snapshot fail. The warning
+    // binds this incomplete coverage to the snapshot review record.
+    let mut warnings = Vec::new();
+    let schema_objects = if capabilities.supports_table_browsing {
+        let result = match database {
+            Some(database) => {
+                manager
+                    .get_database_schema_objects(&connection_id, database, schema)
+                    .await
+            }
+            None => manager.get_schema_objects(&connection_id, schema).await,
+        };
+        match result {
+            Ok(objects) => objects
+                .into_iter()
+                .map(SchemaObjectSnapshot::from)
+                .collect(),
+            Err(_) => {
+                warnings.push(
+                    "Schema object descriptors were unavailable for this server role; snapshot comparison excludes those objects."
+                        .to_string(),
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     finalize_schema_snapshot(SchemaSnapshot {
         version: SCHEMA_SNAPSHOT_VERSION,
         id: String::new(),
@@ -428,7 +460,8 @@ async fn capture_schema_snapshot_inner(
         captured_at: current_timestamp_millis(),
         relations,
         routines,
-        warnings: Vec::new(),
+        schema_objects,
+        warnings,
     })
     .map_err(|error| error.to_string())
 }
@@ -1391,6 +1424,7 @@ mod tests {
             captured_at: 1,
             relations: Vec::new(),
             routines: Vec::new(),
+            schema_objects: Vec::new(),
             warnings: Vec::new(),
         };
 
@@ -1415,6 +1449,7 @@ mod tests {
             captured_at: 1,
             relations: Vec::new(),
             routines: Vec::new(),
+            schema_objects: Vec::new(),
             warnings: vec![OFFLINE_PROJECT_DDL_REVIEW_WARNING.to_string()],
         };
 

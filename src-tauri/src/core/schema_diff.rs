@@ -1,6 +1,8 @@
 use crate::core::{
     dialect::{database_spec_for_driver, DatabaseKind},
-    protocol::{ColumnInfo, ConstraintInfo, FunctionInfo, FunctionParameterInfo, IndexInfo},
+    protocol::{
+        ColumnInfo, ConstraintInfo, FunctionInfo, FunctionParameterInfo, IndexInfo, SchemaObjectInfo,
+    },
 };
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -50,6 +52,30 @@ impl From<FunctionInfo> for SchemaRoutineSnapshot {
     }
 }
 
+/// Descriptor-only schema object metadata. Unlike relation metadata this never
+/// contains source/DDL, so every resulting drift item remains manual review.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaObjectSnapshot {
+    pub name: String,
+    pub object_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl From<SchemaObjectInfo> for SchemaObjectSnapshot {
+    fn from(object: SchemaObjectInfo) -> Self {
+        Self {
+            name: object.name,
+            object_type: object.object_type,
+            parent_name: object.parent_name,
+            description: object.comment,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaSnapshot {
@@ -68,6 +94,10 @@ pub struct SchemaSnapshot {
     /// fingerprints so existing stored snapshots remain comparable.
     #[serde(default)]
     pub routines: Vec<SchemaRoutineSnapshot>,
+    /// Non-relation descriptors are captured only as review-safe metadata.
+    /// Old snapshots intentionally deserialize as an empty list.
+    #[serde(default)]
+    pub schema_objects: Vec<SchemaObjectSnapshot>,
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -98,6 +128,9 @@ pub enum SchemaChangeKind {
     RoutineCreate,
     RoutineDrop,
     RoutineModify,
+    SchemaObjectCreate,
+    SchemaObjectDrop,
+    SchemaObjectModify,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -197,6 +230,7 @@ pub fn finalize_schema_snapshot(mut snapshot: SchemaSnapshot) -> Result<SchemaSn
             .sort_by(|left, right| left.name.cmp(&right.name));
     }
     snapshot.routines.sort_by_key(routine_sort_key);
+    snapshot.schema_objects.sort_by_key(schema_object_sort_key);
     snapshot.warnings.sort();
     snapshot.warnings.dedup();
     snapshot.fingerprint = snapshot_fingerprint(&snapshot)?;
@@ -411,6 +445,13 @@ pub fn compare_schema_snapshots(
         &mut changes,
         &mut warnings,
     );
+    compare_schema_objects(
+        &source.schema_objects,
+        &target.schema_objects,
+        target_schema,
+        &mut changes,
+        &mut warnings,
+    );
 
     let (changes, preflight_checks) =
         finalize_change_plan(kind, source, target, changes, &mut warnings);
@@ -500,6 +541,13 @@ fn compare_metadata_snapshots(
     compare_routines(
         &source.routines,
         &target.routines,
+        &target.schema_name,
+        &mut changes,
+        &mut routine_warnings,
+    );
+    compare_schema_objects(
+        &source.schema_objects,
+        &target.schema_objects,
         &target.schema_name,
         &mut changes,
         &mut routine_warnings,
@@ -678,6 +726,103 @@ fn compare_routines(
     if changes.len() > change_start {
         warnings.push(
             "Routine signature drift is review-only: routine bodies and automatic routine DDL are intentionally unavailable."
+                .to_string(),
+        );
+    }
+}
+
+fn schema_object_map(
+    objects: &[SchemaObjectSnapshot],
+) -> BTreeMap<String, &SchemaObjectSnapshot> {
+    objects
+        .iter()
+        .map(|object| (schema_object_identity(object), object))
+        .collect()
+}
+
+fn schema_object_identity(object: &SchemaObjectSnapshot) -> String {
+    format!("{}:{}", object.object_type.to_ascii_uppercase(), object.name)
+}
+
+fn schema_object_label(object: &SchemaObjectSnapshot) -> String {
+    match object.parent_name.as_deref() {
+        Some(parent) => format!("{} {} (parent: {parent})", object.object_type, object.name),
+        None => format!("{} {}", object.object_type, object.name),
+    }
+}
+
+fn schema_object_review_change(
+    kind: SchemaChangeKind,
+    schema_name: &str,
+    object: &SchemaObjectSnapshot,
+    summary: String,
+) -> SchemaChange {
+    let mut change = change(
+        kind,
+        SchemaChangeRisk::Review,
+        schema_name,
+        &object.name,
+        Some(object.object_type.clone()),
+        object.parent_name.clone(),
+        summary,
+        Vec::new(),
+        false,
+        true,
+    );
+    change.phase = SchemaChangePhase::ManualReview;
+    change.blocked_reason = Some(
+        "Schema object descriptors do not include source/DDL; review and apply this change manually."
+            .to_string(),
+    );
+    change
+}
+
+fn compare_schema_objects(
+    source: &[SchemaObjectSnapshot],
+    target: &[SchemaObjectSnapshot],
+    schema_name: &str,
+    changes: &mut Vec<SchemaChange>,
+    warnings: &mut Vec<String>,
+) {
+    let source_objects = schema_object_map(source);
+    let target_objects = schema_object_map(target);
+    let mut identities = source_objects
+        .keys()
+        .chain(target_objects.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    identities.sort();
+    identities.dedup();
+
+    let change_start = changes.len();
+    for identity in identities {
+        match (source_objects.get(&identity), target_objects.get(&identity)) {
+            (Some(source_object), None) => changes.push(schema_object_review_change(
+                SchemaChangeKind::SchemaObjectCreate,
+                schema_name,
+                source_object,
+                format!("Review creation of {}", schema_object_label(source_object)),
+            )),
+            (None, Some(target_object)) => changes.push(schema_object_review_change(
+                SchemaChangeKind::SchemaObjectDrop,
+                schema_name,
+                target_object,
+                format!("Review removal of {}", schema_object_label(target_object)),
+            )),
+            (Some(source_object), Some(target_object)) if source_object != target_object => {
+                changes.push(schema_object_review_change(
+                    SchemaChangeKind::SchemaObjectModify,
+                    schema_name,
+                    source_object,
+                    format!("Review changed {}", schema_object_label(source_object)),
+                ));
+            }
+            _ => {}
+        }
+    }
+    if changes.len() > change_start {
+        warnings.push(
+            "Schema object descriptor drift is review-only: source/DDL and automatic migration are intentionally unavailable."
                 .to_string(),
         );
     }
@@ -1701,10 +1846,9 @@ fn relation_map(relations: &[SchemaRelationSnapshot]) -> BTreeMap<String, &Schem
 }
 
 fn snapshot_fingerprint(snapshot: &SchemaSnapshot) -> Result<String> {
-    // Stored v1 snapshots did not include routines. Keep their established
-    // fingerprint shape when routines are absent, while making every captured
-    // routine signature bind a new snapshot to its complete review metadata.
-    let payload = if snapshot.routines.is_empty() {
+    // Stored v1 snapshots did not include routines or descriptor-only schema
+    // objects. Keep their established fingerprint shape when both are absent.
+    let payload = if snapshot.routines.is_empty() && snapshot.schema_objects.is_empty() {
         serde_json::to_vec(&(
             snapshot.version,
             &snapshot.driver,
@@ -1720,6 +1864,7 @@ fn snapshot_fingerprint(snapshot: &SchemaSnapshot) -> Result<String> {
             &snapshot.schema_name,
             &snapshot.relations,
             &snapshot.routines,
+            &snapshot.schema_objects,
         ))?
     };
     Ok(hex_digest(&payload))
@@ -1740,6 +1885,16 @@ fn routine_sort_key(routine: &SchemaRoutineSnapshot) -> String {
             .collect::<Vec<_>>()
             .join(","),
         routine.return_type,
+    )
+}
+
+fn schema_object_sort_key(object: &SchemaObjectSnapshot) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        object.object_type,
+        object.name,
+        object.parent_name.as_deref().unwrap_or_default(),
+        object.description.as_deref().unwrap_or_default(),
     )
 }
 
@@ -1800,7 +1955,10 @@ fn phase_for_kind(kind: SchemaChangeKind) -> SchemaChangePhase {
         }
         SchemaChangeKind::RoutineCreate
         | SchemaChangeKind::RoutineDrop
-        | SchemaChangeKind::RoutineModify => SchemaChangePhase::ManualReview,
+        | SchemaChangeKind::RoutineModify
+        | SchemaChangeKind::SchemaObjectCreate
+        | SchemaChangeKind::SchemaObjectDrop
+        | SchemaChangeKind::SchemaObjectModify => SchemaChangePhase::ManualReview,
     }
 }
 
@@ -2651,6 +2809,7 @@ mod tests {
                 constraints: Vec::new(),
             }],
             routines: Vec::new(),
+            schema_objects: Vec::new(),
             warnings: Vec::new(),
         })
         .unwrap()
@@ -2747,6 +2906,37 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("Routine signature drift")));
+    }
+
+    #[test]
+    fn descriptor_object_drift_is_review_only_and_never_generates_ddl() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        source.schema_objects = vec![SchemaObjectSnapshot {
+            name: "orders_id_seq".to_string(),
+            object_type: "sequence".to_string(),
+            parent_name: Some("orders".to_string()),
+            description: Some("Primary-key generator".to_string()),
+        }];
+        let source = finalize_schema_snapshot(source).unwrap();
+        let target = snapshot("actual", vec![column("id", "int4", false)]);
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::SchemaObjectCreate)
+            .expect("schema object creation should be visible in drift review");
+
+        assert_eq!(change.phase, SchemaChangePhase::ManualReview);
+        assert_eq!(change.risk, SchemaChangeRisk::Review);
+        assert!(change.manual_review);
+        assert!(change.sql.is_empty());
+        assert!(change.blocked_reason.is_some());
+        assert_eq!(plan.summary.blocked, 1);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Schema object descriptor drift")));
     }
 
     #[test]
