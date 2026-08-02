@@ -3,7 +3,8 @@ use super::{
     dialect::DatabaseCapabilities,
     protocol::{
         CollectionInfo, ColumnInfo, ConstraintInfo, DatabaseCreateRequest, ForeignKeyReferenceInfo,
-        FunctionInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult, TableInfo,
+        FunctionInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult,
+        SchemaObjectInfo, TableInfo,
     },
 };
 use anyhow::{anyhow, Result};
@@ -257,6 +258,17 @@ pub trait DatabaseDriver: Send + Sync {
         self.get_schemas().await
     }
 
+    /// Read-only descriptors for non-relation objects in an explicitly selected
+    /// database. Drivers with no separate database hierarchy keep the active
+    /// connection behavior by default.
+    async fn get_database_schema_objects(
+        &self,
+        _database: &str,
+        schema: &str,
+    ) -> Result<Vec<SchemaObjectInfo>> {
+        self.get_schema_objects(schema).await
+    }
+
     /// Get tables in a specific schema
     async fn get_tables(&self, _schema: &str) -> Result<Vec<TableInfo>> {
         Ok(Vec::new())
@@ -266,6 +278,13 @@ pub trait DatabaseDriver: Send + Sync {
     /// Drivers without database-scoped connections delegate to `get_tables`.
     async fn get_database_tables(&self, _database: &str, schema: &str) -> Result<Vec<TableInfo>> {
         self.get_tables(schema).await
+    }
+
+    /// Lists descriptor-only schema objects that are not relations. Drivers
+    /// return an empty list unless they can identify the object kind without
+    /// guessing a DDL or mutation contract.
+    async fn get_schema_objects(&self, _schema: &str) -> Result<Vec<SchemaObjectInfo>> {
+        Ok(Vec::new())
     }
 
     /// Get collections, indexes, or analogous document/search objects in a namespace.

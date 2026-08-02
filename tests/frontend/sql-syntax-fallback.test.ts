@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { sqlSyntaxFallbackCompletions } from "@/features/query-editor";
+import {
+  sqlCommandSnippetCompletions,
+  sqlSyntaxFallbackCompletions,
+} from "@/features/query-editor";
 
 function labels(source: string) {
   return sqlSyntaxFallbackCompletions(source).map((item) => item.label);
@@ -60,5 +63,41 @@ SELECT`;
     expect(labels("SELECT ';' AS marker WHERE ")).toEqual(
       expect.arrayContaining(["=", "IN", "IS NULL"]),
     );
+  });
+
+  it("recommends cursor-navigable common commands at a statement boundary", () => {
+    const snippet = sqlCommandSnippetCompletions("sel", {
+      driver: "postgres",
+    })[0];
+
+    expect(snippet).toMatchObject({
+      label: "sel · select rows",
+      insertTextFormat: 2,
+      filterText: expect.stringContaining("sel"),
+    });
+    expect(snippet?.insertText).toContain("LIMIT ${3:100}");
+    expect(labels("sel")).toContain("sel · select rows");
+  });
+
+  it("adapts bounded SELECT and ALTER templates to the product dialect", () => {
+    const body = (driver: string, prefix = "sel") =>
+      sqlCommandSnippetCompletions(prefix, { driver })[0]?.insertText;
+
+    expect(body("sqlserver")).toContain("SELECT TOP ${1:100}");
+    expect(body("oracle")).toContain("ROWNUM <= ${3:100}");
+    expect(body("db2")).toContain("FETCH FIRST ${3:100} ROWS ONLY");
+    expect(body("firebird")).toContain("ROWS ${3:100}");
+    expect(body("jdbc")).not.toContain("LIMIT");
+    expect(body("clickhouse", "upd")).toContain("ALTER TABLE ${1:table}");
+    expect(body("dameng", "at")).toContain("ADD (${2:column} ${3:type})");
+  });
+
+  it("does not inject SQL commands into native non-SQL editors", () => {
+    expect(
+      sqlSyntaxFallbackCompletions("", {
+        driver: "redis",
+        supportsSqlQuery: false,
+      }),
+    ).toEqual([]);
   });
 });

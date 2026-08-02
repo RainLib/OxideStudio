@@ -98,8 +98,9 @@ dbx 仅用于观察交互、能力覆盖和测试组合，不是 OxideStudio 的
 3. 补全 provider 的集成测试偏少，更多测试集中在纯 helper；缺两条真实文档、
    不同光标位置、取消、过期响应和 text edit 映射的组合测试。
 4. LSP 已提供格式化、`SELECT *` 展开和危险 mutation 的 `WHERE 1 = 0` 安全 guard
-   code actions；仍缺 DataGrip 级的批量 intentions、批量多光标 SQL 结构编辑、可配置
-   dialect inspection profile 和项目级 scratch/console 组织。
+   code actions；编辑器另提供多选区原子 quote/unquote identifier 与 clipboard→`IN (...)`
+   intention。仍缺 metadata 驱动的列清单/JOIN/WHERE 重写 preview、更复杂的结构化多光标编辑、
+   可配置 dialect inspection profile 和项目级 scratch/console 组织。
 
 本轮已在 LSP server 增加高置信度软边界：空行后的顶层语句关键字会获得独立
 completion scope，同时保护 CTE、INSERT SELECT、EXPLAIN、CREATE body、
@@ -149,6 +150,14 @@ bundled LSP 共用的 statement-scope contract，以消除实现副本。
   失效未 pin 的 active capability cache。Grid WHERE/Sort 输入与 Agent 的
   `lsp.getCompletions` 同样携带该 contract；Monaco 的全局 provider 只服务当前虚拟
   文档，避免后台标签页被当前连接或当前 package version 的 LSP 会话误处理。
+- 已增加 `get_connection_database_capability_context`，从同一个 live driver 实例一次读取
+  canonical driver、外置包精确版本、签名 capability、协商后的 server version 和迁移模式。
+  LSP 配置不再分别查询活动包目录与服务端版本，从而避免重连/包切换期间拼出不存在的组合；
+  Query Editor 同样优先读取 live contract，未连接或旧后端才保守回退到版本固定的目录能力。
+- 常用 SQL 推荐不再只是静态关键词：语句边界会给出 bounded SELECT、INSERT、带 WHERE 的
+  UPDATE/DELETE、CTE、建表、加列和索引 snippet，并按实际产品选择 `TOP`、`ROWNUM`、
+  `FETCH FIRST`、`ROWS`、`LIMIT` 与 ClickHouse mutation 语法。未知 JDBC 不猜分页方言，
+  非 SQL provider 不接收这些模板；接受记录继续只保存在本机并参与 connection scope 排序。
 - LSP 进程健康与 schema-aware completion 状态已拆分：status bar 会明确显示 metadata
   正在同步、缓存命中、完整就绪或部分降级。这样 LSP 二进制已启动但 metadata 尚未可用时，
   不会错误显示为完全可用。
@@ -200,6 +209,8 @@ parameter、transaction、primary-key mutation 和 rollback 测试。
 
 按产品族拆分的 70+ 发布目标、工作区类型和 conformance 门槛见
 [`driver-family-rollout.md`](driver-family-rollout.md)。
+逐功能差距与 DBX 源码位置的一一对应关系见
+[`dbx-detailed-gap-matrix.md`](dbx-detailed-gap-matrix.md)。
 
 ### dbx 可参考点
 
@@ -223,7 +234,7 @@ dbx 的 JDBC/driver-profile 主要解决“可连接”的广度；它不能证�
 | --- | --- | --- |
 | 创建 database/schema | PostgreSQL/MySQL 使用 Host 已验证方言；其它为语义化 sidecar 请求 | `supportsCreateDatabase` + runtime `databaseCreation`，可独立声明 owner/charset/collation |
 | schema diff / migration | PostgreSQL 原子事务；MySQL 显式确认的逐语句 journal；SQLite、文档/搜索后端、无 Host DDL planner 的外置包以及跨驱动映射只生成关系、字段、索引、约束的 metadata diff | 不能复用 Host SQL；必须新增“方言生成 + 预检 + apply + post-verify” sidecar conformance 合同后才开放自动执行 |
-| 数据导入/导出/复制 | 走参数绑定、行数/大小预算和连接侧权限，不借 Agent Shell；SQLite/DuckDB 与 Grid 复用有界 ANSI/PG 数据路径，CSV/JSON 导入不再被 PostgreSQL/MySQL 的枚举限制误拒绝。关系型的首个“表→表”复制通路现为 `preview → exact confirmation → append`：后端重新读取两端元数据、按列名（大小写不敏感）映射、拒绝未赋值的必填目标列，并把 source/target、列映射、源/目标类型、limit/batch 绑定进动态确认短语。预览会明确展示两端字段类型；跨类型族只形成需人工审查的 warning，不伪造数据转换。目标连接声明 catalog 能力时，复制对话框先选择 `database → schema → table`，选中的 database 也进入确认令牌和后端请求，避免跨库复制错误落到连接默认库。一次执行最大 10,000 行、每批最多 500 行；跨库事务不被伪装成原子操作，批次失败会明确已提交行数。除内置 PostgreSQL、MySQL/MariaDB、SQLite、DuckDB 外，chooser 只显示签名声明 `supportsTableDataTransfer`、运行时事务可用且采用已审核 PostgreSQL/MySQL/SQLite/DuckDB 方言的外置连接；它独立于 Grid 编辑，以支持 DuckDB 等受控批量写入。generic JDBC、只读数仓和仅能 Grid 编辑的包不再被误显示为“可迁移”。 | 需要经版本 conformance 验证的类型转换、取消、事务/partial-commit policy 和 source/target fixture；首版不支持 replace/upsert、全量复制或外置 JDBC 自动写入，只有 query/metadata 的包不得显示写入入口。 |
+| 数据导入/导出/复制 | 走参数绑定、行数/大小预算和连接侧权限，不借 Agent Shell；SQLite/DuckDB 与 Grid 复用有界 ANSI/PG 数据路径，CSV/JSON 导入不再被 PostgreSQL/MySQL 的枚举限制误拒绝。关系型的“表→表”复制通路现为 `preview → exact confirmation → append/overwrite/upsert`：后端重新读取两端元数据、按列名（大小写不敏感）映射、拒绝未赋值的必填目标列，并把 source/target、模式、列映射、源/目标类型、limit/batch、upsert key 和 PostgreSQL reseed 选项绑定进动态确认短语。upsert 仅对 bundled PostgreSQL/MySQL/SQLite 开放，要求目标声明完整主键且全部 key columns 有 source mapping；外置包在 signed semantic conflict-write contract 完成前保持拒绝。PostgreSQL 目标可显式启用同事务 serial/identity generator 同步，预览会列出受影响列；没有可同步列时只给出 warning。多表复制先读取选表间 FK，完成拓扑排序和逐表映射预检，再在单一目标事务中执行，循环 FK 在没有明确 target capability 时拒绝。预览会明确展示两端字段类型；跨类型族只形成需人工审查的 warning，不伪造数据转换。目标连接声明 catalog 能力时，复制对话框先选择 `database → schema → table`，选中的 database 也进入确认令牌和后端请求，避免跨库复制错误落到连接默认库。一次执行最大 10,000 行、每批最多 500 行；所有写入模式使用同一目标事务，失败或取消会回滚目标变更，并产生隐私受限的逐对象终态报告。除内置 PostgreSQL、MySQL/MariaDB、SQLite、DuckDB 外，chooser 只显示签名声明 `supportsTableDataTransfer`、运行时事务可用且采用已审核 PostgreSQL/MySQL/SQLite/DuckDB 方言的外置连接；它独立于 Grid 编辑，以支持 DuckDB 等受控批量写入。generic JDBC、只读数仓和仅能 Grid 编辑的包不再被误显示为“可迁移”。 | 仍需经版本 conformance 验证的 source/target fixture；外置驱动 upsert、循环 FK policy、schema object transfer、ownership preview 和外置 semantic DDL contract 必须各自完成后才开放。只有 query/metadata 的包不得显示写入入口。 |
 
 CSV 对话框提供编码、分隔符、列映射和类型预览；提交时所有 INSERT 又会以刚读取的
 目标列元数据复核未知列、必填列与非空约束。这一后端复核同样覆盖 JSON 导入、Grid 与

@@ -12,6 +12,10 @@ export {
 } from "./model/completionFallback";
 export { sqlSyntaxFallbackCompletions } from "./model/sqlSyntaxFallback";
 export {
+  sqlCommandSnippetCompletions,
+  type SqlCommandSnippetOptions,
+} from "./model/sqlCommandSnippets";
+export {
   editorDocumentIdentity,
   type EditorDocumentIdentity,
   type EditorDocumentTab,
@@ -51,3 +55,8 @@ export {
 } from "./model/currentStatementDecoration";
 export { elasticsearchJsonStringCompletionRange } from "./model/elasticsearchCompletionRange";
 export { parseElasticsearchConsoleServerVersion } from "./model/elasticsearchConsoleVersion";
+export {
+  quoteSqlIdentifierSelection,
+  sqlInListFromClipboard,
+  unquoteSqlIdentifierSelection,
+} from "./model/sqlEditorIntentions";

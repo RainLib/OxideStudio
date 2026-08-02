@@ -40,6 +40,21 @@ pub struct DatabaseAdminUser {
     pub authentication_plugin: Option<String>,
 }
 
+/// A deliberately small, read-only server metric. Values remain strings so a
+/// driver cannot lose precision when returning counters larger than a JS safe
+/// integer. `available: false` is an explicit capability/permission downgrade,
+/// not a zero value.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseAdminMetric {
+    pub key: String,
+    pub label: String,
+    pub value: Option<String>,
+    pub unit: String,
+    pub description: Option<String>,
+    pub available: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateDatabaseAdminUserRequest {
@@ -219,6 +234,96 @@ fn user_list_sql(kind: DatabaseKind) -> &'static str {
             "SELECT User AS user_name, Host AS host, plugin AS authentication_plugin \
              FROM mysql.user ORDER BY User, Host LIMIT 200"
         }
+    }
+}
+
+fn metrics_sql(kind: DatabaseKind) -> &'static str {
+    match kind {
+        DatabaseKind::Postgres => {
+            "WITH activity AS ( \
+                SELECT COUNT(*) FILTER (WHERE pid <> pg_backend_pid()) AS connections, \
+                COUNT(*) FILTER (WHERE pid <> pg_backend_pid() AND state = 'active') AS active_queries \
+                FROM pg_stat_activity \
+             ), stats AS ( \
+                SELECT xact_commit, xact_rollback, blks_hit, blks_read \
+                FROM pg_stat_database WHERE datname = current_database() \
+             ) \
+             SELECT 'connections' AS metric_key, 'Connections' AS metric_label, connections::text AS metric_value, 'count' AS metric_unit, \
+                'Other currently visible server sessions' AS metric_description FROM activity \
+             UNION ALL SELECT 'activeQueries', 'Active queries', active_queries::text, 'count', \
+                'Visible sessions currently executing a query' FROM activity \
+             UNION ALL SELECT 'cacheHitPercent', 'Cache hit rate', \
+                CASE WHEN COALESCE(blks_hit, 0) + COALESCE(blks_read, 0) > 0 \
+                     THEN ROUND(100.0 * blks_hit / (blks_hit + blks_read), 2)::text END, '%', \
+                'PostgreSQL shared-buffer hits for the current database' FROM stats \
+             UNION ALL SELECT 'committedTransactions', 'Committed transactions', xact_commit::text, 'count', \
+                'Current database cumulative counter since statistics reset' FROM stats \
+             UNION ALL SELECT 'rolledBackTransactions', 'Rolled back transactions', xact_rollback::text, 'count', \
+                'Current database cumulative counter since statistics reset' FROM stats \
+             UNION ALL SELECT 'databaseSizeBytes', 'Database size', pg_database_size(current_database())::text, 'bytes', \
+                'Allocated size of the current database'"
+        }
+        DatabaseKind::Mysql => {
+            "SELECT 'connections' AS metric_key, 'Connections' AS metric_label, COUNT(*) + 0 AS metric_value, 'count' AS metric_unit, \
+                'Visible server sessions' AS metric_description \
+             FROM information_schema.PROCESSLIST \
+             UNION ALL SELECT 'activeQueries', 'Active queries', COUNT(*) + 0, 'count', \
+                'Visible sessions executing a non-idle command' \
+             FROM information_schema.PROCESSLIST \
+             WHERE COMMAND NOT IN ('Sleep', 'Daemon') \
+             UNION ALL SELECT 'databaseSizeBytes', 'Database size', COALESCE(SUM(data_length + index_length), 0) + 0, 'bytes', \
+                'Allocated data and index bytes for the current database' \
+             FROM information_schema.TABLES WHERE table_schema = DATABASE()"
+        }
+    }
+}
+
+fn metric_from_row(result: &QueryResult, row: &[Value]) -> Option<DatabaseAdminMetric> {
+    let key = value_string(result_row(result, row, "metric_key"))?;
+    let label = value_string(result_row(result, row, "metric_label"))?;
+    let unit = value_string(result_row(result, row, "metric_unit"))?;
+    let value = value_string(result_row(result, row, "metric_value"));
+    Some(DatabaseAdminMetric {
+        key,
+        label,
+        value: value.clone(),
+        unit,
+        description: value_string(result_row(result, row, "metric_description")),
+        available: value.is_some(),
+    })
+}
+
+#[tauri::command]
+pub async fn list_database_admin_metrics(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    driver: String,
+) -> Result<Response<Vec<DatabaseAdminMetric>>, String> {
+    let result: Result<Vec<DatabaseAdminMetric>, String> = async {
+        ensure_host_database_admin_allowed(&manager, &connection_id).await?;
+        let result = primary_result(
+            manager
+                .query(
+                    &connection_id,
+                    metrics_sql(admin_kind(&driver)?),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .map_err(|error| error.to_string())?,
+        )?;
+        Ok(result
+            .rows
+            .iter()
+            .take(ADMIN_RESULT_LIMIT)
+            .filter_map(|row| metric_from_row(&result, row))
+            .collect())
+    }
+    .await;
+    match result {
+        Ok(metrics) => Ok(Response::ok(metrics)),
+        Err(error) => Ok(Response::err("DATABASE_ADMIN_METRICS_ERROR", &error)),
     }
 }
 

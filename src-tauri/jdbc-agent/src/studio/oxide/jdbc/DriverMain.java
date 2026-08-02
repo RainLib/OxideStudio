@@ -79,7 +79,7 @@ public final class DriverMain {
     try {
       writeResponse(output, ok(id, handle(request)));
     } catch (Exception error) {
-      writeResponse(output, error(id, "JDBC_DRIVER_ERROR", safeMessage(error)));
+      writeResponse(output, error(id, errorCode(text(request.get("method")), error), safeMessage(error)));
     }
   }
 
@@ -121,14 +121,28 @@ public final class DriverMain {
     value.put("capabilities", capabilities); return value;
   }
 
+  /**
+   * Rust's tagged DriverRequest enum serializes its variant fields with their
+   * wire names (snake_case). Keep camelCase as a temporary compatibility
+   * fallback for pre-runner fixture clients, but never require it from the
+   * desktop Host.
+   */
+  private static Object protocolField(Map<String, Object> params, String wireName, String legacyName) {
+    return params.containsKey(wireName) ? params.get(wireName) : params.get(legacyName);
+  }
+
+  private static String connectionId(Map<String, Object> params) {
+    return text(protocolField(params, "connection_id", "connectionId"));
+  }
+
   private static void connect(Map<String, Object> params) throws SQLException {
-    String id = text(params.get("connectionId")); Map<String, Object> config = object(params.get("config"));
+    String id = connectionId(params); Map<String, Object> config = object(params.get("config"));
     Connection replacement = DriverManager.getConnection(text(config.get("url")));
     Connection previous = CONNECTIONS.put(id, replacement); close(previous);
   }
-  private static void disconnect(Map<String, Object> params) { close(CONNECTIONS.remove(text(params.get("connectionId")))); }
+  private static void disconnect(Map<String, Object> params) { close(CONNECTIONS.remove(connectionId(params))); }
   private static Connection connection(Map<String, Object> params) {
-    Connection value = CONNECTIONS.get(text(params.get("connectionId")));
+    Connection value = CONNECTIONS.get(connectionId(params));
     if (value == null) throw new IllegalArgumentException("Connection is not open"); return value;
   }
   private static String serverVersion(Connection connection) throws SQLException {
@@ -161,8 +175,8 @@ public final class DriverMain {
   }
 
   private static boolean cancel(Map<String, Object> params) {
-    String connectionId = text(params.get("connectionId"));
-    String queryId = text(params.get("queryId"));
+    String connectionId = connectionId(params);
+    String queryId = text(protocolField(params, "query_id", "queryId"));
     Statement statement = RUNNING_QUERIES.get(queryKey(connectionId, queryId));
     if (statement == null) return false;
     try {
@@ -180,13 +194,13 @@ public final class DriverMain {
   private static Map<String, Object> query(Map<String, Object> params) throws SQLException {
     Connection connection = connection(params); String sql = text(params.get("statement"));
     List<Object> values = array(params.get("parameters"));
-    String queryId = nullable(params.get("queryId"));
+    String queryId = nullable(protocolField(params, "query_id", "queryId"));
     try (PreparedStatement statement = connection.prepareStatement(sql)) {
       configureQueryStatement(statement);
       for (int index = 0; index < values.size(); index++) {
         Map<String, Object> parameter = object(values.get(index)); statement.setObject(index + 1, parameter.get("value"));
       }
-      String runningKey = queryId == null || queryId.isBlank() ? null : queryKey(text(params.get("connectionId")), queryId);
+      String runningKey = queryId == null || queryId.isBlank() ? null : queryKey(connectionId(params), queryId);
       if (runningKey != null) RUNNING_QUERIES.put(runningKey, statement);
       try {
         boolean hasRows = statement.execute();
@@ -379,10 +393,32 @@ public final class DriverMain {
   }
   private static Map<String, Object> value(String kind, Object value) { Map<String, Object> result = new LinkedHashMap<>(); result.put("kind", kind); result.put("value", value); return result; }
   private static Map<String, Object> ok(long id, Map<String, Object> result) { Map<String, Object> response = new LinkedHashMap<>(); response.put("id", id); response.put("status", "ok"); response.put("result", result); return response; }
+  private static String errorCode(String method, Exception error) {
+    if (!(error instanceof SQLException)) return "JDBC_DRIVER_ERROR";
+    return switch (method) {
+      case "connect" -> "CONNECT_FAILED";
+      case "ping" -> "PING_FAILED";
+      case "serverVersion" -> "VERSION_FAILED";
+      case "query" -> "QUERY_FAILED";
+      case "metadata" -> "METADATA_FAILED";
+      case "createDatabase" -> "DATABASE_CREATION_FAILED";
+      case "cancel" -> "CANCELLATION_FAILED";
+      default -> "JDBC_DRIVER_ERROR";
+    };
+  }
   private static Map<String, Object> error(long id, String code, String message) { Map<String, Object> details = new LinkedHashMap<>(); Map<String, Object> item = new LinkedHashMap<>(); item.put("code", code); item.put("message", message); item.put("retryable", false); item.put("details", details); Map<String, Object> response = new LinkedHashMap<>(); response.put("id", id); response.put("status", "error"); response.put("result", item); return response; }
   private static String requiredEnv(String name) { String value = System.getenv(name); if (value == null || value.isBlank()) throw new IllegalStateException("Host did not bind driver identity"); return value; }
   private static void close(Connection connection) { if (connection != null) try { connection.close(); } catch (SQLException ignored) {} }
-  private static String safeMessage(Exception error) { String value = error.getMessage(); return value == null || value.isBlank() ? error.getClass().getSimpleName() : value.substring(0, Math.min(value.length(), 1024)); }
+  private static String safeMessage(Exception error) {
+    String value = error.getMessage();
+    if (value == null || value.isBlank()) return error.getClass().getSimpleName();
+    // JDBC vendors commonly repeat the supplied URL in exceptions. Never let
+    // URL userinfo or password/token query properties cross the sidecar IPC
+    // boundary, even in a classified error response.
+    value = value.replaceAll("(?i)([a-z][a-z0-9+.-]*://[^\\s/@:]+):[^\\s@/]+@", "$1:<redacted>@");
+    value = value.replaceAll("(?i)((?:password|pwd|token|secret)\\s*[=:]\\s*)[^\\s;,&]+", "$1<redacted>");
+    return value.substring(0, Math.min(value.length(), 1024));
+  }
   @SuppressWarnings("unchecked") private static Map<String, Object> object(Object value) { return value instanceof Map<?, ?> map ? (Map<String, Object>) map : new LinkedHashMap<>(); }
   @SuppressWarnings("unchecked") private static List<Object> array(Object value) { return value instanceof List<?> list ? (List<Object>) list : List.of(); }
   private static String text(Object value) { if (value == null) throw new IllegalArgumentException("Required string field is missing"); return String.valueOf(value); }

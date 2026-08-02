@@ -101,6 +101,26 @@ export interface DatabaseCapabilities {
   commonDataTypes: string[];
 }
 
+export type SchemaMigrationCapabilityMode =
+  | "transactional"
+  | "nonTransactional"
+  | "reviewOnly";
+
+/**
+ * Exact capability snapshot for one connected driver instance. This keeps the
+ * package contract and negotiated server version together so editor and
+ * migration consumers do not combine values from different reconnects.
+ */
+export interface ConnectionDatabaseCapabilityContext {
+  connectionId: string;
+  driver: DatabaseDriver;
+  distribution: "bundled" | "external";
+  packageVersion?: string | null;
+  serverVersion?: string | null;
+  schemaMigrationMode: SchemaMigrationCapabilityMode;
+  capabilities: DatabaseCapabilities;
+}
+
 export interface DatabaseDriverInstallation {
   driver: string;
   displayName: string;
@@ -150,6 +170,12 @@ export interface DatabaseDriverRuntimeSummary {
   unavailableProcessCount: number;
   /** Registered external connections whose owned sidecar has exited. */
   unhealthyConnectionCount: number;
+  /** Launches observed since this desktop process started. */
+  launchCount: number;
+  /** Distinct connected sidecars observed exited since this desktop process started. */
+  observedExitCount: number;
+  lastStartedAtMillis?: number | null;
+  lastExitObservedAtMillis?: number | null;
 }
 
 export interface ManagedJavaRuntimeInstallation {
@@ -206,6 +232,31 @@ export interface DatabaseDriverConformance {
   migration: string[];
   /** Versions that passed source paging, type mapping, and partial-commit transfer fixtures. */
   dataTransfer?: string[];
+  /** Hash-bound reports from the official conformance runner. */
+  evidence?: DatabaseDriverConformanceEvidence[];
+}
+
+export interface DatabaseDriverConformanceEvidence {
+  schemaVersion: number;
+  runnerVersion: string;
+  driverId: string;
+  packageVersion: string;
+  entrypointSha256: string;
+  target: string;
+  serverVersion: string;
+  fixtureId: string;
+  fixtureSha256: string;
+  reportUrl: string;
+  reportSha256: string;
+  operations: Array<
+    | "connect"
+    | "metadata"
+    | "query"
+    | "cancellation"
+    | "mutations"
+    | "migration"
+    | "dataTransfer"
+  >;
 }
 
 export interface DatabaseDriverCatalog {
@@ -444,15 +495,98 @@ export interface TableDataTransferEndpoint {
   database?: string;
 }
 
-export type TableDataTransferMode = "append" | "overwrite";
+export type TableDataTransferMode = "append" | "overwrite" | "upsert";
 
 export interface TableDataTransferRequest {
+  /** Enables a durable, privacy-bounded terminal report for this project. */
+  projectId?: string;
   transferId: string;
   source: TableDataTransferEndpoint;
   target: TableDataTransferEndpoint;
   mode?: TableDataTransferMode;
   maxRows?: number;
   batchSize?: number;
+  reseedIdentity?: boolean;
+}
+
+export interface DatabaseAdminMetric {
+  key: string;
+  label: string;
+  value?: string | null;
+  unit: string;
+  description?: string | null;
+  available: boolean;
+}
+
+/**
+ * Read-only multi-table copy review. The returned confirmation token binds
+ * FK order and per-table mappings before the native batch executor writes.
+ */
+export interface TableDataTransferBatchPlanRequest {
+  sourceConnectionId: string;
+  sourceDriver: DatabaseDriver;
+  sourceDatabase?: string;
+  sourceSchema: string;
+  targetConnectionId: string;
+  targetDriver: DatabaseDriver;
+  targetDatabase?: string;
+  targetSchema: string;
+  tables: string[];
+  mode?: TableDataTransferMode;
+  maxRows?: number;
+  batchSize?: number;
+  reseedIdentity?: boolean;
+}
+
+export interface TableDataTransferDependency {
+  prerequisiteTable: string;
+  dependentTable: string;
+  constraintName: string;
+}
+
+export interface TableDataTransferBatchTablePreflight {
+  table: string;
+  canExecute: boolean;
+  mappedColumns: number;
+  /** Digest of the reviewed mapping; no SQL or row data is exposed. */
+  planDigest?: string | null;
+  warnings: string[];
+}
+
+export interface TableDataTransferBatchPlan {
+  orderedTables: string[];
+  dependencies: TableDataTransferDependency[];
+  cyclicTables: string[];
+  tablePreflights: TableDataTransferBatchTablePreflight[];
+  /**
+   * True only when the FK graph and every table mapping are executable. The
+   * native executor still rebuilds this plan before opening its transaction.
+   */
+  canExecute: boolean;
+  confirmationToken: string;
+  warnings: string[];
+}
+
+export interface TableDataTransferBatchExecuteRequest {
+  /** Enables a privacy-bounded terminal report for every selected table. */
+  projectId?: string;
+  transferId: string;
+  plan: TableDataTransferBatchPlanRequest;
+}
+
+export interface TableDataTransferBatchTableResult {
+  table: string;
+  rowsTransferred: number;
+  batches: number;
+  limitReached: boolean;
+  reportId?: string | null;
+}
+
+export interface TableDataTransferBatchResult {
+  rowsTransferred: number;
+  batches: number;
+  limitReached: boolean;
+  tables: TableDataTransferBatchTableResult[];
 }
 
 export interface TableDataTransferColumnMapping {
@@ -479,6 +613,9 @@ export interface TableDataTransferPreview {
   maxRows: number;
   batchSize: number;
   targetRowsToDelete?: number | null;
+  /** Target primary-key columns used as the conflict identity in upsert mode. */
+  upsertKeyColumns: string[];
+  identityReseedColumns: string[];
   canExecute: boolean;
   confirmationToken: string;
   warnings: string[];
@@ -511,6 +648,8 @@ export interface TableDataTransferResult {
   batches: number;
   limitReached: boolean;
   mappedColumns: TableDataTransferColumnMapping[];
+  /** Set when the terminal transfer report was stored successfully. */
+  reportId?: string | null;
 }
 
 export type TableDataTransferProgressStatus =
@@ -518,6 +657,19 @@ export type TableDataTransferProgressStatus =
   | "done"
   | "cancelled"
   | "error";
+
+export type TableDataTransferVerificationStatus =
+  | "verified"
+  | "needsReview"
+  | "notAvailable";
+
+/** A read-only post-commit count observation; it never includes row values. */
+export interface TableDataTransferVerification {
+  status: TableDataTransferVerificationStatus;
+  expectedRows?: number | null;
+  observedRows?: number | null;
+  message: string;
+}
 
 export interface TableDataTransferProgress {
   transferId: string;
@@ -527,6 +679,27 @@ export interface TableDataTransferProgress {
   status: TableDataTransferProgressStatus;
   terminal: boolean;
   message?: string | null;
+}
+
+/** No connection URL, credentials, SQL, parameters, or row values are stored. */
+export interface TableDataTransferReport {
+  id: string;
+  projectId: string;
+  transferId: string;
+  source: TableDataTransferEndpoint;
+  target: TableDataTransferEndpoint;
+  mode: TableDataTransferMode;
+  planDigest: string;
+  maxRows: number;
+  rowsTransferred: number;
+  batches: number;
+  limitReached: boolean;
+  status: Exclude<TableDataTransferProgressStatus, "running">;
+  startedAt: number;
+  finishedAt: number;
+  error?: string | null;
+  /** Missing for reports written before post-commit verification existed. */
+  verification?: TableDataTransferVerification | null;
 }
 
 export interface SqlScriptImportResult {
@@ -693,6 +866,15 @@ export interface TableInfo {
   schema?: string;
   type?: string;
   comment?: string;
+}
+
+/** Read-only descriptor for a schema object that is not a relation. */
+export interface SchemaObjectInfo {
+  name: string;
+  schema?: string | null;
+  objectType: string;
+  parentName?: string | null;
+  comment?: string | null;
 }
 
 /**

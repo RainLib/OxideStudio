@@ -1,4 +1,4 @@
-.PHONY: help setup install submodules dev dev-no-watch start web preview build package test test-frontend test-rust test-lsp test-lsp-integration test-live-db check cargo-check lsp-build ai ai-tools ai-manifest ai-inspect ai-mcp-smoke ai-mcp-stdio ai-plan clean info
+.PHONY: help setup install submodules dev dev-no-watch start web preview build package test test-frontend test-rust test-lsp test-lsp-integration test-live-db driver-conformance check cargo-check lsp-build ai ai-tools ai-manifest ai-inspect ai-mcp-smoke ai-mcp-stdio ai-plan clean info
 
 .DEFAULT_GOAL := help
 
@@ -77,6 +77,9 @@ test-lsp-integration: lsp-build ## Run OxideStudio LSP integration tests against
 
 test-live-db: ## Run Docker-backed live database tests for all supported drivers.
 	$(NPM) run test:live-db
+
+driver-conformance: ## Run a signed-driver conformance fixture. Usage: make driver-conformance ARGS="--manifest ... --fixture ... --out ..."
+	$(NPM) run driver:conformance -- $(ARGS)
 
 check: build cargo-check ## Run the standard local checks without live database containers.
 

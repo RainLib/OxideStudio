@@ -1,6 +1,7 @@
 import { invokeWithInterceptors } from "./client";
 import type {
   TableInfo,
+  SchemaObjectInfo,
   CollectionInfo,
   CollectionPage,
   ColumnInfo,
@@ -65,6 +66,32 @@ export async function getTables(
   schema: string
 ): Promise<TableInfo[]> {
   return invokeWithInterceptors<TableInfo[]>("get_tables", {
+    connectionId,
+    schema,
+  });
+}
+
+/**
+ * Read-only non-relation object descriptors from an explicitly selected
+ * database. This does not alter the active query database.
+ */
+export async function getDatabaseSchemaObjects(
+  connectionId: string,
+  database: string,
+  schema: string,
+): Promise<SchemaObjectInfo[]> {
+  return invokeWithInterceptors<SchemaObjectInfo[]>(
+    "get_database_schema_objects",
+    { connectionId, database, schema },
+  );
+}
+
+/** Descriptor-only schema objects (for example PostgreSQL sequences/triggers). */
+export async function getSchemaObjects(
+  connectionId: string,
+  schema: string,
+): Promise<SchemaObjectInfo[]> {
+  return invokeWithInterceptors<SchemaObjectInfo[]>("get_schema_objects", {
     connectionId,
     schema,
   });
@@ -368,7 +395,9 @@ export const schemaService = {
   getDatabases,
   getSchemas,
   getDatabaseSchemas,
+  getDatabaseSchemaObjects,
   getTables,
+  getSchemaObjects,
   getDatabaseTables,
   getCollections,
   getCollectionsPage,

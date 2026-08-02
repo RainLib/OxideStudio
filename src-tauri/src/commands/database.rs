@@ -10,7 +10,7 @@ use crate::core::{
         ManagedJavaRuntimeInstallation,
     },
     driver_sidecar::DatabaseDriverSidecar,
-    manager::{ConnectionManager, ExternalDriverRuntimeSummary},
+    manager::{ConnectionManager, ExternalDriverRuntimeSummary, LiveConnectionCapabilitySnapshot},
     protocol::{DatabaseCreateRequest, Response},
 };
 use serde::Serialize;
@@ -69,6 +69,29 @@ pub struct DatabaseDriverProbeResult {
     pub supports_referencing_foreign_keys: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SchemaMigrationCapabilityMode {
+    Transactional,
+    NonTransactional,
+    ReviewOnly,
+}
+
+/// Connection-scoped capability contract consumed by editor intelligence,
+/// migration review and other feature gates. Unlike the product catalogue,
+/// this describes the exact live driver instance and negotiated server.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionDatabaseCapabilityContext {
+    pub connection_id: String,
+    pub driver: String,
+    pub distribution: String,
+    pub package_version: Option<String>,
+    pub server_version: Option<String>,
+    pub schema_migration_mode: SchemaMigrationCapabilityMode,
+    pub capabilities: DatabaseCapabilities,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseDriverCatalog {
@@ -92,6 +115,10 @@ pub struct DatabaseDriverRuntimeSummary {
     pub process_ids: Vec<u32>,
     pub unavailable_process_count: usize,
     pub unhealthy_connection_count: usize,
+    pub launch_count: u64,
+    pub observed_exit_count: u64,
+    pub last_started_at_millis: Option<u64>,
+    pub last_exit_observed_at_millis: Option<u64>,
 }
 
 impl From<ExternalDriverRuntimeSummary> for DatabaseDriverRuntimeSummary {
@@ -103,6 +130,10 @@ impl From<ExternalDriverRuntimeSummary> for DatabaseDriverRuntimeSummary {
             process_ids: value.process_ids,
             unavailable_process_count: value.unavailable_process_count,
             unhealthy_connection_count: value.unhealthy_connection_count,
+            launch_count: value.launch_count,
+            observed_exit_count: value.observed_exit_count,
+            last_started_at_millis: value.last_started_at_millis,
+            last_exit_observed_at_millis: value.last_exit_observed_at_millis,
         }
     }
 }
@@ -182,15 +213,13 @@ fn bundled_database_driver_installations() -> Vec<DatabaseDriverInstallation> {
     .collect()
 }
 
-fn fallback_external_database_capabilities(
-    package: &InstalledDriverPackage,
+fn conservative_external_database_capabilities(
+    driver: &str,
+    display_name: &str,
 ) -> DatabaseCapabilities {
-    if let Some(capabilities) = &package.manifest.capabilities {
-        return capabilities.clone();
-    }
     DatabaseCapabilities {
-        driver: package.manifest.driver_id.clone(),
-        display_name: package.manifest.display_name.clone(),
+        driver: driver.to_string(),
+        display_name: display_name.to_string(),
         data_model: DatabaseDataModel::Relational,
         connection_mode: DatabaseConnectionMode::Network,
         lsp_language_id: "sql".to_string(),
@@ -233,6 +262,74 @@ fn fallback_external_database_capabilities(
         default_primary_key_type: "INTEGER".to_string(),
         common_data_types: Vec::new(),
     }
+}
+
+fn fallback_external_database_capabilities(
+    package: &InstalledDriverPackage,
+) -> DatabaseCapabilities {
+    package.manifest.capabilities.clone().unwrap_or_else(|| {
+        conservative_external_database_capabilities(
+            &package.manifest.driver_id,
+            &package.manifest.display_name,
+        )
+    })
+}
+
+fn schema_migration_capability_mode(
+    driver: &str,
+    external_package: bool,
+) -> SchemaMigrationCapabilityMode {
+    if external_package {
+        // External packages currently expose metadata snapshots and read-only
+        // drift review, but not a semantic DDL execution protocol.
+        return SchemaMigrationCapabilityMode::ReviewOnly;
+    }
+    match DatabaseKind::from_str(driver) {
+        Ok(DatabaseKind::Postgres) => SchemaMigrationCapabilityMode::Transactional,
+        Ok(DatabaseKind::Mysql) => SchemaMigrationCapabilityMode::NonTransactional,
+        Err(_) => SchemaMigrationCapabilityMode::ReviewOnly,
+    }
+}
+
+fn connection_database_capability_context(
+    connection_id: String,
+    snapshot: LiveConnectionCapabilitySnapshot,
+) -> Result<ConnectionDatabaseCapabilityContext, String> {
+    let external_package = snapshot.external_driver_id.is_some();
+    let driver = snapshot
+        .external_driver_id
+        .as_deref()
+        .or(snapshot.driver_id.as_deref())
+        .map(canonical_capability_driver)
+        .ok_or_else(|| {
+            "The live connection does not expose a trusted driver identity".to_string()
+        })?;
+    let capabilities = match snapshot.package_capabilities {
+        Some(capabilities) => capabilities,
+        None if external_package => conservative_external_database_capabilities(
+            &driver,
+            &format!("{} external package", driver),
+        ),
+        None => DatabaseKind::from_str(&driver)
+            .map(DatabaseKind::capabilities)
+            .or_else(|_| {
+                database_capabilities_for_driver(&driver).map_err(|error| error.to_string())
+            })?,
+    };
+
+    Ok(ConnectionDatabaseCapabilityContext {
+        connection_id,
+        schema_migration_mode: schema_migration_capability_mode(&driver, external_package),
+        driver,
+        distribution: if external_package {
+            "external".to_string()
+        } else {
+            "bundled".to_string()
+        },
+        package_version: snapshot.package_version,
+        server_version: snapshot.server_version,
+        capabilities,
+    })
 }
 
 /// Capability lookups drive editor, LSP and Data Editor affordances. They
@@ -475,6 +572,30 @@ pub async fn get_database_capabilities(
     match result {
         Ok(capabilities) => Ok(Response::ok(capabilities)),
         Err(error) => Ok(Response::err("DATABASE_CAPABILITIES_ERROR", &error)),
+    }
+}
+
+#[tauri::command]
+pub async fn get_connection_database_capability_context(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+) -> Result<Response<ConnectionDatabaseCapabilityContext>, String> {
+    let result = manager
+        .capability_snapshot(&connection_id)
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|snapshot| {
+            connection_database_capability_context(connection_id.clone(), snapshot)
+        });
+
+    match result {
+        Ok(context) => Ok(Response::ok(context)),
+        Err(error) => Ok(Response::err_with_details(
+            "CONNECTION_DATABASE_CAPABILITY_CONTEXT_ERROR",
+            &error,
+            true,
+            Some(serde_json::json!({ "connectionId": connection_id })),
+        )),
     }
 }
 
@@ -1169,6 +1290,69 @@ mod tests {
         assert_eq!(canonical_capability_driver(" PostgreSQL "), "postgres");
         assert_eq!(canonical_capability_driver("MariaDB"), "mysql");
         assert_eq!(canonical_capability_driver("Trino"), "trino");
+    }
+
+    #[test]
+    fn live_capability_context_keeps_package_version_server_and_migration_boundary_together() {
+        let mut capabilities = DatabaseKind::Postgres.capabilities();
+        capabilities.display_name = "Pinned PostgreSQL package".to_string();
+        capabilities.supports_table_data_transfer = false;
+        let context = connection_database_capability_context(
+            "connection-1".to_string(),
+            LiveConnectionCapabilitySnapshot {
+                driver_id: Some("postgres".to_string()),
+                external_driver_id: Some("postgres".to_string()),
+                package_version: Some("16.4.1".to_string()),
+                package_capabilities: Some(capabilities.clone()),
+                server_version: Some("16.3".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(context.connection_id, "connection-1");
+        assert_eq!(context.distribution, "external");
+        assert_eq!(context.package_version.as_deref(), Some("16.4.1"));
+        assert_eq!(context.server_version.as_deref(), Some("16.3"));
+        assert_eq!(
+            context.schema_migration_mode,
+            SchemaMigrationCapabilityMode::ReviewOnly
+        );
+        assert_eq!(context.capabilities, capabilities);
+    }
+
+    #[test]
+    fn native_capability_context_advertises_only_verified_host_migration_modes() {
+        let postgres = connection_database_capability_context(
+            "postgres-1".to_string(),
+            LiveConnectionCapabilitySnapshot {
+                driver_id: Some("postgresql".to_string()),
+                external_driver_id: None,
+                package_version: None,
+                package_capabilities: None,
+                server_version: Some("17.1".to_string()),
+            },
+        )
+        .unwrap();
+        let mysql = connection_database_capability_context(
+            "mysql-1".to_string(),
+            LiveConnectionCapabilitySnapshot {
+                driver_id: Some("mariadb".to_string()),
+                external_driver_id: None,
+                package_version: None,
+                package_capabilities: None,
+                server_version: Some("11.4".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            postgres.schema_migration_mode,
+            SchemaMigrationCapabilityMode::Transactional
+        );
+        assert_eq!(
+            mysql.schema_migration_mode,
+            SchemaMigrationCapabilityMode::NonTransactional
+        );
     }
 
     #[test]

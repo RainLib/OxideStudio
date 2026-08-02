@@ -112,64 +112,72 @@ test("generic JDBC Agent executes and discovers H2 through the driver protocol",
   assert.equal(handshake.result.value.capabilities.metadata, true);
 
   assert.equal((await request(agent, output, 2, "connect", {
-    connectionId: "h2",
+    connection_id: "h2",
     config: { url: "jdbc:h2:mem:oxide_fixture;DB_CLOSE_DELAY=-1" },
   })).status, "ok");
   assert.equal((await request(agent, output, 3, "query", {
-    connectionId: "h2",
+    connection_id: "h2",
     statement: "CREATE TABLE widgets (id INT PRIMARY KEY, name VARCHAR(40))",
     parameters: [],
   })).status, "ok");
   assert.equal((await request(agent, output, 4, "query", {
-    connectionId: "h2",
+    connection_id: "h2",
     statement: "INSERT INTO widgets (id, name) VALUES (?, ?)",
     parameters: [{ value: 1 }, { value: "H2" }],
   })).status, "ok");
   assert.equal((await request(agent, output, 5, "query", {
-    connectionId: "h2",
+    connection_id: "h2",
     statement: "CREATE UNIQUE INDEX widgets_name_unique ON widgets(name)",
     parameters: [],
   })).status, "ok");
   assert.equal((await request(agent, output, 6, "query", {
-    connectionId: "h2",
+    connection_id: "h2",
     statement: "CREATE TABLE widget_notes (id INT PRIMARY KEY, widget_id INT NOT NULL, CONSTRAINT widget_notes_widget_fk FOREIGN KEY (widget_id) REFERENCES widgets(id))",
     parameters: [],
   })).status, "ok");
   const query = await request(agent, output, 13, "query", {
-    connectionId: "h2",
+    connection_id: "h2",
     statement: "SELECT id, name, TRUE AS enabled, CAST(1.25 AS DECIMAL(4, 2)) AS score FROM widgets",
     parameters: [],
   });
   assert.deepEqual(query.result.value[0].rows, [[1, "H2", true, 1.25]]);
+  const invalidQuery = await request(agent, output, 14, "query", {
+    connection_id: "h2",
+    statement: "SELECT * FROM oxide_fixture_missing_table",
+    parameters: [],
+  });
+  assert.equal(invalidQuery.status, "error");
+  assert.equal(invalidQuery.result.code, "QUERY_FAILED");
+  assert.equal(JSON.stringify(invalidQuery).includes("jdbc:h2:mem:oxide_fixture"), false);
 
   assert.equal((await request(agent, output, 7, "createDatabase", {
-    connectionId: "h2",
+    connection_id: "h2",
     request: { name: "fixture_schema", namespaceKind: "schema" },
   })).status, "ok");
 
   const relations = await request(agent, output, 8, "metadata", {
-    connectionId: "h2",
+    connection_id: "h2",
     request: { kind: "relations", namespace: "PUBLIC" },
   });
   assert.ok(relations.result.value.some((relation) => relation.name === "WIDGETS"));
   const columns = await request(agent, output, 9, "metadata", {
-    connectionId: "h2",
+    connection_id: "h2",
     request: { kind: "columns", namespace: "PUBLIC", relation: "WIDGETS" },
   });
   assert.ok(columns.result.value.some((column) => column.name === "ID" && column.is_primary_key));
   assert.ok(columns.result.value.some((column) => column.name === "NAME" && column.is_unique));
   const indexes = await request(agent, output, 10, "metadata", {
-    connectionId: "h2",
+    connection_id: "h2",
     request: { kind: "indexes", namespace: "PUBLIC", relation: "WIDGETS" },
   });
   assert.ok(indexes.result.value.some((index) => index.name === "WIDGETS_NAME_UNIQUE" && index.is_unique));
   const constraints = await request(agent, output, 11, "metadata", {
-    connectionId: "h2",
+    connection_id: "h2",
     request: { kind: "constraints", namespace: "PUBLIC", relation: "WIDGET_NOTES" },
   });
   assert.ok(constraints.result.value.some((constraint) => constraint.constraint_type === "FOREIGN KEY" && constraint.referenced_table === "WIDGETS"));
   const references = await request(agent, output, 12, "metadata", {
-    connectionId: "h2",
+    connection_id: "h2",
     request: { kind: "referencingForeignKeys", namespace: "PUBLIC", relation: "WIDGETS" },
   });
   assert.ok(references.result.value.some((reference) => reference.table === "WIDGET_NOTES" && reference.referenced_table === "WIDGETS"));

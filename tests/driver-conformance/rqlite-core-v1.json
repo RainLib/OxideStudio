@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "id": "rqlite-core-v1",
+  "driverId": "rqlite",
+  "connection": { "urlEnv": "OXIDE_RQLITE_CONFORMANCE_URL" },
+  "serverVersionPattern": ".+",
+  "setup": [
+    { "statement": "CREATE TABLE oxide_conformance_items (id INTEGER PRIMARY KEY, name TEXT NOT NULL)" }
+  ],
+  "query": {
+    "statement": "SELECT ? AS bound_number, ? AS bound_text",
+    "parameters": [42, "oxide"],
+    "context": { "readOnly": true },
+    "expect": {
+      "minResultSets": 1,
+      "minRows": 1,
+      "columns": ["bound_number", "bound_text"],
+      "firstRow": [42, "oxide"]
+    }
+  },
+  "errorMapping": {
+    "statement": "SELECT * FROM oxide_conformance_missing_table",
+    "context": { "readOnly": true },
+    "expectedCodes": ["QUERY_FAILED"]
+  },
+  "metadata": [
+    {
+      "id": "schemas",
+      "request": { "kind": "schemas", "database": null },
+      "expect": { "type": "array", "contains": { "equals": "main" } }
+    },
+    {
+      "id": "relations",
+      "request": { "kind": "relations", "database": null, "namespace": "main" },
+      "expect": { "type": "array", "contains": { "path": ["name"], "equals": "oxide_conformance_items" } }
+    }
+  ],
+  "cleanup": [{ "statement": "DROP TABLE oxide_conformance_items" }]
+}

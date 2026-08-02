@@ -5,11 +5,16 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  canRetryTableDataTransferReport,
   canExecuteTableDataTransfer,
   supportsBoundedTableDataTransfer,
+  supportsTableDataTransferUpsert,
   TableDataTransferDialog,
 } from "@/components/workspace/TableDataTransferDialog";
-import type { TableDataTransferPreview } from "@/services/tauri/types";
+import type {
+  TableDataTransferPreview,
+  TableDataTransferReport,
+} from "@/services/tauri/types";
 
 const mocks = vi.hoisted(() => ({
   ensureConnectionReady: vi.fn(),
@@ -24,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   createTableDataTransferTarget: vi.fn(),
   executeTableDataTransfer: vi.fn(),
   cancelTableDataTransfer: vi.fn(),
+  listTableDataTransferReports: vi.fn(),
   listenTableDataTransferProgress: vi.fn(),
 }));
 
@@ -48,6 +54,7 @@ vi.mock("@/services/tauri", () => ({
     createTableDataTransferTarget: mocks.createTableDataTransferTarget,
     executeTableDataTransfer: mocks.executeTableDataTransfer,
     cancelTableDataTransfer: mocks.cancelTableDataTransfer,
+    listTableDataTransferReports: mocks.listTableDataTransferReports,
     listenTableDataTransferProgress: mocks.listenTableDataTransferProgress,
   },
 }));
@@ -69,6 +76,7 @@ describe("TableDataTransferDialog", () => {
     mocks.getSchemas.mockResolvedValue(["public"]);
     mocks.getTables.mockResolvedValue([{ name: "users_copy", type: "BASE TABLE" }]);
     mocks.listenTableDataTransferProgress.mockResolvedValue(vi.fn());
+    mocks.listTableDataTransferReports.mockResolvedValue([]);
     container = document.createElement("div");
     document.body.append(container);
   });
@@ -158,6 +166,53 @@ describe("TableDataTransferDialog", () => {
 
     expect(
       canExecuteTableDataTransfer(preview, "TRANSFER A13F9C", false),
+    ).toBe(false);
+  });
+
+  it("keeps upsert behind the bundled semantic SQL boundary", () => {
+    expect(supportsTableDataTransferUpsert("bundled")).toBe(true);
+    expect(supportsTableDataTransferUpsert("external")).toBe(false);
+    expect(supportsTableDataTransferUpsert(null)).toBe(false);
+  });
+
+  it("only permits a report to seed a fresh retry for the same source relation", () => {
+    const source = {
+      connectionId: "source",
+      driver: "postgres" as const,
+      database: "app",
+      schema: "public",
+      table: "users",
+    };
+    const report = {
+      id: "table-transfer-report-1",
+      projectId: "project-a",
+      transferId: "transfer-0001",
+      source,
+      target: {
+        connectionId: "target",
+        driver: "postgres",
+        database: "archive",
+        schema: "public",
+        table: "users_copy",
+      },
+      mode: "append",
+      planDigest: "a".repeat(64),
+      maxRows: 100,
+      rowsTransferred: 2,
+      batches: 1,
+      limitReached: false,
+      status: "done",
+      startedAt: 1,
+      finishedAt: 2,
+      error: null,
+    } satisfies TableDataTransferReport;
+
+    expect(canRetryTableDataTransferReport(report, source)).toBe(true);
+    expect(
+      canRetryTableDataTransferReport(report, { ...source, table: "admins" }),
+    ).toBe(false);
+    expect(
+      canRetryTableDataTransferReport(report, { ...source, database: undefined }),
     ).toBe(false);
   });
 

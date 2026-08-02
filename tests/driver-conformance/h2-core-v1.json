@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "h2-core-v1",
+  "driverId": "h2",
+  "connection": { "defaultUrl": "jdbc:h2:mem:oxide_conformance;DB_CLOSE_DELAY=-1" },
+  "serverVersionPattern": "^2\\.3\\.",
+  "setup": [
+    { "statement": "CREATE TABLE oxide_conformance_items (id INTEGER PRIMARY KEY, name VARCHAR(40) NOT NULL)" }
+  ],
+  "query": {
+    "statement": "SELECT ? AS bound_number, ? AS bound_text",
+    "parameters": [42, "oxide"],
+    "expect": {
+      "minResultSets": 1,
+      "minRows": 1,
+      "columns": ["BOUND_NUMBER", "BOUND_TEXT"],
+      "firstRow": [42, "oxide"]
+    }
+  },
+  "errorMapping": {
+    "statement": "SELECT * FROM oxide_conformance_missing_table",
+    "expectedCodes": ["QUERY_FAILED"]
+  },
+  "metadata": [
+    {
+      "id": "schemas",
+      "request": { "kind": "schemas", "database": null },
+      "expect": { "type": "array", "contains": { "equals": "PUBLIC" } }
+    },
+    {
+      "id": "relations",
+      "request": { "kind": "relations", "database": null, "namespace": "PUBLIC" },
+      "expect": { "type": "array", "contains": { "path": ["name"], "equals": "OXIDE_CONFORMANCE_ITEMS" } }
+    }
+  ],
+  "cleanup": [{ "statement": "DROP TABLE oxide_conformance_items" }]
+}

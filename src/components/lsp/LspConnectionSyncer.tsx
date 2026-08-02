@@ -9,7 +9,6 @@ import { useProjectStore } from "@/store/useProjectStore";
 import { useProjectFilesStore } from "@/store/useProjectFilesStore";
 import { useLspClient } from "@/hooks/useLspClient";
 import {
-  connectionService,
   databaseService,
   projectFilesService,
   schemaService,
@@ -156,40 +155,52 @@ export function LspConnectionSyncer() {
   const clearSemanticStatus = useLspSemanticStatusStore(
     (state) => state.clearStatus,
   );
+  const recordSemanticTelemetry = useLspSemanticStatusStore(
+    (state) => state.recordTelemetry,
+  );
   const activeConnection = connections.find((c) => c.id === activeConnectionId);
-  const [resolvedCapabilities, setResolvedCapabilities] = useState<{
+  const [resolvedCapabilityContext, setResolvedCapabilityContext] = useState<{
     connectionId: string;
     capabilities: DatabaseCapabilities;
+    serverVersion: string | null;
   } | null>(null);
   useEffect(() => {
     if (!activeConnection) {
-      setResolvedCapabilities(null);
+      setResolvedCapabilityContext(null);
       return;
     }
     let cancelled = false;
-    setResolvedCapabilities(null);
+    setResolvedCapabilityContext(null);
     void databaseService
-      .getDatabaseCapabilities(
-        activeConnection.driver,
-        activeConnection.driverPackageVersion,
-      )
-      .then((capabilities) => {
+      .getConnectionDatabaseCapabilityContext(activeConnection.id)
+      .then((context) => {
         if (!cancelled) {
-          setResolvedCapabilities({
+          setResolvedCapabilityContext({
             connectionId: activeConnection.id,
-            capabilities,
+            capabilities: context.capabilities,
+            serverVersion: context.serverVersion || null,
           });
         }
       })
-      .catch((error) => {
+      .catch(async (error) => {
         console.warn(
-          `[LSP] Failed to resolve capabilities for ${activeConnection.name}:`,
+          `[LSP] Failed to resolve live capability context for ${activeConnection.name}:`,
           error,
         );
+        let capabilities: DatabaseCapabilities;
+        try {
+          capabilities = await databaseService.getDatabaseCapabilities(
+            activeConnection.driver,
+            activeConnection.driverPackageVersion,
+          );
+        } catch {
+          capabilities = defaultDatabaseCapabilities(activeConnection.driver);
+        }
         if (!cancelled) {
-          setResolvedCapabilities({
+          setResolvedCapabilityContext({
             connectionId: activeConnection.id,
-            capabilities: defaultDatabaseCapabilities(activeConnection.driver),
+            capabilities,
+            serverVersion: null,
           });
         }
       });
@@ -204,22 +215,18 @@ export function LspConnectionSyncer() {
   ]);
   const lspCapabilities = useMemo<DatabaseCapabilities>(() => {
     const resolvedForActiveConnection =
-      resolvedCapabilities &&
+      resolvedCapabilityContext &&
       activeConnection &&
-      resolvedCapabilities.connectionId === activeConnection.id
-        ? resolvedCapabilities.capabilities
+      resolvedCapabilityContext.connectionId === activeConnection.id
+        ? resolvedCapabilityContext.capabilities
         : null;
-    if (
-      resolvedForActiveConnection &&
-      resolvedForActiveConnection.driver.toLowerCase() ===
-        activeConnection?.driver.toLowerCase()
-    ) {
+    if (resolvedForActiveConnection) {
       return resolvedForActiveConnection;
     }
     return defaultDatabaseCapabilities(
       activeConnection?.driver || DEFAULT_DATABASE_DRIVER,
     );
-  }, [activeConnection?.driver, activeConnection?.id, resolvedCapabilities]);
+  }, [activeConnection?.driver, activeConnection?.id, resolvedCapabilityContext]);
   const supportsMetadataSync = Boolean(activeConnection);
   const hasConnectionLspTab = tabs.some(
     (tab) =>
@@ -316,6 +323,18 @@ export function LspConnectionSyncer() {
       return;
     }
 
+    if (resolvedCapabilityContext?.connectionId !== activeConnectionId) {
+      setSemanticStatus(activeConnectionId, {
+        state: "syncing",
+        totalObjects: 0,
+        cacheHits: 0,
+        cacheMisses: 0,
+        failedObjects: 0,
+        message: "Resolving the live driver package and server capability contract.",
+      });
+      return;
+    }
+
     if (!supportsLspCapabilities(lspCapabilities)) {
       lastConfigRef.current = null;
       clearSemanticStatus(activeConnectionId);
@@ -384,15 +403,11 @@ export function LspConnectionSyncer() {
     const capabilitiesPromise: Promise<DatabaseCapabilities> = Promise.resolve(
       lspCapabilities,
     );
-    const serverVersionPromise = connectionService
-      .getServerVersion(activeConnectionId)
-      .catch((error) => {
-        console.warn(
-          `[LSP] Failed to detect server version for ${connection.name}:`,
-          error,
-        );
-        return null;
-      });
+    const serverVersionPromise = Promise.resolve(
+      resolvedCapabilityContext?.connectionId === activeConnectionId
+        ? resolvedCapabilityContext.serverVersion
+        : null,
+    );
 
     const getSchemaId = (
       schemaName: string,
@@ -924,6 +939,7 @@ export function LspConnectionSyncer() {
             } catch (error) {
               console.error("[LSP] Failed to sync schema:", error);
               if (!isStale()) {
+                recordSemanticTelemetry(activeConnectionId, "syncFailure");
                 setSemanticStatus(activeConnectionId, {
                   state: "error",
                   totalObjects: metadataWork.length,
@@ -1039,6 +1055,7 @@ export function LspConnectionSyncer() {
             });
 
             if (dispatchResult.status === "stale") {
+              recordSemanticTelemetry(activeConnectionId, "stale");
               console.log("[LSP] Skipping stale schema configuration");
               return;
             }
@@ -1051,6 +1068,7 @@ export function LspConnectionSyncer() {
             }
 
             if (dispatchResult.status === "sent-stale") {
+              recordSemanticTelemetry(activeConnectionId, "stale");
               console.log(
                 "[LSP] Configuration sent, but not cached because a newer sync started"
               );
@@ -1064,6 +1082,7 @@ export function LspConnectionSyncer() {
           } catch (err) {
             console.error("[LSP] Failed to sync schema:", err);
             if (!isStale()) {
+              recordSemanticTelemetry(activeConnectionId, "syncFailure");
               setSemanticStatus(activeConnectionId, {
                 state: "error",
                 totalObjects: metadataWork.length,
@@ -1104,6 +1123,7 @@ export function LspConnectionSyncer() {
     setSemanticStatus,
     clearSemanticStatus,
     lspCapabilities,
+    resolvedCapabilityContext,
   ]);
 
   return null;

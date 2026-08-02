@@ -451,17 +451,32 @@ export function driverCandidateConformance(
       entry.packageVersion === activePackage.packageVersion,
   );
   const conformance = release?.conformance;
+  const evidenceCovers = (operation: string, version: string) =>
+    conformance?.evidence?.some(
+      (evidence) =>
+        evidence.schemaVersion === 1 &&
+        evidence.driverId === candidate.driver &&
+        evidence.packageVersion === activePackage.packageVersion &&
+        evidence.serverVersion.trim().toLowerCase() ===
+          version.trim().toLowerCase() &&
+        evidence.operations.includes(
+          operation as (typeof evidence.operations)[number],
+        ),
+    ) ?? false;
   const verifiedVersions = Array.from(
     new Set(
       [
-        ...(conformance?.connect || []),
-        ...(conformance?.metadata || []),
-        ...(conformance?.query || []),
-        ...(conformance?.cancellation || []),
-        ...(conformance?.mutations || []),
-        ...(conformance?.migration || []),
-        ...(conformance?.dataTransfer || []),
+        ["connect", conformance?.connect || []] as const,
+        ["metadata", conformance?.metadata || []] as const,
+        ["query", conformance?.query || []] as const,
+        ["cancellation", conformance?.cancellation || []] as const,
+        ["mutations", conformance?.mutations || []] as const,
+        ["migration", conformance?.migration || []] as const,
+        ["dataTransfer", conformance?.dataTransfer || []] as const,
       ]
+        .flatMap(([operation, versions]) =>
+          versions.filter((version) => evidenceCovers(operation, version)),
+        )
         .map((version) => version.trim())
         .filter(Boolean),
     ),

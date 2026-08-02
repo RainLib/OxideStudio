@@ -5,6 +5,25 @@
 
 ## 通用交付门槛
 
+### 版本证据的生成与绑定
+
+`scripts/run-driver-conformance.mjs` 对一个精确 package entrypoint 运行
+`connect/ping/version/parameterized query/error mapping/metadata` fixture，并生成不含
+URL、凭据、SQL 或行值的哈希报告。签名 catalog 的 `conformance.evidence` 必须将该报告、
+fixture、entrypoint、target 和 server version 一起绑定；声明的每个 operation/version 都必须
+被至少一条 evidence 覆盖。详见 [driver-conformance-runner.md](driver-conformance-runner.md)。
+
+### 当前可复现的本地证据
+
+2026-08-02，DuckDB `oxide.duckdb@0.1.0` 的 Windows x64 release sidecar 已通过
+`duckdb-core-v1` fixture：DuckDB `v1.5.5`、connect、参数化 query、错误归类、
+schema/relation/column metadata 与 rollback transaction 均通过。该结果证明包与协议可运行，
+但尚未成为 catalog `ready` 证据：发布流程仍需将精确 entrypoint 和该报告托管、以正式 URL
+引用，并对 manifest 生成 Minisign 签名。ClickHouse 与 RQLite 已完成 release 构建和 payload
+封装验证；由于当前工作区没有受控的真实服务端，二者尚没有可声明的 server-version evidence。
+H2 的内存 JDBC fixture 已进入同一 runner；它在 managed Java 21 和经 digest 绑定的 H2 JAR
+可用的 CI runner 上生成 package evidence，不能由本地 Maven 缓存缺失时的跳过测试替代。
+
 | 层级 | 必须证明的行为 |
 | --- | --- |
 | Connect | URL/凭据不写入日志；connect、ping、server version 和失败归类可用；驱动包必须声明 network/file 连接方式，文件型包不能露出 host、SSH 或 TLS 控件。单端点且无 database/catalog URL 段的引擎可声明 `supportsConnectionDatabase: false`，连接表单只隐藏 database 字段，仍保留 host/port/认证字段。 |
@@ -22,7 +41,7 @@
 | --- | --- | --- | --- |
 | 原生关系型 | PostgreSQL、MySQL/MariaDB | 原生完整路径 | 扩版本 fixture 与 sidecar 迁移验证。 |
 | 嵌入式 | SQLite、DuckDB、Turso、D1、Rqlite、H2、Access | SQLite 原生：文件/内存连接、查询、Explorer 元数据、LSP、分页/筛选/行编辑、表/视图/索引基础 DDL、Agent 引擎级只读查询与只读快照差异。DuckDB：独立 sidecar 源码已完成连接、原生参数绑定、查询、事务、attached catalog/schema/table/column/index/constraint 元数据、catalog 选择器/表格预览与 DuckDB 标识的 SQLite-compatible LSP 基线；已支持签名包能力驱动的 schema snapshot 与只读 diff，仍须由发布系统签名、安装和激活。RQLite：独立 HTTP sidecar 已实现 `readyz`/status、JSON 参数绑定、查询结果/错误映射、SQLite `main` schema 的表/列/索引/约束/反向外键 metadata；Agent 的只读请求强制使用 RQLite `/db/query` 服务端只读连接。 | DuckDB 取消、行编辑及专用 DuckDB 语法实现；RQLite 真实集群 fixture、发布签名与安装/激活；随后 Turso/D1。 |
-| 企业 SQL / OLAP | SQL Server、Oracle、DB2、Firebird、Dameng、Kingbase、HighGo、Vastbase、ClickHouse | ClickHouse：独立 HTTP sidecar 源码已实现 `/` health、version、Basic Auth、database URL 选择、JSON query、数据库/表/列/data-skipping index metadata，并将 Agent read-only request 固定为 HTTP GET；不声明行编辑、事务、取消、通用 DDL 或 positional 参数。其他产品由签名 sidecar 接入。 | ClickHouse 真实 23.x/24.x/25.x fixture、签名发布/安装激活、类型和错误流 fixture；随后 SQL Server。 |
+| 企业 SQL / OLAP | SQL Server、Oracle、DB2、Firebird、Dameng、Kingbase、HighGo、Vastbase、ClickHouse | ClickHouse：独立 HTTP sidecar 源码已实现 `/` health、version、Basic Auth、database URL 选择、JSON query、数据库/表/列/data-skipping index metadata，以及安全的 `?`/`$n` 到 typed HTTP parameter 映射；Agent read-only request 固定为 HTTP GET。不声明行编辑、事务、取消或通用 DDL。其他产品由签名 sidecar 接入。 | ClickHouse 真实 23.x/24.x/25.x fixture、签名发布/安装激活、类型和错误流 fixture；随后 SQL Server。 |
 | PostgreSQL 协议族 | Redshift、OpenGauss、GaussDB、Kingbase 等 | 复用 PG LSP/quote 的候选 | 每个包声明 server range 与 capability 覆盖，不允许仅改名称。 |
 | MySQL 协议族 | Doris、StarRocks、OceanBase、GBase、GoldenDB | 复用 MySQL LSP/quote 的候选 | 先只读 metadata/query；事务和 Grid 编辑分别验收。 |
 | Warehouse | Snowflake、Trino、Presto、Hive、Spark、Databricks、BigQuery | sidecar contract 可表达只读 | 以只读 query + catalog + 分页为第一阶段。 |

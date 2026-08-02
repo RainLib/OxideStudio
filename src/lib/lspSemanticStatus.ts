@@ -19,40 +19,49 @@ export function lspSemanticStatusPresentation(
   const objectLabel = `${status.totalObjects} schema object${
     status.totalObjects === 1 ? "" : "s"
   }`;
+  const telemetry = status.telemetry;
+  const telemetryLabel = [
+    telemetry.restarts > 0 ? `${telemetry.restarts} restart${telemetry.restarts === 1 ? "" : "s"}` : null,
+    telemetry.staleResponses > 0 ? `${telemetry.staleResponses} stale sync${telemetry.staleResponses === 1 ? "" : "s"}` : null,
+    telemetry.syncFailures > 0 ? `${telemetry.syncFailures} sync failure${telemetry.syncFailures === 1 ? "" : "s"}` : null,
+    telemetry.lastRecoveryMs != null ? `last recovery ${telemetry.lastRecoveryMs}ms` : null,
+  ].filter((value): value is string => Boolean(value)).join(" · ");
+  const withTelemetry = (title: string) =>
+    telemetryLabel ? `${title} Telemetry: ${telemetryLabel}.` : title;
 
   switch (status.state) {
     case "syncing":
       return {
         label: "schema syncing",
-        title: "Schema metadata is syncing. Keyword and already-known object completion remain available.",
+        title: withTelemetry("Schema metadata is syncing. Keyword and already-known object completion remain available."),
         attention: true,
       };
     case "cached":
       return {
         label: "schema cached",
-        title: `Schema-aware completion is ready from cache (${objectLabel}).`,
+        title: withTelemetry(`Schema-aware completion is ready from cache (${objectLabel}).`),
         attention: false,
       };
     case "full":
       return {
         label: "schema ready",
-        title: `Schema-aware completion is ready (${objectLabel}).`,
+        title: withTelemetry(`Schema-aware completion is ready (${objectLabel}).`),
         attention: false,
       };
     case "limited":
       return {
         label: "schema limited",
-        title:
+        title: withTelemetry(
           status.message ??
-          `Some schema metadata could not be loaded. Keyword and object-name completion remain available (${objectLabel}).`,
+          `Some schema metadata could not be loaded. Keyword and object-name completion remain available (${objectLabel}).`),
         attention: true,
       };
     case "error":
       return {
         label: "schema unavailable",
-        title:
+        title: withTelemetry(
           status.message ??
-          "Schema metadata could not be sent to the language service. Keyword completion may still be available.",
+          "Schema metadata could not be sent to the language service. Keyword completion may still be available."),
         attention: true,
       };
   }

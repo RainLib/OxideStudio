@@ -1723,6 +1723,17 @@ function DriverManagementSettings() {
   }, []);
 
   useEffect(() => {
+    // Runtime health is connection-owned and can change after a sidecar exits;
+    // keep the Driver Manager truthful without requiring the user to reopen it.
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void refreshDriverRuntimes();
+      }
+    }, 15_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
     setCatalogUrlInput(catalogUrl);
   }, [catalogUrl]);
 
@@ -2185,6 +2196,13 @@ function DriverManagementSettings() {
                       {" "}· {runtime.processIds.length} process{runtime.processIds.length === 1 ? "" : "es"}
                     </span>
                   )}
+                  {runtime.launchCount > 0 && (
+                    <span
+                      title={`Observed since this desktop process started${runtime.lastStartedAtMillis ? `. Latest launch: ${new Date(runtime.lastStartedAtMillis).toLocaleString()}` : ""}.`}
+                    >
+                      {" "}({runtime.launchCount} launch{runtime.launchCount === 1 ? "" : "es"})
+                    </span>
+                  )}
                   {runtime.unavailableProcessCount > 0 && (
                     <span
                       className="text-amber-400"
@@ -2199,6 +2217,14 @@ function DriverManagementSettings() {
                       title="A registered external connection owns a sidecar that has exited. Reconnect the affected data source before continuing."
                     >
                       {" "}· {runtime.unhealthyConnectionCount} exited
+                    </span>
+                  )}
+                  {runtime.observedExitCount > 0 && (
+                    <span
+                      className="text-amber-400"
+                      title={`Observed since this desktop process started${runtime.lastExitObservedAtMillis ? `. Latest observed exit: ${new Date(runtime.lastExitObservedAtMillis).toLocaleString()}` : ""}. Driver output is not retained.`}
+                    >
+                      {" "}({runtime.observedExitCount} observed exit{runtime.observedExitCount === 1 ? "" : "s"})
                     </span>
                   )}
                 </span>

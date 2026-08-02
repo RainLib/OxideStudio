@@ -15,15 +15,25 @@ export interface LspSemanticCompletionStatus {
   failedObjects: number;
   updatedAt: number;
   message?: string;
+  /** Process-health counters; never contain SQL text or object metadata. */
+  telemetry: {
+    staleResponses: number;
+    syncFailures: number;
+    restarts: number;
+    lastFailureAt?: number;
+    lastRecoveryMs?: number;
+  };
 }
 
 interface LspSemanticStatusState {
   byConnectionId: Record<string, LspSemanticCompletionStatus>;
   setStatus: (
     connectionId: string,
-    status: Omit<LspSemanticCompletionStatus, "updatedAt">,
+    status: Omit<LspSemanticCompletionStatus, "updatedAt" | "telemetry"> &
+      Partial<Pick<LspSemanticCompletionStatus, "telemetry">>,
   ) => void;
   clearStatus: (connectionId: string) => void;
+  recordTelemetry: (connectionId: string, event: "stale" | "syncFailure" | "restart", durationMs?: number) => void;
 }
 
 /**
@@ -41,6 +51,11 @@ export const useLspSemanticStatusStore = create<LspSemanticStatusState>(
           [connectionId]: {
             ...status,
             updatedAt: Date.now(),
+            telemetry: current.byConnectionId[connectionId]?.telemetry || {
+              staleResponses: 0,
+              syncFailures: 0,
+              restarts: 0,
+            },
           },
         },
       })),
@@ -50,6 +65,36 @@ export const useLspSemanticStatusStore = create<LspSemanticStatusState>(
         const { [connectionId]: _removed, ...byConnectionId } =
           current.byConnectionId;
         return { byConnectionId };
+      }),
+    recordTelemetry: (connectionId, event, durationMs) =>
+      set((current) => {
+        const previous = current.byConnectionId[connectionId] || {
+          state: "limited" as const,
+          totalObjects: 0,
+          cacheHits: 0,
+          cacheMisses: 0,
+          failedObjects: 0,
+          updatedAt: Date.now(),
+          telemetry: { staleResponses: 0, syncFailures: 0, restarts: 0 },
+        };
+        const telemetry = { ...previous.telemetry };
+        if (event === "stale") telemetry.staleResponses += 1;
+        else if (event === "restart") {
+          telemetry.restarts += 1;
+          if (typeof durationMs === "number" && Number.isFinite(durationMs)) {
+            telemetry.lastRecoveryMs = Math.max(0, Math.round(durationMs));
+          }
+        }
+        else {
+          telemetry.syncFailures += 1;
+          telemetry.lastFailureAt = Date.now();
+        }
+        return {
+          byConnectionId: {
+            ...current.byConnectionId,
+            [connectionId]: { ...previous, telemetry, updatedAt: Date.now() },
+          },
+        };
       }),
   }),
 );

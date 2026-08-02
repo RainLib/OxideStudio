@@ -12,7 +12,9 @@ import type {
 export function parseElasticsearchConsoleServerVersion(
   version: string | null | undefined,
 ): ElasticsearchServerVersion | undefined {
-  const parts = version?.match(/(6|7|8)(?:\.(\d+))?/);
+  // Do not reinterpret an unsupported major's minor component (for example
+  // the `6` in `5.6.16`) as a supported Elasticsearch major.
+  const parts = version?.match(/(?<![\d.])(6|7|8)(?:\.(\d+))?/);
   const major = Number.parseInt(parts?.[1] || "", 10);
   const minor = Number.parseInt(parts?.[2] || "0", 10);
   return major === 6 || major === 7 || major === 8

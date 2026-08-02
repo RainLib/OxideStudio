@@ -65,6 +65,7 @@ import type {
   DatabaseCapabilities,
   DatabaseDriver,
   FunctionInfo,
+  SchemaObjectInfo,
   SqlScriptImportPreview,
   TableInfo,
 } from "@/services/tauri/types";
@@ -451,6 +452,13 @@ export function SchemaSidebar() {
   } = useSchemaStore();
 
   const [filterText, setFilterText] = useState("");
+  const [schemaObjectDescriptors, setSchemaObjectDescriptors] = useState<
+    SchemaObjectInfo[]
+  >([]);
+  const [schemaObjectDescriptorScope, setSchemaObjectDescriptorScope] =
+    useState<string | null>(null);
+  const [isSchemaObjectDescriptorsLoading, setIsSchemaObjectDescriptorsLoading] =
+    useState(false);
   const [isFilterVisible, setIsFilterVisible] = useState(false);
   const [isDataSourceDialogOpen, setIsDataSourceDialogOpen] = useState(false);
   const [isCreateDbDialogOpen, setIsCreateDbDialogOpen] = useState(false);
@@ -1164,6 +1172,60 @@ export function SchemaSidebar() {
     isActiveConnectionReady,
     isLoading,
     loadTables,
+    shouldAutoIntrospect,
+  ]);
+
+  useEffect(() => {
+    const normalizedDriver = activeDriver.trim().toLowerCase();
+    const supportsDescriptors = ["postgres", "postgresql", "pgsql"].includes(
+      normalizedDriver,
+    );
+    if (
+      !shouldAutoIntrospect ||
+      !isActiveConnectionReady ||
+      !activeConnectionId ||
+      !currentSchema ||
+      !isActiveNamespaceExpanded ||
+      !supportsDescriptors
+    ) {
+      setSchemaObjectDescriptors([]);
+      setSchemaObjectDescriptorScope(null);
+      setIsSchemaObjectDescriptorsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setIsSchemaObjectDescriptorsLoading(true);
+    void schemaService
+      .getSchemaObjects(activeConnectionId, currentSchema)
+      .then((objects) => {
+        if (!cancelled) {
+          setSchemaObjectDescriptors(objects);
+          setSchemaObjectDescriptorScope(
+            `${activeConnectionId}:${currentSchema}`,
+          );
+        }
+      })
+      .catch(() => {
+        // Object descriptors are supplementary metadata. A failure must not
+        // hide relation metadata or promote an unsupported product to an
+        // erroring Explorer state.
+        if (!cancelled) {
+          setSchemaObjectDescriptors([]);
+          setSchemaObjectDescriptorScope(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsSchemaObjectDescriptorsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeConnectionId,
+    activeDriver,
+    currentSchema,
+    isActiveConnectionReady,
+    isActiveNamespaceExpanded,
     shouldAutoIntrospect,
   ]);
 
@@ -2648,6 +2710,25 @@ export function SchemaSidebar() {
       schema,
       "virtual-views",
     );
+    const descriptorObjectsKey = objectGroupKey(
+      connectionId,
+      driver,
+      schema,
+      "schema-descriptors",
+    );
+    const descriptorObjects =
+      isCurrentSchema &&
+      schemaObjectDescriptorScope === `${connectionId}:${schema}`
+        ? schemaObjectDescriptors
+            .filter((object) =>
+              object.name.toLowerCase().includes(filterText.toLowerCase()),
+            )
+            .sort((left, right) =>
+              left.objectType === right.objectType
+                ? left.name.localeCompare(right.name)
+                : left.objectType.localeCompare(right.objectType),
+            )
+        : [];
 
     const toggleObjectGroup = (key: string) => {
       setExpandedObjectGroupKeys((current) =>
@@ -2871,6 +2952,87 @@ export function SchemaSidebar() {
                         onClick={() => void copyText(view.name)}
                       >
                         Copy Name
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
+                );
+              })
+            ))}
+        </div>
+      );
+    };
+
+    const renderSchemaObjectDescriptors = () => {
+      if (!isCurrentSchema || !["postgres", "postgresql", "pgsql"].includes(
+        (driver || "").trim().toLowerCase(),
+      )) {
+        return null;
+      }
+      const isExpanded = expandedObjectGroupKeys.includes(descriptorObjectsKey);
+      return (
+        <div>
+          <button
+            type="button"
+            className="wb-tree-row w-full gap-1.5 px-0.5 hover:bg-[hsl(var(--wb-hover))]"
+            onClick={() => toggleObjectGroup(descriptorObjectsKey)}
+          >
+            {isExpanded ? (
+              <ChevronDown size={12} className="shrink-0 wb-muted" />
+            ) : (
+              <ChevronRight size={12} className="shrink-0 wb-muted" />
+            )}
+            <Folder size={12} className="shrink-0 text-amber-400/80" />
+            <span className="truncate text-[11px] text-[hsl(var(--wb-text))]">
+              Schema objects
+            </span>
+            {!isSchemaObjectDescriptorsLoading && (
+              <span className="text-[9px] wb-muted">{descriptorObjects.length}</span>
+            )}
+          </button>
+          {isExpanded &&
+            (isSchemaObjectDescriptorsLoading && descriptorObjects.length === 0 ? (
+              <div className="pl-7 text-[11px] italic wb-muted">
+                Loading schema objects...
+              </div>
+            ) : descriptorObjects.length === 0 ? (
+              <div className="pl-7 text-[11px] italic wb-muted">
+                {filterText ? `No schema objects match "${filterText}"` : "No supported schema objects found"}
+              </div>
+            ) : (
+              descriptorObjects.map((object) => {
+                const objectType = object.objectType.toLowerCase();
+                const parentSuffix = object.parentName
+                  ? ` on ${object.parentName}`
+                  : "";
+                const qualifiedName = schema ? `${schema}.${object.name}` : object.name;
+                return (
+                  <ContextMenu key={`${objectType}:${object.name}:${object.parentName || ""}`}>
+                    <ContextMenuTrigger asChild>
+                      <div
+                        className="group ml-4 flex h-6 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                        title={`${object.objectType}${parentSuffix}${object.comment ? `\n${object.comment}` : ""}`}
+                      >
+                        {objectType === "sequence" ? (
+                          <KeyRound size={12} className="shrink-0 text-amber-400/80" />
+                        ) : objectType === "trigger" ? (
+                          <Network size={12} className="shrink-0 text-sky-400/80" />
+                        ) : (
+                          <Folder size={12} className="shrink-0 text-violet-400/80" />
+                        )}
+                        <span className="min-w-0 flex-1 truncate">
+                          {highlightMatch(object.name, filterText)}
+                        </span>
+                        <span className="shrink-0 text-[9px] uppercase opacity-50">
+                          {object.objectType}{parentSuffix}
+                        </span>
+                      </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className={menuContentClass}>
+                      <ContextMenuItem
+                        className={menuItemClass}
+                        onClick={() => void copyText(qualifiedName)}
+                      >
+                        Copy qualified name
                       </ContextMenuItem>
                     </ContextMenuContent>
                   </ContextMenu>
@@ -3785,6 +3947,7 @@ export function SchemaSidebar() {
           </>
         )}
       {renderRoutines()}
+        {renderSchemaObjectDescriptors()}
         {renderVirtualViews()}
       </div>
     );

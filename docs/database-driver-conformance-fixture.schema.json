@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oxidestudio.local/schemas/database-driver-conformance-fixture-v1.json",
+  "title": "OxideStudio Database Driver Conformance Fixture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "driverId", "connection", "query", "errorMapping"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "$ref": "#/$defs/token" },
+    "driverId": { "$ref": "#/$defs/token" },
+    "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 120000 },
+    "serverVersionPattern": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "urlEnv": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+        "defaultUrl": {
+          "description": "Only non-secret local fixture URLs such as :memory: should be committed. Live credentials belong in environment variables.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "optionsEnv": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/token" },
+          "additionalProperties": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+        }
+      },
+      "anyOf": [{ "required": ["urlEnv"] }, { "required": ["defaultUrl"] }]
+    },
+    "setup": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/query" } },
+    "query": { "$ref": "#/$defs/queryExpectation" },
+    "errorMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["statement", "expectedCodes"],
+      "properties": {
+        "statement": { "type": "string", "minLength": 1, "maxLength": 1000000 },
+        "parameters": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/parameter" } },
+        "context": { "type": "object" },
+        "queryId": { "type": ["string", "null"], "maxLength": 128 },
+        "expectedCodes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/token" }
+        }
+      }
+    },
+    "metadata": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "request", "expect"],
+        "properties": {
+          "id": { "$ref": "#/$defs/token" },
+          "request": { "type": "object" },
+          "expect": { "$ref": "#/$defs/valueExpectation" }
+        }
+      }
+    },
+    "transactionRollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mutation", "verify"],
+      "properties": {
+        "context": { "type": "object" },
+        "mutation": { "$ref": "#/$defs/queryExpectation" },
+        "verify": { "$ref": "#/$defs/queryExpectation" }
+      }
+    },
+    "cleanup": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/query" } }
+  },
+  "$defs": {
+    "token": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$" },
+    "parameter": {
+      "oneOf": [
+        { "type": ["string", "number", "boolean", "null"] },
+        {
+          "type": "object",
+          "required": ["value"],
+          "properties": { "value": {}, "dataType": { "type": ["string", "null"], "maxLength": 96 } },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "query": {
+      "type": "object",
+      "required": ["statement"],
+      "properties": {
+        "statement": { "type": "string", "minLength": 1, "maxLength": 1000000 },
+        "parameters": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/parameter" } },
+        "context": { "type": "object" },
+        "queryId": { "type": ["string", "null"], "maxLength": 128 }
+      },
+      "additionalProperties": false
+    },
+    "queryExpectation": {
+      "type": "object",
+      "required": ["statement"],
+      "properties": {
+        "statement": { "type": "string", "minLength": 1, "maxLength": 1000000 },
+        "parameters": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/parameter" } },
+        "context": { "type": "object" },
+        "queryId": { "type": ["string", "null"], "maxLength": 128 },
+        "expect": { "$ref": "#/$defs/queryResultExpectation" }
+      },
+      "additionalProperties": false
+    },
+    "queryResultExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "minResultSets": { "type": "integer", "minimum": 1 },
+        "minRows": { "type": "integer", "minimum": 0 },
+        "columns": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "firstRow": { "type": "array" }
+      }
+    },
+    "valueExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["array", "object", "string", "number", "boolean", "null"] },
+        "minItems": { "type": "integer", "minimum": 0 },
+        "equals": {},
+        "contains": {
+          "type": "object",
+          "required": ["equals"],
+          "properties": { "path": { "type": "array", "items": { "type": ["string", "integer"] } }, "equals": {} },
+          "additionalProperties": false
+        }
+      }
+    }
+  }
+}

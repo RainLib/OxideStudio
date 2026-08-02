@@ -5,6 +5,7 @@ import {
   ChevronRight,
   Folder,
   GitCompareArrows,
+  KeyRound,
   Network,
   RefreshCw,
   Table,
@@ -21,7 +22,7 @@ import {
 import { cn } from "@/lib/utils";
 import { isViewObject } from "@/lib/databaseDialect";
 import { schemaService } from "@/services/tauri";
-import type { TableInfo } from "@/services/tauri/types";
+import type { SchemaObjectInfo, TableInfo } from "@/services/tauri/types";
 import {
   databaseObjectNavigationKey,
   databaseSchemaNavigationKey,
@@ -33,6 +34,8 @@ type SchemaLoadStatus = "idle" | "loading" | "success" | "error";
 interface SchemaLoadState {
   status: SchemaLoadStatus;
   tables: TableInfo[];
+  objects: SchemaObjectInfo[];
+  objectError: string | null;
   error: string | null;
 }
 
@@ -111,16 +114,23 @@ export function PostgresRemoteDatabaseContents({
       [schema]: {
         status: "loading",
         tables: current[schema]?.tables || [],
+        objects: current[schema]?.objects || [],
+        objectError: null,
         error: null,
       },
     }));
 
     try {
-      const tables = await schemaService.getDatabaseTables(
-        connectionId,
-        database,
-        schema
-      );
+      const [tables, objectResult] = await Promise.all([
+        schemaService.getDatabaseTables(connectionId, database, schema),
+        schemaService
+          .getDatabaseSchemaObjects(connectionId, database, schema)
+          .then((objects) => ({ objects, error: null }))
+          .catch(() => ({
+            objects: [] as SchemaObjectInfo[],
+            error: "Schema object metadata is unavailable for this server role",
+          })),
+      ]);
       if (
         !mountedRef.current ||
         contextVersionRef.current !== contextVersion ||
@@ -130,7 +140,13 @@ export function PostgresRemoteDatabaseContents({
       }
       setSchemaLoads((current) => ({
         ...current,
-        [schema]: { status: "success", tables, error: null },
+        [schema]: {
+          status: "success",
+          tables,
+          objects: objectResult.objects,
+          objectError: objectResult.error,
+          error: null,
+        },
       }));
       onTablesLoaded?.(schema, tables);
     } catch (error) {
@@ -146,6 +162,8 @@ export function PostgresRemoteDatabaseContents({
         [schema]: {
           status: "error",
           tables: current[schema]?.tables || [],
+          objects: current[schema]?.objects || [],
+          objectError: current[schema]?.objectError || null,
           error: loadErrorMessage(error),
         },
       }));
@@ -269,6 +287,8 @@ export function PostgresRemoteDatabaseContents({
         const loadState = schemaLoads[schema] || {
           status: "idle" as const,
           tables: [],
+          objects: [],
+          objectError: null,
           error: null,
         };
         const schemaMatchesFilter = schema
@@ -279,6 +299,13 @@ export function PostgresRemoteDatabaseContents({
               table.name.toLocaleLowerCase().includes(normalizedFilter)
             )
           : loadState.tables;
+        const visibleObjects = normalizedFilter && !schemaMatchesFilter
+          ? loadState.objects.filter((object) =>
+              `${object.name} ${object.objectType} ${object.parentName || ""}`
+                .toLocaleLowerCase()
+                .includes(normalizedFilter)
+            )
+          : loadState.objects;
 
         return (
           <div key={schema} className="min-w-0">
@@ -428,6 +455,34 @@ export function PostgresRemoteDatabaseContents({
                       </ContextMenu>
                     );
                   })}
+                {loadState.status === "success" && visibleObjects.length > 0 && (
+                  <>
+                    <div className="mt-1 flex h-5 min-w-0 items-center gap-1 px-1.5 text-[10px] font-medium wb-muted">
+                      <Folder size={11} className="shrink-0" />
+                      <span className="truncate">schema objects</span>
+                      <span className="ml-auto text-[9px] tabular-nums">{visibleObjects.length}</span>
+                    </div>
+                    {visibleObjects.map((object) => (
+                      <div
+                        key={`${object.objectType}:${object.name}:${object.parentName || ""}`}
+                        className="flex min-w-0 items-center gap-2 px-2 py-1 text-[11px] text-[hsl(var(--wb-text-muted))]"
+                        title={[object.objectType, object.parentName, object.comment].filter(Boolean).join(" · ")}
+                      >
+                        {object.objectType === "sequence" ? <KeyRound size={12} className="shrink-0 opacity-75" /> : <Folder size={12} className="shrink-0 opacity-75" />}
+                        <span className="truncate">
+                          {object.name}
+                          {object.parentName ? ` · ${object.parentName}` : ""}
+                        </span>
+                        <span className="ml-auto shrink-0 text-[9px] wb-muted">{object.objectType}</span>
+                      </div>
+                    ))}
+                  </>
+                )}
+                {loadState.status === "success" && loadState.objectError && (
+                  <div className="px-1.5 py-1 text-[10px] wb-muted">
+                    {loadState.objectError}
+                  </div>
+                )}
               </div>
             )}
           </div>

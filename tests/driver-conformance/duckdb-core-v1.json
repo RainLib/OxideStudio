@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "id": "duckdb-core-v1",
+  "driverId": "duckdb",
+  "connection": { "defaultUrl": ":memory:" },
+  "serverVersionPattern": "^v?1\\.",
+  "setup": [
+    { "statement": "CREATE TABLE oxide_conformance_items (id BIGINT PRIMARY KEY, name VARCHAR NOT NULL)" }
+  ],
+  "query": {
+    "statement": "SELECT ? AS bound_number, ? AS bound_text",
+    "parameters": [42, "oxide"],
+    "expect": {
+      "minResultSets": 1,
+      "minRows": 1,
+      "columns": ["bound_number", "bound_text"],
+      "firstRow": [42, "oxide"]
+    }
+  },
+  "errorMapping": {
+    "statement": "SELECT * FROM oxide_conformance_missing_relation",
+    "expectedCodes": ["QUERY_PREPARE_FAILED", "QUERY_FAILED"]
+  },
+  "metadata": [
+    {
+      "id": "schemas",
+      "request": { "kind": "schemas", "database": null },
+      "expect": { "type": "array", "minItems": 1, "contains": { "equals": "main" } }
+    },
+    {
+      "id": "relations",
+      "request": { "kind": "relations", "database": null, "namespace": "main" },
+      "expect": { "type": "array", "minItems": 1, "contains": { "path": ["name"], "equals": "oxide_conformance_items" } }
+    },
+    {
+      "id": "columns",
+      "request": { "kind": "columns", "database": null, "namespace": "main", "relation": "oxide_conformance_items" },
+      "expect": { "type": "array", "minItems": 2, "contains": { "path": ["name"], "equals": "id" } }
+    }
+  ],
+  "transactionRollback": {
+    "mutation": {
+      "statement": "INSERT INTO oxide_conformance_items (id, name) VALUES (?, ?)",
+      "parameters": [7, "rollback"],
+      "expect": { "minResultSets": 1, "minRows": 0 }
+    },
+    "verify": {
+      "statement": "SELECT COUNT(*) AS row_count FROM oxide_conformance_items WHERE id = ?",
+      "parameters": [7],
+      "expect": { "minRows": 1, "columns": ["row_count"], "firstRow": [0] }
+    }
+  },
+  "cleanup": [{ "statement": "DROP TABLE oxide_conformance_items" }]
+}

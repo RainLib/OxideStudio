@@ -160,6 +160,39 @@ describe("database driver installation inventory", () => {
     expect(defaultDatabaseCapabilities("trino").displayName).toBe("Trino active");
   });
 
+  it("reads one connection-bound capability and server-version snapshot", async () => {
+    mocks.invoke.mockResolvedValue({
+      connectionId: "connection-1",
+      driver: "postgres",
+      distribution: "external",
+      packageVersion: "16.4.1",
+      serverVersion: "16.3",
+      schemaMigrationMode: "reviewOnly",
+      capabilities: {
+        ...defaultDatabaseCapabilities("postgres"),
+        displayName: "Pinned PostgreSQL package",
+        commonDataTypes: ["bigint", "text"],
+      },
+    });
+
+    const context =
+      await databaseService.getConnectionDatabaseCapabilityContext(
+        "connection-1",
+      );
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "get_connection_database_capability_context",
+      { connectionId: "connection-1" },
+    );
+    expect(context).toMatchObject({
+      distribution: "external",
+      packageVersion: "16.4.1",
+      serverVersion: "16.3",
+      schemaMigrationMode: "reviewOnly",
+      capabilities: { displayName: "Pinned PostgreSQL package" },
+    });
+  });
+
   it("invalidates the active capability cache after switching a driver package", async () => {
     mocks.invoke
       .mockResolvedValueOnce({

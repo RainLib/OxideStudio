@@ -3,7 +3,7 @@ use crate::core::{
     manager::ConnectionManager,
     protocol::{
         CollectionInfo, CollectionPage, ColumnInfo, ConstraintInfo, ForeignKeyReferenceInfo,
-        FunctionInfo, IndexInfo, Response, TableInfo,
+        FunctionInfo, IndexInfo, Response, SchemaObjectInfo, TableInfo,
     },
 };
 use tauri::State;
@@ -134,6 +134,49 @@ pub async fn get_collections_page(
             "namespace": namespace,
             "cursor": cursor,
             "limit": limit.clamp(1, 1_000),
+        }),
+    ))
+}
+
+/// Lists descriptor-only objects such as PostgreSQL sequences and triggers.
+/// This is not a generic DDL/source endpoint and exposes no write action.
+#[tauri::command]
+pub async fn get_schema_objects(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    schema: String,
+) -> Result<Response<Vec<SchemaObjectInfo>>, String> {
+    let result = manager.get_schema_objects(&connection_id, &schema).await;
+    Ok(schema_result(
+        result,
+        "SCHEMA_OBJECT_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "schema": schema,
+        }),
+    ))
+}
+
+/// Get read-only descriptors for non-relation objects in one explicitly
+/// selected database. This metadata path never changes the query connection's
+/// active database.
+#[tauri::command]
+pub async fn get_database_schema_objects(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    database: String,
+    schema: String,
+) -> Result<Response<Vec<SchemaObjectInfo>>, String> {
+    let result = manager
+        .get_database_schema_objects(&connection_id, &database, &schema)
+        .await;
+    Ok(schema_result(
+        result,
+        "DATABASE_SCHEMA_OBJECT_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "database": database,
+            "schema": schema,
         }),
     ))
 }

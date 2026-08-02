@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { tableService } from "@/services/tauri/table.service";
+import type { TableDataTransferBatchPlan } from "@/services/tauri/types";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -217,6 +218,7 @@ describe("table service database scope", () => {
 
   it("keeps database-to-database copies behind an explicit preview and confirmation token", async () => {
     const request = {
+      projectId: "project-a",
       transferId: "transfer-test-0001",
       source: {
         connectionId: "source",
@@ -348,5 +350,74 @@ describe("table service database scope", () => {
       expect.objectContaining({ rowsTransferred: 250, status: "running" }),
     );
     expect(stop).toBe(unlisten);
+  });
+
+  it("asks the backend for one FK-ordered multi-table plan instead of looping table writes in the UI", async () => {
+    const request = {
+      sourceConnectionId: "source",
+      sourceDriver: "postgres" as const,
+      sourceSchema: "public",
+      targetConnectionId: "target",
+      targetDriver: "postgres" as const,
+      targetSchema: "archive",
+      tables: ["users", "orders"],
+      mode: "append" as const,
+    };
+    const plan = {
+      orderedTables: ["users", "orders"],
+      dependencies: [{ prerequisiteTable: "users", dependentTable: "orders", constraintName: "orders_user_fk" }],
+      cyclicTables: [],
+      tablePreflights: [
+        { table: "users", canExecute: true, mappedColumns: 2, warnings: [] },
+        { table: "orders", canExecute: true, mappedColumns: 3, warnings: [] },
+      ],
+      canExecute: true,
+      confirmationToken: "BATCH TRANSFER 12345678",
+      warnings: [],
+    } satisfies TableDataTransferBatchPlan;
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: plan,
+    });
+
+    const result = await tableService.previewTableDataTransferBatchPlan(request);
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "preview_table_data_transfer_batch_plan",
+      { request },
+    );
+    expect(result.tablePreflights).toEqual(plan.tablePreflights);
+  });
+
+  it("loads privacy-bounded terminal reports from the target connection history", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: [{
+        id: "table-transfer-report-transfer-test-0001",
+        projectId: "project-a",
+        transferId: "transfer-test-0001",
+        source: { connectionId: "source", driver: "postgres", schema: "public", table: "users" },
+        target: { connectionId: "target", driver: "mysql", schema: "app", table: "users_copy" },
+        mode: "append",
+        planDigest: "a".repeat(64),
+        maxRows: 1000,
+        rowsTransferred: 2,
+        batches: 1,
+        limitReached: false,
+        status: "done",
+        startedAt: 1,
+        finishedAt: 2,
+        error: null,
+      }],
+    });
+
+    const reports = await tableService.listTableDataTransferReports("project-a", "target", 10);
+
+    expect(reports).toHaveLength(1);
+    expect(mocks.invoke).toHaveBeenCalledWith("list_table_data_transfer_reports", {
+      projectId: "project-a",
+      connectionId: "target",
+      limit: 10,
+    });
   });
 });

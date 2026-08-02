@@ -1,3 +1,5 @@
+/// <reference types="vitest/config" />
+
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwind from "@tailwindcss/vite";
@@ -90,5 +92,11 @@ export default defineConfig(async () => ({
   },
   build: {
     chunkSizeWarningLimit: 650,
+  },
+  test: {
+    // Workspace packages have their own test scripts. Keep the root suite
+    // focused on OxideStudio and never collect tests from read-only reference
+    // projects such as sources/dbx.
+    include: ["tests/**/*.{test,spec}.{ts,tsx}"],
   },
 }));

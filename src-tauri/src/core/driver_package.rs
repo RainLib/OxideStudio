@@ -193,6 +193,31 @@ pub struct DriverPackageConformance {
     /// it proves source paging, type mapping and partial-commit reporting.
     #[serde(default)]
     pub data_transfer: Vec<String>,
+    /// Hash-bound reports emitted by the official conformance runner. Version
+    /// strings without a matching evidence reference are rejected from the
+    /// signed catalog, so release coverage is always traceable.
+    #[serde(default)]
+    pub evidence: Vec<DriverPackageConformanceEvidence>,
+}
+
+/// Privacy-bounded pointer to one exact package/server conformance report.
+/// The signed catalog binds report and fixture digests; reports must not carry
+/// connection URLs, credentials, SQL text or result values.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DriverPackageConformanceEvidence {
+    pub schema_version: u32,
+    pub runner_version: String,
+    pub driver_id: String,
+    pub package_version: String,
+    pub entrypoint_sha256: String,
+    pub target: String,
+    pub server_version: String,
+    pub fixture_id: String,
+    pub fixture_sha256: String,
+    pub report_url: String,
+    pub report_sha256: String,
+    pub operations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -974,6 +999,18 @@ fn validate_catalog_manifest_binding(
         if manifest.capabilities.as_ref() != Some(catalog_capabilities) {
             return Err(
                 "Downloaded driver package capabilities do not match the signed catalog entry"
+                    .to_string(),
+            );
+        }
+    }
+    if let Some(conformance) = entry.conformance.as_ref() {
+        if conformance.evidence.iter().any(|evidence| {
+            !evidence
+                .entrypoint_sha256
+                .eq_ignore_ascii_case(&manifest.sha256)
+        }) {
+            return Err(
+                "Downloaded driver package entrypoint digest does not match signed conformance evidence"
                     .to_string(),
             );
         }
@@ -2328,7 +2365,7 @@ fn validate_driver_catalog(catalog: &DriverPackageCatalog) -> Result<(), String>
             validate_capability_contract(&entry.driver_id, capabilities)?;
         }
         if let Some(conformance) = &entry.conformance {
-            validate_driver_conformance(conformance)?;
+            validate_driver_conformance(entry, conformance)?;
             validate_conformance_capability_contract(entry.capabilities.as_ref(), conformance)?;
         }
         if entry.supported_targets.len() > 16
@@ -2349,17 +2386,13 @@ fn validate_driver_catalog(catalog: &DriverPackageCatalog) -> Result<(), String>
     Ok(())
 }
 
-fn validate_driver_conformance(conformance: &DriverPackageConformance) -> Result<(), String> {
+fn validate_driver_conformance(
+    entry: &DriverPackageCatalogEntry,
+    conformance: &DriverPackageConformance,
+) -> Result<(), String> {
     const MAX_VERSIONS_PER_OPERATION: usize = 32;
-    for versions in [
-        &conformance.connect,
-        &conformance.metadata,
-        &conformance.query,
-        &conformance.cancellation,
-        &conformance.mutations,
-        &conformance.migration,
-        &conformance.data_transfer,
-    ] {
+    const MAX_EVIDENCE_PER_PACKAGE: usize = 128;
+    for (_, versions) in conformance_operation_versions(conformance) {
         if versions.len() > MAX_VERSIONS_PER_OPERATION
             || versions.iter().any(|version| {
                 let version = version.trim();
@@ -2376,7 +2409,127 @@ fn validate_driver_conformance(conformance: &DriverPackageConformance) -> Result
             return Err("Driver catalog contains duplicate conformance versions".to_string());
         }
     }
+    if conformance.evidence.len() > MAX_EVIDENCE_PER_PACKAGE {
+        return Err("Driver catalog contains too many conformance evidence records".to_string());
+    }
+    let mut evidence_keys = std::collections::HashSet::new();
+    for evidence in &conformance.evidence {
+        validate_driver_conformance_evidence(entry, evidence)?;
+        let key = format!(
+            "{}:{}:{}:{}:{}",
+            evidence.target.to_ascii_lowercase(),
+            evidence.server_version.to_ascii_lowercase(),
+            evidence.fixture_id.to_ascii_lowercase(),
+            evidence.report_sha256.to_ascii_lowercase(),
+            evidence.operations.join(",").to_ascii_lowercase(),
+        );
+        if !evidence_keys.insert(key) {
+            return Err("Driver catalog contains duplicate conformance evidence".to_string());
+        }
+    }
+    for (operation, versions) in conformance_operation_versions(conformance) {
+        for version in versions {
+            let covered = conformance.evidence.iter().any(|evidence| {
+                evidence.server_version.eq_ignore_ascii_case(version)
+                    && evidence
+                        .operations
+                        .iter()
+                        .any(|candidate| candidate == operation)
+            });
+            if !covered {
+                return Err(format!(
+                    "Driver catalog conformance {operation} version {version} has no matching runner evidence"
+                ));
+            }
+        }
+    }
     Ok(())
+}
+
+fn conformance_operation_versions(
+    conformance: &DriverPackageConformance,
+) -> [(&'static str, &Vec<String>); 7] {
+    [
+        ("connect", &conformance.connect),
+        ("metadata", &conformance.metadata),
+        ("query", &conformance.query),
+        ("cancellation", &conformance.cancellation),
+        ("mutations", &conformance.mutations),
+        ("migration", &conformance.migration),
+        ("dataTransfer", &conformance.data_transfer),
+    ]
+}
+
+fn validate_driver_conformance_evidence(
+    entry: &DriverPackageCatalogEntry,
+    evidence: &DriverPackageConformanceEvidence,
+) -> Result<(), String> {
+    if evidence.schema_version != 1
+        || !is_safe_token(&evidence.runner_version)
+        || evidence.driver_id != entry.driver_id
+        || evidence.package_version != entry.package_version
+        || !is_safe_token(&evidence.target)
+        || !is_safe_token(&evidence.fixture_id)
+        || evidence.server_version.trim().is_empty()
+        || evidence.server_version.len() > 96
+        || evidence.server_version.contains('\0')
+    {
+        return Err("Driver catalog contains invalid conformance evidence identity".to_string());
+    }
+    if !entry.supported_targets.is_empty()
+        && !entry
+            .supported_targets
+            .iter()
+            .any(|target| target == "*" || target.eq_ignore_ascii_case(&evidence.target))
+    {
+        return Err(
+            "Driver catalog conformance evidence target is not supported by the package"
+                .to_string(),
+        );
+    }
+    validate_sha256(
+        &evidence.entrypoint_sha256,
+        "Driver conformance entrypoint SHA-256",
+    )?;
+    validate_sha256(
+        &evidence.fixture_sha256,
+        "Driver conformance fixture SHA-256",
+    )?;
+    validate_sha256(&evidence.report_sha256, "Driver conformance report SHA-256")?;
+    validated_catalog_url(&evidence.report_url, "Driver conformance report URL")?;
+    if evidence.operations.is_empty()
+        || evidence.operations.len() > 7
+        || evidence
+            .operations
+            .iter()
+            .any(|operation| !conformance_operation_is_valid(operation))
+        || evidence
+            .operations
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != evidence.operations.len()
+        || !evidence
+            .operations
+            .iter()
+            .any(|operation| operation == "connect")
+    {
+        return Err("Driver catalog contains invalid conformance evidence operations".to_string());
+    }
+    Ok(())
+}
+
+fn conformance_operation_is_valid(operation: &str) -> bool {
+    matches!(
+        operation,
+        "connect"
+            | "metadata"
+            | "query"
+            | "cancellation"
+            | "mutations"
+            | "migration"
+            | "dataTransfer"
+    )
 }
 
 /// Release evidence is advisory rather than executable authority, but it must
@@ -2536,6 +2689,26 @@ mod tests {
                     mutations: Vec::new(),
                     migration: Vec::new(),
                     data_transfer: Vec::new(),
+                    evidence: vec![DriverPackageConformanceEvidence {
+                        schema_version: 1,
+                        runner_version: "1.0.0".to_string(),
+                        driver_id: "clickhouse".to_string(),
+                        package_version: "1.2.3".to_string(),
+                        entrypoint_sha256: "a".repeat(64),
+                        target: "darwin-arm64".to_string(),
+                        server_version: "24.3".to_string(),
+                        fixture_id: "clickhouse-core-v1".to_string(),
+                        fixture_sha256: "b".repeat(64),
+                        report_url: "https://drivers.example.com/evidence/clickhouse-24.3.json"
+                            .to_string(),
+                        report_sha256: "c".repeat(64),
+                        operations: vec![
+                            "connect".to_string(),
+                            "metadata".to_string(),
+                            "query".to_string(),
+                            "cancellation".to_string(),
+                        ],
+                    }],
                 }),
             }],
         };
@@ -2611,6 +2784,28 @@ mod tests {
             .unwrap_err()
             .contains("duplicate conformance"));
 
+        let mut missing_runner_evidence = valid.clone();
+        missing_runner_evidence.packages[0]
+            .conformance
+            .as_mut()
+            .unwrap()
+            .evidence
+            .clear();
+        assert!(validate_driver_catalog(&missing_runner_evidence)
+            .unwrap_err()
+            .contains("no matching runner evidence"));
+
+        let mut evidence_package_mismatch = valid.clone();
+        evidence_package_mismatch.packages[0]
+            .conformance
+            .as_mut()
+            .unwrap()
+            .evidence[0]
+            .package_version = "9.9.9".to_string();
+        assert!(validate_driver_catalog(&evidence_package_mismatch)
+            .unwrap_err()
+            .contains("invalid conformance evidence identity"));
+
         let mut unsupported_mutations = valid;
         let capabilities = unsupported_mutations.packages[0]
             .capabilities
@@ -2622,6 +2817,13 @@ mod tests {
             .as_mut()
             .expect("fixture has conformance")
             .mutations = vec!["24.3".to_string()];
+        unsupported_mutations.packages[0]
+            .conformance
+            .as_mut()
+            .expect("fixture has conformance")
+            .evidence[0]
+            .operations
+            .push("mutations".to_string());
         assert!(validate_driver_catalog(&unsupported_mutations)
             .unwrap_err()
             .contains("mutation conformance"));
@@ -2689,7 +2891,24 @@ mod tests {
             release_notes_url: None,
             connection_url_template: Some("jdbc:warehouse://{host}:{port}/{database}".to_string()),
             capabilities: Some(capabilities.clone()),
-            conformance: None,
+            conformance: Some(DriverPackageConformance {
+                evidence: vec![DriverPackageConformanceEvidence {
+                    schema_version: 1,
+                    runner_version: "1.0.0".to_string(),
+                    driver_id: "warehouse".to_string(),
+                    package_version: "1.0.0".to_string(),
+                    entrypoint_sha256: "a".repeat(64),
+                    target: "darwin-arm64".to_string(),
+                    server_version: "1.0".to_string(),
+                    fixture_id: "warehouse-core-v1".to_string(),
+                    fixture_sha256: "b".repeat(64),
+                    report_url: "https://drivers.example.com/evidence/warehouse-1.0.json"
+                        .to_string(),
+                    report_sha256: "c".repeat(64),
+                    operations: vec!["connect".to_string()],
+                }],
+                ..DriverPackageConformance::default()
+            }),
         };
         let manifest = DriverPackageManifest {
             schema_version: DRIVER_PACKAGE_SCHEMA_VERSION,
@@ -2716,6 +2935,14 @@ mod tests {
             validate_catalog_manifest_binding(&entry, &protocol_mismatch)
                 .unwrap_err()
                 .contains("protocol")
+        );
+
+        let mut evidence_mismatch = manifest.clone();
+        evidence_mismatch.sha256 = "d".repeat(64);
+        assert!(
+            validate_catalog_manifest_binding(&entry, &evidence_mismatch)
+                .unwrap_err()
+                .contains("conformance evidence")
         );
 
         let mut capability_mismatch = manifest;

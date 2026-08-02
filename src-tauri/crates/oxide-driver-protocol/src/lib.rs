@@ -330,6 +330,31 @@ mod tests {
     }
 
     #[test]
+    fn request_wire_contract_keeps_enum_fields_snake_case_and_nested_context_camel_case() {
+        let envelope = DriverRequestEnvelope {
+            id: 8,
+            request: DriverRequest::Query {
+                connection_id: "connection-1".to_string(),
+                statement: "SELECT ?".to_string(),
+                parameters: Vec::new(),
+                context: DriverQueryContext {
+                    transaction_id: Some("tx-1".to_string()),
+                    read_only: true,
+                    ..DriverQueryContext::default()
+                },
+                query_id: Some("query-1".to_string()),
+            },
+        };
+        let encoded = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(encoded["params"]["connection_id"], "connection-1");
+        assert_eq!(encoded["params"]["query_id"], "query-1");
+        assert_eq!(encoded["params"]["context"]["transactionId"], "tx-1");
+        assert_eq!(encoded["params"]["context"]["readOnly"], true);
+        assert!(encoded["params"].get("connectionId").is_none());
+        assert!(encoded["params"].get("queryId").is_none());
+    }
+
+    #[test]
     fn create_database_request_stays_semantic_and_never_carries_sql() {
         let envelope = DriverRequestEnvelope {
             id: 11,

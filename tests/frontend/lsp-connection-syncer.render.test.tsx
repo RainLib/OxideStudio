@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   getLspDocuments: vi.fn(async () => []),
   getServerVersion: vi.fn(async () => "16.2"),
   getDatabaseCapabilities: vi.fn(),
+  getConnectionDatabaseCapabilityContext: vi.fn(),
   getTables: vi.fn(async () => []),
   getDatabaseTables: vi.fn(async () => []),
   getCollections: vi.fn(async () => []),
@@ -70,6 +71,8 @@ vi.mock("@/services/tauri", () => ({
   },
   databaseService: {
     getDatabaseCapabilities: mocks.getDatabaseCapabilities,
+    getConnectionDatabaseCapabilityContext:
+      mocks.getConnectionDatabaseCapabilityContext,
   },
   projectFilesService: {
     getLspDocuments: mocks.getLspDocuments,
@@ -113,6 +116,21 @@ describe("LspConnectionSyncer render integration", () => {
       defaultDatabaseCapabilities("postgres")
     );
     mocks.getServerVersion.mockResolvedValue("16.2");
+    mocks.getConnectionDatabaseCapabilityContext.mockImplementation(
+      async (connectionId: string) => {
+        const capabilities = await mocks.getDatabaseCapabilities();
+        const serverVersion = await mocks.getServerVersion(connectionId);
+        return {
+          connectionId,
+          driver: capabilities.driver,
+          distribution: "bundled",
+          packageVersion: null,
+          serverVersion,
+          schemaMigrationMode: "transactional",
+          capabilities,
+        };
+      },
+    );
     mocks.getTables.mockResolvedValue([
       {
         name: "users",

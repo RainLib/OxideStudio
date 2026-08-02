@@ -1665,8 +1665,20 @@ fn configure_environment(command: &mut Command, mode: ShellSandboxMode, isolated
             command.env(key, value);
         }
     }
+    #[cfg(target_os = "windows")]
+    for key in ["SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "PSModulePath"] {
+        if let Some(value) = env::var_os(key) {
+            command.env(key, value);
+        }
+    }
     if mode == ShellSandboxMode::Unrestricted {
         for key in ["HOME", "SSH_AUTH_SOCK", "GPG_TTY"] {
+            if let Some(value) = env::var_os(key) {
+                command.env(key, value);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        for key in ["USERPROFILE", "APPDATA", "LOCALAPPDATA"] {
             if let Some(value) = env::var_os(key) {
                 command.env(key, value);
             }
@@ -1675,6 +1687,8 @@ fn configure_environment(command: &mut Command, mode: ShellSandboxMode, isolated
         command.env("HOME", isolated_home);
     }
     command.env("TMPDIR", isolated_home);
+    #[cfg(target_os = "windows")]
+    command.env("TEMP", isolated_home).env("TMP", isolated_home);
     command.env("NO_COLOR", "1");
     command.env("CI", "1");
 }
@@ -2014,16 +2028,21 @@ mod tests {
     #[tokio::test]
     async fn unrestricted_shell_captures_output() {
         let root = tempfile::tempdir().unwrap();
+        let command = if cfg!(target_os = "windows") {
+            "[Console]::Write('oxide-shell')"
+        } else {
+            "printf oxide-shell"
+        };
         let result = execute_shell_command(
             root.path(),
             root.path(),
-            "printf oxide-shell",
+            command,
             ShellSandboxMode::Unrestricted,
             5_000,
         )
         .await
         .unwrap();
-        assert!(result.success);
+        assert!(result.success, "shell result: {result:?}");
         assert_eq!(result.stdout, "oxide-shell");
         assert!(!result.sandboxed);
     }

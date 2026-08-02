@@ -95,7 +95,7 @@ async function crateVersion() {
 
 async function duckdbClientVersion() {
   const lockfile = await readFile(join(driverRoot, "Cargo.lock"), "utf8");
-  const match = lockfile.match(/\[\[package\]\]\nname = "duckdb"\nversion = "([^"]+)"/);
+  const match = lockfile.match(/\[\[package\]\]\r?\nname = "duckdb"\r?\nversion = "([^"]+)"/);
   if (!match) throw new Error("Unable to read duckdb client version from Cargo.lock");
   return match[1];
 }

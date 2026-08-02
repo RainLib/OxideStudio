@@ -3,6 +3,10 @@ import {
   type CompletionItem,
 } from "@/services/lsp/types";
 import { sqlStatementBeforeCursor } from "@/lib/queryEditorCachedCompletion";
+import {
+  sqlCommandSnippetCompletions,
+  type SqlCommandSnippetOptions,
+} from "./sqlCommandSnippets";
 
 /**
  * Small, deterministic completion layer used only when the semantic server
@@ -102,7 +106,9 @@ function grammarItems(
  */
 export function sqlSyntaxFallbackCompletions(
   textBeforeCursor: string,
+  options: SqlCommandSnippetOptions = {},
 ): CompletionItem[] {
+  if (options.supportsSqlQuery === false) return [];
   const statement = currentStatementFragment(textBeforeCursor);
   const trimmed = statement.trim();
   const word = trailingWord(statement);
@@ -122,11 +128,14 @@ export function sqlSyntaxFallbackCompletions(
     !trimmed ||
     (/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed) && !/\s$/.test(statement))
   ) {
-    return grammarItems(
-      STATEMENT_STARTERS,
-      CompletionItemKind.Keyword,
-      "SQL statement",
-    );
+    return [
+      ...sqlCommandSnippetCompletions(statement, options),
+      ...grammarItems(
+        STATEMENT_STARTERS,
+        CompletionItemKind.Keyword,
+        "SQL statement",
+      ),
+    ];
   }
 
   if (/\bSELECT\s+(?:DISTINCT\s+)?$/i.test(statement)) {

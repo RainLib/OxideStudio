@@ -3,8 +3,10 @@ import type {
   DatabaseCapabilities,
   DatabaseDriverActivationState,
   DatabaseAdminSession,
+  DatabaseAdminMetric,
   DatabaseAdminUser,
   CreateDatabaseAdminUserRequest,
+  ConnectionDatabaseCapabilityContext,
   DeleteDatabaseAdminUserRequest,
   DatabaseDriver,
   DatabaseDriverInstallation,
@@ -79,6 +81,26 @@ export async function getDatabaseCapabilities(
     registerDatabaseCapabilities(capabilities);
   }
   return capabilities;
+}
+
+/**
+ * Resolve capabilities from the concrete live connection rather than the
+ * active product catalogue. This is intentionally not cached: reconnecting
+ * may change the pinned package or negotiated server version while retaining
+ * the same connection id.
+ */
+export async function getConnectionDatabaseCapabilityContext(
+  connectionId: string,
+): Promise<ConnectionDatabaseCapabilityContext> {
+  const context =
+    await invokeWithInterceptors<ConnectionDatabaseCapabilityContext>(
+      "get_connection_database_capability_context",
+      { connectionId },
+    );
+  return {
+    ...context,
+    capabilities: cloneCapabilities(context.capabilities),
+  };
 }
 
 export async function listDatabaseCapabilities(): Promise<
@@ -231,6 +253,16 @@ export async function listDatabaseAdminSessions(
   );
 }
 
+export async function listDatabaseAdminMetrics(
+  connectionId: string,
+  driver: DatabaseDriver,
+): Promise<DatabaseAdminMetric[]> {
+  return invokeWithInterceptors<DatabaseAdminMetric[]>(
+    "list_database_admin_metrics",
+    { connectionId, driver },
+  );
+}
+
 export async function terminateDatabaseAdminSession(
   connectionId: string,
   driver: DatabaseDriver,
@@ -350,6 +382,7 @@ export async function renameDatabase(
 
 export const databaseService = {
   getDatabaseCapabilities,
+  getConnectionDatabaseCapabilityContext,
   listDatabaseCapabilities,
   listDatabaseDriverInstallations,
   listExternalDatabaseDriverRuntimes,
@@ -364,6 +397,7 @@ export const databaseService = {
   activateExternalDatabaseDriver,
   rollbackExternalDatabaseDriver,
   listDatabaseAdminSessions,
+  listDatabaseAdminMetrics,
   terminateDatabaseAdminSession,
   listDatabaseAdminUsers,
   createDatabaseAdminUser,

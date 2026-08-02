@@ -29,15 +29,12 @@ fn main() {
     for line in stdin.lock().lines() {
         let response = match line {
             Ok(line) => handle_line(&line, &mut connections),
-            Err(error) => Err(protocol_error("INPUT_READ_FAILED", error.to_string())),
-        };
-        let serialized = match response {
-            Ok(envelope) => serde_json::to_string(&envelope),
-            Err(error) => serde_json::to_string(&DriverResponseEnvelope {
+            Err(error) => DriverResponseEnvelope {
                 id: 0,
-                response: DriverResponse::Error(error),
-            }),
+                response: DriverResponse::Error(protocol_error("INPUT_READ_FAILED", error.to_string())),
+            },
         };
+        let serialized = serde_json::to_string(&response);
         match serialized {
             Ok(line) => {
                 let mut stdout = io::stdout().lock();
@@ -53,15 +50,20 @@ fn main() {
 fn handle_line(
     line: &str,
     connections: &mut HashMap<String, Connection>,
-) -> Result<DriverResponseEnvelope, DriverProtocolError> {
-    let request: DriverRequestEnvelope = serde_json::from_str(line)
-        .map_err(|error| protocol_error("INVALID_REQUEST", error.to_string()))?;
+) -> DriverResponseEnvelope {
+    let request: DriverRequestEnvelope = match serde_json::from_str(line) {
+        Ok(request) => request,
+        Err(error) => return DriverResponseEnvelope {
+            id: 0,
+            response: DriverResponse::Error(protocol_error("INVALID_REQUEST", error.to_string())),
+        },
+    };
     let id = request.id;
-    let response = handle_request(request.request, connections)?;
-    Ok(DriverResponseEnvelope {
-        id,
-        response: DriverResponse::Ok(response),
-    })
+    let response = match handle_request(request.request, connections) {
+        Ok(response) => DriverResponse::Ok(response),
+        Err(error) => DriverResponse::Error(error),
+    };
+    DriverResponseEnvelope { id, response }
 }
 
 fn handle_request(
@@ -992,7 +994,7 @@ mod tests {
             },
         };
         let connect = serde_json::to_string(&connect).unwrap();
-        let connected = handle_line(&connect, &mut connections).unwrap();
+        let connected = handle_line(&connect, &mut connections);
         assert_eq!(connected.id, 7);
         assert!(matches!(
             connected.response,
@@ -1009,8 +1011,7 @@ mod tests {
                 query_id: None,
             },
         };
-        let created =
-            handle_line(&serde_json::to_string(&create).unwrap(), &mut connections).unwrap();
+        let created = handle_line(&serde_json::to_string(&create).unwrap(), &mut connections);
         assert_eq!(created.id, 8);
 
         let query_request = DriverRequestEnvelope {
@@ -1026,13 +1027,30 @@ mod tests {
         let response = handle_line(
             &serde_json::to_string(&query_request).unwrap(),
             &mut connections,
-        )
-        .unwrap();
+        );
         assert_eq!(response.id, 9);
         let DriverResponse::Ok(DriverResult::Query(results)) = response.response else {
             panic!("expected a query response");
         };
         assert_eq!(results[0].rows, vec![vec![json!(42)]]);
+    }
+
+    #[test]
+    fn protocol_envelope_preserves_request_id_for_driver_errors() {
+        let mut connections = HashMap::new();
+        let request = DriverRequestEnvelope {
+            id: 21,
+            request: DriverRequest::Query {
+                connection_id: "missing".to_string(),
+                statement: "SELECT 1".to_string(),
+                parameters: Vec::new(),
+                context: Default::default(),
+                query_id: None,
+            },
+        };
+        let response = handle_line(&serde_json::to_string(&request).unwrap(), &mut connections);
+        assert_eq!(response.id, 21);
+        assert!(matches!(response.response, DriverResponse::Error(error) if error.code == "CONNECTION_NOT_FOUND"));
     }
 
     #[test]

@@ -9,7 +9,20 @@ import test from "node:test";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
+async function commandAvailable(command) {
+  const child = spawn(command, ["-version"], { cwd: root, stdio: "ignore" });
+  const [code] = await once(child, "close").catch(() => [null]);
+  return code === 0;
+}
+
+async function requireJdk(t) {
+  if (await commandAvailable("java") && await commandAvailable("javac")) return true;
+  t.skip("JDK fixture is not available on this runner");
+  return false;
+}
+
 test("JDBC Agent advertises cancellable queries and responds to a bounded cancel", async (t) => {
+  if (!(await requireJdk(t))) return;
   const temporary = await mkdtemp(join(tmpdir(), "oxide-jdbc-agent-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const build = spawn(process.execPath, ["scripts/build-jdbc-driver-agent.mjs", temporary], {
@@ -35,7 +48,7 @@ test("JDBC Agent advertises cancellable queries and responds to a bounded cancel
     stdout += chunk;
   });
   agent.stdin.write(`${JSON.stringify({ id: 1, method: "handshake", params: {} })}\n`);
-  agent.stdin.write(`${JSON.stringify({ id: 2, method: "cancel", params: { connectionId: "missing", queryId: "q1" } })}\n`);
+  agent.stdin.write(`${JSON.stringify({ id: 2, method: "cancel", params: { connection_id: "missing", query_id: "q1" } })}\n`);
   agent.stdin.end();
   const [code] = await once(agent, "close");
   assert.equal(code, 0);
@@ -53,6 +66,7 @@ test("JDBC Agent advertises cancellable queries and responds to a bounded cancel
 });
 
 test("JDBC Agent scopes schema metadata to the requested catalog", async (t) => {
+  if (!(await requireJdk(t))) return;
   const temporary = await mkdtemp(join(tmpdir(), "oxide-jdbc-catalog-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const build = spawn(process.execPath, ["scripts/build-jdbc-driver-agent.mjs", temporary], {
@@ -179,13 +193,13 @@ public final class CatalogDriver implements Driver {
   agent.stdin.write(`${JSON.stringify({
     id: 1,
     method: "connect",
-    params: { connectionId: "catalog", config: { url: "jdbc:oxide-catalog:test" } },
+    params: { connection_id: "catalog", config: { url: "jdbc:oxide-catalog:test" } },
   })}\n`);
   agent.stdin.write(`${JSON.stringify({
     id: 2,
     method: "metadata",
     params: {
-      connectionId: "catalog",
+      connection_id: "catalog",
       request: { kind: "schemas", database: "second" },
     },
   })}\n`);

@@ -20,8 +20,13 @@ import type {
   TableImportResult,
   TableDataTransferPreview,
   TableDataTransferRequest,
+  TableDataTransferBatchPlan,
+  TableDataTransferBatchPlanRequest,
+  TableDataTransferBatchExecuteRequest,
+  TableDataTransferBatchResult,
   TableDataTransferResult,
   TableDataTransferProgress,
+  TableDataTransferReport,
   TableDataTransferTargetPlan,
   TableDataTransferTargetPlanRequest,
   TableFilter,
@@ -222,6 +227,38 @@ export async function cancelTableDataTransfer(
   return invokeWithInterceptors<string>("cancel_table_data_transfer", {
     transferId,
   });
+}
+
+/** Builds a read-only FK dependency order for a selected group of tables. */
+export async function previewTableDataTransferBatchPlan(
+  request: TableDataTransferBatchPlanRequest,
+): Promise<TableDataTransferBatchPlan> {
+  return invokeWithInterceptors<TableDataTransferBatchPlan>(
+    "preview_table_data_transfer_batch_plan",
+    { request },
+  );
+}
+
+/** Executes all selected tables inside one native target transaction. */
+export async function executeTableDataTransferBatch(
+  request: TableDataTransferBatchExecuteRequest,
+  confirmationToken: string,
+): Promise<TableDataTransferBatchResult> {
+  return invokeWithInterceptors<TableDataTransferBatchResult>(
+    "execute_table_data_transfer_batch",
+    { request, confirmationToken },
+  );
+}
+
+export async function listTableDataTransferReports(
+  projectId: string,
+  connectionId: string,
+  limit = 20,
+): Promise<TableDataTransferReport[]> {
+  return invokeWithInterceptors<TableDataTransferReport[]>(
+    "list_table_data_transfer_reports",
+    { projectId, connectionId, limit },
+  );
 }
 
 export async function listenTableDataTransferProgress(
@@ -624,10 +661,13 @@ export async function refreshMaterializedView(
 export const tableService = {
   previewTablePage,
   previewTableDataTransfer,
+  previewTableDataTransferBatchPlan,
+  executeTableDataTransferBatch,
   previewTableDataTransferTarget,
   createTableDataTransferTarget,
   executeTableDataTransfer,
   cancelTableDataTransfer,
+  listTableDataTransferReports,
   listenTableDataTransferProgress,
   exportTableData,
   previewTableCsvImport,

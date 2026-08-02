@@ -32,18 +32,25 @@ struct ClickHouseConnection {
     default_database: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClickHouseBoundParameter {
+    name: String,
+    data_type: &'static str,
+    value: String,
+}
+
 fn main() {
     let stdin = io::stdin();
     let mut connections = HashMap::new();
     for line in stdin.lock().lines() {
-        let response = line
-            .map_err(|error| protocol_error("INPUT_READ_FAILED", error.to_string()))
-            .and_then(|line| handle_line(&line, &mut connections));
-        let serialized =
-            serde_json::to_string(&response.unwrap_or_else(|error| DriverResponseEnvelope {
+        let response = match line {
+            Ok(line) => handle_line(&line, &mut connections),
+            Err(error) => DriverResponseEnvelope {
                 id: 0,
-                response: DriverResponse::Error(error),
-            }));
+                response: DriverResponse::Error(protocol_error("INPUT_READ_FAILED", error.to_string())),
+            },
+        };
+        let serialized = serde_json::to_string(&response);
         match serialized {
             Ok(line) => {
                 let mut stdout = io::stdout().lock();
@@ -59,14 +66,20 @@ fn main() {
 fn handle_line(
     line: &str,
     connections: &mut HashMap<String, ClickHouseConnection>,
-) -> Result<DriverResponseEnvelope, DriverProtocolError> {
-    let request: DriverRequestEnvelope = serde_json::from_str(line)
-        .map_err(|error| protocol_error("INVALID_REQUEST", error.to_string()))?;
+) -> DriverResponseEnvelope {
+    let request: DriverRequestEnvelope = match serde_json::from_str(line) {
+        Ok(request) => request,
+        Err(error) => return DriverResponseEnvelope {
+            id: 0,
+            response: DriverResponse::Error(protocol_error("INVALID_REQUEST", error.to_string())),
+        },
+    };
     let id = request.id;
-    Ok(DriverResponseEnvelope {
-        id,
-        response: DriverResponse::Ok(handle_request(request.request, connections)?),
-    })
+    let response = match handle_request(request.request, connections) {
+        Ok(response) => DriverResponse::Ok(response),
+        Err(error) => DriverResponse::Error(error),
+    };
+    DriverResponseEnvelope { id, response }
 }
 
 fn handle_request(
@@ -302,10 +315,8 @@ fn query(
     if statement.trim().is_empty() {
         return Err(protocol_error("QUERY_EMPTY", "SQL statement is required"));
     }
-    if !parameters.is_empty() {
-        return Err(protocol_error("PARAMETERS_UNSUPPORTED", "ClickHouse HTTP parameters are named and typed; this package does not remap positional protocol parameters"));
-    }
-    let url = query_url(connection, statement, context, query_id)?;
+    let (statement, parameters) = bind_clickhouse_parameters(statement, parameters)?;
+    let url = query_url(connection, &statement, context, query_id, &parameters)?;
     let response = if context.read_only {
         authenticated(connection, connection.client.get(url)).send()
     } else {
@@ -316,7 +327,7 @@ fn query(
         .send()
     }
     .map_err(http_error("QUERY_FAILED"))?;
-    parse_query_response(response, statement)
+    parse_query_response(response, &statement)
 }
 
 fn query_url(
@@ -324,6 +335,7 @@ fn query_url(
     statement: &str,
     context: &DriverQueryContext,
     query_id: Option<&str>,
+    parameters: &[ClickHouseBoundParameter],
 ) -> Result<Url, DriverProtocolError> {
     let mut url = root_url(connection)?;
     {
@@ -341,6 +353,9 @@ fn query_url(
         if let Some(query_id) = query_id.filter(|value| !value.trim().is_empty()) {
             pairs.append_pair("query_id", query_id);
         }
+        for parameter in parameters {
+            pairs.append_pair(&format!("param_{}", parameter.name), &parameter.value);
+        }
         if context.read_only {
             // The ClickHouse HTTP API treats GET query requests as read-only.
             // Do not silently fall back to POST for agent-owned reads.
@@ -351,6 +366,193 @@ fn query_url(
         }
     }
     Ok(url)
+}
+
+/// Converts protocol positional markers into ClickHouse's typed HTTP
+/// parameters. Values remain URL-encoded query parameters; they are never
+/// interpolated into SQL text. `?` is assigned left-to-right and `$1` style
+/// markers may be repeated. Markers inside quoted identifiers, strings and
+/// comments are deliberately left untouched.
+fn bind_clickhouse_parameters(
+    statement: &str,
+    parameters: &[DriverQueryParameter],
+) -> Result<(String, Vec<ClickHouseBoundParameter>), DriverProtocolError> {
+    if parameters.is_empty() {
+        return Ok((statement.to_string(), Vec::new()));
+    }
+    let typed = parameters
+        .iter()
+        .enumerate()
+        .map(|(index, parameter)| clickhouse_bound_parameter(index + 1, parameter))
+        .collect::<Result<Vec<_>, _>>()?;
+    let chars = statement.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(statement.len() + parameters.len() * 16);
+    let mut used = vec![false; parameters.len()];
+    let mut next_question_mark = 0usize;
+    let mut index = 0usize;
+    let mut state = ParameterScanState::Code;
+    while index < chars.len() {
+        let current = chars[index];
+        let next = chars.get(index + 1).copied();
+        match state {
+            ParameterScanState::Code => {
+                if current == '\'' {
+                    state = ParameterScanState::SingleQuote;
+                    output.push(current);
+                    index += 1;
+                } else if current == '"' {
+                    state = ParameterScanState::DoubleQuote;
+                    output.push(current);
+                    index += 1;
+                } else if current == '`' {
+                    state = ParameterScanState::Backtick;
+                    output.push(current);
+                    index += 1;
+                } else if current == '-' && next == Some('-') {
+                    state = ParameterScanState::LineComment;
+                    output.push_str("--");
+                    index += 2;
+                } else if current == '/' && next == Some('*') {
+                    state = ParameterScanState::BlockComment;
+                    output.push_str("/*");
+                    index += 2;
+                } else if current == '?' {
+                    if next_question_mark >= typed.len() {
+                        return Err(protocol_error("PARAMETER_COUNT_MISMATCH", "SQL contains more positional parameters than the request"));
+                    }
+                    output.push_str(&clickhouse_parameter_placeholder(&typed[next_question_mark]));
+                    used[next_question_mark] = true;
+                    next_question_mark += 1;
+                    index += 1;
+                } else if current == '$' && next.is_some_and(|value| value.is_ascii_digit()) {
+                    let start = index + 1;
+                    let mut end = start;
+                    while chars.get(end).is_some_and(|value| value.is_ascii_digit()) {
+                        end += 1;
+                    }
+                    let ordinal = chars[start..end]
+                        .iter()
+                        .collect::<String>()
+                        .parse::<usize>()
+                        .map_err(|_| protocol_error("PARAMETER_COUNT_MISMATCH", "SQL parameter marker is invalid"))?;
+                    if ordinal == 0 || ordinal > typed.len() {
+                        return Err(protocol_error("PARAMETER_COUNT_MISMATCH", "SQL parameter marker is outside the request parameter range"));
+                    }
+                    output.push_str(&clickhouse_parameter_placeholder(&typed[ordinal - 1]));
+                    used[ordinal - 1] = true;
+                    index = end;
+                } else {
+                    output.push(current);
+                    index += 1;
+                }
+            }
+            ParameterScanState::SingleQuote => {
+                output.push(current);
+                index += 1;
+                if current == '\'' {
+                    if chars.get(index) == Some(&'\'') {
+                        output.push('\'');
+                        index += 1;
+                    } else {
+                        state = ParameterScanState::Code;
+                    }
+                }
+            }
+            ParameterScanState::DoubleQuote => {
+                output.push(current);
+                index += 1;
+                if current == '"' {
+                    if chars.get(index) == Some(&'"') {
+                        output.push('"');
+                        index += 1;
+                    } else {
+                        state = ParameterScanState::Code;
+                    }
+                }
+            }
+            ParameterScanState::Backtick => {
+                output.push(current);
+                index += 1;
+                if current == '`' {
+                    if chars.get(index) == Some(&'`') {
+                        output.push('`');
+                        index += 1;
+                    } else {
+                        state = ParameterScanState::Code;
+                    }
+                }
+            }
+            ParameterScanState::LineComment => {
+                output.push(current);
+                index += 1;
+                if current == '\n' {
+                    state = ParameterScanState::Code;
+                }
+            }
+            ParameterScanState::BlockComment => {
+                output.push(current);
+                index += 1;
+                if current == '*' && chars.get(index) == Some(&'/') {
+                    output.push('/');
+                    index += 1;
+                    state = ParameterScanState::Code;
+                }
+            }
+        }
+    }
+    if used.iter().any(|value| !value) {
+        return Err(protocol_error("PARAMETER_COUNT_MISMATCH", "Every request parameter must have a SQL marker"));
+    }
+    Ok((output, typed))
+}
+
+#[derive(Clone, Copy)]
+enum ParameterScanState {
+    Code,
+    SingleQuote,
+    DoubleQuote,
+    Backtick,
+    LineComment,
+    BlockComment,
+}
+
+fn clickhouse_bound_parameter(
+    ordinal: usize,
+    parameter: &DriverQueryParameter,
+) -> Result<ClickHouseBoundParameter, DriverProtocolError> {
+    let (data_type, value) = match &parameter.value {
+        Value::Null => {
+            return Err(protocol_error(
+                "PARAMETER_UNSUPPORTED",
+                "ClickHouse HTTP parameter binding does not support NULL without an explicit nullable type contract",
+            ));
+        }
+        Value::Bool(value) => ("UInt8", if *value { "1".to_string() } else { "0".to_string() }),
+        Value::Number(value) if value.is_i64() => ("Int64", value.to_string()),
+        Value::Number(value) if value.is_u64() => ("UInt64", value.to_string()),
+        Value::Number(value) if value.is_f64() => ("Float64", value.to_string()),
+        Value::String(value) => ("String", value.clone()),
+        Value::Array(_) | Value::Object(_) => (
+            "String",
+            serde_json::to_string(&parameter.value)
+                .map_err(|error| protocol_error("PARAMETER_UNSUPPORTED", error.to_string()))?,
+        ),
+        Value::Number(_) => {
+            return Err(protocol_error(
+                "PARAMETER_UNSUPPORTED",
+                "ClickHouse cannot represent the supplied numeric parameter",
+            ));
+        }
+    };
+    Ok(ClickHouseBoundParameter {
+        name: format!("oxide_p{ordinal}"),
+        data_type,
+        value,
+    })
+}
+
+fn clickhouse_parameter_placeholder(parameter: &ClickHouseBoundParameter) -> String {
+    format!("{{{}:{}}}", parameter.name, parameter.data_type)
 }
 
 fn parse_query_response(
@@ -628,6 +830,7 @@ mod tests {
                 ..DriverQueryContext::default()
             },
             Some("turn-7"),
+            &[],
         )
         .unwrap();
         let parameters = url.query_pairs().collect::<BTreeMap<_, _>>();
@@ -649,24 +852,73 @@ mod tests {
         );
     }
     #[test]
-    fn positional_parameters_are_never_implicitly_interpolated() {
-        let connection = clickhouse_connection(SecretConnectionConfig {
-            url: "clickhouse://localhost/default".to_string(),
-            options: BTreeMap::new(),
-        })
-        .unwrap();
-        let error = query(
-            &connection,
-            "SELECT ?",
-            &[DriverQueryParameter {
-                value: json!(1),
-                data_type: None,
-            }],
-            &DriverQueryContext::default(),
-            None,
+    fn positional_parameters_become_typed_http_parameters_without_touching_literals() {
+        let (sql, parameters) = bind_clickhouse_parameters(
+            "SELECT ? AS first, $2 AS second, '$1 ?' AS literal -- ?\n",
+            &[
+                DriverQueryParameter {
+                    value: json!(7),
+                    data_type: None,
+                },
+                DriverQueryParameter {
+                    value: json!("oxide"),
+                    data_type: None,
+                },
+            ],
         )
-        .unwrap_err();
-        assert_eq!(error.code, "PARAMETERS_UNSUPPORTED");
+        .unwrap();
+        assert_eq!(
+            sql,
+            "SELECT {oxide_p1:Int64} AS first, {oxide_p2:String} AS second, '$1 ?' AS literal -- ?\n"
+        );
+        assert_eq!(
+            parameters,
+            vec![
+                ClickHouseBoundParameter {
+                    name: "oxide_p1".to_string(),
+                    data_type: "Int64",
+                    value: "7".to_string(),
+                },
+                ClickHouseBoundParameter {
+                    name: "oxide_p2".to_string(),
+                    data_type: "String",
+                    value: "oxide".to_string(),
+                },
+            ]
+        );
+    }
+    #[test]
+    fn parameter_binding_refuses_unmapped_or_null_values() {
+        assert_eq!(
+            bind_clickhouse_parameters(
+                "SELECT ?",
+                &[
+                    DriverQueryParameter {
+                        value: json!(1),
+                        data_type: None,
+                    },
+                    DriverQueryParameter {
+                        value: json!(2),
+                        data_type: None,
+                    },
+                ],
+            )
+            .unwrap_err()
+            .code,
+            "PARAMETER_COUNT_MISMATCH"
+        );
+        assert_eq!(
+            bind_clickhouse_parameters(
+                "SELECT ?",
+                &[DriverQueryParameter {
+                    value: Value::Null,
+                    data_type: None,
+                }],
+            )
+            .unwrap_err()
+            .code,
+            "PARAMETER_UNSUPPORTED"
+        );
     }
     #[test]
     fn parses_json_result_in_metadata_order() {

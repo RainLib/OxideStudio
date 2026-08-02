@@ -66,8 +66,10 @@ import {
 } from "@/lib/actionEvents";
 import { editorExecutionConfirmation } from "@/lib/sqlExecutionGate";
 import {
+  completionUsageScore,
   completionUsageScope,
   recordCompletionUsage,
+  usageRankedCompletionSortText,
 } from "@/lib/completionUsage";
 import { StatusBarPortal } from "./StatusBarPortal";
 import {
@@ -78,6 +80,7 @@ import {
 import { cn } from "@/lib/utils";
 import { normalizeKeybinding } from "@/lib/keybindings";
 import { redactSecretString } from "@/lib/redaction";
+import { sqlInsertValueHints } from "@/lib/sqlInsertValueHints";
 import {
   attachVimMode,
   APP_EVENT_VIM_WINDOW_NAVIGATE,
@@ -185,11 +188,14 @@ import {
   queryTransactionExecutionId,
   parseElasticsearchConsoleServerVersion,
   selectedOrFullEditorText,
+  quoteSqlIdentifierSelection,
+  sqlInListFromClipboard,
   sqlSyntaxFallbackCompletions,
   sqlCompletionItemType,
   syncLspModelBeforeCompletion,
   toMonacoRange,
   toMonacoWorkspaceEdit,
+  unquoteSqlIdentifierSelection,
 } from "@/features/query-editor";
 
 type TransactionMode = "auto" | "manual";
@@ -513,10 +519,19 @@ export function QueryEditor({
     }
     let cancelled = false;
     setConnectionCapabilities(null);
-    void databaseService
-      .getDatabaseCapabilities(
-        activeConnection.driver,
-        activeConnection.driverPackageVersion,
+    const liveCapabilityRequest =
+      typeof databaseService.getConnectionDatabaseCapabilityContext ===
+      "function"
+        ? databaseService
+            .getConnectionDatabaseCapabilityContext(activeConnection.id)
+            .then((context) => context.capabilities)
+        : Promise.reject(new Error("Live capability context unavailable"));
+    void liveCapabilityRequest
+      .catch(() =>
+        databaseService.getDatabaseCapabilities(
+          activeConnection.driver,
+          activeConnection.driverPackageVersion,
+        ),
       )
       .then((nextCapabilities) => {
         if (!cancelled) {
@@ -1601,11 +1616,16 @@ export function QueryEditor({
                   position.column,
                 )
               : range;
-            const syntax = sqlSyntaxFallbackCompletions(textBeforeCursor).map((item) => ({
+            const syntax = sqlSyntaxFallbackCompletions(textBeforeCursor, {
+              driver: capabilities.driver,
+              supportsSqlQuery: capabilities.supportsSqlQuery,
+            }).map((item) => ({
               label: item.label,
               kind: toMonacoCompletionKind(monaco, item.kind),
               detail: item.detail || "SQL syntax",
-              documentation: { value: "Available SQL syntax for the current clause." },
+              documentation: item.documentation
+                ? { value: item.documentation }
+                : { value: "Available SQL syntax for the current clause." },
               // Use the same completed-keyword replacement semantics as a
               // live LSP response. In particular, an offline/restarting LSP
               // must append ` DISTINCT` after a typed `SELECT`, not replace
@@ -1623,7 +1643,23 @@ export function QueryEditor({
                 typedWord,
                 completedContextKeyword,
               ),
-              sortText: item.sortText || `9:${item.label}`,
+              sortText: rankByUsage
+                ? usageRankedCompletionSortText(
+                    item.sortText || `9:${item.label}`,
+                    completionUsageScore(usageScope, item.label),
+                  )
+                : item.sortText || `9:${item.label}`,
+              command: rankByUsage
+                ? {
+                    id: RECORD_COMPLETION_USAGE_COMMAND,
+                    title: "Record SQL completion usage",
+                    arguments: [usageScope, item.label],
+                  }
+                : undefined,
+              insertTextRules:
+                item.insertTextFormat === 2
+                  ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+                  : undefined,
               range: insertRange,
             }));
             return mergeCompletionFallbackSuggestions(cached, syntax);
@@ -1747,7 +1783,10 @@ export function QueryEditor({
               ? filteredItems
               : mergeCompletionFallbackSuggestions(
                   filteredItems,
-                  sqlSyntaxFallbackCompletions(textBeforeCursor),
+                  sqlSyntaxFallbackCompletions(textBeforeCursor, {
+                    driver: capabilities.driver,
+                    supportsSqlQuery: capabilities.supportsSqlQuery,
+                  }),
                 );
             const lineBeforeCursor = model
               .getLineContent(position.lineNumber)
@@ -2271,7 +2310,7 @@ export function QueryEditor({
 
     const inlayHintDisposables = LSP_PROVIDER_LANGUAGES.map((language) =>
       monaco.languages.registerInlayHintsProvider(language, {
-        displayName: "Database parameter hints",
+        displayName: "Database parameter and INSERT column hints",
         provideInlayHints: async (model: any, range: any) => {
           const uri = model.uri.toString();
           if (!isCurrentLspModelUri(uri)) {
@@ -2287,8 +2326,7 @@ export function QueryEditor({
               character: range.endColumn - 1,
             },
           });
-          return {
-            hints: hints.map((hint) => ({
+          const lspInlayHints = hints.map((hint) => ({
               position: {
                 lineNumber: hint.position.line + 1,
                 column: hint.position.character + 1,
@@ -2311,7 +2349,41 @@ export function QueryEditor({
               })),
               paddingLeft: hint.paddingLeft,
               paddingRight: hint.paddingRight,
-            })),
+            }));
+          // DBX's positional INSERT labels are useful even when the language
+          // server is temporarily unavailable. We only derive them from an
+          // explicit column list, so this provider never performs metadata
+          // reads or guesses a table's physical column order while typing.
+          const rangeStart = model.getOffsetAt({
+            lineNumber: range.startLineNumber,
+            column: range.startColumn,
+          });
+          const rangeEnd = model.getOffsetAt({
+            lineNumber: range.endLineNumber,
+            column: range.endColumn,
+          });
+          const lspPositions = new Set(
+            lspInlayHints.map(
+              (hint) => `${hint.position.lineNumber}:${hint.position.column}`,
+            ),
+          );
+          const insertValueHints = sqlInsertValueHints(model.getValue())
+            .filter((hint) => hint.offset >= rangeStart && hint.offset <= rangeEnd)
+            .map((hint) => ({
+              position: model.getPositionAt(hint.offset),
+              label: `${hint.column}:`,
+              kind: monaco.languages.InlayHintKind.Parameter,
+              tooltip: "Column matched from this INSERT statement's explicit column list.",
+              paddingRight: true,
+            }))
+            .filter(
+              (hint) =>
+                !lspPositions.has(
+                  `${hint.position.lineNumber}:${hint.position.column}`,
+                ),
+            );
+          return {
+            hints: [...lspInlayHints, ...insertValueHints],
             dispose: () => undefined,
           };
         },
@@ -2349,6 +2421,7 @@ export function QueryEditor({
     activeTab?.targetSchema,
     currentSchema,
     schemaTables,
+    capabilities,
     driver,
     driverCatalogStatus,
     canUseLsp,
@@ -3699,6 +3772,64 @@ export function QueryEditor({
     monaco,
     mountedEditor,
   ]);
+
+  useEffect(() => {
+    if (!monaco || !mountedEditor || isElasticsearchConsole) return;
+    const replaceSelections = (transform: (selected: string) => string | null) => {
+      const model = mountedEditor.getModel();
+      const selections = mountedEditor
+        .getSelections()
+        ?.filter((selection) => !selection.isEmpty());
+      if (!model || !selections?.length) return;
+      // Intentions are all-or-nothing across cursors: leaving one selected
+      // identifier unmodified would make a batch edit look successful while
+      // silently producing a mixed SQL document.
+      const edits = [];
+      for (const selection of selections) {
+        const replacement = transform(model.getValueInRange(selection));
+        if (replacement === null) return;
+        edits.push({
+          range: selection,
+          text: replacement,
+          forceMoveMarkers: true,
+        });
+      }
+      mountedEditor.executeEdits("oxide.sql-intention", edits);
+    };
+    const actions = [
+      mountedEditor.addAction({
+        id: "oxide.sql.quoteIdentifier",
+        label: "Quote selected SQL identifier",
+        contextMenuGroupId: "oxide.sql",
+        contextMenuOrder: 1,
+        run: () => replaceSelections((selected) => quoteSqlIdentifierSelection(driver, selected)),
+      }),
+      mountedEditor.addAction({
+        id: "oxide.sql.unquoteIdentifier",
+        label: "Unquote selected SQL identifier",
+        contextMenuGroupId: "oxide.sql",
+        contextMenuOrder: 2,
+        run: () => replaceSelections(unquoteSqlIdentifierSelection),
+      }),
+      mountedEditor.addAction({
+        id: "oxide.sql.pasteInList",
+        label: "Paste clipboard as SQL IN list",
+        contextMenuGroupId: "oxide.sql",
+        contextMenuOrder: 3,
+        run: async () => {
+          try {
+            const clipboard = await navigator.clipboard?.readText();
+            const list = clipboard ? sqlInListFromClipboard(clipboard) : null;
+            if (list !== null) replaceSelections(() => list);
+          } catch {
+            // Clipboard permission is host-controlled; leave the document
+            // untouched when it is unavailable.
+          }
+        },
+      }),
+    ];
+    return () => actions.forEach((action) => action.dispose());
+  }, [driver, isElasticsearchConsole, monaco, mountedEditor]);
 
   const handleTransactionModeChange = (mode: TransactionMode) => {
     if (!supportsTransactions) return;

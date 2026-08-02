@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { DatabaseCapabilities, DatabaseDriver } from "@/services/tauri/types";
+import { useLspSemanticStatusStore } from "@/store/useLspSemanticStatusStore";
 import { LspClient } from "./client";
 import {
   builtInLspProfileForDriver,
@@ -87,7 +88,16 @@ export async function ensureLspSession(options: {
     throw new Error(`LSP binary not found at: ${binaryInfo.path}`);
   }
 
+  // An initialized-but-dead client is a restart, not the normal cold start.
+  // Keep only a counter by connection; never propagate document text here.
+  const restarting = descriptor.client.isInitialized();
+  const recoveryStartedAt = restarting ? Date.now() : null;
   await descriptor.client.initialize(binaryInfo.path);
+  if (restarting) {
+    useLspSemanticStatusStore
+      .getState()
+      .recordTelemetry(options.connectionId, "restart", Date.now() - recoveryStartedAt!);
+  }
   return descriptor;
 }
 

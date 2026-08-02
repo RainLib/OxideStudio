@@ -222,6 +222,19 @@ pub struct TableInfo {
     pub comment: Option<String>,
 }
 
+/// A non-relation object visible in a schema tree. This deliberately carries
+/// only descriptor metadata: callers must not infer that a sequence, trigger,
+/// type, or extension has table/grid/DDL capabilities from its presence.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaObjectInfo {
+    pub name: String,
+    pub schema: Option<String>,
+    pub object_type: String,
+    pub parent_name: Option<String>,
+    pub comment: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CollectionInfo {
     pub name: String,

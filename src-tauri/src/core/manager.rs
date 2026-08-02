@@ -5,8 +5,9 @@ use super::protocol::{
 use super::ssh::SshTunnel;
 use super::{dialect::DatabaseCapabilities, driver::DatabaseDriver};
 use anyhow::{anyhow, Result};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
@@ -15,6 +16,12 @@ pub struct ConnectionManager {
     connections: Arc<Mutex<HashMap<String, ManagedConnection>>>,
     // Store active schema per connection
     active_schemas: Arc<Mutex<HashMap<String, String>>>,
+    /// Process-lifetime, package-level sidecar telemetry. It intentionally
+    /// keeps neither connection configuration nor driver output; connection
+    /// ids are only transient deduplication keys for observed exits.
+    external_runtime_telemetry: Arc<
+        Mutex<BTreeMap<(String, String), ExternalDriverRuntimeTelemetry>>,
+    >,
 }
 
 struct ManagedConnection {
@@ -41,6 +48,45 @@ pub struct ExternalDriverRuntimeSummary {
     /// still registered. This is aggregated package health only; no runtime
     /// output or connection identity is retained.
     pub unhealthy_connection_count: usize,
+    /// Sidecar launches observed while this desktop process has been running.
+    pub launch_count: u64,
+    /// Distinct registered sidecars observed exited while still connected.
+    /// This is not a database failure count and never includes stderr.
+    pub observed_exit_count: u64,
+    pub last_started_at_millis: Option<u64>,
+    pub last_exit_observed_at_millis: Option<u64>,
+}
+
+#[derive(Default)]
+struct ExternalDriverRuntimeTelemetry {
+    launch_count: u64,
+    observed_exit_count: u64,
+    last_started_at_millis: Option<u64>,
+    last_exit_observed_at_millis: Option<u64>,
+    observed_exited_connection_ids: HashSet<String>,
+}
+
+/// Immutable capability inputs captured from one concrete live driver.
+///
+/// Keeping the driver identity, signed package contract and negotiated server
+/// version together prevents consumers such as LSP sync and migration review
+/// from combining values that belonged to different connection generations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveConnectionCapabilitySnapshot {
+    pub driver_id: Option<String>,
+    pub external_driver_id: Option<String>,
+    pub package_version: Option<String>,
+    pub package_capabilities: Option<DatabaseCapabilities>,
+    pub server_version: Option<String>,
+}
+
+fn runtime_timestamp_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 impl Default for ConnectionManager {
@@ -54,6 +100,7 @@ impl ConnectionManager {
         Self {
             connections: Arc::new(Mutex::new(HashMap::new())),
             active_schemas: Arc::new(Mutex::new(HashMap::new())),
+            external_runtime_telemetry: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -63,6 +110,26 @@ impl ConnectionManager {
             .get(id)
             .map(|connection| connection.driver.clone())
             .ok_or_else(|| anyhow!("Connection not found: {}", id))
+    }
+
+    async fn record_external_runtime_replacement(
+        &self,
+        connection_id: &str,
+        package_identity: Option<(String, String)>,
+    ) {
+        let mut telemetry = self.external_runtime_telemetry.lock().await;
+        // A reconnect replaces the owned process. Remove the prior transient
+        // observation before counting this launch; no connection identity ever
+        // leaves this manager-level deduplication set.
+        for value in telemetry.values_mut() {
+            value.observed_exited_connection_ids.remove(connection_id);
+        }
+        let Some(package_identity) = package_identity else {
+            return;
+        };
+        let entry = telemetry.entry(package_identity).or_default();
+        entry.launch_count = entry.launch_count.saturating_add(1);
+        entry.last_started_at_millis = Some(runtime_timestamp_millis());
     }
 
     pub async fn add_connection(&self, id: String, driver: Box<dyn DatabaseDriver>) {
@@ -76,6 +143,7 @@ impl ConnectionManager {
         let removed = conns.remove(id);
         drop(conns);
         self.clear_schema_context(id).await;
+        self.record_external_runtime_replacement(id, None).await;
         removed
     }
 
@@ -104,6 +172,9 @@ impl ConnectionManager {
         ssh_tunnel: Option<SshTunnel>,
         driver_id: Option<String>,
     ) -> Result<()> {
+        let external_package_identity = driver
+            .external_package_identity()
+            .map(|(driver, version)| (driver.to_string(), version.to_string()));
         let old_driver = {
             let mut conns = self.connections.lock().await;
             conns.insert(
@@ -119,6 +190,8 @@ impl ConnectionManager {
         };
 
         self.clear_schema_context(&id).await;
+        self.record_external_runtime_replacement(&id, external_package_identity)
+            .await;
 
         if let Some(old_driver) = old_driver {
             if let Err(error) = old_driver.driver.disconnect().await {
@@ -176,6 +249,34 @@ impl ConnectionManager {
         Ok(self.get_driver(id).await?.server_version().await)
     }
 
+    /// Resolve all connection-owned capability inputs from the same live
+    /// driver instance. The global connection lock is released before asking
+    /// the driver for its negotiated version, so a slow sidecar cannot block
+    /// unrelated connections.
+    pub async fn capability_snapshot(&self, id: &str) -> Result<LiveConnectionCapabilitySnapshot> {
+        let (driver, driver_id) = {
+            let connections = self.connections.lock().await;
+            let connection = connections
+                .get(id)
+                .ok_or_else(|| anyhow!("Connection not found: {}", id))?;
+            (connection.driver.clone(), connection.driver_id.clone())
+        };
+        let (external_driver_id, package_version) = driver
+            .external_package_identity()
+            .map(|(driver, version)| (Some(driver.to_string()), Some(version.to_string())))
+            .unwrap_or((None, None));
+        let package_capabilities = driver.package_capabilities();
+        let server_version = driver.server_version().await;
+
+        Ok(LiveConnectionCapabilitySnapshot {
+            driver_id,
+            external_driver_id,
+            package_version,
+            package_capabilities,
+            server_version,
+        })
+    }
+
     pub async fn active_external_driver_connections(
         &self,
         driver_id: &str,
@@ -210,11 +311,12 @@ impl ConnectionManager {
         let connections = {
             let connections = self.connections.lock().await;
             connections
-                .values()
-                .filter_map(|connection| {
+                .iter()
+                .filter_map(|(connection_id, connection)| {
                     let (driver, package_version) =
                         connection.driver.external_package_identity()?;
                     Some((
+                        connection_id.clone(),
                         driver.to_string(),
                         package_version.to_string(),
                         connection.driver.clone(),
@@ -224,11 +326,13 @@ impl ConnectionManager {
         };
 
         let mut grouped = BTreeMap::<(String, String), (usize, Vec<u32>, usize, usize)>::new();
-        for (driver, package_version, connection) in connections {
+        let mut health_observations = Vec::with_capacity(connections.len());
+        for (connection_id, driver, package_version, connection) in connections {
             let process_id = connection.external_runtime_process_id().await;
             let is_healthy = connection.external_runtime_is_healthy().await;
+            let package_identity = (driver, package_version);
             let entry = grouped
-                .entry((driver, package_version))
+                .entry(package_identity.clone())
                 .or_insert((0, Vec::new(), 0, 0));
             entry.0 += 1;
             if let Some(process_id) = process_id {
@@ -241,7 +345,36 @@ impl ConnectionManager {
             if matches!(is_healthy, Some(false)) {
                 entry.3 += 1;
             }
+            health_observations.push((package_identity, connection_id, is_healthy));
         }
+
+        let telemetry = {
+            let mut telemetry = self.external_runtime_telemetry.lock().await;
+            for (package_identity, connection_id, is_healthy) in health_observations {
+                let entry = telemetry.entry(package_identity).or_default();
+                if matches!(is_healthy, Some(false)) {
+                    if entry.observed_exited_connection_ids.insert(connection_id) {
+                        entry.observed_exit_count = entry.observed_exit_count.saturating_add(1);
+                        entry.last_exit_observed_at_millis = Some(runtime_timestamp_millis());
+                    }
+                } else {
+                    entry.observed_exited_connection_ids.remove(&connection_id);
+                }
+            }
+            grouped
+                .keys()
+                .map(|identity| {
+                    let entry = telemetry.get(identity).expect("runtime telemetry entry exists");
+                    (
+                        identity.clone(),
+                        entry.launch_count,
+                        entry.observed_exit_count,
+                        entry.last_started_at_millis,
+                        entry.last_exit_observed_at_millis,
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
 
         grouped
             .into_iter()
@@ -256,6 +389,15 @@ impl ConnectionManager {
                     ),
                 )| {
                     process_ids.sort_unstable();
+                    let (
+                        launch_count,
+                        observed_exit_count,
+                        last_started_at_millis,
+                        last_exit_observed_at_millis,
+                    ) = telemetry
+                        .get(&(driver.clone(), package_version.clone()))
+                        .copied()
+                        .unwrap_or((0, 0, None, None));
                     ExternalDriverRuntimeSummary {
                         driver,
                         package_version,
@@ -263,6 +405,10 @@ impl ConnectionManager {
                         process_ids,
                         unavailable_process_count,
                         unhealthy_connection_count,
+                        launch_count,
+                        observed_exit_count,
+                        last_started_at_millis,
+                        last_exit_observed_at_millis,
                     }
                 },
             )
@@ -281,6 +427,17 @@ impl ConnectionManager {
     /// lives in the bundled dialect registry.
     pub async fn package_capabilities(&self, id: &str) -> Result<Option<DatabaseCapabilities>> {
         Ok(self.get_driver(id).await?.package_capabilities())
+    }
+
+    /// Whether the live connection is owned by an independently installed
+    /// package. Mutation planners use this boundary when a newer semantic
+    /// operation has not yet been added to the signed sidecar protocol.
+    pub async fn is_external_driver_connection(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .get_driver(id)
+            .await?
+            .external_package_identity()
+            .is_some())
     }
 
     /// Identity captured when the connection was opened through the desktop
@@ -489,6 +646,18 @@ impl ConnectionManager {
         driver.get_database_schemas(database).await
     }
 
+    /// Get read-only non-relation object descriptors from an explicitly
+    /// selected database without changing the active query database.
+    pub async fn get_database_schema_objects(
+        &self,
+        id: &str,
+        database: &str,
+        schema: &str,
+    ) -> Result<Vec<super::protocol::SchemaObjectInfo>> {
+        let driver = self.get_driver(id).await?;
+        driver.get_database_schema_objects(database, schema).await
+    }
+
     /// Get tables
     pub async fn get_tables(
         &self,
@@ -507,6 +676,17 @@ impl ConnectionManager {
     ) -> Result<Vec<super::protocol::TableInfo>> {
         let driver = self.get_driver(id).await?;
         driver.get_database_tables(database, schema).await
+    }
+
+    /// Read-only descriptors for schema objects that are not tables/views.
+    /// The driver remains the authority for which kinds it can expose.
+    pub async fn get_schema_objects(
+        &self,
+        id: &str,
+        schema: &str,
+    ) -> Result<Vec<super::protocol::SchemaObjectInfo>> {
+        let driver = self.get_driver(id).await?;
+        driver.get_schema_objects(schema).await
     }
 
     pub async fn get_collections(
@@ -669,6 +849,41 @@ mod tests {
         version: &'static str,
         process_id: Option<u32>,
         healthy: Option<bool>,
+    }
+
+    struct CapabilityDriver {
+        capabilities: DatabaseCapabilities,
+    }
+
+    #[async_trait]
+    impl DatabaseDriver for CapabilityDriver {
+        fn external_package_identity(&self) -> Option<(&str, &str)> {
+            Some(("postgres", "16.4.1"))
+        }
+
+        fn package_capabilities(&self) -> Option<DatabaseCapabilities> {
+            Some(self.capabilities.clone())
+        }
+
+        async fn server_version(&self) -> Option<String> {
+            Some("16.3".to_string())
+        }
+
+        async fn connect(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn disconnect(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn ping(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn query(&self, _sql: &str) -> Result<Vec<QueryResult>> {
+            Ok(Vec::new())
+        }
     }
 
     #[async_trait]
@@ -1137,16 +1352,48 @@ mod tests {
             )
             .await;
 
+        let summaries = manager.external_driver_runtime_summaries().await;
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[0];
+        assert_eq!(summary.driver, "oracle");
+        assert_eq!(summary.package_version, "23.3.0");
+        assert_eq!(summary.connection_count, 3);
+        assert_eq!(summary.process_ids, vec![8201, 8202]);
+        assert_eq!(summary.unavailable_process_count, 1);
+        assert_eq!(summary.unhealthy_connection_count, 1);
+        assert_eq!(summary.launch_count, 3);
+        assert_eq!(summary.observed_exit_count, 1);
+        assert!(summary.last_started_at_millis.is_some());
+        assert!(summary.last_exit_observed_at_millis.is_some());
+    }
+
+    #[tokio::test]
+    async fn capability_snapshot_stays_bound_to_the_live_package_instance() {
+        let manager = ConnectionManager::new();
+        let mut capabilities = crate::core::dialect::DatabaseKind::Postgres.capabilities();
+        capabilities.display_name = "Pinned PostgreSQL sidecar".to_string();
+        capabilities.supports_table_data_transfer = false;
+        manager
+            .replace_connection_with_tunnel_and_driver_id(
+                "conn".to_string(),
+                Box::new(CapabilityDriver {
+                    capabilities: capabilities.clone(),
+                }),
+                None,
+                Some("postgres".to_string()),
+            )
+            .await
+            .unwrap();
+
         assert_eq!(
-            manager.external_driver_runtime_summaries().await,
-            vec![ExternalDriverRuntimeSummary {
-                driver: "oracle".to_string(),
-                package_version: "23.3.0".to_string(),
-                connection_count: 3,
-                process_ids: vec![8201, 8202],
-                unavailable_process_count: 1,
-                unhealthy_connection_count: 1,
-            }],
+            manager.capability_snapshot("conn").await.unwrap(),
+            LiveConnectionCapabilitySnapshot {
+                driver_id: Some("postgres".to_string()),
+                external_driver_id: Some("postgres".to_string()),
+                package_version: Some("16.4.1".to_string()),
+                package_capabilities: Some(capabilities),
+                server_version: Some("16.3".to_string()),
+            }
         );
     }
 

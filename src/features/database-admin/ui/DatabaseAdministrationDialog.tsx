@@ -10,14 +10,15 @@ import {
 import { cn } from "@/lib/utils";
 import { databaseService } from "@/services/tauri";
 import type {
+  DatabaseAdminMetric,
   DatabaseAdminSession,
   DatabaseAdminUser,
   DatabaseDriver,
 } from "@/services/tauri/types";
-import { Activity, Lock, RefreshCw, Shield, Trash2, Unlock, UserPlus, Users } from "lucide-react";
+import { Activity, BarChart3, Lock, RefreshCw, Shield, Trash2, Unlock, UserPlus, Users } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-type AdminView = "sessions" | "users";
+type AdminView = "sessions" | "metrics" | "users";
 type AccountForm = "create" | "password" | null;
 
 interface DatabaseAdministrationDialogProps {
@@ -43,6 +44,24 @@ function isMysqlFamily(driver: DatabaseDriver) {
   return driver === "mysql" || driver === "mariadb";
 }
 
+function formatMetricValue(metric: DatabaseAdminMetric) {
+  if (!metric.available || !metric.value) return "Unavailable";
+  const value = Number(metric.value);
+  if (!Number.isFinite(value)) return metric.value;
+  if (metric.unit === "bytes") {
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let amount = value;
+    let unitIndex = 0;
+    while (amount >= 1024 && unitIndex < units.length - 1) {
+      amount /= 1024;
+      unitIndex += 1;
+    }
+    return `${amount.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${units[unitIndex]}`;
+  }
+  if (metric.unit === "%") return `${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}%`;
+  return value.toLocaleString();
+}
+
 export function DatabaseAdministrationDialog({
   open,
   onOpenChange,
@@ -52,6 +71,7 @@ export function DatabaseAdministrationDialog({
 }: DatabaseAdministrationDialogProps) {
   const [view, setView] = useState<AdminView>("sessions");
   const [sessions, setSessions] = useState<DatabaseAdminSession[]>([]);
+  const [metrics, setMetrics] = useState<DatabaseAdminMetric[]>([]);
   const [users, setUsers] = useState<DatabaseAdminUser[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isMutating, setIsMutating] = useState(false);
@@ -82,6 +102,8 @@ export function DatabaseAdministrationDialog({
     try {
       if (view === "sessions") {
         setSessions(await databaseService.listDatabaseAdminSessions(connectionId, driver));
+      } else if (view === "metrics") {
+        setMetrics(await databaseService.listDatabaseAdminMetrics(connectionId, driver));
       } else {
         setUsers(await databaseService.listDatabaseAdminUsers(connectionId, driver));
       }
@@ -205,7 +227,7 @@ export function DatabaseAdministrationDialog({
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
           <DialogTitle className="text-[13px]">Database Administration{titleSuffix}</DialogTitle>
           <DialogDescription className="text-[11px] wb-muted">
-            Sessions and accounts use fixed, driver-aware actions. Password values are never stored by this panel.
+            Metrics, sessions and accounts use fixed, driver-aware actions. Password values are never stored by this panel.
           </DialogDescription>
         </DialogHeader>
 
@@ -288,6 +310,13 @@ export function DatabaseAdministrationDialog({
               </button>
               <button
                 type="button"
+                className={cn("wb-toolbar-button h-7 gap-1.5 px-2 text-[11px]", view === "metrics" && "wb-toolbar-button-active")}
+                onClick={() => setView("metrics")}
+              >
+                <BarChart3 size={13} /> Metrics
+              </button>
+              <button
+                type="button"
                 className={cn("wb-toolbar-button h-7 gap-1.5 px-2 text-[11px]", view === "users" && "wb-toolbar-button-active")}
                 onClick={() => setView("users")}
               >
@@ -309,6 +338,8 @@ export function DatabaseAdministrationDialog({
                 <div className="px-3 py-3 text-[11px] wb-muted">Loading…</div>
               ) : view === "sessions" ? (
                 sessions.length === 0 ? <EmptyState label="No other active sessions" /> : <SessionRows sessions={sessions} onTerminate={handleTerminate} disabled={isMutating} />
+              ) : view === "metrics" ? (
+                metrics.length === 0 ? <EmptyState label="No read-only server metrics returned" /> : <MetricCards metrics={metrics} />
               ) : (
                 users.length === 0 ? <EmptyState label="No database accounts returned" /> : <UserRows users={users} onPassword={openPassword} onLogin={handleLogin} onDelete={handleDeleteUser} disabled={isMutating} />
               )}
@@ -317,6 +348,22 @@ export function DatabaseAdministrationDialog({
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function MetricCards({ metrics }: { metrics: DatabaseAdminMetric[] }) {
+  return (
+    <div className="grid gap-px bg-[hsl(var(--wb-border-subtle))] sm:grid-cols-2">
+      {metrics.map((metric) => (
+        <div key={metric.key} className="min-w-0 bg-[hsl(var(--wb-panel))] px-3 py-3">
+          <div className="text-[10px] wb-muted">{metric.label}</div>
+          <div className={cn("mt-1 truncate text-[16px] font-medium", !metric.available && "wb-muted")} title={metric.value || "Unavailable"}>
+            {formatMetricValue(metric)}
+          </div>
+          {metric.description && <div className="mt-1 text-[10px] leading-4 wb-muted">{metric.description}</div>}
+        </div>
+      ))}
+    </div>
   );
 }
 

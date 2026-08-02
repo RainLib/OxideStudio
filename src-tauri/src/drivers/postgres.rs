@@ -3,7 +3,7 @@ use crate::core::driver::DatabaseDriver;
 use crate::core::protocol::{
     ColumnDef, ColumnInfo, ConstraintInfo, ForeignKeyReferenceInfo, FunctionInfo,
     FunctionParameterInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult,
-    TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
+    SchemaObjectInfo, TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
 };
 use crate::core::statement::{
     execution_mode, execution_statement_kind, split_sql_statements, QueryExecutionMode,
@@ -202,6 +202,95 @@ impl PostgresDriver {
                 name: row.try_get("table_name").unwrap_or_default(),
                 schema: Some(schema.to_string()),
                 table_type: row.try_get("table_type").ok(),
+                comment: row.try_get("comment").ok(),
+            })
+            .collect())
+    }
+
+    /// Schema-object discovery is intentionally descriptor-only. Definitions,
+    /// ownership mutation and transfer behavior require their own reviewed
+    /// contracts and are not derived from this Explorer list.
+    async fn schema_objects_on_pool(
+        pool: &Pool<Postgres>,
+        schema: &str,
+    ) -> Result<Vec<SchemaObjectInfo>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                c.relname AS object_name,
+                'sequence'::text AS object_type,
+                NULL::text AS parent_name,
+                obj_description(c.oid, 'pg_class') AS comment
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = $1
+              AND c.relkind = 'S'
+            UNION ALL
+            SELECT
+                t.tgname AS object_name,
+                'trigger'::text AS object_type,
+                c.relname AS parent_name,
+                obj_description(t.oid, 'pg_trigger') AS comment
+            FROM pg_trigger t
+            JOIN pg_class c ON c.oid = t.tgrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = $1
+              AND NOT t.tgisinternal
+            UNION ALL
+            SELECT
+                ty.typname AS object_name,
+                'domain'::text AS object_type,
+                NULL::text AS parent_name,
+                obj_description(ty.oid, 'pg_type') AS comment
+            FROM pg_type ty
+            JOIN pg_namespace n ON n.oid = ty.typnamespace
+            WHERE n.nspname = $1
+              AND ty.typtype = 'd'
+            UNION ALL
+            SELECT
+                ty.typname AS object_name,
+                'type'::text AS object_type,
+                NULL::text AS parent_name,
+                obj_description(ty.oid, 'pg_type') AS comment
+            FROM pg_type ty
+            JOIN pg_namespace n ON n.oid = ty.typnamespace
+            WHERE n.nspname = $1
+              AND ty.typtype = 'e'
+            UNION ALL
+            SELECT
+                e.extname AS object_name,
+                'extension'::text AS object_type,
+                NULL::text AS parent_name,
+                obj_description(e.oid, 'pg_extension') AS comment
+            FROM pg_extension e
+            JOIN pg_namespace n ON n.oid = e.extnamespace
+            WHERE n.nspname = $1
+            UNION ALL
+            SELECT
+                child.relname AS object_name,
+                'partition'::text AS object_type,
+                parent.relname AS parent_name,
+                obj_description(child.oid, 'pg_class') AS comment
+            FROM pg_inherits i
+            JOIN pg_class child ON child.oid = i.inhrelid
+            JOIN pg_class parent ON parent.oid = i.inhparent
+            JOIN pg_namespace n ON n.oid = child.relnamespace
+            WHERE n.nspname = $1
+            ORDER BY object_type, object_name
+            "#,
+        )
+        .bind(schema)
+        .persistent(false)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| SchemaObjectInfo {
+                name: row.try_get("object_name").unwrap_or_default(),
+                schema: Some(schema.to_string()),
+                object_type: row.try_get("object_type").unwrap_or_default(),
+                parent_name: row.try_get("parent_name").ok(),
                 comment: row.try_get("comment").ok(),
             })
             .collect())
@@ -1603,6 +1692,34 @@ impl DatabaseDriver for PostgresDriver {
                     schema
                 )
             })?
+    }
+
+    async fn get_database_schema_objects(
+        &self,
+        database: &str,
+        schema: &str,
+    ) -> Result<Vec<SchemaObjectInfo>> {
+        let mut metadata_pool = self.metadata_pool.lock().await;
+        self.get_pool().await?;
+        let pool = self
+            .ensure_metadata_pool(&mut metadata_pool, database)
+            .await?;
+        drop(metadata_pool);
+
+        timeout(METADATA_QUERY_TIMEOUT, Self::schema_objects_on_pool(&pool, schema))
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "Timed out loading schema objects from PostgreSQL database '{}', schema '{}'",
+                    database,
+                    schema
+                )
+            })?
+    }
+
+    async fn get_schema_objects(&self, schema: &str) -> Result<Vec<SchemaObjectInfo>> {
+        let pool = self.get_pool().await?;
+        Self::schema_objects_on_pool(&pool, schema).await
     }
 
     async fn get_columns(&self, schema: &str, table: &str) -> Result<Vec<ColumnInfo>> {

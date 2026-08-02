@@ -25,6 +25,10 @@ test("DuckDB package preparation produces a manifest-bound sidecar payload", asy
   const manifest = JSON.parse(await readFile(join(output, "manifest.json"), "utf8"));
   assert.equal(manifest.packageId, "oxide.duckdb");
   assert.equal(manifest.packageVersion, "9.9.9");
+  // The repository lockfile is CRLF on Windows. This assertion exercises the
+  // lockfile parser through the packaging command and prevents a line-ending
+  // regression from producing an unsigned/incomplete release payload.
+  assert.equal(manifest.clientVersion, "1.10505.0");
   assert.equal(manifest.entrypoint, "oxide-driver-duckdb");
   assert.deepEqual(manifest.supportedTargets, ["test-target"]);
   assert.equal(manifest.capabilities.lspLanguageId, "duckdb");

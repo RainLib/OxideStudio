@@ -1387,6 +1387,7 @@ export function TableDataView() {
       {tabConnectionId && activeTab.schemaName && activeTab.tableName && (
         <TableDataTransferDialog
           open={isTransferDialogOpen}
+          projectId={activeProjectId}
           source={{
             connectionId: tabConnectionId,
             driver,
