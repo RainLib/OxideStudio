@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    fs::{create_dir_all, metadata, File},
+    fs::{create_dir_all, metadata, remove_file, rename, File},
     io::{BufRead, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
@@ -964,6 +964,45 @@ fn export_file_path(
     let table = sanitize_file_part(table);
     dir.push(format!("{schema}_{table}_{timestamp}.{extension}"));
     Ok(dir)
+}
+
+/// A local export is not discoverable until all rows and the format footer are
+/// written successfully. The guard deletes only its unique sibling partial
+/// file on any error path; it never touches a user-selected final file.
+struct ExportTemporaryFile {
+    path: PathBuf,
+    finalized: bool,
+}
+
+impl ExportTemporaryFile {
+    fn create(final_path: &Path) -> Result<Self, String> {
+        let file_name = final_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| "Unable to derive export file name".to_string())?;
+        let path = final_path.with_file_name(format!(
+            ".{file_name}.{}.partial",
+            uuid::Uuid::new_v4()
+        ));
+        Ok(Self {
+            path,
+            finalized: false,
+        })
+    }
+
+    fn finalize(&mut self, final_path: &Path) -> Result<(), String> {
+        rename(&self.path, final_path).map_err(|error| error.to_string())?;
+        self.finalized = true;
+        Ok(())
+    }
+}
+
+impl Drop for ExportTemporaryFile {
+    fn drop(&mut self) {
+        if !self.finalized {
+            let _ = remove_file(&self.path);
+        }
+    }
 }
 
 fn row_to_object(columns: &[String], row: &[Value]) -> Value {
@@ -5446,7 +5485,8 @@ pub async fn export_table_data(
         };
         let filter = filter_clause.as_deref();
         let file_path = export_file_path(&app, &schema, &table, format)?;
-        let file = File::create(&file_path).map_err(|e| e.to_string())?;
+        let mut temporary_file = ExportTemporaryFile::create(&file_path)?;
+        let file = File::create(&temporary_file.path).map_err(|e| e.to_string())?;
         let mut writer = BufWriter::new(file);
 
         let mut offset = 0_u64;
@@ -5562,6 +5602,8 @@ pub async fn export_table_data(
             writer.write_all(b"]").map_err(|e| e.to_string())?;
         }
         writer.flush().map_err(|e| e.to_string())?;
+        drop(writer);
+        temporary_file.finalize(&file_path)?;
 
         Ok(TableExportResult {
             file_path: file_path.display().to_string(),

@@ -49,6 +49,16 @@ database target until its relevant queue entries pass.
   driver/host/port/database/user identity; verify unknown/incomplete endpoint
   metadata stays selectable and imported names remain deterministic.
 
+## Table export atomic finalization
+
+- Inject write, flush, and rename failures for CSV, JSON, and SQL exports.
+  The final destination must not appear before finalization; any generated
+  sibling `.partial` file must be removed on every error path.
+- Verify a completed export is visible at the returned final path and its
+  content is complete for each supported format. Cancellation, progress,
+  backpressure, encoding/BOM, and durable report behavior remain separate
+  implementation gaps.
+
 ## External driver runtime telemetry
 
 - Verify launch and observed-exit counters with a controlled sidecar crash,
