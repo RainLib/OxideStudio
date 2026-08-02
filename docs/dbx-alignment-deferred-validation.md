@@ -78,7 +78,7 @@ database target until its relevant queue entries pass.
 ## Explorer schema object descriptors
 
 - Verify PostgreSQL sequence, non-internal trigger, domain, enum type,
-  extension and partition discovery across schemas, quoted names, comments,
+  composite/range/multirange type, extension and partition discovery across schemas, quoted names, comments,
   trigger/partition parents, empty schemas, permission errors,
   connection/schema switches, and refreshes. Descriptors must remain read-only
   and must not enable table data editing, generated DDL, or migration actions.
@@ -86,7 +86,7 @@ database target until its relevant queue entries pass.
 ## Schema snapshot descriptor drift
 
 - Capture two PostgreSQL snapshots containing sequence, non-internal trigger,
-  domain, enum type, extension and partition descriptors. Verify additions,
+  domain, enum type, composite/range/multirange type, extension and partition descriptors. Verify additions,
   removals, parent/comment changes, deterministic fingerprints, and old
   snapshots without `schemaObjects` remain readable.
 - Verify descriptor catalog permission failure is retained as a snapshot

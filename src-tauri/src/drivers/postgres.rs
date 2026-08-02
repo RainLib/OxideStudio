@@ -249,13 +249,45 @@ impl PostgresDriver {
             UNION ALL
             SELECT
                 ty.typname AS object_name,
-                'type'::text AS object_type,
+                'enum type'::text AS object_type,
                 NULL::text AS parent_name,
                 obj_description(ty.oid, 'pg_type') AS comment
             FROM pg_type ty
             JOIN pg_namespace n ON n.oid = ty.typnamespace
             WHERE n.nspname = $1
               AND ty.typtype = 'e'
+            UNION ALL
+            SELECT
+                ty.typname AS object_name,
+                'composite type'::text AS object_type,
+                NULL::text AS parent_name,
+                obj_description(ty.oid, 'pg_type') AS comment
+            FROM pg_type ty
+            JOIN pg_namespace n ON n.oid = ty.typnamespace
+            LEFT JOIN pg_class relation ON relation.oid = ty.typrelid
+            WHERE n.nspname = $1
+              AND ty.typtype = 'c'
+              AND relation.relkind = 'c'
+            UNION ALL
+            SELECT
+                ty.typname AS object_name,
+                'range type'::text AS object_type,
+                NULL::text AS parent_name,
+                obj_description(ty.oid, 'pg_type') AS comment
+            FROM pg_type ty
+            JOIN pg_namespace n ON n.oid = ty.typnamespace
+            WHERE n.nspname = $1
+              AND ty.typtype = 'r'
+            UNION ALL
+            SELECT
+                ty.typname AS object_name,
+                'multirange type'::text AS object_type,
+                NULL::text AS parent_name,
+                obj_description(ty.oid, 'pg_type') AS comment
+            FROM pg_type ty
+            JOIN pg_namespace n ON n.oid = ty.typnamespace
+            WHERE n.nspname = $1
+              AND ty.typtype = 'm'
             UNION ALL
             SELECT
                 e.extname AS object_name,
