@@ -191,6 +191,7 @@ pub fn run() {
             commands::database_admin::list_database_admin_lock_waits,
             commands::database_admin::terminate_database_admin_session,
             commands::database_admin::list_database_admin_users,
+            commands::database_admin::list_database_admin_role_memberships,
             commands::database_admin::create_database_admin_user,
             commands::database_admin::update_database_admin_user_password,
             commands::database_admin::set_database_admin_user_login,

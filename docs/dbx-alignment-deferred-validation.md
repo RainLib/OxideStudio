@@ -144,3 +144,10 @@ database target until its relevant queue entries pass.
   when needed, each edge has stable waiting/blocking IDs, and neither path
   returns SQL text or lock payloads. Verify missing privilege/system views are
   surfaced as capability errors rather than an empty result.
+
+## Database role memberships
+
+- Validate PostgreSQL `pg_auth_members`, MySQL 8 `mysql.role_edges`, and a
+  supported MariaDB/legacy MySQL `mysql.roles_mapping` fixture. Confirm role
+  and member names retain account host qualifiers where applicable, no SQL or
+  grants are returned, and a missing metadata privilege is surfaced visibly.

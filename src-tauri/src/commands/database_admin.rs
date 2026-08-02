@@ -40,6 +40,16 @@ pub struct DatabaseAdminUser {
     pub authentication_plugin: Option<String>,
 }
 
+/// A read-only role-to-member edge. Account host qualifiers are retained only
+/// where the server itself exposes them, so MySQL-family role names remain
+/// unambiguous without returning grants, passwords, or SQL text.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseAdminRoleMembership {
+    pub role: String,
+    pub member: String,
+}
+
 /// A deliberately small, read-only server metric. Values remain strings so a
 /// driver cannot lose precision when returning counters larger than a JS safe
 /// integer. `available: false` is an explicit capability/permission downgrade,
@@ -250,6 +260,23 @@ fn user_list_sql(kind: DatabaseKind) -> &'static str {
              FROM mysql.user ORDER BY User, Host LIMIT 200"
         }
     }
+}
+
+const MYSQL_ROLE_MEMBERSHIPS_SQL: &str = "SELECT \
+    CONCAT(FROM_USER, '@', FROM_HOST) AS role_name, \
+    CONCAT(TO_USER, '@', TO_HOST) AS member_name \
+    FROM mysql.role_edges ORDER BY FROM_USER, FROM_HOST, TO_USER, TO_HOST LIMIT 200";
+
+const MARIADB_ROLE_MEMBERSHIPS_SQL: &str = "SELECT \
+    Role AS role_name, CONCAT(User, '@', Host) AS member_name \
+    FROM mysql.roles_mapping ORDER BY Role, User, Host LIMIT 200";
+
+fn postgres_role_memberships_sql() -> &'static str {
+    "SELECT role.rolname AS role_name, member.rolname AS member_name \
+     FROM pg_auth_members membership \
+     JOIN pg_roles role ON role.oid = membership.roleid \
+     JOIN pg_roles member ON member.oid = membership.member \
+     ORDER BY role.rolname, member.rolname LIMIT 200"
 }
 
 fn metrics_sql(kind: DatabaseKind) -> &'static str {
@@ -614,6 +641,79 @@ pub async fn list_database_admin_users(
     match result {
         Ok(users) => Ok(Response::ok(users)),
         Err(error) => Ok(Response::err("DATABASE_ADMIN_USERS_ERROR", &error)),
+    }
+}
+
+fn role_memberships_from_result(result: &QueryResult) -> Vec<DatabaseAdminRoleMembership> {
+    result
+        .rows
+        .iter()
+        .take(ADMIN_RESULT_LIMIT)
+        .filter_map(|row| {
+            Some(DatabaseAdminRoleMembership {
+                role: value_string(result_row(result, row, "role_name"))?,
+                member: value_string(result_row(result, row, "member_name"))?,
+            })
+        })
+        .collect()
+}
+
+async fn query_database_admin_role_memberships(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    sql: &str,
+) -> Result<Vec<DatabaseAdminRoleMembership>, String> {
+    let result = primary_result(
+        manager
+            .query(connection_id, sql, None, None, None)
+            .await
+            .map_err(|error| error.to_string())?,
+    )?;
+    Ok(role_memberships_from_result(&result))
+}
+
+#[tauri::command]
+pub async fn list_database_admin_role_memberships(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    driver: String,
+) -> Result<Response<Vec<DatabaseAdminRoleMembership>>, String> {
+    let result: Result<Vec<DatabaseAdminRoleMembership>, String> = async {
+        ensure_host_database_admin_allowed(&manager, &connection_id).await?;
+        match admin_kind(&driver)? {
+            DatabaseKind::Postgres => query_database_admin_role_memberships(
+                &manager,
+                &connection_id,
+                postgres_role_memberships_sql(),
+            )
+            .await,
+            DatabaseKind::Mysql => match query_database_admin_role_memberships(
+                &manager,
+                &connection_id,
+                MYSQL_ROLE_MEMBERSHIPS_SQL,
+            )
+            .await
+            {
+                Ok(memberships) => Ok(memberships),
+                Err(modern_error) => query_database_admin_role_memberships(
+                    &manager,
+                    &connection_id,
+                    MARIADB_ROLE_MEMBERSHIPS_SQL,
+                )
+                .await
+                .map_err(|legacy_error| format!(
+                    "MySQL/MariaDB role metadata is unavailable (modern view: {modern_error}; legacy view: {legacy_error})"
+                )),
+            },
+        }
+    }
+    .await;
+    match result {
+        Ok(memberships) => Ok(Response::ok(memberships)),
+        Err(error) => Ok(Response::err(
+            "DATABASE_ADMIN_ROLE_MEMBERSHIPS_ERROR",
+            &error,
+        )),
     }
 }
 

@@ -515,6 +515,12 @@ export interface TableDataTransferRequest {
   reseedIdentity?: boolean;
 }
 
+/** A read-only role-to-member relationship returned by the connected server. */
+export interface DatabaseAdminRoleMembership {
+  role: string;
+  member: string;
+}
+
 export interface DatabaseAdminMetric {
   key: string;
   label: string;
