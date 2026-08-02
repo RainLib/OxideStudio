@@ -164,6 +164,7 @@ export function TableDataView() {
     file: File;
     nativePath?: string;
     previewTruncated?: boolean;
+    contentDigest?: string;
   } | null>(null);
   const [jsonImportSource, setJsonImportSource] = useState<{
     nativePath: string;
@@ -214,6 +215,7 @@ export function TableDataView() {
         file,
         nativePath: selected,
         previewTruncated: preview.truncated,
+        contentDigest: preview.contentDigest,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -832,6 +834,7 @@ export function TableDataView() {
           csvOptions.firstRowHeader ?? true,
           activeTab.databaseName,
           csvOptions,
+          csvImportSource.contentDigest,
         );
         rowsImported = imported.rowsImported;
       } else if (activeTab.databaseName) {
@@ -945,6 +948,8 @@ export function TableDataView() {
         "json",
         true,
         activeTab.databaseName,
+        undefined,
+        jsonImportSource.preview.contentDigest,
       );
       const importedRowCount = imported.rowsImported.toLocaleString();
       finishTask(taskId, `${importedRowCount} rows imported`);
@@ -1000,6 +1005,8 @@ export function TableDataView() {
         "xlsx",
         true,
         activeTab.databaseName,
+        undefined,
+        xlsxImportSource.preview.contentDigest,
       );
       const importedRowCount = imported.rowsImported.toLocaleString();
       finishTask(taskId, `${importedRowCount} rows imported`);

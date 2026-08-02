@@ -133,6 +133,9 @@ pub struct TableCsvImportPreview {
     pub bytes: Vec<u8>,
     pub total_bytes: u64,
     pub truncated: bool,
+    /// SHA-256 of the complete reviewed file, not only the preview prefix.
+    /// The desktop sends this back at execution time to reject a changed file.
+    pub content_digest: String,
 }
 
 /// Structured, read-only JSON preview returned after a user selects a JSON,
@@ -143,6 +146,7 @@ pub struct TableCsvImportPreview {
 pub struct TableJsonImportPreview {
     pub file_name: String,
     pub total_bytes: u64,
+    pub content_digest: String,
     pub source_columns: Vec<String>,
     pub sample_rows: Vec<BTreeMap<String, Value>>,
     /// Present for bounded `.json` documents. Large JSON-lines sources only
@@ -157,6 +161,7 @@ pub struct TableJsonImportPreview {
 pub struct TableXlsxImportPreview {
     pub file_name: String,
     pub total_bytes: u64,
+    pub content_digest: String,
     pub sheet_name: String,
     pub source_columns: Vec<String>,
     pub sample_rows: Vec<BTreeMap<String, Value>>,
@@ -5678,6 +5683,7 @@ fn read_csv_import_preview(path: &Path) -> Result<TableCsvImportPreview, String>
         bytes,
         total_bytes,
         truncated: total_bytes > MAX_CSV_IMPORT_PREVIEW_BYTES as u64,
+        content_digest: import_file_digest(path)?,
     })
 }
 
@@ -5781,6 +5787,7 @@ fn read_json_lines_import_preview(path: &Path) -> Result<TableJsonImportPreview,
     Ok(TableJsonImportPreview {
         file_name: import_file_name(path, "JSON data"),
         total_bytes: metadata(path).map_err(|error| error.to_string())?.len(),
+        content_digest: import_file_digest(path)?,
         source_columns: source_columns.into_iter().collect(),
         sample_rows,
         total_rows: if has_more_rows { None } else { Some(seen_rows) },
@@ -5818,6 +5825,7 @@ fn read_json_import_preview(path: &Path) -> Result<TableJsonImportPreview, Strin
     Ok(TableJsonImportPreview {
         file_name: import_file_name(path, "JSON data"),
         total_bytes: metadata(path).map_err(|error| error.to_string())?.len(),
+        content_digest: import_file_digest(path)?,
         source_columns,
         sample_rows,
         total_rows: Some(total_rows),
@@ -5865,6 +5873,42 @@ fn validate_xlsx_headers(headers: &[String]) -> Result<(), String> {
         if !normalized_headers.insert(normalized) {
             return Err("XLSX column names must be unique".to_string());
         }
+    }
+    Ok(())
+}
+
+/// Hash the complete source incrementally so the UI can bind an approved
+/// preview to the exact file it later imports without placing a large file in
+/// renderer memory. This digest is an integrity token only; it contains no
+/// source row values and is never persisted.
+fn import_file_digest(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn verify_import_file_digest(path: &Path, expected: Option<&str>) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let expected = expected.trim().to_ascii_lowercase();
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Invalid import preview digest".to_string());
+    }
+    let actual = import_file_digest(path)?;
+    if actual != expected {
+        return Err(
+            "The import file changed after preview. Review the file again before importing."
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -5935,6 +5979,7 @@ fn read_xlsx_import_preview(path: &Path) -> Result<TableXlsxImportPreview, Strin
     Ok(TableXlsxImportPreview {
         file_name: import_file_name(path, "XLSX data"),
         total_bytes: metadata(path).map_err(|error| error.to_string())?.len(),
+        content_digest: import_file_digest(path)?,
         sheet_name,
         source_columns,
         sample_rows,
@@ -6502,6 +6547,7 @@ pub async fn import_table_data(
     format: TableImportFormat,
     first_row_header: Option<bool>,
     csv_options: Option<TableCsvImportOptions>,
+    expected_file_digest: Option<String>,
 ) -> Result<Response<TableImportResult>, String> {
     let result: Result<TableImportResult, String> = async {
         // Import uses the same bounded parameterized row-mutation path as
@@ -6513,6 +6559,7 @@ pub async fn import_table_data(
             table_data_dialect_for_connection(&manager, &connection_id, &driver, true).await?;
         let path = PathBuf::from(file_path.trim());
         validate_import_file(&path, format)?;
+        verify_import_file_digest(&path, expected_file_digest.as_deref())?;
         let database = database.as_deref();
         ensure_target_relation_operation_allowed(
             &manager,

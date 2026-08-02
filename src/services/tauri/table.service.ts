@@ -134,6 +134,7 @@ export async function importTableData(
   firstRowHeader = true,
   databaseName?: string,
   csvOptions?: TableCsvImportOptions,
+  expectedFileDigest?: string,
 ): Promise<TableImportResult> {
   return invokeWithInterceptors<TableImportResult>("import_table_data", {
     connectionId,
@@ -145,6 +146,7 @@ export async function importTableData(
     firstRowHeader,
     database: databaseName,
     csvOptions,
+    expectedFileDigest,
   });
 }
 

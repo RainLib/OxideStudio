@@ -59,6 +59,16 @@ database target until its relevant queue entries pass.
   backpressure, encoding/BOM, and durable report behavior remain separate
   implementation gaps.
 
+## Reviewed table-import file binding
+
+- For CSV, JSON, JSONL/NDJSON, and XLSX, preview a file, mutate or replace it,
+  then submit the original digest. Execution must reject it before opening the
+  write transaction. A matching digest must allow the existing transaction
+  flow unchanged.
+- Verify malformed and mixed-case digest inputs, maximum-size streaming CSV
+  files, and that the hash token is returned only to the requesting UI and is
+  neither logged nor persisted with imported row data.
+
 ## External driver runtime telemetry
 
 - Verify launch and observed-exit counters with a controlled sidecar crash,

@@ -463,12 +463,16 @@ export interface TableCsvImportPreview {
   bytes: number[];
   totalBytes: number;
   truncated: boolean;
+  /** SHA-256 integrity token for the entire reviewed source file. */
+  contentDigest: string;
 }
 
 /** A bounded, structured sample used to review a JSON/JSONL import before it writes. */
 export interface TableJsonImportPreview {
   fileName: string;
   totalBytes: number;
+  /** SHA-256 integrity token for the entire reviewed source file. */
+  contentDigest: string;
   sourceColumns: string[];
   sampleRows: Array<Record<string, unknown>>;
   /** `null` for large streaming JSONL/NDJSON sources. */
@@ -480,6 +484,8 @@ export interface TableJsonImportPreview {
 export interface TableXlsxImportPreview {
   fileName: string;
   totalBytes: number;
+  /** SHA-256 integrity token for the entire reviewed source file. */
+  contentDigest: string;
   sheetName: string;
   sourceColumns: string[];
   sampleRows: Array<Record<string, unknown>>;
