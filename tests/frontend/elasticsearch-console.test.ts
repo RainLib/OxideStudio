@@ -153,6 +153,73 @@ describe("Elasticsearch Kibana Console requests", () => {
     ).toContain("_update/{id}");
   });
 
+  it("matches bundled LSP version gates for Elasticsearch 6, 7, and 8", () => {
+    const source = `POST /products/_search
+{
+  "query": {
+    ""
+  }
+}`;
+    const offset = source.indexOf('""') + 1;
+    const bodySource = "POST /products/_search\n{\n  \"";
+
+    const elasticsearchSix = elasticsearchConsoleCompletions(
+      source,
+      offset,
+      { major: 6, minor: 8 },
+    ).map((item) => item.label);
+    expect(elasticsearchSix).toContain("type");
+    expect(elasticsearchSix).not.toContain("intervals");
+    expect(elasticsearchSix).not.toContain("combined_fields");
+    expect(
+      elasticsearchConsoleCompletions(bodySource, bodySource.length, {
+        major: 6,
+        minor: 8,
+      }).map((item) => item.label),
+    ).not.toEqual(expect.arrayContaining(["runtime_mappings", "knn"]));
+
+    const elasticsearchSevenTen = elasticsearchConsoleCompletions(
+      source,
+      offset,
+      { major: 7, minor: 10 },
+    ).map((item) => item.label);
+    expect(elasticsearchSevenTen).not.toContain("type");
+    expect(elasticsearchSevenTen).toContain("intervals");
+    expect(elasticsearchSevenTen).not.toContain("combined_fields");
+    expect(
+      elasticsearchConsoleCompletions(bodySource, bodySource.length, {
+        major: 7,
+        minor: 10,
+      }).map((item) => item.label),
+    ).not.toContain("runtime_mappings");
+
+    const elasticsearchSevenThirteen = elasticsearchConsoleCompletions(
+      source,
+      offset,
+      { major: 7, minor: 13 },
+    ).map((item) => item.label);
+    expect(elasticsearchSevenThirteen).toContain("combined_fields");
+    expect(
+      elasticsearchConsoleCompletions(bodySource, bodySource.length, {
+        major: 7,
+        minor: 13,
+      }).map((item) => item.label),
+    ).toContain("runtime_mappings");
+    expect(
+      elasticsearchConsoleCompletions(bodySource, bodySource.length, {
+        major: 7,
+        minor: 13,
+      }).map((item) => item.label),
+    ).not.toContain("knn");
+
+    expect(
+      elasticsearchConsoleCompletions(bodySource, bodySource.length, {
+        major: 8,
+        minor: 0,
+      }).map((item) => item.label),
+    ).toEqual(expect.arrayContaining(["runtime_mappings", "knn"]));
+  });
+
   it("separates HTTP method, index, operation, and request-body completion", () => {
     expect(
       elasticsearchConsoleCompletions("", 0).map((item) => item.label),
@@ -326,7 +393,7 @@ describe("Elasticsearch Kibana Console requests", () => {
     const elasticsearchSixSource = "GET /anocs_test/";
     const elasticsearchSixResult = completionProvider.provideCompletionItems(
       {
-        __oxideElasticsearchMajorVersion: 6,
+        __oxideElasticsearchServerVersion: { major: 6, minor: 8 },
         getOffsetAt: () => elasticsearchSixSource.length,
         getWordUntilPosition: (position: any) => ({
           startColumn: position.column,
@@ -340,6 +407,25 @@ describe("Elasticsearch Kibana Console requests", () => {
     expect(
       elasticsearchSixResult.suggestions.map((item: any) => item.label),
     ).toContain("{type}/{id}");
+
+    for (const majorVersion of [7, 8] as const) {
+      const result = completionProvider.provideCompletionItems(
+        {
+          __oxideElasticsearchServerVersion: { major: majorVersion, minor: 0 },
+          getOffsetAt: () => elasticsearchSixSource.length,
+          getWordUntilPosition: (position: any) => ({
+            startColumn: position.column,
+            endColumn: position.column,
+          }),
+          getLineContent: () => elasticsearchSixSource,
+          getValue: () => elasticsearchSixSource,
+        },
+        { lineNumber: 1, column: elasticsearchSixSource.length + 1 },
+      );
+      const labels = result.suggestions.map((item: any) => item.label);
+      expect(labels).toContain("_doc/{id}");
+      expect(labels).not.toContain("{type}/{id}");
+    }
   });
 
   it("continues with Query DSL inside an auto-closed search body", () => {

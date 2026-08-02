@@ -1,6 +1,6 @@
 use crate::core::{
-    dialect::DatabaseKind,
-    protocol::{ColumnInfo, ConstraintInfo, IndexInfo},
+    dialect::{database_spec_for_driver, DatabaseKind},
+    protocol::{ColumnInfo, ConstraintInfo, FunctionInfo, FunctionParameterInfo, IndexInfo},
 };
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,34 @@ pub struct SchemaRelationSnapshot {
     pub constraints: Vec<ConstraintInfo>,
 }
 
+/// A compact routine signature intentionally excludes source/DDL text. Routine
+/// bodies can contain credentials, implementation details, and dialect-specific
+/// syntax; signatures are enough for drift review but never for auto-migration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaRoutineSnapshot {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine_type: Option<String>,
+    #[serde(default)]
+    pub parameters: Vec<FunctionParameterInfo>,
+    pub return_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl From<FunctionInfo> for SchemaRoutineSnapshot {
+    fn from(function: FunctionInfo) -> Self {
+        Self {
+            name: function.name,
+            routine_type: function.routine_type,
+            parameters: function.parameters,
+            return_type: function.return_type,
+            description: function.description,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaSnapshot {
@@ -36,6 +64,10 @@ pub struct SchemaSnapshot {
     pub schema_name: String,
     pub captured_at: i64,
     pub relations: Vec<SchemaRelationSnapshot>,
+    /// Added after snapshot v1 shipped. Empty values preserve legacy v1
+    /// fingerprints so existing stored snapshots remain comparable.
+    #[serde(default)]
+    pub routines: Vec<SchemaRoutineSnapshot>,
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -63,6 +95,9 @@ pub enum SchemaChangeKind {
     ConstraintAdd,
     ConstraintDrop,
     ConstraintModify,
+    RoutineCreate,
+    RoutineDrop,
+    RoutineModify,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -161,6 +196,7 @@ pub fn finalize_schema_snapshot(mut snapshot: SchemaSnapshot) -> Result<SchemaSn
             .constraints
             .sort_by(|left, right| left.name.cmp(&right.name));
     }
+    snapshot.routines.sort_by_key(routine_sort_key);
     snapshot.warnings.sort();
     snapshot.warnings.dedup();
     snapshot.fingerprint = snapshot_fingerprint(&snapshot)?;
@@ -185,15 +221,8 @@ pub fn compare_schema_snapshots(
             SCHEMA_SNAPSHOT_VERSION
         ));
     }
-    let source_kind = DatabaseKind::from_str(&source.driver)?;
-    let target_kind = DatabaseKind::from_str(&target.driver)?;
-    if source_kind != target_kind {
-        return Err(anyhow!(
-            "Cross-driver schema migration is unsupported: {} -> {}",
-            target.driver,
-            source.driver
-        ));
-    }
+    let source_spec = database_spec_for_driver(&source.driver);
+    let target_spec = database_spec_for_driver(&target.driver);
     if source.schema_name != target.schema_name {
         return Err(anyhow!(
             "Cross-schema comparison requires an explicit schema mapping: {} -> {}",
@@ -202,7 +231,47 @@ pub fn compare_schema_snapshots(
         ));
     }
 
-    let kind = target_kind;
+    // A signed external package can provide a full metadata contract without
+    // being compiled into the host's DDL planner. Keep those snapshots useful
+    // for review, diagrams and drift detection, while deliberately refusing to
+    // synthesize generic migration SQL for an unknown dialect.
+    let (Some(source_spec), Some(target_spec)) = (source_spec, target_spec) else {
+        if source.driver != target.driver {
+            let mut plan =
+                compare_metadata_snapshots(source, target, generated_at, &target.driver)?;
+            plan.warnings.push(format!(
+                "Cross-driver comparison {} -> {} is review-only. Type mapping, DDL generation, and automatic apply are disabled.",
+                source.driver, target.driver
+            ));
+            plan.migration_sql = format!(
+                "-- Cross-driver metadata comparison: {} -> {}.\n-- No migration commands were generated.\n",
+                source.driver, target.driver
+            );
+            return Ok(plan);
+        }
+        return compare_metadata_snapshots(source, target, generated_at, &target.driver);
+    };
+    if source_spec.driver != target_spec.driver {
+        let mut plan =
+            compare_metadata_snapshots(source, target, generated_at, target_spec.driver)?;
+        plan.warnings.push(format!(
+            "Cross-driver comparison {} -> {} is review-only. Type mapping, DDL generation, and automatic apply are disabled.",
+            source.driver, target.driver
+        ));
+        plan.migration_sql = format!(
+            "-- Cross-driver metadata comparison: {} -> {}.\n-- No migration commands were generated.\n",
+            source.driver, target.driver
+        );
+        return Ok(plan);
+    }
+    // SQLite snapshots are fully useful for drift review and diagrams, but
+    // applying a generic migration plan would be unsafe because many ALTER
+    // operations require a rebuild-table workflow. Keep comparison read-only
+    // until that dedicated planner exists.
+    if !target_spec.supports_table_browsing || target_spec.driver == "sqlite" {
+        return compare_metadata_snapshots(source, target, generated_at, target_spec.driver);
+    }
+    let kind = DatabaseKind::from_str(target_spec.driver)?;
     let target_schema = target.schema_name.as_str();
     let source_relations = relation_map(&source.relations);
     let target_relations = relation_map(&target.relations);
@@ -335,6 +404,13 @@ pub fn compare_schema_snapshots(
             (None, None) => unreachable!(),
         }
     }
+    compare_routines(
+        &source.routines,
+        &target.routines,
+        target_schema,
+        &mut changes,
+        &mut warnings,
+    );
 
     let (changes, preflight_checks) =
         finalize_change_plan(kind, source, target, changes, &mut warnings);
@@ -369,6 +445,433 @@ pub fn compare_schema_snapshots(
         preflight_sql,
         warnings,
     })
+}
+
+fn compare_metadata_snapshots(
+    source: &SchemaSnapshot,
+    target: &SchemaSnapshot,
+    generated_at: i64,
+    driver: &str,
+) -> Result<SchemaDiffPlan> {
+    let source_objects = relation_map(&source.relations);
+    let target_objects = relation_map(&target.relations);
+    let mut object_names = source_objects
+        .keys()
+        .chain(target_objects.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    object_names.sort();
+    object_names.dedup();
+    let mut changes = Vec::new();
+
+    for object_name in object_names {
+        match (
+            source_objects.get(&object_name),
+            target_objects.get(&object_name),
+        ) {
+            (Some(source_object), None) => changes.push(metadata_only_change(
+                SchemaChangeKind::RelationCreate,
+                &target.schema_name,
+                &object_name,
+                source_object.object_type.clone(),
+                None,
+                format!("Object {object_name} exists in the snapshot but not in live metadata"),
+            )),
+            (None, Some(target_object)) => changes.push(metadata_only_change(
+                SchemaChangeKind::RelationDrop,
+                &target.schema_name,
+                &object_name,
+                target_object.object_type.clone(),
+                None,
+                format!("Live object {object_name} is absent from the snapshot"),
+            )),
+            (Some(source_object), Some(target_object)) => {
+                compare_metadata_children(
+                    &target.schema_name,
+                    source_object,
+                    target_object,
+                    &mut changes,
+                );
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+    let mut routine_warnings = Vec::new();
+    compare_routines(
+        &source.routines,
+        &target.routines,
+        &target.schema_name,
+        &mut changes,
+        &mut routine_warnings,
+    );
+
+    for (order, change) in changes.iter_mut().enumerate() {
+        change.order = order;
+    }
+    let summary = summarize_changes(&changes);
+    let id = stable_id(
+        "metadata-diff",
+        &format!(
+            "metadata-diff:{}:{}:{}",
+            source.fingerprint, target.fingerprint, target.schema_name
+        ),
+    );
+
+    Ok(SchemaDiffPlan {
+        id,
+        source_snapshot_id: source.id.clone(),
+        target_snapshot_id: target.id.clone(),
+        driver: driver.to_string(),
+        target_connection_id: target.connection_id.clone(),
+        target_database_name: target.database_name.clone(),
+        target_schema_name: target.schema_name.clone(),
+        generated_at,
+        transactional: false,
+        summary,
+        changes,
+        migration_sql: "-- Metadata-only comparison; no migration commands were generated.\n"
+            .to_string(),
+        preflight_checks: Vec::new(),
+        preflight_sql: String::new(),
+        warnings: {
+            let mut warnings = vec![
+                "This driver requires review-specific schema handling; automatic restore is disabled."
+                    .to_string(),
+            ];
+            warnings.extend(routine_warnings);
+            warnings.sort();
+            warnings.dedup();
+            warnings
+        },
+    })
+}
+
+fn routine_map(routines: &[SchemaRoutineSnapshot]) -> BTreeMap<String, &SchemaRoutineSnapshot> {
+    routines
+        .iter()
+        .map(|routine| (routine_identity(routine), routine))
+        .collect()
+}
+
+/// Use the executable signature as the identity so overloaded routines remain
+/// distinct. Parameter names are intentionally excluded: a rename can be
+/// reviewed as a modification, while a type/arity change becomes drop/create.
+fn routine_identity(routine: &SchemaRoutineSnapshot) -> String {
+    format!(
+        "{}:{}({})",
+        routine
+            .routine_type
+            .as_deref()
+            .unwrap_or("FUNCTION")
+            .to_ascii_uppercase(),
+        routine.name,
+        routine
+            .parameters
+            .iter()
+            .map(|parameter| parameter.data_type.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+fn routine_label(routine: &SchemaRoutineSnapshot) -> String {
+    format!(
+        "{}({})",
+        routine.name,
+        routine
+            .parameters
+            .iter()
+            .map(|parameter| parameter.data_type.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+fn routine_object_type(routine: &SchemaRoutineSnapshot) -> Option<String> {
+    Some(
+        routine
+            .routine_type
+            .as_deref()
+            .unwrap_or("FUNCTION")
+            .to_ascii_uppercase(),
+    )
+}
+
+fn routine_review_change(
+    kind: SchemaChangeKind,
+    schema_name: &str,
+    routine: &SchemaRoutineSnapshot,
+    summary: String,
+) -> SchemaChange {
+    let mut change = change(
+        kind,
+        SchemaChangeRisk::Review,
+        schema_name,
+        &routine.name,
+        routine_object_type(routine),
+        Some(routine_label(routine)),
+        summary,
+        Vec::new(),
+        false,
+        true,
+    );
+    change.phase = SchemaChangePhase::ManualReview;
+    change.blocked_reason = Some(
+        "Routine bodies and executable DDL are intentionally excluded from schema snapshots; review and apply this change manually."
+            .to_string(),
+    );
+    change
+}
+
+fn compare_routines(
+    source: &[SchemaRoutineSnapshot],
+    target: &[SchemaRoutineSnapshot],
+    schema_name: &str,
+    changes: &mut Vec<SchemaChange>,
+    warnings: &mut Vec<String>,
+) {
+    let source_routines = routine_map(source);
+    let target_routines = routine_map(target);
+    let mut identities = source_routines
+        .keys()
+        .chain(target_routines.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    identities.sort();
+    identities.dedup();
+
+    let change_start = changes.len();
+    for identity in identities {
+        match (
+            source_routines.get(&identity),
+            target_routines.get(&identity),
+        ) {
+            (Some(source_routine), None) => changes.push(routine_review_change(
+                SchemaChangeKind::RoutineCreate,
+                schema_name,
+                source_routine,
+                format!(
+                    "Review creation of routine {}",
+                    routine_label(source_routine)
+                ),
+            )),
+            (None, Some(target_routine)) => changes.push(routine_review_change(
+                SchemaChangeKind::RoutineDrop,
+                schema_name,
+                target_routine,
+                format!(
+                    "Review removal of routine {}",
+                    routine_label(target_routine)
+                ),
+            )),
+            (Some(source_routine), Some(target_routine)) if source_routine != target_routine => {
+                changes.push(routine_review_change(
+                    SchemaChangeKind::RoutineModify,
+                    schema_name,
+                    source_routine,
+                    format!("Review changed routine {}", routine_label(source_routine)),
+                ));
+            }
+            _ => {}
+        }
+    }
+    if changes.len() > change_start {
+        warnings.push(
+            "Routine signature drift is review-only: routine bodies and automatic routine DDL are intentionally unavailable."
+                .to_string(),
+        );
+    }
+}
+
+fn compare_metadata_children(
+    schema_name: &str,
+    source: &SchemaRelationSnapshot,
+    target: &SchemaRelationSnapshot,
+    changes: &mut Vec<SchemaChange>,
+) {
+    let source_columns = source
+        .columns
+        .iter()
+        .map(|column| (column.name.as_str(), column))
+        .collect::<BTreeMap<_, _>>();
+    let target_columns = target
+        .columns
+        .iter()
+        .map(|column| (column.name.as_str(), column))
+        .collect::<BTreeMap<_, _>>();
+    let mut column_names = source_columns
+        .keys()
+        .chain(target_columns.keys())
+        .copied()
+        .collect::<Vec<_>>();
+    column_names.sort();
+    column_names.dedup();
+    for column_name in column_names {
+        let (kind, summary) = match (
+            source_columns.get(column_name),
+            target_columns.get(column_name),
+        ) {
+            (Some(_), None) => (
+                SchemaChangeKind::ColumnAdd,
+                format!("Field {column_name} is missing from live metadata"),
+            ),
+            (None, Some(_)) => (
+                SchemaChangeKind::ColumnDrop,
+                format!("Live field {column_name} is absent from the snapshot"),
+            ),
+            (Some(source_column), Some(target_column)) if source_column != target_column => (
+                SchemaChangeKind::ColumnModify,
+                format!("Field {column_name} metadata changed"),
+            ),
+            _ => continue,
+        };
+        changes.push(metadata_only_change(
+            kind,
+            schema_name,
+            &source.name,
+            source.object_type.clone(),
+            Some(column_name.to_string()),
+            summary,
+        ));
+    }
+
+    // A number of engines expose the backing index for a primary/unique
+    // constraint in both metadata collections. Mirror the native planner's
+    // view so a read-only diff explains the logical constraint once instead
+    // of reporting a duplicate index change as well.
+    let source_constraint_names = source
+        .constraints
+        .iter()
+        .map(|constraint| constraint.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let target_constraint_names = target
+        .constraints
+        .iter()
+        .map(|constraint| constraint.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let source_indexes = source
+        .indexes
+        .iter()
+        .filter(|index| !index.is_primary && !source_constraint_names.contains(index.name.as_str()))
+        .map(|index| (index.name.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let target_indexes = target
+        .indexes
+        .iter()
+        .filter(|index| !index.is_primary && !target_constraint_names.contains(index.name.as_str()))
+        .map(|index| (index.name.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut index_names = source_indexes
+        .keys()
+        .chain(target_indexes.keys())
+        .copied()
+        .collect::<Vec<_>>();
+    index_names.sort();
+    index_names.dedup();
+    for index_name in index_names {
+        let (kind, summary) = match (
+            source_indexes.get(index_name),
+            target_indexes.get(index_name),
+        ) {
+            (Some(_), None) => (
+                SchemaChangeKind::IndexAdd,
+                format!("Index {index_name} is missing from live metadata"),
+            ),
+            (None, Some(_)) => (
+                SchemaChangeKind::IndexDrop,
+                format!("Live index {index_name} is absent from the snapshot"),
+            ),
+            (Some(source_index), Some(target_index)) if source_index != target_index => (
+                SchemaChangeKind::IndexModify,
+                format!("Index {index_name} metadata changed"),
+            ),
+            _ => continue,
+        };
+        changes.push(metadata_only_change(
+            kind,
+            schema_name,
+            &source.name,
+            source.object_type.clone(),
+            Some(index_name.to_string()),
+            summary,
+        ));
+    }
+
+    let source_constraints = source
+        .constraints
+        .iter()
+        .map(|constraint| (constraint.name.as_str(), constraint))
+        .collect::<BTreeMap<_, _>>();
+    let target_constraints = target
+        .constraints
+        .iter()
+        .map(|constraint| (constraint.name.as_str(), constraint))
+        .collect::<BTreeMap<_, _>>();
+    let mut constraint_names = source_constraints
+        .keys()
+        .chain(target_constraints.keys())
+        .copied()
+        .collect::<Vec<_>>();
+    constraint_names.sort();
+    constraint_names.dedup();
+    for constraint_name in constraint_names {
+        let (kind, summary) = match (
+            source_constraints.get(constraint_name),
+            target_constraints.get(constraint_name),
+        ) {
+            (Some(_), None) => (
+                SchemaChangeKind::ConstraintAdd,
+                format!("Constraint {constraint_name} is missing from live metadata"),
+            ),
+            (None, Some(_)) => (
+                SchemaChangeKind::ConstraintDrop,
+                format!("Live constraint {constraint_name} is absent from the snapshot"),
+            ),
+            (Some(source_constraint), Some(target_constraint))
+                if source_constraint != target_constraint =>
+            {
+                (
+                    SchemaChangeKind::ConstraintModify,
+                    format!("Constraint {constraint_name} metadata changed"),
+                )
+            }
+            _ => continue,
+        };
+        changes.push(metadata_only_change(
+            kind,
+            schema_name,
+            &source.name,
+            source.object_type.clone(),
+            Some(constraint_name.to_string()),
+            summary,
+        ));
+    }
+}
+
+fn metadata_only_change(
+    kind: SchemaChangeKind,
+    schema_name: &str,
+    relation_name: &str,
+    object_type: Option<String>,
+    child_name: Option<String>,
+    summary: String,
+) -> SchemaChange {
+    let mut change = change(
+        kind,
+        SchemaChangeRisk::Review,
+        schema_name,
+        relation_name,
+        object_type,
+        child_name,
+        summary,
+        Vec::new(),
+        false,
+        true,
+    );
+    change.phase = SchemaChangePhase::ManualReview;
+    change.blocked_reason =
+        Some("Automatic migration is unavailable for this metadata-only comparison.".to_string());
+    change
 }
 
 fn compare_relation(
@@ -1198,14 +1701,46 @@ fn relation_map(relations: &[SchemaRelationSnapshot]) -> BTreeMap<String, &Schem
 }
 
 fn snapshot_fingerprint(snapshot: &SchemaSnapshot) -> Result<String> {
-    let payload = serde_json::to_vec(&(
-        snapshot.version,
-        &snapshot.driver,
-        &snapshot.database_name,
-        &snapshot.schema_name,
-        &snapshot.relations,
-    ))?;
+    // Stored v1 snapshots did not include routines. Keep their established
+    // fingerprint shape when routines are absent, while making every captured
+    // routine signature bind a new snapshot to its complete review metadata.
+    let payload = if snapshot.routines.is_empty() {
+        serde_json::to_vec(&(
+            snapshot.version,
+            &snapshot.driver,
+            &snapshot.database_name,
+            &snapshot.schema_name,
+            &snapshot.relations,
+        ))?
+    } else {
+        serde_json::to_vec(&(
+            snapshot.version,
+            &snapshot.driver,
+            &snapshot.database_name,
+            &snapshot.schema_name,
+            &snapshot.relations,
+            &snapshot.routines,
+        ))?
+    };
     Ok(hex_digest(&payload))
+}
+
+fn routine_sort_key(routine: &SchemaRoutineSnapshot) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        routine.routine_type.as_deref().unwrap_or_default(),
+        routine.name,
+        routine
+            .parameters
+            .iter()
+            .map(|parameter| format!(
+                "{}:{}:{}",
+                parameter.name, parameter.data_type, parameter.optional
+            ))
+            .collect::<Vec<_>>()
+            .join(","),
+        routine.return_type,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1263,6 +1798,9 @@ fn phase_for_kind(kind: SchemaChangeKind) -> SchemaChangePhase {
         SchemaChangeKind::ConstraintAdd | SchemaChangeKind::IndexAdd => {
             SchemaChangePhase::CreateDependencies
         }
+        SchemaChangeKind::RoutineCreate
+        | SchemaChangeKind::RoutineDrop
+        | SchemaChangeKind::RoutineModify => SchemaChangePhase::ManualReview,
     }
 }
 
@@ -1274,7 +1812,7 @@ fn finalize_change_plan(
     warnings: &mut Vec<String>,
 ) -> (Vec<SchemaChange>, Vec<SchemaPreflightCheck>) {
     for change in &mut changes {
-        if change.sql.is_empty() {
+        if change.sql.is_empty() && change.blocked_reason.is_none() {
             change.blocked_reason =
                 Some("No complete executable definition is available for this change.".to_string());
         }
@@ -2112,9 +2650,24 @@ mod tests {
                 indexes: Vec::new(),
                 constraints: Vec::new(),
             }],
+            routines: Vec::new(),
             warnings: Vec::new(),
         })
         .unwrap()
+    }
+
+    fn routine(name: &str, return_type: &str) -> SchemaRoutineSnapshot {
+        SchemaRoutineSnapshot {
+            name: name.to_string(),
+            routine_type: Some("FUNCTION".to_string()),
+            parameters: vec![FunctionParameterInfo {
+                name: "input".to_string(),
+                data_type: "text".to_string(),
+                optional: false,
+            }],
+            return_type: return_type.to_string(),
+            description: None,
+        }
     }
 
     fn constraint(name: &str, constraint_type: &str, columns: &[&str]) -> ConstraintInfo {
@@ -2156,6 +2709,44 @@ mod tests {
         second.relations.reverse();
         let second = finalize_schema_snapshot(second).unwrap();
         assert_eq!(first.fingerprint, second.fingerprint);
+    }
+
+    #[test]
+    fn routine_signatures_change_the_snapshot_fingerprint() {
+        let legacy = snapshot("legacy", vec![column("id", "int4", false)]);
+        let mut with_routine = legacy.clone();
+        with_routine.id = "with-routine".to_string();
+        with_routine.routines = vec![routine("normalize_email", "text")];
+        let with_routine = finalize_schema_snapshot(with_routine).unwrap();
+
+        assert_ne!(legacy.fingerprint, with_routine.fingerprint);
+    }
+
+    #[test]
+    fn routine_drift_is_review_only_and_blocks_automatic_migration() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        source.routines = vec![routine("normalize_email", "text")];
+        let source = finalize_schema_snapshot(source).unwrap();
+        let target = snapshot("actual", vec![column("id", "int4", false)]);
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::RoutineCreate)
+            .expect("routine creation should be visible in drift review");
+
+        assert_eq!(change.phase, SchemaChangePhase::ManualReview);
+        assert_eq!(change.risk, SchemaChangeRisk::Review);
+        assert!(change.manual_review);
+        assert!(change.sql.is_empty());
+        assert!(change.blocked_reason.is_some());
+        assert_eq!(plan.summary.blocked, 1);
+        assert!(plan.migration_sql.contains("MANUAL REVIEW REQUIRED"));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Routine signature drift")));
     }
 
     #[test]
@@ -2204,12 +2795,55 @@ mod tests {
     }
 
     #[test]
-    fn rejects_cross_driver_migration() {
+    fn cross_driver_comparison_is_metadata_only_and_never_generates_sql() {
         let source = snapshot("desired", vec![column("id", "bigint", false)]);
         let mut target = snapshot("actual", vec![column("id", "bigint", false)]);
         target.driver = "mysql".to_string();
-        let error = compare_schema_snapshots(&source, &target, 2).unwrap_err();
-        assert!(error.to_string().contains("Cross-driver"));
+        target.relations[0]
+            .columns
+            .push(column("legacy", "varchar", true));
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        assert!(!plan.transactional);
+        assert!(plan
+            .migration_sql
+            .contains("Cross-driver metadata comparison"));
+        assert!(plan.changes.iter().all(|change| change.sql.is_empty()));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("review-only")));
+    }
+
+    #[test]
+    fn driver_aliases_keep_their_shared_native_migration_planner() {
+        let mut source = snapshot("desired", vec![column("id", "bigint", false)]);
+        let mut target = snapshot("actual", vec![column("id", "bigint", false)]);
+        source.driver = "mariadb".to_string();
+        target.driver = "mysql".to_string();
+        target.relations.clear();
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        assert_eq!(plan.driver, "mysql");
+        assert!(plan.migration_sql.contains("CREATE TABLE"));
+    }
+
+    #[test]
+    fn external_driver_snapshots_are_compared_as_read_only_metadata() {
+        let mut source = snapshot("desired", vec![column("id", "INTEGER", false)]);
+        let mut target = snapshot("actual", vec![column("id", "INTEGER", false)]);
+        source.driver = "duckdb".to_string();
+        target.driver = "duckdb".to_string();
+        target.relations[0]
+            .columns
+            .push(column("legacy", "VARCHAR", true));
+        source = finalize_schema_snapshot(source).unwrap();
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+
+        assert_eq!(plan.driver, "duckdb");
+        assert!(!plan.transactional);
+        assert!(plan.migration_sql.contains("Metadata-only comparison"));
+        assert!(plan.changes.iter().all(|change| change.sql.is_empty()));
     }
 
     #[test]
@@ -2519,6 +3153,95 @@ mod tests {
         assert_eq!(plan.summary.blocked, 1);
         assert!(plan.migration_sql.contains("PLAN BLOCKED"));
         assert!(!plan.migration_sql.contains("ALTER COLUMN \"id\" TYPE"));
+    }
+
+    #[test]
+    fn mongodb_snapshots_produce_metadata_only_diffs() {
+        let mut source = snapshot(
+            "desired",
+            vec![
+                column("_id", "objectId", false),
+                column("email", "string", true),
+            ],
+        );
+        source.driver = "mongodb".to_string();
+        source.database_name = None;
+        source.schema_name = "app".to_string();
+        source.relations[0].object_type = Some("collection".to_string());
+        source.relations[0].indexes = vec![
+            index("email_1", &["email"], "btree"),
+            // MongoDB reports the backing unique index and its logical
+            // constraint through two metadata endpoints. The review plan
+            // must present the latter once, not as a second index action.
+            index("email_unique", &["email"], "btree"),
+        ];
+        source.relations[0].constraints = vec![constraint("email_unique", "UNIQUE", &["email"])];
+        source = finalize_schema_snapshot(source).unwrap();
+
+        let mut target = snapshot("actual", vec![column("_id", "objectId", false)]);
+        target.driver = "mongodb".to_string();
+        target.database_name = None;
+        target.schema_name = "app".to_string();
+        target.relations[0].object_type = Some("collection".to_string());
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+
+        assert!(plan
+            .changes
+            .iter()
+            .any(|change| change.kind == SchemaChangeKind::ColumnAdd));
+        assert!(plan
+            .changes
+            .iter()
+            .any(|change| change.kind == SchemaChangeKind::IndexAdd));
+        assert!(plan
+            .changes
+            .iter()
+            .any(|change| change.kind == SchemaChangeKind::ConstraintAdd));
+        assert!(!plan.changes.iter().any(|change| {
+            change.kind == SchemaChangeKind::IndexAdd
+                && change.child_name.as_deref() == Some("email_unique")
+        }));
+        assert!(plan.changes.iter().all(|change| change.sql.is_empty()));
+        assert!(plan
+            .changes
+            .iter()
+            .all(|change| change.blocked_reason.is_some()));
+        assert!(!plan.transactional);
+        assert!(plan.migration_sql.contains("Metadata-only comparison"));
+    }
+
+    #[test]
+    fn sqlite_snapshots_produce_metadata_only_diffs() {
+        let mut source = snapshot(
+            "desired",
+            vec![
+                column("id", "INTEGER", false),
+                column("email", "TEXT", true),
+            ],
+        );
+        source.driver = "sqlite".to_string();
+        source.database_name = None;
+        source.schema_name = "main".to_string();
+        source = finalize_schema_snapshot(source).unwrap();
+
+        let mut target = snapshot("actual", vec![column("id", "INTEGER", false)]);
+        target.driver = "sqlite".to_string();
+        target.database_name = None;
+        target.schema_name = "main".to_string();
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+
+        assert_eq!(plan.driver, "sqlite");
+        assert!(!plan.transactional);
+        assert!(plan
+            .changes
+            .iter()
+            .any(|change| change.kind == SchemaChangeKind::ColumnAdd));
+        assert!(plan.changes.iter().all(|change| change.sql.is_empty()));
+        assert!(plan.migration_sql.contains("Metadata-only comparison"));
     }
 
     #[test]

@@ -65,6 +65,33 @@ import { compileElasticsearchConsoleExecution } from "@/lib/elasticsearchConsole
 import type { DataCompareSource } from "@/lib/dataCompare";
 import type { AgentFileDiffPreview } from "@/lib/agentFileReview";
 import type { GitFileDiffPreview } from "@/lib/projectGitDiff";
+import {
+  removeGridLayout,
+  saveGridLayout,
+  type GridLayoutScope,
+  type PersistedGridLayout,
+} from "@/features/data-grid";
+
+function gridLayoutScopeForTab(tab: TabData): GridLayoutScope {
+  return {
+    type: tab.type,
+    connectionId: tab.connectionId,
+    databaseName: tab.databaseName,
+    schemaName: tab.schemaName,
+    tableName: tab.tableName,
+    queryLanguage: tab.queryLanguage,
+    sql: tab.sql,
+  };
+}
+
+function saveTabGridLayout(tab: TabData) {
+  saveGridLayout(gridLayoutScopeForTab(tab), {
+    columnWidths: tab.columnWidths || {},
+    columnOrder: tab.columnOrder || [],
+    hiddenColumns: tab.hiddenColumns || [],
+    frozenColumnCount: tab.frozenColumnCount || 0,
+  });
+}
 
 async function refreshMetadataAfterQuery(
   connectionId: string,
@@ -79,7 +106,7 @@ async function refreshMetadataAfterQuery(
   const driver = connection?.driver || DEFAULT_DATABASE_DRIVER;
   const fallbackCapabilities = defaultDatabaseCapabilities(driver);
   const capabilities = await databaseService
-    .getDatabaseCapabilities(driver)
+    .getDatabaseCapabilities(driver, connection?.driverPackageVersion)
     .catch(() => fallbackCapabilities);
   const canBrowseTables = supportsTableWorkspace(capabilities);
   const canBrowseCollections =
@@ -234,6 +261,7 @@ export interface TabData {
   columnWidths?: Record<string, number>;
   columnOrder?: string[];
   hiddenColumns?: string[];
+  frozenColumnCount?: number;
   // Target schema for query execution
   targetSchema?: string | null;
   tableColumns?: ColumnInfo[];
@@ -836,6 +864,8 @@ interface TabState {
   setColumnWidth: (tabId: string, columnId: string, width: number) => void;
   setColumnOrder: (tabId: string, columnOrder: string[]) => void;
   setColumnHidden: (tabId: string, columnId: string, hidden: boolean) => void;
+  setFrozenColumnCount: (tabId: string, count: number) => void;
+  restoreColumnLayout: (tabId: string, layout: PersistedGridLayout) => void;
   showAllColumns: (tabId: string) => void;
   resetColumnLayout: (tabId: string) => void;
   // Schema selection method
@@ -3098,52 +3128,102 @@ export const useTabStore = create<TabState>((set, get) => ({
   },
 
   setColumnWidth: (tabId, columnId, width) => {
+    const tab = get().tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    const nextTab = {
+      ...tab,
+      columnWidths: { ...(tab.columnWidths || {}), [columnId]: width },
+    };
+    saveTabGridLayout(nextTab);
     set((state) => ({
       tabs: state.tabs.map((t) => {
         if (t.id !== tabId) return t;
-        const columnWidths = t.columnWidths || {};
-        return {
-          ...t,
-          columnWidths: {
-            ...columnWidths,
-            [columnId]: width,
-          },
-        };
+        return nextTab;
       }),
     }));
   },
 
   setColumnOrder: (tabId, columnOrder) => {
+    const tab = get().tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    const nextTab = { ...tab, columnOrder };
+    saveTabGridLayout(nextTab);
     set((state) => ({
-      tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, columnOrder } : t)),
+      tabs: state.tabs.map((t) => (t.id === tabId ? nextTab : t)),
     }));
   },
 
   setColumnHidden: (tabId, columnId, hidden) => {
+    const tab = get().tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    const hiddenColumns = new Set(tab.hiddenColumns || []);
+    if (hidden) hiddenColumns.add(columnId);
+    else hiddenColumns.delete(columnId);
+    const nextTab = { ...tab, hiddenColumns: [...hiddenColumns] };
+    saveTabGridLayout(nextTab);
     set((state) => ({
       tabs: state.tabs.map((tab) => {
         if (tab.id !== tabId) return tab;
-        const hiddenColumns = new Set(tab.hiddenColumns || []);
-        if (hidden) hiddenColumns.add(columnId);
-        else hiddenColumns.delete(columnId);
-        return { ...tab, hiddenColumns: [...hiddenColumns] };
+        return nextTab;
       }),
     }));
   },
 
-  showAllColumns: (tabId) => {
+  setFrozenColumnCount: (tabId, count) => {
+    const frozenColumnCount = Math.max(0, Math.floor(count));
+    const tab = get().tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    const nextTab = { ...tab, frozenColumnCount };
+    saveTabGridLayout(nextTab);
     set((state) => ({
       tabs: state.tabs.map((tab) =>
-        tab.id === tabId ? { ...tab, hiddenColumns: [] } : tab,
+        tab.id === tabId ? nextTab : tab,
+      ),
+    }));
+  },
+
+  restoreColumnLayout: (tabId, layout) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId
+          ? {
+              ...tab,
+              columnWidths: layout.columnWidths,
+              columnOrder: layout.columnOrder,
+              hiddenColumns: layout.hiddenColumns,
+              frozenColumnCount: layout.frozenColumnCount,
+            }
+          : tab,
+      ),
+    }));
+  },
+
+  showAllColumns: (tabId) => {
+    const tab = get().tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    const nextTab = { ...tab, hiddenColumns: [] };
+    saveTabGridLayout(nextTab);
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId ? nextTab : tab,
       ),
     }));
   },
 
   resetColumnLayout: (tabId) => {
+    const tab = get().tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    removeGridLayout(gridLayoutScopeForTab(tab));
     set((state) => ({
       tabs: state.tabs.map((tab) =>
         tab.id === tabId
-          ? { ...tab, columnWidths: {}, columnOrder: [], hiddenColumns: [] }
+          ? {
+              ...tab,
+              columnWidths: {},
+              columnOrder: [],
+              hiddenColumns: [],
+              frozenColumnCount: 0,
+            }
           : tab,
       ),
     }));

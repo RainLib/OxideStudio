@@ -8,6 +8,10 @@ pub enum QueryExecutionMode {
 pub enum StatementScanDialect {
     Mysql,
     Postgres,
+    /// T-SQL uses `[identifier]` quoting, including `]]` escapes. Keeping it
+    /// separate from the generic/PostgreSQL scanner prevents a semicolon in a
+    /// legal SQL Server identifier from changing the current-statement scope.
+    SqlServer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +92,11 @@ fn skip_block_comment(sql: &str, mut index: usize, dialect: StatementScanDialect
     let mut depth = 1usize;
 
     while index < sql.len() {
-        if dialect == StatementScanDialect::Postgres && sql[index..].starts_with("/*") {
+        if matches!(
+            dialect,
+            StatementScanDialect::Postgres | StatementScanDialect::SqlServer
+        ) && sql[index..].starts_with("/*")
+        {
             depth += 1;
             index += 2;
             continue;
@@ -321,6 +329,51 @@ fn skip_quoted_region(
     }
 
     index
+}
+
+fn skip_sqlserver_bracket_identifier(sql: &str, mut index: usize) -> usize {
+    debug_assert!(sql[index..].starts_with('['));
+    index += '['.len_utf8();
+
+    while index < sql.len() {
+        let Some(ch) = sql[index..].chars().next() else {
+            break;
+        };
+        index += ch.len_utf8();
+        if ch != ']' {
+            continue;
+        }
+        if sql[index..].starts_with(']') {
+            index += ']'.len_utf8();
+            continue;
+        }
+        return index;
+    }
+
+    sql.len()
+}
+
+fn skip_quoted_or_identifier_region(
+    sql: &str,
+    index: usize,
+    dialect: StatementScanDialect,
+) -> Option<usize> {
+    let ch = sql[index..].chars().next()?;
+    match dialect {
+        StatementScanDialect::Mysql if matches!(ch, '\'' | '"' | '`') => {
+            Some(skip_quoted_region(sql, index, ch, dialect))
+        }
+        StatementScanDialect::Postgres if matches!(ch, '\'' | '"') => {
+            Some(skip_quoted_region(sql, index, ch, dialect))
+        }
+        StatementScanDialect::SqlServer if ch == '[' => {
+            Some(skip_sqlserver_bracket_identifier(sql, index))
+        }
+        StatementScanDialect::SqlServer if matches!(ch, '\'' | '"') => {
+            Some(skip_quoted_region(sql, index, ch, dialect))
+        }
+        _ => None,
+    }
 }
 
 fn skip_balanced_parentheses(sql: &str, mut index: usize) -> Option<usize> {
@@ -573,7 +626,9 @@ fn mysql_dash_comment_at(sql: &str, index: usize) -> bool {
 
 fn line_comment_at(sql: &str, index: usize, dialect: StatementScanDialect) -> bool {
     match dialect {
-        StatementScanDialect::Postgres => sql[index..].starts_with("--"),
+        StatementScanDialect::Postgres | StatementScanDialect::SqlServer => {
+            sql[index..].starts_with("--")
+        }
         StatementScanDialect::Mysql => {
             sql[index..].starts_with('#') || mysql_dash_comment_at(sql, index)
         }
@@ -710,18 +765,14 @@ pub fn split_sql_statement_spans(
             }
         }
 
+        if let Some(end) = skip_quoted_or_identifier_region(sql, index, dialect) {
+            index = end;
+            continue;
+        }
+
         let Some(ch) = sql[index..].chars().next() else {
             break;
         };
-
-        let is_quoted_region = match dialect {
-            StatementScanDialect::Mysql => matches!(ch, '\'' | '"' | '`'),
-            StatementScanDialect::Postgres => matches!(ch, '\'' | '"'),
-        };
-        if is_quoted_region {
-            index = skip_quoted_region(sql, index, ch, dialect);
-            continue;
-        }
 
         if sql[index..].starts_with(delimiter) {
             push_statement_span(&mut statements, sql, statement_start, index, dialect);
@@ -735,6 +786,164 @@ pub fn split_sql_statement_spans(
 
     push_statement_span(&mut statements, sql, statement_start, sql.len(), dialect);
 
+    statements
+}
+
+const SOFT_STATEMENT_KEYWORDS: &[&str] = &[
+    "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "CREATE", "ALTER", "DROP",
+    "TRUNCATE", "EXPLAIN", "SHOW", "DESCRIBE", "DESC", "USE", "CALL", "EXEC", "EXECUTE", "BEGIN",
+    "COMMIT", "ROLLBACK", "ANALYZE", "VACUUM",
+];
+
+fn mask_sql_noise_for_soft_boundaries(sql: &str, dialect: StatementScanDialect) -> String {
+    let mut masked = sql.as_bytes().to_vec();
+    let mut index = 0usize;
+    while index < sql.len() {
+        let end = if line_comment_at(sql, index, dialect) {
+            skip_line_comment(sql, index)
+        } else if sql[index..].starts_with("/*") {
+            skip_block_comment(sql, index, dialect)
+        } else if dialect == StatementScanDialect::Postgres {
+            if let Some(tag) = dollar_quote_at(sql, index) {
+                let search_start = index + tag.len();
+                sql[search_start..]
+                    .find(tag)
+                    .map(|offset| search_start + offset + tag.len())
+                    .unwrap_or(sql.len())
+            } else {
+                let Some(ch) = sql[index..].chars().next() else {
+                    break;
+                };
+                let quoted = matches!(ch, '\'' | '"');
+                if quoted {
+                    skip_quoted_region(sql, index, ch, dialect)
+                } else {
+                    index += ch.len_utf8();
+                    continue;
+                }
+            }
+        } else if let Some(end) = skip_quoted_or_identifier_region(sql, index, dialect) {
+            end
+        } else {
+            let Some(ch) = sql[index..].chars().next() else {
+                break;
+            };
+            index += ch.len_utf8();
+            continue;
+        };
+        for byte in &mut masked[index..end] {
+            if !matches!(*byte, b'\n' | b'\r') {
+                *byte = b' ';
+            }
+        }
+        index = end;
+    }
+    // Every replaced byte is ASCII, so the original UTF-8 remains valid.
+    String::from_utf8(masked).expect("SQL noise masking preserves UTF-8")
+}
+
+fn soft_statement_keyword(line: &str) -> Option<&'static str> {
+    let trimmed = line.trim_start();
+    let end = trimmed
+        .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .unwrap_or(trimmed.len());
+    let keyword = trimmed.get(..end)?;
+    SOFT_STATEMENT_KEYWORDS
+        .iter()
+        .copied()
+        .find(|candidate| keyword.eq_ignore_ascii_case(candidate))
+}
+
+fn soft_statement_is_wrapped_continuation(initial: &str, candidate: &str) -> bool {
+    match initial {
+        "WITH" => matches!(
+            candidate,
+            "SELECT" | "INSERT" | "UPDATE" | "DELETE" | "MERGE"
+        ),
+        "INSERT" => matches!(candidate, "SELECT" | "WITH"),
+        "EXPLAIN" | "DESCRIBE" | "DESC" => matches!(
+            candidate,
+            "SELECT" | "WITH" | "INSERT" | "UPDATE" | "DELETE" | "MERGE"
+        ),
+        "CREATE" => matches!(candidate, "SELECT" | "WITH" | "BEGIN"),
+        // ClickHouse ALTER TABLE ... UPDATE is a single mutation statement.
+        "ALTER" => candidate == "UPDATE",
+        _ => false,
+    }
+}
+
+fn soft_statement_is_set_continuation(previous_non_empty_line: &str, candidate: &str) -> bool {
+    if candidate != "SELECT" {
+        return false;
+    }
+    matches!(
+        previous_non_empty_line.trim().to_ascii_uppercase().as_str(),
+        "UNION" | "UNION ALL" | "INTERSECT" | "EXCEPT" | "MINUS"
+    )
+}
+
+/// Split explicit semicolon-delimited statements, then recover only
+/// high-confidence top-level query blocks that a user separated with a blank
+/// line but forgot to terminate. This is deliberately intended for cursor
+/// selection/highlighting, not bulk script execution: a console's Run All
+/// action must preserve the database's own statement boundaries.
+pub fn split_sql_statement_spans_with_soft_boundaries(
+    sql: &str,
+    dialect: StatementScanDialect,
+) -> Vec<SqlStatementSpan<'_>> {
+    let mut statements = Vec::new();
+    for hard_span in split_sql_statement_spans(sql, dialect) {
+        let source = hard_span.text;
+        let masked = mask_sql_noise_for_soft_boundaries(source, dialect);
+        let mut start = hard_span.start;
+        let mut initial_keyword: Option<&str> = None;
+        let mut previous_non_empty_line = "";
+        let mut blank_lines = 0usize;
+        let mut parenthesis_depth = 0usize;
+        let mut line_offset = 0usize;
+
+        for line_with_newline in masked.split_inclusive('\n') {
+            let line = line_with_newline
+                .strip_suffix('\n')
+                .unwrap_or(line_with_newline);
+            let trimmed = line.trim();
+            let keyword = soft_statement_keyword(line);
+
+            if initial_keyword.is_none() && !trimmed.is_empty() {
+                initial_keyword = keyword;
+            } else if blank_lines > 0 && parenthesis_depth == 0 {
+                if let (Some(initial), Some(candidate)) = (initial_keyword, keyword) {
+                    if !soft_statement_is_wrapped_continuation(initial, candidate)
+                        && !soft_statement_is_set_continuation(previous_non_empty_line, candidate)
+                    {
+                        let leading = line.len() - line.trim_start().len();
+                        let next_start = hard_span.start + line_offset + leading;
+                        push_statement_span(&mut statements, sql, start, next_start, dialect);
+                        start = next_start;
+                        initial_keyword = Some(candidate);
+                    }
+                }
+            }
+
+            for character in line.chars() {
+                match character {
+                    '(' => parenthesis_depth += 1,
+                    ')' => parenthesis_depth = parenthesis_depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+            if trimmed.is_empty() {
+                if initial_keyword.is_some() {
+                    blank_lines += 1;
+                }
+            } else {
+                previous_non_empty_line = trimmed;
+                blank_lines = 0;
+            }
+            line_offset += line_with_newline.len();
+        }
+        push_statement_span(&mut statements, sql, start, hard_span.end, dialect);
+    }
     statements
 }
 
@@ -929,17 +1138,14 @@ fn contains_read_only_forbidden_syntax(
             }
         }
 
+        if let Some(end) = skip_quoted_or_identifier_region(sql, index, dialect) {
+            index = end;
+            continue;
+        }
+
         let Some(ch) = sql[index..].chars().next() else {
             break;
         };
-        let is_quoted_region = match dialect {
-            StatementScanDialect::Mysql => matches!(ch, '\'' | '"' | '`'),
-            StatementScanDialect::Postgres => matches!(ch, '\'' | '"'),
-        };
-        if is_quoted_region {
-            index = skip_quoted_region(sql, index, ch, dialect);
-            continue;
-        }
 
         if is_identifier_start(ch) {
             let start = index;
@@ -1095,6 +1301,31 @@ fn strict_quoted_region_end(
     Err("Filter SQL contains an unterminated quoted value")
 }
 
+fn strict_sqlserver_bracket_identifier_end(
+    sql: &str,
+    mut index: usize,
+) -> Result<usize, &'static str> {
+    debug_assert!(sql[index..].starts_with('['));
+    index += '['.len_utf8();
+
+    while index < sql.len() {
+        let Some(ch) = sql[index..].chars().next() else {
+            break;
+        };
+        index += ch.len_utf8();
+        if ch != ']' {
+            continue;
+        }
+        if sql[index..].starts_with(']') {
+            index += ']'.len_utf8();
+            continue;
+        }
+        return Ok(index);
+    }
+
+    Err("Filter SQL contains an unterminated quoted identifier")
+}
+
 /// Validates an untrusted SQL fragment before it is inserted as a table `WHERE` predicate.
 ///
 /// The validator intentionally accepts expressions rather than complete statements. Quoted
@@ -1142,9 +1373,20 @@ pub fn validate_sql_filter_expression(
             break;
         };
 
+        if dialect == StatementScanDialect::SqlServer && ch == '[' {
+            let end =
+                strict_sqlserver_bracket_identifier_end(sql, index).map_err(ToString::to_string)?;
+            index = end;
+            saw_token = true;
+            saw_expression_content = true;
+            continue;
+        }
+
         let is_quoted_region = match dialect {
             StatementScanDialect::Mysql => matches!(ch, '\'' | '"' | '`'),
-            StatementScanDialect::Postgres => matches!(ch, '\'' | '"'),
+            StatementScanDialect::Postgres | StatementScanDialect::SqlServer => {
+                matches!(ch, '\'' | '"')
+            }
         };
         if is_quoted_region {
             let end = strict_quoted_region_end(sql, index, ch).map_err(ToString::to_string)?;
@@ -1235,8 +1477,9 @@ pub fn validate_sql_filter_expression(
 mod tests {
     use super::{
         classify_statement, execution_mode, execution_statement_kind, has_multiple_statements,
-        split_sql_statement_spans, split_sql_statements, validate_read_only_sql,
-        validate_sql_filter_expression, QueryExecutionMode, StatementKind, StatementScanDialect,
+        split_sql_statement_spans, split_sql_statement_spans_with_soft_boundaries,
+        split_sql_statements, validate_read_only_sql, validate_sql_filter_expression,
+        QueryExecutionMode, StatementKind, StatementScanDialect,
     };
 
     #[test]
@@ -1424,6 +1667,25 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_bracket_identifiers_preserve_statement_and_filter_boundaries() {
+        let sql = "SELECT [semi;colon] FROM [dbo].[orders]; SELECT 2";
+        assert_eq!(
+            split_sql_statements(sql, StatementScanDialect::SqlServer),
+            vec!["SELECT [semi;colon] FROM [dbo].[orders]", "SELECT 2"]
+        );
+        assert!(validate_read_only_sql(
+            "SELECT [DELETE;] FROM [dbo].[orders]",
+            StatementScanDialect::SqlServer,
+        )
+        .is_ok());
+        assert!(validate_sql_filter_expression(
+            "[order;status] = 1",
+            StatementScanDialect::SqlServer,
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn detects_mysql_multi_statement_scripts() {
         assert!(has_multiple_statements(
             "SELECT 1; CREATE TABLE users(id INT)",
@@ -1518,6 +1780,31 @@ mod tests {
             &sql[statements[1].start..statements[1].end],
             statements[1].text
         );
+    }
+
+    #[test]
+    fn soft_boundaries_recover_blank_line_separated_top_level_queries() {
+        let sql = "SELECT * FROM first_table\n\nSELECT * FROM second_table";
+        let statements =
+            split_sql_statement_spans_with_soft_boundaries(sql, StatementScanDialect::Postgres);
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].text, "SELECT * FROM first_table");
+        assert_eq!(statements[1].text, "SELECT * FROM second_table");
+    }
+
+    #[test]
+    fn soft_boundaries_keep_wrapped_nested_and_set_queries_together() {
+        for sql in [
+            "WITH recent AS (\n  SELECT 1\n)\n\nSELECT * FROM recent",
+            "SELECT * FROM (\n\n  SELECT * FROM nested\n) nested_query",
+            "SELECT 1\nUNION ALL\n\nSELECT 2",
+            "SELECT '-- SELECT'\n\n/* SELECT */\nFROM logs",
+        ] {
+            let statements =
+                split_sql_statement_spans_with_soft_boundaries(sql, StatementScanDialect::Postgres);
+            assert_eq!(statements.len(), 1, "should not split: {sql}");
+        }
     }
 
     #[test]

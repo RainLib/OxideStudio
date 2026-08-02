@@ -3,7 +3,7 @@
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppBar } from "@/components/AppBar";
 import { ThemeContext, type ThemeContextType } from "@/theme/ThemeProvider";
 
@@ -39,11 +39,19 @@ describe("Workbench settings entry", () => {
   let container: HTMLDivElement;
   let root: Root | null = null;
 
+  beforeEach(() => {
+    // Keep the title-bar test independent from the first-run account popover.
+    // Under full-suite load its delayed auto-open can otherwise race the
+    // settings popover, even though the settings behavior itself is correct.
+    localStorage.setItem("oxide-enterprise-account-choice-seen", "1");
+  });
+
   afterEach(() => {
     root?.unmount();
     root = null;
     container?.remove();
     document.body.innerHTML = "";
+    localStorage.removeItem("oxide-enterprise-account-choice-seen");
   });
 
   it("opens workspace settings from the title bar", async () => {

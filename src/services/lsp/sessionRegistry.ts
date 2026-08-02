@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DatabaseDriver } from "@/services/tauri/types";
+import type { DatabaseCapabilities, DatabaseDriver } from "@/services/tauri/types";
 import { LspClient } from "./client";
 import {
   builtInLspProfileForDriver,
@@ -38,10 +38,11 @@ export const LSP_SESSION_IDLE_SHUTDOWN_MS = 30_000;
 export function getLspSessionDescriptor(options: {
   connectionId: string | null | undefined;
   driver: DatabaseDriver | null | undefined;
+  capabilities?: DatabaseCapabilities;
 }): LspSessionDescriptor | null {
   if (!options.connectionId || !options.driver) return null;
 
-  const profile = builtInLspProfileForDriver(options.driver);
+  const profile = builtInLspProfileForDriver(options.driver, options.capabilities);
   if (!profile || profile.activationPolicy === "off") return null;
 
   const key = lspSessionKeyForDriver({
@@ -64,6 +65,7 @@ export function getLspSessionDescriptor(options: {
 export async function ensureLspSession(options: {
   connectionId: string;
   driver: DatabaseDriver;
+  capabilities?: DatabaseCapabilities;
 }) {
   const descriptor = getLspSessionDescriptor(options);
   if (!descriptor) return null;

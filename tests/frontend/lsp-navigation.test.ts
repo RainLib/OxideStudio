@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { revealLspDatabaseDefinition } from "@/lib/lspNavigation";
+import {
+  revealLspDatabaseDefinition,
+  revealLspProjectDefinition,
+} from "@/lib/lspNavigation";
 import { getLspDatabaseObjectUri } from "@/services/lsp/objectUri";
+import { getLspProjectDocumentUri } from "@/services/lsp/document";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useDatabaseNavigationStore } from "@/lib/databaseNavigation";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
@@ -13,6 +17,11 @@ vi.mock("@/services/tauri/settings.service", () => ({
     resetAppSettings: vi.fn(),
   },
 }));
+
+const projectFileOpenMock = vi.hoisted(() => ({
+  openProjectFileInEditor: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/lib/projectFileOpen", () => projectFileOpenMock);
 
 describe("LSP database definition navigation", () => {
   beforeEach(() => {
@@ -65,5 +74,15 @@ describe("LSP database definition navigation", () => {
       revealLspDatabaseDefinition("file:///schema.sql", "project-1")
     ).resolves.toBe(false);
     expect(useDatabaseNavigationStore.getState().revealRequest).toBeNull();
+  });
+
+  it("opens only definitions belonging to the active project", async () => {
+    const uri = getLspProjectDocumentUri("project-1", "queries/report.sql");
+
+    await expect(revealLspProjectDefinition(uri, "project-1")).resolves.toBe(true);
+    expect(projectFileOpenMock.openProjectFileInEditor).toHaveBeenCalledWith(
+      "queries/report.sql",
+    );
+    await expect(revealLspProjectDefinition(uri, "project-2")).resolves.toBe(false);
   });
 });

@@ -20,6 +20,7 @@ export type SqlCompletionSettings = {
   keywordCase: "upper" | "lower" | "preserve";
   tableAlias: "none" | "initials";
   rankByUsage: boolean;
+  appendSpace: boolean;
 };
 
 export type WorkbenchToolWindowId =
@@ -40,6 +41,11 @@ export type PinnableTitleToolId = Extract<
 export type WorkbenchSide = "left" | "right";
 
 export type AppLocale = "system" | "en-US" | "zh-CN";
+export type AppearanceStylePreset = "oxide" | "graphite" | "violet" | "terminal";
+export type AppearanceAccent = "blue" | "violet" | "teal" | "amber";
+export type AppearanceFontFamily = "system" | "sans" | "mono";
+export type AppearanceDensity = "compact" | "comfortable";
+export type AppearanceChromeGradient = "immersive" | "subtle" | "off";
 
 export type WorkbenchToolWindows = {
   databaseExplorer: {
@@ -72,6 +78,12 @@ export type AppSettings = {
   appearance: {
     uiFontSize: number;
     locale: AppLocale;
+    stylePreset: AppearanceStylePreset;
+    accent: AppearanceAccent;
+    fontFamily: AppearanceFontFamily;
+    density: AppearanceDensity;
+    chromeGradient: AppearanceChromeGradient;
+    reduceMotion: boolean;
   };
   workbench: {
     layout: {
@@ -116,6 +128,12 @@ export type AppSettings = {
     showOnlySelectedSchemas: boolean;
     showCacheBadges: boolean;
   };
+  drivers: {
+    /** HTTPS URL for the optional, signed external-driver discovery catalog. */
+    catalogUrl: string;
+    /** Restart-applied location of independently updateable driver packages. */
+    storePath: string;
+  };
   ai: {
     plannerKind: AiPlannerKind;
     shell: {
@@ -139,6 +157,12 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   appearance: {
     uiFontSize: 12,
     locale: "system",
+    stylePreset: "oxide",
+    accent: "blue",
+    fontFamily: "system",
+    density: "compact",
+    chromeGradient: "immersive",
+    reduceMotion: false,
   },
   workbench: {
     layout: {
@@ -230,6 +254,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
       keywordCase: "upper",
       tableAlias: "none",
       rankByUsage: true,
+      appendSpace: true,
     },
     inlineCompletion: {
       enabled: false,
@@ -257,6 +282,10 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     refreshMode: "cache-first",
     showOnlySelectedSchemas: true,
     showCacheBadges: true,
+  },
+  drivers: {
+    catalogUrl: "",
+    storePath: "",
   },
   ai: {
     plannerKind: "model",
@@ -318,6 +347,41 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         ["appearance", "locale"],
         ["system", "en-US", "zh-CN"],
         defaults.appearance.locale,
+      ),
+      stylePreset: enumAt(
+        raw,
+        ["appearance", "stylePreset"],
+        ["oxide", "graphite", "violet", "terminal"],
+        defaults.appearance.stylePreset,
+      ),
+      accent: enumAt(
+        raw,
+        ["appearance", "accent"],
+        ["blue", "violet", "teal", "amber"],
+        defaults.appearance.accent,
+      ),
+      fontFamily: enumAt(
+        raw,
+        ["appearance", "fontFamily"],
+        ["system", "sans", "mono"],
+        defaults.appearance.fontFamily,
+      ),
+      density: enumAt(
+        raw,
+        ["appearance", "density"],
+        ["compact", "comfortable"],
+        defaults.appearance.density,
+      ),
+      chromeGradient: enumAt(
+        raw,
+        ["appearance", "chromeGradient"],
+        ["immersive", "subtle", "off"],
+        defaults.appearance.chromeGradient,
+      ),
+      reduceMotion: boolAt(
+        raw,
+        ["appearance", "reduceMotion"],
+        defaults.appearance.reduceMotion,
       ),
     },
     workbench: {
@@ -459,6 +523,11 @@ export function normalizeAppSettings(value: unknown): AppSettings {
           ["editor", "sqlCompletion", "rankByUsage"],
           defaults.editor.sqlCompletion.rankByUsage,
         ),
+        appendSpace: boolAt(
+          raw,
+          ["editor", "sqlCompletion", "appendSpace"],
+          defaults.editor.sqlCompletion.appendSpace,
+        ),
       },
       inlineCompletion: {
         enabled: boolAt(
@@ -564,6 +633,19 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         raw,
         ["databaseExplorer", "showCacheBadges"],
         defaults.databaseExplorer.showCacheBadges,
+      ),
+    },
+    drivers: {
+      catalogUrl: boundedHttpsUrlAt(
+        raw,
+        ["drivers", "catalogUrl"],
+        defaults.drivers.catalogUrl,
+      ),
+      storePath: stringAt(
+        raw,
+        ["drivers", "storePath"],
+        defaults.drivers.storePath,
+        4096,
       ),
     },
     ai: {
@@ -825,6 +907,31 @@ function stringAt(
   if (typeof item !== "string") return fallback;
   const normalized = item.trim();
   return normalized && normalized.length <= maxLength ? normalized : fallback;
+}
+
+function boundedHttpsUrlAt(
+  value: Record<string, unknown>,
+  path: string[],
+  fallback: string,
+) {
+  const item = getAt(value, path);
+  if (typeof item !== "string") return fallback;
+  const normalized = item.trim();
+  if (!normalized) return "";
+  if (normalized.length > 512) return fallback;
+  try {
+    const url = new URL(normalized);
+    return url.protocol === "https:" &&
+      Boolean(url.hostname) &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash
+      ? url.toString()
+      : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function vimMappingsAt(

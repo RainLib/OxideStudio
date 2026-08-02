@@ -6,6 +6,7 @@ import type {
   ExplainQueryRequest,
   ElasticsearchConsoleFileExportResult,
   ElasticsearchConsoleFileImportResult,
+  SqlScriptImportPreview,
   SqlScriptImportResult,
   SqlStatementSelection,
   SqlSyntaxValidation,
@@ -61,16 +62,21 @@ export async function resolveSqlStatementAtCursor(
 export async function validateSqlSyntax(
   driver: string,
   sql: string,
+  lspLanguageId?: string,
+  lspServerDialect?: string,
 ): Promise<SqlSyntaxValidation> {
   return invokeWithInterceptors<SqlSyntaxValidation>("validate_sql_syntax", {
     driver,
     sql,
+    ...(lspLanguageId ? { lspLanguageId } : {}),
+    ...(lspServerDialect ? { lspServerDialect } : {}),
   });
 }
 
 export async function importSqlScript(
   connectionId: string,
   filePath: string,
+  reviewDigest: string,
   schema?: string,
   database?: string,
 ): Promise<SqlScriptImportResult> {
@@ -79,7 +85,18 @@ export async function importSqlScript(
     filePath,
     schema,
     database,
+    reviewDigest,
   });
+}
+
+export async function previewSqlScriptImport(
+  connectionId: string,
+  filePath: string,
+): Promise<SqlScriptImportPreview> {
+  return invokeWithInterceptors<SqlScriptImportPreview>(
+    "preview_sql_script_import",
+    { connectionId, filePath },
+  );
 }
 
 export async function importElasticsearchConsoleFile(): Promise<ElasticsearchConsoleFileImportResult | null> {
@@ -139,6 +156,7 @@ export async function getSqlCompletion(
 export const queryService = {
   executeQuery,
   executeReadOnlyQuery,
+  previewSqlScriptImport,
   importSqlScript,
   importElasticsearchConsoleFile,
   exportElasticsearchConsoleFile,

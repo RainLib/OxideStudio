@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/select";
 import { databaseService, tableService } from "@/services/tauri";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
+import { useConnectionStore } from "@/store/useConnectionStore";
 import type {
   AlterColumnValueMode,
   ColumnInfo,
@@ -184,6 +185,10 @@ export function EditColumnsDialog({
   const [error, setError] = useState<string | null>(null);
   const { loadTables, bumpMetadataVersion } = useSchemaStore();
   const { refreshTableTabs } = useTabStore();
+  const packageVersion = useConnectionStore((state) =>
+    state.connections.find((item) => item.id === connectionId)
+      ?.driverPackageVersion,
+  );
   const draftAutoIncrementSupported = supportsAutoIncrementForDataType(
     capabilities,
     draft.type
@@ -258,7 +263,7 @@ export function EditColumnsDialog({
     setError(null);
 
     databaseService
-      .getDatabaseCapabilities(driver)
+      .getDatabaseCapabilities(driver, packageVersion)
       .then((value) => {
         if (cancelled) return;
         setCapabilities(value);
@@ -273,7 +278,7 @@ export function EditColumnsDialog({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, connectionId, driver, schema, tableName]);
+  }, [isOpen, connectionId, driver, packageVersion, schema, tableName]);
 
   const updateDraft = (
     field: keyof ColumnDraft,
@@ -438,58 +443,58 @@ export function EditColumnsDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-[780px] bg-[#18181b] text-foreground border-white/10 max-h-[82vh] flex flex-col p-0 gap-0">
-        <DialogHeader className="p-4 border-b border-white/5">
-          <DialogTitle>Edit Columns</DialogTitle>
-          <div className="text-xs text-muted-foreground font-mono truncate">
+      <DialogContent className="flex max-h-[82vh] w-[780px] max-w-[calc(100vw-32px)] flex-col gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.35)]">
+        <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3">
+          <DialogTitle className="text-[13px] font-semibold">Edit Columns</DialogTitle>
+          <div className="truncate font-mono text-[10px] text-[hsl(var(--wb-text-muted))]">
             {schema}.{tableName}
           </div>
         </DialogHeader>
 
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        <div className="flex-1 space-y-4 overflow-y-auto p-4">
           {error && (
-            <div className="bg-destructive/10 text-destructive text-xs p-2 rounded border border-destructive/20">
+            <div className="rounded-[4px] border border-destructive/25 bg-destructive/10 px-2.5 py-2 text-[10px] text-destructive" role="alert">
               {error}
             </div>
           )}
 
           <div className="space-y-2">
-            <div className="text-xs font-medium text-muted-foreground">
+            <div className="text-[10px] font-medium text-[hsl(var(--wb-text-muted))]">
               Existing Columns
             </div>
-            <div className="border border-white/10 rounded-sm overflow-hidden">
+            <div className="overflow-hidden rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))]">
               {isLoading ? (
-                <div className="p-3 text-xs text-muted-foreground">
+                <div className="p-3 text-[10px] text-[hsl(var(--wb-text-muted))]">
                   Loading columns...
                 </div>
               ) : columns.length === 0 ? (
-                <div className="p-3 text-xs text-muted-foreground">
+                <div className="p-3 text-[10px] text-[hsl(var(--wb-text-muted))]">
                   No columns loaded
                 </div>
               ) : (
                 columns.map((column) => (
                   <div
                     key={column.name}
-                    className="grid grid-cols-[minmax(140px,1fr)_minmax(120px,1fr)_minmax(120px,auto)_96px] items-center gap-2 px-3 py-2 border-b border-white/5 last:border-b-0 bg-[#27272a]/30"
+                    className="grid grid-cols-[minmax(140px,1fr)_minmax(120px,1fr)_minmax(120px,auto)_96px] items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2 last:border-b-0 hover:bg-[hsl(var(--wb-hover))]"
                   >
                     <div className="min-w-0">
                       <div className="font-mono text-xs truncate">
                         {column.name}
                       </div>
                       {column.comment && (
-                        <div className="text-[10px] text-muted-foreground truncate">
+                        <div className="truncate text-[10px] text-[hsl(var(--wb-text-muted))]">
                           {column.comment}
                         </div>
                       )}
                     </div>
-                    <div className="font-mono text-[11px] text-muted-foreground truncate">
+                    <div className="truncate font-mono text-[11px] text-[hsl(var(--wb-text-muted))]">
                       {column.data_type}
                     </div>
                     <div className="flex flex-wrap justify-end gap-1">
                       {formatColumnFlags(column).map((flag) => (
                         <span
                           key={flag}
-                          className="text-[9px] px-1.5 py-0.5 rounded bg-background-tertiary text-muted-foreground border border-white/10"
+                          className="rounded-[3px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-1.5 py-0.5 text-[9px] text-[hsl(var(--wb-text-muted))]"
                         >
                           {flag}
                         </span>
@@ -499,7 +504,7 @@ export function EditColumnsDialog({
                       <Button
                         variant="ghost"
                         size="icon"
-                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                        className="h-7 w-7 text-[hsl(var(--wb-text-muted))] hover:text-[hsl(var(--wb-text))]"
                         onClick={() => handleStartAlterColumn(column)}
                         disabled={
                           !!alteringColumn ||
@@ -514,7 +519,7 @@ export function EditColumnsDialog({
                       <Button
                         variant="ghost"
                         size="icon"
-                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                        className="h-7 w-7 text-[hsl(var(--wb-text-muted))] hover:text-[hsl(var(--wb-text))]"
                         onClick={() => handleRenameColumn(column.name)}
                         disabled={
                           !!renamingColumn ||
@@ -529,7 +534,7 @@ export function EditColumnsDialog({
                       <Button
                         variant="ghost"
                         size="icon"
-                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        className="h-7 w-7 text-[hsl(var(--wb-text-muted))] hover:text-destructive"
                         onClick={() => handleDropColumn(column.name)}
                         disabled={
                           !!droppingColumn ||
@@ -549,10 +554,10 @@ export function EditColumnsDialog({
           </div>
 
           {alterDraft && (
-            <div className="space-y-2 border border-white/10 rounded-sm p-3 bg-[#27272a]/30">
+            <div className="space-y-2 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-3">
               <div className="flex items-center justify-between gap-2">
                 <div>
-                  <div className="text-xs font-medium text-muted-foreground">
+                  <div className="text-[10px] font-medium text-[hsl(var(--wb-text-muted))]">
                     Alter Column
                   </div>
                   <div className="font-mono text-xs">{alterDraft.name}</div>
@@ -573,7 +578,7 @@ export function EditColumnsDialog({
                     value={alterDraft.type}
                     onValueChange={(value) => updateAlterDraft("type", value)}
                   >
-                    <SelectTrigger className="h-8 text-xs bg-[#18181b] border-white/10">
+                    <SelectTrigger className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] text-xs">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -589,7 +594,7 @@ export function EditColumnsDialog({
                   value={alterDraft.length}
                   onChange={(e) => updateAlterDraft("length", e.target.value)}
                   placeholder="Length"
-                  className="col-span-2 h-8 text-xs bg-[#18181b] border-white/10"
+                  className="col-span-2 h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] text-xs"
                 />
                 <label className="col-span-1 flex items-center gap-1 text-xs">
                   <Checkbox
@@ -610,7 +615,7 @@ export function EditColumnsDialog({
                       )
                     }
                   >
-                    <SelectTrigger className="h-8 text-xs bg-[#18181b] border-white/10">
+                    <SelectTrigger className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] text-xs">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -633,7 +638,7 @@ export function EditColumnsDialog({
                   }
                   placeholder="Default expression"
                   disabled={alterDraft.defaultMode !== "set"}
-                  className="col-span-4 h-8 text-xs bg-[#18181b] border-white/10 disabled:opacity-50"
+                  className="col-span-4 h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] text-xs disabled:opacity-50"
                 />
               </div>
               <div className="grid grid-cols-12 gap-2 items-center">
@@ -647,7 +652,7 @@ export function EditColumnsDialog({
                       )
                     }
                   >
-                    <SelectTrigger className="h-8 text-xs bg-[#18181b] border-white/10">
+                    <SelectTrigger className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] text-xs">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -668,7 +673,7 @@ export function EditColumnsDialog({
                   onChange={(e) => updateAlterDraft("comment", e.target.value)}
                   placeholder="Comment"
                   disabled={alterDraft.commentMode !== "set"}
-                  className="col-span-6 h-8 text-xs bg-[#18181b] border-white/10 disabled:opacity-50"
+                  className="col-span-6 h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] text-xs disabled:opacity-50"
                 />
                 <Button
                   onClick={handleAlterColumn}
@@ -682,7 +687,7 @@ export function EditColumnsDialog({
           )}
 
           <div className="space-y-2">
-            <div className="text-xs font-medium text-muted-foreground">
+            <div className="text-[10px] font-medium text-[hsl(var(--wb-text-muted))]">
               Add Column
             </div>
             <div className="grid grid-cols-12 gap-2 items-center">
@@ -690,14 +695,14 @@ export function EditColumnsDialog({
                 value={draft.name}
                 onChange={(e) => updateDraft("name", e.target.value)}
                 placeholder="Column name"
-                className="col-span-3 h-8 text-xs bg-[#27272a] border-white/10"
+                className="col-span-3 h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] text-xs"
               />
               <div className="col-span-2">
                 <Select
                   value={draft.type}
                   onValueChange={(value) => updateDraft("type", value)}
                 >
-                  <SelectTrigger className="h-8 text-xs bg-[#27272a] border-white/10">
+                  <SelectTrigger className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] text-xs">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -713,13 +718,13 @@ export function EditColumnsDialog({
                 value={draft.length}
                 onChange={(e) => updateDraft("length", e.target.value)}
                 placeholder="Length"
-                className="col-span-2 h-8 text-xs bg-[#27272a] border-white/10"
+                className="col-span-2 h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] text-xs"
               />
               <Input
                 value={draft.comment}
                 onChange={(e) => updateDraft("comment", e.target.value)}
                 placeholder="Comment"
-                className="col-span-2 h-8 text-xs bg-[#27272a] border-white/10"
+                className="col-span-2 h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] text-xs"
               />
               <div className="col-span-3 flex items-center gap-2 h-8">
                 <label className="flex items-center gap-1 text-xs">
@@ -768,11 +773,11 @@ export function EditColumnsDialog({
           </div>
         </div>
 
-        <DialogFooter className="p-4 border-t border-white/5 bg-[#27272a]/30">
-          <Button variant="ghost" onClick={onClose} disabled={isSubmitting}>
+        <DialogFooter className="border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.56)] px-4 py-2.5">
+          <Button className="h-7 text-[11px]" variant="ghost" onClick={onClose} disabled={isSubmitting}>
             Close
           </Button>
-          <Button onClick={handleAddColumn} disabled={isSubmitting}>
+          <Button className="h-7 text-[11px]" onClick={handleAddColumn} disabled={isSubmitting}>
             <Plus size={14} className="mr-2" />
             {isSubmitting ? "Adding..." : "Add Column"}
           </Button>

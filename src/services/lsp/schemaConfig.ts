@@ -58,6 +58,9 @@ export type LspSchemaDefinition = {
   id: string;
   catalog?: string | null;
   database: string;
+  driver?: string | null;
+  server_version?: string | null;
+  snapshot_revision?: number | null;
   source_uri: string | null;
   tables: LspTableDefinition[];
   functions: LspFunctionDefinition[];
@@ -136,6 +139,9 @@ export function lspSchemaSignature(schemaDefinitions: LspSchemaDefinition[]) {
       id: schema.id,
       catalog: schema.catalog ?? null,
       database: schema.database,
+      driver: schema.driver ?? null,
+      server_version: schema.server_version ?? null,
+      snapshot_revision: schema.snapshot_revision ?? null,
       source_uri: schema.source_uri ?? null,
       tables: sortCanonical(
         schema.tables.map((table) => ({

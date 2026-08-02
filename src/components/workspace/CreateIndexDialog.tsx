@@ -87,33 +87,33 @@ export function CreateIndexDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-[520px] bg-[#18181b] text-foreground border-white/10 p-0 gap-0">
-        <DialogHeader className="p-4 border-b border-white/5">
-          <DialogTitle>Create Index</DialogTitle>
-          <div className="text-xs text-muted-foreground font-mono truncate">
+      <DialogContent className="w-[520px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.35)]">
+        <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3">
+          <DialogTitle className="text-[13px] font-semibold">Create Index</DialogTitle>
+          <div className="truncate font-mono text-[10px] text-[hsl(var(--wb-text-muted))]">
             {tableName}
           </div>
         </DialogHeader>
 
-        <div className="p-4 space-y-4">
+        <div className="space-y-4 p-4">
           {error && (
-            <div className="bg-destructive/10 text-destructive text-xs p-2 rounded border border-destructive/20">
+            <div className="rounded-[4px] border border-destructive/25 bg-destructive/10 px-2.5 py-2 text-[10px] text-destructive" role="alert">
               {error}
             </div>
           )}
 
           <div className="space-y-1">
-            <label className="text-xs font-medium text-muted-foreground">
+            <label className="text-[10px] font-medium text-[hsl(var(--wb-text-muted))]">
               Index Name
             </label>
             <Input
               value={indexName}
               onChange={(event) => setIndexName(event.target.value)}
-              className="h-8 text-xs bg-[#27272a] border-white/10 font-mono"
+              className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] font-mono text-[11px]"
             />
           </div>
 
-          <label className="flex items-center gap-2 text-xs">
+          <label className="flex items-center gap-2 text-[11px] text-[hsl(var(--wb-text))]">
             <Checkbox
               checked={unique}
               onCheckedChange={(checked) => setUnique(!!checked)}
@@ -122,19 +122,19 @@ export function CreateIndexDialog({
           </label>
 
           <div className="space-y-2">
-            <div className="text-xs font-medium text-muted-foreground">
+            <div className="text-[10px] font-medium text-[hsl(var(--wb-text-muted))]">
               Columns
             </div>
-            <div className="max-h-56 overflow-auto border border-white/10 rounded-sm">
+            <div className="max-h-56 overflow-auto rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))]">
               {columns.length === 0 ? (
-                <div className="p-3 text-xs text-muted-foreground">
+                <div className="p-3 text-[10px] text-[hsl(var(--wb-text-muted))]">
                   No columns loaded
                 </div>
               ) : (
                 columns.map((column) => (
                   <label
                     key={column.name}
-                    className="flex items-center gap-2 px-3 py-2 border-b border-white/5 last:border-b-0 text-xs"
+                    className="flex items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2 text-[11px] last:border-b-0 hover:bg-[hsl(var(--wb-hover))]"
                   >
                     <Checkbox
                       checked={selectedColumns.includes(column.name)}
@@ -145,7 +145,7 @@ export function CreateIndexDialog({
                     <span className="min-w-0 flex-1 truncate font-mono">
                       {column.name}
                     </span>
-                    <span className="shrink-0 text-muted-foreground font-mono">
+                    <span className="shrink-0 font-mono text-[10px] text-[hsl(var(--wb-text-muted))]">
                       {column.data_type}
                     </span>
                   </label>
@@ -155,11 +155,11 @@ export function CreateIndexDialog({
           </div>
         </div>
 
-        <DialogFooter className="p-4 border-t border-white/5 bg-[#27272a]/30">
-          <Button variant="ghost" onClick={onClose} disabled={isSubmitting}>
+        <DialogFooter className="border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.56)] px-4 py-2.5">
+          <Button className="h-7 text-[11px]" variant="ghost" onClick={onClose} disabled={isSubmitting}>
             Cancel
           </Button>
-          <Button onClick={handleCreate} disabled={isSubmitting}>
+          <Button className="h-7 text-[11px]" onClick={handleCreate} disabled={isSubmitting}>
             {isSubmitting ? "Creating..." : "Create Index"}
           </Button>
         </DialogFooter>

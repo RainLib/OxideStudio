@@ -73,6 +73,19 @@ export function normalizeInvokeError(
   error: unknown,
 ): ApiError {
   if (error instanceof ApiError) return error;
+  if (isDesktopInvokeUnavailable(error)) {
+    return new ApiError(
+      "The OxideStudio desktop backend is unavailable. Open this workspace in the desktop app to connect to databases or use project tools.",
+      "TAURI_RUNTIME_UNAVAILABLE",
+      error,
+      {
+        retryable: false,
+        category: "application",
+        context: safeCommandContext(args),
+        command,
+      },
+    );
+  }
   const payload = structuredErrorPayload(error);
   const code = payload?.code || commandFailureCode(command);
   const message =
@@ -89,6 +102,20 @@ export function normalizeInvokeError(
     },
     command,
   });
+}
+
+/**
+ * `@tauri-apps/api` throws this otherwise opaque TypeError when Vite is opened
+ * in a normal browser rather than inside Tauri. Surface a recoverable product
+ * state instead of leaking an implementation detail into Database Explorer.
+ */
+function isDesktopInvokeUnavailable(error: unknown) {
+  return (
+    error instanceof TypeError &&
+    /(?:cannot read propert(?:y|ies).*invoke|reading ['"]invoke['"])/iu.test(
+      error.message,
+    )
+  );
 }
 
 function structuredErrorPayload(error: unknown): ApiErrorPayload | null {
@@ -166,6 +193,7 @@ function safeCommandContext(args?: Record<string, unknown>) {
     "table",
     "view",
     "queryId",
+    "transferId",
     "relativePath",
     "newRelativePath",
   ]) {

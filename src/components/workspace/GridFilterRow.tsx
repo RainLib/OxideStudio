@@ -1,9 +1,13 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { GridColumn } from "@glideapps/glide-data-grid";
 import { ArrowUpDown, Code2, Filter, Plus, Search, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import type { DatabaseDriver } from "@/services/tauri/types";
+import type { DatabaseCapabilities, DatabaseDriver } from "@/services/tauri/types";
 import { WhereCompletionInput } from "./WhereCompletionInput";
+import {
+  rememberDataGridConditionHistory,
+  type DataGridConditionHistoryScope,
+} from "@/features/data-grid/model/conditionHistory";
 import {
   Select,
   SelectContent,
@@ -40,7 +44,9 @@ interface GridFilterRowProps {
   onSearch?: () => void;
   connectionId?: string | null;
   driver?: DatabaseDriver | null;
+  capabilities?: DatabaseCapabilities | null;
   tabId?: string | null;
+  databaseName?: string | null;
   schemaName?: string | null;
   tableName?: string | null;
   sortColumn?: string | null;
@@ -76,13 +82,26 @@ export function GridFilterRow({
   onSearch,
   connectionId,
   driver,
+  capabilities,
   tabId,
+  databaseName,
   schemaName,
   tableName,
   sortColumn,
   sortDirection,
   onSortChange,
 }: GridFilterRowProps) {
+  const [whereHistoryRevision, setWhereHistoryRevision] = useState(0);
+  const whereHistoryScope = useMemo<DataGridConditionHistoryScope>(
+    () => ({ connectionId, databaseName, schemaName, tableName }),
+    [connectionId, databaseName, schemaName, tableName],
+  );
+  const applySqlFilter = useCallback(() => {
+    rememberDataGridConditionHistory(whereHistoryScope, sqlFilter);
+    setWhereHistoryRevision((revision) => revision + 1);
+    onSearch?.();
+  }, [onSearch, sqlFilter, whereHistoryScope]);
+
   useEffect(() => {
     if (mode !== "visual" || columns.length === 0) return;
     const firstColumn = String(columns[0]?.id || columns[0]?.title || "");
@@ -148,9 +167,12 @@ export function GridFilterRow({
           onApply={onSearch}
           connectionId={connectionId}
           driver={driver}
+          capabilities={capabilities}
           tabId={tabId}
+          databaseName={databaseName}
           schemaName={schemaName}
           tableName={tableName}
+          historyRevision={whereHistoryRevision}
         />
         {sqlFilter && (
           <button
@@ -166,7 +188,7 @@ export function GridFilterRow({
         <button
           type="button"
           className={filterButtonClass}
-          onClick={onSearch}
+          onClick={applySqlFilter}
           title="Apply WHERE condition"
         >
           <Search size={12} />

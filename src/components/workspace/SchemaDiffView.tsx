@@ -17,7 +17,9 @@ import {
   X,
 } from "lucide-react";
 import { requestDatabaseObjectReveal } from "@/lib/databaseNavigation";
+import { normalizeDatabaseDriverName } from "@/lib/databaseDialect";
 import { cn } from "@/lib/utils";
+import { isProjectDdlSnapshot } from "@/features/schema-diff/model/projectDdlSnapshot";
 import { schemaService } from "@/services/tauri/schema.service";
 import type {
   SchemaChange,
@@ -68,6 +70,7 @@ export function SchemaDiffView() {
   const [confirmationTarget, setConfirmationTarget] = useState("");
   const [allowReview, setAllowReview] = useState(false);
   const [allowDestructive, setAllowDestructive] = useState(false);
+  const [allowNonTransactional, setAllowNonTransactional] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
   const [execution, setExecution] = useState<SchemaMigrationJournalEntry | null>(null);
   const [executionError, setExecutionError] = useState<string | null>(null);
@@ -106,6 +109,7 @@ export function SchemaDiffView() {
     setConfirmationTarget("");
     setAllowReview(false);
     setAllowDestructive(false);
+    setAllowNonTransactional(false);
     setExecution(null);
     setExecutionError(null);
     setPreviewSurface("migration");
@@ -130,7 +134,17 @@ export function SchemaDiffView() {
   const destructiveChangeCount = plan.changes.filter(
     (change) => change.risk === "destructive" || !change.reversible,
   ).length;
-  const supportsSafeApply = plan.driver === "postgres" && plan.transactional;
+  // The backend resolves aliases (for example `mariadb`) through the dialect
+  // registry before it executes a migration. Mirror that decision here so the
+  // confirmation surface cannot hide a reviewed, executable family plan.
+  const normalizedPlanDriver = normalizeDatabaseDriverName(plan.driver);
+  const isNonTransactionalPlan =
+    normalizedPlanDriver === "mysql" && !plan.transactional;
+  const isOfflineProjectDdlSource = isProjectDdlSnapshot(source);
+  const supportsSafeApply =
+    !isOfflineProjectDdlSource &&
+    ((normalizedPlanDriver === "postgres" && plan.transactional) ||
+      isNonTransactionalPlan);
   const currentJournal = execution || recentExecutions[0] || null;
   const requiredConfirmationTarget = [
     target.connectionName,
@@ -140,7 +154,8 @@ export function SchemaDiffView() {
   const confirmationReady =
     confirmationTarget.trim() === requiredConfirmationTarget &&
     (!requiresReview || allowReview) &&
-    (!requiresDestructive || allowDestructive);
+    (!requiresDestructive || allowDestructive) &&
+    (!isNonTransactionalPlan || allowNonTransactional);
 
   const copySql = async () => {
     if (!previewSql) return;
@@ -184,6 +199,7 @@ export function SchemaDiffView() {
         confirmationTarget: confirmationTarget.trim(),
         allowReview,
         allowDestructive,
+        allowNonTransactional,
       });
       setExecution(entry);
       setRecentExecutions((entries) => [
@@ -291,29 +307,40 @@ export function SchemaDiffView() {
             }
             title={
               !supportsSafeApply
-                ? "Safe automatic apply currently requires PostgreSQL transactional DDL"
+                ? isOfflineProjectDdlSource
+                  ? "Project DDL baselines are review-only. Capture a live snapshot before applying a migration."
+                  : "Automatic apply is available for PostgreSQL transactions and explicitly acknowledged MySQL DDL"
                 : plan.summary.blocked > 0
                   ? "Resolve blocked changes before applying"
-                  : "Refresh the live target, run preflight, apply atomically, then verify"
+                  : isNonTransactionalPlan
+                    ? "Refresh the live target, run preflight, apply each reviewed statement, then verify"
+                    : "Refresh the live target, run preflight, apply atomically, then verify"
             }
           >
             {isApplying ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
-            {isApplying ? "Applying…" : "Apply safely"}
+            {isApplying ? "Applying…" : isNonTransactionalPlan ? "Apply reviewed plan" : "Apply safely"}
           </button>
         </div>
       </header>
+
+      {isOfflineProjectDdlSource && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-amber-400/20 bg-amber-400/[0.045] px-4 py-2 text-[9px] text-amber-100/90">
+          <AlertTriangle size={12} className="shrink-0 text-amber-300" />
+          Project DDL baselines can be compared and reviewed, but cannot be applied. Capture a live baseline before creating an executable migration.
+        </div>
+      )}
 
       {confirmationOpen && (
         <section className="shrink-0 border-b border-amber-400/25 bg-amber-400/[0.045] px-4 py-3">
           <div className="flex items-start justify-between gap-6">
             <div className="min-w-0">
               <div className="flex items-center gap-2 text-[11px] font-semibold text-amber-200">
-                <ShieldAlert size={13} /> Confirm transactional migration
+                <ShieldAlert size={13} /> Confirm {isNonTransactionalPlan ? "non-transactional" : "transactional"} migration
               </div>
               <p className="mt-1 max-w-3xl text-[9px] leading-4 wb-muted">
-                OxideStudio will recapture the live target and reject stale plans, run every
-                generated preflight check, commit all {plan.changes.flatMap((change) => change.sql).length} statement(s)
-                in one PostgreSQL transaction, then recapture and compare the schema again.
+                {isNonTransactionalPlan
+                  ? `OxideStudio will recapture the live target and reject stale plans, run every generated preflight check, then execute ${plan.changes.flatMap((change) => change.sql).length} reviewed MySQL statement(s) one at a time. MySQL can auto-commit DDL, so a failed run may leave earlier statements applied; the journal and post-verification show the exact outcome.`
+                  : `OxideStudio will recapture the live target and reject stale plans, run every generated preflight check, commit all ${plan.changes.flatMap((change) => change.sql).length} statement(s) in one PostgreSQL transaction, then recapture and compare the schema again.`}
               </p>
             </div>
             <button
@@ -360,6 +387,18 @@ export function SchemaDiffView() {
                   className="accent-red-400"
                 />
                 I approve {destructiveChangeCount} destructive/non-reversible change(s)
+              </label>
+            )}
+            {isNonTransactionalPlan && (
+              <label className="flex h-7 items-center gap-2 text-[9px] text-amber-100/90">
+                <input
+                  type="checkbox"
+                  checked={allowNonTransactional}
+                  onChange={(event) => setAllowNonTransactional(event.target.checked)}
+                  disabled={isApplying}
+                  className="accent-amber-400"
+                />
+                I understand MySQL DDL can partially commit before a failure
               </label>
             )}
             <button
@@ -501,9 +540,11 @@ export function SchemaDiffView() {
                     ? currentJournal?.rollback.requiresManualReview
                       ? "Generated reverse plan · manual review required"
                       : "Generated reverse plan · review before use"
-                : plan.transactional
+                : plan.transactional && normalizedPlanDriver === "postgres"
                   ? "PostgreSQL · ROLLBACK guard"
-                  : "MySQL · DDL may auto-commit"}
+                  : normalizedPlanDriver === "mysql"
+                    ? "MySQL family · DDL may auto-commit"
+                    : "Metadata comparison · apply is unavailable"}
             </span>
           </div>
 
@@ -775,12 +816,15 @@ function formatMigrationStatus(status: SchemaMigrationStatus) {
       return "Rolled back";
     case "running":
       return "Running";
+    case "interrupted":
+      return "Interrupted — recapture required";
   }
 }
 
 function migrationStatusStyle(status: SchemaMigrationStatus) {
   if (status === "succeeded") return "border-emerald-400/25 text-emerald-300";
   if (status === "running") return "border-sky-400/25 text-sky-300";
+  if (status === "interrupted") return "border-red-400/25 text-red-300";
   if (status === "blocked") return "border-amber-400/25 text-amber-300";
   return "border-red-400/25 text-red-300";
 }
@@ -788,6 +832,7 @@ function migrationStatusStyle(status: SchemaMigrationStatus) {
 function statusTextStyle(status: SchemaMigrationStatus) {
   if (status === "succeeded") return "text-emerald-300";
   if (status === "running") return "text-sky-300";
+  if (status === "interrupted") return "text-red-300";
   if (status === "blocked") return "text-amber-300";
   return "text-red-300";
 }

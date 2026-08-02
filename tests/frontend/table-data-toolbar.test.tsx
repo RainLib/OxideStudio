@@ -109,7 +109,7 @@ describe("TableDataToolbar", () => {
       "Delete 2 selected rows",
       "Submit changes",
       "This object is read-only",
-      "Import CSV",
+      "Import data",
       "Export CSV",
       "Export JSON",
     ]) {
@@ -123,5 +123,58 @@ describe("TableDataToolbar", () => {
       container.querySelector<HTMLButtonElement>('[aria-label="Refresh data"]')
         ?.disabled
     ).toBe(false);
+  });
+
+  it("keeps transpose view read-only and identifies the active presentation", async () => {
+    const onToggleTranspose = vi.fn();
+    const noop = vi.fn();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <TableDataToolbar
+          isExecuting={false}
+          readOnly={false}
+          viewOnly
+          editingEnabled
+          hasEdits={false}
+          editedCellCount={0}
+          newRowCount={0}
+          selectedRowCount={0}
+          onRefresh={noop}
+          onAddRow={noop}
+          onDeleteRows={noop}
+          onSave={noop}
+          onRevert={noop}
+          onSearch={noop}
+          onFitColumns={noop}
+          onResetColumns={noop}
+          onToggleEditing={noop}
+          transposed
+          onToggleTranspose={onToggleTranspose}
+          onImport={noop}
+          onExportCsv={noop}
+          onExportJson={noop}
+          onExportSql={noop}
+        />,
+      );
+    });
+
+    const transposeButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Show standard grid"]',
+    );
+    expect(transposeButton?.getAttribute("aria-pressed")).toBe("true");
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[aria-label="Transpose view is read-only; return to the grid to edit"]',
+      )?.disabled,
+    ).toBe(true);
+
+    await act(async () => {
+      transposeButton?.click();
+    });
+    expect(onToggleTranspose).toHaveBeenCalledOnce();
   });
 });

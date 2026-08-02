@@ -21,6 +21,8 @@ const SQL_IGNORED_RELATION_TOKENS = new Set([
 ]);
 
 export type RelationReference = {
+  /** Optional server catalog/database from a three-part relation identifier. */
+  database?: string;
   schema?: string;
   table: string;
 };
@@ -902,7 +904,10 @@ function readIdentifierPart(sql: string, index: number): [string, number] | null
   return [sql.slice(start, index), index];
 }
 
-function readIdentifierPath(sql: string, index: number): [string, number] | null {
+function readIdentifierPath(
+  sql: string,
+  index: number
+): [string[], number] | null {
   const first = readIdentifierPart(sql, index);
   if (!first) return null;
 
@@ -920,34 +925,7 @@ function readIdentifierPath(sql: string, index: number): [string, number] | null
     index = next[1];
   }
 
-  return [parts.join("."), index];
-}
-
-function unquoteIdentifierPart(part: string) {
-  const trimmed = part.trim().replace(/[;,)]*$/g, "");
-  if (trimmed.length >= 2) {
-    const first = trimmed[0];
-    const last = trimmed[trimmed.length - 1];
-    if (
-      (first === '"' && last === '"') ||
-      (first === "`" && last === "`") ||
-      (first === "[" && last === "]")
-    ) {
-      return trimmed
-        .slice(1, -1)
-        .replace(/""/g, '"')
-        .replace(/``/g, "`");
-    }
-  }
-  return trimmed;
-}
-
-function splitIdentifierPath(identifier: string) {
-  return identifier
-    .split(".")
-    .map(unquoteIdentifierPart)
-    .map((part) => part.trim())
-    .filter(Boolean);
+  return [parts, index];
 }
 
 function skipBalancedParentheses(maskedSql: string, index: number) {
@@ -1025,8 +1003,7 @@ export function extractRelationReferences(
   const seen = new Set<string>();
   const searchableSql = maskSqlNoise(sql, dialect).toLowerCase();
   const cteNames = collectCteNames(sql, dialect);
-  const pushReference = (identifier: string) => {
-    const parts = splitIdentifierPath(identifier);
+  const pushReference = (parts: string[]) => {
     const table = parts[parts.length - 1];
     if (
       !table ||
@@ -1041,15 +1018,20 @@ export function extractRelationReferences(
       : parts.length >= 2
         ? parts[parts.length - 2]
         : undefined;
+    const database = parts.includes(SQL_PLACEHOLDER_IDENTIFIER)
+      ? undefined
+      : parts.length >= 3
+        ? parts[parts.length - 3]
+        : undefined;
     if (!schema && cteNames.has(table.toLowerCase())) {
       return;
     }
 
-    const key = `${schema || ""}.${table}`.toLowerCase();
+    const key = `${database || ""}.${schema || ""}.${table}`.toLowerCase();
     if (seen.has(key)) return;
 
     seen.add(key);
-    references.push({ schema, table });
+    references.push({ ...(database ? { database } : {}), ...(schema ? { schema } : {}), table });
   };
 
   for (const keyword of SQL_RELATION_KEYWORDS) {

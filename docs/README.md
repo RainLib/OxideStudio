@@ -2,6 +2,8 @@
 
 - [当前架构](architecture.md)：前后端分层、状态域、驱动边界、关键数据流与架构债务。
 - [DataGrip 能力差距与路线图](datagrip-gap-analysis.md)：2026.1 对标矩阵、P0/P1/P2 优先级和验收标准。
+- [DBX 源码实施地图与迁移导航](dbx-implementation-migration-map.md)：DBX 各领域源码入口、设计原则、OxideStudio 对应模块与可验证迁移清单。
+- [DBX 能力差距与演进方案](dbx-reference-gap-analysis.md)：DBX 对照结论、当前事实、优先级与产品族发布路线。
 - [ADR-0001：Search Everywhere 分层索引](decisions/0001-search-everywhere-index.md)：会话内搜索边界、性能预算与持久化全局索引方案。
 - [ADR-0002：Query History 项目级执行日志](decisions/0002-query-history-persistence.md)：SQLite 持久化、容量边界、迁移和安全重跑规则。
 - [ADR-0003：Explain Plan 安全执行与规范化 Artifact](decisions/0003-explain-plan-safety.md)：后端 SQL 生成、只读/Analyze 边界、规范计划树和稳定节点跳转。
@@ -15,12 +17,16 @@
 - [ADR-0011：Agent Task 安全持久化](decisions/0011-agent-task-summary-persistence.md)：项目级任务摘要、session 恢复、数据最小化和保留策略。
 - [ADR-0012：Deep Agents 桌面运行边界](decisions/0012-deep-agents-desktop-runtime-boundary.md)：Node-only 发布物审计、WebView 禁止直接打包、sidecar/服务协议与降级路径。
 - [ADR-0013：PostgreSQL Migration 安全执行](decisions/0013-schema-migration-execution.md)：指纹绑定、preflight 断言、原子 apply、持久日志、post-verify 与 rollback artifact。
+- [受管理 Java Runtime Schema](managed-java-runtime.schema.json)：JDBC sidecar 使用的独立签名 Java 21 运行时清单。
 - [ADR-0014：Schema Diagram 快照 Artifact](decisions/0014-schema-diagram-artifact.md)：稳定快照输入、复合 FK、确定性布局、过滤缩放与 Explorer 联动。
 - [ADR-0015：Loaded Data Compare](decisions/0015-loaded-data-compare.md)：不可变结果快照、复合 key、重复键拒绝静默配对、数值容差与截断边界。
 - [AI Agent 产品与技术规格](AI_AGENT_PRODUCT_SPEC.md)：完整能力矩阵、状态机、页面动作协议、安全模型、Deep Agents 分层方案和 LSP 相关性规则。
 - [AI / Agent 集成](AI_AGENT_INTEGRATION.md)：应用内 Assistant、CLI、MCP、工具策略与审计。
 - [外部 AI 接入指南](EXTERNAL_AI_INTEGRATION.md)：通过 Rust `oxide-agent` 使用 MCP/CLI、固定项目与连接授权、调用五个只读工具。
 - [LSP 集成](LSP_INTEGRATION.md)：SQL LSP 生命周期、文档同步和协议边界。
+- [外置数据库驱动包 Schema](database-driver-package.schema.json)：已签名 sidecar package 的可机读能力契约。
+- [数据库驱动族覆盖与验收](driver-family-rollout.md)：dbx 参考族、真实支持口径与逐包发布门槛。
+- [数据库族 Conformance Matrix](database-family-conformance-matrix.md)：连接、LSP、Explorer、迁移和 Grid 的可验证边界。
 - [样式系统](STYLE_GUIDE.md)：CVA 变体、tokens 和组件约定。
 - [国际化与字体定制](INTERNATIONALIZATION.md)：语言持久化、全局 UI 字号和新增文案约定。
 - [应用更新](UPDATES.md)：签名更新、发布配置和验证流程。

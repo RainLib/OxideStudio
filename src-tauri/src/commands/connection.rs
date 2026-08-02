@@ -1,16 +1,94 @@
 /// 连接管理相关 commands
 use crate::core::{
     config::{ConfigManager, SavedConnection as ConfigSavedConnection, SshTunnelConfig},
-    dialect::database_capabilities_for_driver,
+    dialect::{canonical_driver_name, database_capabilities_for_driver},
     driver::DatabaseDriver,
+    driver_package::DatabaseDriverPackageRegistry,
     manager::ConnectionManager,
     protocol::Response,
     redaction::redact_connection_url,
     ssh::SshTunnel,
     store::{MetaStore, SavedConnection as StoreSavedConnection},
 };
-use crate::drivers::connect_driver;
-use tauri::State;
+use crate::drivers::connect_preferred_driver;
+use serde::Serialize;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
+use tokio::sync::oneshot;
+
+const MAX_CONNECTION_IMPORT_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Content read only after a native file-picker selection. Parsing remains in
+/// the UI so the preview can show every field, but passwords and driver paths
+/// are deliberately not interpreted by this Host boundary.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionImportFile {
+    pub file_name: String,
+    pub content: String,
+}
+
+#[tauri::command]
+pub async fn import_connection_config_file(
+    app: AppHandle,
+) -> Result<Response<Option<ConnectionImportFile>>, String> {
+    let (sender, receiver) = oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Connection configuration", &["xml", "json"])
+        .set_title("Import DataGrip or DBeaver connections")
+        .pick_file(move |selection| {
+            let _ = sender.send(selection);
+        });
+    let selection = receiver
+        .await
+        .map_err(|_| "Connection import dialog closed unexpectedly".to_string())?;
+    let Some(selection) = selection else {
+        return Ok(Response::ok(None));
+    };
+    let path = selection
+        .into_path()
+        .map_err(|_| "The selected connection import is not a local file".to_string())?;
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .map_err(|error| format!("Unable to inspect the selected connection file: {error}"))?;
+    if !metadata.is_file() {
+        return Ok(Response::err(
+            "CONNECTION_IMPORT_ERROR",
+            "The selected connection import path is not a file",
+        ));
+    }
+    if metadata.len() > MAX_CONNECTION_IMPORT_BYTES {
+        return Ok(Response::err(
+            "CONNECTION_IMPORT_ERROR",
+            &format!(
+                "Connection import files are limited to {} MB",
+                MAX_CONNECTION_IMPORT_BYTES / 1024 / 1024
+            ),
+        ));
+    }
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|error| format!("Unable to read the selected connection file: {error}"))?;
+    if content.len() as u64 > MAX_CONNECTION_IMPORT_BYTES {
+        return Ok(Response::err(
+            "CONNECTION_IMPORT_ERROR",
+            &format!(
+                "Connection import files are limited to {} MB",
+                MAX_CONNECTION_IMPORT_BYTES / 1024 / 1024
+            ),
+        ));
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Connection configuration")
+        .to_string();
+    Ok(Response::ok(Some(ConnectionImportFile {
+        file_name,
+        content,
+    })))
+}
 
 async fn ping_driver_or_cleanup(driver: &dyn DatabaseDriver) -> Result<(), String> {
     match driver.ping().await {
@@ -104,6 +182,7 @@ fn config_connection_from_store(
             project_id: project_id.to_string(),
             name: connection.name,
             driver: connection.driver,
+            driver_package_version: None,
             url: String::new(),
             host: None,
             port: None,
@@ -125,10 +204,12 @@ fn config_connection_from_store(
 #[tauri::command]
 pub async fn connect_db(
     manager: State<'_, ConnectionManager>,
+    registry: State<'_, DatabaseDriverPackageRegistry>,
     connection_id: String,
     driver: String,
     url: String,
     ssh_tunnel: Option<SshTunnelConfig>,
+    package_version: Option<String>,
 ) -> Result<Response<String>, String> {
     let error_context = serde_json::json!({
         "connectionId": connection_id,
@@ -141,29 +222,48 @@ pub async fn connect_db(
             redact_connection_url(&url)
         );
 
-        let capabilities =
-            database_capabilities_for_driver(&driver).map_err(|error| error.to_string())?;
+        // External packages may introduce a driver family that is not linked
+        // into this build. Its sidecar remains the authority for execution;
+        // the catalog is used here only for a friendly connection label.
+        let display_name = database_capabilities_for_driver(&driver)
+            .map(|capabilities| capabilities.display_name)
+            .unwrap_or_else(|_| driver.trim().to_string());
 
         let (connection_url, ssh_tunnel) = SshTunnel::prepare(&driver, &url, ssh_tunnel.as_ref())
             .await
             .map_err(|error| error.to_string())?;
 
-        let db_driver = connect_driver(&driver, &connection_url)
-            .await
-            .map_err(|error| error.to_string())?;
+        let db_driver = connect_preferred_driver(
+            &registry,
+            &driver,
+            &connection_url,
+            connection_id.clone(),
+            package_version.as_deref(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
 
         ping_driver_or_cleanup(db_driver.as_ref()).await?;
         let server_version = db_driver.server_version().await;
 
         // Replace existing connection with the same ID and close the old driver.
         manager
-            .replace_connection_with_tunnel(connection_id.clone(), db_driver, ssh_tunnel)
+            .replace_connection_with_tunnel_and_driver_id(
+                connection_id.clone(),
+                db_driver,
+                ssh_tunnel,
+                Some(
+                    canonical_driver_name(&driver)
+                        .unwrap_or_else(|| driver.trim())
+                        .to_ascii_lowercase(),
+                ),
+            )
             .await
             .map_err(|e| format!("Failed to replace connection: {}", e))?;
 
         let server_label = server_version
-            .map(|version| format!("{} {version}", capabilities.display_name))
-            .unwrap_or_else(|| capabilities.display_name.to_string());
+            .map(|version| format!("{display_name} {version}"))
+            .unwrap_or_else(|| display_name.to_string());
         Ok(format!("Connected to {server_label} successfully"))
     }
     .await;
@@ -182,9 +282,11 @@ pub async fn connect_db(
 /// 测试数据库连接，不注册为当前工作区连接
 #[tauri::command]
 pub async fn test_db_connection(
+    registry: State<'_, DatabaseDriverPackageRegistry>,
     driver: String,
     url: String,
     ssh_tunnel: Option<SshTunnelConfig>,
+    package_version: Option<String>,
 ) -> Result<Response<String>, String> {
     let error_context = serde_json::json!({ "driver": driver });
     let result: Result<String, String> = async {
@@ -194,14 +296,21 @@ pub async fn test_db_connection(
             redact_connection_url(&url)
         );
 
-        let capabilities =
-            database_capabilities_for_driver(&driver).map_err(|error| error.to_string())?;
+        let display_name = database_capabilities_for_driver(&driver)
+            .map(|capabilities| capabilities.display_name)
+            .unwrap_or_else(|_| driver.trim().to_string());
         let (connection_url, _ssh_tunnel) = SshTunnel::prepare(&driver, &url, ssh_tunnel.as_ref())
             .await
             .map_err(|error| error.to_string())?;
-        let db_driver = connect_driver(&driver, &connection_url)
-            .await
-            .map_err(|error| error.to_string())?;
+        let db_driver = connect_preferred_driver(
+            &registry,
+            &driver,
+            &connection_url,
+            format!("test-{}", uuid::Uuid::new_v4()),
+            package_version.as_deref(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
 
         ping_driver_or_cleanup(db_driver.as_ref()).await?;
         let server_version = db_driver.server_version().await;
@@ -211,8 +320,8 @@ pub async fn test_db_connection(
             .map_err(|e| format!("Connection cleanup failed: {}", e))?;
 
         let server_label = server_version
-            .map(|version| format!("{} {version}", capabilities.display_name))
-            .unwrap_or_else(|| capabilities.display_name.to_string());
+            .map(|version| format!("{display_name} {version}"))
+            .unwrap_or_else(|| display_name.to_string());
         Ok(format!("{server_label} connection is available"))
     }
     .await;

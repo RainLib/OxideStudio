@@ -48,7 +48,15 @@ describe("AppPreferencesProvider", () => {
   it("applies persisted locale and typography without workspace hydration", async () => {
     useSettingsStore.setState({
       settings: normalizeAppSettings({
-        appearance: { locale: "zh-CN", uiFontSize: 16 },
+        appearance: {
+          locale: "zh-CN",
+          uiFontSize: 16,
+          accent: "violet",
+          fontFamily: "mono",
+          density: "comfortable",
+          chromeGradient: "subtle",
+          reduceMotion: true,
+        },
       }),
     });
     container = document.createElement("div");
@@ -73,5 +81,8 @@ describe("AppPreferencesProvider", () => {
     expect(
       document.documentElement.style.getPropertyValue("--wb-ui-font-size-xs"),
     ).toBe("14px");
+    expect(document.documentElement.dataset.appearanceAccent).toBe("violet");
+    expect(document.documentElement.dataset.appearanceFont).toBe("mono");
+    expect(document.documentElement.dataset.appearanceDensity).toBe("comfortable");
   });
 });

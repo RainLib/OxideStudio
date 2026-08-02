@@ -83,6 +83,28 @@ describe("PostgreSQL database catalog cache", () => {
     );
   });
 
+  it("keeps an external catalog provider isolated from PostgreSQL cache entries", async () => {
+    const duckdbIdentity: PostgresDatabaseCatalogIdentity = {
+      projectId: "project-a",
+      connectionId: "duckdb-1",
+      driver: "duckdb",
+    };
+    mocks.getResources.mockResolvedValue([
+      cachedResource(duckdbIdentity, ["memory", "analytics"]),
+    ]);
+
+    await expect(readCachedPostgresDatabaseCatalog(duckdbIdentity)).resolves.toEqual({
+      databases: ["memory", "analytics"],
+      source: "cache",
+      updatedAt: 1234,
+    });
+    expect(mocks.getResources).toHaveBeenCalledWith(
+      "duckdb-1",
+      "oxide:server-catalog:duckdb-1:duckdb",
+      "project-a",
+    );
+  });
+
   it("rejects a resource returned from another project", async () => {
     mocks.getResources.mockResolvedValue([
       cachedResource({ ...identity, projectId: "project-b" }),

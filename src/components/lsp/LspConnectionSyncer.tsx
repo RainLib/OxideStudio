@@ -1,11 +1,17 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useConnectionStore } from "@/store/useConnectionStore";
+import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
+import { useLspSemanticStatusStore } from "@/store/useLspSemanticStatusStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
+import { useProjectStore } from "@/store/useProjectStore";
+import { useProjectFilesStore } from "@/store/useProjectFilesStore";
 import { useLspClient } from "@/hooks/useLspClient";
 import {
+  connectionService,
   databaseService,
+  projectFilesService,
   schemaService,
   type CollectionInfo,
   type DatabaseCapabilities,
@@ -24,6 +30,7 @@ import {
   getCachedLspMetadata,
   type CachedLspMetadata,
 } from "@/services/lsp/metadataCache";
+import { usesOnDemandOnlyLspColumnMetadata } from "@/services/lsp/metadataPolicy";
 import { dispatchLspConfiguration } from "@/services/lsp/configDispatch";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
 import {
@@ -41,11 +48,15 @@ import {
   scheduleDebouncedLspSync,
   type LspSyncTimer,
 } from "@/services/lsp/syncScheduler";
+import { getLspProjectDocumentUri } from "@/services/lsp/document";
+import type { LspClient } from "@/services/lsp/client";
 import {
+  DEFAULT_DATABASE_DRIVER,
   defaultDatabaseCapabilities,
-  normalizeLspDialect,
-  supportsLspLanguageId,
-  supportsTableWorkspace,
+  lspLanguageIdForCapabilities,
+  lspServerDialectForCapabilities,
+  supportsLspCapabilities,
+  supportsSqlRelationMetadataLsp,
 } from "@/lib/databaseDialect";
 import { v4 as uuidv4 } from "uuid";
 
@@ -54,6 +65,13 @@ const LSP_PROGRESS_PUBLISH_INTERVAL_MS = 1_000;
 const LSP_PROGRESS_PUBLISH_BATCHES = 8;
 
 type CachedLspTableDefinition = CachedLspMetadata<LspTableDefinition>;
+
+type OpenProjectLspDocument = {
+  client: LspClient;
+  sessionKey: string;
+  content: string;
+  version: number;
+};
 
 async function collectionToLspTableDefinitionWithMetadata(
   connectionId: string,
@@ -93,6 +111,11 @@ async function collectionToLspTableDefinitionWithMetadata(
 }
 
 export function LspConnectionSyncer() {
+  // A package activation can add a new LSP dialect/capability at runtime.
+  // Subscribe so the normal sync effect publishes a fresh configuration.
+  const driverCatalogStatus = useDatabaseDriverCatalogStore(
+    (state) => state.status,
+  );
   const activeConnectionId = useConnectionStore(
     (state) => state.activeConnectionId
   );
@@ -103,6 +126,23 @@ export function LspConnectionSyncer() {
   const metadataVersion = useSchemaStore((state) => state.metadataVersion);
   const tabs = useTabStore((state) => state.tabs);
   const activeTabId = useTabStore((state) => state.activeTabId);
+  const activeProjectId = useProjectStore((state) => state.activeProjectId);
+  const activeProjectRoot = useProjectStore((state) =>
+    state.projects.find((project) => project.id === state.activeProjectId)
+      ?.root_path || null,
+  );
+  const projectDocuments = useProjectFilesStore((state) => state.documents);
+  const projectFileOperations = useProjectFilesStore(
+    (state) => state.pendingOperations,
+  );
+  const projectDocumentRevisionKey = useMemo(
+    () =>
+      `${projectFileOperations}:${Object.entries(projectDocuments)
+        .map(([path, document]) => `${path}:${document.revision}`)
+        .sort()
+        .join("|")}`,
+    [projectDocuments, projectFileOperations],
+  );
   const keywordCase = useSettingsStore(
     (state) => state.settings.editor.sqlCompletion.keywordCase
   );
@@ -110,7 +150,76 @@ export function LspConnectionSyncer() {
     (state) => state.settings.editor.sqlCompletion.tableAlias
   );
   const completionPreferences = { keywordCase, tableAlias } as const;
+  const setSemanticStatus = useLspSemanticStatusStore(
+    (state) => state.setStatus,
+  );
+  const clearSemanticStatus = useLspSemanticStatusStore(
+    (state) => state.clearStatus,
+  );
   const activeConnection = connections.find((c) => c.id === activeConnectionId);
+  const [resolvedCapabilities, setResolvedCapabilities] = useState<{
+    connectionId: string;
+    capabilities: DatabaseCapabilities;
+  } | null>(null);
+  useEffect(() => {
+    if (!activeConnection) {
+      setResolvedCapabilities(null);
+      return;
+    }
+    let cancelled = false;
+    setResolvedCapabilities(null);
+    void databaseService
+      .getDatabaseCapabilities(
+        activeConnection.driver,
+        activeConnection.driverPackageVersion,
+      )
+      .then((capabilities) => {
+        if (!cancelled) {
+          setResolvedCapabilities({
+            connectionId: activeConnection.id,
+            capabilities,
+          });
+        }
+      })
+      .catch((error) => {
+        console.warn(
+          `[LSP] Failed to resolve capabilities for ${activeConnection.name}:`,
+          error,
+        );
+        if (!cancelled) {
+          setResolvedCapabilities({
+            connectionId: activeConnection.id,
+            capabilities: defaultDatabaseCapabilities(activeConnection.driver),
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeConnection?.driver,
+    activeConnection?.driverPackageVersion,
+    activeConnection?.id,
+    driverCatalogStatus,
+  ]);
+  const lspCapabilities = useMemo<DatabaseCapabilities>(() => {
+    const resolvedForActiveConnection =
+      resolvedCapabilities &&
+      activeConnection &&
+      resolvedCapabilities.connectionId === activeConnection.id
+        ? resolvedCapabilities.capabilities
+        : null;
+    if (
+      resolvedForActiveConnection &&
+      resolvedForActiveConnection.driver.toLowerCase() ===
+        activeConnection?.driver.toLowerCase()
+    ) {
+      return resolvedForActiveConnection;
+    }
+    return defaultDatabaseCapabilities(
+      activeConnection?.driver || DEFAULT_DATABASE_DRIVER,
+    );
+  }, [activeConnection?.driver, activeConnection?.id, resolvedCapabilities]);
   const supportsMetadataSync = Boolean(activeConnection);
   const hasConnectionLspTab = tabs.some(
     (tab) =>
@@ -128,8 +237,9 @@ export function LspConnectionSyncer() {
         activeConnection &&
         supportsMetadataSync &&
         hasConnectionLspTab &&
-        supportsLspLanguageId(activeConnection.driver)
+        supportsLspCapabilities(lspCapabilities)
     ),
+    capabilities: lspCapabilities,
   });
 
   // Track if we've already sent config for this connection+schema
@@ -139,11 +249,58 @@ export function LspConnectionSyncer() {
   const tableMetadataCacheRef = useRef<Map<string, CachedLspTableDefinition>>(
     new Map()
   );
+  const openedProjectDocumentsRef = useRef<
+    Map<string, OpenProjectLspDocument>
+  >(new Map());
 
   useEffect(() => {
     tableMetadataCacheRef.current.clear();
     lastConfigRef.current = null;
   }, [activeConnectionId, metadataVersion]);
+
+  useEffect(() => {
+    return () => {
+      for (const [uri, document] of openedProjectDocumentsRef.current) {
+        void document.client.didClose(uri);
+      }
+      openedProjectDocumentsRef.current.clear();
+    };
+  }, []);
+
+  // A project document is bound to the same connection-scoped semantic
+  // configuration as a console. Do not let an old virtual SQL file survive
+  // while that context is unavailable (for example after disconnecting,
+  // removing the project root, or closing the last query tab). The normal
+  // synchronization path handles content changes; this effect covers the
+  // early-return paths before a full metadata sync can run.
+  useEffect(() => {
+    const canKeepProjectDocumentsOpen = Boolean(
+      isReady &&
+        activeConnectionId &&
+        activeConnection &&
+        activeProjectRoot &&
+        hasConnectionLspTab &&
+        supportsLspCapabilities(lspCapabilities),
+    );
+    if (canKeepProjectDocumentsOpen) return;
+
+    const openedDocuments = Array.from(
+      openedProjectDocumentsRef.current.entries(),
+    );
+    if (openedDocuments.length === 0) return;
+
+    openedProjectDocumentsRef.current.clear();
+    void Promise.allSettled(
+      openedDocuments.map(([uri, document]) => document.client.didClose(uri)),
+    );
+  }, [
+    activeConnection,
+    activeConnectionId,
+    activeProjectRoot,
+    hasConnectionLspTab,
+    isReady,
+    lspCapabilities,
+  ]);
 
   useEffect(() => {
     cancelScheduledLspSync(debounceTimerRef);
@@ -155,24 +312,37 @@ export function LspConnectionSyncer() {
 
     if (!supportsMetadataSync) {
       lastConfigRef.current = null;
+      clearSemanticStatus(activeConnectionId);
       return;
     }
 
-    if (!supportsLspLanguageId(connection.driver)) {
+    if (!supportsLspCapabilities(lspCapabilities)) {
       lastConfigRef.current = null;
+      clearSemanticStatus(activeConnectionId);
       console.log(`[LSP] Skipping unsupported driver: ${connection.driver}`);
       return;
     }
 
     // Wait for schemas to be loaded
     if (!schemas || schemas.length === 0) {
+      setSemanticStatus(activeConnectionId, {
+        state: "syncing",
+        totalObjects: 0,
+        cacheHits: 0,
+        cacheMisses: 0,
+        failedObjects: 0,
+        message: "Waiting for the database schema before semantic completion can be synchronized.",
+      });
       console.log("[LSP] Waiting for schemas to load...");
       return;
     }
 
     const syncPlan = createLspSyncPlan({
       activeConnectionId,
-      connection,
+      connection: {
+        ...connection,
+        supportsDatabaseCatalogs: lspCapabilities.supportsDatabaseCatalogs,
+      },
       schemas,
       currentSchema,
       activeTabId,
@@ -195,19 +365,33 @@ export function LspConnectionSyncer() {
     // bounded sync. This keeps connection selection itself lightweight.
     if (queryTabs.length === 0) {
       lastConfigRef.current = null;
+      clearSemanticStatus(activeConnectionId);
       return;
     }
 
     const syncGeneration = syncGenerationRef.current + 1;
     syncGenerationRef.current = syncGeneration;
-    const capabilitiesPromise: Promise<DatabaseCapabilities> = databaseService
-      .getDatabaseCapabilities(connection.driver)
+    const metadataStats = {
+      cacheHits: 0,
+      cacheMisses: 0,
+      failedObjects: 0,
+    };
+    const recordMetadataCacheStatus = (status: "hit" | "miss") => {
+      if (syncGenerationRef.current !== syncGeneration) return;
+      if (status === "hit") metadataStats.cacheHits += 1;
+      else metadataStats.cacheMisses += 1;
+    };
+    const capabilitiesPromise: Promise<DatabaseCapabilities> = Promise.resolve(
+      lspCapabilities,
+    );
+    const serverVersionPromise = connectionService
+      .getServerVersion(activeConnectionId)
       .catch((error) => {
         console.warn(
-          `[LSP] Failed to load capabilities for ${connection.driver}:`,
-          error
+          `[LSP] Failed to detect server version for ${connection.name}:`,
+          error,
         );
-        return defaultDatabaseCapabilities(connection.driver);
+        return null;
       });
 
     const getSchemaId = (
@@ -244,6 +428,53 @@ export function LspConnectionSyncer() {
         objectType,
         columnName,
       });
+
+    const synchronizeProjectDocuments = async (
+      documents: Array<{ relativePath: string; content: string }>,
+      lspDialect: string,
+    ) => {
+      const nextDocuments = new Map(
+        documents.map((document) => [
+          getLspProjectDocumentUri(activeProjectId, document.relativePath, lspDialect),
+          document,
+        ]),
+      );
+      const sessionKey = lspClient.getSessionKey();
+
+      for (const [uri, previous] of openedProjectDocumentsRef.current) {
+        if (
+          previous.sessionKey === sessionKey &&
+          nextDocuments.has(uri)
+        ) {
+          continue;
+        }
+        openedProjectDocumentsRef.current.delete(uri);
+        await previous.client.didClose(uri);
+      }
+
+      for (const [uri, document] of nextDocuments) {
+        const previous = openedProjectDocumentsRef.current.get(uri);
+        if (
+          previous &&
+          previous.sessionKey === sessionKey &&
+          previous.content === document.content
+        ) {
+          continue;
+        }
+        const version = (previous?.version || 0) + 1;
+        if (previous?.sessionKey === sessionKey) {
+          await lspClient.didChange(uri, document.content, version);
+        } else {
+          await lspClient.didOpen(uri, document.content, version, lspDialect);
+        }
+        openedProjectDocumentsRef.current.set(uri, {
+          client: lspClient,
+          sessionKey,
+          content: document.content,
+          version,
+        });
+      }
+    };
 
     const assignSourceLocations = (
       catalog: LspCatalogTarget,
@@ -330,6 +561,9 @@ export function LspConnectionSyncer() {
           })),
         });
       } catch (error) {
+        if (syncGenerationRef.current === syncGeneration) {
+          metadataStats.failedObjects += 1;
+        }
         console.error(
           `[LSP] Failed to fetch metadata for ${[
             catalog.catalogName,
@@ -366,7 +600,9 @@ export function LspConnectionSyncer() {
         tableMetadataCacheRef.current,
         cacheKey,
         LSP_METADATA_CACHE_TTL_MS,
-        () => buildTableDefinition(catalog, table)
+        () => buildTableDefinition(catalog, table),
+        undefined,
+        recordMetadataCacheStatus,
       );
     };
 
@@ -375,6 +611,13 @@ export function LspConnectionSyncer() {
       delayMs: 500,
       generation: syncGeneration,
       run: ({ isCancelled }) => {
+        setSemanticStatus(activeConnectionId, {
+          state: "syncing",
+          totalObjects: 0,
+          cacheHits: 0,
+          cacheMisses: 0,
+          failedObjects: 0,
+        });
         console.log("[LSP] Building schema configuration for:", connection.name);
         console.log(
           "[LSP] Target catalogs:",
@@ -388,17 +631,55 @@ export function LspConnectionSyncer() {
         // Build tables array with columns
         // tables is an ARRAY: TableInfo[]
         const buildTableDefinitions = async () => {
-          const capabilities = await capabilitiesPromise;
+          const [capabilities, serverVersion] = await Promise.all([
+            capabilitiesPromise,
+            serverVersionPromise,
+          ]);
           const isStale = () =>
             isCancelled() || syncGenerationRef.current !== syncGeneration;
-          const canSyncTableMetadata = supportsTableWorkspace(capabilities);
+          if (!supportsLspCapabilities(capabilities)) {
+            if (!isStale()) {
+              setSemanticStatus(activeConnectionId, {
+                state: "error",
+                totalObjects: 0,
+                cacheHits: 0,
+                cacheMisses: 0,
+                failedObjects: 0,
+                message: `${capabilities.displayName} does not declare a compatible language-service capability for this driver package.`,
+              });
+            }
+            return;
+          }
+          const canSyncTableMetadata = supportsSqlRelationMetadataLsp(capabilities);
+          const useOnDemandColumnMetadata =
+            canSyncTableMetadata &&
+            usesOnDemandOnlyLspColumnMetadata(connection.driver);
           const canSyncCollectionMetadata =
             !canSyncTableMetadata &&
             (capabilities.supportsCollectionBrowsing ||
               capabilities.supportsKeyValueBrowsing);
-          const lspDialect = normalizeLspDialect(
-            capabilities.lspLanguageId || connection.driver
-          );
+          // Keep the editor's generic `sql` URI/language while explicitly
+          // mapping it to the concrete reviewed server baseline. This makes
+          // an installed SQL-family package (for example Trino or Doris)
+          // retain its schema binding instead of letting the server infer a
+          // dialect from a different connection or from an unsupported `sql`
+          // config value.
+          const documentLanguageId = lspLanguageIdForCapabilities(capabilities);
+          const lspDialect = lspServerDialectForCapabilities(capabilities);
+          const projectLspDocuments = activeProjectRoot
+            ? await projectFilesService
+                .getLspDocuments({
+                  projectId: activeProjectId,
+                  expectedRoot: activeProjectRoot,
+                })
+                .catch((error) => {
+                  console.warn(
+                    "[LSP] Project SQL documents could not be synchronized:",
+                    error,
+                  );
+                  return [];
+                })
+            : [];
           const { fileSchemas, fileDialects } = buildLspFileMappings({
             queryTabs,
             schemaByTabId,
@@ -407,8 +688,22 @@ export function LspConnectionSyncer() {
             defaultCatalog,
             driver: connection.driver,
             lspDialect,
+            documentLanguageId,
             getSchemaId,
           });
+          const projectSchemaId = getSchemaId(
+            defaultSchema,
+            defaultCatalog.catalogName,
+          );
+          for (const document of projectLspDocuments) {
+            const uri = getLspProjectDocumentUri(
+              activeProjectId,
+              document.relativePath,
+              lspDialect,
+            );
+            fileSchemas[uri] = projectSchemaId;
+            fileDialects[uri] = lspDialect;
+          }
           const catalogs = await Promise.all(
             targetCatalogs.map(async (catalog) => {
               const { databaseName, schemaName } = catalog;
@@ -472,12 +767,24 @@ export function LspConnectionSyncer() {
                 })
               );
 
+              const tables = selectLspTablesForSchema(
+                schemaTables,
+                preferredTablesByCatalog.get(lspCatalogKey(catalog)),
+              );
+              const preferredTables = useOnDemandColumnMetadata
+                ? selectLspTablesForSchema(
+                    tables,
+                    preferredTablesByCatalog.get(lspCatalogKey(catalog)),
+                    preferredTablesByCatalog.get(lspCatalogKey(catalog))?.size || 0,
+                  )
+                : tables;
+
               return {
                 ...catalog,
-                tables: selectLspTablesForSchema(
-                  schemaTables,
-                  preferredTablesByCatalog.get(lspCatalogKey(catalog))
-                ),
+                tables,
+                metadataTableIndexes: preferredTables
+                  .map((table) => tables.indexOf(table))
+                  .filter((index) => index >= 0),
                 collections: selectLspTablesForSchema(
                   schemaCollections,
                   preferredTablesByCatalog.get(lspCatalogKey(catalog))
@@ -497,6 +804,9 @@ export function LspConnectionSyncer() {
               id: getSchemaId(catalog.schemaName, catalog.catalogName),
               catalog: catalog.catalogName,
               database: catalog.schemaName,
+              driver: connection.driver,
+              server_version: serverVersion,
+              snapshot_revision: metadataVersion,
               source_uri: objectSourceUri(catalog),
               tables: canSyncTableMetadata
                 ? catalog.tables.map((table) =>
@@ -534,7 +844,8 @@ export function LspConnectionSyncer() {
 
           catalogs.forEach((catalog, schemaIndex) => {
             if (canSyncTableMetadata) {
-              catalog.tables.forEach((table, objectIndex) => {
+              catalog.metadataTableIndexes.forEach((objectIndex) => {
+                const table = catalog.tables[objectIndex]!;
                 metadataWork.push({
                   schemaIndex,
                   objectIndex,
@@ -600,12 +911,29 @@ export function LspConnectionSyncer() {
               if (dispatchResult.status === "sent") {
                 lastConfigRef.current = dispatchResult.lastConfigKey;
               }
+              if (
+                dispatchResult.status !== "stale" &&
+                dispatchResult.status !== "sent-stale"
+              ) {
+                await synchronizeProjectDocuments(projectLspDocuments, documentLanguageId);
+              }
               return (
                 dispatchResult.status !== "stale" &&
                 dispatchResult.status !== "sent-stale"
               );
             } catch (error) {
               console.error("[LSP] Failed to sync schema:", error);
+              if (!isStale()) {
+                setSemanticStatus(activeConnectionId, {
+                  state: "error",
+                  totalObjects: metadataWork.length,
+                  ...metadataStats,
+                  message:
+                    error instanceof Error
+                      ? error.message
+                      : "Schema configuration could not be sent to the language service.",
+                });
+              }
               return !isStale();
             }
           };
@@ -678,6 +1006,24 @@ export function LspConnectionSyncer() {
           );
           console.log("[LSP] - Files:", Object.keys(fileSchemas).length);
 
+          const publishSemanticCompletionStatus = () => {
+            setSemanticStatus(activeConnectionId, {
+              state:
+                metadataStats.failedObjects > 0
+                  ? "limited"
+                  : metadataStats.cacheHits > 0 && metadataStats.cacheMisses === 0
+                    ? "cached"
+                    : "full",
+              totalObjects: metadataWork.length,
+              ...metadataStats,
+              ...(metadataStats.failedObjects > 0
+                ? {
+                    message: `${metadataStats.failedObjects} object${metadataStats.failedObjects === 1 ? "" : "s"} could not be enriched; keyword and object-name completion remain available.`,
+                  }
+                : {}),
+            });
+          };
+
           try {
             const dispatchResult = await dispatchLspConfiguration({
               connectionId: activeConnectionId,
@@ -699,6 +1045,8 @@ export function LspConnectionSyncer() {
 
             if (dispatchResult.status === "duplicate") {
               console.log("[LSP] Skipping duplicate configuration send");
+              await synchronizeProjectDocuments(projectLspDocuments, documentLanguageId);
+              publishSemanticCompletionStatus();
               return;
             }
 
@@ -710,9 +1058,22 @@ export function LspConnectionSyncer() {
             }
 
             lastConfigRef.current = dispatchResult.lastConfigKey;
+            await synchronizeProjectDocuments(projectLspDocuments, documentLanguageId);
             console.log("[LSP] ✅ Configuration sent and cached");
+            publishSemanticCompletionStatus();
           } catch (err) {
             console.error("[LSP] Failed to sync schema:", err);
+            if (!isStale()) {
+              setSemanticStatus(activeConnectionId, {
+                state: "error",
+                totalObjects: metadataWork.length,
+                ...metadataStats,
+                message:
+                  err instanceof Error
+                    ? err.message
+                    : "Schema configuration could not be sent to the language service.",
+              });
+            }
           }
         };
 
@@ -736,6 +1097,13 @@ export function LspConnectionSyncer() {
     supportsMetadataSync,
     keywordCase,
     tableAlias,
+    driverCatalogStatus,
+    activeProjectId,
+    activeProjectRoot,
+    projectDocumentRevisionKey,
+    setSemanticStatus,
+    clearSemanticStatus,
+    lspCapabilities,
   ]);
 
   return null;

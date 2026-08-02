@@ -12,11 +12,13 @@ import {
 
 const mocks = vi.hoisted(() => ({
   listDatabaseCapabilities: vi.fn(),
+  listDatabaseDriverInstallations: vi.fn(),
 }));
 
 vi.mock("@/services/tauri", () => ({
   databaseService: {
     listDatabaseCapabilities: mocks.listDatabaseCapabilities,
+    listDatabaseDriverInstallations: mocks.listDatabaseDriverInstallations,
   },
 }));
 
@@ -29,6 +31,7 @@ describe("runtime database driver catalog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetCatalog();
+    mocks.listDatabaseDriverInstallations.mockResolvedValue([]);
   });
 
   it("uses the backend list as the authoritative create/AI driver catalog", () => {
@@ -59,6 +62,7 @@ describe("runtime database driver catalog", () => {
       defaultDatabaseCapabilities("mysql"),
       defaultDatabaseCapabilities("mongodb"),
     ]);
+    mocks.listDatabaseDriverInstallations.mockResolvedValue([]);
 
     await useDatabaseDriverCatalogStore.getState().load();
 

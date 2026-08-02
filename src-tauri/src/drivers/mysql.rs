@@ -713,6 +713,15 @@ impl DatabaseDriver for MysqlDriver {
         Ok(())
     }
 
+    async fn begin_database_transaction(
+        &self,
+        session_id: &str,
+        database: &str,
+        _schema: Option<&str>,
+    ) -> Result<()> {
+        self.begin_transaction(session_id, Some(database)).await
+    }
+
     async fn query_transaction(&self, session_id: &str, sql: &str) -> Result<Vec<QueryResult>> {
         let session = self.get_transaction_session(session_id).await?;
         let mut conn = session.lock().await;
@@ -737,6 +746,24 @@ impl DatabaseDriver for MysqlDriver {
         let result = self.query_on_connection(sql, &mut conn).await;
         drop(tracked_query);
         result
+    }
+
+    async fn execute_parameterized_transaction(
+        &self,
+        session_id: &str,
+        statements: &[ParameterizedStatement],
+    ) -> Result<Vec<u64>> {
+        let session = self.get_transaction_session(session_id).await?;
+        let mut conn = session.lock().await;
+        let mut rows_affected = Vec::with_capacity(statements.len());
+        for statement in statements {
+            let mut query = sqlx::query(&statement.sql).persistent(false);
+            for param in &statement.params {
+                query = bind_mysql_parameter(query, param)?;
+            }
+            rows_affected.push(query.execute(&mut **conn).await?.rows_affected());
+        }
+        Ok(rows_affected)
     }
 
     async fn cancel_query(&self, query_id: &str) -> Result<bool> {

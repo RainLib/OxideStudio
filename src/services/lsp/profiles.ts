@@ -1,9 +1,11 @@
-import type { DatabaseDriver } from "@/services/tauri/types";
+import type { DatabaseCapabilities, DatabaseDriver } from "@/services/tauri/types";
 import {
-  configuredLspLanguageId,
-  lspLanguageId,
-  queryEditorLanguageId,
-  supportsLspLanguageId,
+  configuredLspLanguageIdForCapabilities,
+  defaultDatabaseCapabilities,
+  lspLanguageIdForCapabilities,
+  lspServerDialectForCapabilities,
+  queryEditorLanguageIdForCapabilities,
+  supportsLspCapabilities,
 } from "@/lib/databaseDialect";
 import { DEFAULT_LSP_METADATA_BATCHING } from "./schemaBatching";
 
@@ -13,6 +15,8 @@ export type BuiltInLspProfile = {
   id: string;
   driver: DatabaseDriver;
   displayName: string;
+  /** Generic `sql` documents remain neutral while the server uses this parser. */
+  serverDialect: string;
   languageId: string;
   documentLanguageId: string;
   activationPolicy: LspActivationPolicy;
@@ -24,17 +28,24 @@ export type BuiltInLspProfile = {
 };
 
 export function builtInLspProfileForDriver(
-  driver: DatabaseDriver
+  driver: DatabaseDriver,
+  capabilities?: DatabaseCapabilities,
 ): BuiltInLspProfile | null {
-  if (!supportsLspLanguageId(driver)) return null;
+  const effectiveCapabilities =
+    capabilities || defaultDatabaseCapabilities(driver);
+  if (!supportsLspCapabilities(effectiveCapabilities)) return null;
 
-  const languageId = lspLanguageId(driver);
+  const languageId = lspLanguageIdForCapabilities(effectiveCapabilities);
+  const serverDialect = lspServerDialectForCapabilities(effectiveCapabilities);
   return {
-    id: `builtin:${String(driver)}:${configuredLspLanguageId(driver)}`,
+    id: `builtin:${String(driver)}:${configuredLspLanguageIdForCapabilities(effectiveCapabilities)}:${serverDialect}`,
     driver,
     displayName: `${String(driver)} intelligence`,
+    serverDialect,
     languageId,
-    documentLanguageId: queryEditorLanguageId(driver),
+    documentLanguageId: queryEditorLanguageIdForCapabilities(
+      effectiveCapabilities,
+    ),
     activationPolicy: "auto",
     binaryKind: "bundled",
     metadataBatching: DEFAULT_LSP_METADATA_BATCHING,

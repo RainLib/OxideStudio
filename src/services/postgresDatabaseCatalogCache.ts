@@ -3,6 +3,7 @@ import {
   storeService,
   type Resource,
 } from "@/services/tauri/store.service";
+import type { DatabaseDriver } from "@/services/tauri/types";
 
 export const POSTGRES_DATABASE_CATALOG_CACHE_KIND =
   "POSTGRES_DATABASE_CATALOG_CACHE";
@@ -12,7 +13,12 @@ const POSTGRES_DATABASE_CATALOG_CACHE_VERSION = 1;
 export interface PostgresDatabaseCatalogIdentity {
   projectId: string;
   connectionId: string;
-  driver: "postgres";
+  /**
+   * The file keeps its historical name for storage compatibility, but its
+   * cache key is driver-scoped and can safely serve any capability-declared
+   * catalog provider (for example DuckDB attached databases).
+   */
+  driver: DatabaseDriver;
 }
 
 export interface PostgresDatabaseCatalogSnapshot {
@@ -23,7 +29,7 @@ export interface PostgresDatabaseCatalogSnapshot {
 
 interface StoredPostgresDatabaseCatalog {
   version: number;
-  driver: "postgres";
+  driver: DatabaseDriver;
   connectionId: string;
   databases: string[];
 }
@@ -168,7 +174,7 @@ export async function persistPostgresDatabaseCatalog(
         connection_id: identity.connectionId,
         parent_id: parentId,
         kind: POSTGRES_DATABASE_CATALOG_CACHE_KIND,
-        name: "PostgreSQL server database catalog",
+        name: `${identity.driver} database catalog`,
         metadata: {
           version: POSTGRES_DATABASE_CATALOG_CACHE_VERSION,
           driver: identity.driver,
@@ -200,7 +206,7 @@ export function refreshPostgresDatabaseCatalog(
     try {
       await persistPostgresDatabaseCatalog(identity, databases);
     } catch (error) {
-      console.warn("Failed to cache PostgreSQL database catalog", error);
+      console.warn("Failed to cache database catalog", error);
     }
     const snapshot = {
       databases,

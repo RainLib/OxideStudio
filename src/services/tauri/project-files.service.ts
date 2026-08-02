@@ -40,6 +40,12 @@ export interface ProjectCompletionSnippet {
   content: string;
 }
 
+/** A bounded saved SQL file mirrored into the local language service. */
+export interface ProjectLspDocument {
+  relativePath: string;
+  content: string;
+}
+
 export interface ProjectGitFileChange {
   relativePath: string;
   previousPath?: string | null;
@@ -242,6 +248,21 @@ export const projectFilesService = {
             : null,
           query: options.query.slice(-8_192),
           referencedObjects: options.referencedObjects || [],
+        },
+      },
+    );
+  },
+
+  getLspDocuments: async (options: {
+    projectId: string;
+    expectedRoot?: string | null;
+  }): Promise<ProjectLspDocument[]> => {
+    return await invokeRawCommand<ProjectLspDocument[]>(
+      "get_project_lsp_documents",
+      {
+        request: {
+          projectId: requireProjectId(options.projectId),
+          ...expectedRootArgument(options.expectedRoot),
         },
       },
     );

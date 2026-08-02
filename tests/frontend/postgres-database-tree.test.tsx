@@ -5,6 +5,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  connectionCatalogDatabaseName,
   PostgresDatabaseTree,
   postgresConnectionDatabaseName,
 } from "@/components/workspace/PostgresDatabaseTree";
@@ -318,5 +319,27 @@ describe("PostgresDatabaseTree", () => {
       postgresConnectionDatabaseName({ database: "configured_db" })
     ).toBe("configured_db");
     expect(postgresConnectionDatabaseName({})).toBe("postgres");
+  });
+
+  it("resolves configured catalogs for external server drivers without treating file paths as catalogs", () => {
+    expect(
+      connectionCatalogDatabaseName({
+        driver: "sqlserver",
+        database: "fallback_catalog",
+        connectionUrl: "jdbc:sqlserver://db.example.test:1433/warehouse",
+      }),
+    ).toBe("warehouse");
+    expect(
+      connectionCatalogDatabaseName({
+        driver: "sqlserver",
+        database: "configured_catalog",
+      }),
+    ).toBe("configured_catalog");
+    expect(
+      connectionCatalogDatabaseName({
+        driver: "sqlite",
+        database: "/tmp/analytics.sqlite",
+      }),
+    ).toBe("");
   });
 });

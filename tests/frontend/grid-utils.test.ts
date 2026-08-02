@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTypedCell, formatValue } from "@/lib/gridUtils";
+import { applyFilter, createTypedCell, formatValue } from "@/lib/gridUtils";
 
 describe("data grid value formatting", () => {
   it("keeps SQL NULL visually distinct from an empty string", () => {
@@ -30,5 +30,24 @@ describe("data grid value formatting", () => {
 
     expect("displayData" in cell && cell.displayData).toContain("1");
     expect("data" in cell && cell.data).toBe("1234567");
+  });
+
+  it("uses the result-set type to align numeric text returned as a string", () => {
+    const cell = createTypedCell("9007199254740993", true, "NOT LOADED", "DECIMAL(38,0)");
+
+    expect("contentAlign" in cell && cell.contentAlign).toBe("right");
+    expect("data" in cell && cell.data).toBe("9007199254740993");
+  });
+
+  it("supports database-tool style negative and NULL filters", () => {
+    expect(
+      applyFilter("active", { operator: "notEquals", value: "paused" }),
+    ).toBe(true);
+    expect(
+      applyFilter("active", { operator: "notContains", value: "use" }),
+    ).toBe(true);
+    expect(applyFilter(null, { operator: "isNull", value: "" })).toBe(true);
+    expect(applyFilter(undefined, { operator: "isNotNull", value: "" })).toBe(false);
+    expect(applyFilter(0, { operator: "isNotNull", value: "" })).toBe(true);
   });
 });

@@ -1,22 +1,29 @@
 use crate::core::{
-    dialect::DatabaseKind,
+    dialect::{database_spec_for_driver, DatabaseKind},
     manager::ConnectionManager,
     protocol::{ParameterizedStatement, QueryResult, Response},
     schema_diff::{
         compare_schema_snapshots as build_schema_diff, finalize_schema_snapshot, SchemaChangeRisk,
         SchemaDiffPlan, SchemaDiffSummary, SchemaPreflightAssertion, SchemaPreflightCheck,
-        SchemaRelationSnapshot, SchemaSnapshot, SCHEMA_SNAPSHOT_VERSION,
+        SchemaRelationSnapshot, SchemaRoutineSnapshot, SchemaSnapshot, SCHEMA_SNAPSHOT_VERSION,
     },
     store::{MetaStore, Resource},
 };
 use serde::{Deserialize, Serialize};
-use std::{str::FromStr, sync::Arc, time::SystemTime};
+use std::{
+    collections::HashSet,
+    str::FromStr,
+    sync::{Arc, Mutex, OnceLock},
+    time::SystemTime,
+};
 use tauri::State;
 use tokio::{sync::Semaphore, task::JoinSet};
 
 const SNAPSHOT_METADATA_CONCURRENCY: usize = 6;
 const MIGRATION_JOURNAL_PARENT_ID: &str = "schema-migration-journal-v1";
 const MIGRATION_JOURNAL_KIND: &str = "SCHEMA_MIGRATION_JOURNAL";
+const OFFLINE_PROJECT_DDL_REVIEW_WARNING: &str = "OFFLINE_PROJECT_DDL_REVIEW_ONLY";
+static ACTIVE_MIGRATION_JOURNALS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,16 +37,98 @@ pub struct ExecuteSchemaMigrationRequest {
     pub allow_review: bool,
     #[serde(default)]
     pub allow_destructive: bool,
+    /// MySQL and similar engines can auto-commit DDL. This acknowledgement is
+    /// deliberately separate from review/destructive approval so a caller
+    /// cannot mistake sequential, partially committed execution for a
+    /// transactional migration.
+    #[serde(default)]
+    pub allow_non_transactional: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum SchemaMigrationStatus {
     Running,
+    /// A journal that was left running by a previous application process.
+    /// Its live target must be recaptured; it is never safe to resume it.
+    Interrupted,
     Blocked,
     Failed,
     VerificationFailed,
     Succeeded,
+}
+
+struct ActiveMigrationJournal {
+    id: String,
+}
+
+impl ActiveMigrationJournal {
+    fn register(id: &str) -> Self {
+        let journals = ACTIVE_MIGRATION_JOURNALS.get_or_init(|| Mutex::new(HashSet::new()));
+        if let Ok(mut journals) = journals.lock() {
+            journals.insert(id.to_string());
+        }
+        Self { id: id.to_string() }
+    }
+}
+
+impl Drop for ActiveMigrationJournal {
+    fn drop(&mut self) {
+        if let Some(journals) = ACTIVE_MIGRATION_JOURNALS.get() {
+            if let Ok(mut journals) = journals.lock() {
+                journals.remove(&self.id);
+            }
+        }
+    }
+}
+
+fn migration_is_active(id: &str) -> bool {
+    ACTIVE_MIGRATION_JOURNALS
+        .get()
+        .and_then(|journals| journals.lock().ok().map(|journals| journals.contains(id)))
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaMigrationExecutionMode {
+    Transactional,
+    NonTransactional,
+}
+
+fn schema_migration_execution_mode(driver: &str) -> Option<SchemaMigrationExecutionMode> {
+    // Resolve aliases through the same dialect registry that generated the
+    // migration plan. This keeps MariaDB and future PostgreSQL/MySQL family
+    // aliases from silently losing their explicit transaction semantics.
+    match DatabaseKind::from_str(driver).ok()? {
+        DatabaseKind::Postgres => Some(SchemaMigrationExecutionMode::Transactional),
+        // MySQL DDL may commit implicitly. It is still useful to apply a
+        // reviewed plan, but it must run in an explicit statement-by-statement
+        // mode with a persistent progress journal.
+        DatabaseKind::Mysql => Some(SchemaMigrationExecutionMode::NonTransactional),
+    }
+}
+
+fn ensure_host_schema_migration_capability(
+    capabilities: Option<&crate::core::dialect::DatabaseCapabilities>,
+) -> Result<(), String> {
+    if let Some(capabilities) = capabilities {
+        return Err(format!(
+            "{} does not provide a verified semantic schema migration protocol",
+            capabilities.display_name
+        ));
+    }
+    Ok(())
+}
+
+async fn ensure_host_schema_migration_allowed(
+    manager: &ConnectionManager,
+    connection_id: &str,
+) -> Result<(), String> {
+    let capabilities = manager
+        .package_capabilities(connection_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    ensure_host_schema_migration_capability(capabilities.as_ref())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -160,11 +249,21 @@ async fn capture_schema_snapshot_inner(
     database: Option<String>,
     schema: String,
 ) -> Result<SchemaSnapshot, String> {
-    let kind = DatabaseKind::from_str(&driver).map_err(|error| error.to_string())?;
-    if !kind.capabilities().supports_table_browsing {
+    let capabilities = manager
+        .package_capabilities(&connection_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .or_else(|| database_spec_for_driver(&driver).map(|spec| spec.capabilities()))
+        .ok_or_else(|| {
+            format!(
+                "{} does not declare a signed schema snapshot capability contract",
+                driver.trim()
+            )
+        })?;
+    if !capabilities.supports_table_browsing && !capabilities.supports_collection_browsing {
         return Err(format!(
-            "{} does not expose relational schema snapshots",
-            kind.display_name()
+            "{} does not expose schema or collection snapshots",
+            capabilities.display_name
         ));
     }
     let schema = schema.trim();
@@ -172,50 +271,100 @@ async fn capture_schema_snapshot_inner(
         return Err("Schema name is required".to_string());
     }
     let database = database.as_deref();
-    let tables = match database {
-        Some(database) => {
-            manager
-                .get_database_tables(&connection_id, database, schema)
-                .await
+    let objects: Vec<(String, Option<String>)> = if capabilities.supports_table_browsing {
+        match database {
+            Some(database) => {
+                manager
+                    .get_database_tables(&connection_id, database, schema)
+                    .await
+            }
+            None => manager.get_tables(&connection_id, schema).await,
         }
-        None => manager.get_tables(&connection_id, schema).await,
-    }
-    .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|table| (table.name, table.table_type))
+        .collect()
+    } else {
+        manager
+            .get_collections(&connection_id, schema)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|collection| (collection.name, collection.collection_type))
+            .collect()
+    };
 
     let manager = manager.clone();
     let concurrency = Arc::new(Semaphore::new(SNAPSHOT_METADATA_CONCURRENCY));
     let mut captures = JoinSet::new();
-    for table in tables {
+    for (relation_name, object_type) in objects {
         let manager = manager.clone();
         let concurrency = Arc::clone(&concurrency);
         let connection_id = connection_id.clone();
         let database = database.map(ToString::to_string);
         let schema = schema.to_string();
-        let relation_name = table.name;
-        let object_type = table.table_type;
+        let supports_indexes = capabilities.supports_table_indexes;
+        let supports_constraints = capabilities.supports_table_constraints;
+        let database_scoped = capabilities.supports_table_browsing && database.is_some();
         captures.spawn(async move {
             let _permit = concurrency
                 .acquire_owned()
                 .await
                 .map_err(|_| "Schema snapshot concurrency gate closed".to_string())?;
-            let metadata = match database.as_deref() {
-                Some(database) => tokio::try_join!(
-                    manager.get_database_columns(&connection_id, database, &schema, &relation_name),
-                    manager.get_database_indexes(&connection_id, database, &schema, &relation_name),
-                    manager.get_database_constraints(
-                        &connection_id,
-                        database,
-                        &schema,
-                        &relation_name
-                    ),
-                ),
-                None => tokio::try_join!(
-                    manager.get_columns(&connection_id, &schema, &relation_name),
-                    manager.get_indexes(&connection_id, &schema, &relation_name),
-                    manager.get_constraints(&connection_id, &schema, &relation_name),
-                ),
-            }
-            .map_err(|error| {
+            let columns = async {
+                match (database_scoped, database.as_deref()) {
+                    (true, Some(database)) => {
+                        manager
+                            .get_database_columns(&connection_id, database, &schema, &relation_name)
+                            .await
+                    }
+                    _ => {
+                        manager
+                            .get_columns(&connection_id, &schema, &relation_name)
+                            .await
+                    }
+                }
+            };
+            let indexes = async {
+                if !supports_indexes {
+                    return Ok(Vec::new());
+                }
+                match (database_scoped, database.as_deref()) {
+                    (true, Some(database)) => {
+                        manager
+                            .get_database_indexes(&connection_id, database, &schema, &relation_name)
+                            .await
+                    }
+                    _ => {
+                        manager
+                            .get_indexes(&connection_id, &schema, &relation_name)
+                            .await
+                    }
+                }
+            };
+            let constraints = async {
+                if !supports_constraints {
+                    return Ok(Vec::new());
+                }
+                match (database_scoped, database.as_deref()) {
+                    (true, Some(database)) => {
+                        manager
+                            .get_database_constraints(
+                                &connection_id,
+                                database,
+                                &schema,
+                                &relation_name,
+                            )
+                            .await
+                    }
+                    _ => {
+                        manager
+                            .get_constraints(&connection_id, &schema, &relation_name)
+                            .await
+                    }
+                }
+            };
+            let metadata = tokio::try_join!(columns, indexes, constraints).map_err(|error| {
                 format!("Failed to capture metadata for {schema}.{relation_name}: {error}")
             })?;
 
@@ -244,6 +393,28 @@ async fn capture_schema_snapshot_inner(
         }
     }
 
+    // Capture only review-safe routine signatures. Definitions/bodies are not
+    // requested because they are dialect-specific and may contain sensitive
+    // implementation details; the diff planner deliberately never emits DDL
+    // from these records.
+    let routines = if capabilities.supports_functions {
+        let functions = match (capabilities.supports_table_browsing, database) {
+            (true, Some(database)) => {
+                manager
+                    .get_database_functions(&connection_id, database, schema)
+                    .await
+            }
+            _ => manager.get_functions(&connection_id, schema).await,
+        }
+        .map_err(|error| format!("Failed to capture routines for {schema}: {error}"))?;
+        functions
+            .into_iter()
+            .map(SchemaRoutineSnapshot::from)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     finalize_schema_snapshot(SchemaSnapshot {
         version: SCHEMA_SNAPSHOT_VERSION,
         id: String::new(),
@@ -251,11 +422,12 @@ async fn capture_schema_snapshot_inner(
         project_id,
         connection_id,
         connection_name,
-        driver: kind.as_str().to_string(),
+        driver: capabilities.driver,
         database_name: database.map(ToString::to_string),
         schema_name: schema.to_string(),
         captured_at: current_timestamp_millis(),
         relations,
+        routines,
         warnings: Vec::new(),
     })
     .map_err(|error| error.to_string())
@@ -298,7 +470,7 @@ pub async fn execute_schema_migration(
         "expectedPlanId": request.expected_plan_id,
     });
 
-    let source = match verify_snapshot_integrity(request.source) {
+    let source = match ensure_snapshot_is_executable_source(request.source) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             return Ok(Response::err_with_details(
@@ -324,6 +496,19 @@ pub async fn execute_schema_migration(
         return Ok(Response::err_with_details(
             "SCHEMA_MIGRATION_PROJECT_MISMATCH",
             "Source and target snapshots belong to different projects",
+            false,
+            Some(context),
+        ));
+    }
+    // A snapshot can be captured from an external package, but the current
+    // migration executor builds native PostgreSQL/MySQL SQL. Never infer that
+    // an external package sharing one of those ids accepts the same DDL.
+    if let Err(error) =
+        ensure_host_schema_migration_allowed(manager.inner(), &expected_target.connection_id).await
+    {
+        return Ok(Response::err_with_details(
+            "SCHEMA_MIGRATION_UNSAFE_DRIVER",
+            &error,
             false,
             Some(context),
         ));
@@ -371,10 +556,20 @@ pub async fn execute_schema_migration(
             Some(context),
         ));
     }
-    if approved_plan.driver != DatabaseKind::Postgres.as_str() {
+    let Some(execution_mode) = schema_migration_execution_mode(&approved_plan.driver) else {
         return Ok(Response::err_with_details(
             "SCHEMA_MIGRATION_UNSAFE_DRIVER",
-            "Automatic migration apply is limited to PostgreSQL because MySQL DDL can auto-commit; open the reviewed SQL in a console instead",
+            "Automatic migration apply is available only for PostgreSQL transactional plans and explicitly acknowledged MySQL non-transactional plans; open the reviewed SQL in a console for other drivers",
+            false,
+            Some(context),
+        ));
+    };
+    if execution_mode == SchemaMigrationExecutionMode::NonTransactional
+        && !request.allow_non_transactional
+    {
+        return Ok(Response::err_with_details(
+            "SCHEMA_MIGRATION_NON_TRANSACTIONAL_APPROVAL_REQUIRED",
+            "This driver can auto-commit DDL. Explicitly acknowledge non-transactional execution before applying the reviewed plan",
             false,
             Some(context),
         ));
@@ -516,6 +711,15 @@ pub async fn execute_schema_migration(
         error: None,
         warnings: Vec::new(),
     };
+    if execution_mode == SchemaMigrationExecutionMode::NonTransactional {
+        journal.warnings.push(
+            "This migration runs statement by statement because MySQL DDL can auto-commit. A failure can leave already recorded statements committed; use the journal and post-verification to recover."
+                .to_string(),
+        );
+    }
+    // Register before persistence. A journal that is visible as `running` in
+    // this process must never be mistaken for a stale process-crash record.
+    let _active_journal = ActiveMigrationJournal::register(&journal.id);
     persist_journal_or_warn(meta_store.inner(), &mut journal).await;
 
     for check in &plan.preflight_checks {
@@ -539,32 +743,61 @@ pub async fn execute_schema_migration(
         return Ok(Response::ok(journal));
     }
 
-    let apply_result = match fresh_target.database_name.as_deref() {
-        Some(database) => {
-            manager
-                .execute_database_parameterized_batch(
-                    &fresh_target.connection_id,
-                    database,
-                    &statements,
-                )
-                .await
+    match execution_mode {
+        SchemaMigrationExecutionMode::Transactional => {
+            let apply_result = match fresh_target.database_name.as_deref() {
+                Some(database) => {
+                    manager
+                        .execute_database_parameterized_batch(
+                            &fresh_target.connection_id,
+                            database,
+                            &statements,
+                        )
+                        .await
+                }
+                None => {
+                    manager
+                        .execute_parameterized_batch(&fresh_target.connection_id, &statements)
+                        .await
+                }
+            };
+            if let Err(error) = apply_result {
+                journal.status = SchemaMigrationStatus::Failed;
+                journal.finished_at = Some(current_timestamp_millis());
+                journal.error = Some(format!(
+                    "PostgreSQL rejected the migration; the transaction was rolled back: {error}"
+                ));
+                persist_journal_or_warn(meta_store.inner(), &mut journal).await;
+                return Ok(Response::ok(journal));
+            }
+            journal.committed_statements = statements.len();
         }
-        None => {
-            manager
-                .execute_parameterized_batch(&fresh_target.connection_id, &statements)
-                .await
+        SchemaMigrationExecutionMode::NonTransactional => {
+            for statement in &statements {
+                if let Err(error) = manager
+                    .execute_parameterized(
+                        &fresh_target.connection_id,
+                        &statement.sql,
+                        &statement.params,
+                    )
+                    .await
+                {
+                    journal.status = SchemaMigrationStatus::Failed;
+                    journal.finished_at = Some(current_timestamp_millis());
+                    journal.error = Some(format!(
+                        "MySQL rejected migration statement {} of {}; {} statement(s) may already be committed: {error}",
+                        journal.committed_statements + 1,
+                        statements.len(),
+                        journal.committed_statements,
+                    ));
+                    persist_journal_or_warn(meta_store.inner(), &mut journal).await;
+                    return Ok(Response::ok(journal));
+                }
+                journal.committed_statements += 1;
+                persist_journal_or_warn(meta_store.inner(), &mut journal).await;
+            }
         }
-    };
-    if let Err(error) = apply_result {
-        journal.status = SchemaMigrationStatus::Failed;
-        journal.finished_at = Some(current_timestamp_millis());
-        journal.error = Some(format!(
-            "PostgreSQL rejected the migration; the transaction was rolled back: {error}"
-        ));
-        persist_journal_or_warn(meta_store.inner(), &mut journal).await;
-        return Ok(Response::ok(journal));
     }
-    journal.committed_statements = statements.len();
 
     let post_target = match capture_schema_snapshot_inner(
         manager.inner(),
@@ -657,6 +890,11 @@ pub async fn list_schema_migration_journal(
             serde_json::from_value::<SchemaMigrationJournalEntry>(resource.metadata).ok()
         })
         .collect::<Vec<_>>();
+    for entry in &mut entries {
+        if interrupt_stale_migration_journal(entry) {
+            persist_journal_or_warn(meta_store.inner(), entry).await;
+        }
+    }
     entries.sort_by(|left, right| right.started_at.cmp(&left.started_at));
     entries.truncate(limit.unwrap_or(20).clamp(1, 100));
     Ok(Response::ok(entries))
@@ -672,6 +910,43 @@ fn verify_snapshot_integrity(snapshot: SchemaSnapshot) -> Result<SchemaSnapshot,
         return Err("Snapshot contents do not match its fingerprint".to_string());
     }
     Ok(finalized)
+}
+
+/// Project DDL baselines are intentionally partial, review-only descriptions.
+/// Check the marker before fingerprint verification so a future source format
+/// cannot accidentally make this execution path available without an explicit
+/// backend contract change.
+fn ensure_snapshot_is_executable_source(
+    snapshot: SchemaSnapshot,
+) -> Result<SchemaSnapshot, String> {
+    if snapshot
+        .warnings
+        .iter()
+        .any(|warning| warning == OFFLINE_PROJECT_DDL_REVIEW_WARNING)
+    {
+        return Err(
+            "Project DDL baselines are review-only. Capture a live schema snapshot before applying a migration."
+                .to_string(),
+        );
+    }
+    verify_snapshot_integrity(snapshot)
+}
+
+fn interrupt_stale_migration_journal(journal: &mut SchemaMigrationJournalEntry) -> bool {
+    if journal.status != SchemaMigrationStatus::Running || migration_is_active(&journal.id) {
+        return false;
+    }
+    journal.status = SchemaMigrationStatus::Interrupted;
+    journal.finished_at = Some(current_timestamp_millis());
+    journal.error = Some(
+        "Migration did not reach a terminal journal entry in this application session. The live target may be partially changed; capture a fresh snapshot and review a new plan before any further migration."
+            .to_string(),
+    );
+    journal.warnings.push(
+        "Interrupted migrations cannot be resumed automatically because the database state must be revalidated."
+            .to_string(),
+    );
+    true
 }
 
 fn migration_confirmation_target(snapshot: &SchemaSnapshot) -> String {
@@ -976,6 +1251,87 @@ mod tests {
     }
 
     #[test]
+    fn migration_execution_mode_keeps_mysql_non_transactional() {
+        assert_eq!(
+            schema_migration_execution_mode("postgres"),
+            Some(SchemaMigrationExecutionMode::Transactional)
+        );
+        assert_eq!(
+            schema_migration_execution_mode("mysql"),
+            Some(SchemaMigrationExecutionMode::NonTransactional)
+        );
+        assert_eq!(
+            schema_migration_execution_mode("mariadb"),
+            Some(SchemaMigrationExecutionMode::NonTransactional)
+        );
+        assert_eq!(schema_migration_execution_mode("sqlite"), None);
+        assert_eq!(schema_migration_execution_mode("duckdb"), None);
+    }
+
+    #[test]
+    fn external_packages_cannot_receive_host_generated_schema_migrations() {
+        let mut capabilities = DatabaseKind::Postgres.capabilities();
+        capabilities.display_name = "PostgreSQL JDBC package".to_string();
+
+        assert!(ensure_host_schema_migration_capability(None).is_ok());
+        assert_eq!(
+            ensure_host_schema_migration_capability(Some(&capabilities)).unwrap_err(),
+            "PostgreSQL JDBC package does not provide a verified semantic schema migration protocol"
+        );
+    }
+
+    #[test]
+    fn active_migration_journal_is_not_treated_as_an_interrupted_process() {
+        let id = "schema-migration-active-test";
+        let guard = ActiveMigrationJournal::register(id);
+        assert!(migration_is_active(id));
+        drop(guard);
+        assert!(!migration_is_active(id));
+    }
+
+    #[test]
+    fn stale_running_journal_requires_a_fresh_snapshot_instead_of_resume() {
+        let mut journal = SchemaMigrationJournalEntry {
+            id: "schema-migration-stale-test".to_string(),
+            project_id: "project-1".to_string(),
+            connection_id: "connection-1".to_string(),
+            connection_name: "Production".to_string(),
+            database_name: Some("app".to_string()),
+            schema_name: "public".to_string(),
+            plan_id: "plan-1".to_string(),
+            source_fingerprint: "source".to_string(),
+            target_fingerprint_before: "target".to_string(),
+            status: SchemaMigrationStatus::Running,
+            started_at: 1,
+            finished_at: None,
+            statement_count: 2,
+            committed_statements: 1,
+            preflight_results: Vec::new(),
+            rollback: SchemaRollbackArtifact {
+                available: false,
+                reason: None,
+                plan_id: None,
+                change_count: 0,
+                requires_manual_review: true,
+                sql: None,
+            },
+            verification: None,
+            error: None,
+            warnings: Vec::new(),
+        };
+
+        assert!(interrupt_stale_migration_journal(&mut journal));
+        assert_eq!(journal.status, SchemaMigrationStatus::Interrupted);
+        assert_eq!(journal.committed_statements, 1);
+        assert!(journal.finished_at.is_some());
+        assert!(journal
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("fresh snapshot")));
+        assert!(!interrupt_stale_migration_journal(&mut journal));
+    }
+
+    #[test]
     fn zero_value_preflight_passes_zero_and_blocks_non_zero() {
         let check = check(SchemaPreflightAssertion::ZeroValue, Some("blocking_rows"));
 
@@ -1034,6 +1390,7 @@ mod tests {
             schema_name: "public".to_string(),
             captured_at: 1,
             relations: Vec::new(),
+            routines: Vec::new(),
             warnings: Vec::new(),
         };
 
@@ -1041,5 +1398,28 @@ mod tests {
             migration_confirmation_target(&snapshot),
             "Production / app / public"
         );
+    }
+
+    #[test]
+    fn project_ddl_baseline_cannot_enter_migration_execution() {
+        let snapshot = SchemaSnapshot {
+            version: SCHEMA_SNAPSHOT_VERSION,
+            id: "project-ddl-1".to_string(),
+            fingerprint: "offline-1234".to_string(),
+            project_id: "project-1".to_string(),
+            connection_id: "connection-1".to_string(),
+            connection_name: "Production".to_string(),
+            driver: "postgres".to_string(),
+            database_name: Some("app".to_string()),
+            schema_name: "public".to_string(),
+            captured_at: 1,
+            relations: Vec::new(),
+            routines: Vec::new(),
+            warnings: vec![OFFLINE_PROJECT_DDL_REVIEW_WARNING.to_string()],
+        };
+
+        let error = ensure_snapshot_is_executable_source(snapshot).unwrap_err();
+
+        assert!(error.contains("review-only"));
     }
 }

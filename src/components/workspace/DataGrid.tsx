@@ -22,6 +22,7 @@ import {
   type CellClickedEventArgs,
   type DataEditorRef,
   type GridKeyEventArgs,
+  type GridMouseEventArgs,
   type HeaderClickedEventArgs,
 } from "@glideapps/glide-data-grid";
 import "@glideapps/glide-data-grid/dist/index.css";
@@ -35,10 +36,13 @@ import {
   ArrowUpAZ,
   ArrowUpRight,
   Copy,
+  Database,
   Download,
   Eye,
   EyeOff,
   FileJson,
+  Pin,
+  PinOff,
   RotateCcw,
   Rows3,
   Search,
@@ -49,11 +53,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ColumnFilter } from "./GridFilterRow";
-import {
-  DataGridContextMenu,
-  type DataGridContextMenuItem,
-} from "./DataGridContextMenu";
+import type { ColumnFilter, FilterOperator } from "./GridFilterRow";
 import {
   exportToCsv,
   exportToJson,
@@ -65,10 +65,26 @@ import {
   resultColumnGridId,
   resultColumnIndexByGridId,
 } from "@/lib/gridColumns";
+import {
+  compactResultColumnType,
+  DataGridContextMenu,
+  DataGridHoverTooltip,
+  gridCellTooltipText,
+  resolveHeaderColumnType,
+  resolveRenderedColumnType,
+  resultColumnTypeFamily,
+  transposeQueryResult,
+  gridLayoutKey,
+  loadGridLayout,
+  normalizeGridLayout,
+  type DataGridContextMenuItem,
+  type DataGridHoverTooltipState,
+} from "@/features/data-grid";
 import { ValueEditorDialog, type ValueEditorTarget } from "./ValueEditorDialog";
 import type {
   ConstraintInfo,
   ForeignKeyReferenceInfo,
+  QueryResult,
 } from "@/services/tauri/types";
 import {
   buildForeignKeyNavigationPlans,
@@ -113,6 +129,9 @@ interface DataGridProps {
   onSelectionSummaryChange?: (summary: DataGridSelectionSummary) => void;
   tableConstraints?: ConstraintInfo[];
   referencingForeignKeys?: ForeignKeyReferenceInfo[];
+  /** Alternate presentation data. It is always inspected read-only. */
+  resultOverride?: QueryResult;
+  transposed?: boolean;
 }
 
 function rangeIndexes(start: number, length: number) {
@@ -131,31 +150,26 @@ function exportFilename(title: string | undefined, extension: "csv" | "json") {
 function columnIconForType(type: string, isPrimaryKey?: boolean) {
   if (isPrimaryKey) return GridColumnIcon.HeaderRowID;
 
-  const normalized = type.toLowerCase();
-  if (
-    /\b(int|serial|decimal|numeric|real|double|float|money)\b/.test(normalized)
-  ) {
-    return GridColumnIcon.HeaderNumber;
+  switch (resultColumnTypeFamily(type)) {
+    case "number":
+      return GridColumnIcon.HeaderNumber;
+    case "boolean":
+      return GridColumnIcon.HeaderBoolean;
+    case "date":
+    case "datetime":
+      return GridColumnIcon.HeaderDate;
+    case "time":
+      return GridColumnIcon.HeaderTime;
+    case "json":
+    case "binary":
+      return GridColumnIcon.HeaderCode;
+    case "array":
+      return GridColumnIcon.HeaderArray;
+    case "reference":
+      return GridColumnIcon.HeaderReference;
+    default:
+      return GridColumnIcon.HeaderString;
   }
-  if (/\b(bool|boolean|bit)\b/.test(normalized)) {
-    return GridColumnIcon.HeaderBoolean;
-  }
-  if (/\b(timestamp|datetime|date)\b/.test(normalized)) {
-    return GridColumnIcon.HeaderDate;
-  }
-  if (/\btime\b/.test(normalized)) {
-    return GridColumnIcon.HeaderTime;
-  }
-  if (/\b(json|jsonb|xml|object|map)\b/.test(normalized)) {
-    return GridColumnIcon.HeaderCode;
-  }
-  if (/\[\]|\b(array|list|set)\b/.test(normalized)) {
-    return GridColumnIcon.HeaderArray;
-  }
-  if (/\b(uuid|foreign|reference)\b/.test(normalized)) {
-    return GridColumnIcon.HeaderReference;
-  }
-  return GridColumnIcon.HeaderString;
 }
 
 function cssHslVar(name: string, fallback: string) {
@@ -187,6 +201,8 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       onSelectionSummaryChange,
       tableConstraints = [],
       referencingForeignKeys = [],
+      resultOverride,
+      transposed = false,
     },
     ref,
   ) {
@@ -200,6 +216,8 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       setColumnWidth,
       setColumnOrder,
       setColumnHidden,
+      setFrozenColumnCount,
+      restoreColumnLayout,
       showAllColumns,
       deleteRows,
       runTabQuery,
@@ -227,7 +245,15 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     );
 
     const resultIndex = activeTab?.activeResultIndex ?? 0;
-    const result = activeTab?.results?.[resultIndex] ?? activeTab?.results?.[0];
+    const sourceResult =
+      activeTab?.results?.[resultIndex] ?? activeTab?.results?.[0];
+    const [queryResultTransposed, setQueryResultTransposed] = useState(false);
+    const isTransposed = transposed || queryResultTransposed;
+    const result =
+      resultOverride ??
+      (isTransposed && sourceResult
+        ? transposeQueryResult(sourceResult)
+        : sourceResult);
     const error = activeTab?.error;
     const errorConnection = connections.find(
       (connection) => connection.id === activeTab?.connectionId,
@@ -245,10 +271,16 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     );
     const gridState = activeTab?.gridState;
     const pendingEdits = activeTab?.pendingEdits || EMPTY_PENDING_EDITS;
-    const isEditable = activeTab?.type === "table" && !readOnly;
+    const isEditable = activeTab?.type === "table" && !readOnly && !isTransposed;
     const columnWidths = activeTab?.columnWidths || {};
     const columnOrder = activeTab?.columnOrder || [];
     const hiddenColumns = activeTab?.hiddenColumns || [];
+    const frozenColumnCount = isTransposed
+      ? Math.min(1, Math.max(0, (result?.columns.length || 0) - 1))
+      : Math.min(
+          activeTab?.frozenColumnCount || 0,
+          Math.max(0, (result?.columns.length || overrideColumns?.length || 0) - 1),
+        );
     const newRowsCount = activeTab?.newRowsCount || 0;
 
     // Row selection state
@@ -275,23 +307,83 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       columnId?: string;
       columnName?: string;
     }>({ type: null, x: 0, y: 0 });
+    const [hoverTooltip, setHoverTooltip] =
+      useState<DataGridHoverTooltipState | null>(null);
 
     const gridContainerRef = useRef<HTMLDivElement>(null);
     const dataEditorRef = useRef<DataEditorRef>(null);
+    const restoredLayoutRef = useRef<string | null>(null);
 
     const tableColumns = activeTab?.tableColumns;
 
+    const layoutColumnIds = useMemo(() => {
+      if (isTransposed) return [];
+      if (result?.columns?.length) {
+        return result.columns.map((_column, index) =>
+          resultColumnGridId(result.columns, index),
+        );
+      }
+      return overrideColumns?.map((column) => column.name) || [];
+    }, [isTransposed, overrideColumns, result?.columns]);
+
     useEffect(() => {
+      if (!activeTab || layoutColumnIds.length === 0 || isTransposed) return;
+      const scope = {
+        type: activeTab.type,
+        connectionId: activeTab.connectionId,
+        databaseName: activeTab.databaseName,
+        schemaName: activeTab.schemaName,
+        tableName: activeTab.tableName,
+        queryLanguage: activeTab.queryLanguage,
+        sql: activeTab.sql,
+      };
+      const layoutKey = gridLayoutKey(scope);
+      if (!layoutKey) return;
+      // Include the ephemeral tab id: closing and reopening the same object
+      // must hydrate the new tab from its durable layout rather than inheriting
+      // the previous tab's in-memory "already restored" marker.
+      const restoreKey = `${activeTab.id}:${layoutKey}:${layoutColumnIds.join("\\u0001")}`;
+      if (restoredLayoutRef.current === restoreKey) return;
+
+      restoredLayoutRef.current = restoreKey;
+      restoreColumnLayout(
+        activeTab.id,
+        loadGridLayout(scope, layoutColumnIds) ||
+          normalizeGridLayout({}, layoutColumnIds),
+      );
+    }, [
+      activeTab,
+      isTransposed,
+      layoutColumnIds,
+      restoreColumnLayout,
+    ]);
+
+    useEffect(() => {
+      setQueryResultTransposed(false);
       setValueEditorTarget(null);
       setGridSelection({
         columns: CompactSelection.empty(),
         rows: CompactSelection.empty(),
       });
       setContextMenu({ type: null, x: 0, y: 0 });
+      setHoverTooltip(null);
     }, [activeTabId, resultIndex]);
 
     // Column definitions
     const columns = useMemo<GridColumn[]>(() => {
+      if (isTransposed && result && result.columns.length > 0) {
+        return result.columns.map((column, index) => ({
+          title: column.name,
+          id: `transpose:${index}`,
+          width: Math.round((index === 0 ? 190 : 150) * gridScale),
+          icon:
+            showTypeIcons && index === 0
+              ? GridColumnIcon.HeaderString
+              : undefined,
+          hasMenu: false,
+        }));
+      }
+
       // If we have a result, use its columns
       if (result && result.columns.length > 0) {
         const allColumns = result.columns
@@ -302,24 +394,17 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
             const customWidth =
               columnWidths[columnId] ?? columnWidths[col.name];
 
-            let title = col.name || "Unknown";
-            let columnIcon: GridColumnIcon | undefined;
-            if (tableColumns) {
-              try {
-                const meta = tableColumns.find((c) => c.name === col.name);
-                if (meta) {
-                  let type = meta.data_type || "text";
-                  if (type === "character varying") type = "varchar";
-                  if (type === "timestamp without time zone")
-                    type = "timestamp";
-
-                  title = `${col.name} (${type})`;
-                  columnIcon = columnIconForType(type, meta.is_primary_key);
-                }
-              } catch (e) {
-                console.error("DataGrid: Error generating column header", e);
-              }
-            }
+            const metadata = tableColumns?.find((item) => item.name === col.name);
+            const dataType = resolveHeaderColumnType({
+              tableColumnType: metadata?.data_type,
+              resultColumnType: col.data_type,
+            });
+            const title = dataType
+              ? `${col.name || "Unknown"} (${compactResultColumnType(dataType)})`
+              : col.name || "Unknown";
+            const columnIcon = dataType
+              ? columnIconForType(dataType, metadata?.is_primary_key)
+              : undefined;
 
             return {
               title,
@@ -396,11 +481,19 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       showTypeIcons,
       gridScale,
       hiddenColumns,
+      isTransposed,
     ]);
 
     // Apply filters and sorting
     const { filteredRows, sortedIndices } = useMemo(() => {
       if (!result) return { filteredRows: [], sortedIndices: [] };
+
+      if (isTransposed) {
+        return {
+          filteredRows: result.rows,
+          sortedIndices: result.rows.map((_, index) => index),
+        };
+      }
 
       let indices = result.rows.map((_, i) => i);
 
@@ -493,7 +586,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         filteredRows: indices.map((i) => result.rows[i]),
         sortedIndices: indices,
       };
-    }, [result, gridState, globalFilter, columnFilters, activeTab?.type]);
+    }, [result, gridState, globalFilter, columnFilters, activeTab?.type, isTransposed]);
 
     const selectedRowIndexes = useMemo(
       () =>
@@ -514,7 +607,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       () =>
         columns.map((visualColumn) => {
           const originalColumnIndex = result
-            ? resultColumnIndexByGridId(result.columns, visualColumn.id)
+            ? isTransposed
+              ? Number(String(visualColumn.id).replace("transpose:", ""))
+              : resultColumnIndexByGridId(result.columns, visualColumn.id)
             : -1;
           const resultColumn = result?.columns[originalColumnIndex];
           return {
@@ -526,12 +621,13 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               )?.data_type,
           };
         }),
-      [columns, result, tableColumns],
+      [columns, result, tableColumns, isTransposed],
     );
 
     const selectionAggregate = useMemo(() => {
       if (
         !result ||
+        isTransposed ||
         columns.length === 0 ||
         deferredGridSelectionContext.activeTabId !== activeTabId ||
         deferredGridSelectionContext.resultIndex !== resultIndex
@@ -585,6 +681,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       result,
       resultIndex,
       sortedIndices,
+      isTransposed,
     ]);
 
     // Update getCellContent to handle missing result & new rows
@@ -654,10 +751,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         // Determine original column index
         let originalColIndex = -1;
         if (result && result.columns.length > 0) {
-          originalColIndex = resultColumnIndexByGridId(
-            result.columns,
-            visualColumn.id,
-          );
+          originalColIndex = isTransposed
+            ? col
+            : resultColumnIndexByGridId(result.columns, visualColumn.id);
         } else if (overrideColumns) {
           originalColIndex = overrideColumns.findIndex(
             (c) => c.name === visualColumn.id,
@@ -690,8 +786,27 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           val,
           isEditable,
           isNewRow ? "DEFAULT" : "NOT LOADED",
+          resolveRenderedColumnType({
+            resultColumnType: result?.columns[originalColIndex]?.data_type,
+            tableColumnType:
+              tableColumns?.find(
+                (column) =>
+                  column.name === result?.columns[originalColIndex]?.name,
+              )?.data_type || overrideColumns?.[originalColIndex]?.type,
+          }),
         );
         const gridCell = { ...baseCell };
+
+        if (pendingEdits.has(editKey)) {
+          gridCell.themeOverride = {
+            ...gridCell.themeOverride,
+            bgCell: cssHslVarAlpha(
+              "--wb-accent",
+              0.12,
+              "rgba(91, 137, 214, 0.12)",
+            ),
+          };
+        }
 
         // Force editable for compatible types
         if (gridCell.kind !== GridCellKind.Boolean) {
@@ -702,7 +817,12 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         // Apply theme override for new rows
         if (isNewRow) {
           gridCell.themeOverride = {
-            bgCell: "rgba(34, 197, 94, 0.1)", // Green tint
+            ...gridCell.themeOverride,
+            bgCell: cssHslVarAlpha(
+              "--wb-accent",
+              0.09,
+              "rgba(91, 137, 214, 0.09)",
+            ),
           };
         }
 
@@ -716,6 +836,8 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         columns,
         overrideColumns,
         isEditable,
+        tableColumns,
+        isTransposed,
       ],
     );
 
@@ -726,7 +848,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         col: number,
         _bounds: { x: number; y: number; width: number; height: number },
       ) => {
-        if (!activeTab || !result) return;
+        if (!activeTab || !result || isTransposed) return;
 
         const visualColumn = columns[col];
         if (!visualColumn) return;
@@ -755,7 +877,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
 
         setGridSort(activeTab.id, newDirection ? columnId : null, newDirection);
       },
-      [activeTab, result, gridState, setGridSort, columns],
+      [activeTab, result, gridState, setGridSort, columns, isTransposed],
     );
 
     // Handle cell edit
@@ -855,20 +977,20 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     // Column resize handler
     const onColumnResize = useCallback(
       (column: GridColumn, newSize: number) => {
-        if (!activeTab || !column.id) return;
+        if (!activeTab || !column.id || isTransposed) return;
         setColumnWidth(
           activeTab.id,
           column.id,
           Math.round(newSize / gridScale),
         );
       },
-      [activeTab, gridScale, setColumnWidth],
+      [activeTab, gridScale, setColumnWidth, isTransposed],
     );
 
     // Column move handler
     const onColumnMoved = useCallback(
       (startIndex: number, endIndex: number) => {
-        if (!activeTab) return;
+        if (!activeTab || isTransposed) return;
 
         const newOrder = [...columns]
           .map((c) => c.id || "")
@@ -879,7 +1001,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           setColumnOrder(activeTab.id, newOrder);
         }
       },
-      [activeTab, columns, setColumnOrder],
+      [activeTab, columns, setColumnOrder, isTransposed],
     );
 
     const visualColumnIndexToResultIndex = useCallback(
@@ -887,6 +1009,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         const visualColumn = columns[visualColumnIndex];
         if (!visualColumn) return -1;
         if (result) {
+          if (isTransposed) return visualColumnIndex;
           return resultColumnIndexByGridId(result.columns, visualColumn.id);
         }
         return (
@@ -895,7 +1018,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           ) ?? -1
         );
       },
-      [columns, overrideColumns, result],
+      [columns, overrideColumns, result, isTransposed],
     );
 
     const openValueEditor = useCallback(
@@ -1072,7 +1195,10 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
 
     const onCellContextMenu = useCallback(
       (cell: Item, event: CellClickedEventArgs) => {
-        if (!result && (!overrideColumns || overrideColumns.length === 0)) {
+        if (
+          isTransposed ||
+          (!result && (!overrideColumns || overrideColumns.length === 0))
+        ) {
           return;
         }
         event.preventDefault();
@@ -1107,13 +1233,65 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         menuPosition,
         overrideColumns,
         result,
+        isTransposed,
+        visualColumnIndexToResultIndex,
+      ],
+    );
+
+    const onItemHovered = useCallback(
+      (event: GridMouseEventArgs) => {
+        if (event.kind !== "cell" && event.kind !== "header") {
+          setHoverTooltip(null);
+          return;
+        }
+
+        const [col, row] = event.location;
+        const visualColumn = columns[col];
+        if (!visualColumn) {
+          setHoverTooltip(null);
+          return;
+        }
+
+        const originalColumnIndex = visualColumnIndexToResultIndex(col);
+        const column =
+          result?.columns[originalColumnIndex] ??
+          overrideColumns?.[originalColumnIndex];
+        const metadata = column
+          ? tableColumns?.find((item) => item.name === column.name)
+          : undefined;
+        const content =
+          event.kind === "cell"
+            ? gridCellTooltipText(getCellContent([col, row]))
+            : "";
+        const rect = gridContainerRef.current?.getBoundingClientRect();
+
+        setHoverTooltip({
+          key: `${event.kind}:${col}:${row}:${content}`,
+          x: (rect?.left ?? 0) + event.localEventX,
+          y: (rect?.top ?? 0) + event.localEventY,
+          columnName: column?.name ?? String(visualColumn.id),
+          columnType: column
+            ? "data_type" in column
+              ? column.data_type
+              : column.type
+            : "",
+          columnComment: metadata?.comment?.trim() || undefined,
+          content,
+        });
+      },
+      [
+        columns,
+        getCellContent,
+        overrideColumns,
+        result,
+        tableColumns,
         visualColumnIndexToResultIndex,
       ],
     );
 
     const onHeaderContextMenu = useCallback(
       (col: number, event: HeaderClickedEventArgs) => {
-        if (!result) return;
+        if (!result || isTransposed) return;
         event.preventDefault();
         const position = menuPosition(event.localEventX, event.localEventY);
         const columnId = String(columns[col]?.id || "");
@@ -1129,7 +1307,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           columnName: result.columns[originalColumnIndex]?.name || columnId,
         });
       },
-      [columns, menuPosition, result],
+      [columns, menuPosition, result, isTransposed],
     );
 
     // Close context menu
@@ -1205,14 +1383,23 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
 
     const handleHideColumn = useCallback(() => {
       if (!activeTab || !contextMenu.columnId || columns.length <= 1) return;
+      if (
+        contextMenu.col !== undefined &&
+        contextMenu.col < frozenColumnCount
+      ) {
+        setFrozenColumnCount(activeTab.id, frozenColumnCount - 1);
+      }
       setColumnHidden(activeTab.id, contextMenu.columnId, true);
       closeContextMenu();
     }, [
       activeTab,
       closeContextMenu,
       columns.length,
+      contextMenu.col,
       contextMenu.columnId,
+      frozenColumnCount,
       setColumnHidden,
+      setFrozenColumnCount,
     ]);
 
     const handleShowAllColumns = useCallback(() => {
@@ -1220,6 +1407,18 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       showAllColumns(activeTab.id);
       closeContextMenu();
     }, [activeTab, closeContextMenu, showAllColumns]);
+
+    const handleFreezeThroughColumn = useCallback(() => {
+      if (!activeTab || contextMenu.col === undefined) return;
+      setFrozenColumnCount(activeTab.id, contextMenu.col + 1);
+      closeContextMenu();
+    }, [activeTab, closeContextMenu, contextMenu.col, setFrozenColumnCount]);
+
+    const handleUnfreezeColumns = useCallback(() => {
+      if (!activeTab) return;
+      setFrozenColumnCount(activeTab.id, 0);
+      closeContextMenu();
+    }, [activeTab, closeContextMenu, setFrozenColumnCount]);
 
     const handleDeleteSelectedRows = useCallback(async () => {
       if (!activeTab || selectedRowIndexes.length === 0) return;
@@ -1255,37 +1454,118 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       [columns.length, handleDeleteSelectedRows],
     );
 
-    const handleQuickFilter = useCallback(() => {
+    const contextCellValue = useMemo(() => {
       if (
-        !activeTab ||
         !result ||
-        !contextMenu.columnId ||
         contextMenu.col === undefined ||
         contextMenu.row === undefined
       ) {
-        return;
+        return undefined;
       }
-      const resultColumnIndex = visualColumnIndexToResultIndex(contextMenu.col);
-      const resultRowIndex = sortedIndices[contextMenu.row];
-      if (resultColumnIndex < 0 || resultRowIndex === undefined) return;
+      const columnIndex = visualColumnIndexToResultIndex(contextMenu.col);
+      const isNewRow = contextMenu.row >= filteredRows.length;
+      const rowIndex = isNewRow
+        ? -1 - (contextMenu.row - filteredRows.length)
+        : sortedIndices[contextMenu.row];
+      if (columnIndex < 0 || rowIndex === undefined) return undefined;
 
-      const value = result.rows[resultRowIndex]?.[resultColumnIndex];
-      setGridFilter(activeTab.id, contextMenu.columnId, {
-        operator: "equals",
-        value: value === null ? "null" : String(value ?? ""),
-      });
-      closeContextMenu();
+      const editKey = `${rowIndex}:${columnIndex}`;
+      return pendingEdits.has(editKey)
+        ? pendingEdits.get(editKey)
+        : rowIndex >= 0
+          ? result.rows[rowIndex]?.[columnIndex]
+          : undefined;
     }, [
-      activeTab,
-      closeContextMenu,
       contextMenu.col,
-      contextMenu.columnId,
       contextMenu.row,
+      filteredRows.length,
+      pendingEdits,
       result,
-      setGridFilter,
       sortedIndices,
       visualColumnIndexToResultIndex,
     ]);
+
+    const handleLocalCellFilter = useCallback(
+      (
+        operator:
+          | "equals"
+          | "notEquals"
+          | "contains"
+          | "notContains"
+          | "isNull"
+          | "isNotNull",
+      ) => {
+        if (!activeTab || !contextMenu.columnId) return;
+        setGridFilter(activeTab.id, contextMenu.columnId, {
+          operator,
+          value:
+            operator === "isNull" || operator === "isNotNull"
+              ? "__presence__"
+              : String(contextCellValue ?? ""),
+        });
+        closeContextMenu();
+      },
+      [
+        activeTab,
+        closeContextMenu,
+        contextCellValue,
+        contextMenu.columnId,
+        setGridFilter,
+      ],
+    );
+
+    const handleDatabaseCellFilter = useCallback(
+      async (operator: FilterOperator) => {
+        if (
+          activeTab?.type !== "table" ||
+          !contextMenu.columnId ||
+          contextCellValue === null ||
+          contextCellValue === undefined
+        ) {
+          return;
+        }
+        const nextFilter: ColumnFilter = {
+          column: contextMenu.columnId,
+          operator,
+          value: String(contextCellValue),
+          logic: "AND",
+        };
+        const existingFilters = (activeTab.visualFilters || []).filter(
+          (filter) => filter.column && filter.value.trim(),
+        );
+        const nextFilters = [...existingFilters, nextFilter];
+        setFilterMode(activeTab.id, "visual");
+        setVisualFilters(activeTab.id, nextFilters);
+        setSqlFilter(activeTab.id, "");
+        closeContextMenu();
+        await loadTablePage(activeTab.id, 0, null, nextFilters, {
+          discardAction: "filter the table by this value",
+        });
+      },
+      [
+        activeTab,
+        closeContextMenu,
+        contextCellValue,
+        contextMenu.columnId,
+        loadTablePage,
+        setFilterMode,
+        setSqlFilter,
+        setVisualFilters,
+      ],
+    );
+
+    const handleClearLocalColumnFilter = useCallback(() => {
+      if (!activeTab || !contextMenu.columnId) return;
+      setGridFilter(activeTab.id, contextMenu.columnId, undefined);
+      closeContextMenu();
+    }, [activeTab, closeContextMenu, contextMenu.columnId, setGridFilter]);
+
+    const contextValueLabel = useMemo(() => {
+      if (contextCellValue === null) return "NULL";
+      const value = String(contextCellValue ?? "").replace(/\s+/g, " ").trim();
+      if (!value) return "empty value";
+      return value.length > 28 ? `${value.slice(0, 27)}…` : value;
+    }, [contextCellValue]);
 
     const handleSetCellNull = useCallback(() => {
       if (
@@ -1411,12 +1691,14 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           {
             id: "copy-column-name",
             label: "Copy Column Name",
+            description: "Copy this column identifier to the clipboard.",
             icon: <Copy size={12} />,
             onSelect: handleCopyColumnName,
           },
           {
             id: "sort-ascending",
             label: "Sort Ascending",
+            description: "Order the visible rows by this column.",
             icon: <ArrowUpAZ size={12} />,
             separatorBefore: true,
             onSelect: handleSortAsc,
@@ -1424,12 +1706,14 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           {
             id: "sort-descending",
             label: "Sort Descending",
+            description: "Order the visible rows by this column.",
             icon: <ArrowDownAZ size={12} />,
             onSelect: handleSortDesc,
           },
           {
             id: "clear-sort",
             label: "Clear Sort",
+            description: "Restore the result's original row order.",
             icon: <RotateCcw size={12} />,
             disabled: !gridState?.sortColumn,
             onSelect: handleClearSort,
@@ -1437,6 +1721,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           {
             id: "column-filter",
             label: "Set Column Filter...",
+            description: "Filter the visible result using this column.",
             icon: <Search size={12} />,
             separatorBefore: true,
             onSelect: handleOpenColumnFilter,
@@ -1444,6 +1729,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           {
             id: "hide-column",
             label: "Hide Column",
+            description: "Hide this column only in the current grid layout.",
             icon: <EyeOff size={12} />,
             disabled: columns.length <= 1,
             separatorBefore: true,
@@ -1452,9 +1738,29 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           {
             id: "show-all-columns",
             label: "Show All Columns",
+            description: "Restore every hidden column in this grid.",
             icon: <Eye size={12} />,
             disabled: hiddenColumns.length === 0,
             onSelect: handleShowAllColumns,
+          },
+          {
+            id: "freeze-through-column",
+            label: "Freeze Through This Column",
+            description: "Keep this and preceding columns visible while scrolling.",
+            icon: <Pin size={12} />,
+            disabled:
+              contextMenu.col === undefined ||
+              frozenColumnCount === contextMenu.col + 1,
+            separatorBefore: true,
+            onSelect: handleFreezeThroughColumn,
+          },
+          {
+            id: "unfreeze-columns",
+            label: "Unfreeze Columns",
+            description: "Allow every column to scroll normally.",
+            icon: <PinOff size={12} />,
+            disabled: frozenColumnCount === 0,
+            onSelect: handleUnfreezeColumns,
           },
         ];
       }
@@ -1463,6 +1769,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           {
             id: "open-value-editor",
             label: "Open Value Editor...",
+            description: "Inspect or edit the complete cell value.",
             icon: <SquarePen size={12} />,
             shortcut: "⇧↵",
             onSelect: handleOpenValueEditor,
@@ -1470,20 +1777,111 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           {
             id: "copy-cell",
             label: "Copy",
+            description: "Copy the selected grid cells to the clipboard.",
             icon: <Copy size={12} />,
             shortcut: "⌘C",
             separatorBefore: true,
             onSelect: () => void onCopy(gridSelection),
           },
           {
-            id: "filter-cell-value",
-            label: "Filter by This Value",
+            id: "filter-current-result",
+            label: "Filter Current Result",
+            description: "Filter rows already loaded in this grid.",
             icon: <Search size={12} />,
-            onSelect: handleQuickFilter,
+            children: [
+              {
+                id: "filter-local-equals",
+                label: `Equals ${contextValueLabel}`,
+                onSelect: () =>
+                  handleLocalCellFilter(
+                    contextCellValue === null ? "isNull" : "equals",
+                  ),
+              },
+              {
+                id: "filter-local-not-equals",
+                label: `Does Not Equal ${contextValueLabel}`,
+                onSelect: () =>
+                  handleLocalCellFilter(
+                    contextCellValue === null ? "isNotNull" : "notEquals",
+                  ),
+              },
+              {
+                id: "filter-local-contains",
+                label: `Contains ${contextValueLabel}`,
+                disabled: contextCellValue == null,
+                separatorBefore: true,
+                onSelect: () => handleLocalCellFilter("contains"),
+              },
+              {
+                id: "filter-local-not-contains",
+                label: `Does Not Contain ${contextValueLabel}`,
+                disabled: contextCellValue == null,
+                onSelect: () => handleLocalCellFilter("notContains"),
+              },
+              {
+                id: "filter-local-null",
+                label: "Is NULL",
+                separatorBefore: true,
+                onSelect: () => handleLocalCellFilter("isNull"),
+              },
+              {
+                id: "filter-local-not-null",
+                label: "Is Not NULL",
+                onSelect: () => handleLocalCellFilter("isNotNull"),
+              },
+              {
+                id: "filter-local-clear",
+                label: "Clear Column Filter",
+                disabled: !contextMenu.columnId
+                  ? true
+                  : !gridState?.columnFilters?.[contextMenu.columnId],
+                separatorBefore: true,
+                onSelect: handleClearLocalColumnFilter,
+              },
+            ],
           },
+          ...(activeTab?.type === "table" && contextCellValue != null
+            ? [
+                {
+                  id: "filter-entire-table",
+                  label: "Filter Entire Table",
+                  description: "Reload the table with a server-side filter.",
+                  icon: <Database size={12} />,
+                  children: [
+                    {
+                      id: "filter-database-equals",
+                      label: `Equals ${contextValueLabel}`,
+                      onSelect: () =>
+                        void handleDatabaseCellFilter("equals"),
+                    },
+                    {
+                      id: "filter-database-contains",
+                      label: `Contains ${contextValueLabel}`,
+                      onSelect: () =>
+                        void handleDatabaseCellFilter("contains"),
+                    },
+                    {
+                      id: "filter-database-greater",
+                      label: `Greater Than ${contextValueLabel}`,
+                      separatorBefore: true,
+                      onSelect: () => void handleDatabaseCellFilter(">"),
+                    },
+                    {
+                      id: "filter-database-less",
+                      label: `Less Than ${contextValueLabel}`,
+                      onSelect: () => void handleDatabaseCellFilter("<"),
+                    },
+                  ],
+                } satisfies DataGridContextMenuItem,
+              ]
+            : []),
           ...contextForeignKeyPlans.map((plan, index) => ({
             id: `foreign-key-${plan.direction}-${plan.constraintName}-${index}`,
             label: foreignKeyNavigationLabel(plan),
+            description:
+              plan.direction === "referenced"
+                ? "Open the row referenced by this foreign key."
+                : "Show rows that reference the selected value.",
             icon:
               plan.direction === "referenced" ? (
                 <ArrowUpRight size={12} />
@@ -1496,6 +1894,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           {
             id: "set-cell-null",
             label: "Set NULL",
+            description: "Stage a NULL value; write it with Submit changes.",
             icon: <CircleSlash2 size={12} />,
             disabled: !isEditable || !contextColumnAllowsNull,
             separatorBefore: true,
@@ -1504,6 +1903,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           {
             id: "delete-selected-rows",
             label: "Delete Selected Rows",
+            description: "Delete selected rows after confirmation.",
             icon: <Trash2 size={12} />,
             danger: true,
             disabled: !isEditable || selectedRowIndexes.length === 0,
@@ -1515,7 +1915,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       return [];
     }, [
       contextMenu.type,
+      activeTab?.type,
       gridSelection,
+      gridState?.columnFilters,
       gridState?.sortColumn,
       handleClearSort,
       handleCopyColumnName,
@@ -1524,7 +1926,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       handleHideColumn,
       handleOpenValueEditor,
       handleShowAllColumns,
-      handleQuickFilter,
+      handleFreezeThroughColumn,
+      handleUnfreezeColumns,
+      handleLocalCellFilter,
+      handleDatabaseCellFilter,
+      handleClearLocalColumnFilter,
       handleForeignKeyNavigation,
       handleSetCellNull,
       handleSortAsc,
@@ -1535,6 +1941,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       selectedRowIndexes.length,
       columns.length,
       hiddenColumns.length,
+      frozenColumnCount,
+      contextMenu.col,
+      contextMenu.columnId,
+      contextCellValue,
+      contextValueLabel,
       contextForeignKeyPlans,
     ]);
 
@@ -1748,9 +2159,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         {activeTab?.type !== "table" && result && (
           <div className="h-9 shrink-0 border-b wb-data-toolbar flex items-center gap-2 px-3">
             <div className="text-xs text-muted-foreground">
-              {result.truncated ? "First " : ""}
-              {result.rows.length.toLocaleString()} row
-              {result.rows.length === 1 ? "" : "s"}
+              {isTransposed && sourceResult
+                ? `${sourceResult.columns.length.toLocaleString()} fields × ${sourceResult.rows.length.toLocaleString()} rows`
+                : `${result.truncated ? "First " : ""}${result.rows.length.toLocaleString()} row${result.rows.length === 1 ? "" : "s"}`}
             </div>
             {result.truncated && (
               <div
@@ -1763,6 +2174,22 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               </div>
             )}
             <div className="flex-1" />
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              disabled={!sourceResult || sourceResult.rows.length === 0}
+              onClick={() => setQueryResultTransposed((current) => !current)}
+              title={
+                isTransposed
+                  ? "Show standard result grid"
+                  : "Transpose rows and columns"
+              }
+              aria-pressed={isTransposed}
+            >
+              <Rows3 size={14} className="mr-1.5" />
+              {isTransposed ? "Standard" : "Transpose"}
+            </Button>
             <Button
               variant="ghost"
               size="sm"
@@ -1819,14 +2246,16 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                 ref={dataEditorRef}
                 getCellContent={getCellContent}
                 columns={columns}
+                freezeColumns={frozenColumnCount}
                 rows={filteredRows.length + newRowsCount}
-                onHeaderMenuClick={onHeaderMenuClick}
-                onHeaderContextMenu={onHeaderContextMenu}
-                onCellContextMenu={onCellContextMenu}
+                onHeaderMenuClick={isTransposed ? undefined : onHeaderMenuClick}
+                onHeaderContextMenu={isTransposed ? undefined : onHeaderContextMenu}
+                onCellContextMenu={isTransposed ? undefined : onCellContextMenu}
+                onItemHovered={onItemHovered}
                 onCellEdited={isEditable ? onCellEdited : undefined}
                 onKeyDown={onGridKeyDown}
-                onColumnResize={onColumnResize}
-                onColumnMoved={onColumnMoved}
+                onColumnResize={isTransposed ? undefined : onColumnResize}
+                onColumnMoved={isTransposed ? undefined : onColumnMoved}
                 smoothScrollX
                 smoothScrollY
                 width="100%"
@@ -1868,6 +2297,8 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               onClose={closeContextMenu}
             />
           )}
+
+          <DataGridHoverTooltip tooltip={hoverTooltip} />
 
           {activeTab?.isExecuting && (
             <DataGridBusyIndicator

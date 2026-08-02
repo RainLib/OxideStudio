@@ -151,6 +151,34 @@
   }
 }
 
+:root[data-appearance-accent="blue"] {
+  --wb-accent: 216 82% 64%;
+  --wb-active: 218 32% 25%;
+  --wb-active-strong: 218 38% 32%;
+  --wb-brand: 276 44% 55%;
+}
+
+:root[data-appearance-accent="violet"] {
+  --wb-accent: 274 78% 66%;
+  --wb-active: 270 32% 25%;
+  --wb-active-strong: 270 38% 32%;
+  --wb-brand: 274 60% 58%;
+}
+
+:root[data-appearance-accent="teal"] {
+  --wb-accent: 176 68% 48%;
+  --wb-active: 176 28% 24%;
+  --wb-active-strong: 176 34% 30%;
+  --wb-brand: 176 56% 45%;
+}
+
+:root[data-appearance-accent="amber"] {
+  --wb-accent: 38 92% 56%;
+  --wb-active: 38 31% 25%;
+  --wb-active-strong: 38 37% 31%;
+  --wb-brand: 38 72% 52%;
+}
+
 @layer base {
   * {
     @apply border-border;
@@ -240,7 +268,7 @@
 
 @layer components {
   .workbench-shell {
-    @apply h-screen w-screen overflow-hidden font-sans;
+    @apply h-screen w-screen overflow-hidden;
     background:
       radial-gradient(
           ellipse 115vw 105vh at 0 0,
@@ -253,8 +281,45 @@
         top left / 100% 100% no-repeat,
       hsl(var(--wb-frame));
     color: hsl(var(--wb-text));
+    font-family: var(--wb-ui-font-family, ui-sans-serif, system-ui, sans-serif);
     font-size: var(--wb-ui-font-size, 12px);
     isolation: isolate;
+  }
+
+  :root[data-appearance-font="sans"] .workbench-shell,
+  :root[data-appearance-font="sans"] .settings-dialog {
+    --wb-ui-font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  }
+
+  :root[data-appearance-font="mono"] .workbench-shell,
+  :root[data-appearance-font="mono"] .settings-dialog {
+    --wb-ui-font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  :root[data-chrome-gradient="subtle"] .workbench-shell {
+    background:
+      radial-gradient(ellipse 90vw 52vh at 0 0, hsl(var(--wb-titlebar) / 0.7) 0, hsl(var(--wb-brand) / 0.08) 42%, hsl(var(--wb-frame) / 0) 72%) top left / 100% 100% no-repeat,
+      hsl(var(--wb-frame));
+  }
+
+  :root[data-chrome-gradient="off"] .workbench-shell {
+    background: hsl(var(--wb-frame));
+  }
+
+  :root[data-appearance-density="comfortable"] .wb-tool-header,
+  :root[data-appearance-density="comfortable"] .wb-explorer-toolbar,
+  :root[data-appearance-density="comfortable"] .wb-editor-commandbar,
+  :root[data-appearance-density="comfortable"] .wb-toolbar,
+  :root[data-appearance-density="comfortable"] .wb-table-commandbar {
+    min-height: 36px;
+  }
+
+  :root[data-reduce-motion="true"] .workbench-shell *,
+  :root[data-reduce-motion="true"] .settings-dialog * {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
   }
 
   .workbench-shell :where(.text-xs, .text-\[11px\], .text-\[12px\]) {

@@ -28,6 +28,12 @@ const COMPLETION_FILE_LIMIT: usize = 5_000;
 const COMPLETION_FILE_SIZE_LIMIT: u64 = 256 * 1024;
 const COMPLETION_INDEX_SIZE_LIMIT: usize = 20 * 1024 * 1024;
 const COMPLETION_CONTEXT_SIZE_LIMIT: usize = 8 * 1024;
+// Project SQL files are opened as bounded, read-only virtual documents in the
+// local language service. Keep this smaller than the generic AI completion
+// index: an LSP receives full document text rather than ranked excerpts.
+const LSP_PROJECT_DOCUMENT_LIMIT: usize = 128;
+const LSP_PROJECT_DOCUMENT_SIZE_LIMIT: usize = 128 * 1024;
+const LSP_PROJECT_DOCUMENT_TOTAL_SIZE_LIMIT: usize = 5 * 1024 * 1024;
 const PROJECT_FILE_PREVIEW_SIZE_LIMIT: u64 = 25 * 1024 * 1024;
 const PROJECT_GIT_STATUS_SIZE_LIMIT: usize = 4 * 1024 * 1024;
 const PROJECT_GIT_DIFF_SIZE_LIMIT: usize = 1024 * 1024;
@@ -308,6 +314,22 @@ pub struct ProjectCompletionContextRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectCompletionSnippet {
+    pub relative_path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLspDocumentsRequest {
+    pub project_id: String,
+    pub expected_root: Option<String>,
+}
+
+/// A saved SQL document that may be mirrored into the local language service.
+/// This intentionally does not expose absolute paths or non-SQL project files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLspDocument {
     pub relative_path: String,
     pub content: String,
 }
@@ -855,6 +877,17 @@ fn is_completion_database_file(path: &Path) -> bool {
         })
 }
 
+fn is_lsp_sql_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "sql" | "psql" | "pgsql" | "mysql"
+            )
+        })
+}
+
 fn excluded_completion_entry(name: &str, is_directory: bool) -> bool {
     let lower = name.to_ascii_lowercase();
     if name.starts_with('.') {
@@ -950,6 +983,31 @@ fn completion_index(root: &ProjectRoot) -> Result<ProjectCompletionIndex> {
         .map_err(|_| anyhow!("project completion index lock is poisoned"))?;
     indexes.insert(root.path.clone(), index.clone());
     Ok(index)
+}
+
+fn project_lsp_documents(root: &ProjectRoot) -> Result<Vec<ProjectLspDocument>> {
+    let index = completion_index(root)?;
+    let mut total_size = 0usize;
+
+    Ok(index
+        .files
+        .into_iter()
+        .filter(|file| is_lsp_sql_file(Path::new(&file.relative_path)))
+        .filter_map(|file| {
+            if file.content.len() > LSP_PROJECT_DOCUMENT_SIZE_LIMIT
+                || total_size.saturating_add(file.content.len())
+                    > LSP_PROJECT_DOCUMENT_TOTAL_SIZE_LIMIT
+            {
+                return None;
+            }
+            total_size += file.content.len();
+            Some(ProjectLspDocument {
+                relative_path: file.relative_path,
+                content: file.content,
+            })
+        })
+        .take(LSP_PROJECT_DOCUMENT_LIMIT)
+        .collect())
 }
 
 fn completion_query_terms(request: &ProjectCompletionContextRequest) -> Vec<String> {
@@ -1435,6 +1493,33 @@ pub async fn get_project_completion_context(
         )
     })?;
     Ok(ranked_project_snippets(&index, &request))
+}
+
+#[tauri::command]
+pub async fn get_project_lsp_documents(
+    meta_store: State<'_, MetaStore>,
+    request: ProjectLspDocumentsRequest,
+) -> Result<Vec<ProjectLspDocument>, CommandError> {
+    let error_context = serde_json::json!({
+        "projectId": request.project_id,
+    });
+    let root = project_root(
+        &meta_store,
+        &request.project_id,
+        request.expected_root.as_deref(),
+    )
+    .await
+    .map_err(|error| {
+        project_command_error(
+            "PROJECT_ROOT_RESOLUTION_FAILED",
+            error,
+            true,
+            error_context.clone(),
+        )
+    })?;
+    project_lsp_documents(&root).map_err(|error| {
+        project_command_error("PROJECT_LSP_INDEX_FAILED", error, true, error_context)
+    })
 }
 
 async fn run_git_bounded(
@@ -2501,6 +2586,41 @@ mod tests {
         assert!(snippets
             .iter()
             .all(|snippet| !snippet.content.contains("password")));
+    }
+
+    #[test]
+    fn project_lsp_documents_only_include_bounded_saved_sql_files() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir_all(temp.path().join("queries")).unwrap();
+        fs::create_dir_all(temp.path().join("node_modules/pkg")).unwrap();
+        fs::write(temp.path().join("queries/report.sql"), "SELECT 1;").unwrap();
+        fs::write(temp.path().join("queries/seed.mysql"), "SELECT 2;").unwrap();
+        fs::write(
+            temp.path().join("queries/config.json"),
+            "{\"token\": \"no\"}",
+        )
+        .unwrap();
+        fs::write(temp.path().join(".env.sql"), "SELECT secret;").unwrap();
+        fs::write(
+            temp.path().join("node_modules/pkg/dependency.sql"),
+            "SELECT 3;",
+        )
+        .unwrap();
+
+        let root = ProjectRoot::new(temp.path()).unwrap();
+        let documents = project_lsp_documents(&root).unwrap();
+
+        assert_eq!(documents.len(), 2);
+        assert_eq!(
+            documents
+                .iter()
+                .map(|document| document.relative_path.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["queries/report.sql", "queries/seed.mysql"]),
+        );
+        assert!(documents
+            .iter()
+            .all(|document| !document.content.contains("secret")));
     }
 
     #[test]

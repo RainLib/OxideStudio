@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { DatabaseDriver } from "@/services/tauri/types";
+import type { DatabaseCapabilities, DatabaseDriver } from "@/services/tauri/types";
 import {
   ensureLspSession,
   getLspSessionDescriptor,
@@ -18,6 +18,7 @@ type LspRuntimeStatus =
 type UseLspClientOptions = {
   connectionId?: string | null;
   driver?: DatabaseDriver | null;
+  capabilities?: DatabaseCapabilities;
   enabled?: boolean;
 };
 
@@ -33,11 +34,12 @@ export function useLspClient(options: UseLspClientOptions = {}) {
     () =>
       enabled
         ? getLspSessionDescriptor({
-            connectionId: options.connectionId,
-            driver: options.driver,
+          connectionId: options.connectionId,
+          driver: options.driver,
+          capabilities: options.capabilities,
           })
         : null,
-    [enabled, options.connectionId, options.driver]
+    [enabled, options.capabilities, options.connectionId, options.driver]
   );
   const [isReady, setIsReady] = useState(
     () => descriptor?.client.isInitialized() ?? false
@@ -68,6 +70,7 @@ export function useLspClient(options: UseLspClientOptions = {}) {
       ensureLspSession({
         connectionId: options.connectionId!,
         driver: options.driver!,
+        capabilities: options.capabilities,
       })
         .then((nextDescriptor) => {
           if (!mounted) return;
@@ -99,7 +102,7 @@ export function useLspClient(options: UseLspClientOptions = {}) {
       if (healthTimer) clearInterval(healthTimer);
       releaseSession();
     };
-  }, [descriptor, options.connectionId, options.driver]);
+  }, [descriptor, options.capabilities, options.connectionId, options.driver]);
 
   return {
     isReady,

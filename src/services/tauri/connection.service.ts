@@ -1,5 +1,5 @@
 import { invokeRawCommand, invokeWithInterceptors } from "./client";
-import type { SavedConnection, SshTunnelConfig } from "./types";
+import type { ConnectionImportFile, SavedConnection, SshTunnelConfig } from "./types";
 
 /**
  * 数据库连接服务
@@ -29,12 +29,14 @@ export async function connect(
   driver: string,
   url: string,
   sshTunnel?: SshTunnelConfig,
+  packageVersion?: string,
 ): Promise<string> {
   return invokeWithInterceptors<string>("connect_db", {
     connectionId,
     driver,
     url,
     sshTunnel,
+    packageVersion,
   });
 }
 
@@ -45,11 +47,13 @@ export async function testConnection(
   driver: string,
   url: string,
   sshTunnel?: SshTunnelConfig,
+  packageVersion?: string,
 ): Promise<string> {
   return invokeWithInterceptors<string>("test_db_connection", {
     driver,
     url,
     sshTunnel,
+    packageVersion,
   });
 }
 
@@ -70,6 +74,13 @@ export async function getServerVersion(
   return invokeWithInterceptors<string | null>(
     "get_connection_server_version",
     { connectionId },
+  );
+}
+
+/** Opens a native picker and reads a bounded DataGrip/DBeaver configuration. */
+export async function importConnectionConfigFile(): Promise<ConnectionImportFile | null> {
+  return invokeWithInterceptors<ConnectionImportFile | null>(
+    "import_connection_config_file",
   );
 }
 
@@ -122,6 +133,7 @@ export const connectionService = {
   testConnection,
   disconnect,
   getServerVersion,
+  importConnectionConfigFile,
   loadConnections,
   saveConnections,
   deleteConnection,

@@ -17,9 +17,17 @@ import {
 import { aiService } from "@/services/tauri/ai.service";
 import { agentHostService } from "@/services/tauri/agent-host.service";
 import { databaseService } from "@/services/tauri/database.service";
-import type { DatabaseDriverInstallation } from "@/services/tauri/types";
+import type {
+  DatabaseDriverCatalogEntry,
+  DatabaseDriverInstallation,
+  DatabaseDriverRuntimeSummary,
+  DatabaseDriverStoreInfo,
+  DatabaseDriverProbeResult,
+  ManagedJavaRuntimeInstallation,
+} from "@/services/tauri/types";
 import { useAiSettingsStore } from "@/store/useAiSettingsStore";
 import { useProjectStore } from "@/store/useProjectStore";
+import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { ThemeContext } from "@/theme/ThemeProvider";
 import { useI18n } from "@/i18n";
@@ -41,6 +49,13 @@ import {
   openSideToolWindow,
 } from "@/lib/workbenchLayout";
 import { parseVimMappings, serializeVimMappings } from "@/lib/vimMappings";
+import { DatabaseBrandIcon } from "@/components/icons/DatabaseBrandIcon";
+import {
+  REFERENCE_DATABASE_DRIVER_CANDIDATES,
+  driverCandidateAvailability,
+  driverCandidateConformance,
+  referenceDriverDeliveryPlan,
+} from "@/features/database-drivers";
 import {
   Bot,
   Braces,
@@ -61,6 +76,10 @@ interface SettingsDialogProps {
 
 export type SettingsSection =
   | "appearance"
+  | "appearanceStyles"
+  | "appearanceColors"
+  | "appearanceTypography"
+  | "appearanceAdvanced"
   | "workbench"
   | "keymap"
   | "editor"
@@ -93,6 +112,26 @@ function createSettingsTree(t: Translate): SettingsTreeGroup[] {
         id: "appearance",
         label: t("settings.section.appearance"),
         section: "appearance",
+      },
+      {
+        id: "appearanceStyles",
+        label: t("settings.section.appearanceStyles"),
+        section: "appearanceStyles",
+      },
+      {
+        id: "appearanceColors",
+        label: t("settings.section.appearanceColors"),
+        section: "appearanceColors",
+      },
+      {
+        id: "appearanceTypography",
+        label: t("settings.section.appearanceTypography"),
+        section: "appearanceTypography",
+      },
+      {
+        id: "appearanceAdvanced",
+        label: t("settings.section.appearanceAdvanced"),
+        section: "appearanceAdvanced",
       },
       {
         id: "workbench",
@@ -162,6 +201,22 @@ function createSectionMeta(
     appearance: {
       group: t("settings.group.appearanceBehavior"),
       title: t("settings.section.appearance"),
+    },
+    appearanceStyles: {
+      group: t("settings.group.appearanceBehavior"),
+      title: t("settings.section.appearanceStyles"),
+    },
+    appearanceColors: {
+      group: t("settings.group.appearanceBehavior"),
+      title: t("settings.section.appearanceColors"),
+    },
+    appearanceTypography: {
+      group: t("settings.group.appearanceBehavior"),
+      title: t("settings.section.appearanceTypography"),
+    },
+    appearanceAdvanced: {
+      group: t("settings.group.appearanceBehavior"),
+      title: t("settings.section.appearanceAdvanced"),
     },
     workbench: {
       group: t("settings.group.appearanceBehavior"),
@@ -514,6 +569,18 @@ export function SettingsDialog({
                   onUpdate={updateAppSettings}
                 />
               )}
+              {activeSection === "appearanceStyles" && (
+                <AppearanceStyleSettings settings={appSettings} onUpdate={updateAppSettings} />
+              )}
+              {activeSection === "appearanceColors" && (
+                <AppearanceColorSettings settings={appSettings} onUpdate={updateAppSettings} />
+              )}
+              {activeSection === "appearanceTypography" && (
+                <AppearanceTypographySettings settings={appSettings} onUpdate={updateAppSettings} />
+              )}
+              {activeSection === "appearanceAdvanced" && (
+                <AppearanceAdvancedSettings settings={appSettings} onUpdate={updateAppSettings} />
+              )}
               {activeSection === "workbench" && (
                 <WorkbenchSettings
                   settings={appSettings}
@@ -733,6 +800,266 @@ function AppearanceSettings({
       <p className="-mt-1 mb-2 ml-[148px] text-[11px] text-[hsl(var(--wb-text-muted))]">
         {t("settings.appearance.editorFontHint")}
       </p>
+    </SettingsPanel>
+  );
+}
+
+const appearancePresets = [
+  {
+    id: "oxide",
+    label: "Oxide",
+    detail: "Balanced blue chrome for dense database work.",
+    accent: "blue",
+    fontFamily: "system",
+    density: "compact",
+    chromeGradient: "immersive",
+  },
+  {
+    id: "graphite",
+    label: "Graphite",
+    detail: "Quiet neutral chrome with a subtle title background.",
+    accent: "blue",
+    fontFamily: "system",
+    density: "comfortable",
+    chromeGradient: "subtle",
+  },
+  {
+    id: "violet",
+    label: "Violet",
+    detail: "A violet accent that keeps the work surface restrained.",
+    accent: "violet",
+    fontFamily: "sans",
+    density: "compact",
+    chromeGradient: "immersive",
+  },
+  {
+    id: "terminal",
+    label: "Terminal",
+    detail: "Teal emphasis and a monospace interface for keyboard work.",
+    accent: "teal",
+    fontFamily: "mono",
+    density: "compact",
+    chromeGradient: "subtle",
+  },
+] as const;
+
+function AppearanceStyleSettings({
+  settings,
+  onUpdate,
+}: {
+  settings: AppSettings;
+  onUpdate: (updates: Partial<AppSettings>) => void;
+}) {
+  const appearance = settings.appearance;
+  return (
+    <SettingsPanel>
+      <SettingsDivider title="Built-in styles" first />
+      <p className="mb-3 text-[12px] text-[hsl(var(--wb-text-muted))]">
+        Start with a cohesive workbench style, then refine its colors, type, and behavior below.
+      </p>
+      <div className="grid max-w-[680px] grid-cols-1 gap-2 sm:grid-cols-2">
+        {appearancePresets.map((preset) => {
+          const selected = appearance.stylePreset === preset.id;
+          return (
+            <button
+              key={preset.id}
+              type="button"
+              aria-pressed={selected}
+              onClick={() =>
+                onUpdate({
+                  appearance: {
+                    ...appearance,
+                    stylePreset: preset.id,
+                    accent: preset.accent,
+                    fontFamily: preset.fontFamily,
+                    density: preset.density,
+                    chromeGradient: preset.chromeGradient,
+                  },
+                })
+              }
+              className={cn(
+                "flex min-h-16 items-start gap-3 rounded-[4px] border px-3 py-2 text-left transition-colors",
+                selected
+                  ? "border-[hsl(var(--wb-accent))] bg-[hsl(var(--wb-accent)/0.1)]"
+                  : "border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] hover:bg-[hsl(var(--wb-hover))]",
+              )}
+            >
+              <span
+                className="mt-0.5 h-4 w-4 shrink-0 rounded-full border border-white/20"
+                style={{
+                  backgroundColor:
+                    preset.accent === "violet"
+                      ? "hsl(274 78% 66%)"
+                      : preset.accent === "teal"
+                        ? "hsl(176 68% 48%)"
+                        : "hsl(216 82% 64%)",
+                }}
+              />
+              <span className="min-w-0">
+                <span className="block text-[12px] font-medium text-[hsl(var(--wb-text))]">{preset.label}</span>
+                <span className="mt-0.5 block text-[11px] leading-4 text-[hsl(var(--wb-text-muted))]">{preset.detail}</span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </SettingsPanel>
+  );
+}
+
+function AppearanceColorSettings({
+  settings,
+  onUpdate,
+}: {
+  settings: AppSettings;
+  onUpdate: (updates: Partial<AppSettings>) => void;
+}) {
+  const appearance = settings.appearance;
+  const accents = [
+    ["blue", "Blue", "hsl(216 82% 64%)"],
+    ["violet", "Violet", "hsl(274 78% 66%)"],
+    ["teal", "Teal", "hsl(176 68% 48%)"],
+    ["amber", "Amber", "hsl(38 92% 56%)"],
+  ] as const;
+  return (
+    <SettingsPanel>
+      <SettingsDivider title="Accent color" first />
+      <SettingRow label="Accent:">
+        <div className="flex flex-wrap gap-2">
+          {accents.map(([id, label, color]) => {
+            const selected = appearance.accent === id;
+            return (
+              <button
+                key={id}
+                type="button"
+                aria-pressed={selected}
+                onClick={() =>
+                  onUpdate({ appearance: { ...appearance, accent: id, stylePreset: "oxide" } })
+                }
+                className={cn(
+                  "flex h-7 items-center gap-1.5 rounded-[4px] border px-2 text-[12px]",
+                  selected
+                    ? "border-[hsl(var(--wb-accent))] bg-[hsl(var(--wb-active))]"
+                    : "border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] hover:bg-[hsl(var(--wb-hover))]",
+                )}
+              >
+                <span className="h-3 w-3 rounded-full" style={{ backgroundColor: color }} />
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      </SettingRow>
+      <p className="ml-[148px] max-w-[470px] text-[11px] text-[hsl(var(--wb-text-muted))]">
+        Accent color is used for selection, focus, actions, and the workbench title treatment.
+      </p>
+    </SettingsPanel>
+  );
+}
+
+function AppearanceTypographySettings({
+  settings,
+  onUpdate,
+}: {
+  settings: AppSettings;
+  onUpdate: (updates: Partial<AppSettings>) => void;
+}) {
+  const appearance = settings.appearance;
+  return (
+    <SettingsPanel>
+      <SettingsDivider title="Typography" first />
+      <SettingRow label="Interface font:">
+        <select
+          className={selectClass}
+          value={appearance.fontFamily}
+          onChange={(event) =>
+            onUpdate({
+              appearance: {
+                ...appearance,
+                fontFamily: event.target.value as AppSettings["appearance"]["fontFamily"],
+                stylePreset: "oxide",
+              },
+            })
+          }
+        >
+          <option value="system">System UI</option>
+          <option value="sans">Sans-serif</option>
+          <option value="mono">Monospace</option>
+        </select>
+        <span className="settings-hint">Applied to workbench chrome and panels</span>
+      </SettingRow>
+      <SettingRow label="UI font size:">
+        <NumberInput
+          value={appearance.uiFontSize}
+          min={10}
+          max={20}
+          onChange={(uiFontSize) =>
+            onUpdate({ appearance: { ...appearance, uiFontSize } })
+          }
+        />
+        <span className="settings-hint">Editor and data grid sizes stay independent</span>
+      </SettingRow>
+    </SettingsPanel>
+  );
+}
+
+function AppearanceAdvancedSettings({
+  settings,
+  onUpdate,
+}: {
+  settings: AppSettings;
+  onUpdate: (updates: Partial<AppSettings>) => void;
+}) {
+  const appearance = settings.appearance;
+  return (
+    <SettingsPanel>
+      <SettingsDivider title="Advanced appearance" first />
+      <SettingRow label="Panel density:">
+        <select
+          className={selectClass}
+          value={appearance.density}
+          onChange={(event) =>
+            onUpdate({
+              appearance: {
+                ...appearance,
+                density: event.target.value as AppSettings["appearance"]["density"],
+                stylePreset: "oxide",
+              },
+            })
+          }
+        >
+          <option value="compact">Compact</option>
+          <option value="comfortable">Comfortable</option>
+        </select>
+        <span className="settings-hint">Toolbar and panel header spacing</span>
+      </SettingRow>
+      <SettingRow label="Title gradient:">
+        <select
+          className={selectClass}
+          value={appearance.chromeGradient}
+          onChange={(event) =>
+            onUpdate({
+              appearance: {
+                ...appearance,
+                chromeGradient: event.target.value as AppSettings["appearance"]["chromeGradient"],
+                stylePreset: "oxide",
+              },
+            })
+          }
+        >
+          <option value="immersive">Immersive</option>
+          <option value="subtle">Subtle</option>
+          <option value="off">Off</option>
+        </select>
+        <span className="settings-hint">Controls the upper-left workbench treatment</span>
+      </SettingRow>
+      <SettingRow label="Motion:">
+        <CheckboxLabel
+          label="Reduce interface motion"
+          checked={appearance.reduceMotion}
+          onChange={() => onUpdate({ appearance: { ...appearance, reduceMotion: !appearance.reduceMotion } })}
+        />
+      </SettingRow>
     </SettingsPanel>
   );
 }
@@ -1054,6 +1381,19 @@ function EditorSettings({
           })
         }
       />
+      <CheckboxLabel
+        label="Insert a space after completed SQL names and keywords"
+        detail="Skips functions, snippets, properties, schemas, and punctuation boundaries"
+        checked={editor.sqlCompletion.appendSpace}
+        onChange={() =>
+          updateEditor({
+            sqlCompletion: {
+              ...editor.sqlCompletion,
+              appendSpace: !editor.sqlCompletion.appendSpace,
+            },
+          })
+        }
+      />
       <SettingsDivider title="Vim" />
       <CheckboxLabel
         label="Enable Vim keybindings"
@@ -1254,17 +1594,117 @@ function DatabaseExplorerSettings({
 }
 
 function DriverManagementSettings() {
+  const catalogUrl = useSettingsStore((state) => state.settings.drivers.catalogUrl);
+  const driverStorePath = useSettingsStore((state) => state.settings.drivers.storePath);
+  const updateSettings = useSettingsStore((state) => state.updateSettings);
   const [installations, setInstallations] = useState<
     DatabaseDriverInstallation[] | null
   >(null);
+  const [javaRuntimes, setJavaRuntimes] = useState<
+    ManagedJavaRuntimeInstallation[] | null
+  >(null);
+  const [driverStore, setDriverStore] = useState<
+    DatabaseDriverStoreInfo | null
+  >(null);
+  const [driverRuntimes, setDriverRuntimes] = useState<
+    DatabaseDriverRuntimeSummary[] | null
+  >(null);
+  const [catalogUrlInput, setCatalogUrlInput] = useState(catalogUrl);
+  const [catalogEntries, setCatalogEntries] = useState<
+    DatabaseDriverCatalogEntry[] | null
+  >(null);
+  const [catalogStatus, setCatalogStatus] = useState<
+    | { status: "idle" }
+    | { status: "loading" }
+    | { status: "success"; message: string }
+    | { status: "error"; message: string }
+  >({ status: "idle" });
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [probeStates, setProbeStates] = useState<
+    Record<
+      string,
+      | { status: "loading" }
+      | { status: "success"; result: DatabaseDriverProbeResult }
+      | { status: "error"; message: string }
+    >
+  >({});
+  const [packageAction, setPackageAction] = useState<
+    | { status: "idle" }
+    | { status: "loading"; key: string }
+    | { status: "success"; message: string }
+    | { status: "error"; message: string }
+  >({ status: "idle" });
+  const candidateAvailability = useMemo(() => {
+    const installed = installations || [];
+    const catalog = catalogEntries || [];
+    return REFERENCE_DATABASE_DRIVER_CANDIDATES.map((candidate) => ({
+      candidate,
+      availability: driverCandidateAvailability(candidate, installed),
+      conformance: driverCandidateConformance(candidate, installed, catalog),
+      delivery: referenceDriverDeliveryPlan(candidate),
+    }));
+  }, [catalogEntries, installations]);
+  const candidateCoverage = useMemo(
+    () => ({
+      bundled: candidateAvailability.filter(
+        ({ availability }) => availability === "bundled",
+      ).length,
+      activePackage: candidateAvailability.filter(
+        ({ availability }) => availability === "activePackage",
+      ).length,
+      requiresPackage: candidateAvailability.filter(
+        ({ availability }) => availability === "requiresPackage",
+      ).length,
+      activeRecorded: candidateAvailability.filter(
+        ({ conformance }) => conformance.state === "activeRecorded",
+      ).length,
+      activeUnrecorded: candidateAvailability.filter(
+        ({ conformance }) => conformance.state === "activeUnrecorded",
+      ).length,
+    }),
+    [candidateAvailability],
+  );
+
+  const refreshInstallations = async () => {
+    const [drivers, runtimes, store] = await Promise.all([
+      databaseService.listDatabaseDriverInstallations(),
+      databaseService.listManagedJavaRuntimes(),
+      databaseService.getDatabaseDriverStoreInfo(),
+    ]);
+    setInstallations(drivers);
+    setJavaRuntimes(runtimes);
+    setDriverStore(store);
+    setLoadError(null);
+  };
+
+  const refreshDriverRuntimes = async () => {
+    // Older embedded/test hosts can omit this newly added read-only command.
+    // Driver installation management must remain usable in that case.
+    const loadRuntimes = databaseService.listExternalDatabaseDriverRuntimes;
+    if (!loadRuntimes) {
+      setDriverRuntimes([]);
+      return;
+    }
+    try {
+      setDriverRuntimes(await loadRuntimes());
+    } catch {
+      setDriverRuntimes([]);
+    }
+  };
 
   useEffect(() => {
     let active = true;
-    void databaseService
-      .listDatabaseDriverInstallations()
-      .then((result) => {
-        if (active) setInstallations(result);
+    void Promise.all([
+      databaseService.listDatabaseDriverInstallations(),
+      databaseService.listManagedJavaRuntimes(),
+      databaseService.getDatabaseDriverStoreInfo(),
+    ])
+      .then(([drivers, runtimes, store]) => {
+        if (active) {
+          setInstallations(drivers);
+          setJavaRuntimes(runtimes);
+          setDriverStore(store);
+        }
       })
       .catch((error: unknown) => {
         if (active) {
@@ -1278,14 +1718,290 @@ function DriverManagementSettings() {
     };
   }, []);
 
+  useEffect(() => {
+    void refreshDriverRuntimes();
+  }, []);
+
+  useEffect(() => {
+    setCatalogUrlInput(catalogUrl);
+  }, [catalogUrl]);
+
+  const checkCatalog = async () => {
+    const nextUrl = catalogUrlInput.trim();
+    if (!nextUrl) {
+      setCatalogEntries(null);
+      setCatalogStatus({
+        status: "error",
+        message: "Enter an HTTPS catalog URL before checking for driver packages.",
+      });
+      return;
+    }
+    setCatalogStatus({ status: "loading" });
+    try {
+      const result = await databaseService.getExternalDatabaseDriverCatalog(nextUrl);
+      await updateSettings({
+        drivers: { catalogUrl: result.sourceUrl, storePath: driverStorePath },
+      });
+      setCatalogEntries(result.catalog.packages);
+      setCatalogStatus({
+        status: "success",
+        message: `${result.catalog.packages.length} signed package${result.catalog.packages.length === 1 ? "" : "s"} available for review.`,
+      });
+    } catch (error) {
+      setCatalogEntries(null);
+      setCatalogStatus({
+        status: "error",
+        message:
+          error instanceof Error ? error.message : "Unable to verify driver catalog.",
+      });
+    }
+  };
+
+  const importPackage = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose Database Driver Package",
+      });
+      if (typeof selected !== "string") return;
+      setPackageAction({ status: "loading", key: "import" });
+      const installed = await databaseService.installExternalDatabaseDriver(
+        selected,
+        true,
+      );
+      await refreshInstallations();
+      await useDatabaseDriverCatalogStore.getState().refresh();
+      setPackageAction({
+        status: "success",
+        message: `${installed.displayName} ${installed.packageVersion || ""} installed and activated.`,
+      });
+    } catch (error) {
+      setPackageAction({
+        status: "error",
+        message:
+          error instanceof Error ? error.message : "Unable to install driver package.",
+      });
+    }
+  };
+
+  const installCatalogPackage = async (entry: DatabaseDriverCatalogEntry) => {
+    const nextUrl = catalogUrlInput.trim();
+    if (!nextUrl || !entry.archiveSha256) return;
+    const key = `catalog-install:${entry.driverId}:${entry.packageVersion}`;
+    try {
+      setPackageAction({ status: "loading", key });
+      const installed = await databaseService.installExternalDatabaseDriverFromCatalog(
+        nextUrl,
+        entry.driverId,
+        entry.packageVersion,
+        true,
+      );
+      await refreshInstallations();
+      await useDatabaseDriverCatalogStore.getState().refresh();
+      setPackageAction({
+        status: "success",
+        message: `${installed.displayName} ${installed.packageVersion || ""} installed and activated.`,
+      });
+    } catch (error) {
+      setPackageAction({
+        status: "error",
+        message:
+          error instanceof Error ? error.message : "Unable to install driver package.",
+      });
+    }
+  };
+
+  const importJavaRuntime = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose Signed Java 21 Runtime",
+      });
+      if (typeof selected !== "string") return;
+      setPackageAction({ status: "loading", key: "import-java" });
+      const runtime = await databaseService.installManagedJavaRuntime(selected, true);
+      await refreshInstallations();
+      setPackageAction({
+        status: "success",
+        message: `Java ${runtime.javaMajor} runtime ${runtime.runtimeVersion} installed and activated.`,
+      });
+    } catch (error) {
+      setPackageAction({
+        status: "error",
+        message:
+          error instanceof Error ? error.message : "Unable to install Java runtime.",
+      });
+    }
+  };
+
+  const migrateDriverStore = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const parentDirectory = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose a parent directory for the migrated Driver Store",
+      });
+      if (typeof parentDirectory !== "string") return;
+      const separator = parentDirectory.includes("\\") ? "\\" : "/";
+      const destination = `${parentDirectory.replace(/[\\/]+$/u, "")}${separator}oxide-database-drivers`;
+      setPackageAction({ status: "loading", key: "migrate-store" });
+      const store = await databaseService.migrateDatabaseDriverStore(destination);
+      setDriverStore(store);
+      await updateSettings({
+        drivers: { catalogUrl, storePath: store.activePath },
+      });
+      setPackageAction({
+        status: "success",
+        message: "Driver Store copied and verified. Restart OxideStudio to use the new location; the old store was kept unchanged.",
+      });
+    } catch (error) {
+      setPackageAction({
+        status: "error",
+        message:
+          error instanceof Error ? error.message : "Unable to migrate Driver Store.",
+      });
+    }
+  };
+
+  const activatePackage = async (installation: DatabaseDriverInstallation) => {
+    const packageVersion = installation.packageVersion;
+    if (!packageVersion) return;
+    const key = `activate:${installation.driver}:${packageVersion}`;
+    setPackageAction({ status: "loading", key });
+    try {
+      await databaseService.activateExternalDatabaseDriver(
+        installation.driver,
+        packageVersion,
+      );
+      await refreshInstallations();
+      await useDatabaseDriverCatalogStore.getState().refresh();
+      setPackageAction({
+        status: "success",
+        message: `${installation.displayName} ${packageVersion} activated.`,
+      });
+    } catch (error) {
+      setPackageAction({
+        status: "error",
+        message: error instanceof Error ? error.message : "Unable to activate package.",
+      });
+    }
+  };
+
+  const rollbackPackage = async (installation: DatabaseDriverInstallation) => {
+    const key = `rollback:${installation.driver}`;
+    setPackageAction({ status: "loading", key });
+    try {
+      const state = await databaseService.rollbackExternalDatabaseDriver(
+        installation.driver,
+      );
+      await refreshInstallations();
+      await useDatabaseDriverCatalogStore.getState().refresh();
+      setPackageAction({
+        status: "success",
+        message: `${installation.displayName} rolled back to ${state.current}.`,
+      });
+    } catch (error) {
+      setPackageAction({
+        status: "error",
+        message: error instanceof Error ? error.message : "Unable to roll back package.",
+      });
+    }
+  };
+
+  const probePackage = async (installation: DatabaseDriverInstallation) => {
+    const key = `${installation.driver}:${installation.packageVersion || "active"}`;
+    setProbeStates((state) => ({ ...state, [key]: { status: "loading" } }));
+    try {
+      const result = await databaseService.probeExternalDatabaseDriver(
+        installation.driver,
+      );
+      setProbeStates((state) => ({
+        ...state,
+        [key]: { status: "success", result },
+      }));
+    } catch (error) {
+      setProbeStates((state) => ({
+        ...state,
+        [key]: {
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Unable to start this driver package.",
+        },
+      }));
+    }
+  };
+
   return (
     <SettingsPanel>
       <SettingsDivider title="Installed database clients" first />
       <p className="mb-3 max-w-[72ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
-        This inventory reports the exact client libraries compiled into the current
-        application build. Database server versions are detected separately when a
-        connection is opened.
+        This inventory combines bundled recovery drivers with discovered external
+        packages. An external package is enabled only after its signature, target,
+        protocol, and executable digest are verified.
       </p>
+      {driverStore && (
+        <div className="mb-3 flex items-center gap-2 border-y border-[hsl(var(--wb-border-subtle))] py-2 text-[11px]">
+          <div className="min-w-0 flex-1">
+            <div className="text-[hsl(var(--wb-text-muted))]">Driver Store</div>
+            <div className="truncate font-mono text-[hsl(var(--wb-text))]" title={driverStore.activePath}>
+              {driverStore.activePath}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="h-6 shrink-0 rounded-[3px] border border-[hsl(var(--wb-border))] px-2 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:opacity-50"
+            disabled={packageAction.status === "loading"}
+            onClick={() => void migrateDriverStore()}
+          >
+            {packageAction.status === "loading" && packageAction.key === "migrate-store"
+              ? "Migrating…"
+              : "Move…"}
+          </button>
+        </div>
+      )}
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <span
+          role={packageAction.status === "error" ? "alert" : "status"}
+          className={cn(
+            "min-w-0 truncate text-[11px]",
+            packageAction.status === "error"
+              ? "text-[hsl(var(--destructive))]"
+              : "text-[hsl(var(--wb-text-muted))]",
+          )}
+          title={"message" in packageAction ? packageAction.message : undefined}
+        >
+          {"message" in packageAction ? packageAction.message : ""}
+        </span>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            className="h-7 rounded-[3px] border border-[hsl(var(--wb-border))] px-2.5 text-[11px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:opacity-50"
+            disabled={packageAction.status === "loading"}
+            onClick={() => void importJavaRuntime()}
+          >
+            {packageAction.status === "loading" && packageAction.key === "import-java"
+              ? "Installing…"
+              : "Import Java runtime…"}
+          </button>
+          <button
+            type="button"
+            className="h-7 rounded-[3px] border border-[hsl(var(--wb-border))] px-2.5 text-[11px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:opacity-50"
+            disabled={packageAction.status === "loading"}
+            onClick={() => void importPackage()}
+          >
+            {packageAction.status === "loading" && packageAction.key === "import"
+              ? "Installing…"
+              : "Import package…"}
+          </button>
+        </div>
+      </div>
       {loadError && (
         <p role="alert" className="py-2 text-[12px] text-[hsl(var(--destructive))]">
           {loadError}
@@ -1306,9 +2022,12 @@ function DriverManagementSettings() {
       )}
       {installations && (
         <div className="border-y border-[hsl(var(--wb-border-subtle))]">
-          {installations.map((installation) => (
+          {installations.map((installation) => {
+            const packageKey = `${installation.driver}:${installation.packageVersion || "active"}`;
+            const probeState = probeStates[packageKey];
+            return (
             <div
-              key={installation.driver}
+              key={`${installation.driver}:${installation.distribution}:${installation.packageVersion || installation.clientVersion}`}
               className="grid min-h-14 grid-cols-[minmax(120px,0.8fr)_minmax(170px,1fr)_minmax(150px,1fr)] items-center gap-4 border-b border-[hsl(var(--wb-border-subtle))] py-2 last:border-b-0"
             >
               <div className="min-w-0">
@@ -1327,22 +2046,468 @@ function DriverManagementSettings() {
               </div>
               <div className="min-w-0 text-[11px] leading-4 text-[hsl(var(--wb-text-muted))]">
                 <div>{installation.implementation}</div>
-                <div>Bundled · updates with OxideStudio</div>
+                <div>
+                  {installation.distribution === "external"
+                    ? `${installation.active ? "Active" : "Installed"} · package ${installation.packageVersion || "unknown"}`
+                    : "Bundled · updates with OxideStudio"}
+                </div>
+                {installation.runtime && <div>{installation.runtime}</div>}
+                {installation.runtimeReady === false && (
+                  <div className="text-[hsl(var(--destructive))]">
+                    Import a signed Java runtime before connecting.
+                  </div>
+                )}
+                {installation.status && installation.status !== "ready" && (
+                  <div
+                    className="text-[hsl(var(--destructive))]"
+                    title={installation.statusMessage || undefined}
+                  >
+                    {installation.status === "invalid"
+                      ? "Package verification failed"
+                      : installation.status === "untrusted"
+                        ? "Package signature is not trusted"
+                        : "Package is incompatible"}
+                  </div>
+                )}
+                {installation.distribution === "external" &&
+                  installation.status === "ready" && (
+                    <div className="mt-1.5 flex min-w-0 items-center gap-2">
+                      {!installation.active && installation.packageVersion && (
+                        <button
+                          type="button"
+                          className="h-6 shrink-0 rounded-[3px] border border-[hsl(var(--wb-border))] px-2 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:opacity-50"
+                          disabled={packageAction.status === "loading"}
+                          onClick={() => void activatePackage(installation)}
+                        >
+                          {packageAction.status === "loading" &&
+                          packageAction.key ===
+                            `activate:${installation.driver}:${installation.packageVersion}`
+                            ? "Activating…"
+                            : "Activate"}
+                        </button>
+                      )}
+                      {installation.active && (
+                        <button
+                          type="button"
+                          className="h-6 shrink-0 rounded-[3px] border border-[hsl(var(--wb-border))] px-2 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:opacity-50"
+                          disabled={
+                            probeState?.status === "loading" ||
+                            packageAction.status === "loading"
+                          }
+                          onClick={() => void probePackage(installation)}
+                        >
+                          {probeState?.status === "loading"
+                            ? "Verifying…"
+                            : "Verify package"}
+                        </button>
+                      )}
+                      {installation.active && installation.canRollback && (
+                        <button
+                          type="button"
+                          className="h-6 shrink-0 rounded-[3px] border border-[hsl(var(--wb-border))] px-2 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:opacity-50"
+                          disabled={packageAction.status === "loading"}
+                          onClick={() => void rollbackPackage(installation)}
+                        >
+                          {packageAction.status === "loading" &&
+                          packageAction.key === `rollback:${installation.driver}`
+                            ? "Rolling back…"
+                            : "Rollback"}
+                        </button>
+                      )}
+                      {probeState?.status === "success" && (
+                        <span className="truncate text-[10px] text-[hsl(var(--wb-accent))]">
+                          Started · query
+                          {probeState.result.supportsMetadata
+                            ? " + metadata"
+                            : ""}
+                          {probeState.result.supportsTransactions
+                            ? " + transactions"
+                            : ""}
+                          {probeState.result.supportsTableRowMutation
+                            ? " + grid edits"
+                            : ""}
+                          {probeState.result.supportsTableDataTransfer
+                            ? " + table transfer"
+                            : ""}
+                          {probeState.result.supportsAgentReadOnlyEnforcement
+                            ? " + Agent read-only"
+                            : ""}
+                        </span>
+                      )}
+                      {probeState?.status === "error" && (
+                        <span
+                          role="alert"
+                          className="truncate text-[10px] text-[hsl(var(--destructive))]"
+                          title={probeState.message}
+                        >
+                          Verification failed
+                        </span>
+                      )}
+                    </div>
+                  )}
+              </div>
+            </div>
+            );
+          })}
+        </div>
+      )}
+
+      {driverRuntimes && driverRuntimes.length > 0 && (
+        <>
+          <SettingsDivider title="Active external driver runtimes" />
+          <div className="mb-2 flex items-center justify-between gap-3 text-[11px] text-[hsl(var(--wb-text-muted))]">
+            <span>Connection-owned sidecars. Process controls and driver output stay outside this view.</span>
+            <button
+              type="button"
+              className="shrink-0 text-[10px] text-[hsl(var(--wb-accent))] hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]"
+              onClick={() => void refreshDriverRuntimes()}
+              title="Refresh active external driver runtimes"
+            >
+              Refresh
+            </button>
+          </div>
+          <div className="border-y border-[hsl(var(--wb-border-subtle))]">
+            {driverRuntimes.map((runtime) => (
+              <div
+                key={`${runtime.driver}:${runtime.packageVersion}`}
+                className="grid min-h-10 grid-cols-[minmax(110px,0.8fr)_minmax(110px,0.8fr)_minmax(0,1fr)] items-center gap-3 border-b border-[hsl(var(--wb-border-subtle))] px-2 py-1.5 text-[10px] last:border-b-0"
+              >
+                <span className="min-w-0 truncate font-medium text-[hsl(var(--wb-text))]">
+                  {runtime.driver}
+                </span>
+                <span className="truncate font-mono text-[hsl(var(--wb-text-muted))]">
+                  package {runtime.packageVersion}
+                </span>
+                <span className="min-w-0 text-right text-[hsl(var(--wb-text-muted))]">
+                  {runtime.connectionCount} connection{runtime.connectionCount === 1 ? "" : "s"}
+                  {runtime.processIds.length > 0 && (
+                    <span title={`Sidecar PID: ${runtime.processIds.join(", ")}`}>
+                      {" "}· {runtime.processIds.length} process{runtime.processIds.length === 1 ? "" : "es"}
+                    </span>
+                  )}
+                  {runtime.unavailableProcessCount > 0 && (
+                    <span
+                      className="text-amber-400"
+                      title="A connected driver entry has no observable sidecar process id. Reconnect it if work fails."
+                    >
+                      {" "}· {runtime.unavailableProcessCount} unavailable
+                    </span>
+                  )}
+                  {runtime.unhealthyConnectionCount > 0 && (
+                    <span
+                      className="text-red-400"
+                      title="A registered external connection owns a sidecar that has exited. Reconnect the affected data source before continuing."
+                    >
+                      {" "}· {runtime.unhealthyConnectionCount} exited
+                    </span>
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <SettingsDivider title="Reference package coverage" />
+      <p className="mb-2 max-w-[72ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
+        {REFERENCE_DATABASE_DRIVER_CANDIDATES.length} database products are tracked:
+        {" "}{candidateCoverage.bundled} bundled, {candidateCoverage.activePackage} active
+        package{candidateCoverage.activePackage === 1 ? "" : "s"} ({candidateCoverage.activeRecorded}
+        {" "}with recorded version evidence{candidateCoverage.activeUnrecorded
+          ? `, ${candidateCoverage.activeUnrecorded} unrecorded`
+          : ""}), and {" "}
+        {candidateCoverage.requiresPackage} awaiting a signed package. These rows are
+        planning and package-discovery metadata, never connection choices by themselves.
+      </p>
+      <details className="group border-y border-[hsl(var(--wb-border-subtle))]" data-testid="reference-driver-coverage">
+        <summary className="flex h-8 cursor-pointer list-none items-center justify-between gap-3 px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]">
+          <span>Show tracked driver products</span>
+          <span className="font-mono text-[10px] group-open:hidden">{REFERENCE_DATABASE_DRIVER_CANDIDATES.length} products</span>
+          <span className="hidden font-mono text-[10px] group-open:inline">Hide list</span>
+        </summary>
+        <div className="max-h-64 overflow-y-auto border-t border-[hsl(var(--wb-border-subtle))]">
+          {candidateAvailability.map(({ candidate, availability, conformance, delivery }) => {
+            const catalogRelease = catalogEntries?.find(
+              (entry) => entry.driverId === candidate.driver,
+            );
+            const availabilityLabel =
+              conformance.state === "bundled"
+                ? "Bundled"
+                : conformance.state === "activeRecorded"
+                  ? `Verified: ${conformance.verifiedVersions.join(", ")}`
+                  : conformance.state === "activeUnrecorded"
+                    ? "Active · no version evidence"
+                  : catalogRelease
+                    ? `Release ${catalogRelease.packageVersion}`
+                    : "Package required";
+            const availabilityClassName =
+              conformance.state === "notInstalled"
+                ? "text-[hsl(var(--wb-text-muted))]"
+                : conformance.state === "activeUnrecorded"
+                  ? "text-amber-400"
+                : "text-[hsl(var(--wb-accent))]";
+            return (
+              <div
+                key={candidate.driver}
+                className="grid min-h-8 grid-cols-[minmax(140px,1fr)_minmax(88px,0.5fr)_minmax(124px,0.65fr)_minmax(110px,0.55fr)_auto] items-center gap-3 border-b border-[hsl(var(--wb-border-subtle))] px-2 py-1 last:border-b-0"
+              >
+                <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-[hsl(var(--wb-text))]" title={candidate.driver}>
+                  <DatabaseBrandIcon
+                    driver={candidate.driver}
+                    size={12}
+                    className="shrink-0"
+                  />
+                  <span className="truncate">{candidate.displayName}</span>
+                </span>
+                <span className="truncate font-mono text-[10px] text-[hsl(var(--wb-text-muted))]">
+                  {candidate.dataModel} · {candidate.preferredRuntime}
+                </span>
+                <span
+                  className="truncate text-[10px] text-[hsl(var(--wb-text-muted))]"
+                  title={
+                    delivery.lspRoute === "notApplicable"
+                      ? "This product needs its own workspace and language provider; it is never routed into the SQL Grid."
+                      : `After the matching signed runtime is active: ${delivery.lspLabel}.`
+                  }
+                >
+                  {delivery.lspLabel}
+                </span>
+                <span
+                  className={cn("truncate text-right text-[10px]", availabilityClassName)}
+                  title={
+                    conformance.state === "activeUnrecorded"
+                      ? "The active signed package has no matching signed-catalog server-version conformance record."
+                      : conformance.state === "activeRecorded"
+                        ? `Matching signed release verified against: ${conformance.verifiedVersions.join(", ")}`
+                        : undefined
+                  }
+                >
+                  {availabilityLabel}
+                </span>
+                {availability === "requiresPackage" &&
+                  catalogRelease?.archiveSha256 && (
+                    <button
+                      type="button"
+                      className="col-start-5 justify-self-end text-[10px] text-[hsl(var(--wb-accent))] hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={packageAction.status === "loading"}
+                      onClick={() => void installCatalogPackage(catalogRelease)}
+                      title="Install this signed package release after archive and manifest verification"
+                    >
+                      {packageAction.status === "loading" &&
+                      packageAction.key ===
+                        `catalog-install:${catalogRelease.driverId}:${catalogRelease.packageVersion}`
+                        ? "Installing…"
+                        : "Install"}
+                    </button>
+                  )}
+              </div>
+            );
+          })}
+        </div>
+      </details>
+
+      <SettingsDivider title="Managed Java runtimes" />
+      <p className="mb-2 max-w-[72ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
+        JDBC packages use only an imported, signed Java 21 runtime. The system Java
+        installation and PATH are never used to launch a driver.
+      </p>
+      {javaRuntimes && javaRuntimes.length > 0 ? (
+        <div className="border-y border-[hsl(var(--wb-border-subtle))]">
+          {javaRuntimes.map((runtime) => (
+            <div
+              key={`${runtime.javaMajor}:${runtime.target}:${runtime.runtimeVersion}`}
+              className="grid min-h-12 grid-cols-[minmax(120px,0.8fr)_minmax(170px,1fr)_minmax(150px,1fr)] items-center gap-4 border-b border-[hsl(var(--wb-border-subtle))] py-2 last:border-b-0"
+            >
+              <div className="text-[12px] font-medium text-[hsl(var(--wb-text))]">
+                Java {runtime.javaMajor}
+              </div>
+              <div className="font-mono text-[11px] text-[hsl(var(--wb-text))]">
+                {runtime.runtimeVersion}
+              </div>
+              <div className="text-[11px] leading-4 text-[hsl(var(--wb-text-muted))]">
+                <div>{runtime.active ? "Active" : "Installed"} · {runtime.target}</div>
+                {runtime.status !== "ready" && (
+                  <div className="text-[hsl(var(--destructive))]" title={runtime.statusMessage || undefined}>
+                    Runtime verification failed
+                  </div>
+                )}
               </div>
             </div>
           ))}
+        </div>
+      ) : (
+        <p className="text-[11px] text-[hsl(var(--wb-text-muted))]">No managed Java runtime installed.</p>
+      )}
+
+      <SettingsDivider title="Signed package catalog" />
+      <p className="mb-2 max-w-[72ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
+        Check a signed HTTPS catalog for independently released packages. A release
+        can be installed only when its signed entry includes an archive SHA-256;
+        download, digest verification, package verification, and activation checks
+        still run locally. Verified release archives are reused from the Driver Store
+        only after their digest is checked again. Entries without a digest remain
+        review-and-import only.
+      </p>
+      <div className="flex items-center gap-2">
+        <input
+          aria-label="Signed driver catalog URL"
+          className="h-7 min-w-0 flex-1 rounded-[3px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] px-2 text-[11px] text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
+          placeholder="https://drivers.example.com/catalog.json"
+          value={catalogUrlInput}
+          onChange={(event) => setCatalogUrlInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void checkCatalog();
+          }}
+        />
+        <button
+          type="button"
+          className="h-7 shrink-0 rounded-[3px] border border-[hsl(var(--wb-border))] px-2.5 text-[11px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:opacity-50"
+          disabled={catalogStatus.status === "loading"}
+          onClick={() => void checkCatalog()}
+        >
+          {catalogStatus.status === "loading" ? "Checking…" : "Check catalog"}
+        </button>
+      </div>
+      {"message" in catalogStatus && (
+        <p
+          role={catalogStatus.status === "error" ? "alert" : "status"}
+          className={cn(
+            "mt-1.5 text-[11px]",
+            catalogStatus.status === "error"
+              ? "text-[hsl(var(--destructive))]"
+              : "text-[hsl(var(--wb-text-muted))]",
+          )}
+        >
+          {catalogStatus.message}
+        </p>
+      )}
+      {catalogEntries && catalogEntries.length > 0 && (
+        <div className="mt-2 border-y border-[hsl(var(--wb-border-subtle))]">
+          {catalogEntries.map((entry) => {
+            const matchingInstallations = (installations || []).filter(
+              (installation) =>
+                installation.distribution === "external" &&
+                installation.driver === entry.driverId,
+            );
+            const exactInstall = matchingInstallations.find(
+              (installation) => installation.packageVersion === entry.packageVersion,
+            );
+            const installedLabel = exactInstall
+              ? exactInstall.active
+                ? "Active"
+                : "Installed"
+              : matchingInstallations[0]?.packageVersion
+                ? `Installed ${matchingInstallations[0].packageVersion}`
+                : null;
+            const capabilityLabel = entry.capabilities
+              ? `${entry.capabilities.dataModel} · ${entry.capabilities.lspLanguageId} intelligence`
+              : null;
+            const serverVersionLabel = entry.serverVersionRange?.trim()
+              ? `Server compatibility: ${entry.serverVersionRange.trim()}`
+              : null;
+            const connectVersions = entry.conformance?.connect || [];
+            const metadataVersions = entry.conformance?.metadata || [];
+            const queryVersions = entry.conformance?.query || [];
+            const mutationVersions = entry.conformance?.mutations || [];
+            const migrationVersions = entry.conformance?.migration || [];
+            const transferVersions = entry.conformance?.dataTransfer || [];
+            const conformanceLabel = [
+              connectVersions.length
+                ? `Connect verified: ${connectVersions.join(", ")}`
+                : null,
+              metadataVersions.length
+                ? `Metadata verified: ${metadataVersions.join(", ")}`
+                : null,
+              queryVersions.length
+                ? `Query verified: ${queryVersions.join(", ")}`
+                : null,
+              mutationVersions.length
+                ? `Grid edits verified: ${mutationVersions.join(", ")}`
+                : null,
+              migrationVersions.length
+                ? `Migration verified: ${migrationVersions.join(", ")}`
+                : null,
+              transferVersions.length
+                ? `Transfer verified: ${transferVersions.join(", ")}`
+                : null,
+            ]
+              .filter((value): value is string => Boolean(value))
+              .join(" · ") || null;
+            return (
+              <div
+                key={`${entry.driverId}:${entry.packageVersion}`}
+                className="grid grid-cols-[minmax(120px,0.8fr)_minmax(130px,1fr)_minmax(160px,1fr)] items-center gap-3 border-b border-[hsl(var(--wb-border-subtle))] py-1.5 text-[11px] last:border-b-0"
+              >
+                <span className="min-w-0" title={entry.driverId}>
+                  <span className="block truncate text-[hsl(var(--wb-text))]">
+                    {entry.displayName}
+                  </span>
+                  {capabilityLabel && (
+                    <span className="block truncate text-[10px] text-[hsl(var(--wb-text-muted))]" title={capabilityLabel}>
+                      {capabilityLabel}
+                    </span>
+                  )}
+                  {serverVersionLabel && (
+                    <span className="block truncate text-[10px] text-[hsl(var(--wb-text-muted))]" title={serverVersionLabel}>
+                      {serverVersionLabel}
+                    </span>
+                  )}
+                  {conformanceLabel && (
+                    <span className="block truncate text-[10px] text-[hsl(var(--wb-text-muted))]" title={conformanceLabel}>
+                      {conformanceLabel}
+                    </span>
+                  )}
+                </span>
+                <span className="min-w-0 truncate font-mono text-[hsl(var(--wb-text-muted))]">
+                  {entry.packageVersion} · protocol {entry.protocolVersion}
+                </span>
+                <span className="flex min-w-0 items-center justify-between gap-2">
+                  {installedLabel && (
+                    <span className="truncate text-[hsl(var(--wb-text-muted))]" title={installedLabel}>
+                      {installedLabel}
+                    </span>
+                  )}
+                  {entry.archiveSha256 && !exactInstall && (
+                    <button
+                      type="button"
+                      className="shrink-0 text-[hsl(var(--wb-accent))] hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={packageAction.status === "loading"}
+                      onClick={() => void installCatalogPackage(entry)}
+                      title="Download this signed release, verify its archive digest and package signature, then activate it if no live connection uses another version"
+                    >
+                      {packageAction.status === "loading" && packageAction.key === `catalog-install:${entry.driverId}:${entry.packageVersion}`
+                        ? "Installing…"
+                        : "Install"}
+                    </button>
+                  )}
+                  <a
+                    className="min-w-0 truncate text-[hsl(var(--wb-accent))] hover:underline"
+                    href={entry.downloadUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="Open the package download location"
+                  >
+                    Review download
+                  </a>
+                </span>
+              </div>
+            );
+          })}
         </div>
       )}
 
       <SettingsDivider title="Update boundary" />
       <SettingRow label="Independent updates:">
-        <span className="text-[12px] text-amber-400">Not available for bundled drivers</span>
+        <span className="text-[12px] text-[hsl(var(--wb-text))]">
+          External sidecar packages use an independent update boundary
+        </span>
       </SettingRow>
       <p className="max-w-[72ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
-        The current clients are linked into the Rust application, so a client-library
-        security or compatibility update still requires an OxideStudio release. This
-        page exposes that boundary explicitly; it does not claim that bundled clients
-        can already be updated independently.
+        Bundled clients remain linked into the application as a recovery channel.
+        Offline packages are copied through a bounded staging area, reject symbolic
+        links, and are committed only when the manifest signature, target, protocol
+        major, and entrypoint digest pass validation. Activation keeps one previous
+        version for atomic rollback; bundled clients remain the recovery channel.
       </p>
     </SettingsPanel>
   );

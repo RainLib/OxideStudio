@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oxidestudio.local/schemas/database-driver-catalog-v1.json",
+  "title": "OxideStudio Signed Database Driver Catalog",
+  "description": "The exact catalog JSON bytes must have a trusted detached Minisign signature at <catalog-url>.minisig. Entries carrying archiveSha256 permit one explicit, digest-bound tar.gz download; every package is independently verified before installation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "packages"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "generatedAt": { "type": ["string", "null"], "maxLength": 128 },
+    "packages": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["driverId", "displayName", "packageVersion", "protocolVersion", "downloadUrl"],
+        "properties": {
+          "driverId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$" },
+          "displayName": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "packageVersion": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$" },
+          "protocolVersion": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "downloadUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
+          "archiveSha256": {
+            "description": "Optional SHA-256 for an explicit verified in-app archive install. Omit to keep this entry review-and-import only.",
+            "type": ["string", "null"],
+            "pattern": "^[A-Fa-f0-9]{64}$"
+          },
+          "supportedTargets": {
+            "type": "array",
+            "maxItems": 16,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1, "maxLength": 96 }
+          },
+          "serverVersionRange": { "type": ["string", "null"], "maxLength": 512 },
+          "releaseNotesUrl": { "type": ["string", "null"], "format": "uri", "pattern": "^https://" },
+          "connectionUrlTemplate": { "type": ["string", "null"], "maxLength": 512 },
+          "capabilities": {
+            "description": "Optional signed discovery contract. Importing the package still revalidates its own manifest and sidecar handshake.",
+            "type": ["object", "null"],
+            "properties": {
+              "driver": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$" },
+              "displayName": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "dataModel": { "enum": ["relational", "document", "keyValue", "search", "graph", "wideColumn", "timeSeries", "coordination", "queue"] },
+              "lspLanguageId": { "type": "string", "minLength": 1, "maxLength": 96 },
+              "lspServerDialect": { "enum": ["postgres", "mysql", "sqlite", "duckdb", "hive", "clickhouse"] },
+              "supportsTableDataTransfer": {
+                "type": "boolean",
+                "description": "Discovery-only transfer capability. Installation still validates the package manifest and runtime transaction handshake."
+              }
+            },
+            "additionalProperties": true
+          },
+          "conformance": {
+            "description": "Signed release evidence for UI transparency only; it is not execution authority.",
+            "type": ["object", "null"],
+            "properties": {
+              "connect": { "$ref": "#/$defs/versionList" },
+              "metadata": { "$ref": "#/$defs/versionList" },
+              "query": { "$ref": "#/$defs/versionList" },
+              "cancellation": { "$ref": "#/$defs/versionList" },
+              "mutations": { "$ref": "#/$defs/versionList" },
+              "migration": { "$ref": "#/$defs/versionList" },
+              "dataTransfer": { "$ref": "#/$defs/versionList" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "versionList": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 96 }
+    }
+  }
+}

@@ -104,11 +104,58 @@ describe("connection store", () => {
       hasConnectionDisplayCache: false,
       activeConnectionId: null,
       connectedConnectionIds: [],
+      connectionRuntimeStates: {},
       isConnected: false,
       isLoading: false,
       loadError: null,
       selectedConnection: null,
     });
+  });
+
+  it("persists imported local sources in one write before exposing them in state", async () => {
+    const first = connection({ id: "imported-postgres", name: "Imported Postgres" });
+    const second = connection({
+      id: "imported-mysql",
+      name: "Imported MySQL",
+      driver: "mysql",
+      port: 3306,
+    });
+
+    await useConnectionStore.getState().importConnections([first, second]);
+
+    expect(mocks.saveConnections).toHaveBeenCalledTimes(1);
+    expect(mocks.saveConnections).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({ ...first, projectId: "sqls" }),
+        expect.objectContaining({ ...second, projectId: "sqls" }),
+      ],
+      "sqls",
+    );
+    expect(useConnectionStore.getState().connections).toEqual([
+      expect.objectContaining({ ...first, projectId: "sqls" }),
+      expect.objectContaining({ ...second, projectId: "sqls" }),
+    ]);
+    expect(useConnectionStore.getState().selectedConnection).toEqual(
+      expect.objectContaining({ ...second, projectId: "sqls" }),
+    );
+  });
+
+  it("does not expose a partial import when its single storage write fails", async () => {
+    mocks.saveConnections.mockRejectedValueOnce(new Error("disk unavailable"));
+
+    await expect(
+      useConnectionStore.getState().importConnections([
+        connection({ id: "imported-postgres" }),
+        connection({
+          id: "imported-mysql",
+          driver: "mysql",
+          port: 3306,
+        }),
+      ]),
+    ).rejects.toThrow("disk unavailable");
+
+    expect(useConnectionStore.getState().connections).toEqual([]);
+    expect(useConnectionStore.getState().selectedConnection).toBeNull();
   });
 
   it("tests a connection without activating or saving it", async () => {
@@ -158,6 +205,9 @@ describe("connection store", () => {
       "postgres-1",
     ]);
     expect(useConnectionStore.getState().isConnected).toBe(true);
+    expect(useConnectionStore.getState().connectionRuntimeStates[config.id]).toMatchObject({
+      status: "connected",
+    });
   });
 
   it("keeps previous backend connections open after a successful switch", async () => {
@@ -264,6 +314,9 @@ describe("connection store", () => {
       "postgres-1",
     ]);
     expect(useConnectionStore.getState().isConnected).toBe(true);
+    expect(
+      useConnectionStore.getState().connectionRuntimeStates["mysql-1"],
+    ).toMatchObject({ status: "error", message: "login failed" });
   });
 
   it("does not issue a frontend disconnect when reconnecting the same id", async () => {

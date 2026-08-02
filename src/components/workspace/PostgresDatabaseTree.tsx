@@ -14,8 +14,12 @@ import {
   Network,
   RefreshCw,
 } from "lucide-react";
-import { defaultDatabaseName } from "@/lib/databaseDialect";
+import {
+  defaultDatabaseName,
+  isFileBasedDatabaseDriver,
+} from "@/lib/databaseDialect";
 import { parseConnectionUrl } from "@/lib/connectionUrlParser";
+import type { DatabaseDriver } from "@/services/tauri/types";
 import { useDatabaseNavigationStore } from "@/lib/databaseNavigation";
 import {
   ContextMenu,
@@ -63,16 +67,27 @@ export interface PostgresDatabaseTreeProps {
   ) => ReactNode;
 }
 
-export function postgresConnectionDatabaseName(connection: {
+/**
+ * Resolve the configured server catalog using the same URL precedence as the
+ * connection form. The component retains its historical PostgreSQL filename,
+ * but external JDBC catalog providers use the same Explorer tree and must not
+ * lose their current database context.
+ */
+export function connectionCatalogDatabaseName(connection: {
+  driver?: DatabaseDriver;
   database?: string;
   connectionUrl?: string;
   url?: string;
 }) {
+  const driver = connection.driver || "postgres";
+  // File-backed engines discover attached catalogs at runtime. Their
+  // connection `database` is a file path, not a catalog name.
+  if (isFileBasedDatabaseDriver(driver)) return "";
   // The connection store gives an explicit connection URL precedence over
   // individual form fields, so the Explorer must resolve the database in the
   // same order or schemas can appear under the wrong node.
-  const explicitUrl = parseConnectionUrl(connection.connectionUrl || "");
-  if (explicitUrl?.driver === "postgres" && explicitUrl.database) {
+  const explicitUrl = parseConnectionUrl(connection.connectionUrl || "", driver);
+  if (explicitUrl?.database) {
     try {
       return decodeURIComponent(explicitUrl.database);
     } catch {
@@ -82,8 +97,8 @@ export function postgresConnectionDatabaseName(connection: {
 
   if (connection.database) return connection.database;
 
-  const legacyUrl = parseConnectionUrl(connection.url || "");
-  if (legacyUrl?.driver === "postgres" && legacyUrl.database) {
+  const legacyUrl = parseConnectionUrl(connection.url || "", driver);
+  if (legacyUrl?.database) {
     try {
       return decodeURIComponent(legacyUrl.database);
     } catch {
@@ -91,7 +106,16 @@ export function postgresConnectionDatabaseName(connection: {
     }
   }
 
-  return defaultDatabaseName("postgres") || "postgres";
+  return defaultDatabaseName(driver) || "";
+}
+
+/** Backward-compatible name used by PostgreSQL-specific callers and tests. */
+export function postgresConnectionDatabaseName(connection: {
+  database?: string;
+  connectionUrl?: string;
+  url?: string;
+}) {
+  return connectionCatalogDatabaseName({ ...connection, driver: "postgres" });
 }
 
 function databaseRows(databases: string[], currentDatabase: string) {

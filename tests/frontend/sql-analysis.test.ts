@@ -55,12 +55,14 @@ describe("SQL analysis helpers", () => {
           JOIN orders o ON o.user_id = u.id;
           UPDATE \`sales\`.\`orders\` SET status = 'paid';
           INSERT INTO [dbo].[audit_log] (id) VALUES (1);
+          SELECT * FROM [warehouse].[reporting].[monthly.sales];
           CREATE INDEX idx_events_id ON public.events (id);
         `,
         "postgres"
       )
     ).toEqual([
       { schema: "app", table: "users" },
+      { database: "warehouse", schema: "reporting", table: "monthly.sales" },
       { table: "orders" },
       { schema: "sales", table: "orders" },
       { schema: "dbo", table: "audit_log" },

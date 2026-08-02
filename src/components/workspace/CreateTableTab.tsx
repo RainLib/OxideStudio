@@ -85,7 +85,7 @@ export function CreateTableTab({
     setCapabilities(null);
 
     databaseService
-      .getDatabaseCapabilities(driver)
+      .getDatabaseCapabilities(driver, connection?.driverPackageVersion)
       .then((value) => {
         if (!cancelled) setCapabilities(value);
       })
@@ -97,7 +97,7 @@ export function CreateTableTab({
     return () => {
       cancelled = true;
     };
-  }, [driver]);
+  }, [connection?.driverPackageVersion, driver]);
 
   // Update default type based on driver
   useEffect(() => {

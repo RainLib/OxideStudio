@@ -1,4 +1,7 @@
-import { selectPreferredNamespace } from "@/lib/databaseDialect";
+import {
+  isFileBasedDatabaseDriver,
+  selectPreferredNamespace,
+} from "@/lib/databaseDialect";
 import { extractRelationReferences } from "@/lib/sqlAnalysis";
 import type { DatabaseDriver } from "@/services/tauri/types";
 import { getLspDocumentUri } from "./document";
@@ -8,6 +11,8 @@ export type LspSyncConnection = {
   id: string;
   driver: DatabaseDriver;
   database?: string | null;
+  /** The installed/pinned package declares server catalog selection. */
+  supportsDatabaseCatalogs?: boolean;
 };
 
 export type LspSyncTab = {
@@ -143,7 +148,16 @@ export function createLspSyncPlan(options: {
     )) {
       const qualifiedSchema = findKnownSchemaName(schemas, reference.schema);
       const schemaName = qualifiedSchema || tabCatalog.schemaName;
-      const referencedCatalog = { ...tabCatalog, schemaName };
+      const referencedDatabase =
+        supportsConnectionCatalogs(connection) && reference.database
+          ? normalizeDatabaseName(reference.database)
+          : null;
+      const referencedCatalog: LspCatalogTarget = {
+        catalogName:
+          referencedDatabase || tabCatalog.catalogName,
+        databaseName: referencedDatabase || tabCatalog.databaseName,
+        schemaName,
+      };
       targetCatalogsByKey.set(lspCatalogKey(referencedCatalog), referencedCatalog);
       addPreferredTable(preferredTablesBySchema, schemaName, reference.table);
       addPreferredTable(
@@ -180,6 +194,9 @@ export function buildLspFileMappings(options: {
   defaultSchema: string;
   defaultCatalog?: LspCatalogTarget;
   driver: DatabaseDriver;
+  /** Language sent in didOpen/didChange and encoded in the virtual URI. */
+  documentLanguageId?: string;
+  /** Concrete dialect understood by the bundled LSP server. */
   lspDialect: string;
   getSchemaId: (
     schemaName: string,
@@ -195,6 +212,7 @@ export function buildLspFileMappings(options: {
     defaultCatalog,
     driver,
     lspDialect,
+    documentLanguageId = lspDialect,
     getSchemaId,
   } = options;
 
@@ -214,14 +232,14 @@ export function buildLspFileMappings(options: {
         schemaName,
       };
       return [
-        getLspDocumentUri(tab.id, driver, lspDialect),
+        getLspDocumentUri(tab.id, driver, documentLanguageId),
         getSchemaId(schemaName, catalog.catalogName, catalog.databaseName),
       ];
     })
   );
   const fileDialects = Object.fromEntries(
     queryTabs.map((tab) => [
-      getLspDocumentUri(tab.id, driver, lspDialect),
+      getLspDocumentUri(tab.id, driver, documentLanguageId),
       lspDialect,
     ])
   );
@@ -253,9 +271,28 @@ function schemaForLspTab(tab: LspSyncTab, defaultSchema: string) {
 }
 
 function defaultCatalogName(connection: LspSyncConnection) {
-  return connection.driver === "postgres"
-    ? normalizeDatabaseName(connection.database)
-    : null;
+  // A DuckDB connection's `database` field is the primary file path, not the
+  // attached-catalog name. Attached query tabs are handled by
+  // `catalogForLspTab`; never publish that path as a schema-mapping catalog.
+  if (connection.driver === "duckdb") return null;
+  if (!supportsConnectionCatalogs(connection)) return null;
+  return normalizeDatabaseName(connection.database);
+}
+
+function supportsConnectionCatalogs(connection: LspSyncConnection) {
+  // PostgreSQL remains compatible with older callers that do not yet pass a
+  // capability contract. Once a live (including external-package) capability
+  // is supplied, its explicit false is authoritative: package aliases must
+  // not turn an ordinary connection database field into a catalog scope.
+  if (connection.supportsDatabaseCatalogs !== undefined) {
+    return connection.supportsDatabaseCatalogs === true;
+  }
+  // DuckDB's primary database is a local file, but attached databases are
+  // genuine catalog scopes. Preserve that legacy capability while keeping
+  // `defaultCatalogName` below from treating the file path itself as one.
+  if (connection.driver === "duckdb") return true;
+  if (isFileBasedDatabaseDriver(connection.driver)) return false;
+  return connection.driver === "postgres";
 }
 
 function catalogForLspTab(
@@ -263,7 +300,9 @@ function catalogForLspTab(
   defaultCatalog: LspCatalogTarget,
   connection: LspSyncConnection
 ): LspCatalogTarget {
-  const databaseName = normalizeDatabaseName(tab.databaseName);
+  const databaseName = supportsConnectionCatalogs(connection)
+    ? normalizeDatabaseName(tab.databaseName)
+    : null;
   return {
     catalogName:
       databaseName || defaultCatalog.catalogName || defaultCatalogName(connection),

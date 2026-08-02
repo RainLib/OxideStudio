@@ -151,6 +151,27 @@ describe("LSP sync plan", () => {
     });
   });
 
+  it("keeps a generic SQL document URI while routing it to a concrete server dialect", () => {
+    const mappings = buildLspFileMappings({
+      queryTabs: [{ id: "oracle-query", type: "query", targetSchema: "app" }],
+      schemaByTabId: { "oracle-query": "app" },
+      defaultSchema: "app",
+      driver: "oracle",
+      documentLanguageId: "sql",
+      lspDialect: "postgres",
+      getSchemaId: (schemaName) => `schema-${schemaName}`,
+    });
+
+    expect(mappings).toEqual({
+      fileSchemas: {
+        "oxide://query/oracle-query.oracle.sql": "schema-app",
+      },
+      fileDialects: {
+        "oxide://query/oracle-query.oracle.sql": "postgres",
+      },
+    });
+  });
+
   it("isolates PostgreSQL tabs by catalog when databases share a schema name", () => {
     const plan = createLspSyncPlan({
       activeConnectionId: "postgres-main",
@@ -220,6 +241,124 @@ describe("LSP sync plan", () => {
     expect(mappings.fileSchemas).toEqual({
       "oxide://query/primary-query.postgres.postgres": "primary/public",
       "oxide://query/analytics-query.postgres.postgres": "analytics/public",
+    });
+  });
+
+  it("does not widen an external PostgreSQL package without catalog capability", () => {
+    const plan = createLspSyncPlan({
+      activeConnectionId: "external-postgres",
+      connection: {
+        id: "external-postgres",
+        driver: "postgres",
+        database: "primary",
+        supportsDatabaseCatalogs: false,
+      },
+      schemas: ["public"],
+      currentSchema: "public",
+      tabs: [
+        {
+          id: "package-query",
+          type: "query",
+          connectionId: "external-postgres",
+          databaseName: "analytics",
+          targetSchema: "public",
+          sql: "SELECT id FROM events",
+        },
+      ],
+    });
+
+    expect(plan?.defaultCatalog).toEqual({
+      catalogName: null,
+      databaseName: null,
+      schemaName: "public",
+    });
+    expect(plan?.catalogByTabId["package-query"]).toEqual({
+      catalogName: null,
+      databaseName: null,
+      schemaName: "public",
+    });
+  });
+
+  it("preserves the selected catalog for capability-declared external SQL drivers", () => {
+    const plan = createLspSyncPlan({
+      activeConnectionId: "sqlserver-main",
+      connection: {
+        id: "sqlserver-main",
+        driver: "sqlserver",
+        database: "warehouse",
+        supportsDatabaseCatalogs: true,
+      },
+      schemas: ["sales"],
+      currentSchema: "sales",
+      tabs: [
+        {
+          id: "query",
+          type: "query",
+          connectionId: "sqlserver-main",
+          targetSchema: "sales",
+          sql: "SELECT id FROM archive.sales.orders",
+        },
+      ],
+    });
+
+    expect(plan?.defaultCatalog).toEqual({
+      catalogName: "warehouse",
+      databaseName: null,
+      schemaName: "sales",
+    });
+    expect(plan?.catalogByTabId.query).toEqual({
+      catalogName: "warehouse",
+      databaseName: null,
+      schemaName: "sales",
+    });
+    expect(plan?.targetCatalogs).toContainEqual({
+      catalogName: "archive",
+      databaseName: "archive",
+      schemaName: "sales",
+    });
+  });
+
+  it("isolates attached DuckDB catalogs without treating the file path as a catalog", () => {
+    const plan = createLspSyncPlan({
+      activeConnectionId: "duckdb-main",
+      connection: {
+        id: "duckdb-main",
+        driver: "duckdb",
+        database: "/workspace/analytics.duckdb",
+      },
+      schemas: ["main"],
+      currentSchema: "main",
+      tabs: [
+        {
+          id: "main-query",
+          type: "query",
+          connectionId: "duckdb-main",
+          targetSchema: "main",
+          sql: "SELECT * FROM local_events",
+        },
+        {
+          id: "attached-query",
+          type: "query",
+          connectionId: "duckdb-main",
+          databaseName: "archive",
+          targetSchema: "main",
+          sql: "SELECT * FROM archived_events",
+        },
+      ],
+    });
+
+    expect(plan?.targetCatalogs).toEqual([
+      { catalogName: null, databaseName: null, schemaName: "main" },
+      { catalogName: "archive", databaseName: "archive", schemaName: "main" },
+    ]);
+    expect(plan?.catalogByTabId["main-query"]).toMatchObject({
+      catalogName: null,
+      schemaName: "main",
+    });
+    expect(plan?.catalogByTabId["attached-query"]).toMatchObject({
+      catalogName: "archive",
+      databaseName: "archive",
+      schemaName: "main",
     });
   });
 

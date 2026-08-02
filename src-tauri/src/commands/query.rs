@@ -1,16 +1,17 @@
 /// 查询执行相关 commands
 use crate::core::{
-    dialect::DatabaseKind,
+    dialect::{canonical_driver_name, DatabaseKind},
     explain::{build_explain_statement, parse_explain_results},
     manager::ConnectionManager,
     parser::{CompletionContext, SqlParser},
     protocol::{ExplainPlan, ExplainPlanMode, QueryResult, Response},
     statement::{
-        split_sql_statement_spans, split_sql_statements, validate_read_only_sql,
-        StatementScanDialect,
+        split_sql_statement_spans_with_soft_boundaries, split_sql_statements,
+        validate_read_only_sql, StatementScanDialect,
     },
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlparser::{
     dialect::{MySqlDialect, PostgreSqlDialect},
     parser::Parser,
@@ -199,6 +200,20 @@ pub struct ImportSqlScriptResult {
     pub rows_affected: u64,
 }
 
+/// Bounded, read-only review data for a SQL script import. Execution requires
+/// the digest returned here and recomputes it immediately before sending SQL
+/// to the selected data source.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlScriptImportPreview {
+    pub file_name: String,
+    pub total_bytes: u64,
+    pub statement_count: u64,
+    pub statement_preview: Vec<String>,
+    pub truncated: bool,
+    pub review_digest: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsoleFileImportResult {
@@ -240,7 +255,7 @@ pub struct SqlSyntaxDiagnostic {
 #[serde(rename_all = "camelCase")]
 pub struct SqlSyntaxValidation {
     pub valid: bool,
-    pub driver: &'static str,
+    pub driver: String,
     pub statement_count: usize,
     pub diagnostics: Vec<SqlSyntaxDiagnostic>,
 }
@@ -280,8 +295,28 @@ fn syntax_diagnostic(error: impl ToString) -> SqlSyntaxDiagnostic {
     }
 }
 
-fn validate_sql_syntax_text(driver: &str, sql: &str) -> Result<SqlSyntaxValidation, String> {
-    let kind = DatabaseKind::from_str(driver).map_err(|error| error.to_string())?;
+fn validate_sql_syntax_text(
+    driver: &str,
+    sql: &str,
+    lsp_language_id: Option<&str>,
+    lsp_server_dialect: Option<&str>,
+) -> Result<SqlSyntaxValidation, String> {
+    let requested_driver = driver.trim();
+    let canonical_driver = canonical_driver_name(requested_driver)
+        .map(str::to_string)
+        .unwrap_or_else(|| requested_driver.to_ascii_lowercase());
+    if canonical_driver.is_empty() {
+        return Err("Database driver is required".to_string());
+    }
+    let parser_kind = DatabaseKind::from_str(&canonical_driver).ok();
+    let declared_language = lsp_language_id
+        .map(str::trim)
+        .filter(|language| !language.is_empty())
+        .map(str::to_ascii_lowercase);
+    let declared_server_dialect = lsp_server_dialect
+        .map(str::trim)
+        .filter(|dialect| !dialect.is_empty())
+        .map(str::to_ascii_lowercase);
     if sql.chars().count() > MAX_SQL_SYNTAX_VALIDATION_CHARS {
         return Err(format!(
             "SQL syntax validation is limited to {MAX_SQL_SYNTAX_VALIDATION_CHARS} characters"
@@ -290,7 +325,7 @@ fn validate_sql_syntax_text(driver: &str, sql: &str) -> Result<SqlSyntaxValidati
     if sql.trim().is_empty() {
         return Ok(SqlSyntaxValidation {
             valid: false,
-            driver: kind.as_str(),
+            driver: canonical_driver.clone(),
             statement_count: 0,
             diagnostics: vec![SqlSyntaxDiagnostic {
                 severity: "error",
@@ -301,20 +336,62 @@ fn validate_sql_syntax_text(driver: &str, sql: &str) -> Result<SqlSyntaxValidati
         });
     }
 
-    let parsed = match kind {
-        DatabaseKind::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql),
-        DatabaseKind::Mysql => Parser::parse_sql(&MySqlDialect {}, sql),
+    // Generic SQL documents can retain their neutral UI language while a
+    // signed capability selects a reviewed parser baseline (for example a
+    // MySQL-wire-compatible driver). Dedicated document languages continue to
+    // select their own parser and never accept an unrelated override.
+    let parser_language = match declared_language.as_deref() {
+        Some("sql") => declared_server_dialect.as_deref().unwrap_or("sql"),
+        Some(language) => language,
+        None => "",
+    };
+    let parsed = match parser_language {
+        // `sql` is the product's generic editor language. It intentionally
+        // follows the same PostgreSQL-compatible conservative parser used by
+        // the generic LSP baseline, while retaining the vendor driver label in
+        // the returned diagnostic.
+        "postgres" | "sqlite" | "duckdb" | "sql" => Parser::parse_sql(&PostgreSqlDialect {}, sql),
+        "mysql" => Parser::parse_sql(&MySqlDialect {}, sql),
+        // A known editor language without a matching Host parser must not be
+        // silently parsed as PostgreSQL; execution/server diagnostics remain
+        // authoritative for that dialect.
+        language if !language.is_empty() => {
+            return Err(format!(
+                "SQL syntax validation is not supported for {canonical_driver} ({language})"
+            ))
+        }
+        _ => match parser_kind {
+            Some(DatabaseKind::Mysql) => Parser::parse_sql(&MySqlDialect {}, sql),
+            // SQLite's common SELECT/DML grammar is validated by the same
+            // conservative parser used by its LSP compatibility dialect. Native
+            // execution remains the source of truth for SQLite-specific DDL.
+            // DuckDB external packages use the SQLite-compatible LSP profile.
+            // Syntax validation deliberately follows that same conservative
+            // baseline rather than becoming unavailable merely because the driver
+            // is independently installed instead of linked into the app.
+            Some(DatabaseKind::Postgres) | None
+                if matches!(canonical_driver.as_str(), "sqlite" | "duckdb") =>
+            {
+                Parser::parse_sql(&PostgreSqlDialect {}, sql)
+            }
+            Some(DatabaseKind::Postgres) => Parser::parse_sql(&PostgreSqlDialect {}, sql),
+            None => {
+                return Err(format!(
+                    "SQL syntax validation is not supported for {canonical_driver}"
+                ))
+            }
+        },
     };
     match parsed {
         Ok(statements) => Ok(SqlSyntaxValidation {
             valid: true,
-            driver: kind.as_str(),
+            driver: canonical_driver.clone(),
             statement_count: statements.len(),
             diagnostics: Vec::new(),
         }),
         Err(error) => Ok(SqlSyntaxValidation {
             valid: false,
-            driver: kind.as_str(),
+            driver: canonical_driver,
             statement_count: 0,
             diagnostics: vec![syntax_diagnostic(error)],
         }),
@@ -345,7 +422,7 @@ fn sql_statement_at_cursor(
     dialect: StatementScanDialect,
     cursor_utf16_offset: usize,
 ) -> Option<SqlStatementSelection> {
-    let statements = split_sql_statement_spans(sql, dialect);
+    let statements = split_sql_statement_spans_with_soft_boundaries(sql, dialect);
     if statements.is_empty() {
         return None;
     }
@@ -470,10 +547,111 @@ pub async fn resolve_sql_statement_at_cursor(
 pub fn validate_sql_syntax(
     driver: String,
     sql: String,
+    lsp_language_id: Option<String>,
+    lsp_server_dialect: Option<String>,
 ) -> Result<Response<SqlSyntaxValidation>, String> {
-    match validate_sql_syntax_text(&driver, &sql) {
+    match validate_sql_syntax_text(
+        &driver,
+        &sql,
+        lsp_language_id.as_deref(),
+        lsp_server_dialect.as_deref(),
+    ) {
         Ok(validation) => Ok(Response::ok(validation)),
         Err(error) => Ok(Response::err("SQL_SYNTAX_VALIDATION_UNAVAILABLE", &error)),
+    }
+}
+
+fn read_sql_import_source(path: &PathBuf) -> Result<(String, u64), String> {
+    if path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_none_or(|extension| !extension.eq_ignore_ascii_case("sql"))
+    {
+        return Err("Select a .sql script to import".to_string());
+    }
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("The selected SQL import path is not a file".to_string());
+    }
+    if metadata.len() > MAX_SQL_IMPORT_BYTES {
+        return Err(format!(
+            "SQL import files are limited to {} MB",
+            MAX_SQL_IMPORT_BYTES / 1024 / 1024
+        ));
+    }
+    let sql = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    if sql.len() as u64 > MAX_SQL_IMPORT_BYTES {
+        return Err(format!(
+            "SQL import files are limited to {} MB",
+            MAX_SQL_IMPORT_BYTES / 1024 / 1024
+        ));
+    }
+    Ok((sql, metadata.len()))
+}
+
+fn sql_import_digest(sql: &str) -> String {
+    format!("{:x}", Sha256::digest(sql.as_bytes()))
+}
+
+fn sql_import_statement_preview(statement: &str) -> String {
+    const MAX_PREVIEW_CHARS: usize = 1_200;
+    let normalized = statement.trim();
+    let mut preview = normalized
+        .chars()
+        .take(MAX_PREVIEW_CHARS)
+        .collect::<String>();
+    if normalized.chars().nth(MAX_PREVIEW_CHARS).is_some() {
+        preview.push('…');
+    }
+    preview
+}
+
+#[tauri::command]
+pub async fn preview_sql_script_import(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    file_path: String,
+) -> Result<Response<SqlScriptImportPreview>, String> {
+    let result: Result<SqlScriptImportPreview, String> = async {
+        let path = PathBuf::from(file_path.trim());
+        let (sql, total_bytes) = read_sql_import_source(&path)?;
+        let dialect = manager
+            .statement_scan_dialect(&connection_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "SQL script import is only available for SQL data sources".to_string()
+            })?;
+        let statements = split_sql_statements(&sql, dialect);
+        if statements.is_empty() {
+            return Err(
+                "The selected SQL script does not contain executable statements".to_string(),
+            );
+        }
+        const MAX_PREVIEW_STATEMENTS: usize = 20;
+        Ok(SqlScriptImportPreview {
+            file_name: path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.is_empty())
+                .unwrap_or("SQL script")
+                .to_string(),
+            total_bytes,
+            statement_count: statements.len() as u64,
+            statement_preview: statements
+                .iter()
+                .take(MAX_PREVIEW_STATEMENTS)
+                .map(|statement| sql_import_statement_preview(statement))
+                .collect(),
+            truncated: statements.len() > MAX_PREVIEW_STATEMENTS,
+            review_digest: sql_import_digest(&sql),
+        })
+    }
+    .await;
+
+    match result {
+        Ok(preview) => Ok(Response::ok(preview)),
+        Err(error) => Ok(Response::err("PREVIEW_SQL_SCRIPT_IMPORT_ERROR", &error)),
     }
 }
 
@@ -484,27 +662,17 @@ pub async fn import_sql_script(
     file_path: String,
     schema: Option<String>,
     database: Option<String>,
+    review_digest: String,
 ) -> Result<Response<ImportSqlScriptResult>, String> {
     let result: Result<ImportSqlScriptResult, String> = async {
         let path = PathBuf::from(file_path.trim());
-        if path
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_none_or(|extension| !extension.eq_ignore_ascii_case("sql"))
-        {
-            return Err("Select a .sql script to import".to_string());
+        let (sql, _) = read_sql_import_source(&path)?;
+        if review_digest.trim().is_empty() || review_digest != sql_import_digest(&sql) {
+            return Err(
+                "The SQL script changed or was not reviewed. Preview it again before importing."
+                    .to_string(),
+            );
         }
-        let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
-        if !metadata.is_file() {
-            return Err("The selected SQL import path is not a file".to_string());
-        }
-        if metadata.len() > MAX_SQL_IMPORT_BYTES {
-            return Err(format!(
-                "SQL import files are limited to {} MB",
-                MAX_SQL_IMPORT_BYTES / 1024 / 1024
-            ));
-        }
-        let sql = fs::read_to_string(&path).map_err(|error| error.to_string())?;
         let dialect = manager
             .statement_scan_dialect(&connection_id)
             .await
@@ -703,6 +871,18 @@ pub async fn execute_read_only_query(
     let kind = match dialect {
         StatementScanDialect::Postgres => DatabaseKind::Postgres,
         StatementScanDialect::Mysql => DatabaseKind::Mysql,
+        // SQL Server has no equivalent Host-generated read-only transaction
+        // wrapper. A package may still expose an agent read endpoint when its
+        // own runtime declares enforcement, but this generic command must not
+        // pretend `BEGIN READ ONLY` is valid T-SQL.
+        StatementScanDialect::SqlServer => {
+            return Ok(Response::err_with_details(
+                "READ_ONLY_QUERY_UNSUPPORTED",
+                "SQL Server read-only execution requires a driver-enforced read-only endpoint",
+                false,
+                Some(query_context),
+            ));
+        }
     };
     if let Err(reason) = validate_read_only_sql(&sql, dialect) {
         return Ok(Response::err_with_details(
@@ -782,6 +962,14 @@ pub async fn explain_query(
     let kind = match dialect {
         StatementScanDialect::Postgres => DatabaseKind::Postgres,
         StatementScanDialect::Mysql => DatabaseKind::Mysql,
+        StatementScanDialect::SqlServer => {
+            return Ok(Response::err_with_details(
+                "EXPLAIN_UNSUPPORTED",
+                "SQL Server Explain Plan requires a driver-specific implementation",
+                false,
+                Some(context),
+            ));
+        }
     };
     let (explain_sql, format) = match build_explain_statement(&request.sql, kind, request.mode) {
         Ok(statement) => statement,
@@ -1068,6 +1256,7 @@ pub async fn get_sql_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
     use std::borrow::Cow;
     use std::error::Error as StdError;
     use std::fmt;
@@ -1114,6 +1303,54 @@ mod tests {
 
         fn kind(&self) -> ErrorKind {
             ErrorKind::UniqueViolation
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StatementScopeFixture {
+        id: String,
+        dialect: String,
+        before_cursor: String,
+        after_cursor: String,
+        backend_selected: String,
+        statement_index: usize,
+        statement_count: usize,
+    }
+
+    #[test]
+    fn statement_scope_fixtures_match_cursor_selection_contract() {
+        let fixtures: Vec<StatementScopeFixture> = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/sql-statement-scope.json"
+        ))
+        .expect("statement scope fixture JSON should remain valid");
+
+        for fixture in fixtures {
+            let dialect = match fixture.dialect.as_str() {
+                "postgres" => StatementScanDialect::Postgres,
+                "mysql" => StatementScanDialect::Mysql,
+                other => panic!("unknown statement scope fixture dialect: {other}"),
+            };
+            let sql = format!("{}{}", fixture.before_cursor, fixture.after_cursor);
+            let cursor_offset = fixture.before_cursor.encode_utf16().count();
+            let selected = sql_statement_at_cursor(&sql, dialect, cursor_offset)
+                .unwrap_or_else(|| panic!("fixture {} should select a statement", fixture.id));
+
+            assert_eq!(
+                selected.sql, fixture.backend_selected,
+                "fixture {} selected an unexpected statement",
+                fixture.id
+            );
+            assert_eq!(
+                selected.statement_index, fixture.statement_index,
+                "fixture {} selected an unexpected statement index",
+                fixture.id
+            );
+            assert_eq!(
+                selected.statement_count, fixture.statement_count,
+                "fixture {} produced an unexpected statement count",
+                fixture.id
+            );
         }
     }
 
@@ -1166,10 +1403,48 @@ mod tests {
     }
 
     #[test]
+    fn statement_at_cursor_recovers_blank_line_separated_queries_without_semicolons() {
+        let sql = "SELECT '🚀' FROM first_table\n\nSELECT * FROM second_table";
+        let cursor = sql[..sql.find("second_table").unwrap()]
+            .encode_utf16()
+            .count();
+        let selected =
+            sql_statement_at_cursor(sql, StatementScanDialect::Postgres, cursor).unwrap();
+
+        assert_eq!(selected.sql, "SELECT * FROM second_table");
+        assert_eq!(selected.statement_index, 1);
+        assert_eq!(selected.statement_count, 2);
+    }
+
+    #[test]
+    fn sql_import_review_digest_binds_the_exact_script_contents() {
+        let original = "CREATE TABLE audit_log (id integer);";
+        assert_eq!(sql_import_digest(original), sql_import_digest(original));
+        assert_ne!(
+            sql_import_digest(original),
+            sql_import_digest("CREATE TABLE audit_log (id bigint);")
+        );
+    }
+
+    #[test]
+    fn sql_import_statement_preview_is_bounded_and_preserves_short_statements() {
+        assert_eq!(
+            sql_import_statement_preview("  SELECT * FROM users;  "),
+            "SELECT * FROM users;"
+        );
+        let long_statement = format!("SELECT {}", "x".repeat(1_300));
+        let preview = sql_import_statement_preview(&long_statement);
+        assert_eq!(preview.chars().count(), 1_201);
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
     fn syntax_validation_uses_the_requested_vendor_dialect_without_execution() {
         let postgres = validate_sql_syntax_text(
             "postgresql",
             "SELECT payload->>'name' FROM events; SELECT 2;",
+            None,
+            None,
         )
         .expect("PostgreSQL should be supported");
         assert!(postgres.valid);
@@ -1177,16 +1452,57 @@ mod tests {
         assert_eq!(postgres.statement_count, 2);
         assert!(postgres.diagnostics.is_empty());
 
-        let mysql = validate_sql_syntax_text("mariadb", "SELECT `name` FROM `users` LIMIT 1;")
-            .expect("MySQL should be supported");
+        let mysql =
+            validate_sql_syntax_text("mariadb", "SELECT `name` FROM `users` LIMIT 1;", None, None)
+                .expect("MySQL should be supported");
         assert!(mysql.valid);
         assert_eq!(mysql.driver, "mysql");
         assert_eq!(mysql.statement_count, 1);
+
+        let sqlite = validate_sql_syntax_text(
+            "sqlite",
+            "SELECT name FROM users WHERE id = 1 LIMIT 1;",
+            None,
+            None,
+        )
+        .expect("SQLite should have editor syntax validation");
+        assert!(sqlite.valid);
+        assert_eq!(sqlite.driver, "sqlite");
+
+        let duckdb = validate_sql_syntax_text(
+            "duckdb",
+            "SELECT name FROM metrics WHERE created_at >= CURRENT_DATE;",
+            None,
+            None,
+        )
+        .expect("DuckDB should use the SQLite-compatible validation profile");
+        assert!(duckdb.valid);
+        assert_eq!(duckdb.driver, "duckdb");
+
+        let generic_package = validate_sql_syntax_text(
+            "trino",
+            "SELECT region, count(*) FROM analytics.orders GROUP BY region;",
+            Some("sql"),
+            None,
+        )
+        .expect("generic SQL packages should use the editor's SQL baseline");
+        assert!(generic_package.valid);
+        assert_eq!(generic_package.driver, "trino");
+
+        let mysql_compatible = validate_sql_syntax_text(
+            "doris",
+            "SELECT `order` FROM `sales` LIMIT 1;",
+            Some("sql"),
+            Some("mysql"),
+        )
+        .expect("a generic MySQL-compatible package should use its reviewed parser baseline");
+        assert!(mysql_compatible.valid);
+        assert_eq!(mysql_compatible.driver, "doris");
     }
 
     #[test]
     fn syntax_validation_returns_bounded_structured_diagnostics() {
-        let invalid = validate_sql_syntax_text("postgres", "SELECT ( FROM users")
+        let invalid = validate_sql_syntax_text("postgres", "SELECT ( FROM users", None, None)
             .expect("invalid syntax is a validation result");
         assert!(!invalid.valid);
         assert_eq!(invalid.statement_count, 0);
@@ -1195,11 +1511,11 @@ mod tests {
         assert_eq!(invalid.diagnostics[0].line, Some(1));
         assert!(invalid.diagnostics[0].column.is_some());
 
-        let empty =
-            validate_sql_syntax_text("mysql", " \n").expect("empty SQL is a validation result");
+        let empty = validate_sql_syntax_text("mysql", " \n", None, None)
+            .expect("empty SQL is a validation result");
         assert!(!empty.valid);
         assert_eq!(empty.diagnostics[0].line, Some(1));
-        assert!(validate_sql_syntax_text("redis", "GET key").is_err());
+        assert!(validate_sql_syntax_text("redis", "GET key", None, None).is_err());
     }
 
     #[test]

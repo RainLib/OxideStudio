@@ -16,6 +16,13 @@ export interface InvalidValueEditorDraft {
 export type ValueEditorDraftResult =
   ParsedValueEditorDraft | InvalidValueEditorDraft;
 
+export type JsonPreviewResult =
+  | { ok: true; value: unknown }
+  | { ok: false; error: string };
+
+/** Keep inspection parsing bounded so a cell preview cannot stall the editor. */
+export const JSON_TREE_PREVIEW_MAX_CHARACTERS = 1_000_000;
+
 const JSON_TYPE = /\b(jsonb?|object|map|document)\b/i;
 const BINARY_TYPE =
   /\b(bytea|binary|varbinary|tinyblob|blob|mediumblob|longblob|raw)\b/i;
@@ -198,6 +205,27 @@ export function formatJsonDraft(
       ok: true,
       value: JSON.stringify(value, null, compact ? undefined : 2),
     };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `Invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+/**
+ * Parses a JSON draft for the read-only tree presentation. Unlike the staging
+ * parser this never changes the draft or reports an editor error by itself.
+ */
+export function parseJsonPreview(draft: string): JsonPreviewResult {
+  if (draft.length > JSON_TREE_PREVIEW_MAX_CHARACTERS) {
+    return {
+      ok: false,
+      error: "JSON is too large for the tree preview. Use the text view instead.",
+    };
+  }
+  try {
+    return { ok: true, value: JSON.parse(draft) };
   } catch (error) {
     return {
       ok: false,

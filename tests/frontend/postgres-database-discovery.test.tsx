@@ -55,13 +55,17 @@ function identity(
   return { projectId, connectionId, driver: "postgres" };
 }
 
+const catalogOptions = {
+  canBrowseDatabaseCatalogs: true,
+};
+
 describe("usePostgresDatabaseDiscovery", () => {
   let container: HTMLDivElement;
   let root: Root | null;
   let observedState: PostgresDatabaseDiscoveryState | null;
 
   function Harness(options: DiscoveryOptions) {
-    observedState = usePostgresDatabaseDiscovery(options);
+    observedState = usePostgresDatabaseDiscovery({ ...catalogOptions, ...options });
     return null;
   }
 
@@ -133,6 +137,29 @@ describe("usePostgresDatabaseDiscovery", () => {
       cacheLoaded: true,
     });
     expect(mocks.refreshCatalog).not.toHaveBeenCalled();
+  });
+
+  it("discovers a capability-enabled DuckDB catalog through the same scoped cache", async () => {
+    mocks.readCachedCatalog.mockResolvedValueOnce(cacheSnapshot(["memory", "analytics"]));
+
+    await render({
+      projectId: "project-a",
+      connectionId: "duckdb-connection",
+      driver: "duckdb",
+      isConnectionReady: false,
+      refreshVersion: 0,
+    });
+
+    expect(mocks.readCachedCatalog).toHaveBeenCalledWith({
+      projectId: "project-a",
+      connectionId: "duckdb-connection",
+      driver: "duckdb",
+    });
+    expect(state()).toMatchObject({
+      connectionId: "duckdb-connection",
+      databases: ["memory", "analytics"],
+      source: "cache",
+    });
   });
 
   it("keeps cached rows usable while a slow remote refresh is pending", async () => {

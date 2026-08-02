@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use oxide_enterprise_contracts::{AccessAction, ManagedDataSourceDescriptor};
 use sqlparser::{
     ast::{ObjectName, Visit, Visitor},
-    dialect::{MySqlDialect, PostgreSqlDialect},
+    dialect::{MsSqlDialect, MySqlDialect, PostgreSqlDialect},
     parser::Parser,
 };
 use std::{fs, ops::ControlFlow};
@@ -427,7 +427,7 @@ impl Visitor for FirstRelation {
                     .0
                     .iter()
                     .map(ToString::to_string)
-                    .map(|segment| segment.trim_matches(['`', '"']).to_string())
+                    .map(|segment| segment.trim_matches(['`', '"', '[', ']']).to_string())
                     .collect(),
             );
         }
@@ -439,6 +439,7 @@ fn first_relation(sql: &str, dialect: Option<StatementScanDialect>) -> Result<Ve
     let statements = match dialect {
         Some(StatementScanDialect::Mysql) => Parser::parse_sql(&MySqlDialect {}, sql),
         Some(StatementScanDialect::Postgres) => Parser::parse_sql(&PostgreSqlDialect {}, sql),
+        Some(StatementScanDialect::SqlServer) => Parser::parse_sql(&MsSqlDialect {}, sql),
         None => return Err(anyhow!("managed driver does not support SQL queries")),
     }
     .context("query could not be parsed for managed object authorization")?;
@@ -462,6 +463,18 @@ mod tests {
             )
             .unwrap(),
             vec!["app", "public", "orders"]
+        );
+    }
+
+    #[test]
+    fn extracts_bracket_quoted_sqlserver_query_target() {
+        assert_eq!(
+            first_relation(
+                "SELECT id FROM [app].[dbo].[orders]",
+                Some(StatementScanDialect::SqlServer),
+            )
+            .unwrap(),
+            vec!["app", "dbo", "orders"]
         );
     }
 

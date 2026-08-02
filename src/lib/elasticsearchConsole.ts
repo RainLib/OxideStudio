@@ -65,6 +65,13 @@ export interface ElasticsearchMappingField {
 }
 
 export type ElasticsearchMajorVersion = 6 | 7 | 8;
+export type ElasticsearchServerVersion = {
+  major: ElasticsearchMajorVersion;
+  minor: number;
+};
+type ElasticsearchVersionInput =
+  | ElasticsearchMajorVersion
+  | ElasticsearchServerVersion;
 
 export const ELASTICSEARCH_CONSOLE_LANGUAGE_ID = "elasticsearch-console";
 export const ELASTICSEARCH_COMPLETION_TRIGGER_CHARACTERS = Array.from(
@@ -400,18 +407,19 @@ function operationCompletions(
 function indexOperationCompletions(
   method: string | undefined,
   typedOperation: string,
-  majorVersion?: ElasticsearchMajorVersion,
+  version?: ElasticsearchVersionInput,
 ) {
   return operationCompletions(
-    elasticsearchIndexOperationsForVersion(majorVersion),
+    elasticsearchIndexOperationsForVersion(version),
     method,
     typedOperation,
   );
 }
 
 function elasticsearchIndexOperationsForVersion(
-  majorVersion?: ElasticsearchMajorVersion,
+  version?: ElasticsearchVersionInput,
 ) {
+  const majorVersion = normalizeElasticsearchVersion(version)?.major;
   if (majorVersion !== 6) return INDEX_OPERATION_COMPLETIONS;
   return INDEX_OPERATION_COMPLETIONS.map((completion) => {
     if (completion.label === "_doc/{id}") {
@@ -611,6 +619,20 @@ const SEARCH_BODY_COMPLETIONS: ElasticsearchConsoleCompletion[] = [
     detail: "Set a search timeout",
     kind: "property",
   },
+  {
+    label: "runtime_mappings",
+    insertText:
+      '"runtime_mappings": {\n  "${1:field}": {\n    "type": "${2:keyword}"\n  }\n}',
+    detail: "Define runtime fields for this search (Elasticsearch 7.11+)",
+    kind: "property",
+  },
+  {
+    label: "knn",
+    insertText:
+      '"knn": {\n  "field": "${1:vector}",\n  "query_vector": [${2:0.1}],\n  "k": ${3:10},\n  "num_candidates": ${4:100}\n}',
+    detail: "Run an approximate k-nearest-neighbor search (Elasticsearch 8+)",
+    kind: "property",
+  },
 ];
 const BOOL_CLAUSE_COMPLETIONS: ElasticsearchConsoleCompletion[] = [
   {
@@ -789,7 +811,108 @@ const QUERY_CLAUSE_COMPLETIONS: ElasticsearchConsoleCompletion[] = [
     detail: "Match geo points within a distance",
     kind: "property",
   },
+  {
+    label: "type",
+    insertText: '"type": {\n  "value": "${1:type}"\n}',
+    detail: "Match an Elasticsearch mapping type (Elasticsearch 6 only)",
+    kind: "property",
+  },
+  {
+    label: "intervals",
+    insertText:
+      '"intervals": {\n  "${1:field}": {\n    "all_of": { "intervals": [] }\n  }\n}',
+    detail: "Run a positional intervals query (Elasticsearch 7+)",
+    kind: "property",
+  },
+  {
+    label: "distance_feature",
+    insertText:
+      '"distance_feature": {\n  "field": "${1:date_or_geo_field}",\n  "pivot": "${2:7d}",\n  "origin": "${3:now}"\n}',
+    detail: "Boost results by distance from an origin (Elasticsearch 7+)",
+    kind: "property",
+  },
+  {
+    label: "rank_feature",
+    insertText: '"rank_feature": {\n  "field": "${1:rank_field}"\n}',
+    detail: "Boost results from a rank_feature field (Elasticsearch 7+)",
+    kind: "property",
+  },
+  {
+    label: "pinned",
+    insertText:
+      '"pinned": {\n  "ids": ["${1:id}"],\n  "organic": { "match_all": {} }\n}',
+    detail: "Pin selected documents above organic matches (Elasticsearch 7+)",
+    kind: "property",
+  },
+  {
+    label: "combined_fields",
+    insertText:
+      '"combined_fields": {\n  "query": "${1:value}",\n  "fields": ["${2:field}"]\n}',
+    detail: "Search multiple text fields as one field (Elasticsearch 7.13+)",
+    kind: "property",
+  },
 ];
+
+function normalizeElasticsearchVersion(
+  version?: ElasticsearchVersionInput,
+): ElasticsearchServerVersion | undefined {
+  if (typeof version === "number") return { major: version, minor: 0 };
+  if (!version) return undefined;
+  return version;
+}
+
+function supportsElasticsearchVersion(
+  version: ElasticsearchVersionInput | undefined,
+  minimumMajor: ElasticsearchMajorVersion,
+  minimumMinor = 0,
+) {
+  const normalized = normalizeElasticsearchVersion(version);
+  // The server version may be temporarily unavailable during a reconnect.
+  // In that state keep suggestions discoverable instead of hiding valid DSL.
+  return (
+    !normalized ||
+    normalized.major > minimumMajor ||
+    (normalized.major === minimumMajor && normalized.minor >= minimumMinor)
+  );
+}
+
+function filterVersionedSearchBodyCompletions(
+  completions: readonly ElasticsearchConsoleCompletion[],
+  version?: ElasticsearchVersionInput,
+) {
+  return completions.filter((completion) => {
+    if (completion.label === "runtime_mappings") {
+      return supportsElasticsearchVersion(version, 7, 11);
+    }
+    if (completion.label === "knn") {
+      return supportsElasticsearchVersion(version, 8);
+    }
+    return true;
+  });
+}
+
+function filterVersionedQueryCompletions(
+  completions: readonly ElasticsearchConsoleCompletion[],
+  version?: ElasticsearchVersionInput,
+) {
+  const normalized = normalizeElasticsearchVersion(version);
+  return completions.filter((completion) => {
+    if (completion.label === "type") {
+      return !normalized || normalized.major <= 6;
+    }
+    if (
+      ["intervals", "distance_feature", "rank_feature", "pinned"].includes(
+        completion.label,
+      )
+    ) {
+      return supportsElasticsearchVersion(version, 7);
+    }
+    if (completion.label === "combined_fields") {
+      return supportsElasticsearchVersion(version, 7, 13);
+    }
+    return true;
+  });
+}
 
 const AGGREGATION_TYPE_COMPLETIONS: ElasticsearchConsoleCompletion[] = [
   {
@@ -971,8 +1094,9 @@ export function registerElasticsearchConsoleLanguage(monaco: any) {
         const completions = elasticsearchConsoleCompletions(
           model.getValue(),
           offset,
-          (model as { __oxideElasticsearchMajorVersion?: ElasticsearchMajorVersion })
-            .__oxideElasticsearchMajorVersion,
+          (model as {
+            __oxideElasticsearchServerVersion?: ElasticsearchServerVersion;
+          }).__oxideElasticsearchServerVersion,
         );
 
         return {
@@ -1984,14 +2108,14 @@ export function elasticsearchConsoleCompletionContext(
 export function elasticsearchConsoleCompletions(
   source: string,
   cursorOffset: number,
-  majorVersion?: ElasticsearchMajorVersion,
+  version?: ElasticsearchVersionInput,
 ): ElasticsearchConsoleCompletion[] {
   const context = elasticsearchConsoleCompletionContext(source, cursorOffset);
   return elasticsearchConsoleCompletionsForContext(
     source,
     cursorOffset,
     context,
-    majorVersion,
+    version,
   );
 }
 
@@ -2040,7 +2164,7 @@ function elasticsearchConsoleCompletionsForContext(
   source: string,
   cursorOffset: number,
   context: ElasticsearchConsoleCompletionContext,
-  majorVersion?: ElasticsearchMajorVersion,
+  version?: ElasticsearchVersionInput,
 ): ElasticsearchConsoleCompletion[] {
   if (context.area === "method") {
     return HTTP_METHODS.map((method) => ({
@@ -2056,7 +2180,7 @@ function elasticsearchConsoleCompletionsForContext(
       ? indexOperationCompletions(
           context.method,
           context.typed,
-          majorVersion,
+          version,
         )
       : globalOperationCompletions(context.method, context.typed);
   }
@@ -2071,10 +2195,13 @@ function elasticsearchConsoleCompletionsForContext(
     );
   }
   if (context.area === "body-start") {
-    return requestBodyCompletions(context.operation, context.method);
+    return filterVersionedSearchBodyCompletions(
+      requestBodyCompletions(context.operation, context.method),
+      version,
+    );
   }
   if (context.area === "query-clause") {
-    return QUERY_CLAUSE_COMPLETIONS;
+    return filterVersionedQueryCompletions(QUERY_CLAUSE_COMPLETIONS, version);
   }
   if (context.area === "bool-clause") {
     return BOOL_CLAUSE_COMPLETIONS;
@@ -2094,7 +2221,7 @@ function elasticsearchConsoleCompletionsForContext(
         : request.text.indexOf("\n"),
     );
     return /\/(?:_search|_count)(?:[/?]|$)/i.test(requestLine || "")
-      ? SEARCH_BODY_COMPLETIONS
+      ? filterVersionedSearchBodyCompletions(SEARCH_BODY_COMPLETIONS, version)
       : [];
   }
   if (context.area === "value" && context.valueKey === "_source") {
@@ -2146,7 +2273,7 @@ export function elasticsearchConsoleInlineSuggestion(
   source: string,
   cursorOffset: number,
   preferredIndex?: string,
-  majorVersion?: ElasticsearchMajorVersion,
+  version?: ElasticsearchVersionInput,
 ) {
   const context = elasticsearchConsoleCompletionContext(source, cursorOffset);
   if (context.area === "method") {
@@ -2174,7 +2301,7 @@ export function elasticsearchConsoleInlineSuggestion(
       source,
       cursorOffset,
       context,
-      majorVersion,
+      version,
     )[0];
     if (!candidate) return "";
     const insertion = plainElasticsearchSnippet(candidate.insertText);
@@ -2187,7 +2314,7 @@ export function elasticsearchConsoleInlineSuggestion(
     source,
     cursorOffset,
     context,
-    majorVersion,
+    version,
   );
   const candidate = completions.find((item) =>
     item.label.toLowerCase().startsWith(context.typed.toLowerCase()),

@@ -45,7 +45,17 @@ pub fn run() {
 
             // Initialize config manager
             let config_manager = ConfigManager::new(app.handle());
+            let default_driver_package_root = app
+                .path()
+                .app_data_dir()
+                .expect("failed to get application data directory")
+                .join("database-drivers");
+            let driver_package_root =
+                config_manager.driver_package_store_path(default_driver_package_root);
             app.manage(config_manager);
+            app.manage(core::driver_package::DatabaseDriverPackageRegistry::new(
+                driver_package_root,
+            ));
 
             // Initialize cache manager (legacy JSON cache)
             let cache_manager = CacheManager::new(app.handle());
@@ -82,6 +92,7 @@ pub fn run() {
             // Initialize SQL Parser state
             app.manage(ParserState(Mutex::new(SqlParser::new())));
             app.manage(QueryCancellationState::default());
+            app.manage(commands::table::TableDataTransferCancellationState::default());
             app.manage(commands::ai::AiCancellationState::default());
             app.manage(enterprise::EnterpriseClient::new(app.handle()));
             // AgentHostManager is side-effect free here. The sidecar and
@@ -110,8 +121,11 @@ pub fn run() {
             commands::connection::test_db_connection,
             commands::connection::disconnect_db,
             commands::connection::get_connection_server_version,
+            commands::connection::import_connection_config_file,
             commands::connection::save_connections,
             commands::connection::load_connections,
+            commands::database::get_database_driver_store_info,
+            commands::database::migrate_database_driver_store,
             // AI commands
             commands::ai::ai_chat_completion,
             commands::ai::ai_inline_completion,
@@ -147,6 +161,7 @@ pub fn run() {
             commands::query::execute_query,
             commands::query::resolve_sql_statement_at_cursor,
             commands::query::validate_sql_syntax,
+            commands::query::preview_sql_script_import,
             commands::query::import_sql_script,
             commands::query::import_elasticsearch_console_file,
             commands::query::export_elasticsearch_console_file,
@@ -158,9 +173,25 @@ pub fn run() {
             commands::database::get_database_capabilities,
             commands::database::list_database_capabilities,
             commands::database::list_database_driver_installations,
+            commands::database::list_external_database_driver_runtimes,
+            commands::database::list_managed_java_runtimes,
+            commands::database::get_external_database_driver_catalog,
+            commands::database::install_external_database_driver,
+            commands::database::install_external_database_driver_from_catalog,
+            commands::database::install_managed_java_runtime,
+            commands::database::activate_external_database_driver,
+            commands::database::rollback_external_database_driver,
+            commands::database::probe_external_database_driver,
             commands::database::create_database,
             commands::database::drop_database,
             commands::database::rename_database,
+            commands::database_admin::list_database_admin_sessions,
+            commands::database_admin::terminate_database_admin_session,
+            commands::database_admin::list_database_admin_users,
+            commands::database_admin::create_database_admin_user,
+            commands::database_admin::update_database_admin_user_password,
+            commands::database_admin::set_database_admin_user_login,
+            commands::database_admin::delete_database_admin_user,
             commands::schema::get_databases,
             commands::schema::get_schemas,
             commands::schema::get_database_schemas,
@@ -185,7 +216,15 @@ pub fn run() {
             commands::schema_diff::list_schema_migration_journal,
             // Table commands
             commands::table::preview_table_page,
+            commands::table::preview_table_data_transfer,
+            commands::table::preview_table_data_transfer_target,
+            commands::table::create_table_data_transfer_target,
+            commands::table::execute_table_data_transfer,
+            commands::table::cancel_table_data_transfer,
             commands::table::export_table_data,
+            commands::table::preview_table_csv_import,
+            commands::table::preview_table_json_import,
+            commands::table::preview_table_xlsx_import,
             commands::table::import_table_data,
             commands::table::mutate_table_rows,
             commands::table::create_table,
@@ -242,6 +281,7 @@ pub fn run() {
             commands::project_files::set_project_root,
             commands::project_files::list_project_entries,
             commands::project_files::get_project_completion_context,
+            commands::project_files::get_project_lsp_documents,
             commands::project_files::get_project_git_changes,
             commands::project_files::get_project_git_file_diff,
             commands::project_git::get_project_git_repository,

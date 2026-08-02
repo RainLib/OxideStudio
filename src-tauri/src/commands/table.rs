@@ -1,5 +1,5 @@
 use crate::core::{
-    dialect::DatabaseKind,
+    dialect::{canonical_driver_name, database_spec_for_driver, DatabaseKind},
     manager::ConnectionManager,
     protocol::{
         ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult,
@@ -7,23 +7,57 @@ use crate::core::{
     },
     statement::{validate_sql_filter_expression, StatementScanDialect},
 };
+use calamine::{open_workbook_auto, Data, Reader};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{create_dir_all, metadata, File},
-    io::{BufReader, BufWriter, Read, Write},
+    io::{BufRead, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::{watch, Mutex as AsyncMutex};
 
 const DEFAULT_PAGE_SIZE: u32 = 500;
 const MAX_PAGE_SIZE: u32 = 5_000;
-const MAX_IMPORT_FILE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_JSON_IMPORT_FILE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_XLSX_IMPORT_FILE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_JSON_LINES_IMPORT_FILE_BYTES: u64 = 512 * 1024 * 1024;
+/// CSV records are parsed incrementally and written through a single explicit
+/// transaction, so they can have a larger bounded source budget than JSON,
+/// whose array form is still parsed into memory.
+const MAX_CSV_IMPORT_FILE_BYTES: u64 = 512 * 1024 * 1024;
+/// The desktop CSV review UI intentionally reads only a bounded prefix.  The
+/// actual import remains streaming and is allowed to use the larger import
+/// budget above.  Keeping this separate prevents a preview from turning a
+/// 512 MiB import into a renderer-memory allocation.
+const MAX_CSV_IMPORT_PREVIEW_BYTES: usize = 32 * 1024 * 1024;
+/// JSON imports use a structured review rather than copying arbitrary file
+/// bytes into the renderer. Keep both the number of records and nested values
+/// bounded so selecting a valid-but-large JSON document cannot create a UI
+/// memory spike before the user confirms the transaction.
+const MAX_JSON_IMPORT_PREVIEW_ROWS: usize = 50;
+const MAX_JSON_IMPORT_PREVIEW_COLUMNS: usize = 256;
+const MAX_JSON_IMPORT_PREVIEW_STRING_CHARS: usize = 1_024;
+const MAX_JSON_IMPORT_PREVIEW_ARRAY_ITEMS: usize = 32;
+const MAX_JSON_IMPORT_PREVIEW_OBJECT_FIELDS: usize = 32;
 const MAX_IMPORT_ROWS: usize = 100_000;
+const IMPORT_BATCH_SIZE: usize = 500;
+/// A database-to-database copy is intentionally bounded.  It is a reviewed
+/// table-data transfer, not an unbounded background replication feature.
+const DEFAULT_TRANSFER_ROWS: u32 = 1_000;
+const MAX_TRANSFER_ROWS: u32 = 10_000;
+const DEFAULT_TRANSFER_BATCH_SIZE: u32 = 250;
+const MAX_TRANSFER_BATCH_SIZE: u32 = 500;
+const MAX_TRANSFER_OVERWRITE_ROWS: u64 = 100_000;
+pub const TABLE_DATA_TRANSFER_PROGRESS_EVENT: &str = "table-data-transfer://progress";
+const TABLE_DATA_TRANSFER_CANCELLED: &str = "TABLE_DATA_TRANSFER_CANCELLED";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +88,27 @@ pub struct TableExportResult {
 pub enum TableImportFormat {
     Csv,
     Json,
+    Xlsx,
+}
+
+/// The import plan intentionally contains only source-column indices and
+/// target identifiers. It never carries source rows or credentials across the
+/// IPC boundary, which keeps large native imports streamable and reviewable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableCsvColumnMapping {
+    pub source_index: usize,
+    pub target_column: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableCsvImportOptions {
+    pub delimiter: Option<String>,
+    pub first_row_header: Option<bool>,
+    #[serde(default)]
+    pub column_mapping: Vec<TableCsvColumnMapping>,
+    pub empty_fields_as_null: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +117,240 @@ pub struct TableImportResult {
     pub file_path: String,
     pub rows_imported: u64,
     pub batches: u64,
+}
+
+/// Bytes returned to the desktop review dialog. This read-only command
+/// validates the selected CSV path and limits the renderer payload; it is
+/// paired with the existing desktop import command rather than a general file
+/// API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableCsvImportPreview {
+    pub file_name: String,
+    pub bytes: Vec<u8>,
+    pub total_bytes: u64,
+    pub truncated: bool,
+}
+
+/// Structured, read-only JSON preview returned after a user selects a JSON,
+/// JSONL, or NDJSON file. It deliberately contains only a bounded leading
+/// sample; the original path is still revalidated by `import_table_data`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableJsonImportPreview {
+    pub file_name: String,
+    pub total_bytes: u64,
+    pub source_columns: Vec<String>,
+    pub sample_rows: Vec<BTreeMap<String, Value>>,
+    /// Present for bounded `.json` documents. Large JSON-lines sources only
+    /// inspect their leading sample before confirmation, so their full count
+    /// remains intentionally unknown until the streaming transaction runs.
+    pub total_rows: Option<u64>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableXlsxImportPreview {
+    pub file_name: String,
+    pub total_bytes: u64,
+    pub sheet_name: String,
+    pub source_columns: Vec<String>,
+    pub sample_rows: Vec<BTreeMap<String, Value>>,
+    pub total_rows: u64,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferEndpoint {
+    pub connection_id: String,
+    pub driver: String,
+    pub schema: String,
+    pub table: String,
+    pub database: Option<String>,
+}
+
+/// Append keeps existing rows. Overwrite first performs a reviewed, bounded
+/// transactional delete and is deliberately not an alias for `TRUNCATE`.
+/// Upsert remains unavailable until key/conflict semantics are explicit in
+/// every participating driver contract.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TableDataTransferMode {
+    Append,
+    Overwrite,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TableDataTransferCompatibility {
+    Exact,
+    Safe,
+    Review,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TableDataTransferConversion {
+    None,
+    TargetBinding,
+    StringifyJson,
+    StringifyScalar,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferRequest {
+    pub transfer_id: String,
+    pub source: TableDataTransferEndpoint,
+    pub target: TableDataTransferEndpoint,
+    #[serde(default = "default_table_data_transfer_mode")]
+    pub mode: TableDataTransferMode,
+    pub max_rows: Option<u32>,
+    pub batch_size: Option<u32>,
+}
+
+fn default_table_data_transfer_mode() -> TableDataTransferMode {
+    TableDataTransferMode::Append
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferColumnMapping {
+    pub source: String,
+    pub target: String,
+    /// Retained for API compatibility; this is the target binding type.
+    pub data_type: String,
+    pub source_data_type: String,
+    pub target_data_type: String,
+    pub compatibility: TableDataTransferCompatibility,
+    pub conversion: TableDataTransferConversion,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferPreview {
+    pub mode: TableDataTransferMode,
+    pub mapped_columns: Vec<TableDataTransferColumnMapping>,
+    pub skipped_source_columns: Vec<String>,
+    pub preview_rows: u32,
+    pub max_rows: u32,
+    pub batch_size: u32,
+    pub target_rows_to_delete: Option<u64>,
+    pub can_execute: bool,
+    /// The user must type this exact short-lived plan binding to start a
+    /// destructive cross-connection write.  Execute recomputes the plan and
+    /// rejects stale tokens if either endpoint or the column mapping changed.
+    pub confirmation_token: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferTargetPlanRequest {
+    pub source: TableDataTransferEndpoint,
+    pub target: TableDataTransferEndpoint,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferTargetColumn {
+    pub name: String,
+    pub source_data_type: String,
+    pub target_data_type: String,
+    pub target_length: Option<String>,
+    pub is_primary_key: bool,
+    pub is_not_null: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferTargetPlan {
+    pub columns: Vec<TableDataTransferTargetColumn>,
+    pub statements: Vec<String>,
+    pub confirmation_token: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferResult {
+    pub rows_transferred: u64,
+    pub batches: u64,
+    pub limit_reached: bool,
+    pub mapped_columns: Vec<TableDataTransferColumnMapping>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TableDataTransferProgressStatus {
+    Running,
+    Done,
+    Cancelled,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferProgress {
+    pub transfer_id: String,
+    pub rows_transferred: u64,
+    pub max_rows: u32,
+    pub batches: u64,
+    pub status: TableDataTransferProgressStatus,
+    pub terminal: bool,
+    pub message: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct TableDataTransferCancellationHandle {
+    source_connection_id: String,
+    sender: watch::Sender<bool>,
+}
+
+#[derive(Default)]
+pub struct TableDataTransferCancellationState(
+    Arc<AsyncMutex<HashMap<String, TableDataTransferCancellationHandle>>>,
+);
+
+impl TableDataTransferCancellationState {
+    async fn register(
+        &self,
+        transfer_id: &str,
+        source_connection_id: &str,
+    ) -> Result<watch::Receiver<bool>, String> {
+        validate_table_data_transfer_id(transfer_id)?;
+        let (sender, receiver) = watch::channel(false);
+        let mut handles = self.0.lock().await;
+        if handles.contains_key(transfer_id) {
+            return Err(format!(
+                "Table data transfer is already active: {transfer_id}"
+            ));
+        }
+        handles.insert(
+            transfer_id.to_string(),
+            TableDataTransferCancellationHandle {
+                source_connection_id: source_connection_id.to_string(),
+                sender,
+            },
+        );
+        Ok(receiver)
+    }
+
+    async fn request_cancel(
+        &self,
+        transfer_id: &str,
+    ) -> Option<TableDataTransferCancellationHandle> {
+        self.0.lock().await.get(transfer_id).cloned()
+    }
+
+    async fn take(&self, transfer_id: &str) {
+        self.0.lock().await.remove(transfer_id);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +476,143 @@ fn schema_option(schema: &str) -> Option<&str> {
     } else {
         Some(schema)
     }
+}
+
+/// SQLite and DuckDB accept the ANSI/PostgreSQL-style quoted identifiers,
+/// `LIMIT/OFFSET`, and numbered bind markers used by the bounded data-grid
+/// path. Keep this adapter deliberately narrow: it enables data preview and
+/// row mutations. SQLite relation DDL is routed through its native builders
+/// below rather than through this PostgreSQL-compatible data-grid dialect.
+fn table_data_dialect(driver: &str) -> Result<DatabaseKind, String> {
+    if matches!(
+        driver.trim().to_ascii_lowercase().as_str(),
+        "sqlite" | "sqlite3" | "duckdb"
+    ) {
+        return Ok(DatabaseKind::Postgres);
+    }
+    DatabaseKind::from_str(driver).map_err(|error| error.to_string())
+}
+
+fn reviewed_table_data_dialect(
+    capabilities: &crate::core::dialect::DatabaseCapabilities,
+    requires_mutation: bool,
+) -> Result<DatabaseKind, String> {
+    if !capabilities.supports_table_browsing {
+        return Err(format!(
+            "{} does not provide a reviewed table browsing contract",
+            capabilities.display_name
+        ));
+    }
+    if requires_mutation && !capabilities.supports_table_row_mutation {
+        return Err(format!(
+            "{} does not provide a reviewed table row-mutation contract",
+            capabilities.display_name
+        ));
+    }
+
+    match capabilities
+        .lsp_language_id
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "postgres" | "sqlite" | "duckdb" => Ok(DatabaseKind::Postgres),
+        "mysql" => Ok(DatabaseKind::Mysql),
+        _ => Err(format!(
+            "{} does not declare a reviewed table SQL dialect",
+            capabilities.display_name
+        )),
+    }
+}
+
+async fn table_data_dialect_for_connection(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    driver: &str,
+    requires_mutation: bool,
+) -> Result<DatabaseKind, String> {
+    let capabilities = manager
+        .package_capabilities(connection_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    match capabilities {
+        Some(capabilities) => reviewed_table_data_dialect(&capabilities, requires_mutation),
+        None => table_data_dialect(driver),
+    }
+}
+
+/// Resolve the dialect used by the bounded table-to-table transfer path.
+///
+/// A signed external package is not automatically safe for this operation:
+/// generic SQL has no reliable pagination or parameter convention. Packages
+/// can opt in only through the reviewed transfer capability and one of the
+/// two host implementations whose generated SQL is exercised here.
+async fn table_data_transfer_dialect(
+    manager: &ConnectionManager,
+    endpoint: &TableDataTransferEndpoint,
+) -> Result<DatabaseKind, String> {
+    // Check the live package contract before the built-in driver-name route.
+    // A package may intentionally reuse `postgres` or `mysql` while not
+    // implementing the reviewed paging/type-mapping/batch-write transfer
+    // contract. Its signed explicit false must never be widened by an alias.
+    if let Some(capabilities) = manager
+        .package_capabilities(&endpoint.connection_id)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        if !capabilities.supports_table_data_transfer {
+            return Err(format!(
+                "{} does not provide a reviewed bounded table-data transfer path",
+                capabilities.display_name
+            ));
+        }
+
+        return match capabilities.lsp_language_id.trim() {
+            "postgres" | "sqlite" | "duckdb" => Ok(DatabaseKind::Postgres),
+            "mysql" => Ok(DatabaseKind::Mysql),
+            _ => Err(format!(
+                "{} does not declare a reviewed transfer dialect",
+                capabilities.display_name
+            )),
+        };
+    }
+
+    table_data_dialect(&endpoint.driver).map_err(|_| {
+        format!(
+            "{} does not provide a reviewed bounded table-data transfer path",
+            endpoint.driver.trim()
+        )
+    })
+}
+
+/// Table DDL currently has host-owned, dialect-specific builders only. A
+/// sidecar may share a built-in driver id (for example `postgres`) while using
+/// different DDL grammar, so never send those generated statements through an
+/// external runtime. Packages keep metadata and query support, and can expose
+/// semantic DDL later through an explicit protocol capability.
+fn ensure_host_table_ddl_capability(
+    capabilities: Option<&crate::core::dialect::DatabaseCapabilities>,
+    operation: &str,
+) -> Result<(), String> {
+    if let Some(capabilities) = capabilities {
+        return Err(format!(
+            "{} does not provide a verified semantic table {operation} operation",
+            capabilities.display_name
+        ));
+    }
+    Ok(())
+}
+
+async fn ensure_host_table_ddl_allowed(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    operation: &str,
+) -> Result<(), String> {
+    let capabilities = manager
+        .package_capabilities(connection_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    ensure_host_table_ddl_capability(capabilities.as_ref(), operation)
 }
 
 fn validated_raw_filter_sql(
@@ -593,6 +1019,272 @@ fn render_table_column_definition(
     Ok((definition, column_name.to_string()))
 }
 
+fn is_sqlite_driver(driver: &str) -> bool {
+    database_spec_for_driver(driver).is_some_and(|spec| spec.driver.eq_ignore_ascii_case("sqlite"))
+}
+
+fn sqlite_quote_identifier(value: &str) -> String {
+    // SQLite shares ANSI double-quoted identifier rules with PostgreSQL.  Keep
+    // this local rather than expanding DatabaseKind: its many Postgres/MySQL
+    // helpers encode DDL semantics SQLite does not share.
+    DatabaseKind::Postgres.quote_identifier(value.trim())
+}
+
+fn sqlite_qualified_relation(schema: &str, relation: &str) -> Result<String, String> {
+    let relation = relation.trim();
+    if relation.is_empty() {
+        return Err("Table name is required".to_string());
+    }
+    let relation = sqlite_quote_identifier(relation);
+    match schema.trim() {
+        "" => Ok(relation),
+        schema => Ok(format!("{}.{}", sqlite_quote_identifier(schema), relation)),
+    }
+}
+
+fn sqlite_column_definition(
+    column: &CreateTableColumn,
+    allow_primary_key: bool,
+) -> Result<(String, String), String> {
+    let name = column.name.trim();
+    if name.is_empty() {
+        return Err("All columns must have a name".to_string());
+    }
+    let data_type = normalize_data_type(&column.data_type);
+    let sqlite = database_spec_for_driver("sqlite").expect("SQLite dialect is registered");
+    if !sqlite
+        .common_data_types
+        .iter()
+        .any(|supported| normalize_data_type(supported) == data_type)
+    {
+        return Err(format!(
+            "Unsupported SQLite data type: {}",
+            column.data_type
+        ));
+    }
+    if column
+        .comment
+        .as_deref()
+        .is_some_and(|comment| !comment.trim().is_empty())
+    {
+        return Err("SQLite does not support column comments".to_string());
+    }
+    if !allow_primary_key && (column.is_primary_key || column.is_auto_increment) {
+        return Err(
+            "SQLite cannot add a primary-key or AUTOINCREMENT column to an existing table"
+                .to_string(),
+        );
+    }
+    if column.is_auto_increment && (!column.is_primary_key || data_type != "INTEGER") {
+        return Err(
+            "SQLite AUTOINCREMENT requires a single INTEGER PRIMARY KEY column".to_string(),
+        );
+    }
+
+    let mut definition = format!(
+        "{} {}",
+        sqlite_quote_identifier(name),
+        render_column_type(column)?
+    );
+    if column.is_primary_key {
+        definition.push_str(" PRIMARY KEY");
+    }
+    if column.is_auto_increment {
+        definition.push_str(" AUTOINCREMENT");
+    }
+    if column.is_not_null && !column.is_primary_key {
+        definition.push_str(" NOT NULL");
+    }
+    Ok((definition, name.to_string()))
+}
+
+fn build_sqlite_create_table_statements(
+    schema: &str,
+    table: &str,
+    columns: &[CreateTableColumn],
+) -> Result<Vec<String>, String> {
+    if columns.is_empty() {
+        return Err("At least one column is required".to_string());
+    }
+    let table = sqlite_qualified_relation(schema, table)?;
+    let primary_key_count = columns
+        .iter()
+        .filter(|column| column.is_primary_key)
+        .count();
+    if primary_key_count > 1 && columns.iter().any(|column| column.is_auto_increment) {
+        return Err("SQLite AUTOINCREMENT cannot be used with a composite primary key".to_string());
+    }
+    let mut definitions = Vec::with_capacity(columns.len() + 1);
+    let mut primary_keys = Vec::new();
+    for column in columns {
+        let mut rendered_column = column.clone();
+        if primary_key_count > 1 {
+            rendered_column.is_primary_key = false;
+        }
+        let (definition, name) = sqlite_column_definition(&rendered_column, true)?;
+        if column.is_primary_key && primary_key_count > 1 {
+            primary_keys.push(name);
+        }
+        definitions.push(definition);
+    }
+    if primary_keys.len() > 1 {
+        let keys = primary_keys
+            .iter()
+            .map(|name| sqlite_quote_identifier(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        definitions.push(format!("PRIMARY KEY ({keys})"));
+    }
+    Ok(vec![format!(
+        "CREATE TABLE {table} (\n  {}\n);",
+        definitions.join(",\n  ")
+    )])
+}
+
+fn build_sqlite_add_column_statements(
+    schema: &str,
+    table: &str,
+    column: &CreateTableColumn,
+) -> Result<Vec<String>, String> {
+    let table = sqlite_qualified_relation(schema, table)?;
+    let (definition, _) = sqlite_column_definition(column, false)?;
+    Ok(vec![format!(
+        "ALTER TABLE {table} ADD COLUMN {definition};"
+    )])
+}
+
+fn build_sqlite_drop_column_statement(
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Result<String, String> {
+    let column = column.trim();
+    if column.is_empty() {
+        return Err("Column name is required".to_string());
+    }
+    Ok(format!(
+        "ALTER TABLE {} DROP COLUMN {};",
+        sqlite_qualified_relation(schema, table)?,
+        sqlite_quote_identifier(column),
+    ))
+}
+
+fn build_sqlite_rename_column_statement(
+    schema: &str,
+    table: &str,
+    old_name: &str,
+    new_name: &str,
+    existing_columns: &BTreeMap<String, ColumnInfo>,
+) -> Result<String, String> {
+    let old_name = old_name.trim();
+    let new_name = new_name.trim();
+    if old_name.is_empty() || new_name.is_empty() {
+        return Err("Column names are required".to_string());
+    }
+    if old_name == new_name {
+        return Err("New column name must be different".to_string());
+    }
+    if !existing_columns.contains_key(old_name) {
+        return Err(format!("Unknown column: {old_name}"));
+    }
+    if existing_columns.contains_key(new_name) {
+        return Err(format!("Column already exists: {new_name}"));
+    }
+    Ok(format!(
+        "ALTER TABLE {} RENAME COLUMN {} TO {};",
+        sqlite_qualified_relation(schema, table)?,
+        sqlite_quote_identifier(old_name),
+        sqlite_quote_identifier(new_name),
+    ))
+}
+
+fn validated_sqlite_index_columns(
+    columns: &[String],
+    existing_columns: &BTreeMap<String, ColumnInfo>,
+) -> Result<Vec<String>, String> {
+    let mut seen = HashSet::new();
+    let mut validated = Vec::new();
+    for column in columns {
+        let column = column.trim();
+        if column.is_empty() {
+            continue;
+        }
+        if !existing_columns.contains_key(column) {
+            return Err(format!("Unknown column: {column}"));
+        }
+        if seen.insert(column.to_string()) {
+            validated.push(column.to_string());
+        }
+    }
+    if validated.is_empty() {
+        Err("At least one index column is required".to_string())
+    } else {
+        Ok(validated)
+    }
+}
+
+fn build_sqlite_create_index_statement(
+    schema: &str,
+    table: &str,
+    index: &str,
+    columns: &[String],
+    existing_columns: &BTreeMap<String, ColumnInfo>,
+    unique: bool,
+) -> Result<String, String> {
+    let index = index.trim();
+    if index.is_empty() {
+        return Err("Index name is required".to_string());
+    }
+    let columns = validated_sqlite_index_columns(columns, existing_columns)?;
+    let schema = schema.trim();
+    let index = if schema.is_empty() {
+        sqlite_quote_identifier(index)
+    } else {
+        format!(
+            "{}.{}",
+            sqlite_quote_identifier(schema),
+            sqlite_quote_identifier(index)
+        )
+    };
+    let columns = columns
+        .iter()
+        .map(|column| sqlite_quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        "CREATE {}INDEX {index} ON {} ({columns});",
+        if unique { "UNIQUE " } else { "" },
+        sqlite_qualified_relation(schema, table)?,
+    ))
+}
+
+fn build_sqlite_drop_index_statement(
+    schema: &str,
+    table: &str,
+    index: &str,
+) -> Result<String, String> {
+    let index = index.trim();
+    if index.is_empty() {
+        return Err("Index name is required".to_string());
+    }
+    if index.eq_ignore_ascii_case("PRIMARY") {
+        return Err("Primary key indexes must be changed through table definition".to_string());
+    }
+    // Validate the relation even though SQLite's DROP INDEX syntax does not
+    // repeat it; this keeps the command's safety boundary consistent.
+    let _ = sqlite_qualified_relation(schema, table)?;
+    let index = if schema.trim().is_empty() {
+        sqlite_quote_identifier(index)
+    } else {
+        format!(
+            "{}.{}",
+            sqlite_quote_identifier(schema),
+            sqlite_quote_identifier(index)
+        )
+    };
+    Ok(format!("DROP INDEX {index};"))
+}
+
 fn build_create_table_statements(
     kind: DatabaseKind,
     schema: &str,
@@ -709,6 +1401,23 @@ fn build_create_view_statement(
 
     let select_sql = normalize_view_select_sql(select_sql)?;
     Ok(kind.create_view_query(schema_option(schema), view, &select_sql, replace))
+}
+
+fn build_sqlite_create_view_statement(
+    schema: &str,
+    view: &str,
+    select_sql: &str,
+    replace: bool,
+) -> Result<String, String> {
+    if replace {
+        return Err("SQLite does not support CREATE OR REPLACE VIEW".to_string());
+    }
+    let select_sql = normalize_view_select_sql(select_sql)?;
+    Ok(format!(
+        "CREATE VIEW {} AS {};",
+        sqlite_qualified_relation(schema, view)?,
+        select_sql,
+    ))
 }
 
 fn build_create_materialized_view_statement(
@@ -1483,6 +2192,8 @@ fn build_insert_mutation(
     columns: &BTreeMap<String, ColumnInfo>,
     values: &BTreeMap<String, Value>,
 ) -> Result<(String, Vec<QueryParameter>), String> {
+    validate_insert_values(columns, values)?;
+
     if values.is_empty() {
         let table = kind.qualified_table(schema_option(schema), table);
         let sql = match kind {
@@ -1510,6 +2221,41 @@ fn build_insert_mutation(
         placeholders.join(", ")
     );
     Ok((sql, params))
+}
+
+/// Keep import, grid and Agent-originated inserts on the same target-table
+/// contract. Client-side CSV validation improves the preview, but it cannot
+/// be authoritative: cached metadata can be stale and native JSON imports do
+/// not pass through the CSV mapping dialog.
+fn validate_insert_values(
+    columns: &BTreeMap<String, ColumnInfo>,
+    values: &BTreeMap<String, Value>,
+) -> Result<(), String> {
+    for (column_name, value) in values {
+        let column = column_for(columns, column_name)?;
+        if value.is_null() && !column.is_nullable {
+            return Err(format!("Required column {column_name} cannot be NULL"));
+        }
+    }
+
+    for column in columns.values() {
+        let has_server_default = column
+            .default_value
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        if !column.is_nullable
+            && !column.is_auto_increment
+            && !has_server_default
+            && !values.contains_key(&column.name)
+        {
+            return Err(format!(
+                "Required column {} is not provided and has no server default",
+                column.name
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn build_update_mutation(
@@ -1821,6 +2567,38 @@ async fn query_target(
     }
 }
 
+async fn query_transfer_source_tracked(
+    manager: &ConnectionManager,
+    endpoint: &TableDataTransferEndpoint,
+    transfer_id: &str,
+    sql: &str,
+) -> Result<Vec<QueryResult>, anyhow::Error> {
+    match endpoint.database.as_deref() {
+        Some(database) => {
+            manager
+                .query_database_with_context(
+                    &endpoint.connection_id,
+                    database,
+                    sql,
+                    schema_option(&endpoint.schema),
+                    Some(transfer_id),
+                )
+                .await
+        }
+        None => {
+            manager
+                .query(
+                    &endpoint.connection_id,
+                    sql,
+                    schema_option(&endpoint.schema).map(str::to_string),
+                    None,
+                    Some(transfer_id.to_string()),
+                )
+                .await
+        }
+    }
+}
+
 async fn query_target_parameterized(
     manager: &ConnectionManager,
     connection_id: &str,
@@ -1862,6 +2640,1300 @@ async fn execute_target_parameterized_batch(
     }
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedTableDataTransferPlan {
+    source_kind: DatabaseKind,
+    target_kind: DatabaseKind,
+    mapped_columns: Vec<TableDataTransferColumnMapping>,
+    skipped_source_columns: Vec<String>,
+    source_columns: BTreeMap<String, ColumnInfo>,
+    target_columns: BTreeMap<String, ColumnInfo>,
+    max_rows: u32,
+    batch_size: u32,
+    target_rows_to_delete: Option<u64>,
+    confirmation_token: String,
+    warnings: Vec<String>,
+}
+
+fn normalized_transfer_limit(value: Option<u32>) -> u32 {
+    value
+        .unwrap_or(DEFAULT_TRANSFER_ROWS)
+        .clamp(1, MAX_TRANSFER_ROWS)
+}
+
+fn validate_table_data_transfer_id(transfer_id: &str) -> Result<(), String> {
+    let transfer_id = transfer_id.trim();
+    if !(8..=128).contains(&transfer_id.len())
+        || !transfer_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(
+            "Transfer id must contain 8-128 ASCII letters, digits, hyphens, or underscores."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_table_data_transfer_overwrite_rows(count: u64) -> Result<u64, String> {
+    if count > MAX_TRANSFER_OVERWRITE_ROWS {
+        return Err(format!(
+            "Overwrite is limited to {MAX_TRANSFER_OVERWRITE_ROWS} existing target rows; the target currently contains {count}."
+        ));
+    }
+    Ok(count)
+}
+
+fn emit_table_data_transfer_progress(app: &AppHandle, progress: TableDataTransferProgress) {
+    if let Err(error) = app.emit(TABLE_DATA_TRANSFER_PROGRESS_EVENT, progress) {
+        tracing::warn!("Could not emit table data transfer progress: {error}");
+    }
+}
+
+fn bounded_table_data_transfer_message(message: &str) -> String {
+    const MAX_CHARS: usize = 1_024;
+    let mut bounded = message.chars().take(MAX_CHARS).collect::<String>();
+    if message.chars().count() > MAX_CHARS {
+        bounded.push('…');
+    }
+    bounded
+}
+
+fn normalized_transfer_batch_size(value: Option<u32>) -> u32 {
+    value
+        .unwrap_or(DEFAULT_TRANSFER_BATCH_SIZE)
+        .clamp(1, MAX_TRANSFER_BATCH_SIZE)
+}
+
+fn normalized_transfer_driver_id(driver: &str) -> String {
+    canonical_driver_name(driver)
+        .unwrap_or_else(|| driver.trim())
+        .to_ascii_lowercase()
+}
+
+async fn ensure_transfer_endpoint_driver_matches_connection(
+    manager: &ConnectionManager,
+    endpoint: &TableDataTransferEndpoint,
+) -> Result<(), String> {
+    let Some(connected_driver) = manager
+        .connection_driver_id(&endpoint.connection_id)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        // Programmatic legacy/test connections may not carry an identity.
+        // Their driver remains the execution authority; preserve that path
+        // while all desktop-opened connections receive the stronger binding.
+        return Ok(());
+    };
+    let requested_driver = normalized_transfer_driver_id(&endpoint.driver);
+    if connected_driver != requested_driver {
+        return Err(format!(
+            "Transfer endpoint driver '{}' does not match the connected driver '{}'. Refresh the connection and preview again.",
+            endpoint.driver.trim(), connected_driver
+        ));
+    }
+    Ok(())
+}
+
+fn endpoint_label(endpoint: &TableDataTransferEndpoint) -> String {
+    let namespace = endpoint
+        .database
+        .as_deref()
+        .filter(|database| !database.trim().is_empty())
+        .map(|database| format!("{database}."))
+        .unwrap_or_default();
+    let schema = schema_option(&endpoint.schema)
+        .map(|schema| format!("{schema}."))
+        .unwrap_or_default();
+    format!("{}{}{}", namespace, schema, endpoint.table.trim())
+}
+
+fn transfer_confirmation_token(
+    request: &TableDataTransferRequest,
+    mapped_columns: &[TableDataTransferColumnMapping],
+    max_rows: u32,
+    batch_size: u32,
+    target_rows_to_delete: Option<u64>,
+) -> Result<String, String> {
+    let binding = serde_json::json!({
+        "transferId": &request.transfer_id,
+        "source": &request.source,
+        "target": &request.target,
+        "mode": request.mode,
+        "mappedColumns": mapped_columns,
+        "maxRows": max_rows,
+        "batchSize": batch_size,
+        "targetRowsToDelete": target_rows_to_delete,
+    });
+    let encoded = serde_json::to_vec(&binding).map_err(|error| error.to_string())?;
+    let digest = format!("{:x}", Sha256::digest(encoded));
+    Ok(format!("TRANSFER {}", digest[..8].to_ascii_uppercase()))
+}
+
+fn build_data_transfer_column_mapping(
+    source_columns: &[ColumnInfo],
+    target_columns: &[ColumnInfo],
+) -> Result<(Vec<TableDataTransferColumnMapping>, Vec<String>), String> {
+    let mut target_by_name = BTreeMap::<String, Vec<&ColumnInfo>>::new();
+    for target in target_columns {
+        target_by_name
+            .entry(target.name.to_ascii_lowercase())
+            .or_default()
+            .push(target);
+    }
+
+    let mut mappings = Vec::new();
+    let mut skipped = Vec::new();
+    for source in source_columns {
+        let matches = target_by_name
+            .get(&source.name.to_ascii_lowercase())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        match matches {
+            [target] => {
+                let (compatibility, conversion, reason) =
+                    transfer_type_mapping_assessment(&source.data_type, &target.data_type);
+                mappings.push(TableDataTransferColumnMapping {
+                    source: source.name.clone(),
+                    target: target.name.clone(),
+                    data_type: target.data_type.clone(),
+                    source_data_type: source.data_type.clone(),
+                    target_data_type: target.data_type.clone(),
+                    compatibility,
+                    conversion,
+                    reason,
+                });
+            }
+            [] => skipped.push(source.name.clone()),
+            _ => {
+                return Err(format!(
+                    "Target table has ambiguous case-insensitive column matches for {}",
+                    source.name
+                ));
+            }
+        }
+    }
+
+    if mappings.is_empty() {
+        return Err("Source and target tables do not have any compatible column names".to_string());
+    }
+
+    let mapped_targets = mappings
+        .iter()
+        .map(|mapping| mapping.target.as_str())
+        .collect::<HashSet<_>>();
+    let missing_required = target_columns
+        .iter()
+        .filter(|column| {
+            !column.is_nullable
+                && !column.is_auto_increment
+                && !column
+                    .default_value
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                && !mapped_targets.contains(column.name.as_str())
+        })
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    if !missing_required.is_empty() {
+        return Err(format!(
+            "Target requires values for column(s): {}",
+            missing_required.join(", ")
+        ));
+    }
+
+    Ok((mappings, skipped))
+}
+
+fn transfer_type_family(data_type: &str) -> &'static str {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return "unknown";
+    }
+    if normalized.contains("json") {
+        return "json";
+    }
+    if normalized.contains("bool") || normalized == "bit" {
+        return "boolean";
+    }
+    if normalized.contains("uuid") || normalized.contains("uniqueidentifier") {
+        return "uuid";
+    }
+    if normalized.contains("blob")
+        || normalized.contains("binary")
+        || normalized.contains("bytea")
+        || normalized.contains("varbinary")
+    {
+        return "binary";
+    }
+    if normalized.contains("timestamp")
+        || normalized.contains("datetime")
+        || normalized == "date"
+        || normalized == "time"
+    {
+        return "temporal";
+    }
+    if normalized.contains("int") || normalized.contains("serial") {
+        return "integer";
+    }
+    if normalized.contains("numeric")
+        || normalized.contains("decimal")
+        || normalized.contains("float")
+        || normalized.contains("double")
+        || normalized.contains("real")
+    {
+        return "numeric";
+    }
+    if normalized.contains("char")
+        || normalized.contains("text")
+        || normalized.contains("string")
+        || normalized.contains("clob")
+        || normalized.contains("varchar")
+    {
+        return "text";
+    }
+    "other"
+}
+
+fn normalized_transfer_type(data_type: &str) -> String {
+    data_type
+        .trim()
+        .to_ascii_lowercase()
+        .split('(')
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter(|part| !matches!(*part, "unsigned" | "zerofill"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn transfer_type_mapping_assessment(
+    source_data_type: &str,
+    target_data_type: &str,
+) -> (
+    TableDataTransferCompatibility,
+    TableDataTransferConversion,
+    String,
+) {
+    use TableDataTransferCompatibility::{Exact, Review, Safe, Unsupported};
+    use TableDataTransferConversion::{None, StringifyJson, StringifyScalar, TargetBinding};
+
+    let source_normalized = normalized_transfer_type(source_data_type);
+    let target_normalized = normalized_transfer_type(target_data_type);
+    let source_family = transfer_type_family(source_data_type);
+    let target_family = transfer_type_family(target_data_type);
+
+    if !source_normalized.is_empty() && source_normalized == target_normalized {
+        return (Exact, None, "Source and target types match.".to_string());
+    }
+    if target_family == "text" {
+        let conversion = match source_family {
+            "json" => StringifyJson,
+            "text" => TargetBinding,
+            _ => StringifyScalar,
+        };
+        return (
+            Safe,
+            conversion,
+            "The source value is serialized through the target text binding.".to_string(),
+        );
+    }
+    if source_family == target_family && source_family != "other" {
+        return (
+            Safe,
+            TargetBinding,
+            format!("Both types belong to the {source_family} family."),
+        );
+    }
+    if source_family == "integer" && target_family == "numeric" {
+        return (
+            Safe,
+            TargetBinding,
+            "Integer values widen through the target numeric binding.".to_string(),
+        );
+    }
+    if source_family == "numeric" && target_family == "integer" {
+        return (
+            Review,
+            TargetBinding,
+            "Numeric-to-integer conversion can lose fractional values or overflow.".to_string(),
+        );
+    }
+    if source_family == "text" {
+        return (
+            Review,
+            TargetBinding,
+            format!(
+                "Text values must be parsed by the target {target_family} binding; sample rows are validated during preview."
+            ),
+        );
+    }
+    if matches!(source_family, "unknown" | "other") || matches!(target_family, "unknown" | "other")
+    {
+        return (
+            Review,
+            TargetBinding,
+            "The type family is not recognized; the target driver must validate each parameter."
+                .to_string(),
+        );
+    }
+
+    let unsupported = matches!(
+        (source_family, target_family),
+        (
+            "binary",
+            "boolean" | "integer" | "numeric" | "temporal" | "uuid" | "json"
+        ) | (
+            "json",
+            "boolean" | "integer" | "numeric" | "temporal" | "uuid" | "binary"
+        ) | ("temporal", "boolean" | "binary" | "json")
+            | (
+                "uuid",
+                "boolean" | "integer" | "numeric" | "temporal" | "binary" | "json"
+            )
+            | ("boolean", "temporal" | "binary" | "json" | "uuid")
+            | (
+                "integer" | "numeric",
+                "temporal" | "binary" | "json" | "uuid"
+            )
+    );
+    if unsupported {
+        return (
+            Unsupported,
+            None,
+            format!("No reviewed {source_family}-to-{target_family} conversion is available."),
+        );
+    }
+
+    (
+        Review,
+        TargetBinding,
+        format!(
+            "The target driver must convert {source_family} values to {target_family}; review representative rows."
+        ),
+    )
+}
+
+fn transfer_type_mapping_warnings(mappings: &[TableDataTransferColumnMapping]) -> Vec<String> {
+    mappings
+        .iter()
+        .filter_map(|mapping| match mapping.compatibility {
+            TableDataTransferCompatibility::Exact | TableDataTransferCompatibility::Safe => None,
+            TableDataTransferCompatibility::Review => Some(format!(
+                "Type review: {} ({}) → {} ({}). {}",
+                mapping.source,
+                mapping.source_data_type,
+                mapping.target,
+                mapping.target_data_type,
+                mapping.reason,
+            )),
+            TableDataTransferCompatibility::Unsupported => Some(format!(
+                "Blocked mapping: {} ({}) → {} ({}). {}",
+                mapping.source,
+                mapping.source_data_type,
+                mapping.target,
+                mapping.target_data_type,
+                mapping.reason,
+            )),
+        })
+        .collect()
+}
+
+fn transfer_plan_can_execute(mappings: &[TableDataTransferColumnMapping]) -> bool {
+    mappings
+        .iter()
+        .all(|mapping| mapping.compatibility != TableDataTransferCompatibility::Unsupported)
+}
+
+fn apply_transfer_conversion(
+    mapping: &TableDataTransferColumnMapping,
+    value: &Value,
+) -> Result<Value, String> {
+    use TableDataTransferConversion::{None, StringifyJson, StringifyScalar, TargetBinding};
+
+    if mapping.compatibility == TableDataTransferCompatibility::Unsupported {
+        return Err(format!(
+            "Unsupported transfer mapping {} ({}) → {} ({}): {}",
+            mapping.source,
+            mapping.source_data_type,
+            mapping.target,
+            mapping.target_data_type,
+            mapping.reason,
+        ));
+    }
+    match mapping.conversion {
+        None | TargetBinding => Ok(value.clone()),
+        StringifyJson => {
+            if value.is_null() {
+                Ok(Value::Null)
+            } else if let Value::String(value) = value {
+                Ok(Value::String(value.clone()))
+            } else {
+                serde_json::to_string(value)
+                    .map(Value::String)
+                    .map_err(|error| {
+                        format!(
+                            "Could not serialize {} as JSON text: {error}",
+                            mapping.source
+                        )
+                    })
+            }
+        }
+        StringifyScalar => match value {
+            Value::Null => Ok(Value::Null),
+            Value::String(value) => Ok(Value::String(value.clone())),
+            Value::Bool(value) => Ok(Value::String(value.to_string())),
+            Value::Number(value) => Ok(Value::String(value.to_string())),
+            Value::Array(_) | Value::Object(_) => serde_json::to_string(value)
+                .map(Value::String)
+                .map_err(|error| {
+                    format!(
+                        "Could not serialize {} as target text: {error}",
+                        mapping.source
+                    )
+                }),
+        },
+    }
+}
+
+fn transfer_target_column_type(
+    source_data_type: &str,
+    target_driver: &str,
+) -> (String, Option<String>, String) {
+    let family = transfer_type_family(source_data_type);
+    let normalized = normalized_transfer_type(source_data_type);
+    let source_lower = source_data_type.trim().to_ascii_lowercase();
+    let unsigned_integer = family == "integer" && source_lower.contains("unsigned");
+    let floating_numeric = family == "numeric"
+        && ["float", "double", "real"]
+            .iter()
+            .any(|marker| source_lower.contains(marker));
+    let target_driver = normalized_transfer_driver_id(target_driver);
+    let is_sqlite = matches!(target_driver.as_str(), "sqlite" | "sqlite3");
+    let is_mysql = matches!(target_driver.as_str(), "mysql" | "mariadb");
+
+    let (data_type, length) = if is_sqlite {
+        match family {
+            "integer" if unsigned_integer => ("NUMERIC", None),
+            "integer" => ("INTEGER", None),
+            "numeric" if floating_numeric => ("REAL", None),
+            "numeric" => ("NUMERIC", None),
+            "boolean" => ("BOOLEAN", None),
+            "temporal" if normalized == "date" => ("DATE", None),
+            "temporal" => ("DATETIME", None),
+            "binary" => ("BLOB", None),
+            "json" => ("JSON", None),
+            _ => ("TEXT", None),
+        }
+    } else if is_mysql {
+        match family {
+            "integer" if unsigned_integer => ("DECIMAL", Some("20,0".to_string())),
+            "integer" => ("BIGINT", None),
+            "numeric" if floating_numeric => ("DOUBLE", None),
+            "numeric" => ("DECIMAL", Some("65,30".to_string())),
+            "boolean" => ("BOOLEAN", None),
+            "temporal" if normalized == "date" => ("DATE", None),
+            "temporal" => ("DATETIME", None),
+            "binary" => ("BLOB", None),
+            "json" => ("JSON", None),
+            "uuid" => ("VARCHAR", Some("36".to_string())),
+            _ => ("TEXT", None),
+        }
+    } else {
+        match family {
+            "integer" if unsigned_integer => ("DECIMAL", None),
+            "integer" => ("BIGINT", None),
+            "numeric" if floating_numeric => ("DOUBLE PRECISION", None),
+            "numeric" => ("DECIMAL", None),
+            "boolean" => ("BOOLEAN", None),
+            "temporal" if normalized == "date" => ("DATE", None),
+            "temporal" => ("TIMESTAMP", None),
+            "binary" => ("BYTEA", None),
+            "json" => ("JSONB", None),
+            "uuid" => ("UUID", None),
+            _ => ("TEXT", None),
+        }
+    };
+
+    let reason = if family == "other" || family == "unknown" {
+        format!(
+            "The source type '{}' is not recognized; the generated target uses TEXT for a reviewable, non-lossy textual fallback.",
+            source_data_type.trim()
+        )
+    } else if data_type.eq_ignore_ascii_case(source_data_type.trim()) && length.is_none() {
+        "The source type is directly supported by the target dialect.".to_string()
+    } else {
+        format!(
+            "The source {family} type is mapped to the target dialect's conservative {data_type} representation."
+        )
+    };
+
+    (data_type.to_string(), length, reason)
+}
+
+fn build_transfer_target_columns(
+    source_columns: &[ColumnInfo],
+    target_driver: &str,
+) -> Result<(Vec<TableDataTransferTargetColumn>, Vec<CreateTableColumn>), String> {
+    if source_columns.is_empty() {
+        return Err("Source table has no column metadata".to_string());
+    }
+
+    let mut planned = Vec::with_capacity(source_columns.len());
+    let mut create_columns = Vec::with_capacity(source_columns.len());
+    for source in source_columns {
+        let (target_data_type, target_length, reason) =
+            transfer_target_column_type(&source.data_type, target_driver);
+        planned.push(TableDataTransferTargetColumn {
+            name: source.name.clone(),
+            source_data_type: source.data_type.clone(),
+            target_data_type: target_data_type.clone(),
+            target_length: target_length.clone(),
+            is_primary_key: source.is_primary_key,
+            is_not_null: !source.is_nullable,
+            reason,
+        });
+        create_columns.push(CreateTableColumn {
+            name: source.name.clone(),
+            data_type: target_data_type,
+            length: target_length,
+            is_primary_key: source.is_primary_key,
+            is_not_null: !source.is_nullable,
+            // Identity/sequence semantics are deliberately not synthesized:
+            // transfer inserts the reviewed source values explicitly.
+            is_auto_increment: false,
+            comment: None,
+        });
+    }
+    Ok((planned, create_columns))
+}
+
+async fn ensure_transfer_target_table_absent(
+    manager: &ConnectionManager,
+    endpoint: &TableDataTransferEndpoint,
+) -> Result<(), String> {
+    let tables = match endpoint.database.as_deref() {
+        Some(database) => {
+            manager
+                .get_database_tables(&endpoint.connection_id, database, &endpoint.schema)
+                .await
+        }
+        None => {
+            manager
+                .get_tables(&endpoint.connection_id, &endpoint.schema)
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    if tables
+        .iter()
+        .any(|table| table.name.eq_ignore_ascii_case(endpoint.table.trim()))
+    {
+        return Err(format!(
+            "Target table already exists: {}",
+            endpoint_label(endpoint)
+        ));
+    }
+    Ok(())
+}
+
+fn transfer_target_confirmation_token(
+    request: &TableDataTransferTargetPlanRequest,
+    columns: &[TableDataTransferTargetColumn],
+    statements: &[String],
+) -> Result<String, String> {
+    let binding = serde_json::json!({
+        "source": &request.source,
+        "target": &request.target,
+        "columns": columns,
+        "statements": statements,
+    });
+    let encoded = serde_json::to_vec(&binding).map_err(|error| error.to_string())?;
+    let digest = format!("{:x}", Sha256::digest(encoded));
+    Ok(format!("CREATE {}", digest[..8].to_ascii_uppercase()))
+}
+
+async fn resolve_table_data_transfer_target_plan(
+    manager: &ConnectionManager,
+    request: &TableDataTransferTargetPlanRequest,
+) -> Result<TableDataTransferTargetPlan, String> {
+    if request.source.table.trim().is_empty() || request.target.table.trim().is_empty() {
+        return Err("Source and target table names are required".to_string());
+    }
+    ensure_transfer_endpoint_driver_matches_connection(manager, &request.source).await?;
+    ensure_transfer_endpoint_driver_matches_connection(manager, &request.target).await?;
+    table_data_transfer_dialect(manager, &request.source).await?;
+    table_data_transfer_dialect(manager, &request.target).await?;
+    ensure_host_table_ddl_allowed(manager, &request.target.connection_id, "creation").await?;
+    ensure_transfer_target_table_absent(manager, &request.target).await?;
+
+    let target_driver = normalized_transfer_driver_id(&request.target.driver);
+    let source_columns = get_target_columns(
+        manager,
+        &request.source.connection_id,
+        request.source.database.as_deref(),
+        &request.source.schema,
+        &request.source.table,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let (columns, create_columns) = build_transfer_target_columns(&source_columns, &target_driver)?;
+    let statements = if matches!(target_driver.as_str(), "sqlite" | "sqlite3") {
+        build_sqlite_create_table_statements(
+            &request.target.schema,
+            &request.target.table,
+            &create_columns,
+        )?
+    } else {
+        let kind = DatabaseKind::from_str(&target_driver).map_err(|error| error.to_string())?;
+        build_create_table_statements(
+            kind,
+            &request.target.schema,
+            &request.target.table,
+            &create_columns,
+        )?
+    };
+    let confirmation_token = transfer_target_confirmation_token(request, &columns, &statements)?;
+    let mut warnings = vec![format!(
+        "This creates only the empty target table {}. Data is copied later through a separate reviewed transfer.",
+        endpoint_label(&request.target)
+    )];
+    warnings.push(
+        "Identity, sequence, foreign-key, check, trigger, index, and default expressions are not synthesized. Primary-key and nullability metadata are retained."
+            .to_string(),
+    );
+    warnings.extend(
+        columns
+            .iter()
+            .filter(|column| {
+                !normalized_transfer_type(&column.source_data_type)
+                    .eq_ignore_ascii_case(&normalized_transfer_type(&column.target_data_type))
+            })
+            .map(|column| {
+                format!(
+                    "{}: {} → {}. {}",
+                    column.name, column.source_data_type, column.target_data_type, column.reason
+                )
+            }),
+    );
+
+    Ok(TableDataTransferTargetPlan {
+        columns,
+        statements,
+        confirmation_token,
+        warnings,
+    })
+}
+
+#[tauri::command]
+pub async fn preview_table_data_transfer_target(
+    manager: State<'_, ConnectionManager>,
+    request: TableDataTransferTargetPlanRequest,
+) -> Result<Response<TableDataTransferTargetPlan>, String> {
+    match resolve_table_data_transfer_target_plan(&manager, &request).await {
+        Ok(plan) => Ok(Response::ok(plan)),
+        Err(error) => Ok(Response::err(
+            "PREVIEW_TABLE_DATA_TRANSFER_TARGET_ERROR",
+            &error,
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn create_table_data_transfer_target(
+    manager: State<'_, ConnectionManager>,
+    request: TableDataTransferTargetPlanRequest,
+    confirmation_token: String,
+) -> Result<Response<CreateTableResult>, String> {
+    let result: Result<CreateTableResult, String> = async {
+        let plan = resolve_table_data_transfer_target_plan(&manager, &request).await?;
+        if confirmation_token.trim() != plan.confirmation_token {
+            return Err(format!(
+                "Type the exact confirmation phrase: {}",
+                plan.confirmation_token
+            ));
+        }
+        for statement in &plan.statements {
+            query_target(
+                &manager,
+                &request.target.connection_id,
+                request.target.database.as_deref(),
+                statement,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(CreateTableResult {
+            table: request.target.table.trim().to_string(),
+            statements: plan.statements,
+        })
+    }
+    .await;
+
+    match result {
+        Ok(created) => Ok(Response::ok(created)),
+        Err(error) => Ok(Response::err(
+            "CREATE_TABLE_DATA_TRANSFER_TARGET_ERROR",
+            &error,
+        )),
+    }
+}
+
+async fn resolve_table_data_transfer_plan(
+    manager: &ConnectionManager,
+    request: &TableDataTransferRequest,
+) -> Result<ResolvedTableDataTransferPlan, String> {
+    validate_table_data_transfer_id(&request.transfer_id)?;
+    if request.source.connection_id.trim().is_empty()
+        || request.target.connection_id.trim().is_empty()
+    {
+        return Err("Source and target connections are required".to_string());
+    }
+    if request.source.table.trim().is_empty() || request.target.table.trim().is_empty() {
+        return Err("Source and target tables are required".to_string());
+    }
+    ensure_transfer_endpoint_driver_matches_connection(manager, &request.source).await?;
+    ensure_transfer_endpoint_driver_matches_connection(manager, &request.target).await?;
+    let source_kind = table_data_transfer_dialect(manager, &request.source).await?;
+    let target_kind = table_data_transfer_dialect(manager, &request.target).await?;
+    if request.source.connection_id == request.target.connection_id
+        && request.source.database == request.target.database
+        && request.source.schema == request.target.schema
+        && request.source.table == request.target.table
+    {
+        return Err("Source and target tables must be different".to_string());
+    }
+
+    ensure_target_relation_operation_allowed(
+        manager,
+        &request.target.connection_id,
+        request.target.database.as_deref(),
+        &request.target.schema,
+        &request.target.table,
+        RelationOperation::DataMutation,
+    )
+    .await?;
+
+    let source_columns = get_target_columns(
+        manager,
+        &request.source.connection_id,
+        request.source.database.as_deref(),
+        &request.source.schema,
+        &request.source.table,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let target_columns = get_target_columns(
+        manager,
+        &request.target.connection_id,
+        request.target.database.as_deref(),
+        &request.target.schema,
+        &request.target.table,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let (mapped_columns, skipped_source_columns) =
+        build_data_transfer_column_mapping(&source_columns, &target_columns)?;
+    let max_rows = normalized_transfer_limit(request.max_rows);
+    let batch_size = normalized_transfer_batch_size(request.batch_size);
+    let target_rows_to_delete = if request.mode == TableDataTransferMode::Overwrite {
+        let count_sql = target_kind.count_table_query(
+            schema_option(&request.target.schema),
+            &request.target.table,
+            None,
+        );
+        let results = query_target(
+            manager,
+            &request.target.connection_id,
+            request.target.database.as_deref(),
+            &count_sql,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let count = results
+            .first()
+            .and_then(|result| result.rows.first())
+            .and_then(|row| row.first())
+            .and_then(value_to_u64)
+            .ok_or_else(|| {
+                "Target row count could not be verified for overwrite mode".to_string()
+            })?;
+        Some(validate_table_data_transfer_overwrite_rows(count)?)
+    } else {
+        None
+    };
+    let confirmation_token = transfer_confirmation_token(
+        request,
+        &mapped_columns,
+        max_rows,
+        batch_size,
+        target_rows_to_delete,
+    )?;
+
+    let mut warnings = vec![match target_rows_to_delete {
+        Some(count) => format!(
+            "Overwrite mode deletes {count} existing row(s) from {} inside the same target transaction before inserting source rows.",
+            endpoint_label(&request.target)
+        ),
+        None => format!(
+            "Append mode adds rows to {} and does not delete or update existing rows.",
+            endpoint_label(&request.target)
+        ),
+    }];
+    if !skipped_source_columns.is_empty() {
+        warnings.push(format!(
+            "Source-only columns will be skipped: {}.",
+            skipped_source_columns.join(", ")
+        ));
+    }
+    warnings.extend(transfer_type_mapping_warnings(&mapped_columns));
+    warnings.push(format!(
+        "Each run is bounded to {max_rows} rows, writes batches of at most {batch_size} rows, and commits the target only after every batch succeeds."
+    ));
+
+    Ok(ResolvedTableDataTransferPlan {
+        source_kind,
+        target_kind,
+        mapped_columns,
+        skipped_source_columns,
+        source_columns: column_lookup(source_columns),
+        target_columns: column_lookup(target_columns),
+        max_rows,
+        batch_size,
+        target_rows_to_delete,
+        confirmation_token,
+        warnings,
+    })
+}
+
+fn map_transfer_result_rows(
+    result: &QueryResult,
+    plan: &ResolvedTableDataTransferPlan,
+) -> Result<Vec<BTreeMap<String, Value>>, String> {
+    let indices = plan
+        .mapped_columns
+        .iter()
+        .map(|mapping| {
+            result
+                .columns
+                .iter()
+                .position(|column| column.name.eq_ignore_ascii_case(&mapping.source))
+                .ok_or_else(|| {
+                    format!(
+                        "Source query did not return the mapped column {}",
+                        mapping.source
+                    )
+                })
+                .map(|index| (mapping, index))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    result
+        .rows
+        .iter()
+        .map(|row| {
+            indices
+                .iter()
+                .map(|(mapping, index)| {
+                    row.get(*index)
+                        .ok_or_else(|| "Source row is shorter than its column metadata".to_string())
+                        .and_then(|value| apply_transfer_conversion(mapping, value))
+                        .map(|value| (mapping.target.clone(), value))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub async fn preview_table_data_transfer(
+    manager: State<'_, ConnectionManager>,
+    request: TableDataTransferRequest,
+) -> Result<Response<TableDataTransferPreview>, String> {
+    let result: Result<TableDataTransferPreview, String> = async {
+        let plan = resolve_table_data_transfer_plan(&manager, &request).await?;
+        let preview_limit = plan.max_rows.min(100);
+        let order = build_table_order_by(plan.source_kind, &plan.source_columns, None)?;
+        let sql = plan.source_kind.paged_table_query_with_order(
+            schema_option(&request.source.schema),
+            &request.source.table,
+            None,
+            order.as_deref(),
+            preview_limit,
+            0,
+        );
+        let mut results = query_target(
+            &manager,
+            &request.source.connection_id,
+            request.source.database.as_deref(),
+            &sql,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let source_result = results
+            .drain(..)
+            .next()
+            .unwrap_or_else(|| QueryResult::rows(Vec::new(), Vec::new()));
+        let can_execute = transfer_plan_can_execute(&plan.mapped_columns);
+        if can_execute {
+            // Exercise the same bounded conversion path that execution uses;
+            // preview must prove more than a source row count.
+            map_transfer_result_rows(&source_result, &plan)?;
+        }
+        let preview_rows = source_result.rows.len() as u32;
+
+        Ok(TableDataTransferPreview {
+            mode: request.mode,
+            mapped_columns: plan.mapped_columns,
+            skipped_source_columns: plan.skipped_source_columns,
+            preview_rows,
+            max_rows: plan.max_rows,
+            batch_size: plan.batch_size,
+            target_rows_to_delete: plan.target_rows_to_delete,
+            can_execute,
+            confirmation_token: plan.confirmation_token,
+            warnings: plan.warnings,
+        })
+    }
+    .await;
+
+    match result {
+        Ok(preview) => Ok(Response::ok(preview)),
+        Err(error) => Ok(Response::err("PREVIEW_TABLE_DATA_TRANSFER_ERROR", &error)),
+    }
+}
+
+async fn finish_table_data_transfer_transaction(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    transaction_id: &str,
+    transfer_result: Result<(u64, u64, bool), String>,
+) -> Result<(u64, u64, bool), String> {
+    match transfer_result {
+        Ok(summary) => {
+            manager
+                .commit_transaction(connection_id, transaction_id)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "Transfer batches completed but the final target commit failed; verify the target transaction state before retrying: {error}"
+                    )
+                })?;
+            Ok(summary)
+        }
+        Err(error) => {
+            let rollback = manager
+                .rollback_transaction(connection_id, transaction_id)
+                .await;
+            Err(match rollback {
+                Ok(()) => {
+                    format!("Transfer failed and the target transaction was rolled back: {error}")
+                }
+                Err(rollback_error) => format!(
+                    "Transfer failed and rollback also failed; inspect the target before retrying: {error}; rollback: {rollback_error}"
+                ),
+            })
+        }
+    }
+}
+
+async fn delete_table_data_transfer_target_for_overwrite(
+    manager: &ConnectionManager,
+    endpoint: &TableDataTransferEndpoint,
+    target_kind: DatabaseKind,
+    transaction_id: &str,
+    expected_rows: u64,
+) -> Result<(), String> {
+    let statement = ParameterizedStatement {
+        sql: format!(
+            "DELETE FROM {}",
+            target_kind.qualified_table(schema_option(&endpoint.schema), &endpoint.table)
+        ),
+        params: Vec::new(),
+    };
+    let affected = manager
+        .execute_parameterized_transaction(&endpoint.connection_id, transaction_id, &[statement])
+        .await
+        .map_err(|error| format!("Could not clear the overwrite target: {error}"))?;
+    let actual_rows = affected
+        .first()
+        .copied()
+        .ok_or_else(|| "The target driver did not report overwrite rows affected".to_string())?;
+    if actual_rows != expected_rows {
+        return Err(format!(
+            "The overwrite target changed after preview: expected to delete {expected_rows} row(s), but the target reported {actual_rows}. Preview again."
+        ));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn execute_table_data_transfer(
+    app: AppHandle,
+    manager: State<'_, ConnectionManager>,
+    cancellation: State<'_, TableDataTransferCancellationState>,
+    request: TableDataTransferRequest,
+    confirmation_token: String,
+) -> Result<Response<TableDataTransferResult>, String> {
+    let transfer_id = request.transfer_id.trim().to_string();
+    let mut cancel_rx = match cancellation
+        .register(&transfer_id, &request.source.connection_id)
+        .await
+    {
+        Ok(receiver) => receiver,
+        Err(error) => {
+            return Ok(Response::err("REGISTER_TABLE_DATA_TRANSFER_ERROR", &error));
+        }
+    };
+    let mut last_progress_rows = 0_u64;
+    let mut last_progress_batches = 0_u64;
+    let result: Result<TableDataTransferResult, String> = async {
+        let plan = resolve_table_data_transfer_plan(&manager, &request).await?;
+        if confirmation_token.trim() != plan.confirmation_token {
+            return Err("Transfer plan changed or the confirmation token is invalid. Preview again before copying rows.".to_string());
+        }
+        if !transfer_plan_can_execute(&plan.mapped_columns) {
+            return Err("Transfer contains unsupported column mappings. Preview the plan and change the target schema before copying rows.".to_string());
+        }
+
+        let transaction_id = format!("table-transfer-{}", uuid::Uuid::new_v4());
+        match request.target.database.as_deref() {
+            Some(database) => {
+                manager
+                    .begin_database_transaction(
+                        &request.target.connection_id,
+                        &transaction_id,
+                        database,
+                        schema_option(&request.target.schema).map(str::to_string),
+                    )
+                    .await
+            }
+            None => {
+                manager
+                    .begin_transaction(
+                        &request.target.connection_id,
+                        &transaction_id,
+                        schema_option(&request.target.schema).map(str::to_string),
+                    )
+                    .await
+            }
+        }
+        .map_err(|error| format!("Could not start the target transfer transaction: {error}"))?;
+
+        emit_table_data_transfer_progress(
+            &app,
+            TableDataTransferProgress {
+                transfer_id: transfer_id.clone(),
+                rows_transferred: 0,
+                max_rows: plan.max_rows,
+                batches: 0,
+                status: TableDataTransferProgressStatus::Running,
+                terminal: false,
+                message: None,
+            },
+        );
+
+        let transfer_result: Result<(u64, u64, bool), String> = async {
+            if let Some(expected_rows) = plan.target_rows_to_delete {
+                delete_table_data_transfer_target_for_overwrite(
+                    &manager,
+                    &request.target,
+                    plan.target_kind,
+                    &transaction_id,
+                    expected_rows,
+                )
+                .await?;
+            }
+            let order = build_table_order_by(plan.source_kind, &plan.source_columns, None)?;
+            let mut offset = 0_u64;
+            let mut rows_transferred = 0_u64;
+            let mut batches = 0_u64;
+            let mut limit_reached = false;
+            while rows_transferred < u64::from(plan.max_rows) {
+                if *cancel_rx.borrow() {
+                    return Err(format!(
+                        "{TABLE_DATA_TRANSFER_CANCELLED}: Transfer cancelled by the user"
+                    ));
+                }
+                let remaining = u64::from(plan.max_rows) - rows_transferred;
+                let page_size = u64::from(plan.batch_size).min(remaining) as u32;
+                let sql = plan.source_kind.paged_table_query_with_order(
+                    schema_option(&request.source.schema),
+                    &request.source.table,
+                    None,
+                    order.as_deref(),
+                    page_size,
+                    offset,
+                );
+                let mut results = tokio::select! {
+                    result = query_transfer_source_tracked(
+                        &manager,
+                        &request.source,
+                        &transfer_id,
+                        &sql,
+                    ) => result.map_err(|error| error.to_string())?,
+                    changed = cancel_rx.changed() => {
+                        let _ = changed;
+                        return Err(format!(
+                            "{TABLE_DATA_TRANSFER_CANCELLED}: Transfer cancelled by the user"
+                        ));
+                    }
+                };
+                let source_result = results
+                    .drain(..)
+                    .next()
+                    .unwrap_or_else(|| QueryResult::rows(Vec::new(), Vec::new()));
+                let rows = map_transfer_result_rows(&source_result, &plan)?;
+                if rows.is_empty() {
+                    break;
+                }
+                let statements = rows
+                    .iter()
+                    .map(|row| {
+                        build_insert_mutation(
+                            plan.target_kind,
+                            &request.target.schema,
+                            &request.target.table,
+                            &plan.target_columns,
+                            row,
+                        )
+                        .map(|(sql, params)| ParameterizedStatement { sql, params })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                manager
+                    .execute_parameterized_transaction(
+                        &request.target.connection_id,
+                        &transaction_id,
+                        &statements,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if *cancel_rx.borrow() {
+                    return Err(format!(
+                        "{TABLE_DATA_TRANSFER_CANCELLED}: Transfer cancelled by the user"
+                    ));
+                }
+                let copied = rows.len() as u64;
+                rows_transferred += copied;
+                offset += copied;
+                batches += 1;
+                last_progress_rows = rows_transferred;
+                last_progress_batches = batches;
+                emit_table_data_transfer_progress(
+                    &app,
+                    TableDataTransferProgress {
+                        transfer_id: transfer_id.clone(),
+                        rows_transferred,
+                        max_rows: plan.max_rows,
+                        batches,
+                        status: TableDataTransferProgressStatus::Running,
+                        terminal: false,
+                        message: None,
+                    },
+                );
+                if copied < u64::from(page_size) {
+                    break;
+                }
+                if rows_transferred == u64::from(plan.max_rows) {
+                    limit_reached = true;
+                }
+            }
+            Ok((rows_transferred, batches, limit_reached))
+        }
+        .await;
+
+        let (rows_transferred, batches, limit_reached) =
+            finish_table_data_transfer_transaction(
+                &manager,
+                &request.target.connection_id,
+                &transaction_id,
+                transfer_result,
+            )
+            .await?;
+
+        Ok(TableDataTransferResult {
+            rows_transferred,
+            batches,
+            limit_reached,
+            mapped_columns: plan.mapped_columns,
+        })
+    }
+    .await;
+
+    cancellation.take(&transfer_id).await;
+
+    match &result {
+        Ok(transfer) => emit_table_data_transfer_progress(
+            &app,
+            TableDataTransferProgress {
+                transfer_id: transfer_id.clone(),
+                rows_transferred: transfer.rows_transferred,
+                max_rows: normalized_transfer_limit(request.max_rows),
+                batches: transfer.batches,
+                status: TableDataTransferProgressStatus::Done,
+                terminal: true,
+                message: None,
+            },
+        ),
+        Err(error) => emit_table_data_transfer_progress(
+            &app,
+            TableDataTransferProgress {
+                transfer_id: transfer_id.clone(),
+                rows_transferred: last_progress_rows,
+                max_rows: normalized_transfer_limit(request.max_rows),
+                batches: last_progress_batches,
+                status: if error.contains(TABLE_DATA_TRANSFER_CANCELLED) {
+                    TableDataTransferProgressStatus::Cancelled
+                } else {
+                    TableDataTransferProgressStatus::Error
+                },
+                terminal: true,
+                message: Some(bounded_table_data_transfer_message(error)),
+            },
+        ),
+    }
+
+    match result {
+        Ok(transfer) => Ok(Response::ok(transfer)),
+        Err(error) if error.contains(TABLE_DATA_TRANSFER_CANCELLED) => Ok(Response::err(
+            "TABLE_DATA_TRANSFER_CANCELLED",
+            "Transfer cancelled and target changes were rolled back.",
+        )),
+        Err(error) => Ok(Response::err("EXECUTE_TABLE_DATA_TRANSFER_ERROR", &error)),
+    }
+}
+
+#[tauri::command]
+pub async fn cancel_table_data_transfer(
+    manager: State<'_, ConnectionManager>,
+    cancellation: State<'_, TableDataTransferCancellationState>,
+    transfer_id: String,
+) -> Result<Response<String>, String> {
+    validate_table_data_transfer_id(&transfer_id)?;
+    let Some(handle) = cancellation.request_cancel(&transfer_id).await else {
+        return Ok(Response::err(
+            "TABLE_DATA_TRANSFER_NOT_FOUND",
+            &format!("Table data transfer is not active: {transfer_id}"),
+        ));
+    };
+
+    let backend_cancelled = manager
+        .cancel_query(&handle.source_connection_id, &transfer_id)
+        .await
+        .unwrap_or(false);
+    let _ = handle.sender.send(true);
+    Ok(Response::ok(
+        if backend_cancelled {
+            "Transfer cancellation requested on the source database backend"
+        } else {
+            "Transfer cancellation requested"
+        }
+        .to_string(),
+    ))
+}
+
 fn preview_metadata_required(
     structured_filters: Option<&[TableFilter]>,
     requested_sort: Option<&TableSort>,
@@ -1894,7 +3966,8 @@ pub async fn preview_table_page(
         "pageSize": page_size,
     });
     let result: Result<TablePageResult, String> = async {
-        let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+        let kind =
+            table_data_dialect_for_connection(&manager, &connection_id, &driver, false).await?;
         let database = database.as_deref();
         let page = page.unwrap_or(0);
         let page_size = page_size
@@ -2035,7 +4108,8 @@ pub async fn export_table_data(
     max_rows: Option<u64>,
 ) -> Result<Response<TableExportResult>, String> {
     let result: Result<TableExportResult, String> = async {
-        let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+        let kind =
+            table_data_dialect_for_connection(&manager, &connection_id, &driver, false).await?;
         let page_size = page_size
             .unwrap_or(DEFAULT_PAGE_SIZE)
             .clamp(1, MAX_PAGE_SIZE);
@@ -2219,21 +4293,30 @@ fn validate_import_file(path: &Path, format: TableImportFormat) -> Result<(), St
     if !file_metadata.is_file() {
         return Err("The selected import path is not a file".to_string());
     }
-    if file_metadata.len() > MAX_IMPORT_FILE_BYTES {
-        return Err(format!(
-            "Import files are limited to {} MB",
-            MAX_IMPORT_FILE_BYTES / 1024 / 1024
-        ));
-    }
-
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    let byte_limit = match format {
+        TableImportFormat::Csv => MAX_CSV_IMPORT_FILE_BYTES,
+        TableImportFormat::Json if matches!(extension.as_str(), "jsonl" | "ndjson") => {
+            MAX_JSON_LINES_IMPORT_FILE_BYTES
+        }
+        TableImportFormat::Json => MAX_JSON_IMPORT_FILE_BYTES,
+        TableImportFormat::Xlsx => MAX_XLSX_IMPORT_FILE_BYTES,
+    };
+    if file_metadata.len() > byte_limit {
+        return Err(format!(
+            "Import files are limited to {} MB",
+            byte_limit / 1024 / 1024
+        ));
+    }
+
     let accepted = match format {
         TableImportFormat::Csv => extension == "csv",
         TableImportFormat::Json => matches!(extension.as_str(), "json" | "jsonl" | "ndjson"),
+        TableImportFormat::Xlsx => extension == "xlsx",
     };
     if accepted {
         Ok(())
@@ -2241,6 +4324,320 @@ fn validate_import_file(path: &Path, format: TableImportFormat) -> Result<(), St
         Err(format!(
             "The selected file does not match the {format:?} format"
         ))
+    }
+}
+
+/// Loads a safe, bounded CSV prefix for the review dialog selected through
+/// Tauri's native file picker.  The caller retains the original path only for
+/// the subsequent `import_table_data` invocation; no write occurs here.
+fn read_csv_import_preview(path: &Path) -> Result<TableCsvImportPreview, String> {
+    validate_import_file(path, TableImportFormat::Csv)?;
+    let total_bytes = metadata(path).map_err(|error| error.to_string())?.len();
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let mut bytes = vec![0_u8; total_bytes.min(MAX_CSV_IMPORT_PREVIEW_BYTES as u64) as usize];
+    file.read_exact(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("CSV file")
+        .to_string();
+    Ok(TableCsvImportPreview {
+        file_name,
+        bytes,
+        total_bytes,
+        truncated: total_bytes > MAX_CSV_IMPORT_PREVIEW_BYTES as u64,
+    })
+}
+
+#[tauri::command]
+pub async fn preview_table_csv_import(
+    file_path: String,
+) -> Result<Response<TableCsvImportPreview>, String> {
+    // A preview may read 32 MiB. Keep filesystem work off the async command
+    // runtime so opening the import review cannot delay a live query, LSP
+    // request, or cancellation message.
+    let path = PathBuf::from(file_path.trim());
+    let result = tauri::async_runtime::spawn_blocking(move || read_csv_import_preview(&path))
+        .await
+        .map_err(|error| format!("CSV preview worker failed: {error}"))?;
+
+    match result {
+        Ok(preview) => Ok(Response::ok(preview)),
+        Err(error) => Ok(Response::err("PREVIEW_TABLE_CSV_IMPORT_ERROR", &error)),
+    }
+}
+
+fn import_file_name(path: &Path, fallback: &str) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn bounded_json_import_preview_value(value: &Value) -> Value {
+    match value {
+        Value::String(value) => {
+            let mut bounded = value
+                .chars()
+                .take(MAX_JSON_IMPORT_PREVIEW_STRING_CHARS)
+                .collect::<String>();
+            if value
+                .chars()
+                .nth(MAX_JSON_IMPORT_PREVIEW_STRING_CHARS)
+                .is_some()
+            {
+                bounded.push('…');
+            }
+            Value::String(bounded)
+        }
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .take(MAX_JSON_IMPORT_PREVIEW_ARRAY_ITEMS)
+                .map(bounded_json_import_preview_value)
+                .collect(),
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .take(MAX_JSON_IMPORT_PREVIEW_OBJECT_FIELDS)
+                .map(|(key, value)| (key.clone(), bounded_json_import_preview_value(value)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn read_json_lines_import_preview(path: &Path) -> Result<TableJsonImportPreview, String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let reader = BufReader::new(file);
+    let mut source_columns = BTreeSet::new();
+    let mut sample_rows = Vec::new();
+    let mut seen_rows = 0_u64;
+    let mut has_more_rows = false;
+
+    for (line_index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|error| error.to_string())?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str::<Value>(&line)
+            .map_err(|error| format!("Invalid JSON object on line {}: {error}", line_index + 1))?;
+        let Value::Object(values) = value else {
+            return Err(format!("JSON row {} is not an object", line_index + 1));
+        };
+        seen_rows += 1;
+        if sample_rows.len() >= MAX_JSON_IMPORT_PREVIEW_ROWS {
+            has_more_rows = true;
+            break;
+        }
+        for column in values.keys().take(MAX_JSON_IMPORT_PREVIEW_COLUMNS) {
+            source_columns.insert(column.clone());
+        }
+        sample_rows.push(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, bounded_json_import_preview_value(&value)))
+                .collect(),
+        );
+    }
+
+    if seen_rows == 0 {
+        return Err("The JSON-lines file does not contain any object rows".to_string());
+    }
+    Ok(TableJsonImportPreview {
+        file_name: import_file_name(path, "JSON data"),
+        total_bytes: metadata(path).map_err(|error| error.to_string())?.len(),
+        source_columns: source_columns.into_iter().collect(),
+        sample_rows,
+        total_rows: if has_more_rows { None } else { Some(seen_rows) },
+        truncated: has_more_rows,
+    })
+}
+
+fn read_json_import_preview(path: &Path) -> Result<TableJsonImportPreview, String> {
+    validate_import_file(path, TableImportFormat::Json)?;
+    if is_json_lines_path(path) {
+        return read_json_lines_import_preview(path);
+    }
+    let rows = json_import_rows(path)?;
+    if rows.is_empty() {
+        return Err("The JSON file does not contain any object rows".to_string());
+    }
+    let source_columns = rows
+        .iter()
+        .flat_map(|row| row.keys().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .take(MAX_JSON_IMPORT_PREVIEW_COLUMNS)
+        .collect::<Vec<_>>();
+    let total_rows = rows.len() as u64;
+    let truncated = rows.len() > MAX_JSON_IMPORT_PREVIEW_ROWS;
+    let sample_rows = rows
+        .into_iter()
+        .take(MAX_JSON_IMPORT_PREVIEW_ROWS)
+        .map(|row| {
+            row.into_iter()
+                .map(|(key, value)| (key, bounded_json_import_preview_value(&value)))
+                .collect()
+        })
+        .collect();
+    Ok(TableJsonImportPreview {
+        file_name: import_file_name(path, "JSON data"),
+        total_bytes: metadata(path).map_err(|error| error.to_string())?.len(),
+        source_columns,
+        sample_rows,
+        total_rows: Some(total_rows),
+        truncated,
+    })
+}
+
+fn xlsx_cell_value(cell: &Data) -> Value {
+    match cell {
+        Data::Empty => Value::Null,
+        Data::Int(value) => Value::Number((*value).into()),
+        Data::Float(value) => serde_json::Number::from_f64(*value)
+            .map(Value::Number)
+            .unwrap_or_else(|| Value::String(value.to_string())),
+        Data::String(value) | Data::DateTimeIso(value) | Data::DurationIso(value) => {
+            Value::String(value.clone())
+        }
+        Data::Bool(value) => Value::Bool(*value),
+        // Calamine retains Excel's native serial/date metadata. Rendering it
+        // as text avoids quietly applying a timezone or epoch conversion in
+        // the import layer; the target driver can still coerce it explicitly.
+        Data::DateTime(value) => Value::String(value.to_string()),
+        Data::Error(value) => Value::String(format!("Excel cell error: {value}")),
+    }
+}
+
+fn xlsx_header_value(cell: &Data) -> String {
+    match cell {
+        Data::Empty => String::new(),
+        Data::String(value) => value.trim().to_string(),
+        _ => cell.to_string().trim().to_string(),
+    }
+}
+
+fn validate_xlsx_headers(headers: &[String]) -> Result<(), String> {
+    if headers.is_empty() {
+        return Err("The XLSX worksheet does not contain any columns".to_string());
+    }
+    let mut normalized_headers = HashSet::new();
+    for header in headers {
+        let normalized = header.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return Err("XLSX column names cannot be empty".to_string());
+        }
+        if !normalized_headers.insert(normalized) {
+            return Err("XLSX column names must be unique".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn xlsx_import_rows(
+    path: &Path,
+) -> Result<(String, Vec<String>, Vec<BTreeMap<String, Value>>), String> {
+    let mut workbook = open_workbook_auto(path)
+        .map_err(|error| format!("Unable to read XLSX workbook: {error}"))?;
+    let sheet_name = workbook
+        .sheet_names()
+        .into_iter()
+        .next()
+        .ok_or_else(|| "The XLSX workbook does not contain a worksheet".to_string())?;
+    let range = workbook
+        .worksheet_range(&sheet_name)
+        .map_err(|error| format!("Unable to read worksheet '{sheet_name}': {error}"))?;
+    let mut rows = range.rows();
+    let headers = rows
+        .find(|row| row.iter().any(|cell| !matches!(cell, Data::Empty)))
+        .map(|row| row.iter().map(xlsx_header_value).collect::<Vec<_>>())
+        .ok_or_else(|| "The XLSX worksheet does not contain a header row".to_string())?;
+    validate_xlsx_headers(&headers)?;
+
+    let mut values = Vec::new();
+    for row in rows.filter(|row| row.iter().any(|cell| !matches!(cell, Data::Empty))) {
+        if row
+            .get(headers.len()..)
+            .is_some_and(|extra| extra.iter().any(|cell| !matches!(cell, Data::Empty)))
+        {
+            return Err("An XLSX row contains values beyond the header columns".to_string());
+        }
+        values.push(
+            headers
+                .iter()
+                .enumerate()
+                .map(|(index, header)| {
+                    (
+                        header.clone(),
+                        row.get(index).map(xlsx_cell_value).unwrap_or(Value::Null),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>(),
+        );
+    }
+    Ok((sheet_name, headers, values))
+}
+
+fn read_xlsx_import_preview(path: &Path) -> Result<TableXlsxImportPreview, String> {
+    validate_import_file(path, TableImportFormat::Xlsx)?;
+    let (sheet_name, source_columns, rows) = xlsx_import_rows(path)?;
+    if rows.len() > MAX_IMPORT_ROWS {
+        return Err(format!(
+            "Imports are limited to {MAX_IMPORT_ROWS} rows per transaction"
+        ));
+    }
+    let total_rows = rows.len() as u64;
+    let truncated = rows.len() > MAX_JSON_IMPORT_PREVIEW_ROWS;
+    let sample_rows = rows
+        .into_iter()
+        .take(MAX_JSON_IMPORT_PREVIEW_ROWS)
+        .map(|row| {
+            row.into_iter()
+                .map(|(key, value)| (key, bounded_json_import_preview_value(&value)))
+                .collect()
+        })
+        .collect();
+    Ok(TableXlsxImportPreview {
+        file_name: import_file_name(path, "XLSX data"),
+        total_bytes: metadata(path).map_err(|error| error.to_string())?.len(),
+        sheet_name,
+        source_columns,
+        sample_rows,
+        total_rows,
+        truncated,
+    })
+}
+
+#[tauri::command]
+pub async fn preview_table_json_import(
+    file_path: String,
+) -> Result<Response<TableJsonImportPreview>, String> {
+    let path = PathBuf::from(file_path.trim());
+    let result = tauri::async_runtime::spawn_blocking(move || read_json_import_preview(&path))
+        .await
+        .map_err(|error| format!("JSON preview worker failed: {error}"))?;
+    match result {
+        Ok(preview) => Ok(Response::ok(preview)),
+        Err(error) => Ok(Response::err("PREVIEW_TABLE_JSON_IMPORT_ERROR", &error)),
+    }
+}
+
+#[tauri::command]
+pub async fn preview_table_xlsx_import(
+    file_path: String,
+) -> Result<Response<TableXlsxImportPreview>, String> {
+    let path = PathBuf::from(file_path.trim());
+    let result = tauri::async_runtime::spawn_blocking(move || read_xlsx_import_preview(&path))
+        .await
+        .map_err(|error| format!("XLSX preview worker failed: {error}"))?;
+    match result {
+        Ok(preview) => Ok(Response::ok(preview)),
+        Err(error) => Ok(Response::err("PREVIEW_TABLE_XLSX_IMPORT_ERROR", &error)),
     }
 }
 
@@ -2285,11 +4682,106 @@ fn canonical_import_columns(
     Ok(canonical)
 }
 
+fn csv_delimiter(options: Option<&TableCsvImportOptions>) -> Result<u8, String> {
+    let Some(delimiter) = options.and_then(|options| options.delimiter.as_deref()) else {
+        return Ok(b',');
+    };
+    let bytes = delimiter.as_bytes();
+    if bytes.len() != 1 || matches!(bytes[0], b'\"' | b'\r' | b'\n') {
+        return Err("CSV delimiter must be one non-quote, non-line-break byte".to_string());
+    }
+    Ok(bytes[0])
+}
+
+/// Resolves the exact mapping that was reviewed in the preview. An explicit
+/// mapping has one entry per source index and can deliberately ignore source
+/// columns; an omitted mapping preserves the legacy header-to-column import.
+fn resolve_csv_import_columns(
+    source_columns: &[String],
+    columns: &BTreeMap<String, ColumnInfo>,
+    options: Option<&TableCsvImportOptions>,
+) -> Result<Vec<Option<String>>, String> {
+    let Some(options) = options.filter(|options| !options.column_mapping.is_empty()) else {
+        return canonical_import_columns(source_columns, columns)
+            .map(|columns| columns.into_iter().map(Some).collect());
+    };
+
+    let mut target_by_source = BTreeMap::new();
+    let mut targets = HashSet::new();
+    for mapping in &options.column_mapping {
+        if mapping.source_index >= source_columns.len() {
+            return Err(format!(
+                "CSV mapping refers to source column {} but the file has {} columns",
+                mapping.source_index + 1,
+                source_columns.len()
+            ));
+        }
+        if target_by_source.contains_key(&mapping.source_index) {
+            return Err(format!(
+                "CSV mapping contains source column {} more than once",
+                mapping.source_index + 1
+            ));
+        }
+        let target = mapping
+            .target_column
+            .as_deref()
+            .map(|target| canonical_import_columns(&[target.to_string()], columns))
+            .transpose()?
+            .and_then(|mut targets| targets.pop());
+        if let Some(target) = &target {
+            if !targets.insert(target.clone()) {
+                return Err(format!(
+                    "CSV mapping contains duplicate target column: {target}"
+                ));
+            }
+        }
+        target_by_source.insert(mapping.source_index, target);
+    }
+
+    let resolved = (0..source_columns.len())
+        .map(|index| target_by_source.remove(&index).unwrap_or(None))
+        .collect::<Vec<_>>();
+    if resolved.iter().all(Option::is_none) {
+        return Err("CSV mapping does not include a target column".to_string());
+    }
+    Ok(resolved)
+}
+
+fn csv_record_values(
+    headers: &[Option<String>],
+    record: &csv::StringRecord,
+    empty_fields_as_null: bool,
+) -> Result<BTreeMap<String, Value>, String> {
+    if record.len() != headers.len() {
+        return Err(format!(
+            "CSV row has {} values but {} columns were expected",
+            record.len(),
+            headers.len()
+        ));
+    }
+    Ok(headers
+        .iter()
+        .zip(record.iter())
+        .filter_map(|(column, value)| {
+            column.as_ref().map(|column| {
+                (
+                    column.clone(),
+                    if empty_fields_as_null && value.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::String(value.to_string())
+                    },
+                )
+            })
+        })
+        .collect())
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn execute_import_batch(
+async fn execute_import_transaction_batch(
     manager: &ConnectionManager,
     connection_id: &str,
-    database: Option<&str>,
+    transaction_id: &str,
     kind: DatabaseKind,
     schema: &str,
     table: &str,
@@ -2306,12 +4798,330 @@ async fn execute_import_batch(
                 .map(|(sql, params)| ParameterizedStatement { sql, params })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let imported = execute_target_parameterized_batch(manager, connection_id, database, &statements)
+    let imported = manager
+        .execute_parameterized_transaction(connection_id, transaction_id, &statements)
         .await
         .map_err(|error| error.to_string())?
         .len() as u64;
     rows.clear();
     Ok(imported)
+}
+
+/// Writes already-parsed records through a single explicit transaction. This
+/// is shared by bounded JSON-array and XLSX imports so a later row failure
+/// never leaves an earlier batch committed.
+#[allow(clippy::too_many_arguments)]
+async fn import_materialized_rows_in_transaction(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    kind: DatabaseKind,
+    schema: &str,
+    table: &str,
+    columns: &BTreeMap<String, ColumnInfo>,
+    rows: Vec<BTreeMap<String, Value>>,
+    database: Option<&str>,
+) -> Result<(u64, u64), String> {
+    let transaction_id = format!("table-import-{}", uuid::Uuid::new_v4());
+    match database {
+        Some(database) => {
+            manager
+                .begin_database_transaction(
+                    connection_id,
+                    &transaction_id,
+                    database,
+                    Some(schema.to_string()),
+                )
+                .await
+        }
+        None => {
+            manager
+                .begin_transaction(connection_id, &transaction_id, Some(schema.to_string()))
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+
+    let import_result = async {
+        let mut rows_imported = 0_u64;
+        let mut batches = 0_u64;
+        let mut pending_rows = Vec::with_capacity(IMPORT_BATCH_SIZE);
+        for row in rows {
+            pending_rows.push(row);
+            if pending_rows.len() == IMPORT_BATCH_SIZE {
+                rows_imported += execute_import_transaction_batch(
+                    manager,
+                    connection_id,
+                    &transaction_id,
+                    kind,
+                    schema,
+                    table,
+                    columns,
+                    &mut pending_rows,
+                )
+                .await?;
+                batches += 1;
+            }
+        }
+        if !pending_rows.is_empty() {
+            rows_imported += execute_import_transaction_batch(
+                manager,
+                connection_id,
+                &transaction_id,
+                kind,
+                schema,
+                table,
+                columns,
+                &mut pending_rows,
+            )
+            .await?;
+            batches += 1;
+        }
+        manager
+            .commit_transaction(connection_id, &transaction_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok((rows_imported, batches))
+    }
+    .await;
+
+    if import_result.is_err() {
+        let _ = manager
+            .rollback_transaction(connection_id, &transaction_id)
+            .await;
+    }
+    import_result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn import_csv_in_transaction(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    kind: DatabaseKind,
+    schema: &str,
+    table: &str,
+    columns: &BTreeMap<String, ColumnInfo>,
+    path: &Path,
+    database: Option<&str>,
+    first_row_header: Option<bool>,
+    ordered_columns: Vec<String>,
+    csv_options: Option<&TableCsvImportOptions>,
+) -> Result<(u64, u64), String> {
+    let has_headers = csv_options
+        .and_then(|options| options.first_row_header)
+        .or(first_row_header)
+        .unwrap_or(true);
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(has_headers)
+        .delimiter(csv_delimiter(csv_options)?)
+        .from_path(path)
+        .map_err(|error| error.to_string())?;
+    let source_columns = if has_headers {
+        reader
+            .headers()
+            .map_err(|error| error.to_string())?
+            .iter()
+            .map(|value| value.trim().to_string())
+            .collect::<Vec<_>>()
+    } else {
+        ordered_columns
+    };
+    let headers = resolve_csv_import_columns(&source_columns, columns, csv_options)?;
+    let empty_fields_as_null = csv_options
+        .and_then(|options| options.empty_fields_as_null)
+        .unwrap_or(false);
+    let transaction_id = format!("table-import-{}", uuid::Uuid::new_v4());
+    match database {
+        Some(database) => {
+            manager
+                .begin_database_transaction(
+                    connection_id,
+                    &transaction_id,
+                    database,
+                    Some(schema.to_string()),
+                )
+                .await
+        }
+        None => {
+            manager
+                .begin_transaction(connection_id, &transaction_id, Some(schema.to_string()))
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+
+    let import_result = async {
+        let mut rows_imported = 0_u64;
+        let mut batches = 0_u64;
+        let mut pending_rows = Vec::with_capacity(IMPORT_BATCH_SIZE);
+        for record in reader.records() {
+            let record = record.map_err(|error| error.to_string())?;
+            pending_rows.push(csv_record_values(&headers, &record, empty_fields_as_null)?);
+            if pending_rows.len() == IMPORT_BATCH_SIZE {
+                rows_imported += execute_import_transaction_batch(
+                    manager,
+                    connection_id,
+                    &transaction_id,
+                    kind,
+                    schema,
+                    table,
+                    columns,
+                    &mut pending_rows,
+                )
+                .await?;
+                batches += 1;
+            }
+        }
+        if !pending_rows.is_empty() {
+            rows_imported += execute_import_transaction_batch(
+                manager,
+                connection_id,
+                &transaction_id,
+                kind,
+                schema,
+                table,
+                columns,
+                &mut pending_rows,
+            )
+            .await?;
+            batches += 1;
+        }
+        manager
+            .commit_transaction(connection_id, &transaction_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok((rows_imported, batches))
+    }
+    .await;
+
+    if import_result.is_err() {
+        let _ = manager
+            .rollback_transaction(connection_id, &transaction_id)
+            .await;
+    }
+    import_result
+}
+
+fn is_json_lines_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("jsonl" | "ndjson")
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn import_json_lines_in_transaction(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    kind: DatabaseKind,
+    schema: &str,
+    table: &str,
+    columns: &BTreeMap<String, ColumnInfo>,
+    path: &Path,
+    database: Option<&str>,
+) -> Result<(u64, u64), String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let mut reader = BufReader::new(file);
+    let transaction_id = format!("table-import-{}", uuid::Uuid::new_v4());
+    match database {
+        Some(database) => {
+            manager
+                .begin_database_transaction(
+                    connection_id,
+                    &transaction_id,
+                    database,
+                    Some(schema.to_string()),
+                )
+                .await
+        }
+        None => {
+            manager
+                .begin_transaction(connection_id, &transaction_id, Some(schema.to_string()))
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+
+    let import_result = async {
+        let mut rows_imported = 0_u64;
+        let mut batches = 0_u64;
+        let mut pending_rows = Vec::with_capacity(IMPORT_BATCH_SIZE);
+        let mut line = String::new();
+        let mut line_number = 0_u64;
+        loop {
+            line.clear();
+            if reader
+                .read_line(&mut line)
+                .map_err(|error| error.to_string())?
+                == 0
+            {
+                break;
+            }
+            line_number += 1;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let object = serde_json::from_str::<Value>(&line)
+                .map_err(|error| format!("Invalid JSON object on line {line_number}: {error}"))?;
+            let Value::Object(object) = object else {
+                return Err(format!("JSON row {line_number} is not an object"));
+            };
+            let headers = object.keys().cloned().collect::<Vec<_>>();
+            let canonical_headers = canonical_import_columns(&headers, columns)?;
+            pending_rows.push(
+                headers
+                    .into_iter()
+                    .zip(canonical_headers)
+                    .filter_map(|(source, target)| {
+                        object.get(&source).cloned().map(|value| (target, value))
+                    })
+                    .collect(),
+            );
+            if pending_rows.len() == IMPORT_BATCH_SIZE {
+                rows_imported += execute_import_transaction_batch(
+                    manager,
+                    connection_id,
+                    &transaction_id,
+                    kind,
+                    schema,
+                    table,
+                    columns,
+                    &mut pending_rows,
+                )
+                .await?;
+                batches += 1;
+            }
+        }
+        if !pending_rows.is_empty() {
+            rows_imported += execute_import_transaction_batch(
+                manager,
+                connection_id,
+                &transaction_id,
+                kind,
+                schema,
+                table,
+                columns,
+                &mut pending_rows,
+            )
+            .await?;
+            batches += 1;
+        }
+        manager
+            .commit_transaction(connection_id, &transaction_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok((rows_imported, batches))
+    }
+    .await;
+
+    if import_result.is_err() {
+        let _ = manager
+            .rollback_transaction(connection_id, &transaction_id)
+            .await;
+    }
+    import_result
 }
 
 fn json_import_rows(path: &Path) -> Result<Vec<BTreeMap<String, Value>>, String> {
@@ -2361,9 +5171,16 @@ pub async fn import_table_data(
     file_path: String,
     format: TableImportFormat,
     first_row_header: Option<bool>,
+    csv_options: Option<TableCsvImportOptions>,
 ) -> Result<Response<TableImportResult>, String> {
     let result: Result<TableImportResult, String> = async {
-        let kind = DatabaseKind::from_str(&driver).map_err(|error| error.to_string())?;
+        // Import uses the same bounded parameterized row-mutation path as
+        // grid edits and exports. SQLite/DuckDB are deliberately supported by
+        // the narrow ANSI/PostgreSQL-compatible adapter in
+        // `table_data_dialect`; resolving DatabaseKind directly here made
+        // those drivers inconsistently reject CSV/JSON imports.
+        let kind =
+            table_data_dialect_for_connection(&manager, &connection_id, &driver, true).await?;
         let path = PathBuf::from(file_path.trim());
         validate_import_file(&path, format)?;
         let database = database.as_deref();
@@ -2384,94 +5201,92 @@ pub async fn import_table_data(
             .map(|column| column.name.clone())
             .collect::<Vec<_>>();
         let column_lookup = column_lookup(table_columns);
-        let mut pending_rows = Vec::new();
 
-        match format {
-            TableImportFormat::Csv => {
-                let has_headers = first_row_header.unwrap_or(true);
-                let mut reader = csv::ReaderBuilder::new()
-                    .has_headers(has_headers)
-                    .from_path(&path)
-                    .map_err(|error| error.to_string())?;
-                let headers = if has_headers {
-                    reader
-                        .headers()
-                        .map_err(|error| error.to_string())?
-                        .iter()
-                        .map(|value| value.trim().to_string())
-                        .collect::<Vec<_>>()
-                } else {
-                    ordered_columns
-                };
-                let headers = canonical_import_columns(&headers, &column_lookup)?;
-
-                for record in reader.records() {
-                    let record = record.map_err(|error| error.to_string())?;
-                    if record.len() != headers.len() {
-                        return Err(format!(
-                            "CSV row has {} values but {} columns were expected",
-                            record.len(),
-                            headers.len()
-                        ));
-                    }
-                    pending_rows.push(
-                        headers
-                            .iter()
-                            .zip(record.iter())
-                            .map(|(column, value)| {
-                                (column.clone(), Value::String(value.to_string()))
-                            })
-                            .collect(),
-                    );
-                    if pending_rows.len() > MAX_IMPORT_ROWS {
-                        return Err(format!(
-                            "Imports are limited to {MAX_IMPORT_ROWS} rows per transaction"
-                        ));
-                    }
-                }
-            }
-            TableImportFormat::Json => {
-                for row in json_import_rows(&path)? {
-                    let headers = row.keys().cloned().collect::<Vec<_>>();
-                    let canonical_headers = canonical_import_columns(&headers, &column_lookup)?;
-                    pending_rows.push(
-                        headers
-                            .into_iter()
-                            .zip(canonical_headers)
-                            .filter_map(|(source, target)| {
-                                row.get(&source).cloned().map(|value| (target, value))
-                            })
-                            .collect(),
-                    );
-                    if pending_rows.len() > MAX_IMPORT_ROWS {
-                        return Err(format!(
-                            "Imports are limited to {MAX_IMPORT_ROWS} rows per transaction"
-                        ));
-                    }
-                }
-            }
-        }
-
-        let rows_imported = if pending_rows.is_empty() {
-            0
-        } else {
-            execute_import_batch(
+        // CSV imports use a dedicated transaction session across many small
+        // bound batches. When a server database is selected, the driver must
+        // explicitly bind that session to the selected database; a default
+        // connection transaction is never substituted.
+        if matches!(format, TableImportFormat::Csv) {
+            let (rows_imported, batches) = import_csv_in_transaction(
                 &manager,
                 &connection_id,
-                database,
                 kind,
                 &schema,
                 &table,
                 &column_lookup,
-                &mut pending_rows,
+                &path,
+                database,
+                first_row_header,
+                ordered_columns,
+                csv_options.as_ref(),
             )
-            .await?
+            .await?;
+            return Ok(TableImportResult {
+                file_path: path.display().to_string(),
+                rows_imported,
+                batches,
+            });
+        }
+        if matches!(format, TableImportFormat::Json) && is_json_lines_path(&path) {
+            let (rows_imported, batches) = import_json_lines_in_transaction(
+                &manager,
+                &connection_id,
+                kind,
+                &schema,
+                &table,
+                &column_lookup,
+                &path,
+                database,
+            )
+            .await?;
+            return Ok(TableImportResult {
+                file_path: path.display().to_string(),
+                rows_imported,
+                batches,
+            });
+        }
+        let source_rows = match format {
+            TableImportFormat::Json => json_import_rows(&path)?,
+            TableImportFormat::Xlsx => xlsx_import_rows(&path)?.2,
+            // CSV and JSONL return before this branch so the source remains
+            // streamable rather than materializing every row in memory.
+            TableImportFormat::Csv => unreachable!("CSV import returned above"),
         };
+        if source_rows.len() > MAX_IMPORT_ROWS {
+            return Err(format!(
+                "Imports are limited to {MAX_IMPORT_ROWS} rows per transaction"
+            ));
+        }
+        let pending_rows = source_rows
+            .into_iter()
+            .map(|row| {
+                let headers = row.keys().cloned().collect::<Vec<_>>();
+                let canonical_headers = canonical_import_columns(&headers, &column_lookup)?;
+                Ok(headers
+                    .into_iter()
+                    .zip(canonical_headers)
+                    .filter_map(|(source, target)| {
+                        row.get(&source).cloned().map(|value| (target, value))
+                    })
+                    .collect::<BTreeMap<_, _>>())
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let (rows_imported, batches) = import_materialized_rows_in_transaction(
+            &manager,
+            &connection_id,
+            kind,
+            &schema,
+            &table,
+            &column_lookup,
+            pending_rows,
+            database,
+        )
+        .await?;
 
         Ok(TableImportResult {
             file_path: path.display().to_string(),
             rows_imported,
-            batches: u64::from(rows_imported > 0),
+            batches,
         })
     }
     .await;
@@ -2496,7 +5311,8 @@ pub async fn mutate_table_rows(
     deletes: Vec<TableRowDelete>,
 ) -> Result<Response<TableMutationResult>, String> {
     let result: Result<TableMutationResult, String> = async {
-        let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+        let kind =
+            table_data_dialect_for_connection(&manager, &connection_id, &driver, true).await?;
         let database = database.as_deref();
         ensure_target_relation_operation_allowed(
             &manager,
@@ -2566,8 +5382,13 @@ pub async fn create_table(
     columns: Vec<CreateTableColumn>,
 ) -> Result<Response<CreateTableResult>, String> {
     let result: Result<CreateTableResult, String> = async {
-        let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
-        let statements = build_create_table_statements(kind, &schema, &table, &columns)?;
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "creation").await?;
+        let statements = if is_sqlite_driver(&driver) {
+            build_sqlite_create_table_statements(&schema, &table, &columns)?
+        } else {
+            let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+            build_create_table_statements(kind, &schema, &table, &columns)?
+        };
 
         for statement in &statements {
             manager
@@ -2600,14 +5421,24 @@ pub async fn create_view(
     replace: Option<bool>,
 ) -> Result<Response<CreateViewResult>, String> {
     let result: Result<CreateViewResult, String> = async {
-        let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
-        let statement = build_create_view_statement(
-            kind,
-            &schema,
-            &view,
-            &select_sql,
-            replace.unwrap_or(false),
-        )?;
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "view creation").await?;
+        let statement = if is_sqlite_driver(&driver) {
+            build_sqlite_create_view_statement(
+                &schema,
+                &view,
+                &select_sql,
+                replace.unwrap_or(false),
+            )?
+        } else {
+            let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+            build_create_view_statement(
+                kind,
+                &schema,
+                &view,
+                &select_sql,
+                replace.unwrap_or(false),
+            )?
+        };
 
         manager
             .query(&connection_id, &statement, None, None, None)
@@ -2638,6 +5469,8 @@ pub async fn create_materialized_view(
     with_data: Option<bool>,
 ) -> Result<Response<CreateMaterializedViewResult>, String> {
     let result: Result<CreateMaterializedViewResult, String> = async {
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "materialized-view creation")
+            .await?;
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         let statement = build_create_materialized_view_statement(
             kind,
@@ -2675,7 +5508,7 @@ pub async fn add_table_column(
     column: CreateTableColumn,
 ) -> Result<Response<TableColumnChangeResult>, String> {
     let result: Result<TableColumnChangeResult, String> = async {
-        let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "column creation").await?;
         ensure_resolved_relation_operation_allowed(
             &manager,
             &connection_id,
@@ -2684,7 +5517,12 @@ pub async fn add_table_column(
             RelationOperation::ColumnChange,
         )
         .await?;
-        let statements = build_add_table_column_statements(kind, &schema, &table, &column)?;
+        let statements = if is_sqlite_driver(&driver) {
+            build_sqlite_add_column_statements(&schema, &table, &column)?
+        } else {
+            let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+            build_add_table_column_statements(kind, &schema, &table, &column)?
+        };
 
         for statement in &statements {
             manager
@@ -2718,7 +5556,7 @@ pub async fn drop_table_column(
     cascade: Option<bool>,
 ) -> Result<Response<TableColumnChangeResult>, String> {
     let result: Result<TableColumnChangeResult, String> = async {
-        let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "column deletion").await?;
         ensure_resolved_relation_operation_allowed(
             &manager,
             &connection_id,
@@ -2728,7 +5566,15 @@ pub async fn drop_table_column(
         )
         .await?;
         let cascade = cascade.unwrap_or(false);
-        let statement = build_drop_table_column_statement(kind, &schema, &table, &column, cascade)?;
+        if is_sqlite_driver(&driver) && cascade {
+            return Err("SQLite does not support CASCADE when dropping a column".to_string());
+        }
+        let statement = if is_sqlite_driver(&driver) {
+            build_sqlite_drop_column_statement(&schema, &table, &column)?
+        } else {
+            let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+            build_drop_table_column_statement(kind, &schema, &table, &column, cascade)?
+        };
 
         manager
             .query(&connection_id, &statement, None, None, None)
@@ -2760,7 +5606,7 @@ pub async fn rename_table_column(
     new_name: String,
 ) -> Result<Response<TableColumnChangeResult>, String> {
     let result: Result<TableColumnChangeResult, String> = async {
-        let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "column rename").await?;
         ensure_resolved_relation_operation_allowed(
             &manager,
             &connection_id,
@@ -2774,14 +5620,25 @@ pub async fn rename_table_column(
             .await
             .map(column_lookup)
             .map_err(|e| e.to_string())?;
-        let statement = build_rename_table_column_statement(
-            kind,
-            &schema,
-            &table,
-            &old_name,
-            &new_name,
-            &existing_columns,
-        )?;
+        let statement = if is_sqlite_driver(&driver) {
+            build_sqlite_rename_column_statement(
+                &schema,
+                &table,
+                &old_name,
+                &new_name,
+                &existing_columns,
+            )?
+        } else {
+            let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+            build_rename_table_column_statement(
+                kind,
+                &schema,
+                &table,
+                &old_name,
+                &new_name,
+                &existing_columns,
+            )?
+        };
 
         manager
             .query(&connection_id, &statement, None, None, None)
@@ -2812,6 +5669,7 @@ pub async fn alter_table_column(
     changes: AlterTableColumn,
 ) -> Result<Response<TableColumnChangeResult>, String> {
     let result: Result<TableColumnChangeResult, String> = async {
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "column alteration").await?;
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         ensure_resolved_relation_operation_allowed(
             &manager,
@@ -2868,7 +5726,7 @@ pub async fn create_table_index(
     unique: Option<bool>,
 ) -> Result<Response<TableIndexChangeResult>, String> {
     let result: Result<TableIndexChangeResult, String> = async {
-        let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "index creation").await?;
         ensure_resolved_relation_operation_allowed(
             &manager,
             &connection_id,
@@ -2882,15 +5740,27 @@ pub async fn create_table_index(
             .await
             .map(column_lookup)
             .map_err(|e| e.to_string())?;
-        let statement = build_create_table_index_statement(
-            kind,
-            &schema,
-            &table,
-            &index,
-            &columns,
-            &existing_columns,
-            unique.unwrap_or(false),
-        )?;
+        let statement = if is_sqlite_driver(&driver) {
+            build_sqlite_create_index_statement(
+                &schema,
+                &table,
+                &index,
+                &columns,
+                &existing_columns,
+                unique.unwrap_or(false),
+            )?
+        } else {
+            let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+            build_create_table_index_statement(
+                kind,
+                &schema,
+                &table,
+                &index,
+                &columns,
+                &existing_columns,
+                unique.unwrap_or(false),
+            )?
+        };
 
         manager
             .query(&connection_id, &statement, None, None, None)
@@ -2921,7 +5791,7 @@ pub async fn drop_table_index(
     index: String,
 ) -> Result<Response<TableIndexChangeResult>, String> {
     let result: Result<TableIndexChangeResult, String> = async {
-        let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "index deletion").await?;
         ensure_resolved_relation_operation_allowed(
             &manager,
             &connection_id,
@@ -2930,7 +5800,12 @@ pub async fn drop_table_index(
             RelationOperation::IndexChange,
         )
         .await?;
-        let statement = build_drop_table_index_statement(kind, &schema, &table, &index)?;
+        let statement = if is_sqlite_driver(&driver) {
+            build_sqlite_drop_index_statement(&schema, &table, &index)?
+        } else {
+            let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+            build_drop_table_index_statement(kind, &schema, &table, &index)?
+        };
 
         manager
             .query(&connection_id, &statement, None, None, None)
@@ -2962,6 +5837,7 @@ pub async fn rename_table_index(
     new_name: String,
 ) -> Result<Response<TableIndexChangeResult>, String> {
     let result: Result<TableIndexChangeResult, String> = async {
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "index rename").await?;
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         ensure_resolved_relation_operation_allowed(
             &manager,
@@ -3009,6 +5885,8 @@ pub async fn create_table_unique_constraint(
     columns: Vec<String>,
 ) -> Result<Response<TableConstraintChangeResult>, String> {
     let result: Result<TableConstraintChangeResult, String> = async {
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "unique-constraint creation")
+            .await?;
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         ensure_resolved_relation_operation_allowed(
             &manager,
@@ -3065,6 +5943,7 @@ pub async fn create_table_primary_key(
     columns: Vec<String>,
 ) -> Result<Response<TableConstraintChangeResult>, String> {
     let result: Result<TableConstraintChangeResult, String> = async {
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "primary-key creation").await?;
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         ensure_resolved_relation_operation_allowed(
             &manager,
@@ -3118,6 +5997,8 @@ pub async fn create_table_check_constraint(
     expression: String,
 ) -> Result<Response<TableConstraintChangeResult>, String> {
     let result: Result<TableConstraintChangeResult, String> = async {
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "check-constraint creation")
+            .await?;
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         ensure_resolved_relation_operation_allowed(
             &manager,
@@ -3171,6 +6052,7 @@ pub async fn create_table_foreign_key(
     on_update: Option<String>,
 ) -> Result<Response<TableConstraintChangeResult>, String> {
     let result: Result<TableConstraintChangeResult, String> = async {
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "foreign-key creation").await?;
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         ensure_resolved_relation_operation_allowed(
             &manager,
@@ -3245,6 +6127,7 @@ pub async fn drop_table_constraint(
     constraint: String,
 ) -> Result<Response<TableConstraintChangeResult>, String> {
     let result: Result<TableConstraintChangeResult, String> = async {
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "constraint deletion").await?;
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         ensure_resolved_relation_operation_allowed(
             &manager,
@@ -3298,7 +6181,7 @@ pub async fn truncate_table(
     table: String,
 ) -> Result<Response<String>, String> {
     let result: Result<String, String> = async {
-        let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "truncation").await?;
         ensure_resolved_relation_operation_allowed(
             &manager,
             &connection_id,
@@ -3307,7 +6190,15 @@ pub async fn truncate_table(
             RelationOperation::Truncate,
         )
         .await?;
-        let sql = kind.truncate_table_query(schema_option(&schema), &table);
+        let sql = if is_sqlite_driver(&driver) {
+            format!(
+                "DELETE FROM {};",
+                sqlite_qualified_relation(&schema, &table)?
+            )
+        } else {
+            let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+            kind.truncate_table_query(schema_option(&schema), &table)
+        };
         manager
             .query(&connection_id, &sql, None, None, None)
             .await
@@ -3333,25 +6224,40 @@ pub async fn drop_table(
     object_type: Option<String>,
 ) -> Result<Response<String>, String> {
     let result: Result<String, String> = async {
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "deletion").await?;
         let table_name = table.trim();
         if table_name.is_empty() {
             return Err("Table name is required".to_string());
         }
 
-        let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         let object_type =
             resolve_object_type(&manager, &connection_id, &schema, table_name, object_type).await?;
         let is_view = object_type_is_view(object_type.as_deref());
         let is_materialized_view = object_type_is_materialized_view(object_type.as_deref());
         let is_foreign_table = object_type_is_foreign_table(object_type.as_deref());
-        let sql = kind.drop_relation_query_with_kind(
-            schema_option(&schema),
-            table_name,
-            is_view,
-            is_materialized_view,
-            is_foreign_table,
-            cascade.unwrap_or(false),
-        );
+        let sql = if is_sqlite_driver(&driver) {
+            if cascade.unwrap_or(false) {
+                return Err("SQLite does not support CASCADE when dropping a relation".to_string());
+            }
+            if is_materialized_view || is_foreign_table {
+                return Err("SQLite does not support this relation type".to_string());
+            }
+            let relation_kind = if is_view { "VIEW" } else { "TABLE" };
+            format!(
+                "DROP {relation_kind} {};",
+                sqlite_qualified_relation(&schema, table_name)?,
+            )
+        } else {
+            let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+            kind.drop_relation_query_with_kind(
+                schema_option(&schema),
+                table_name,
+                is_view,
+                is_materialized_view,
+                is_foreign_table,
+                cascade.unwrap_or(false),
+            )
+        };
         manager
             .query(&connection_id, &sql, None, None, None)
             .await
@@ -3378,7 +6284,7 @@ pub async fn rename_table(
     object_type: Option<String>,
 ) -> Result<Response<String>, String> {
     let result: Result<String, String> = async {
-        let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "rename").await?;
         let old_name = old_name.trim();
         let new_name = new_name.trim();
         if old_name.is_empty() || new_name.is_empty() {
@@ -3390,14 +6296,26 @@ pub async fn rename_table(
         let is_view = object_type_is_view(object_type.as_deref());
         let is_materialized_view = object_type_is_materialized_view(object_type.as_deref());
         let is_foreign_table = object_type_is_foreign_table(object_type.as_deref());
-        let sql = kind.rename_relation_query_with_kind(
-            schema_option(&schema),
-            old_name,
-            new_name,
-            is_view,
-            is_materialized_view,
-            is_foreign_table,
-        );
+        let sql = if is_sqlite_driver(&driver) {
+            if is_view || is_materialized_view || is_foreign_table {
+                return Err("SQLite only supports renaming tables through this action".to_string());
+            }
+            format!(
+                "ALTER TABLE {} RENAME TO {};",
+                sqlite_qualified_relation(&schema, old_name)?,
+                sqlite_quote_identifier(new_name),
+            )
+        } else {
+            let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+            kind.rename_relation_query_with_kind(
+                schema_option(&schema),
+                old_name,
+                new_name,
+                is_view,
+                is_materialized_view,
+                is_foreign_table,
+            )
+        };
         manager
             .query(&connection_id, &sql, None, None, None)
             .await
@@ -3429,7 +6347,11 @@ pub async fn get_view_definition(
         "view": view,
     });
     let result: Result<String, String> = async {
-        let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+        // The native view-definition query is vendor-specific catalog SQL.
+        // External packages must expose definition metadata through a future
+        // semantic protocol instead of inheriting this route from an alias.
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "view definition introspection")
+            .await?;
         let view_name = view.trim();
         if view_name.is_empty() {
             return Err("View name is required".to_string());
@@ -3441,7 +6363,20 @@ pub async fn get_view_definition(
             return Err(format!("{view_name} is not a view"));
         }
 
-        let sql = view_definition_query(kind, &schema, view_name);
+        let sql = if is_sqlite_driver(&driver) {
+            let catalog = if schema.trim().is_empty() {
+                "sqlite_master".to_string()
+            } else {
+                format!("{}.sqlite_master", sqlite_quote_identifier(&schema))
+            };
+            format!(
+                "SELECT sql AS definition FROM {catalog} WHERE type = 'view' AND name = {};",
+                sql_string_literal(view_name),
+            )
+        } else {
+            let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
+            view_definition_query(kind, &schema, view_name)
+        };
         let results = manager
             .query(&connection_id, &sql, None, None, None)
             .await
@@ -3518,6 +6453,8 @@ pub async fn refresh_materialized_view(
     concurrently: Option<bool>,
 ) -> Result<Response<String>, String> {
     let result: Result<String, String> = async {
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "materialized-view refresh")
+            .await?;
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         let view_name = view.trim();
         if view_name.is_empty() {
@@ -3577,6 +6514,12 @@ pub async fn get_table_ddl(
                 .await
                 .map_err(|error| error.to_string());
         }
+        // This command falls back to Host-generated SHOW CREATE and
+        // reconstruction queries. An external package can deliberately reuse
+        // a built-in driver id while having different catalog or DDL grammar,
+        // so do not mistake its metadata capability for a reviewed table
+        // definition protocol.
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "definition introspection").await?;
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
         let table_name = table.trim();
         if table_name.is_empty() {
@@ -3707,24 +6650,42 @@ pub async fn get_table_ddl(
 #[cfg(test)]
 mod tests {
     use super::{
+        apply_transfer_conversion, bounded_table_data_transfer_message,
         build_add_table_column_statements, build_alter_table_column_statements,
         build_create_check_constraint_statement, build_create_foreign_key_statement,
         build_create_materialized_view_statement, build_create_primary_key_statement,
         build_create_table_index_statement, build_create_table_statements,
         build_create_unique_constraint_statement, build_create_view_statement,
-        build_drop_table_column_statement, build_drop_table_constraint_statement,
-        build_drop_table_index_statement, build_insert_mutation,
-        build_rename_table_column_statement, build_rename_table_index_statement,
+        build_data_transfer_column_mapping, build_drop_table_column_statement,
+        build_drop_table_constraint_statement, build_drop_table_index_statement,
+        build_insert_mutation, build_rename_table_column_statement,
+        build_rename_table_index_statement, build_sqlite_add_column_statements,
+        build_sqlite_create_index_statement, build_sqlite_create_table_statements,
+        build_sqlite_drop_column_statement, build_sqlite_drop_index_statement,
         build_structured_filter_where, build_table_order_by, build_update_mutation,
-        canonical_import_columns, column_lookup, csv_escape, execute_target_parameterized_batch,
-        generate_postgres_materialized_view_ddl, generate_postgres_table_ddl,
-        generate_postgres_view_ddl, get_target_columns, object_label_from_type,
-        object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
-        postgres_view_definition_query, preview_metadata_required, query_target,
-        query_target_parameterized, relation_operation_allowed, sanitize_file_part,
-        sql_insert_statement, summarize_mutation_affected, validated_raw_filter_sql, value_to_u64,
-        view_definition_query, AlterColumnValueMode, AlterTableColumn, CreateTableColumn,
-        RelationOperation, TableFilter, TableRowUpdate, TableSort,
+        canonical_import_columns, column_lookup, csv_delimiter, csv_escape, csv_record_values,
+        delete_table_data_transfer_target_for_overwrite, ensure_host_table_ddl_capability,
+        ensure_transfer_endpoint_driver_matches_connection, execute_target_parameterized_batch,
+        finish_table_data_transfer_transaction, generate_postgres_materialized_view_ddl,
+        generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
+        is_json_lines_path, object_label_from_type, object_type_is_foreign_table,
+        object_type_is_materialized_view, object_type_is_view, postgres_view_definition_query,
+        preview_metadata_required, query_target, query_target_parameterized,
+        read_csv_import_preview, read_json_import_preview, relation_operation_allowed,
+        resolve_csv_import_columns, reviewed_table_data_dialect, sanitize_file_part,
+        sql_insert_statement, summarize_mutation_affected, table_data_dialect,
+        table_data_transfer_dialect, transfer_confirmation_token, transfer_plan_can_execute,
+        transfer_target_column_type, transfer_target_confirmation_token,
+        transfer_type_mapping_assessment, transfer_type_mapping_warnings,
+        validate_table_data_transfer_id, validate_table_data_transfer_overwrite_rows,
+        validate_xlsx_headers, validated_raw_filter_sql, value_to_u64, view_definition_query,
+        xlsx_cell_value, AlterColumnValueMode, AlterTableColumn, CreateTableColumn,
+        RelationOperation, TableCsvColumnMapping, TableCsvImportOptions,
+        TableDataTransferCancellationState, TableDataTransferColumnMapping,
+        TableDataTransferCompatibility, TableDataTransferConversion, TableDataTransferEndpoint,
+        TableDataTransferMode, TableDataTransferRequest, TableDataTransferTargetColumn,
+        TableDataTransferTargetPlanRequest, TableFilter, TableRowUpdate, TableSort,
+        MAX_JSON_IMPORT_PREVIEW_ROWS, MAX_TRANSFER_OVERWRITE_ROWS,
     };
     use crate::core::{
         dialect::DatabaseKind,
@@ -3737,10 +6698,150 @@ mod tests {
     };
     use anyhow::Result;
     use async_trait::async_trait;
-    use serde_json::json;
-    use std::collections::BTreeMap;
+    use calamine::Data;
+    use serde_json::{json, Value};
+    use std::{
+        collections::BTreeMap,
+        fs,
+        path::Path,
+        sync::{Arc, Mutex},
+    };
 
     struct PreviewTargetDriver;
+
+    struct RestrictedExternalPostgresDriver;
+
+    struct TransferTransactionDriver {
+        events: Arc<Mutex<Vec<String>>>,
+        delete_rows: u64,
+    }
+
+    #[test]
+    fn transfer_target_types_use_conservative_target_dialect_representations() {
+        assert_eq!(
+            transfer_target_column_type("uuid", "postgres"),
+            (
+                "UUID".to_string(),
+                None,
+                "The source type is directly supported by the target dialect.".to_string(),
+            )
+        );
+        assert_eq!(transfer_target_column_type("uuid", "mysql").0, "VARCHAR");
+        assert_eq!(
+            transfer_target_column_type("uuid", "mysql").1.as_deref(),
+            Some("36")
+        );
+        assert_eq!(transfer_target_column_type("bytea", "postgres").0, "BYTEA");
+        assert_eq!(
+            transfer_target_column_type("decimal(18,2)", "sqlite").0,
+            "NUMERIC"
+        );
+        assert_eq!(
+            transfer_target_column_type("bigint unsigned", "mysql")
+                .1
+                .as_deref(),
+            Some("20,0")
+        );
+        assert_eq!(
+            transfer_target_column_type("double precision", "postgres").0,
+            "DOUBLE PRECISION"
+        );
+        assert_eq!(
+            transfer_target_column_type("vendor_geography", "mysql").0,
+            "TEXT"
+        );
+    }
+
+    #[test]
+    fn transfer_target_confirmation_is_bound_to_the_generated_ddl() {
+        let request = TableDataTransferTargetPlanRequest {
+            source: TableDataTransferEndpoint {
+                connection_id: "source".to_string(),
+                driver: "postgres".to_string(),
+                schema: "public".to_string(),
+                table: "events".to_string(),
+                database: None,
+            },
+            target: TableDataTransferEndpoint {
+                connection_id: "target".to_string(),
+                driver: "mysql".to_string(),
+                schema: "app".to_string(),
+                table: "events_copy".to_string(),
+                database: None,
+            },
+        };
+        let columns = vec![TableDataTransferTargetColumn {
+            name: "id".to_string(),
+            source_data_type: "uuid".to_string(),
+            target_data_type: "VARCHAR".to_string(),
+            target_length: Some("36".to_string()),
+            is_primary_key: true,
+            is_not_null: true,
+            reason: "mapped".to_string(),
+        }];
+        let first = transfer_target_confirmation_token(
+            &request,
+            &columns,
+            &["CREATE TABLE events_copy (id VARCHAR(36));".to_string()],
+        )
+        .unwrap();
+        let changed = transfer_target_confirmation_token(
+            &request,
+            &columns,
+            &["CREATE TABLE events_copy (id TEXT);".to_string()],
+        )
+        .unwrap();
+        assert!(first.starts_with("CREATE "));
+        assert_ne!(first, changed);
+    }
+
+    #[async_trait]
+    impl DatabaseDriver for TransferTransactionDriver {
+        async fn connect(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn disconnect(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn ping(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn query(&self, _sql: &str) -> Result<Vec<QueryResult>> {
+            Ok(Vec::new())
+        }
+
+        async fn execute_parameterized_transaction(
+            &self,
+            session_id: &str,
+            statements: &[ParameterizedStatement],
+        ) -> Result<Vec<u64>> {
+            self.events.lock().expect("transfer event mutex").extend(
+                statements
+                    .iter()
+                    .map(|statement| format!("execute:{session_id}:{}", statement.sql)),
+            );
+            Ok(vec![self.delete_rows; statements.len()])
+        }
+
+        async fn commit_transaction(&self, session_id: &str) -> Result<()> {
+            self.events
+                .lock()
+                .expect("transfer event mutex")
+                .push(format!("commit:{session_id}"));
+            Ok(())
+        }
+
+        async fn rollback_transaction(&self, session_id: &str) -> Result<()> {
+            self.events
+                .lock()
+                .expect("transfer event mutex")
+                .push(format!("rollback:{session_id}"));
+            Ok(())
+        }
+    }
 
     #[test]
     fn exports_replayable_sql_insert_statements() {
@@ -3778,6 +6879,528 @@ mod tests {
             vec!["user_id".to_string(), "DisplayName".to_string()]
         );
         assert!(canonical_import_columns(&["missing".to_string()], &columns).is_err());
+    }
+
+    #[test]
+    fn csv_plan_mapping_and_empty_values_match_the_reviewed_contract() {
+        let columns = column_lookup(vec![target_column("id"), target_column("display_name")]);
+        let source = vec![
+            "legacy_id".to_string(),
+            "name".to_string(),
+            "ignored".to_string(),
+        ];
+        let options = TableCsvImportOptions {
+            delimiter: Some(";".to_string()),
+            first_row_header: Some(true),
+            column_mapping: vec![
+                TableCsvColumnMapping {
+                    source_index: 0,
+                    target_column: Some("ID".to_string()),
+                },
+                TableCsvColumnMapping {
+                    source_index: 1,
+                    target_column: Some("display_name".to_string()),
+                },
+                TableCsvColumnMapping {
+                    source_index: 2,
+                    target_column: None,
+                },
+            ],
+            empty_fields_as_null: Some(true),
+        };
+        let resolved = resolve_csv_import_columns(&source, &columns, Some(&options)).unwrap();
+        assert_eq!(
+            resolved,
+            vec![
+                Some("id".to_string()),
+                Some("display_name".to_string()),
+                None
+            ]
+        );
+        assert_eq!(csv_delimiter(Some(&options)).unwrap(), b';');
+        let record = csv::StringRecord::from(vec!["7", "", "discard"]);
+        let values = csv_record_values(&resolved, &record, true).unwrap();
+        assert_eq!(values.get("id"), Some(&Value::String("7".to_string())));
+        assert_eq!(values.get("display_name"), Some(&Value::Null));
+        assert!(!values.contains_key("ignored"));
+    }
+
+    #[test]
+    fn native_csv_preview_is_read_only_and_bounded_to_the_review_payload() {
+        let path =
+            std::env::temp_dir().join(format!("oxide-csv-preview-{}.csv", uuid::Uuid::new_v4()));
+        fs::write(&path, b"email\nreader@example.test\n").unwrap();
+
+        let preview = read_csv_import_preview(&path).unwrap();
+        assert_eq!(
+            preview.file_name,
+            path.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(preview.bytes, b"email\nreader@example.test\n");
+        assert_eq!(preview.total_bytes, preview.bytes.len() as u64);
+        assert!(!preview.truncated);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn json_import_preview_is_structured_bounded_and_does_not_write() {
+        let path =
+            std::env::temp_dir().join(format!("oxide-json-preview-{}.json", uuid::Uuid::new_v4()));
+        fs::write(
+            &path,
+            r#"[{"id":1,"name":"first"},{"id":2,"name":"second","active":true}]"#,
+        )
+        .unwrap();
+
+        let preview = read_json_import_preview(&path).unwrap();
+        assert_eq!(preview.total_rows, Some(2));
+        assert_eq!(preview.source_columns, vec!["active", "id", "name"]);
+        assert_eq!(preview.sample_rows.len(), 2);
+        assert_eq!(preview.sample_rows[0].get("name"), Some(&json!("first")));
+        assert!(!preview.truncated);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            r#"[{"id":1,"name":"first"},{"id":2,"name":"second","active":true}]"#
+        );
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn json_lines_preview_only_reads_a_bounded_leading_sample() {
+        let path = std::env::temp_dir().join(format!(
+            "oxide-json-lines-preview-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let source = (0..=MAX_JSON_IMPORT_PREVIEW_ROWS)
+            .map(|index| format!(r#"{{"id":{index}}}"#))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&path, source).unwrap();
+
+        let preview = read_json_import_preview(&path).unwrap();
+        assert_eq!(preview.total_rows, None);
+        assert_eq!(preview.sample_rows.len(), MAX_JSON_IMPORT_PREVIEW_ROWS);
+        assert!(preview.truncated);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn xlsx_cells_keep_scalar_types_before_driver_coercion() {
+        assert_eq!(xlsx_cell_value(&Data::Int(7)), json!(7));
+        assert_eq!(xlsx_cell_value(&Data::Float(1.5)), json!(1.5));
+        assert_eq!(xlsx_cell_value(&Data::Bool(true)), json!(true));
+        assert_eq!(
+            xlsx_cell_value(&Data::String("reader@example.test".to_string())),
+            json!("reader@example.test")
+        );
+        assert_eq!(xlsx_cell_value(&Data::Empty), Value::Null);
+    }
+
+    #[test]
+    fn xlsx_headers_reject_empty_and_case_insensitive_duplicates() {
+        assert!(validate_xlsx_headers(&["id".to_string(), "email".to_string()]).is_ok());
+        assert!(validate_xlsx_headers(&["id".to_string(), " ID ".to_string()]).is_err());
+        assert!(validate_xlsx_headers(&["".to_string()]).is_err());
+    }
+
+    #[test]
+    fn csv_plan_rejects_unsafe_mapping_shapes() {
+        let columns = column_lookup(vec![target_column("id")]);
+        let source = vec!["source".to_string()];
+        let duplicate = TableCsvImportOptions {
+            delimiter: None,
+            first_row_header: None,
+            column_mapping: vec![
+                TableCsvColumnMapping {
+                    source_index: 0,
+                    target_column: Some("id".to_string()),
+                },
+                TableCsvColumnMapping {
+                    source_index: 0,
+                    target_column: None,
+                },
+            ],
+            empty_fields_as_null: None,
+        };
+        assert!(resolve_csv_import_columns(&source, &columns, Some(&duplicate)).is_err());
+        assert!(csv_delimiter(Some(&TableCsvImportOptions {
+            delimiter: Some("::".to_string()),
+            ..Default::default()
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn recognizes_only_line_delimited_json_for_streaming_imports() {
+        assert!(is_json_lines_path(Path::new("events.jsonl")));
+        assert!(is_json_lines_path(Path::new("events.NDJSON")));
+        assert!(!is_json_lines_path(Path::new("events.json")));
+        assert!(!is_json_lines_path(Path::new("events.csv")));
+    }
+
+    #[test]
+    fn data_transfer_mapping_is_case_insensitive_and_rejects_missing_required_columns() {
+        let source = vec![
+            target_column("id"),
+            target_column("display_name"),
+            target_column("legacy"),
+        ];
+        let mut required = target_column("email");
+        required.is_nullable = false;
+        let target = vec![target_column("ID"), target_column("display_name"), required];
+
+        let error = build_data_transfer_column_mapping(&source, &target).unwrap_err();
+        assert!(error.contains("email"));
+
+        let mut source_with_email = source.clone();
+        source_with_email.push(target_column("EMAIL"));
+        let (mappings, skipped) =
+            build_data_transfer_column_mapping(&source_with_email, &target).unwrap();
+        assert_eq!(
+            mappings
+                .iter()
+                .map(|mapping| (mapping.source.as_str(), mapping.target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("id", "ID"),
+                ("display_name", "display_name"),
+                ("EMAIL", "email")
+            ]
+        );
+        assert_eq!(skipped, vec!["legacy"]);
+    }
+
+    #[test]
+    fn data_transfer_surfaces_type_conversion_review_before_confirmation() {
+        let mapping = |source: &str, target: &str, source_type: &str, target_type: &str| {
+            let (compatibility, conversion, reason) =
+                transfer_type_mapping_assessment(source_type, target_type);
+            TableDataTransferColumnMapping {
+                source: source.to_string(),
+                target: target.to_string(),
+                data_type: target_type.to_string(),
+                source_data_type: source_type.to_string(),
+                target_data_type: target_type.to_string(),
+                compatibility,
+                conversion,
+                reason,
+            }
+        };
+        let mappings = [
+            mapping("id", "id", "bigint", "uuid"),
+            mapping("amount", "amount", "integer", "decimal(18,2)"),
+            mapping("ratio", "ratio", "numeric", "integer"),
+        ];
+        let warnings = transfer_type_mapping_warnings(&mappings);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].contains("Blocked mapping: id (bigint) → id (uuid)"));
+        assert!(warnings[1].contains("Numeric-to-integer conversion"));
+        assert!(!transfer_plan_can_execute(&mappings));
+    }
+
+    #[test]
+    fn data_transfer_type_plan_serializes_json_and_blocks_unreviewed_pairs() {
+        let (compatibility, conversion, _) = transfer_type_mapping_assessment("jsonb", "text");
+        assert_eq!(compatibility, TableDataTransferCompatibility::Safe);
+        assert_eq!(conversion, TableDataTransferConversion::StringifyJson);
+        let mapping = TableDataTransferColumnMapping {
+            source: "payload".to_string(),
+            target: "payload_text".to_string(),
+            data_type: "text".to_string(),
+            source_data_type: "jsonb".to_string(),
+            target_data_type: "text".to_string(),
+            compatibility,
+            conversion,
+            reason: "JSON to text".to_string(),
+        };
+        assert_eq!(
+            apply_transfer_conversion(&mapping, &serde_json::json!({"id": 7})).unwrap(),
+            serde_json::Value::String("{\"id\":7}".to_string())
+        );
+
+        let (compatibility, conversion, reason) =
+            transfer_type_mapping_assessment("bytea", "timestamp");
+        assert_eq!(compatibility, TableDataTransferCompatibility::Unsupported);
+        let blocked = TableDataTransferColumnMapping {
+            source: "id".to_string(),
+            target: "id".to_string(),
+            data_type: "timestamp".to_string(),
+            source_data_type: "bytea".to_string(),
+            target_data_type: "timestamp".to_string(),
+            compatibility,
+            conversion,
+            reason,
+        };
+        assert!(apply_transfer_conversion(&blocked, &serde_json::json!("00FF")).is_err());
+    }
+
+    #[test]
+    fn data_transfer_confirmation_binds_endpoints_and_column_plan() {
+        let request = TableDataTransferRequest {
+            transfer_id: "transfer-test-0001".to_string(),
+            source: TableDataTransferEndpoint {
+                connection_id: "source".to_string(),
+                driver: "postgres".to_string(),
+                schema: "public".to_string(),
+                table: "users".to_string(),
+                database: None,
+            },
+            target: TableDataTransferEndpoint {
+                connection_id: "target".to_string(),
+                driver: "mysql".to_string(),
+                schema: "app".to_string(),
+                table: "users_copy".to_string(),
+                database: None,
+            },
+            mode: TableDataTransferMode::Append,
+            max_rows: Some(500),
+            batch_size: Some(100),
+        };
+        let mappings =
+            build_data_transfer_column_mapping(&[target_column("id")], &[target_column("id")])
+                .unwrap()
+                .0;
+        let token = transfer_confirmation_token(&request, &mappings, 500, 100, None).unwrap();
+        assert!(token.starts_with("TRANSFER "));
+
+        let mut changed = request.clone();
+        changed.target.table = "other_users".to_string();
+        assert_ne!(
+            token,
+            transfer_confirmation_token(&changed, &mappings, 500, 100, None).unwrap()
+        );
+        changed = request.clone();
+        changed.transfer_id = "transfer-test-0002".to_string();
+        assert_ne!(
+            token,
+            transfer_confirmation_token(&changed, &mappings, 500, 100, None).unwrap()
+        );
+        changed = request.clone();
+        changed.mode = TableDataTransferMode::Overwrite;
+        assert_ne!(
+            token,
+            transfer_confirmation_token(&changed, &mappings, 500, 100, Some(12)).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn data_transfer_cancellation_registry_rejects_replay_until_execution_releases_id() {
+        let cancellation = TableDataTransferCancellationState::default();
+        let mut receiver = cancellation
+            .register("transfer-test-0001", "source")
+            .await
+            .unwrap();
+        assert!(cancellation
+            .register("transfer-test-0001", "source")
+            .await
+            .is_err());
+
+        let handle = cancellation
+            .request_cancel("transfer-test-0001")
+            .await
+            .unwrap();
+        handle.sender.send(true).unwrap();
+        receiver.changed().await.unwrap();
+        assert!(*receiver.borrow());
+        assert!(cancellation
+            .request_cancel("transfer-test-0001")
+            .await
+            .is_some());
+
+        cancellation.take("transfer-test-0001").await;
+        assert!(cancellation
+            .register("transfer-test-0001", "source")
+            .await
+            .is_ok());
+    }
+
+    #[test]
+    fn data_transfer_ids_are_bounded_and_safe_for_driver_query_tracking() {
+        assert!(validate_table_data_transfer_id("transfer-12345678").is_ok());
+        assert!(validate_table_data_transfer_id("short").is_err());
+        assert!(validate_table_data_transfer_id("transfer/escape").is_err());
+        assert!(validate_table_data_transfer_id(&"x".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn data_transfer_overwrite_row_count_is_hard_bounded() {
+        assert_eq!(
+            validate_table_data_transfer_overwrite_rows(MAX_TRANSFER_OVERWRITE_ROWS).unwrap(),
+            MAX_TRANSFER_OVERWRITE_ROWS
+        );
+        assert!(
+            validate_table_data_transfer_overwrite_rows(MAX_TRANSFER_OVERWRITE_ROWS + 1)
+                .unwrap_err()
+                .contains("Overwrite is limited")
+        );
+    }
+
+    #[test]
+    fn data_transfer_progress_errors_are_bounded_before_emission() {
+        let message = bounded_table_data_transfer_message(&"值".repeat(2_000));
+        assert_eq!(message.chars().count(), 1_025);
+        assert!(message.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn data_transfer_overwrite_uses_transactional_delete_and_rechecks_reviewed_count() {
+        let manager = ConnectionManager::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        manager
+            .add_connection(
+                "target".to_string(),
+                Box::new(TransferTransactionDriver {
+                    events: Arc::clone(&events),
+                    delete_rows: 12,
+                }),
+            )
+            .await;
+        let endpoint = TableDataTransferEndpoint {
+            connection_id: "target".to_string(),
+            driver: "mysql".to_string(),
+            schema: "app".to_string(),
+            table: "users".to_string(),
+            database: None,
+        };
+
+        delete_table_data_transfer_target_for_overwrite(
+            &manager,
+            &endpoint,
+            DatabaseKind::Mysql,
+            "transfer-overwrite",
+            12,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            events.lock().expect("transfer event mutex").as_slice(),
+            ["execute:transfer-overwrite:DELETE FROM `app`.`users`"]
+        );
+
+        let error = delete_table_data_transfer_target_for_overwrite(
+            &manager,
+            &endpoint,
+            DatabaseKind::Mysql,
+            "transfer-overwrite",
+            11,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("changed after preview"));
+        assert!(error.contains("expected to delete 11"));
+    }
+
+    #[tokio::test]
+    async fn data_transfer_commits_only_after_a_successful_complete_plan() {
+        let manager = ConnectionManager::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        manager
+            .add_connection(
+                "target".to_string(),
+                Box::new(TransferTransactionDriver {
+                    events: Arc::clone(&events),
+                    delete_rows: 0,
+                }),
+            )
+            .await;
+
+        let summary = finish_table_data_transfer_transaction(
+            &manager,
+            "target",
+            "transfer-1",
+            Ok((42, 3, false)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary, (42, 3, false));
+        assert_eq!(
+            events.lock().expect("transfer event mutex").as_slice(),
+            ["commit:transfer-1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn data_transfer_rolls_back_without_committing_after_any_batch_failure() {
+        let manager = ConnectionManager::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        manager
+            .add_connection(
+                "target".to_string(),
+                Box::new(TransferTransactionDriver {
+                    events: Arc::clone(&events),
+                    delete_rows: 0,
+                }),
+            )
+            .await;
+
+        let error = finish_table_data_transfer_transaction(
+            &manager,
+            "target",
+            "transfer-2",
+            Err("batch 2 rejected a value".to_string()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("rolled back"));
+        assert!(error.contains("batch 2 rejected a value"));
+        assert_eq!(
+            events.lock().expect("transfer event mutex").as_slice(),
+            ["rollback:transfer-2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn data_transfer_rejects_an_endpoint_driver_that_does_not_match_the_live_connection() {
+        let manager = ConnectionManager::new();
+        manager
+            .replace_connection_with_tunnel_and_driver_id(
+                "source".to_string(),
+                Box::new(PreviewTargetDriver),
+                None,
+                Some("postgres".to_string()),
+            )
+            .await
+            .unwrap();
+        let endpoint = TableDataTransferEndpoint {
+            connection_id: "source".to_string(),
+            driver: "mysql".to_string(),
+            schema: "public".to_string(),
+            table: "events".to_string(),
+            database: None,
+        };
+
+        let error = ensure_transfer_endpoint_driver_matches_connection(&manager, &endpoint)
+            .await
+            .unwrap_err();
+        assert!(error.contains("does not match"));
+    }
+
+    #[tokio::test]
+    async fn data_transfer_does_not_widen_an_external_postgres_package_capability() {
+        let manager = ConnectionManager::new();
+        manager
+            .add_connection(
+                "external-postgres".to_string(),
+                Box::new(RestrictedExternalPostgresDriver),
+            )
+            .await;
+        let endpoint = TableDataTransferEndpoint {
+            connection_id: "external-postgres".to_string(),
+            driver: "postgres".to_string(),
+            schema: "public".to_string(),
+            table: "events".to_string(),
+            database: None,
+        };
+
+        let error = table_data_transfer_dialect(&manager, &endpoint)
+            .await
+            .unwrap_err();
+        assert!(error.contains("reviewed bounded table-data transfer path"));
     }
 
     fn target_column(name: &str) -> ColumnInfo {
@@ -3865,6 +7488,32 @@ mod tests {
             _table: &str,
         ) -> Result<Vec<ColumnInfo>> {
             Ok(vec![target_column(database)])
+        }
+    }
+
+    #[async_trait]
+    impl DatabaseDriver for RestrictedExternalPostgresDriver {
+        fn package_capabilities(&self) -> Option<crate::core::dialect::DatabaseCapabilities> {
+            let mut capabilities = DatabaseKind::Postgres.capabilities();
+            capabilities.display_name = "Restricted PostgreSQL package".to_string();
+            capabilities.supports_table_data_transfer = false;
+            Some(capabilities)
+        }
+
+        async fn connect(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn disconnect(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn ping(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn query(&self, _sql: &str) -> Result<Vec<QueryResult>> {
+            Ok(vec![QueryResult::execution("restricted", 0)])
         }
     }
 
@@ -4198,6 +7847,76 @@ SELECT id FROM users WHERE active;"#
         assert_eq!(sql, "INSERT INTO `app`.`users` (`name`) VALUES (?);");
         assert_eq!(params.len(), 1);
         assert_eq!(params[0].data_type.as_deref(), Some("varchar"));
+    }
+
+    #[test]
+    fn insert_builder_rechecks_required_columns_before_any_batch_is_created() {
+        let columns = column_lookup(vec![
+            ColumnInfo {
+                name: "email".to_string(),
+                data_type: "text".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                is_unique: false,
+                is_indexed: false,
+                default_value: None,
+                is_auto_increment: false,
+                comment: None,
+            },
+            ColumnInfo {
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                is_unique: true,
+                is_indexed: true,
+                default_value: None,
+                is_auto_increment: true,
+                comment: None,
+            },
+            ColumnInfo {
+                name: "status".to_string(),
+                data_type: "text".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                is_unique: false,
+                is_indexed: false,
+                default_value: Some("'pending'".to_string()),
+                is_auto_increment: false,
+                comment: None,
+            },
+        ]);
+
+        let error = build_insert_mutation(
+            DatabaseKind::Postgres,
+            "public",
+            "users",
+            &columns,
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(error.contains("Required column email"));
+
+        let null_email = BTreeMap::from([("email".to_string(), Value::Null)]);
+        let error = build_insert_mutation(
+            DatabaseKind::Postgres,
+            "public",
+            "users",
+            &columns,
+            &null_email,
+        )
+        .unwrap_err();
+        assert!(error.contains("email cannot be NULL"));
+
+        let values = BTreeMap::from([("email".to_string(), json!("ada@example.test"))]);
+        assert!(build_insert_mutation(
+            DatabaseKind::Postgres,
+            "public",
+            "users",
+            &columns,
+            &values,
+        )
+        .is_ok());
     }
 
     #[test]
@@ -5315,6 +9034,125 @@ WITH DATA;"#
             build_drop_table_constraint_statement(DatabaseKind::Mysql, "app", "users", &primary)
                 .unwrap(),
             "ALTER TABLE `app`.`users` DROP PRIMARY KEY;"
+        );
+    }
+
+    #[test]
+    fn sqlite_uses_the_bounded_ansi_data_grid_path() {
+        assert_eq!(
+            table_data_dialect("sqlite").unwrap(),
+            DatabaseKind::Postgres
+        );
+        assert_eq!(
+            table_data_dialect("sqlite3").unwrap(),
+            DatabaseKind::Postgres
+        );
+        assert_eq!(
+            table_data_dialect("duckdb").unwrap(),
+            DatabaseKind::Postgres
+        );
+        assert!(table_data_dialect("unsupported").is_err());
+    }
+
+    #[test]
+    fn external_driver_aliases_cannot_receive_host_generated_table_ddl() {
+        let capabilities = crate::core::dialect::DatabaseKind::Postgres.capabilities();
+        assert!(ensure_host_table_ddl_capability(None, "creation").is_ok());
+        assert_eq!(
+            ensure_host_table_ddl_capability(Some(&capabilities), "column alteration").unwrap_err(),
+            "PostgreSQL does not provide a verified semantic table column alteration operation"
+        );
+    }
+
+    #[test]
+    fn external_table_data_capabilities_do_not_widen_a_driver_alias() {
+        let mut capabilities = DatabaseKind::Postgres.capabilities();
+        capabilities.display_name = "Restricted PostgreSQL package".to_string();
+        capabilities.supports_table_row_mutation = false;
+
+        assert_eq!(
+            reviewed_table_data_dialect(&capabilities, false).unwrap(),
+            DatabaseKind::Postgres
+        );
+        assert!(reviewed_table_data_dialect(&capabilities, true)
+            .unwrap_err()
+            .contains("row-mutation"));
+        capabilities.lsp_language_id = "sql".to_string();
+        assert!(reviewed_table_data_dialect(&capabilities, false)
+            .unwrap_err()
+            .contains("reviewed table SQL dialect"));
+    }
+
+    #[test]
+    fn sqlite_table_ddl_builders_use_native_syntax_and_guard_unsupported_forms() {
+        let id = CreateTableColumn {
+            name: "id".to_string(),
+            data_type: "INTEGER".to_string(),
+            length: None,
+            is_primary_key: true,
+            is_not_null: true,
+            is_auto_increment: true,
+            comment: None,
+        };
+        let email = CreateTableColumn {
+            name: "email".to_string(),
+            data_type: "TEXT".to_string(),
+            length: None,
+            is_primary_key: false,
+            is_not_null: true,
+            is_auto_increment: false,
+            comment: None,
+        };
+        assert_eq!(
+            build_sqlite_create_table_statements("main", "users", &[id.clone(), email.clone()])
+                .unwrap(),
+            vec![
+                "CREATE TABLE \"main\".\"users\" (\n  \"id\" INTEGER PRIMARY KEY AUTOINCREMENT,\n  \"email\" TEXT NOT NULL\n);"
+                    .to_string(),
+            ],
+        );
+        assert_eq!(
+            build_sqlite_add_column_statements("main", "users", &email).unwrap(),
+            vec!["ALTER TABLE \"main\".\"users\" ADD COLUMN \"email\" TEXT NOT NULL;".to_string()],
+        );
+        assert_eq!(
+            build_sqlite_drop_column_statement("main", "users", "legacy").unwrap(),
+            "ALTER TABLE \"main\".\"users\" DROP COLUMN \"legacy\";"
+        );
+        let columns = column_lookup(vec![ColumnInfo {
+            name: "email".to_string(),
+            data_type: "TEXT".to_string(),
+            is_nullable: false,
+            is_primary_key: false,
+            is_unique: false,
+            is_indexed: false,
+            default_value: None,
+            is_auto_increment: false,
+            comment: None,
+        }]);
+        assert_eq!(
+            build_sqlite_create_index_statement(
+                "main",
+                "users",
+                "users_email_idx",
+                &["email".to_string()],
+                &columns,
+                true,
+            )
+            .unwrap(),
+            "CREATE UNIQUE INDEX \"main\".\"users_email_idx\" ON \"main\".\"users\" (\"email\");"
+        );
+        assert_eq!(
+            build_sqlite_drop_index_statement("main", "users", "users_email_idx").unwrap(),
+            "DROP INDEX \"main\".\"users_email_idx\";"
+        );
+
+        let invalid_autoincrement = CreateTableColumn {
+            data_type: "TEXT".to_string(),
+            ..id
+        };
+        assert!(
+            build_sqlite_create_table_statements("main", "bad", &[invalid_autoincrement]).is_err()
         );
     }
 }

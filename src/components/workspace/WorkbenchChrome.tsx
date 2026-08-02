@@ -92,6 +92,7 @@ export function WorkbenchTitleTools({
   onSetVersionControlPinned,
 }: WorkbenchTitleToolsProps) {
   const [moreToolsOpen, setMoreToolsOpen] = useState(false);
+  const [moreTooltipOpen, setMoreTooltipOpen] = useState(false);
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const activeProject = useProjectStore((state) =>
     state.projects.find((project) => project.id === state.activeProjectId),
@@ -185,8 +186,14 @@ export function WorkbenchTitleTools({
           />
         )}
         {(!commitPinned || !versionControlPinned) && (
-          <Popover open={moreToolsOpen} onOpenChange={setMoreToolsOpen}>
-            <Tooltip>
+          <Popover
+            open={moreToolsOpen}
+            onOpenChange={(open) => {
+              setMoreToolsOpen(open);
+              if (open) setMoreTooltipOpen(false);
+            }}
+          >
+            <Tooltip open={moreTooltipOpen} onOpenChange={setMoreTooltipOpen}>
               <TooltipTrigger asChild>
                 <PopoverTrigger asChild>
                   <button
@@ -197,6 +204,9 @@ export function WorkbenchTitleTools({
                       (versionControlOpen && !versionControlPinned)
                     }
                     aria-label="More tool windows"
+                    onPointerLeave={() => setMoreTooltipOpen(false)}
+                    onPointerDown={() => setMoreTooltipOpen(false)}
+                    onBlur={() => setMoreTooltipOpen(false)}
                   >
                     <MoreHorizontal size={15} />
                   </button>

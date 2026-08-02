@@ -169,7 +169,7 @@ type AgentToolContract = {
 | DB-06 | 只读查询 | 后端重新分类 SQL；限制 row/time/bytes；多语句只要含 mutation 即拒绝 read path | R1 |
 | DB-07 | DML 生成与执行 | 明确表、WHERE、预计行数；先 preview 或 transaction；无 WHERE 默认升级风险 | R2/R3 |
 | DB-08 | DDL / destructive | 生成 migration preview、依赖影响和 rollback 可能性；drop/truncate 逐目标批准 | R4 |
-| DB-09 | Schema diff/migration | 比较版本化 snapshot，不直接拿 display tree；已生成 phase/order/dependsOn、风险/可逆/blocked artifact 与机器可判定 preflight；PostgreSQL 支持指纹绑定的显式批准、原子 apply、持久 journal、post-verify 与有条件 rollback artifact，MySQL 自动 apply 因 DDL auto-commit 保持阻断 | R1-R4 |
+| DB-09 | Schema diff/migration | 比较版本化 snapshot，不直接拿 display tree；已生成 phase/order/dependsOn、风险/可逆/blocked artifact 与机器可判定 preflight；PostgreSQL 支持指纹绑定的显式批准、原子 apply、持久 journal、post-verify 与有条件 rollback artifact；MySQL 要求额外确认 auto-commit 风险、逐条执行并持久记录已提交进度 | R1-R4 |
 | DB-10 | 数据分析 | 对结果做统计/分组/异常解释，优先在 DB 聚合而不是搬运原始数据 | R1 |
 | DB-11 | 导入/导出 | 映射预览、编码/格式/错误策略、目标路径与敏感信息确认 | R2/R3 |
 | DB-12 | 运维诊断 | 查看 session、lock、slow query、容量和权限；kill/cancel session 单独批准 | R1/R3 |

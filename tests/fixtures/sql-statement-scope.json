@@ -1,0 +1,92 @@
+[
+  {
+    "id": "hard-boundary-keeps-utf16-literal-and-comment",
+    "dialect": "postgres",
+    "beforeCursor": "SELECT '🚀;';\n-- next query\nSELECT ",
+    "afterCursor": "2;",
+    "frontendCurrent": "\n-- next query\nSELECT ",
+    "backendSelected": "-- next query\nSELECT 2",
+    "statementIndex": 1,
+    "statementCount": 2
+  },
+  {
+    "id": "blank-line-starts-a-new-top-level-query",
+    "dialect": "postgres",
+    "beforeCursor": "SELECT * FROM legacy_rows\n\nSELECT ",
+    "afterCursor": "* FROM current_rows",
+    "frontendCurrent": "SELECT ",
+    "backendSelected": "SELECT * FROM current_rows",
+    "statementIndex": 1,
+    "statementCount": 2
+  },
+  {
+    "id": "second-select-without-a-semicolon-keeps-its-completion-scope",
+    "dialect": "postgres",
+    "beforeCursor": "SELECT *\nFROM ai_message_feedback AS amf\nLIMIT 100\n\n\nSELECT",
+    "afterCursor": " * FROM next_table\nLIMIT 100",
+    "frontendCurrent": "SELECT",
+    "backendSelected": "SELECT * FROM next_table\nLIMIT 100",
+    "statementIndex": 1,
+    "statementCount": 2
+  },
+  {
+    "id": "cte-body-and-following-select-stay-together",
+    "dialect": "postgres",
+    "beforeCursor": "WITH recent (id) AS (\n  SELECT id FROM orders\n)\n\nSELECT recent.",
+    "afterCursor": "id FROM recent",
+    "frontendCurrent": "WITH recent (id) AS (\n  SELECT id FROM orders\n)\n\nSELECT recent.",
+    "backendSelected": "WITH recent (id) AS (\n  SELECT id FROM orders\n)\n\nSELECT recent.id FROM recent",
+    "statementIndex": 0,
+    "statementCount": 1
+  },
+  {
+    "id": "insert-select-continuation-stays-together",
+    "dialect": "postgres",
+    "beforeCursor": "INSERT INTO archive_orders (id)\n\nSELECT id FROM ",
+    "afterCursor": "staging_orders",
+    "frontendCurrent": "INSERT INTO archive_orders (id)\n\nSELECT id FROM ",
+    "backendSelected": "INSERT INTO archive_orders (id)\n\nSELECT id FROM staging_orders",
+    "statementIndex": 0,
+    "statementCount": 1
+  },
+  {
+    "id": "set-operation-continuation-stays-together",
+    "dialect": "postgres",
+    "beforeCursor": "SELECT id FROM primary_orders\nUNION\n\nSELECT id FROM ",
+    "afterCursor": "backup_orders",
+    "frontendCurrent": "SELECT id FROM primary_orders\nUNION\n\nSELECT id FROM ",
+    "backendSelected": "SELECT id FROM primary_orders\nUNION\n\nSELECT id FROM backup_orders",
+    "statementIndex": 0,
+    "statementCount": 1
+  },
+  {
+    "id": "postgres-dollar-quote-is-not-a-boundary",
+    "dialect": "postgres",
+    "beforeCursor": "DO $body$ BEGIN RAISE NOTICE ';'; END $body$;\nSELECT ",
+    "afterCursor": "42",
+    "frontendCurrent": "\nSELECT ",
+    "backendSelected": "SELECT 42",
+    "statementIndex": 1,
+    "statementCount": 2
+  },
+  {
+    "id": "mysql-backtick-identifier-is-not-a-boundary",
+    "dialect": "mysql",
+    "beforeCursor": "SELECT `semi;colon` FROM `orders`\n\nSELECT ",
+    "afterCursor": "* FROM next_orders",
+    "frontendCurrent": "SELECT ",
+    "backendSelected": "SELECT * FROM next_orders",
+    "statementIndex": 1,
+    "statementCount": 2
+  },
+  {
+    "id": "semicolon-inside-line-comment-is-not-a-boundary",
+    "dialect": "postgres",
+    "beforeCursor": "SELECT 1; -- ; inside comment\nSELECT ",
+    "afterCursor": "2",
+    "frontendCurrent": " -- ; inside comment\nSELECT ",
+    "backendSelected": "-- ; inside comment\nSELECT 2",
+    "statementIndex": 1,
+    "statementCount": 2
+  }
+]

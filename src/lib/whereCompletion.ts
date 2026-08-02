@@ -1,6 +1,7 @@
 import {
   qualifiedTableName,
   quoteIdentifier,
+  quoteIdentifierWithCapabilities,
 } from "@/lib/databaseDialect";
 import type { CompletionItem } from "@/services/lsp/types";
 import { CompletionItemKind } from "@/services/lsp/types";
@@ -17,10 +18,12 @@ export type WhereCompletionDocument = {
 export type WhereCompletionCandidate = {
   label: string;
   insertText: string;
+  /** Place the caret before this many trailing code units after insertion. */
+  cursorOffsetFromEnd?: number;
   detail?: string;
   kind?: number;
   sortText: string;
-  source: "local" | "lsp";
+  source: "local" | "lsp" | "history";
 };
 
 export type WhereReplacementRange = { start: number; end: number };
@@ -47,6 +50,19 @@ const WHERE_VALUE_KEYWORDS = [
   "FALSE",
   "CURRENT_DATE",
   "CURRENT_TIMESTAMP",
+];
+const WHERE_IS_PREDICATES = [
+  { label: "NULL", insertText: "NULL " },
+  { label: "NOT NULL", insertText: "NOT NULL " },
+  { label: "TRUE", insertText: "TRUE " },
+  { label: "FALSE", insertText: "FALSE " },
+  { label: "UNKNOWN", insertText: "UNKNOWN " },
+];
+const WHERE_NOT_PREDICATES = [
+  { label: "IN", insertText: "IN (" },
+  { label: "LIKE", insertText: "LIKE " },
+  { label: "BETWEEN", insertText: "BETWEEN " },
+  { label: "NULL", insertText: "NULL " },
 ];
 const SQL_RESERVED_IDENTIFIERS = new Set([
   "ALL",
@@ -81,6 +97,27 @@ const SQL_RESERVED_IDENTIFIERS = new Set([
   "WHEN",
   "WHERE",
 ]);
+
+// The filter row accepts the same identifier surface as the editor: quoted
+// names may contain spaces and qualified references may mix quote styles.
+// A simple `\S+` or word regex would stop at `"created at"` and offer a
+// second column instead of the predicate/operator that must follow it.
+const SQL_IDENTIFIER_SEGMENT =
+  '(?:"(?:[^"]|"")*"|`[^`]*`|\\[[^\\]]*\\]|[\\p{L}\\p{N}_$@-]+)';
+const TRAILING_IDENTIFIER_REFERENCE = new RegExp(
+  `(?:^|\\s)(${SQL_IDENTIFIER_SEGMENT}(?:\\s*\\.\\s*${SQL_IDENTIFIER_SEGMENT})*)$`,
+  "u",
+);
+const TRAILING_PREDICATE_COLUMN = new RegExp(
+  `(${SQL_IDENTIFIER_SEGMENT}(?:\\s*\\.\\s*${SQL_IDENTIFIER_SEGMENT})*)\\s*(?:=|<>|!=|<=|>=|<|>|\\b(?:like|ilike|between)\\b|\\b(?:not\\s+)?in\\s*\\()\\s*$`,
+  "iu",
+);
+const PREDICATE_COLUMN_START = new RegExp(
+  `(${SQL_IDENTIFIER_SEGMENT}(?:\\s*\\.\\s*${SQL_IDENTIFIER_SEGMENT})*)\\s*(?:=|<>|!=|<=|>=|<|>|\\b(?:like|ilike|between)\\b|\\b(?:not\\s+)?in\\b)`,
+  "giu",
+);
+const COMPLETE_QUOTED_IDENTIFIER_SOURCE =
+  '"(?:[^\"]|\"\")*"|`[^`]*`|\\[[^\\]]*\\]';
 
 export function buildWhereCompletionDocument(options: {
   condition: string;
@@ -118,6 +155,29 @@ export function whereReplacementRange(
   cursorOffset: number,
 ): WhereReplacementRange {
   const boundedCursor = Math.max(0, Math.min(cursorOffset, condition.length));
+  for (const match of condition.matchAll(
+    new RegExp(COMPLETE_QUOTED_IDENTIFIER_SOURCE, "gu"),
+  )) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    if (boundedCursor >= start && boundedCursor <= end) {
+      return { start, end };
+    }
+  }
+
+  // While a quoted identifier is still being typed, replace the unmatched
+  // prefix as a unit. This prevents accepting `status code` after `"sta`
+  // from leaving the original opening quote behind.
+  const unfinishedQuoted = condition
+    .slice(0, boundedCursor)
+    .match(/(?:^|[\s.])("[^"]*|`[^`]*|\[[^\]]*)$/u)?.[1];
+  if (unfinishedQuoted) {
+    return {
+      start: boundedCursor - unfinishedQuoted.length,
+      end: boundedCursor,
+    };
+  }
+
   let start = boundedCursor;
   let end = boundedCursor;
   const isIdentifierCharacter = (character: string) =>
@@ -128,6 +188,88 @@ export function whereReplacementRange(
     end += 1;
   }
   return { start, end };
+}
+
+function completionFilterText(value: string) {
+  const qualifiedParts = value.trim().split(".");
+  const qualifiedTail = qualifiedParts[qualifiedParts.length - 1] || "";
+  return qualifiedTail
+    .replace(/^["`\[]/u, "")
+    .replace(/["`\]]$/u, "");
+}
+
+function unquoteIdentifierSegment(segment: string) {
+  const trimmed = segment.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    return trimmed.slice(1, -1).replace(/""/gu, '"');
+  }
+  if (trimmed.startsWith("`") && trimmed.endsWith("`")) {
+    return trimmed.slice(1, -1);
+  }
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function trailingColumnReference(text: string) {
+  const reference = text.trimEnd().match(TRAILING_IDENTIFIER_REFERENCE)?.[1];
+  if (!reference) return null;
+  const segments = reference.match(new RegExp(SQL_IDENTIFIER_SEGMENT, "gu"));
+  const last = segments?.[segments.length - 1];
+  return last ? unquoteIdentifierSegment(last).toLocaleLowerCase() : null;
+}
+
+function predicateColumnBeforeCursor(
+  text: string,
+  columns: Array<{ name: string; type?: string }>,
+) {
+  const trailingReference = text.match(TRAILING_PREDICATE_COLUMN)?.[1];
+  const references = Array.from(text.matchAll(PREDICATE_COLUMN_START));
+  const reference =
+    trailingReference || references[references.length - 1]?.[1];
+  if (!reference) return undefined;
+  const name = trailingColumnReference(reference);
+  if (!name) return undefined;
+  return columns.find(
+    (column) => column.name.toLocaleLowerCase() === name,
+  );
+}
+
+function predicateValueCandidates(columnType?: string) {
+  const type = columnType?.toLocaleLowerCase() || "";
+  if (/\b(?:bool|boolean|bit)\b/u.test(type)) {
+    return [
+      { label: "TRUE", insertText: "TRUE " },
+      { label: "FALSE", insertText: "FALSE " },
+      { label: "NULL", insertText: "NULL " },
+    ];
+  }
+  if (/\b(?:date|time|timestamp|interval)\b/u.test(type)) {
+    return [
+      { label: "CURRENT_DATE", insertText: "CURRENT_DATE " },
+      { label: "CURRENT_TIMESTAMP", insertText: "CURRENT_TIMESTAMP " },
+      { label: "NULL", insertText: "NULL " },
+    ];
+  }
+  if (/\b(?:int|serial|numeric|decimal|number|float|double|real|money)\b/u.test(type)) {
+    return [
+      { label: "0", insertText: "0 " },
+      { label: "1", insertText: "1 " },
+      { label: "NULL", insertText: "NULL " },
+    ];
+  }
+  if (/\b(?:char|varchar|nvarchar|nchar|text|string|clob|json|xml|uuid)\b/u.test(type)) {
+    return [
+      { label: "''", insertText: "'' " },
+      { label: "'%…%'", insertText: "'%%' ", cursorOffsetFromEnd: 3 },
+      { label: "NULL", insertText: "NULL " },
+    ];
+  }
+  return WHERE_VALUE_KEYWORDS.map((label) => ({
+    label,
+    insertText: `${label} `,
+  }));
 }
 
 function fuzzyScore(label: string, typed: string) {
@@ -149,35 +291,41 @@ function fuzzyScore(label: string, typed: string) {
   return gapScore;
 }
 
-function safeColumnInsertText(driver: DatabaseDriver, name: string) {
+function safeColumnInsertText(
+  driver: DatabaseDriver,
+  name: string,
+  identifierQuote?: string,
+) {
   return /^[A-Za-z_][A-Za-z0-9_$]*$/u.test(name) &&
     !SQL_RESERVED_IDENTIFIERS.has(name.toLocaleUpperCase())
     ? name
-    : quoteIdentifier(driver, name);
+    : identifierQuote
+      ? quoteIdentifierWithCapabilities({ identifierQuote }, name)
+      : quoteIdentifier(driver, name);
 }
 
 export function localWhereCompletionCandidates(options: {
   condition: string;
   cursorOffset: number;
   driver: DatabaseDriver;
+  identifierQuote?: string;
   columns: Array<{ name: string; type?: string }>;
 }) {
   const replacement = whereReplacementRange(
     options.condition,
     options.cursorOffset,
   );
-  const typed = options.condition.slice(replacement.start, options.cursorOffset);
+  const typed = completionFilterText(
+    options.condition.slice(replacement.start, options.cursorOffset),
+  );
   const beforeToken = options.condition.slice(0, replacement.start).trimEnd();
   const beforeCursor = options.condition.slice(0, options.cursorOffset);
   const normalizedColumns = new Set(
-    options.columns.flatMap((column) => [
-      column.name.toLocaleLowerCase(),
-      safeColumnInsertText(options.driver, column.name).toLocaleLowerCase(),
-    ]),
+    options.columns.map((column) => column.name.toLocaleLowerCase()),
   );
-  const lastIdentifier = beforeToken.match(/(?:^|\s)([\p{L}\p{N}_.$@`"-]+)$/u)?.[1];
+  const lastIdentifier = trailingColumnReference(beforeToken);
   const afterColumn = Boolean(
-    lastIdentifier && normalizedColumns.has(lastIdentifier.toLocaleLowerCase()),
+    lastIdentifier && normalizedColumns.has(lastIdentifier),
   );
   const betweenNeedsSeparator =
     /\bbetween\s+(?:[^\s,()]+|'(?:''|[^'])*'|"(?:""|[^"])*")\s*$/iu.test(
@@ -189,10 +337,19 @@ export function localWhereCompletionCandidates(options: {
     );
   const insideInList = /\b(?:not\s+)?in\s*\([^)]*$/iu.test(beforeCursor);
   const afterInComma = insideInList && /,\s*$/u.test(beforeCursor);
+  const afterInValue =
+    insideInList &&
+    !afterInComma &&
+    /(?:'(?:''|[^'])*'|"(?:""|[^"])*"|\b(?:true|false|null|current_date|current_timestamp)\b|[-+]?\d+(?:\.\d+)?)\s*$/iu.test(
+      beforeCursor,
+    );
   const afterNullPredicate = /\bis\s+(?:not\s+)?null\s*$/iu.test(beforeCursor);
+  const afterIsKeyword = /\bis\s*$/iu.test(beforeCursor);
+  const afterNotKeyword = /\bnot\s*$/iu.test(beforeCursor);
   const afterCompletedExpression =
     afterNullPredicate ||
-    (!betweenNeedsSeparator &&
+    (!afterColumn &&
+      !betweenNeedsSeparator &&
       !betweenNeedsUpperValue &&
       !insideInList &&
       /(?:['"\d)]|\b(?:true|false|null|current_date|current_timestamp))$/iu.test(
@@ -203,9 +360,17 @@ export function localWhereCompletionCandidates(options: {
     /\b(?:not\s+)?in\s*\(\s*$/iu.test(beforeCursor) ||
     betweenNeedsUpperValue ||
     afterInComma;
+  const predicateColumn = predicateColumnBeforeCursor(beforeCursor, options.columns);
 
   const keywordCandidates = (
-    keywords: Array<string | { label: string; insertText: string }>,
+    keywords: Array<
+      | string
+      | {
+          label: string;
+          insertText: string;
+          cursorOffsetFromEnd?: number;
+        }
+    >,
     detail: string,
     sortGroup: string,
   ) =>
@@ -219,6 +384,10 @@ export function localWhereCompletionCandidates(options: {
         label: typeof keyword === "string" ? keyword : keyword.label,
         insertText:
           typeof keyword === "string" ? `${keyword} ` : keyword.insertText,
+        cursorOffsetFromEnd:
+          typeof keyword === "string"
+            ? undefined
+            : keyword.cursorOffsetFromEnd,
         detail,
         kind: CompletionItemKind.Keyword,
         sortText: `${sortGroup}:${String(index).padStart(4, "0")}`,
@@ -232,11 +401,33 @@ export function localWhereCompletionCandidates(options: {
       "0",
     );
   }
+  if (afterInValue) {
+    return keywordCandidates(
+      [
+        { label: ",", insertText: ", " },
+        { label: ")", insertText: ") " },
+      ],
+      "IN list continuation",
+      "0",
+    );
+  }
   if (afterCompletedExpression) {
     return keywordCandidates(WHERE_FOLLOW_UPS, "WHERE continuation", "0");
   }
+  if (afterIsKeyword) {
+    return keywordCandidates(WHERE_IS_PREDICATES, "IS predicate", "0");
+  }
+  if (afterNotKeyword) {
+    return keywordCandidates(WHERE_NOT_PREDICATES, "NOT predicate", "0");
+  }
   if (afterPredicateOperator) {
-    return keywordCandidates(WHERE_VALUE_KEYWORDS, "Predicate value", "0");
+    return keywordCandidates(
+      predicateValueCandidates(predicateColumn?.type),
+      predicateColumn?.type
+        ? `${predicateColumn.type} predicate value`
+        : "Predicate value",
+      "0",
+    );
   }
   if (afterColumn) {
     return WHERE_OPERATORS.filter(
@@ -270,7 +461,11 @@ export function localWhereCompletionCandidates(options: {
     )
     .map(({ column }, index) => ({
       label: column.name,
-      insertText: `${safeColumnInsertText(options.driver, column.name)} = `,
+      insertText: `${safeColumnInsertText(
+        options.driver,
+        column.name,
+        options.identifierQuote,
+      )} = `,
       detail: column.type ? `${column.type} · current table` : "Current table column",
       kind: CompletionItemKind.Field,
       sortText: `0:${String(index).padStart(4, "0")}`,

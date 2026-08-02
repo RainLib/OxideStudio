@@ -82,7 +82,7 @@ export function CreateTableDialog({
     setCapabilities(null);
 
     databaseService
-      .getDatabaseCapabilities(driver)
+      .getDatabaseCapabilities(driver, connection?.driverPackageVersion)
       .then((value) => {
         if (!cancelled) setCapabilities(value);
       })
@@ -94,7 +94,7 @@ export function CreateTableDialog({
     return () => {
       cancelled = true;
     };
-  }, [driver]);
+  }, [connection?.driverPackageVersion, driver]);
 
   // Reset state on open
   useEffect(() => {

@@ -16,7 +16,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { ColumnInfo } from "@/services/tauri/types";
+import type { ColumnInfo, TableCsvImportOptions } from "@/services/tauri/types";
 import {
   buildCsvImportPlan,
   createCsvColumnMapping,
@@ -34,8 +34,14 @@ interface CsvImportDialogProps {
   tableName: string;
   columns: ColumnInfo[];
   isSubmitting: boolean;
+  isNativeSource?: boolean;
+  nativePreviewTruncated?: boolean;
   onClose: () => void;
-  onImport: (rows: Array<Record<string, unknown>>) => Promise<void>;
+  onImport: (
+    rows: Array<Record<string, unknown>>,
+    options: TableCsvImportOptions,
+    sourceEncoding: CsvEncoding,
+  ) => Promise<void>;
 }
 
 type DelimiterChoice = "auto" | "comma" | "semicolon" | "tab" | "pipe" | "custom";
@@ -53,6 +59,8 @@ export function CsvImportDialog({
   tableName,
   columns,
   isSubmitting,
+  isNativeSource = false,
+  nativePreviewTruncated = false,
   onClose,
   onImport,
 }: CsvImportDialogProps) {
@@ -83,7 +91,7 @@ export function CsvImportDialog({
       try {
         if (file.size > MAX_IMPORT_FILE_BYTES) {
           throw new Error(
-            "CSV files larger than 32 MiB require the planned native streaming importer.",
+            "CSV files larger than 32 MiB can be imported from Database Explorer → Import/Export → Import CSV (streaming)… using UTF-8, comma delimiters, and a header row.",
           );
         }
         const buffer = typeof file.arrayBuffer === "function"
@@ -166,9 +174,12 @@ export function CsvImportDialog({
   const dataRecords = hasHeader ? parsed.records.slice(1) : parsed.records;
   const previewRecords = dataRecords.slice(0, PREVIEW_ROW_LIMIT);
   const rowLimitError = dataRecords.length > MAX_IMPORT_ROWS
-    ? `CSV contains more than ${MAX_IMPORT_ROWS.toLocaleString()} rows. Use the planned native streaming importer for larger files.`
+    ? `CSV contains more than ${MAX_IMPORT_ROWS.toLocaleString()} rows. Use Database Explorer → Import/Export → Import CSV (streaming)… for a larger standard CSV.`
     : null;
-  const blockingError = loadError || decoded.error || rowLimitError;
+  const nativePreviewError = nativePreviewTruncated
+    ? "This CSV is larger than the 32 MiB review limit. Use Import CSV (streaming)… for a standard UTF-8 comma-delimited import, or split the file before using column mapping."
+    : null;
+  const blockingError = loadError || decoded.error || rowLimitError || nativePreviewError;
   const canImport =
     !isLoading &&
     !isSubmitting &&
@@ -346,14 +357,30 @@ export function CsvImportDialog({
         </div>
 
         <DialogFooter className="flex-row items-center justify-between border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3 sm:justify-between sm:space-x-0">
-          <span className="text-[10px] wb-muted">No rows are written until Import is confirmed. Database errors roll back the full batch.</span>
+          <span className="text-[10px] wb-muted">
+            {isNativeSource && decoded.encoding !== "utf-8"
+              ? "This encoding uses the bounded decoded import path; native streaming accepts UTF-8 only."
+              : "No rows are written until Import is confirmed. Database errors roll back the full batch."}
+          </span>
           <div className="flex gap-2">
             <button type="button" className="wb-text-button h-7 px-3 text-[11px]" onClick={onClose} disabled={isSubmitting}>Cancel</button>
             <button
               type="button"
               className="wb-primary-button h-7 min-w-[112px] justify-center px-3 text-[11px]"
               disabled={!canImport}
-              onClick={() => void onImport(plan.rows)}
+              onClick={() => void onImport(
+                plan.rows,
+                {
+                  delimiter,
+                  firstRowHeader: hasHeader,
+                  columnMapping: mapping.map((item) => ({
+                    sourceIndex: item.sourceIndex,
+                    targetColumn: item.targetColumn,
+                  })),
+                  emptyFieldsAsNull: emptyAsNull,
+                },
+                decoded.encoding,
+              )}
             >
               {isSubmitting ? <Loader2 size={12} className="animate-spin" /> : `Import ${plan.rows.length.toLocaleString()} row${plan.rows.length === 1 ? "" : "s"}`}
             </button>

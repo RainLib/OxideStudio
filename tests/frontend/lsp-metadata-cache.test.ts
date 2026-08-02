@@ -18,6 +18,31 @@ describe("LSP metadata cache", () => {
     expect(calls).toBe(1);
   });
 
+  it("reports whether each request used cached metadata", async () => {
+    const cache = new Map();
+    const states: string[] = [];
+    const loader = async () => ({ name: "users" });
+
+    await getCachedLspMetadata(
+      cache,
+      "public.users",
+      1_000,
+      loader,
+      100,
+      (state) => states.push(state),
+    );
+    await getCachedLspMetadata(
+      cache,
+      "public.users",
+      1_000,
+      loader,
+      200,
+      (state) => states.push(state),
+    );
+
+    expect(states).toEqual(["miss", "hit"]);
+  });
+
   it("refreshes expired metadata entries", async () => {
     const cache = new Map();
     let calls = 0;

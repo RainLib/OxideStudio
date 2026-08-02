@@ -62,6 +62,7 @@ export function AppPreferencesProvider({ children }: { children: ReactNode }) {
   const uiFontSize = useSettingsStore(
     (state) => state.settings.appearance.uiFontSize,
   );
+  const appearance = useSettingsStore((state) => state.settings.appearance);
   const locale = resolveAppLocale(preference);
   const t = useCallback(
     (key: MessageKey, variables?: MessageVariables) =>
@@ -73,6 +74,12 @@ export function AppPreferencesProvider({ children }: { children: ReactNode }) {
     const root = document.documentElement;
     root.lang = locale;
     root.dataset.locale = locale;
+    root.dataset.stylePreset = appearance.stylePreset;
+    root.dataset.appearanceAccent = appearance.accent;
+    root.dataset.appearanceFont = appearance.fontFamily;
+    root.dataset.appearanceDensity = appearance.density;
+    root.dataset.chromeGradient = appearance.chromeGradient;
+    root.dataset.reduceMotion = String(appearance.reduceMotion);
     root.style.setProperty("--wb-ui-font-size", `${uiFontSize}px`);
     root.style.setProperty("--wb-ui-font-size-sm", `${uiFontSize - 1}px`);
     root.style.setProperty("--wb-ui-font-size-xs", `${uiFontSize - 2}px`);
@@ -80,13 +87,19 @@ export function AppPreferencesProvider({ children }: { children: ReactNode }) {
     root.style.setProperty("--wb-ui-font-size-lg", `${uiFontSize + 2}px`);
     return () => {
       delete root.dataset.locale;
+      delete root.dataset.stylePreset;
+      delete root.dataset.appearanceAccent;
+      delete root.dataset.appearanceFont;
+      delete root.dataset.appearanceDensity;
+      delete root.dataset.chromeGradient;
+      delete root.dataset.reduceMotion;
       root.style.removeProperty("--wb-ui-font-size");
       root.style.removeProperty("--wb-ui-font-size-sm");
       root.style.removeProperty("--wb-ui-font-size-xs");
       root.style.removeProperty("--wb-ui-font-size-md");
       root.style.removeProperty("--wb-ui-font-size-lg");
     };
-  }, [locale, uiFontSize]);
+  }, [appearance, locale, uiFontSize]);
 
   return (
     <I18nContext.Provider value={{ locale, preference, t }}>

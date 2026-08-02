@@ -1,4 +1,5 @@
 import { GridCellKind, GridCell } from "@glideapps/glide-data-grid";
+import { resultColumnTypeFamily } from "@/features/data-grid";
 
 export type DataType =
   "unloaded" | "null" | "number" | "boolean" | "date" | "string";
@@ -63,8 +64,10 @@ export function createTypedCell(
   value: any,
   allowOverlay = true,
   unloadedLabel = "NOT LOADED",
+  declaredType?: string,
 ): GridCell {
   const type = detectDataType(value);
+  const typeFamily = resultColumnTypeFamily(declaredType);
   const displayData =
     type === "unloaded" ? unloadedLabel : formatValue(value, type);
 
@@ -92,7 +95,11 @@ export function createTypedCell(
           textDark: "#fbbf24", // Amber-400
         };
       default:
-        return undefined;
+        return typeFamily === "date" ||
+          typeFamily === "time" ||
+          typeFamily === "datetime"
+          ? { textDark: "#fbbf24" }
+          : undefined;
     }
   })();
 
@@ -107,7 +114,8 @@ export function createTypedCell(
           ? JSON.stringify(value)
           : String(value),
     themeOverride,
-    contentAlign: type === "number" ? "right" : "left",
+    contentAlign:
+      type === "number" || typeFamily === "number" ? "right" : "left",
   };
 }
 
@@ -116,11 +124,24 @@ export function createTypedCell(
  */
 export interface FilterState {
   operator:
-    "equals" | "contains" | "startsWith" | "endsWith" | ">" | "<" | ">=" | "<=";
+    | "equals"
+    | "notEquals"
+    | "contains"
+    | "notContains"
+    | "startsWith"
+    | "endsWith"
+    | "isNull"
+    | "isNotNull"
+    | ">"
+    | "<"
+    | ">="
+    | "<=";
   value: string;
 }
 
 export function applyFilter(rowValue: any, filter: FilterState): boolean {
+  if (filter.operator === "isNull") return rowValue === null || rowValue === undefined;
+  if (filter.operator === "isNotNull") return rowValue !== null && rowValue !== undefined;
   if (!filter.value) return true;
 
   const searchValue = filter.value.toLowerCase();
@@ -129,8 +150,12 @@ export function applyFilter(rowValue: any, filter: FilterState): boolean {
   switch (filter.operator) {
     case "equals":
       return cellValue === searchValue;
+    case "notEquals":
+      return cellValue !== searchValue;
     case "contains":
       return cellValue.includes(searchValue);
+    case "notContains":
+      return !cellValue.includes(searchValue);
     case "startsWith":
       return cellValue.startsWith(searchValue);
     case "endsWith":

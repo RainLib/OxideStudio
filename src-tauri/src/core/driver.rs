@@ -1,8 +1,11 @@
-use super::protocol::{
-    CollectionInfo, ColumnInfo, ConstraintInfo, ForeignKeyReferenceInfo, FunctionInfo, IndexInfo,
-    ParameterizedStatement, QueryParameter, QueryResult, TableInfo,
-};
 use super::statement::StatementScanDialect;
+use super::{
+    dialect::DatabaseCapabilities,
+    protocol::{
+        CollectionInfo, ColumnInfo, ConstraintInfo, DatabaseCreateRequest, ForeignKeyReferenceInfo,
+        FunctionInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult, TableInfo,
+    },
+};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
@@ -12,6 +15,36 @@ fn unsupported_driver_feature(feature: &str) -> anyhow::Error {
 
 #[async_trait]
 pub trait DatabaseDriver: Send + Sync {
+    /// When set, this connection is backed by the named independently updated
+    /// sidecar package. Connection management uses it to prevent replacing a
+    /// package that still owns live sessions.
+    fn external_package_identity(&self) -> Option<(&str, &str)> {
+        None
+    }
+
+    /// Process id of the connection-owned external sidecar, when it exposes
+    /// one. This is observability metadata only; callers must never use it to
+    /// control or signal a process outside the trusted driver lifecycle.
+    async fn external_runtime_process_id(&self) -> Option<u32> {
+        None
+    }
+
+    /// Liveness of a connection-owned external sidecar, when the driver can
+    /// report it without probing the database. `None` means this is not an
+    /// external runtime; `Some(false)` means the registered connection still
+    /// points at a process that has exited and should be reconnected.
+    async fn external_runtime_is_healthy(&self) -> Option<bool> {
+        None
+    }
+
+    /// Signed capabilities supplied by an independently updateable driver
+    /// package. Native drivers use the bundled dialect registry instead.
+    /// Exposing this through the live connection keeps snapshot/export policy
+    /// tied to the exact package that was actually launched.
+    fn package_capabilities(&self) -> Option<DatabaseCapabilities> {
+        None
+    }
+
     /// SQL lexer dialect for backend-enforced read-only execution.
     fn statement_scan_dialect(&self) -> Option<StatementScanDialect> {
         None
@@ -56,6 +89,13 @@ pub trait DatabaseDriver: Send + Sync {
         Err(unsupported_driver_feature(
             "Tracked database-scoped queries",
         ))
+    }
+
+    /// Create a top-level database/schema/namespace using the driver's own
+    /// dialect implementation. Native drivers can retain bounded SQL handling;
+    /// external sidecars must explicitly advertise and implement it.
+    async fn create_database(&self, _request: DatabaseCreateRequest) -> Result<()> {
+        Err(unsupported_driver_feature("Database creation"))
     }
 
     /// Execute a parameterized mutation and return rows affected.
@@ -137,6 +177,18 @@ pub trait DatabaseDriver: Send + Sync {
         Err(unsupported_driver_feature("Transactions"))
     }
 
+    /// Start a named transaction against an explicitly selected server
+    /// database. Drivers must override this instead of silently opening the
+    /// connection's primary database when the caller has selected another one.
+    async fn begin_database_transaction(
+        &self,
+        _session_id: &str,
+        _database: &str,
+        _schema: Option<&str>,
+    ) -> Result<()> {
+        Err(unsupported_driver_feature("Database-scoped transactions"))
+    }
+
     /// Execute a query in an existing named transaction session.
     async fn query_transaction(&self, _session_id: &str, _sql: &str) -> Result<Vec<QueryResult>> {
         Err(unsupported_driver_feature("Transactions"))
@@ -150,6 +202,21 @@ pub trait DatabaseDriver: Send + Sync {
         sql: &str,
     ) -> Result<Vec<QueryResult>> {
         self.query_transaction(session_id, sql).await
+    }
+
+    /// Execute bound mutations inside an already-open named transaction.
+    ///
+    /// This is intentionally separate from `execute_parameterized_batch`: the
+    /// latter owns a short transaction, while import/transfer pipelines need
+    /// several bounded batches to share one explicit all-or-nothing boundary.
+    async fn execute_parameterized_transaction(
+        &self,
+        _session_id: &str,
+        _statements: &[ParameterizedStatement],
+    ) -> Result<Vec<u64>> {
+        Err(unsupported_driver_feature(
+            "Transaction-scoped parameterized batch execution",
+        ))
     }
 
     /// Request backend cancellation for a tracked query. Returns true when a
@@ -452,7 +519,15 @@ mod tests {
         assert_eq!(result[0].statement_type.as_deref(), Some("PING"));
 
         assert!(driver.begin_transaction("tx", None).await.is_err());
+        assert!(driver
+            .begin_database_transaction("tx", "other", None)
+            .await
+            .is_err());
         assert!(driver.query_transaction("tx", "PING").await.is_err());
+        assert!(driver
+            .execute_parameterized_transaction("tx", &[])
+            .await
+            .is_err());
         assert!(driver.commit_transaction("tx").await.is_err());
         assert!(driver.rollback_transaction("tx").await.is_err());
     }

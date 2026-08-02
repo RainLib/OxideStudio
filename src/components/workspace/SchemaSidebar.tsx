@@ -1,5 +1,13 @@
 import { cn } from "@/lib/utils";
 import {
+  APP_EVENT_REQUEST_TABLE_CSV_IMPORT,
+  APP_EVENT_REQUEST_TABLE_JSON_IMPORT,
+  APP_EVENT_REQUEST_TABLE_XLSX_IMPORT,
+  type TableCsvImportRequest,
+  type TableJsonImportRequest,
+  type TableXlsxImportRequest,
+} from "@/lib/actionEvents";
+import {
   Database,
   Table,
   KeyRound,
@@ -34,11 +42,15 @@ import {
   useSchemaStore,
   type MetadataNodeState,
 } from "@/store/useSchemaStore";
-import { useConnectionStore } from "@/store/useConnectionStore";
+import {
+  useConnectionStore,
+  type ConnectionRuntimeState,
+} from "@/store/useConnectionStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useTaskStore } from "@/store/useTaskStore";
+import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
 import {
   databaseObjectNavigationKey,
@@ -50,8 +62,10 @@ import { databaseService, queryService, schemaService } from "@/services/tauri";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
 import type {
   CollectionInfo,
+  DatabaseCapabilities,
   DatabaseDriver,
   FunctionInfo,
+  SqlScriptImportPreview,
   TableInfo,
 } from "@/services/tauri/types";
 import {
@@ -107,18 +121,26 @@ import {
 } from "./DatabaseExplorerChrome";
 import { DatabaseBrandIcon } from "@/components/icons/DatabaseBrandIcon";
 import { ConnectionGlyph } from "@/components/icons/ConnectionGlyph";
+import { TableObjectTree } from "@/features/database-explorer/ui/TableObjectTree";
+import {
+  routineCallTemplate,
+  routineKind,
+  routineKindLabel,
+  routineSignature,
+} from "@/features/database-explorer/model/routinePresentation";
 import {
   captureLiveSchemaSnapshot,
   type SchemaSnapshotIdentity,
 } from "@/services/schemaSnapshotStore";
 import {
+  connectionCatalogDatabaseName,
   PostgresDatabaseTree,
-  postgresConnectionDatabaseName,
 } from "./PostgresDatabaseTree";
 import { PostgresRemoteDatabaseContents } from "./PostgresRemoteDatabaseContents";
 import { PostgresDatabaseVisibilitySection } from "./PostgresDatabaseVisibilitySection";
 import { usePostgresDatabaseDiscovery } from "@/hooks/usePostgresDatabaseDiscovery";
 import { buildRedisKeyTree, type RedisKeyTreeNode } from "@/lib/redisKey";
+import { SqlScriptImportDialog } from "./SqlScriptImportDialog";
 import {
   Dialog,
   DialogContent,
@@ -168,11 +190,27 @@ const RedisKeyDialog = lazy(() =>
     default: module.RedisKeyDialog,
   })),
 );
+const DatabaseAdministrationDialog = lazy(() =>
+  import("@/features/database-admin").then((module) => ({
+    default: module.DatabaseAdministrationDialog,
+  })),
+);
 
 interface PostgresRemoteDatabaseState {
   connectionId: string | null;
   schemas: Record<string, string[]>;
   tables: Record<string, Record<string, TableInfo[]>>;
+}
+
+interface PendingSqlScriptImport {
+  connectionId: string;
+  filePath: string;
+  schema?: string;
+  database?: string;
+  connectionName: string;
+  driver: DatabaseDriver;
+  preview: SqlScriptImportPreview;
+  taskId: string;
 }
 
 function routineMatchesFilter(routine: FunctionInfo, filter: string) {
@@ -196,6 +234,7 @@ function routineMatchesFilter(routine: FunctionInfo, filter: string) {
 const DRIVER_TREE_COLORS: Record<string, string> = {
   postgres: "#5b8dd6",
   mysql: "#d9904f",
+  mariadb: "#c0765a",
   redis: "#d95b5b",
   elasticsearch: "#d6ad5b",
   mongodb: "#5fb878",
@@ -206,6 +245,18 @@ function connectionTreeColor(
   color?: string,
 ) {
   return color || DRIVER_TREE_COLORS[driver || ""] || "#75a7ff";
+}
+
+function supportsDatabaseCatalogTree(driver: DatabaseDriver | null | undefined) {
+  return Boolean(
+    driver && defaultDatabaseCapabilities(driver).supportsDatabaseCatalogs,
+  );
+}
+
+function supportsDatabaseAdministration(
+  driver: DatabaseDriver | null | undefined,
+) {
+  return driver === "postgres" || driver === "mysql" || driver === "mariadb";
 }
 
 function connectionRegionStyle(
@@ -237,6 +288,22 @@ function objectGroupKey(
   return `${connectionId}:${driver || "unknown"}:${schema}:${group}`;
 }
 
+function tableTreeKey(
+  connectionId: string,
+  driver: string | null | undefined,
+  databaseName: string | undefined,
+  schema: string,
+  table: string,
+) {
+  return JSON.stringify([
+    connectionId,
+    driver || "unknown",
+    databaseName || "",
+    schema,
+    table,
+  ]);
+}
+
 function MetadataNodeBadge({ state }: { state?: MetadataNodeState }) {
   if (!state || state.status === "idle") return null;
 
@@ -253,25 +320,62 @@ function MetadataNodeBadge({ state }: { state?: MetadataNodeState }) {
   if (state.status === "error") {
     return (
       <span
-        className="shrink-0 rounded-[3px] border border-red-500/35 px-1 text-[9px] leading-4 text-red-300"
+        className="h-1.5 w-1.5 shrink-0 rounded-full bg-red-500"
         title={state.message || "Metadata refresh failed"}
-      >
-        error
-      </span>
+        aria-label="Metadata refresh failed"
+      />
     );
   }
 
   if (state.status === "stale") {
     return (
       <span
-        className="shrink-0 rounded-[3px] border border-[hsl(var(--wb-border-subtle))] px-1 text-[9px] leading-4 wb-muted"
+        className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400/80"
         title={state.message || "Metadata may be stale"}
-      >
-        stale
-      </span>
+        aria-label="Cached metadata may be stale"
+      />
     );
   }
 
+  return null;
+}
+
+function ConnectionRuntimeBadge({
+  runtime,
+  isConnected,
+  isConnecting,
+}: {
+  runtime?: ConnectionRuntimeState;
+  isConnected: boolean;
+  isConnecting: boolean;
+}) {
+  if (isConnecting || runtime?.status === "connecting") {
+    return (
+      <RefreshCw
+        size={10}
+        className="shrink-0 animate-spin text-[hsl(var(--wb-text-muted))]"
+        aria-label="Connecting"
+      />
+    );
+  }
+  if (runtime?.status === "error") {
+    return (
+      <span
+        className="h-2 w-2 shrink-0 rounded-full bg-red-500 ring-1 ring-red-500/25"
+        title={runtime.message || "Connection failed"}
+        aria-label="Connection failed"
+      />
+    );
+  }
+  if (isConnected || runtime?.status === "connected") {
+    return (
+      <span
+        className="h-2 w-2 shrink-0 rounded-full bg-emerald-400 ring-1 ring-emerald-400/25"
+        title="Connected"
+        aria-label="Connected"
+      />
+    );
+  }
   return null;
 }
 
@@ -291,6 +395,9 @@ export function SchemaSidebar() {
   const loadConnections = useConnectionStore((state) => state.loadConnections);
   const connectedConnectionIds = useConnectionStore(
     (state) => state.connectedConnectionIds,
+  );
+  const connectionRuntimeStates = useConnectionStore(
+    (state) => state.connectionRuntimeStates,
   );
   const setActiveConnection = useConnectionStore(
     (state) => state.setActiveConnection,
@@ -349,6 +456,11 @@ export function SchemaSidebar() {
   const [isCreateDbDialogOpen, setIsCreateDbDialogOpen] = useState(false);
   const [isCreateViewDialogOpen, setIsCreateViewDialogOpen] = useState(false);
   const [isCreateRedisKeyOpen, setIsCreateRedisKeyOpen] = useState(false);
+  const [pendingSqlScriptImport, setPendingSqlScriptImport] =
+    useState<PendingSqlScriptImport | null>(null);
+  const [isSqlScriptImporting, setIsSqlScriptImporting] = useState(false);
+  const [databaseAdministrationConnectionId, setDatabaseAdministrationConnectionId] =
+    useState<string | null>(null);
   const [connectingConnectionIds, setConnectingConnectionIds] = useState<
     string[]
   >([]);
@@ -374,6 +486,7 @@ export function SchemaSidebar() {
   const [expandedObjectGroupKeys, setExpandedObjectGroupKeys] = useState<
     string[]
   >([]);
+  const [expandedTableKeys, setExpandedTableKeys] = useState<string[]>([]);
 
   // Programmatic activation (startup cache, Search Everywhere, AI navigation)
   // should expose the same tree state as a direct row click. Paint cached
@@ -430,8 +543,15 @@ export function SchemaSidebar() {
   const [schemaDiagramLoadingKey, setSchemaDiagramLoadingKey] = useState<
     string | null
   >(null);
-  const [capabilities, setCapabilities] = useState(() =>
-    defaultDatabaseCapabilities(DEFAULT_DATABASE_DRIVER),
+  const [connectionCapabilities, setConnectionCapabilities] = useState<{
+    connectionId: string;
+    capabilities: DatabaseCapabilities;
+  } | null>(null);
+  // Runtime package activation changes the capability contract without
+  // changing the saved connection id. Subscribe so the Explorer refreshes its
+  // tree, catalog controls, and object actions in place.
+  const driverCatalogStatus = useDatabaseDriverCatalogStore(
+    (state) => state.status,
   );
   const databaseExplorerSettings = useSettingsStore(
     (store) => store.settings.databaseExplorer,
@@ -457,17 +577,23 @@ export function SchemaSidebar() {
     activeConnectionId && connectedConnectionIds.includes(activeConnectionId),
   );
   const activeDriver = activeConnection?.driver || DEFAULT_DATABASE_DRIVER;
+  const activeCapabilities =
+    connectionCapabilities &&
+    connectionCapabilities.connectionId === activeConnectionId &&
+    connectionCapabilities.capabilities.driver === activeDriver
+      ? connectionCapabilities.capabilities
+      : defaultDatabaseCapabilities(activeDriver);
+  const canBrowseDatabaseCatalogs = Boolean(
+    activeCapabilities.supportsDatabaseCatalogs,
+  );
   const postgresDatabaseDiscovery = usePostgresDatabaseDiscovery({
     projectId: activeProjectId,
     connectionId: activeConnectionId,
     driver: activeConnection?.driver,
+    canBrowseDatabaseCatalogs,
     isConnectionReady: isActiveConnectionReady,
     refreshVersion: postgresDatabaseRefreshVersion,
   });
-  const activeCapabilities =
-    capabilities.driver === activeDriver
-      ? capabilities
-      : defaultDatabaseCapabilities(activeDriver);
   const canBrowseTables = supportsTableWorkspace(activeCapabilities);
   const canBrowseCollections =
     activeCapabilities.supportsCollectionBrowsing ||
@@ -508,17 +634,16 @@ export function SchemaSidebar() {
     ? `oxide-studio-visible-schemas:${activeProjectId}:${activeConnectionId}:${activeDriver}`
     : null;
   const activePostgresDatabase =
-    activeConnection?.driver === "postgres"
-      ? postgresConnectionDatabaseName(activeConnection)
-      : null;
+    activeConnection && canBrowseDatabaseCatalogs
+      ? connectionCatalogDatabaseName(activeConnection)
+      : "";
   const postgresDatabaseRows = useMemo(() => {
-    if (!activePostgresDatabase) return [];
     const discoveredDatabases =
       postgresDatabaseDiscovery.connectionId === activeConnectionId
         ? postgresDatabaseDiscovery.databases
         : [];
     return [
-      activePostgresDatabase,
+      ...(activePostgresDatabase ? [activePostgresDatabase] : []),
       ...discoveredDatabases.filter(
         (database) => database !== activePostgresDatabase,
       ),
@@ -533,7 +658,7 @@ export function SchemaSidebar() {
     postgresDatabaseDiscovery.databases,
   ]);
   const postgresDatabaseVisibilityStorageKey =
-    activeConnectionId && activeDriver === "postgres"
+    activeConnectionId && canBrowseDatabaseCatalogs
       ? `oxide-studio-visible-databases:${activeProjectId}:${activeConnectionId}`
       : null;
   const visiblePostgresDatabaseSet = useMemo(
@@ -570,9 +695,9 @@ export function SchemaSidebar() {
       return currentSchema ? [currentSchema] : [];
     }
 
-    // PostgreSQL schema visibility belongs beneath each database node. Do not
-    // apply the legacy connection-wide schema picker to the current database.
-    if (activeDriver === "postgres") return schemas;
+    // Catalog-aware drivers own schema visibility beneath their database
+    // nodes, rather than through the connection-wide schema picker.
+    if (canBrowseDatabaseCatalogs) return schemas;
 
     if (showAllSchemas || !shouldLimitVisibleSchemas) return schemas;
 
@@ -591,7 +716,7 @@ export function SchemaSidebar() {
 
     return rows;
   }, [
-    activeDriver,
+    canBrowseDatabaseCatalogs,
     currentSchema,
     preferredVisibleSchema,
     schemas,
@@ -600,7 +725,7 @@ export function SchemaSidebar() {
     visibleSchemaSet,
   ]);
   const schemaCountLabel =
-    activeDriver === "postgres" || showAllSchemas || !shouldLimitVisibleSchemas
+    canBrowseDatabaseCatalogs || showAllSchemas || !shouldLimitVisibleSchemas
       ? String(schemas.length)
       : `${schemaRows.length} of ${schemas.length}`;
   const metadataForConnection = (
@@ -881,11 +1006,16 @@ export function SchemaSidebar() {
   useEffect(() => {
     postgresRemoteContextVersion.current += 1;
     setPostgresRemoteDatabases({
-      connectionId: activeDriver === "postgres" ? activeConnectionId : null,
+      connectionId: canBrowseDatabaseCatalogs ? activeConnectionId : null,
       schemas: {},
       tables: {},
     });
-  }, [activeConnectionId, activeDriver, postgresDatabaseRefreshVersion]);
+  }, [
+    activeConnectionId,
+    activeDriver,
+    canBrowseDatabaseCatalogs,
+    postgresDatabaseRefreshVersion,
+  ]);
 
   useEffect(() => {
     // Project switches select and hydrate the first cached data source. Reveal
@@ -899,22 +1029,46 @@ export function SchemaSidebar() {
   useEffect(() => {
     let cancelled = false;
     const fallback = defaultDatabaseCapabilities(activeDriver);
-    setCapabilities(fallback);
+    if (!activeConnection) {
+      setConnectionCapabilities(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    setConnectionCapabilities(null);
 
     databaseService
-      .getDatabaseCapabilities(activeDriver)
+      .getDatabaseCapabilities(
+        activeDriver,
+        activeConnection?.driverPackageVersion,
+      )
       .then((nextCapabilities) => {
-        if (!cancelled) setCapabilities(nextCapabilities);
+        if (!cancelled) {
+          setConnectionCapabilities({
+            connectionId: activeConnection.id,
+            capabilities: nextCapabilities,
+          });
+        }
       })
       .catch((error) => {
         console.error("Failed to load database capabilities:", error);
-        if (!cancelled) setCapabilities(fallback);
+        if (!cancelled) {
+          setConnectionCapabilities({
+            connectionId: activeConnection.id,
+            capabilities: fallback,
+          });
+        }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [activeDriver]);
+  }, [
+    activeConnection?.driverPackageVersion,
+    activeConnection?.id,
+    activeDriver,
+    driverCatalogStatus,
+  ]);
 
   useEffect(() => {
     if (!schemaVisibilityStorageKey) {
@@ -1380,6 +1534,72 @@ export function SchemaSidebar() {
     await loadTablePage(tabId, 0);
   };
 
+  const handleTableCsvImport = async (
+    table: TableInfo,
+    schemaName: string,
+  ) => {
+    if (!activeConnectionId) return;
+    await handleTableDoubleClick(table, schemaName);
+    const detail: TableCsvImportRequest = {
+      connectionId: activeConnectionId,
+      schema: schemaName,
+      table: table.name,
+    };
+    // Opening a table updates the active tab asynchronously. Waiting until the
+    // next frame ensures the receiving table workspace has rebound to the
+    // selected relation before it opens its shared mapping dialog.
+    window.requestAnimationFrame(() => {
+      window.dispatchEvent(
+        new CustomEvent<TableCsvImportRequest>(
+          APP_EVENT_REQUEST_TABLE_CSV_IMPORT,
+          { detail },
+        ),
+      );
+    });
+  };
+
+  const handleTableJsonImport = async (
+    table: TableInfo,
+    schemaName: string,
+  ) => {
+    if (!activeConnectionId) return;
+    await handleTableDoubleClick(table, schemaName);
+    const detail: TableJsonImportRequest = {
+      connectionId: activeConnectionId,
+      schema: schemaName,
+      table: table.name,
+    };
+    window.requestAnimationFrame(() => {
+      window.dispatchEvent(
+        new CustomEvent<TableJsonImportRequest>(
+          APP_EVENT_REQUEST_TABLE_JSON_IMPORT,
+          { detail },
+        ),
+      );
+    });
+  };
+
+  const handleTableXlsxImport = async (
+    table: TableInfo,
+    schemaName: string,
+  ) => {
+    if (!activeConnectionId) return;
+    await handleTableDoubleClick(table, schemaName);
+    const detail: TableXlsxImportRequest = {
+      connectionId: activeConnectionId,
+      schema: schemaName,
+      table: table.name,
+    };
+    window.requestAnimationFrame(() => {
+      window.dispatchEvent(
+        new CustomEvent<TableXlsxImportRequest>(
+          APP_EVENT_REQUEST_TABLE_XLSX_IMPORT,
+          { detail },
+        ),
+      );
+    });
+  };
+
   const handlePostgresRemoteTableOpen = async (
     connectionId: string,
     databaseName: string,
@@ -1573,20 +1793,13 @@ export function SchemaSidebar() {
     );
   };
 
-  const routineSignature = (routine: FunctionInfo) => {
-    const parameters = (routine.parameters || [])
-      .map((parameter) =>
-        [parameter.name, parameter.data_type].filter(Boolean).join(" "),
-      )
-      .join(", ");
-    return `${routine.name}(${parameters})`;
-  };
-
-  const routineKindLabel = (routine: FunctionInfo) =>
-    routine.routine_type?.toLowerCase() === "procedure" ? "proc" : "fn";
-
   const handleCreateTable = () => {
-    if (activeConnectionId && currentSchema && canBrowseTables) {
+    if (
+      activeConnectionId &&
+      currentSchema &&
+      canBrowseTables &&
+      activeCapabilities.supportsTableDdl
+    ) {
       createTableTab(activeConnectionId, currentSchema);
     }
   };
@@ -1697,7 +1910,7 @@ export function SchemaSidebar() {
 
   const handleRefresh = async () => {
     if (activeConnectionId) {
-      if (activeConnection?.driver === "postgres") {
+      if (canBrowseDatabaseCatalogs) {
         setPostgresDatabaseRefreshVersion((version) => version + 1);
       }
       // Force refresh schemas
@@ -1726,7 +1939,7 @@ export function SchemaSidebar() {
     if (connectionId !== activeConnectionId) {
       await setActiveConnection(connectionId);
     }
-    if (wasActiveConnection && connection?.driver === "postgres") {
+    if (wasActiveConnection && supportsDatabaseCatalogTree(connection?.driver)) {
       setPostgresDatabaseRefreshVersion((version) => version + 1);
     }
     await loadSchemas(connectionId, true);
@@ -1832,56 +2045,78 @@ export function SchemaSidebar() {
     });
     if (typeof selected !== "string") return;
 
-    const fileName = selected.split(/[\\/]/).pop() || "SQL script";
-    const target = [database, schema].filter(Boolean).join(".");
-    if (
-      !window.confirm(
-        `Run "${fileName}" against ${target || connection.name}?\n\nThe script may create, update, or delete data. It will run with the selected data source's permissions.`,
-      )
-    ) {
-      return;
-    }
-
-    const connectionError = await setActiveConnection(connectionId);
-    if (connectionError) {
-      setNamespaceError(connectionError);
-      return;
-    }
-
-    setNamespaceError(null);
     const tasks = useTaskStore.getState();
     const taskId = tasks.startTask({
       kind: "import",
-      title: `Import ${fileName}`,
-      detail: target || connection.name,
+      title: `Review ${selected.split(/[\\/]/).pop() || "SQL script"}`,
+      detail: [database, schema].filter(Boolean).join(".") || connection.name,
     });
+    let preview;
     try {
+      preview = await queryService.previewSqlScriptImport(connectionId, selected);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      tasks.failTask(taskId, message, "SQL script review failed");
+      setNamespaceError(message);
+      return;
+    }
+    const target = [database, schema].filter(Boolean).join(".");
+    tasks.setTaskWaiting(taskId, "Awaiting SQL script review");
+    setNamespaceError(null);
+    setPendingSqlScriptImport({
+      connectionId,
+      filePath: selected,
+      schema,
+      database,
+      connectionName: target || connection.name,
+      driver: connection.driver,
+      preview,
+      taskId,
+    });
+  };
+
+  const handleConfirmSqlScriptImport = async () => {
+    const pending = pendingSqlScriptImport;
+    if (!pending) return;
+    const tasks = useTaskStore.getState();
+    setIsSqlScriptImporting(true);
+    tasks.setTaskRunning(pending.taskId, pending.connectionName);
+    tasks.updateTask(pending.taskId, { title: `Import ${pending.preview.fileName}` });
+    try {
+      const connectionError = await setActiveConnection(pending.connectionId);
+      if (connectionError) throw new Error(connectionError);
       const imported = await queryService.importSqlScript(
-        connectionId,
-        selected,
-        schema,
-        database,
+        pending.connectionId,
+        pending.filePath,
+        pending.preview.reviewDigest,
+        pending.schema,
+        pending.database,
       );
       tasks.finishTask(
-        taskId,
+        pending.taskId,
         `${imported.statementsExecuted.toLocaleString()} statements · ${imported.rowsAffected.toLocaleString()} rows affected`,
       );
       bumpMetadataVersion();
 
-      const configuredDatabase =
-        connection.driver === "postgres"
-          ? postgresConnectionDatabaseName(connection)
-          : undefined;
-      if (database && database !== configuredDatabase) {
+      const connection = connections.find(
+        (candidate) => candidate.id === pending.connectionId,
+      );
+      const configuredDatabase = connection && supportsDatabaseCatalogTree(pending.driver)
+        ? connectionCatalogDatabaseName(connection)
+        : undefined;
+      if (pending.database && pending.database !== configuredDatabase) {
         setPostgresDatabaseRefreshVersion((version) => version + 1);
       } else {
-        await loadSchemas(connectionId, true);
-        if (schema) await loadTables(connectionId, schema, true);
+        await loadSchemas(pending.connectionId, true);
+        if (pending.schema) await loadTables(pending.connectionId, pending.schema, true);
       }
+      setPendingSqlScriptImport(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      tasks.failTask(taskId, message);
+      tasks.failTask(pending.taskId, message);
       setNamespaceError(`SQL import failed: ${message}`);
+    } finally {
+      setIsSqlScriptImporting(false);
     }
   };
 
@@ -1937,7 +2172,7 @@ export function SchemaSidebar() {
       postgresRemoteContextVersion.current !== contextVersion ||
       connectionState.activeConnectionId !== connectionId ||
       !connectionState.connectedConnectionIds.includes(connectionId) ||
-      connection?.driver !== "postgres"
+      !supportsDatabaseCatalogTree(connection?.driver)
     ) {
       return;
     }
@@ -2058,12 +2293,11 @@ export function SchemaSidebar() {
         current.includes(connection.id) ? current : [...current, connection.id],
       );
 
-      const currentDatabase =
-        connection.driver === "postgres"
-          ? postgresConnectionDatabaseName(connection)
-          : connection.database || "";
+      const currentDatabase = supportsDatabaseCatalogTree(connection.driver)
+        ? connectionCatalogDatabaseName(connection)
+        : connection.database || "";
       if (
-        connection.driver === "postgres" &&
+        supportsDatabaseCatalogTree(connection.driver) &&
         target.databaseName &&
         target.databaseName !== currentDatabase
       ) {
@@ -2088,7 +2322,9 @@ export function SchemaSidebar() {
       window.requestAnimationFrame(() => {
         const databaseName =
           target.databaseName ||
-          (connection.driver === "postgres" ? currentDatabase : undefined);
+          (supportsDatabaseCatalogTree(connection.driver)
+            ? currentDatabase || undefined
+            : undefined);
         const key = target.objectName
           ? databaseObjectNavigationKey({
               ...target,
@@ -2135,7 +2371,7 @@ export function SchemaSidebar() {
   }, [databaseRevealRequest?.id]);
 
   const renderSchemaVisibilityPicker = () => {
-    const isPostgresPicker = activeDriver === "postgres";
+    const isPostgresPicker = canBrowseDatabaseCatalogs;
     if (
       !activeConnectionId ||
       (schemas.length === 0 &&
@@ -2366,8 +2602,8 @@ export function SchemaSidebar() {
       (connection) => connection.id === connectionId,
     );
     const navigationDatabaseName =
-      objectConnection?.driver === "postgres"
-        ? postgresConnectionDatabaseName(objectConnection)
+      objectConnection && supportsDatabaseCatalogTree(objectConnection.driver)
+        ? connectionCatalogDatabaseName(objectConnection)
         : undefined;
     const schemaObjects = schemaObjectsFor(connectionId, driver, schema);
     const tableRelations = schemaObjects.tables.filter(
@@ -2400,11 +2636,11 @@ export function SchemaSidebar() {
       schemaNodeState?.status === "loading" ||
       (isCurrentSchema && isLoading && schemaObjects.tables.length === 0);
 
-    const serverObjectsKey = objectGroupKey(
+    const routinesKey = objectGroupKey(
       connectionId,
       driver,
       schema,
-      "server-objects",
+      "routines",
     );
     const virtualViewsKey = objectGroupKey(
       connectionId,
@@ -2437,16 +2673,79 @@ export function SchemaSidebar() {
         </button>
       ) : null;
 
-    const renderServerObjects = () => {
+    const renderRoutines = () => {
       if (!activeCapabilities.supportsFunctions) return null;
-      const isExpanded = expandedObjectGroupKeys.includes(serverObjectsKey);
+      const isExpanded = expandedObjectGroupKeys.includes(routinesKey);
+      const functions = schemaObjects.functions.filter(
+        (routine) => routineKind(routine) === "function",
+      );
+      const procedures = schemaObjects.functions.filter(
+        (routine) => routineKind(routine) === "procedure",
+      );
+
+      const renderRoutineRow = (routine: FunctionInfo, index: number) => {
+        const signature = routineSignature(routine);
+        const returnType = routine.return_type || "unknown";
+        const qualifiedName = schema ? `${schema}.${routine.name}` : routine.name;
+
+        return (
+          <ContextMenu key={`${routine.name}:${signature}:${index}`}>
+            <ContextMenuTrigger asChild>
+              <div
+                className="group ml-4 flex h-6 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                title={`${signature} -> ${returnType}`}
+              >
+                <Code2 size={12} className="shrink-0 opacity-70" />
+                <span className="min-w-0 flex-1 truncate">
+                  {highlightMatch(routine.name, filterText)}
+                </span>
+                <span className="shrink-0 text-[9px] uppercase opacity-50">
+                  {routineKindLabel(routine)}
+                </span>
+              </div>
+            </ContextMenuTrigger>
+            <ContextMenuContent className={menuContentClass}>
+              <ContextMenuItem
+                className={menuItemClass}
+                onClick={() => void copyText(qualifiedName)}
+              >
+                Copy qualified name
+              </ContextMenuItem>
+              <ContextMenuItem
+                className={menuItemClass}
+                onClick={() => void copyText(routineCallTemplate(schema, routine))}
+              >
+                Copy call template
+              </ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>
+        );
+      };
+
+      const renderRoutineKind = (
+        label: string,
+        routines: FunctionInfo[],
+      ) => {
+        if (routines.length === 0) return null;
+
+        return (
+          <div>
+            <div className="ml-4 flex h-6 items-center gap-2 px-2 text-[10px] text-[hsl(var(--wb-text-muted))]">
+              <Folder size={11} className="shrink-0 opacity-60" />
+              <span className="min-w-0 flex-1 truncate">{label}</span>
+              <span className="text-[9px] opacity-60">{routines.length}</span>
+            </div>
+            {routines.map(renderRoutineRow)}
+          </div>
+        );
+      };
 
       return (
         <div>
           <button
             type="button"
             className="wb-tree-row w-full gap-1.5 px-0.5 hover:bg-[hsl(var(--wb-hover))]"
-            onClick={() => toggleObjectGroup(serverObjectsKey)}
+            onClick={() => toggleObjectGroup(routinesKey)}
           >
             {isExpanded ? (
               <ChevronDown size={12} className="shrink-0 wb-muted" />
@@ -2455,8 +2754,13 @@ export function SchemaSidebar() {
             )}
             <FolderCog size={12} className="shrink-0 text-sky-400/80" />
             <span className="truncate text-[11px] text-[hsl(var(--wb-text))]">
-              Server Objects
+              Routines
             </span>
+            {!isFunctionsLoading && (
+              <span className="text-[9px] wb-muted">
+                {schemaObjects.functions.length}
+              </span>
+            )}
           </button>
           {isExpanded &&
             (isCurrentSchema &&
@@ -2472,26 +2776,10 @@ export function SchemaSidebar() {
                   : "No routines found"}
               </div>
             ) : (
-              schemaObjects.functions.map((routine, index) => {
-                const signature = routineSignature(routine);
-                const returnType = routine.return_type || "unknown";
-
-                return (
-                  <div
-                    key={`${routine.name}:${signature}:${index}`}
-                    className="group ml-4 flex h-6 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
-                    title={`${signature} -> ${returnType}`}
-                  >
-                    <Code2 size={12} className="shrink-0 opacity-70" />
-                    <span className="min-w-0 flex-1 truncate">
-                      {highlightMatch(routine.name, filterText)}
-                    </span>
-                    <span className="shrink-0 text-[9px] uppercase opacity-50">
-                      {routineKindLabel(routine)}
-                    </span>
-                  </div>
-                );
-              })
+              <>
+                {renderRoutineKind("Functions", functions)}
+                {renderRoutineKind("Procedures", procedures)}
+              </>
             ))}
         </div>
       );
@@ -2601,9 +2889,22 @@ export function SchemaSidebar() {
       const canDeleteCollection = Boolean(collectionDeleteSql(collection));
       const isSelectedCollection =
         isCurrentSchema && selectedTable === collection.name;
+      const canExpandCollectionMetadata =
+        activeCapabilities.dataModel === "document" ||
+        activeCapabilities.dataModel === "search";
+      const collectionTreeKey = tableTreeKey(
+        connectionId,
+        driver,
+        navigationDatabaseName,
+        schema,
+        collection.name,
+      );
+      const isCollectionExpanded =
+        expandedTableKeys.includes(collectionTreeKey);
 
       return (
-        <ContextMenu key={`${schema}:${collection.name}`}>
+        <div key={`${schema}:${collection.name}`}>
+        <ContextMenu>
           <ContextMenuTrigger>
             <div
               data-database-object-key={databaseObjectNavigationKey({
@@ -2632,6 +2933,29 @@ export function SchemaSidebar() {
               }
               title={collection.name}
             >
+              {canExpandCollectionMetadata && (
+                <button
+                  type="button"
+                  className="-mr-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                  aria-label={`${isCollectionExpanded ? "Collapse" : "Expand"} ${collection.name} metadata`}
+                  aria-expanded={isCollectionExpanded}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setExpandedTableKeys((current) =>
+                      current.includes(collectionTreeKey)
+                        ? current.filter((key) => key !== collectionTreeKey)
+                        : [...current, collectionTreeKey],
+                    );
+                  }}
+                  onDoubleClick={(event) => event.stopPropagation()}
+                >
+                  {isCollectionExpanded ? (
+                    <ChevronDown size={10} />
+                  ) : (
+                    <ChevronRight size={10} />
+                  )}
+                </button>
+              )}
               <KeyRound
                 size={12}
                 className={cn(
@@ -2685,6 +3009,21 @@ export function SchemaSidebar() {
             </ContextMenuItem>
           </ContextMenuContent>
         </ContextMenu>
+        {canExpandCollectionMetadata && isCollectionExpanded && (
+          <TableObjectTree
+            identity={{
+              projectId: activeProjectId,
+              connectionId,
+              driver: driver || activeDriver,
+              databaseName: navigationDatabaseName || undefined,
+              schema,
+              table: collection.name,
+            }}
+            includeIndexes={activeCapabilities.supportsTableIndexes}
+            includeConstraints={false}
+          />
+        )}
+        </div>
       );
     };
 
@@ -2878,10 +3217,27 @@ export function SchemaSidebar() {
                   );
                   const isSelectedTable =
                     isCurrentSchema && selectedTable === table.name;
+                  const relationTreeKey = tableTreeKey(
+                    connectionId,
+                    driver,
+                    navigationDatabaseName,
+                    schema,
+                    table.name,
+                  );
+                  const isTableExpanded =
+                    expandedTableKeys.includes(relationTreeKey);
+                  // A pinned external package may expose a narrower object
+                  // contract than the globally active version of the same
+                  // driver. The active connection has already resolved its
+                  // own runtime capability snapshot above; never replace it
+                  // with the global default while rendering its table actions.
+                  const relationCapabilities = isCurrentSchema
+                    ? activeCapabilities
+                    : defaultDatabaseCapabilities(driver || activeDriver);
 
                   return (
+                    <div key={`${schema}:${table.name}`}>
                     <ContextMenu
-                      key={`${schema}:${table.name}`}
                       onOpenChange={(open) => {
                         if (open) {
                           void runForSchema(schema, () =>
@@ -2901,6 +3257,7 @@ export function SchemaSidebar() {
                             },
                           )}
                           tabIndex={-1}
+                          aria-label={`${relationObjectLabel(table.type)} ${schema}.${table.name}. Double-click to open data; right-click for actions; expand for columns and indexes.`}
                           className={cn(
                             "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] px-2 py-1 text-[11px] transition-colors",
                             isSelectedTable
@@ -2915,8 +3272,31 @@ export function SchemaSidebar() {
                           onDoubleClick={() =>
                             void handleTableDoubleClick(table, schema)
                           }
-                          title={table.name}
+                          title={`${relationObjectLabel(table.type)} · ${schema}.${table.name}\nDouble-click to open data · Right-click for actions · Expand for columns and indexes`}
                         >
+                          <button
+                            type="button"
+                            className="-ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                            aria-label={`${isTableExpanded ? "Collapse" : "Expand"} ${table.name} metadata`}
+                            aria-expanded={isTableExpanded}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setExpandedTableKeys((current) =>
+                                current.includes(relationTreeKey)
+                                  ? current.filter(
+                                      (key) => key !== relationTreeKey,
+                                    )
+                                  : [...current, relationTreeKey],
+                              );
+                            }}
+                            onDoubleClick={(event) => event.stopPropagation()}
+                          >
+                            {isTableExpanded ? (
+                              <ChevronDown size={10} />
+                            ) : (
+                              <ChevronRight size={10} />
+                            )}
+                          </button>
                           <Table
                             size={12}
                             className={cn(
@@ -2976,7 +3356,11 @@ export function SchemaSidebar() {
                                   }
                                 })
                               }
-                              disabled={!activeConnectionId || !canBrowseTables}
+                              disabled={
+                                !activeConnectionId ||
+                                !canBrowseTables ||
+                                !activeCapabilities.supportsTableDdl
+                              }
                             >
                               Table
                             </ContextMenuItem>
@@ -3087,6 +3471,7 @@ export function SchemaSidebar() {
                         </ContextMenuItem>
                         <ContextMenuItem
                           className={menuItemClass}
+                          disabled={!relationCapabilities.supportsTableDdl}
                           onClick={() =>
                             void runForSchema(schema, () =>
                               handleRenameClick(table),
@@ -3186,7 +3571,11 @@ export function SchemaSidebar() {
                                   handleEditColumnsClick(table),
                                 )
                               }
-                              disabled={isReadOnlyRelation}
+                              disabled={
+                                isReadOnlyRelation ||
+                                !relationCapabilities.supportsTableDdl ||
+                                !relationCapabilities.supportsColumnAlteration
+                              }
                             >
                               Edit Columns
                             </ContextMenuItem>
@@ -3197,7 +3586,10 @@ export function SchemaSidebar() {
                                   handleTruncateClick(table),
                                 )
                               }
-                              disabled={isReadOnlyRelation}
+                              disabled={
+                                isReadOnlyRelation ||
+                                !relationCapabilities.supportsTableDdl
+                              }
                             >
                               Empty Table
                             </ContextMenuItem>
@@ -3238,7 +3630,7 @@ export function SchemaSidebar() {
                               disabled={isReadOnlyRelation}
                               onClick={() =>
                                 void runForSchema(schema, () =>
-                                  importTableData(table.name, "csv"),
+                                  handleTableCsvImport(table, schema),
                                 )
                               }
                             >
@@ -3248,14 +3640,39 @@ export function SchemaSidebar() {
                             <ContextMenuItem
                               className={menuItemClass}
                               disabled={isReadOnlyRelation}
+                              title="Stream a UTF-8 comma-separated CSV with a header row. Use Import CSV… when you need encoding, delimiter, or column mapping."
                               onClick={() =>
                                 void runForSchema(schema, () =>
-                                  importTableData(table.name, "json"),
+                                  importTableData(table.name, "csv"),
+                                )
+                              }
+                            >
+                              <Upload className="mr-2 h-3.5 w-3.5" />
+                              Import CSV (streaming)...
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              disabled={isReadOnlyRelation}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
+                                  handleTableJsonImport(table, schema),
                                 )
                               }
                             >
                               <Upload className="mr-2 h-3.5 w-3.5" />
                               Import JSON...
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              disabled={isReadOnlyRelation}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
+                                  handleTableXlsxImport(table, schema),
+                                )
+                              }
+                            >
+                              <Upload className="mr-2 h-3.5 w-3.5" />
+                              Import XLSX...
                             </ContextMenuItem>
                             <ContextMenuItem
                               className={menuItemClass}
@@ -3270,8 +3687,8 @@ export function SchemaSidebar() {
                                   connectionId,
                                   schema,
                                   database:
-                                    driver === "postgres"
-                                      ? postgresConnectionDatabaseName(
+                                    supportsDatabaseCatalogTree(driver)
+                                      ? connectionCatalogDatabaseName(
                                           connections.find(
                                             (item) => item.id === connectionId,
                                           ) || {},
@@ -3323,6 +3740,7 @@ export function SchemaSidebar() {
                         </ContextMenuSub>
                         <ContextMenuSeparator className={menuSeparatorClass} />
                         <ContextMenuItem
+                          disabled={!relationCapabilities.supportsTableDdl}
                           onClick={() =>
                             void runForSchema(schema, () =>
                               handleDropClick(table),
@@ -3335,13 +3753,38 @@ export function SchemaSidebar() {
                         </ContextMenuItem>
                       </ContextMenuContent>
                     </ContextMenu>
+                    {isTableExpanded && (
+                      <TableObjectTree
+                        identity={{
+                          projectId: activeProjectId,
+                          connectionId,
+                          driver: driver || activeDriver,
+                          databaseName: navigationDatabaseName || undefined,
+                          schema,
+                          table: table.name,
+                        }}
+                        includeIndexes={
+                          relationCapabilities.supportsTableIndexes
+                        }
+                        includeConstraints={
+                          relationCapabilities.supportsTableConstraints
+                        }
+                        onReferenceSelect={({ schema: referencedSchema, table: referencedTable }) =>
+                          void handleTableDoubleClick(
+                            { name: referencedTable },
+                            referencedSchema,
+                          )
+                        }
+                      />
+                    )}
+                    </div>
                   );
                 })}
               </div>
             )}
           </>
         )}
-        {renderServerObjects()}
+      {renderRoutines()}
         {renderVirtualViews()}
       </div>
     );
@@ -3363,10 +3806,18 @@ export function SchemaSidebar() {
           isLoading={isLoading}
           namespaceLabel={namespaceLabel}
           canCreateNamespace={activeCapabilities.supportsCreateDatabase}
-          canCreateTable={Boolean(currentSchema && canBrowseTables)}
+          canCreateTable={Boolean(
+            currentSchema &&
+              canBrowseTables &&
+              activeCapabilities.supportsTableDdl,
+          )}
           canCreateView={Boolean(
             currentSchema && activeCapabilities.supportsViews,
           )}
+          canManageAdministration={
+            Boolean(activeConnectionId) &&
+            supportsDatabaseAdministration(activeDriver)
+          }
           isFilterVisible={isFilterVisible}
           onNewQueryConsole={handleNewQueryConsole}
           onNewDataSource={handleNewDataSource}
@@ -3375,6 +3826,9 @@ export function SchemaSidebar() {
           onCreateView={handleCreateView}
           onRefresh={() => void handleRefresh()}
           onToggleFilter={() => setIsFilterVisible((visible) => !visible)}
+          onManageAdministration={() =>
+            setDatabaseAdministrationConnectionId(activeConnectionId)
+          }
         />
       </div>
 
@@ -3529,6 +3983,8 @@ export function SchemaSidebar() {
               const isConnecting = connectingConnectionIds.includes(
                 connection.id,
               );
+              const connectionRuntime =
+                connectionRuntimeStates[connection.id];
               const connectionMetadata = metadataForConnection(
                 connection.id,
                 connection.driver,
@@ -3542,16 +3998,18 @@ export function SchemaSidebar() {
               const isFlatKeyValueTree =
                 defaultDatabaseCapabilities(connection.driver).dataModel ===
                 "keyValue";
+              const connectionCanBrowseDatabaseCatalogs =
+                supportsDatabaseCatalogTree(connection.driver);
               const connectedPostgresDatabase =
-                connection.driver === "postgres"
-                  ? postgresConnectionDatabaseName(connection)
+                connectionCanBrowseDatabaseCatalogs
+                  ? connectionCatalogDatabaseName(connection)
                   : "";
               const normalizedObjectFilter = filterText
                 .trim()
                 .toLocaleLowerCase();
               const renderedConnectionSchemas =
                 isActive &&
-                connection.driver === "postgres" &&
+                connectionCanBrowseDatabaseCatalogs &&
                 normalizedObjectFilter &&
                 !connectedPostgresDatabase
                   .toLocaleLowerCase()
@@ -3627,21 +4085,23 @@ export function SchemaSidebar() {
                         <span className="truncate font-medium">
                           {connection.name}
                         </span>
+                        <ConnectionRuntimeBadge
+                          runtime={connectionRuntime}
+                          isConnected={connectedConnectionIds.includes(
+                            connection.id,
+                          )}
+                          isConnecting={isConnecting}
+                        />
                         <MetadataNodeBadge
                           state={connectionMetadata.nodeState}
                         />
-                        {(isConnecting ||
-                          (isActive &&
+                        {isActive &&
                             isFlatKeyValueTree &&
-                            (isLoading || isCollectionsLoading))) && (
+                            (isLoading || isCollectionsLoading) && (
                           <RefreshCw
                             size={11}
                             className="ml-auto shrink-0 animate-spin wb-muted"
-                            aria-label={
-                              isConnecting
-                                ? "Connecting to Redis"
-                                : "Loading Redis keys"
-                            }
+                            aria-label="Loading Redis keys"
                           />
                         )}
                         {isActive ? renderSchemaVisibilityPicker() : null}
@@ -3731,6 +4191,16 @@ export function SchemaSidebar() {
                       >
                         Properties...
                       </ContextMenuItem>
+                      {supportsDatabaseAdministration(connection.driver) && (
+                        <ContextMenuItem
+                          className={menuItemClass}
+                          onClick={() => {
+                            setDatabaseAdministrationConnectionId(connection.id);
+                          }}
+                        >
+                          Database Administration...
+                        </ContextMenuItem>
+                      )}
                       <ContextMenuSub>
                         <ContextMenuSubTrigger
                           className={menuSubClass}
@@ -3748,7 +4218,7 @@ export function SchemaSidebar() {
                               void handleImportSqlScript({
                                 connectionId: connection.id,
                                 database:
-                                  connection.driver === "postgres"
+                                  connectionCanBrowseDatabaseCatalogs
                                     ? connectedPostgresDatabase
                                     : undefined,
                               })
@@ -3781,11 +4251,11 @@ export function SchemaSidebar() {
                       <PostgresDatabaseTree
                         connectionId={connection.id}
                         key={`${connection.id}:${
-                          connection.driver === "postgres"
+                          connectionCanBrowseDatabaseCatalogs
                             ? postgresDatabaseRefreshVersion
                             : 0
                         }:${isActive ? "active" : "inactive"}`}
-                        enabled={isActive && connection.driver === "postgres"}
+                        enabled={isActive && connectionCanBrowseDatabaseCatalogs}
                         databases={
                           postgresDatabaseDiscovery.connectionId ===
                           connection.id
@@ -3812,12 +4282,12 @@ export function SchemaSidebar() {
                         }
                         connectionColor={connectionColor}
                         visibleDatabases={
-                          isActive && connection.driver === "postgres"
+                          isActive && connectionCanBrowseDatabaseCatalogs
                             ? visiblePostgresDatabases
                             : undefined
                         }
                         filterText={
-                          connection.driver === "postgres" ? filterText : ""
+                          connectionCanBrowseDatabaseCatalogs ? filterText : ""
                         }
                         databaseMatchesFilter={(database, normalizedFilter) =>
                           postgresDatabaseMatchesFilter(
@@ -3828,7 +4298,7 @@ export function SchemaSidebar() {
                           )
                         }
                         onLoadDatabase={
-                          isActive && connection.driver === "postgres"
+                          isActive && connectionCanBrowseDatabaseCatalogs
                             ? async (database) => {
                                 if (
                                   !useConnectionStore
@@ -3990,8 +4460,8 @@ export function SchemaSidebar() {
                                       data-database-schema-key={databaseSchemaNavigationKey({
                                         connectionId: connection.id,
                                         databaseName:
-                                          connection.driver === "postgres"
-                                            ? postgresConnectionDatabaseName(
+                                          connectionCanBrowseDatabaseCatalogs
+                                            ? connectionCatalogDatabaseName(
                                                 connection,
                                               )
                                             : connection.database || undefined,
@@ -4075,7 +4545,8 @@ export function SchemaSidebar() {
                                           }}
                                           disabled={
                                             !activeConnectionId ||
-                                            !canBrowseTables
+                                            !canBrowseTables ||
+                                            !activeCapabilities.supportsTableDdl
                                           }
                                         >
                                           Table
@@ -4139,10 +4610,15 @@ export function SchemaSidebar() {
                                       className={menuItemClass}
                                       disabled={
                                         Boolean(schemaDiagramLoadingKey) ||
-                                        !supportsTableWorkspace(
+                                        !(
+                                          supportsTableWorkspace(
+                                            defaultDatabaseCapabilities(
+                                              connection.driver,
+                                            ),
+                                          ) ||
                                           defaultDatabaseCapabilities(
                                             connection.driver,
-                                          ),
+                                          ).supportsCollectionBrowsing
                                         )
                                       }
                                       onClick={() =>
@@ -4152,7 +4628,7 @@ export function SchemaSidebar() {
                                           connectionName: connection.name,
                                           driver: connection.driver,
                                           databaseName:
-                                            connection.driver === "postgres"
+                                            connectionCanBrowseDatabaseCatalogs
                                               ? connectedPostgresDatabase
                                               : undefined,
                                           schemaName: schema,
@@ -4165,10 +4641,15 @@ export function SchemaSidebar() {
                                     <ContextMenuItem
                                       className={menuItemClass}
                                       disabled={
-                                        !supportsTableWorkspace(
+                                        !(
+                                          supportsTableWorkspace(
+                                            defaultDatabaseCapabilities(
+                                              connection.driver,
+                                            ),
+                                          ) ||
                                           defaultDatabaseCapabilities(
                                             connection.driver,
-                                          ),
+                                          ).supportsCollectionBrowsing
                                         )
                                       }
                                       onClick={() => {
@@ -4185,7 +4666,7 @@ export function SchemaSidebar() {
                                             connectionName: connection.name,
                                             driver: connection.driver,
                                             databaseName:
-                                              connection.driver === "postgres"
+                                              connectionCanBrowseDatabaseCatalogs
                                                 ? connectedPostgresDatabase
                                                 : undefined,
                                             schemaName: schema,
@@ -4194,7 +4675,13 @@ export function SchemaSidebar() {
                                       }}
                                     >
                                       <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
-                                      Schema Snapshots / Diff...
+                                      {supportsTableWorkspace(
+                                        defaultDatabaseCapabilities(
+                                          connection.driver,
+                                        ),
+                                      )
+                                        ? "Schema Snapshots / Diff..."
+                                        : "Metadata Snapshots..."}
                                     </ContextMenuItem>
                                     <ContextMenuSub>
                                       <ContextMenuSubTrigger
@@ -4317,6 +4804,22 @@ export function SchemaSidebar() {
         )}
       </div>
 
+      <SqlScriptImportDialog
+        open={Boolean(pendingSqlScriptImport)}
+        preview={pendingSqlScriptImport?.preview || null}
+        target={pendingSqlScriptImport?.connectionName || "selected data source"}
+        isSubmitting={isSqlScriptImporting}
+        onClose={() => {
+          if (pendingSqlScriptImport) {
+            useTaskStore
+              .getState()
+              .cancelTask(pendingSqlScriptImport.taskId, "SQL script review cancelled");
+          }
+          setPendingSqlScriptImport(null);
+        }}
+        onImport={handleConfirmSqlScriptImport}
+      />
+
       <Suspense fallback={null}>
         {isDataSourceDialogOpen && (
           <DataSourceDialog open onOpenChange={setIsDataSourceDialogOpen} />
@@ -4375,6 +4878,27 @@ export function SchemaSidebar() {
         </DialogContent>
       </Dialog>
       <Suspense fallback={null}>
+        {databaseAdministrationConnectionId && (
+          <DatabaseAdministrationDialog
+            open
+            onOpenChange={(open) => {
+              if (!open) setDatabaseAdministrationConnectionId(null);
+            }}
+            connectionId={databaseAdministrationConnectionId}
+            driver={
+              connections.find(
+                (connection) =>
+                  connection.id === databaseAdministrationConnectionId,
+              )?.driver || activeDriver
+            }
+            connectionName={
+              connections.find(
+                (connection) =>
+                  connection.id === databaseAdministrationConnectionId,
+              )?.name
+            }
+          />
+        )}
         {isCreateDbDialogOpen && (
           <CreateDatabaseDialog
             isOpen

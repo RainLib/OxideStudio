@@ -28,7 +28,15 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-type PostgresTransactionSession = Arc<Mutex<PoolConnection<Postgres>>>;
+struct PostgresTransactionSession {
+    connection: Mutex<PoolConnection<Postgres>>,
+    /// A database-scoped session owns a dedicated one-connection pool. Keeping
+    /// it beside the checked-out connection prevents a selected database from
+    /// sharing (or being replaced by) the Explorer metadata pool.
+    _database_pool: Option<Pool<Postgres>>,
+}
+
+type PostgresTransactionSessionHandle = Arc<PostgresTransactionSession>;
 const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const METADATA_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const METADATA_QUERY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -43,7 +51,7 @@ struct PostgresMetadataPool {
 pub struct PostgresDriver {
     pub pool: Mutex<Option<Pool<Postgres>>>,
     pub connection_string: String,
-    pub transaction_sessions: Mutex<HashMap<String, PostgresTransactionSession>>,
+    transaction_sessions: Mutex<HashMap<String, PostgresTransactionSessionHandle>>,
     pub active_queries: StdMutex<HashMap<String, i32>>,
     /// A single cached pool for read-only Database Explorer metadata. Holding
     /// this mutex across a metadata query serializes database switches, so the
@@ -809,7 +817,7 @@ impl PostgresDriver {
     async fn get_transaction_session(
         &self,
         session_id: &str,
-    ) -> Result<PostgresTransactionSession> {
+    ) -> Result<PostgresTransactionSessionHandle> {
         self.transaction_sessions
             .lock()
             .await
@@ -969,7 +977,7 @@ impl DatabaseDriver for PostgresDriver {
         drop(sessions);
 
         for session in drained_sessions {
-            let mut conn = session.lock().await;
+            let mut conn = session.connection.lock().await;
             if let Err(error) = sqlx::query("ROLLBACK").execute(&mut **conn).await {
                 tracing::warn!(
                     "Failed to rollback PostgreSQL transaction on disconnect: {}",
@@ -1363,13 +1371,85 @@ impl DatabaseDriver for PostgresDriver {
             return Err(anyhow!("Transaction already active: {}", session_id));
         }
 
-        sessions.insert(session_id.to_string(), Arc::new(Mutex::new(conn)));
+        sessions.insert(
+            session_id.to_string(),
+            Arc::new(PostgresTransactionSession {
+                connection: Mutex::new(conn),
+                _database_pool: None,
+            }),
+        );
+        Ok(())
+    }
+
+    async fn begin_database_transaction(
+        &self,
+        session_id: &str,
+        database: &str,
+        schema: Option<&str>,
+    ) -> Result<()> {
+        if database.trim().is_empty() {
+            return Err(anyhow!("PostgreSQL database name cannot be empty"));
+        }
+        {
+            let sessions = self.transaction_sessions.lock().await;
+            if sessions.contains_key(session_id) {
+                return Err(anyhow!("Transaction already active: {}", session_id));
+            }
+        }
+
+        let options = self.metadata_connect_options(database)?;
+        let pool = PgPoolOptions::new()
+            .min_connections(0)
+            .max_connections(1)
+            .acquire_timeout(METADATA_CONNECT_TIMEOUT)
+            .idle_timeout(Some(METADATA_POOL_IDLE_TIMEOUT))
+            .max_lifetime(Some(METADATA_POOL_MAX_LIFETIME))
+            .connect_with(options)
+            .await?;
+        let mut conn = pool.acquire().await?;
+        sqlx::query("BEGIN")
+            .persistent(false)
+            .execute(&mut *conn)
+            .await?;
+
+        if let Some(schema) = schema.filter(|schema| !schema.trim().is_empty()) {
+            let search_path = DatabaseKind::Postgres.quote_identifier(schema);
+            if let Err(error) = sqlx::query("SELECT set_config('search_path', $1, true)")
+                .bind(search_path)
+                .persistent(false)
+                .execute(&mut *conn)
+                .await
+            {
+                let _ = sqlx::query("ROLLBACK")
+                    .persistent(false)
+                    .execute(&mut *conn)
+                    .await;
+                return Err(error.into());
+            }
+        }
+
+        let mut sessions = self.transaction_sessions.lock().await;
+        if sessions.contains_key(session_id) {
+            drop(sessions);
+            let _ = sqlx::query("ROLLBACK")
+                .persistent(false)
+                .execute(&mut *conn)
+                .await;
+            return Err(anyhow!("Transaction already active: {}", session_id));
+        }
+        sessions.insert(
+            session_id.to_string(),
+            Arc::new(PostgresTransactionSession {
+                connection: Mutex::new(conn),
+                _database_pool: Some(pool),
+            }),
+        );
         Ok(())
     }
 
     async fn query_transaction(&self, session_id: &str, sql: &str) -> Result<Vec<QueryResult>> {
         let session = self.get_transaction_session(session_id).await?;
-        let mut conn = session.lock().await;
+        let mut conn = session.connection.lock().await;
 
         self.query_on_connection(sql, &mut conn).await
     }
@@ -1385,12 +1465,30 @@ impl DatabaseDriver for PostgresDriver {
         }
 
         let session = self.get_transaction_session(session_id).await?;
-        let mut conn = session.lock().await;
+        let mut conn = session.connection.lock().await;
 
         let tracked_query = self.track_query_on_connection(query_id, &mut conn).await?;
         let result = self.query_on_connection(sql, &mut conn).await;
         drop(tracked_query);
         result
+    }
+
+    async fn execute_parameterized_transaction(
+        &self,
+        session_id: &str,
+        statements: &[ParameterizedStatement],
+    ) -> Result<Vec<u64>> {
+        let session = self.get_transaction_session(session_id).await?;
+        let mut conn = session.connection.lock().await;
+        let mut rows_affected = Vec::with_capacity(statements.len());
+        for statement in statements {
+            let mut query = sqlx::query(&statement.sql).persistent(false);
+            for param in &statement.params {
+                query = bind_pg_parameter(query, param)?;
+            }
+            rows_affected.push(query.execute(&mut **conn).await?.rows_affected());
+        }
+        Ok(rows_affected)
     }
 
     async fn cancel_query(&self, query_id: &str) -> Result<bool> {
@@ -1417,7 +1515,7 @@ impl DatabaseDriver for PostgresDriver {
                 .remove(session_id)
                 .ok_or_else(|| anyhow!("Transaction not found: {}", session_id))?
         };
-        let mut conn = session.lock().await;
+        let mut conn = session.connection.lock().await;
 
         sqlx::query("COMMIT")
             .persistent(false)
@@ -1433,7 +1531,7 @@ impl DatabaseDriver for PostgresDriver {
                 .remove(session_id)
                 .ok_or_else(|| anyhow!("Transaction not found: {}", session_id))?
         };
-        let mut conn = session.lock().await;
+        let mut conn = session.connection.lock().await;
 
         sqlx::query("ROLLBACK")
             .persistent(false)

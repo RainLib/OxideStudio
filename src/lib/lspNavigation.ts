@@ -3,8 +3,10 @@ import {
   requestDatabaseSchemaReveal,
 } from "@/lib/databaseNavigation";
 import { parseLspDatabaseObjectUri } from "@/services/lsp/objectUri";
+import { parseLspProjectDocumentUri } from "@/services/lsp/document";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
+import { openProjectFileInEditor } from "@/lib/projectFileOpen";
 
 /**
  * Resolves an application-owned LSP definition URI through the same Database
@@ -50,5 +52,16 @@ export async function revealLspDatabaseDefinition(
       schemaName: target.schemaName,
     });
   }
+  return true;
+}
+
+/** Open a saved project SQL definition, but only for the active project. */
+export async function revealLspProjectDefinition(
+  uri: string,
+  activeProjectId: string,
+): Promise<boolean> {
+  const target = parseLspProjectDocumentUri(uri);
+  if (!target || target.projectId !== activeProjectId) return false;
+  await openProjectFileInEditor(target.relativePath);
   return true;
 }

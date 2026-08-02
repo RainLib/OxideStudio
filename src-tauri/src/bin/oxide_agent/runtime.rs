@@ -18,7 +18,7 @@ use oxide_studio_lib::{
             StatementScanDialect,
         },
     },
-    drivers::connect_driver,
+    drivers::connect_agent_read_only_driver,
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
@@ -188,7 +188,15 @@ impl ToolRuntime {
         let fetch_rows = max_rows.saturating_add(1);
         let bounded_statement =
             format!("SELECT * FROM (\n{statement}\n) AS oxide_agent_result LIMIT {fetch_rows}");
-        let script = read_only_transaction_script(dialect, &bounded_statement);
+        // SQLite is opened by the shared Agent connection factory with the
+        // engine's read-only flag. It does not accept PostgreSQL/MySQL's
+        // transaction syntax, so the bounded SELECT is sent directly.
+        let uses_engine_read_only = is_file_agent_driver(&connection.stored.driver)?;
+        let script = if uses_engine_read_only {
+            bounded_statement
+        } else {
+            read_only_transaction_script(dialect, &bounded_statement)?
+        };
         let mut results = self
             .execute_sql(
                 &connection,
@@ -197,7 +205,9 @@ impl ToolRuntime {
                 input.schema.as_deref(),
             )
             .await?;
-        strip_transaction_results(&mut results);
+        if !uses_engine_read_only {
+            strip_transaction_results(&mut results);
+        }
         let original_rows = results
             .iter()
             .map(|result| result.rows.len())
@@ -227,10 +237,15 @@ impl ToolRuntime {
             .resolve_connection(input.connection_id.as_deref())
             .await?;
         let dialect = dialect_for_driver(&connection.stored.driver)?;
-        let kind = kind_for_dialect(dialect);
+        let kind = kind_for_dialect(dialect)?;
         let (statement, format) =
             build_explain_statement(&input.sql, kind, ExplainPlanMode::Estimate)?;
-        let script = read_only_transaction_script(dialect, &statement);
+        let uses_engine_read_only = is_file_agent_driver(&connection.stored.driver)?;
+        let script = if uses_engine_read_only {
+            statement
+        } else {
+            read_only_transaction_script(dialect, &statement)?
+        };
         let started = Instant::now();
         let mut results = self
             .execute_sql(
@@ -240,7 +255,9 @@ impl ToolRuntime {
                 input.schema.as_deref(),
             )
             .await?;
-        strip_transaction_results(&mut results);
+        if !uses_engine_read_only {
+            strip_transaction_results(&mut results);
+        }
         let plan = parse_explain_results(
             self.query_id("explain"),
             kind,
@@ -353,7 +370,7 @@ impl ToolRuntime {
         )
         .await
         .context("failed to prepare the saved connection")?;
-        let driver = connect_driver(&connection.stored.driver, &connection_url)
+        let driver = connect_agent_read_only_driver(&connection.stored.driver, &connection_url)
             .await
             .context("failed to connect to the saved database")?;
         if let Err(error) = driver.ping().await {
@@ -455,27 +472,42 @@ fn default_candidate_limit() -> usize {
 fn dialect_for_driver(driver: &str) -> Result<StatementScanDialect> {
     let driver = database_capabilities_for_driver(driver)?.driver;
     match driver.as_str() {
-        "postgres" => Ok(StatementScanDialect::Postgres),
+        "postgres" | "sqlite" => Ok(StatementScanDialect::Postgres),
         "mysql" => Ok(StatementScanDialect::Mysql),
         _ => Err(anyhow!(
-            "external SQL tools are only available for PostgreSQL and MySQL"
+            "external SQL tools are only available for PostgreSQL, MySQL, and SQLite"
         )),
     }
 }
 
-fn kind_for_dialect(dialect: StatementScanDialect) -> DatabaseKind {
+fn is_file_agent_driver(driver: &str) -> Result<bool> {
+    Ok(matches!(
+        database_capabilities_for_driver(driver)?.connection_mode,
+        oxide_studio_lib::core::dialect::DatabaseConnectionMode::File
+    ))
+}
+
+fn kind_for_dialect(dialect: StatementScanDialect) -> Result<DatabaseKind> {
     match dialect {
-        StatementScanDialect::Postgres => DatabaseKind::Postgres,
-        StatementScanDialect::Mysql => DatabaseKind::Mysql,
+        StatementScanDialect::Postgres => Ok(DatabaseKind::Postgres),
+        StatementScanDialect::Mysql => Ok(DatabaseKind::Mysql),
+        StatementScanDialect::SqlServer => Err(anyhow!(
+            "SQL Server requires a driver-specific Explain Plan implementation"
+        )),
     }
 }
 
-fn read_only_transaction_script(dialect: StatementScanDialect, sql: &str) -> String {
+fn read_only_transaction_script(dialect: StatementScanDialect, sql: &str) -> Result<String> {
     let begin = match dialect {
         StatementScanDialect::Postgres => "BEGIN READ ONLY;",
         StatementScanDialect::Mysql => "START TRANSACTION READ ONLY;",
+        StatementScanDialect::SqlServer => {
+            return Err(anyhow!(
+                "SQL Server requires a driver-enforced read-only execution endpoint"
+            ));
+        }
     };
-    format!("{begin}\n{}\n;\nROLLBACK;", sql.trim())
+    Ok(format!("{begin}\n{}\n;\nROLLBACK;", sql.trim()))
 }
 
 fn strip_transaction_results(results: &mut Vec<QueryResult>) {
@@ -584,6 +616,9 @@ fn connection_url_from_config(driver: &str, config: &ConfigSavedConnection) -> R
         })
     {
         let value = value.strip_prefix("jdbc:").unwrap_or(value);
+        if is_file_agent_driver(driver)? {
+            return Ok(value.to_string());
+        }
         let parsed = url::Url::parse(value).context("saved connection URL is invalid")?;
         if parsed.host_str().is_none() && parsed.scheme() != "redis" {
             return Err(anyhow!("saved connection URL must include a host"));
@@ -592,6 +627,22 @@ fn connection_url_from_config(driver: &str, config: &ConfigSavedConnection) -> R
     }
 
     let capabilities = database_capabilities_for_driver(driver)?;
+    if is_file_agent_driver(driver)? {
+        return config
+            .database
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                config
+                    .host
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("saved file database is required"));
+    }
     let host = config
         .host
         .as_deref()
@@ -671,10 +722,20 @@ mod tests {
             "SELECT * FROM (\n{statement}\n) AS oxide_agent_result LIMIT {}",
             201
         );
-        let script = read_only_transaction_script(StatementScanDialect::Postgres, &wrapped);
+        let script = read_only_transaction_script(StatementScanDialect::Postgres, &wrapped)
+            .expect("PostgreSQL read-only wrapper should be available");
         assert!(script.starts_with("BEGIN READ ONLY;"));
         assert!(script.contains("LIMIT 201"));
         assert!(script.ends_with("ROLLBACK;"));
+    }
+
+    #[test]
+    fn sqlite_uses_the_file_and_engine_read_only_paths() {
+        assert!(is_file_agent_driver("sqlite").unwrap());
+        assert_eq!(
+            dialect_for_driver("sqlite").unwrap(),
+            StatementScanDialect::Postgres
+        );
     }
 
     #[test]

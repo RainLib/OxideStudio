@@ -9,6 +9,28 @@ pub enum DatabaseDataModel {
     Document,
     KeyValue,
     Search,
+    /// A graph store requires its own traversal/query workspace; it must not
+    /// inherit the relational Table Editor merely because a package can list
+    /// metadata.
+    Graph,
+    /// Column-family stores are neither SQL tables nor document collections.
+    WideColumn,
+    /// Measurements, retention and time windows require a dedicated editor.
+    TimeSeries,
+    /// Coordination/configuration systems expose administrative objects.
+    Coordination,
+    /// Broker/topic administration has a separate safety model from records.
+    Queue,
+}
+
+/// Addressing mode is a signed driver capability: external packages must be
+/// able to declare local-file data sources without renderer-side ID checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum DatabaseConnectionMode {
+    #[default]
+    Network,
+    File,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,17 +39,70 @@ pub struct DatabaseCapabilities {
     pub driver: String,
     pub display_name: String,
     pub data_model: DatabaseDataModel,
+    #[serde(default)]
+    pub connection_mode: DatabaseConnectionMode,
     pub lsp_language_id: String,
+    /// The parser identity used by the bundled language server. This may be
+    /// more specific than the editor language: a compatible product can keep
+    /// `lspLanguageId: "sql"` in the UI while using a reviewed MySQL or
+    /// PostgreSQL completion baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsp_server_dialect: Option<String>,
     pub namespace_label: String,
     pub identifier_quote: String,
     pub default_port: u16,
     pub supports_sql_query: bool,
     pub supports_table_browsing: bool,
+    /// Whether table rows can be inserted, updated, and deleted through the
+    /// bounded Data Editor command surface.
+    #[serde(default)]
+    pub supports_table_row_mutation: bool,
+    /// Whether this driver has a reviewed table-to-table transfer contract.
+    /// This is intentionally stricter than Grid editing: transfer also relies
+    /// on stable paging, identifier quoting, parameter binding, and a clear
+    /// partial-commit report across two independent connections.
+    #[serde(default)]
+    pub supports_table_data_transfer: bool,
+    /// Whether the driver implements the Table Editor's DDL actions. Metadata
+    /// support alone must never make Create/Rename/Drop controls executable.
+    #[serde(default)]
+    pub supports_table_ddl: bool,
+    /// Whether the bounded Table Editor supports ALTER COLUMN operations for
+    /// this driver. Generic DDL support alone is not enough to expose it.
+    #[serde(default)]
+    pub supports_column_alteration: bool,
+    /// Whether the bounded Table Editor can rename an existing index.
+    #[serde(default)]
+    pub supports_index_rename: bool,
+    /// Whether the bounded Table Editor can alter existing constraints.
+    #[serde(default)]
+    pub supports_constraint_alteration: bool,
     pub supports_collection_browsing: bool,
     pub supports_key_value_browsing: bool,
     pub supports_schemas: bool,
+    /// Whether the Explorer may enumerate multiple catalogs/databases beneath
+    /// one connection. This is deliberately separate from schemas: DuckDB
+    /// attachments, for example, are catalog-scoped even though they are
+    /// local files rather than separate network connections.
+    #[serde(default)]
+    pub supports_database_catalogs: bool,
+    /// Whether the connection accepts a database/catalog segment in its URL
+    /// and should render that field in the connection form. HTTP engines with
+    /// one physical database per endpoint explicitly disable it. Existing
+    /// packages default to true to preserve their established URL behavior.
+    #[serde(default = "default_true")]
+    pub supports_connection_database: bool,
     pub supports_create_database: bool,
+    /// Whether database creation accepts an owner / authorization principal.
+    /// Optional so packages written before this field existed safely hide it.
+    #[serde(default)]
+    pub supports_create_database_owner: bool,
     pub supports_create_database_charset: bool,
+    /// Whether database creation accepts an explicit collation. This is kept
+    /// independent from character sets because several engines support one
+    /// but not the other.
+    #[serde(default)]
+    pub supports_create_database_collation: bool,
     pub supports_column_comments: bool,
     pub supports_inline_column_comments: bool,
     pub supports_rename_database: bool,
@@ -53,17 +128,27 @@ pub struct DatabaseSpec {
     pub aliases: &'static [&'static str],
     pub display_name: &'static str,
     pub data_model: DatabaseDataModel,
+    pub connection_mode: DatabaseConnectionMode,
     pub lsp_language_id: &'static str,
     pub namespace_label: &'static str,
     pub identifier_quote: char,
     pub default_port: u16,
     pub supports_sql_query: bool,
     pub supports_table_browsing: bool,
+    pub supports_table_row_mutation: bool,
+    pub supports_table_ddl: bool,
+    pub supports_column_alteration: bool,
+    pub supports_index_rename: bool,
+    pub supports_constraint_alteration: bool,
     pub supports_collection_browsing: bool,
     pub supports_key_value_browsing: bool,
     pub supports_schemas: bool,
+    pub supports_database_catalogs: bool,
+    pub supports_connection_database: bool,
     pub supports_create_database: bool,
+    pub supports_create_database_owner: bool,
     pub supports_create_database_charset: bool,
+    pub supports_create_database_collation: bool,
     pub supports_column_comments: bool,
     pub supports_inline_column_comments: bool,
     pub supports_rename_database: bool,
@@ -98,7 +183,9 @@ impl DatabaseSpec {
             driver: self.driver.to_string(),
             display_name: self.display_name.to_string(),
             data_model: self.data_model,
+            connection_mode: self.connection_mode,
             lsp_language_id: self.lsp_language_id.to_string(),
+            lsp_server_dialect: None,
             namespace_label: self.namespace_label.to_string(),
             identifier_quote: if self.identifier_quote == '\0' {
                 String::new()
@@ -108,11 +195,25 @@ impl DatabaseSpec {
             default_port: self.default_port,
             supports_sql_query: self.supports_sql_query,
             supports_table_browsing: self.supports_table_browsing,
+            supports_table_row_mutation: self.supports_table_row_mutation,
+            // The bundled table engines share the reviewed bounded transfer
+            // implementation. External packages must opt in explicitly in
+            // their signed capability contract instead of inheriting this
+            // merely by supporting ordinary Grid edits.
+            supports_table_data_transfer: matches!(self.driver, "postgres" | "mysql" | "sqlite"),
+            supports_table_ddl: self.supports_table_ddl,
+            supports_column_alteration: self.supports_column_alteration,
+            supports_index_rename: self.supports_index_rename,
+            supports_constraint_alteration: self.supports_constraint_alteration,
             supports_collection_browsing: self.supports_collection_browsing,
             supports_key_value_browsing: self.supports_key_value_browsing,
             supports_schemas: self.supports_schemas,
+            supports_database_catalogs: self.supports_database_catalogs,
+            supports_connection_database: self.supports_connection_database,
             supports_create_database: self.supports_create_database,
+            supports_create_database_owner: self.supports_create_database_owner,
             supports_create_database_charset: self.supports_create_database_charset,
+            supports_create_database_collation: self.supports_create_database_collation,
             supports_column_comments: self.supports_column_comments,
             supports_inline_column_comments: self.supports_inline_column_comments,
             supports_rename_database: self.supports_rename_database,
@@ -138,6 +239,10 @@ impl DatabaseSpec {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 const POSTGRES_COMMON_DATA_TYPES: &[&str] = &[
     "INTEGER",
     "BIGINT",
@@ -151,6 +256,7 @@ const POSTGRES_COMMON_DATA_TYPES: &[&str] = &[
     "DECIMAL",
     "REAL",
     "DOUBLE PRECISION",
+    "BYTEA",
     "JSONB",
     "UUID",
 ];
@@ -158,6 +264,10 @@ const POSTGRES_COMMON_DATA_TYPES: &[&str] = &[
 const MYSQL_COMMON_DATA_TYPES: &[&str] = &[
     "INT", "BIGINT", "VARCHAR", "TEXT", "DATE", "DATETIME", "BOOLEAN", "DECIMAL", "FLOAT",
     "DOUBLE", "TINYINT", "SMALLINT", "BLOB", "JSON",
+];
+
+const SQLITE_COMMON_DATA_TYPES: &[&str] = &[
+    "INTEGER", "REAL", "TEXT", "BLOB", "NUMERIC", "BOOLEAN", "DATE", "DATETIME", "JSON",
 ];
 
 const REDIS_COMMON_DATA_TYPES: &[&str] = &["string", "list", "set", "zset", "hash", "stream"];
@@ -185,17 +295,27 @@ const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
     aliases: &["postgresql", "pgsql"],
     display_name: "PostgreSQL",
     data_model: DatabaseDataModel::Relational,
+    connection_mode: DatabaseConnectionMode::Network,
     lsp_language_id: "postgres",
     namespace_label: "schema",
     identifier_quote: '"',
     default_port: 5432,
     supports_sql_query: true,
     supports_table_browsing: true,
+    supports_table_row_mutation: true,
+    supports_table_ddl: true,
+    supports_column_alteration: true,
+    supports_index_rename: true,
+    supports_constraint_alteration: true,
     supports_collection_browsing: false,
     supports_key_value_browsing: false,
     supports_schemas: true,
+    supports_database_catalogs: true,
+    supports_connection_database: true,
     supports_create_database: true,
+    supports_create_database_owner: true,
     supports_create_database_charset: false,
+    supports_create_database_collation: false,
     supports_column_comments: true,
     supports_inline_column_comments: false,
     supports_rename_database: true,
@@ -220,17 +340,27 @@ const MYSQL_SPEC: DatabaseSpec = DatabaseSpec {
     aliases: &["mariadb"],
     display_name: "MySQL",
     data_model: DatabaseDataModel::Relational,
+    connection_mode: DatabaseConnectionMode::Network,
     lsp_language_id: "mysql",
     namespace_label: "database",
     identifier_quote: '`',
     default_port: 3306,
     supports_sql_query: true,
     supports_table_browsing: true,
+    supports_table_row_mutation: true,
+    supports_table_ddl: true,
+    supports_column_alteration: true,
+    supports_index_rename: true,
+    supports_constraint_alteration: true,
     supports_collection_browsing: false,
     supports_key_value_browsing: false,
     supports_schemas: true,
+    supports_database_catalogs: false,
+    supports_connection_database: true,
     supports_create_database: true,
+    supports_create_database_owner: false,
     supports_create_database_charset: true,
+    supports_create_database_collation: true,
     supports_column_comments: true,
     supports_inline_column_comments: true,
     supports_rename_database: false,
@@ -250,22 +380,81 @@ const MYSQL_SPEC: DatabaseSpec = DatabaseSpec {
     common_data_types: MYSQL_COMMON_DATA_TYPES,
 };
 
+const SQLITE_SPEC: DatabaseSpec = DatabaseSpec {
+    driver: "sqlite",
+    aliases: &["sqlite3"],
+    display_name: "SQLite",
+    data_model: DatabaseDataModel::Relational,
+    connection_mode: DatabaseConnectionMode::File,
+    lsp_language_id: "sqlite",
+    namespace_label: "schema",
+    identifier_quote: '"',
+    default_port: 0,
+    supports_sql_query: true,
+    supports_table_browsing: true,
+    supports_table_row_mutation: true,
+    // SQLite uses dedicated native builders for supported table DDL; it never
+    // inherits PostgreSQL DDL syntax through DatabaseKind.
+    supports_table_ddl: true,
+    supports_column_alteration: false,
+    supports_index_rename: false,
+    supports_constraint_alteration: false,
+    supports_collection_browsing: false,
+    supports_key_value_browsing: false,
+    supports_schemas: true,
+    supports_database_catalogs: false,
+    supports_connection_database: true,
+    supports_create_database: false,
+    supports_create_database_owner: false,
+    supports_create_database_charset: false,
+    supports_create_database_collation: false,
+    supports_column_comments: false,
+    supports_inline_column_comments: false,
+    supports_rename_database: false,
+    supports_views: true,
+    supports_replace_view: false,
+    supports_materialized_views: false,
+    supports_table_indexes: true,
+    supports_table_constraints: true,
+    supports_foreign_keys: true,
+    supports_check_constraints: true,
+    supports_functions: false,
+    supports_transactions: true,
+    supports_query_cancellation: false,
+    // The native driver supports EXPLAIN, but the shared plan renderer has no
+    // SQLite adapter yet. Keep the capability honest until that adapter lands.
+    supports_explain_plan: false,
+    auto_increment_keyword: Some("AUTOINCREMENT"),
+    default_primary_key_type: "INTEGER",
+    common_data_types: SQLITE_COMMON_DATA_TYPES,
+};
+
 const REDIS_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "redis",
     aliases: &[],
     display_name: "Redis",
     data_model: DatabaseDataModel::KeyValue,
+    connection_mode: DatabaseConnectionMode::Network,
     lsp_language_id: "redis",
     namespace_label: "database",
     identifier_quote: '\0',
     default_port: 6379,
     supports_sql_query: false,
     supports_table_browsing: false,
+    supports_table_row_mutation: false,
+    supports_table_ddl: false,
+    supports_column_alteration: false,
+    supports_index_rename: false,
+    supports_constraint_alteration: false,
     supports_collection_browsing: false,
     supports_key_value_browsing: true,
     supports_schemas: true,
+    supports_database_catalogs: false,
+    supports_connection_database: true,
     supports_create_database: false,
+    supports_create_database_owner: false,
     supports_create_database_charset: false,
+    supports_create_database_collation: false,
     supports_column_comments: false,
     supports_inline_column_comments: false,
     supports_rename_database: false,
@@ -290,17 +479,27 @@ const ELASTICSEARCH_SPEC: DatabaseSpec = DatabaseSpec {
     aliases: &["elastic"],
     display_name: "Elasticsearch",
     data_model: DatabaseDataModel::Search,
+    connection_mode: DatabaseConnectionMode::Network,
     lsp_language_id: "elasticsearch-dsl",
     namespace_label: "index",
     identifier_quote: '\0',
     default_port: 9200,
     supports_sql_query: false,
     supports_table_browsing: false,
+    supports_table_row_mutation: false,
+    supports_table_ddl: false,
+    supports_column_alteration: false,
+    supports_index_rename: false,
+    supports_constraint_alteration: false,
     supports_collection_browsing: true,
     supports_key_value_browsing: false,
     supports_schemas: false,
+    supports_database_catalogs: false,
+    supports_connection_database: true,
     supports_create_database: false,
+    supports_create_database_owner: false,
     supports_create_database_charset: false,
+    supports_create_database_collation: false,
     supports_column_comments: false,
     supports_inline_column_comments: false,
     supports_rename_database: false,
@@ -325,24 +524,34 @@ const MONGODB_SPEC: DatabaseSpec = DatabaseSpec {
     aliases: &["mongo"],
     display_name: "MongoDB",
     data_model: DatabaseDataModel::Document,
+    connection_mode: DatabaseConnectionMode::Network,
     lsp_language_id: "mongodb",
     namespace_label: "database",
     identifier_quote: '\0',
     default_port: 27017,
     supports_sql_query: false,
     supports_table_browsing: false,
+    supports_table_row_mutation: false,
+    supports_table_ddl: false,
+    supports_column_alteration: false,
+    supports_index_rename: false,
+    supports_constraint_alteration: false,
     supports_collection_browsing: true,
     supports_key_value_browsing: false,
     supports_schemas: true,
+    supports_database_catalogs: false,
+    supports_connection_database: true,
     supports_create_database: false,
+    supports_create_database_owner: false,
     supports_create_database_charset: false,
+    supports_create_database_collation: false,
     supports_column_comments: false,
     supports_inline_column_comments: false,
     supports_rename_database: false,
     supports_views: false,
     supports_replace_view: false,
     supports_materialized_views: false,
-    supports_table_indexes: false,
+    supports_table_indexes: true,
     supports_table_constraints: false,
     supports_foreign_keys: false,
     supports_check_constraints: false,
@@ -358,6 +567,7 @@ const MONGODB_SPEC: DatabaseSpec = DatabaseSpec {
 const DATABASE_SPECS: &[&DatabaseSpec] = &[
     &POSTGRES_SPEC,
     &MYSQL_SPEC,
+    &SQLITE_SPEC,
     &ELASTICSEARCH_SPEC,
     &MONGODB_SPEC,
     &REDIS_SPEC,
@@ -1649,6 +1859,9 @@ WITH NO DATA;"#
         assert_eq!(postgres.default_port, 5432);
         assert!(postgres.supports_sql_query);
         assert!(postgres.supports_table_browsing);
+        assert!(postgres.supports_column_alteration);
+        assert!(postgres.supports_index_rename);
+        assert!(postgres.supports_constraint_alteration);
         assert!(!postgres.supports_collection_browsing);
         assert!(!postgres.supports_key_value_browsing);
         assert_eq!(
@@ -1664,7 +1877,9 @@ WITH NO DATA;"#
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
         );
+        assert!(postgres.supports_create_database_owner);
         assert!(!postgres.supports_create_database_charset);
+        assert!(!postgres.supports_create_database_collation);
         assert!(postgres.supports_column_comments);
         assert!(!postgres.supports_inline_column_comments);
         assert!(postgres.supports_rename_database);
@@ -1679,6 +1894,7 @@ WITH NO DATA;"#
         assert!(postgres.supports_transactions);
         assert!(postgres.supports_query_cancellation);
         assert!(postgres.supports_explain_plan);
+        assert_eq!(postgres.connection_mode, DatabaseConnectionMode::Network);
         assert_eq!(postgres.default_primary_key_type, "SERIAL");
 
         let mysql = DatabaseKind::Mysql.capabilities();
@@ -1688,6 +1904,9 @@ WITH NO DATA;"#
         assert_eq!(mysql.default_port, 3306);
         assert!(mysql.supports_sql_query);
         assert!(mysql.supports_table_browsing);
+        assert!(mysql.supports_column_alteration);
+        assert!(mysql.supports_index_rename);
+        assert!(mysql.supports_constraint_alteration);
         assert!(!mysql.supports_collection_browsing);
         assert!(!mysql.supports_key_value_browsing);
         assert_eq!(mysql.display_name, DatabaseKind::Mysql.spec().display_name);
@@ -1700,7 +1919,9 @@ WITH NO DATA;"#
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
         );
+        assert!(!mysql.supports_create_database_owner);
         assert!(mysql.supports_create_database_charset);
+        assert!(mysql.supports_create_database_collation);
         assert!(!mysql.supports_rename_database);
         assert!(mysql.supports_views);
         assert!(mysql.supports_replace_view);
@@ -1719,6 +1940,25 @@ WITH NO DATA;"#
         );
         assert!(mysql.supports_inline_column_comments);
         assert_eq!(mysql.default_primary_key_type, "INT");
+        assert_eq!(mysql.connection_mode, DatabaseConnectionMode::Network);
+
+        let sqlite = database_capabilities_for_driver("sqlite").unwrap();
+        assert_eq!(sqlite.connection_mode, DatabaseConnectionMode::File);
+        assert!(!sqlite.supports_column_alteration);
+        assert!(!sqlite.supports_index_rename);
+        assert!(!sqlite.supports_constraint_alteration);
+    }
+
+    #[test]
+    fn legacy_capability_contracts_keep_database_url_segments_enabled() {
+        let capabilities = database_capabilities_for_driver("postgres").unwrap();
+        let mut legacy = serde_json::to_value(capabilities).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("supportsConnectionDatabase");
+        let restored: DatabaseCapabilities = serde_json::from_value(legacy).unwrap();
+        assert!(restored.supports_connection_database);
     }
 
     #[test]
@@ -1780,6 +2020,7 @@ WITH NO DATA;"#
         assert!(mongodb.supports_schemas);
         assert!(!mongodb.supports_sql_query);
         assert!(!mongodb.supports_table_browsing);
+        assert!(mongodb.supports_table_indexes);
         assert!(!mongodb.supports_key_value_browsing);
         assert!(!mongodb.supports_explain_plan);
         assert!(!mongodb.supports_create_database);
@@ -1787,6 +2028,21 @@ WITH NO DATA;"#
         assert!(all_database_capabilities()
             .iter()
             .any(|capabilities| capabilities.driver == "mongodb"));
+    }
+
+    #[test]
+    fn extended_data_models_round_trip_through_the_signed_capability_contract() {
+        for (encoded, expected) in [
+            (r#""graph""#, DatabaseDataModel::Graph),
+            (r#""wideColumn""#, DatabaseDataModel::WideColumn),
+            (r#""timeSeries""#, DatabaseDataModel::TimeSeries),
+            (r#""coordination""#, DatabaseDataModel::Coordination),
+            (r#""queue""#, DatabaseDataModel::Queue),
+        ] {
+            let parsed: DatabaseDataModel = serde_json::from_str(encoded).unwrap();
+            assert_eq!(parsed, expected);
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), encoded);
+        }
     }
 
     #[test]
@@ -1808,6 +2064,7 @@ WITH NO DATA;"#
             database_capabilities_for_driver("elastic").unwrap().driver,
             "elasticsearch"
         );
+        assert_eq!(canonical_driver_name("sqlite3"), Some("sqlite"));
 
         let drivers = all_database_capabilities()
             .into_iter()
@@ -1815,7 +2072,14 @@ WITH NO DATA;"#
             .collect::<Vec<_>>();
         assert_eq!(
             drivers,
-            vec!["postgres", "mysql", "elasticsearch", "mongodb", "redis"]
+            vec![
+                "postgres",
+                "mysql",
+                "sqlite",
+                "elasticsearch",
+                "mongodb",
+                "redis",
+            ]
         );
 
         assert!(DatabaseKind::from_str("redis").is_err());

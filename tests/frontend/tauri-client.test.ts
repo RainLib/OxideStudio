@@ -60,6 +60,22 @@ describe("tauri api client", () => {
     });
   });
 
+  it("explains when Vite is opened without the desktop backend", async () => {
+    mocks.invoke.mockRejectedValueOnce(
+      new TypeError("Cannot read properties of undefined (reading 'invoke')"),
+    );
+
+    await expect(
+      invokeCommand("get_schemas", { connectionId: "connection-1" }),
+    ).rejects.toMatchObject({
+      code: "TAURI_RUNTIME_UNAVAILABLE",
+      retryable: false,
+      category: "application",
+      message: expect.stringContaining("desktop backend is unavailable"),
+      context: { connectionId: "connection-1" },
+    });
+  });
+
   it("classifies reverse foreign-key discovery as schema metadata", async () => {
     mocks.invoke.mockRejectedValueOnce(new Error("catalog unavailable"));
 

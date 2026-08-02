@@ -2275,6 +2275,60 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
     lsp.shutdown().await
 }
 
+#[tokio::test]
+async fn bundled_sql_lsp_isolates_a_new_query_block_without_a_semicolon() -> Result<()> {
+    let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
+        return Ok(());
+    };
+    lsp.initialize().await?;
+
+    let uri = "file:///oxide/postgres-multiple-query-blocks.sql";
+    let schema_id = "55555555-5555-4555-8555-555555555555";
+    let file_schemas = Map::from_iter([(uri.to_string(), json!(schema_id))]);
+    let file_dialects = Map::from_iter([(uri.to_string(), json!("postgres"))]);
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "defaultDialect": "postgres",
+                "schemas": [
+                    schema(
+                        schema_id,
+                        "public",
+                        "webhook",
+                        "table",
+                        vec![column("owner", "varchar"), column("name", "varchar")]
+                    )
+                ],
+                "fileSchemas": file_schemas,
+                "fileDialects": file_dialects
+            }
+        }),
+    )
+    .await?;
+
+    let sql = "SELECT *\nFROM public.webhook\n\nSELECT ";
+    open_document(&mut lsp, uri, "postgres", sql).await?;
+    assert_completion_at_contains(
+        &mut lsp,
+        uri,
+        3,
+        "SELECT ".encode_utf16().count() as u32,
+        &["webhook.owner", "webhook.name"],
+    )
+    .await?;
+    assert_completion_at_excludes(
+        &mut lsp,
+        uri,
+        3,
+        "SELECT ".encode_utf16().count() as u32,
+        &["owner", "name"],
+    )
+    .await?;
+
+    lsp.shutdown().await
+}
+
 async fn open_document(
     lsp: &mut LspProcess,
     uri: &str,

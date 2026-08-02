@@ -1,11 +1,11 @@
-use super::driver::DatabaseDriver;
 use super::protocol::{
-    ColumnInfo, ConstraintInfo, ForeignKeyReferenceInfo, FunctionInfo, IndexInfo,
-    ParameterizedStatement, QueryParameter,
+    ColumnInfo, ConstraintInfo, DatabaseCreateRequest, ForeignKeyReferenceInfo, FunctionInfo,
+    IndexInfo, ParameterizedStatement, QueryParameter,
 };
 use super::ssh::SshTunnel;
+use super::{dialect::DatabaseCapabilities, driver::DatabaseDriver};
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -20,6 +20,27 @@ pub struct ConnectionManager {
 struct ManagedConnection {
     driver: Arc<dyn DatabaseDriver>,
     ssh_tunnel: Option<SshTunnel>,
+    /// The canonical identity supplied by the trusted connection command.
+    /// Keeping it next to the live driver lets destructive table workflows
+    /// reject a stale or forged UI endpoint instead of trusting its `driver`
+    /// string to select SQL quoting and mutation behaviour.
+    driver_id: Option<String>,
+}
+
+/// Read-only summary of connection-owned external driver processes. The
+/// manager returns only trusted package identity and OS PIDs; URLs, account
+/// names, sidecar stderr, and query text intentionally remain private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalDriverRuntimeSummary {
+    pub driver: String,
+    pub package_version: String,
+    pub connection_count: usize,
+    pub process_ids: Vec<u32>,
+    pub unavailable_process_count: usize,
+    /// Connections whose owned sidecar has exited while the connection is
+    /// still registered. This is aggregated package health only; no runtime
+    /// output or connection identity is retained.
+    pub unhealthy_connection_count: usize,
 }
 
 impl Default for ConnectionManager {
@@ -72,6 +93,17 @@ impl ConnectionManager {
         driver: Box<dyn DatabaseDriver>,
         ssh_tunnel: Option<SshTunnel>,
     ) -> Result<()> {
+        self.replace_connection_with_tunnel_and_driver_id(id, driver, ssh_tunnel, None)
+            .await
+    }
+
+    pub async fn replace_connection_with_tunnel_and_driver_id(
+        &self,
+        id: String,
+        driver: Box<dyn DatabaseDriver>,
+        ssh_tunnel: Option<SshTunnel>,
+        driver_id: Option<String>,
+    ) -> Result<()> {
         let old_driver = {
             let mut conns = self.connections.lock().await;
             conns.insert(
@@ -79,6 +111,9 @@ impl ConnectionManager {
                 ManagedConnection {
                     driver: Arc::from(driver),
                     ssh_tunnel,
+                    driver_id: driver_id
+                        .map(|value| value.trim().to_ascii_lowercase())
+                        .filter(|value| !value.is_empty()),
                 },
             )
         };
@@ -141,11 +176,122 @@ impl ConnectionManager {
         Ok(self.get_driver(id).await?.server_version().await)
     }
 
+    pub async fn active_external_driver_connections(
+        &self,
+        driver_id: &str,
+        package_version: &str,
+    ) -> usize {
+        let connections = self.connections.lock().await;
+        connections
+            .values()
+            .filter(|connection| {
+                connection
+                    .driver
+                    .external_package_identity()
+                    .is_some_and(|(driver, version)| {
+                        driver == driver_id && version == package_version
+                    })
+            })
+            .count()
+    }
+
+    /// A store migration changes where every independently updateable package
+    /// is loaded from on the next launch. Do not stage that migration while a
+    /// live connection still owns any external sidecar.
+    pub async fn active_external_connection_count(&self) -> usize {
+        let connections = self.connections.lock().await;
+        connections
+            .values()
+            .filter(|connection| connection.driver.external_package_identity().is_some())
+            .count()
+    }
+
+    pub async fn external_driver_runtime_summaries(&self) -> Vec<ExternalDriverRuntimeSummary> {
+        let connections = {
+            let connections = self.connections.lock().await;
+            connections
+                .values()
+                .filter_map(|connection| {
+                    let (driver, package_version) =
+                        connection.driver.external_package_identity()?;
+                    Some((
+                        driver.to_string(),
+                        package_version.to_string(),
+                        connection.driver.clone(),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut grouped = BTreeMap::<(String, String), (usize, Vec<u32>, usize, usize)>::new();
+        for (driver, package_version, connection) in connections {
+            let process_id = connection.external_runtime_process_id().await;
+            let is_healthy = connection.external_runtime_is_healthy().await;
+            let entry = grouped
+                .entry((driver, package_version))
+                .or_insert((0, Vec::new(), 0, 0));
+            entry.0 += 1;
+            if let Some(process_id) = process_id {
+                if !entry.1.contains(&process_id) {
+                    entry.1.push(process_id);
+                }
+            } else {
+                entry.2 += 1;
+            }
+            if matches!(is_healthy, Some(false)) {
+                entry.3 += 1;
+            }
+        }
+
+        grouped
+            .into_iter()
+            .map(
+                |(
+                    (driver, package_version),
+                    (
+                        connection_count,
+                        mut process_ids,
+                        unavailable_process_count,
+                        unhealthy_connection_count,
+                    ),
+                )| {
+                    process_ids.sort_unstable();
+                    ExternalDriverRuntimeSummary {
+                        driver,
+                        package_version,
+                        connection_count,
+                        process_ids,
+                        unavailable_process_count,
+                        unhealthy_connection_count,
+                    }
+                },
+            )
+            .collect()
+    }
+
     pub async fn statement_scan_dialect(
         &self,
         id: &str,
     ) -> Result<Option<super::statement::StatementScanDialect>> {
         Ok(self.get_driver(id).await?.statement_scan_dialect())
+    }
+
+    /// Returns the verified external-package capability contract for the live
+    /// connection. Native drivers intentionally return `None`: their contract
+    /// lives in the bundled dialect registry.
+    pub async fn package_capabilities(&self, id: &str) -> Result<Option<DatabaseCapabilities>> {
+        Ok(self.get_driver(id).await?.package_capabilities())
+    }
+
+    /// Identity captured when the connection was opened through the desktop
+    /// command. Test/legacy callers can intentionally omit it and retain the
+    /// previous compatibility behaviour.
+    pub async fn connection_driver_id(&self, id: &str) -> Result<Option<String>> {
+        let connections = self.connections.lock().await;
+        connections
+            .get(id)
+            .map(|connection| connection.driver_id.clone())
+            .ok_or_else(|| anyhow!("Connection not found: {}", id))
     }
 
     /// Execute a query
@@ -200,6 +346,11 @@ impl ConnectionManager {
     ) -> Result<u64> {
         let driver = self.get_driver(id).await?;
         driver.execute_parameterized(sql, params).await
+    }
+
+    pub async fn create_database(&self, id: &str, request: DatabaseCreateRequest) -> Result<()> {
+        let driver = self.get_driver(id).await?;
+        driver.create_database(request).await
     }
 
     pub async fn query_parameterized(
@@ -281,6 +432,31 @@ impl ConnectionManager {
         let driver = self.get_driver(id).await?;
         driver
             .begin_transaction(transaction_id, schema.as_deref())
+            .await
+    }
+
+    pub async fn begin_database_transaction(
+        &self,
+        id: &str,
+        transaction_id: &str,
+        database: &str,
+        schema: Option<String>,
+    ) -> Result<()> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .begin_database_transaction(transaction_id, database, schema.as_deref())
+            .await
+    }
+
+    pub async fn execute_parameterized_transaction(
+        &self,
+        id: &str,
+        transaction_id: &str,
+        statements: &[ParameterizedStatement],
+    ) -> Result<Vec<u64>> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .execute_parameterized_transaction(transaction_id, statements)
             .await
     }
 
@@ -487,6 +663,44 @@ mod tests {
     }
 
     struct DatabaseDiscoveryDriver;
+
+    struct RuntimeDriver {
+        driver: &'static str,
+        version: &'static str,
+        process_id: Option<u32>,
+        healthy: Option<bool>,
+    }
+
+    #[async_trait]
+    impl DatabaseDriver for RuntimeDriver {
+        fn external_package_identity(&self) -> Option<(&str, &str)> {
+            Some((self.driver, self.version))
+        }
+
+        async fn external_runtime_process_id(&self) -> Option<u32> {
+            self.process_id
+        }
+
+        async fn external_runtime_is_healthy(&self) -> Option<bool> {
+            self.healthy
+        }
+
+        async fn connect(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn disconnect(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn ping(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn query(&self, _sql: &str) -> Result<Vec<QueryResult>> {
+            Ok(Vec::new())
+        }
+    }
 
     #[async_trait]
     impl DatabaseDriver for DatabaseDiscoveryDriver {
@@ -884,6 +1098,56 @@ mod tests {
 
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_runtime_summary_groups_packages_without_connection_details() {
+        let manager = ConnectionManager::new();
+        manager
+            .add_connection(
+                "private-connection-a".to_string(),
+                Box::new(RuntimeDriver {
+                    driver: "oracle",
+                    version: "23.3.0",
+                    process_id: Some(8201),
+                    healthy: Some(true),
+                }),
+            )
+            .await;
+        manager
+            .add_connection(
+                "private-connection-b".to_string(),
+                Box::new(RuntimeDriver {
+                    driver: "oracle",
+                    version: "23.3.0",
+                    process_id: Some(8202),
+                    healthy: Some(false),
+                }),
+            )
+            .await;
+        manager
+            .add_connection(
+                "private-connection-c".to_string(),
+                Box::new(RuntimeDriver {
+                    driver: "oracle",
+                    version: "23.3.0",
+                    process_id: None,
+                    healthy: None,
+                }),
+            )
+            .await;
+
+        assert_eq!(
+            manager.external_driver_runtime_summaries().await,
+            vec![ExternalDriverRuntimeSummary {
+                driver: "oracle".to_string(),
+                package_version: "23.3.0".to_string(),
+                connection_count: 3,
+                process_ids: vec![8201, 8202],
+                unavailable_process_count: 1,
+                unhealthy_connection_count: 1,
+            }],
+        );
     }
 
     #[tokio::test]

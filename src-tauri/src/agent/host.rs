@@ -34,7 +34,13 @@ use crate::{
     },
     core::{
         config::{ConfigManager, SavedConnection as ConfigSavedConnection},
-        dialect::{all_database_capabilities, database_capabilities_for_driver, DatabaseKind},
+        dialect::{
+            all_database_capabilities, canonical_driver_name, database_capabilities_for_driver,
+            DatabaseCapabilities, DatabaseKind,
+        },
+        driver_package::{
+            is_safe_driver_package_token, DatabaseDriverPackageRegistry, DriverPackageStatus,
+        },
         explain::{build_explain_statement, parse_explain_results},
         manager::ConnectionManager,
         protocol::{ExplainPlanMode, QueryResult},
@@ -43,7 +49,7 @@ use crate::{
         statement::{validate_read_only_sql, StatementScanDialect},
         store::{MetaStore, SavedConnection as StoreSavedConnection},
     },
-    drivers::connect_driver,
+    drivers::connect_agent_read_only_preferred_driver,
 };
 use anyhow::{anyhow, Context, Result};
 use base64::{
@@ -365,6 +371,8 @@ struct ConnectedAgentTarget {
 struct ResolvedAgentConnection {
     id: String,
     driver: String,
+    capabilities: DatabaseCapabilities,
+    sidecar_read_only_enforced: bool,
     config: ConfigSavedConnection,
     config_digest: String,
     database: Option<String>,
@@ -2108,14 +2116,22 @@ impl AgentHostInner {
                 ))
             }
             RustHostTool::ConnectionCapabilities => {
-                let driver = self.resolve_driver(turn, &request.input).await?;
-                serde_json::to_value(
-                    database_capabilities_for_driver(&driver)
-                        .map_err(|error| SidecarRequestError::tool(error.to_string()))?,
-                )
-                .map_err(SidecarRequestError::from_json)
+                let capabilities = if let Some(driver) = request
+                    .input
+                    .get("driver")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    self.resolve_agent_driver_contract(driver, None)?.0
+                } else {
+                    self.resolve_connection(turn, &request.input)
+                        .await?
+                        .capabilities
+                };
+                serde_json::to_value(capabilities).map_err(SidecarRequestError::from_json)
             }
-            RustHostTool::ProviderList => serde_json::to_value(all_database_capabilities())
+            RustHostTool::ProviderList => serde_json::to_value(self.agent_provider_capabilities())
                 .map_err(SidecarRequestError::from_json),
             RustHostTool::WorkspaceGetActiveTab => {
                 Ok(turn.active_tab.clone().unwrap_or(Value::Null))
@@ -2172,17 +2188,6 @@ impl AgentHostInner {
                 serde_json::to_value(result).map_err(SidecarRequestError::from_json)
             }
         }
-    }
-
-    async fn resolve_driver(
-        &self,
-        turn: &ActiveTurn,
-        input: &Value,
-    ) -> std::result::Result<String, SidecarRequestError> {
-        if let Some(driver) = input.get("driver").and_then(Value::as_str) {
-            return Ok(driver.to_string());
-        }
-        Ok(self.resolve_connection(turn, input).await?.driver)
     }
 
     async fn resolve_connection(
@@ -2281,14 +2286,32 @@ impl AgentHostInner {
                 SidecarRequestError::security(anyhow!("saved connection configuration is invalid"))
             })?;
         validate_connection_config(&turn.project_id, selected, &config)?;
-        let capabilities = database_capabilities_for_driver(&selected.driver)
-            .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+        let (capabilities, sidecar_read_only_enforced) = self.resolve_agent_driver_contract(
+            &selected.driver,
+            config.driver_package_version.as_deref(),
+        )?;
+        let configured_database = config
+            .database
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         let database = turn
             .database
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(ToString::to_string);
+            .map(ToString::to_string)
+            .or_else(|| {
+                if matches!(
+                    capabilities.connection_mode,
+                    crate::core::dialect::DatabaseConnectionMode::Network
+                ) && capabilities.supports_database_catalogs
+                {
+                    configured_database.map(ToString::to_string)
+                } else {
+                    None
+                }
+            });
         let namespace = input
             .get("namespace")
             .and_then(Value::as_str)
@@ -2308,17 +2331,25 @@ impl AgentHostInner {
             })
             .or(database.as_deref())
             .or_else(|| {
-                config
-                    .database
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
+                if matches!(
+                    capabilities.connection_mode,
+                    crate::core::dialect::DatabaseConnectionMode::Network
+                ) {
+                    configured_database
+                } else {
+                    None
+                }
             })
             .unwrap_or_else(|| {
                 if capabilities.driver == "postgres" {
                     "public"
                 } else if capabilities.driver == "redis" {
                     "0"
+                } else if matches!(
+                    capabilities.connection_mode,
+                    crate::core::dialect::DatabaseConnectionMode::File
+                ) {
+                    "main"
                 } else {
                     ""
                 }
@@ -2334,11 +2365,101 @@ impl AgentHostInner {
         Ok(ResolvedAgentConnection {
             id: selected.id.clone(),
             driver: selected.driver.clone(),
+            capabilities,
+            sidecar_read_only_enforced,
             config,
             config_digest,
             database,
             namespace,
         })
+    }
+
+    /// Resolve the same signed driver contract used by the normal connection
+    /// path. New sidecar-only database families are not present in the static
+    /// dialect table, so Agent tooling must never use that table as its only
+    /// capability source.
+    fn resolve_agent_driver_contract(
+        &self,
+        driver: &str,
+        package_version: Option<&str>,
+    ) -> std::result::Result<(DatabaseCapabilities, bool), SidecarRequestError> {
+        let requested = driver.trim();
+        let normalized = requested.to_ascii_lowercase();
+        let canonical = canonical_driver_name(requested).unwrap_or(normalized.as_str());
+        if !is_safe_driver_package_token(canonical) {
+            return Err(SidecarRequestError::security(anyhow!(
+                "saved connection driver is invalid"
+            )));
+        }
+        let registry = self
+            .app
+            .try_state::<DatabaseDriverPackageRegistry>()
+            .ok_or_else(|| {
+                SidecarRequestError::tool("database driver package registry is unavailable")
+            })?;
+        let has_active_package = registry.list_installed().into_iter().any(|package| {
+            package.active && package.manifest.driver_id.eq_ignore_ascii_case(canonical)
+        });
+        if package_version
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+            || has_active_package
+        {
+            let package = match package_version
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                Some(version) => registry.resolve_version(canonical, version),
+                None => registry.resolve_active(canonical),
+            }
+            .map_err(|error| SidecarRequestError::tool(error))?;
+            return package
+                .manifest
+                .capabilities
+                .map(|capabilities| (capabilities, true))
+                .ok_or_else(|| {
+                    SidecarRequestError::tool(
+                        "external driver package does not declare Agent-safe database capabilities",
+                    )
+                });
+        }
+        database_capabilities_for_driver(canonical)
+            .map(|capabilities| (capabilities, false))
+            .map_err(|error| SidecarRequestError::tool(error.to_string()))
+    }
+
+    /// Advertise installed external families to the Agent alongside bundled
+    /// drivers. Only a ready, active, capability-declaring package may replace
+    /// a bundled profile; invalid or inactive packages stay invisible here.
+    fn agent_provider_capabilities(&self) -> Vec<DatabaseCapabilities> {
+        let mut capabilities = all_database_capabilities();
+        let Some(registry) = self.app.try_state::<DatabaseDriverPackageRegistry>() else {
+            return capabilities;
+        };
+        for package in registry.list_installed().into_iter().filter(|package| {
+            package.active
+                && package.status == DriverPackageStatus::Ready
+                && package.manifest.capabilities.is_some()
+        }) {
+            let Some(package_capabilities) = package.manifest.capabilities else {
+                continue;
+            };
+            if let Some(index) = capabilities.iter().position(|current| {
+                current
+                    .driver
+                    .eq_ignore_ascii_case(&package_capabilities.driver)
+            }) {
+                capabilities[index] = package_capabilities;
+            } else {
+                capabilities.push(package_capabilities);
+            }
+        }
+        capabilities.sort_by(|left, right| {
+            left.display_name
+                .to_ascii_lowercase()
+                .cmp(&right.display_name.to_ascii_lowercase())
+        });
+        capabilities
     }
 
     async fn ensure_agent_connection(
@@ -2373,15 +2494,27 @@ impl AgentHostInner {
             return Ok(());
         }
 
-        let url = connection_url_from_config(&target.driver, &target.config)
+        let url = connection_url_from_config(&target.capabilities, &target.config)
             .map_err(SidecarRequestError::security)?;
         let (connection_url, tunnel) =
             SshTunnel::prepare(&target.driver, &url, target.config.ssh_tunnel.as_ref())
                 .await
                 .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
-        let driver = connect_driver(&target.driver, &connection_url)
-            .await
-            .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+        let registry = self
+            .app
+            .try_state::<DatabaseDriverPackageRegistry>()
+            .ok_or_else(|| {
+                SidecarRequestError::tool("database driver package registry is unavailable")
+            })?;
+        let driver = connect_agent_read_only_preferred_driver(
+            &registry,
+            &target.driver,
+            &connection_url,
+            target.id.clone(),
+            target.config.driver_package_version.as_deref(),
+        )
+        .await
+        .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
         if let Err(error) = driver.ping().await {
             let _ = driver.disconnect().await;
             if let Some(tunnel) = tunnel {
@@ -2413,8 +2546,7 @@ impl AgentHostInner {
         let target = self.resolve_connection(turn, &request.input).await?;
         self.ensure_agent_connection(&turn.project_id, &target)
             .await?;
-        let capabilities = database_capabilities_for_driver(&target.driver)
-            .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+        let capabilities = target.capabilities.clone();
 
         if capabilities.supports_table_browsing {
             if request.tool_name == "metadata.listCollections" {
@@ -2457,6 +2589,11 @@ impl AgentHostInner {
                 crate::core::dialect::DatabaseDataModel::Search => "index",
                 crate::core::dialect::DatabaseDataModel::KeyValue => "key",
                 crate::core::dialect::DatabaseDataModel::Relational => "object",
+                crate::core::dialect::DatabaseDataModel::Graph
+                | crate::core::dialect::DatabaseDataModel::WideColumn
+                | crate::core::dialect::DatabaseDataModel::TimeSeries
+                | crate::core::dialect::DatabaseDataModel::Coordination
+                | crate::core::dialect::DatabaseDataModel::Queue => "object",
             };
             return Ok(Value::Array(
                 collections
@@ -2485,8 +2622,7 @@ impl AgentHostInner {
         let target = self.resolve_connection(turn, &request.input).await?;
         self.ensure_agent_connection(&turn.project_id, &target)
             .await?;
-        let capabilities = database_capabilities_for_driver(&target.driver)
-            .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+        let capabilities = target.capabilities.clone();
 
         if capabilities.supports_table_browsing {
             let columns = if let Some(database) = target.database.as_deref() {
@@ -2555,6 +2691,11 @@ impl AgentHostInner {
                 crate::core::dialect::DatabaseDataModel::Search => "index",
                 crate::core::dialect::DatabaseDataModel::KeyValue => "key",
                 crate::core::dialect::DatabaseDataModel::Relational => "object",
+                crate::core::dialect::DatabaseDataModel::Graph
+                | crate::core::dialect::DatabaseDataModel::WideColumn
+                | crate::core::dialect::DatabaseDataModel::TimeSeries
+                | crate::core::dialect::DatabaseDataModel::Coordination
+                | crate::core::dialect::DatabaseDataModel::Queue => "object",
             },
             "collection":collection,
         }))
@@ -2574,9 +2715,30 @@ impl AgentHostInner {
             .statement_scan_dialect(&target.id)
             .await
             .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
-        let mut results = if let Some(dialect) = dialect {
+        let mut results = if target.driver.eq_ignore_ascii_case("sqlite")
+            || target.driver.eq_ignore_ascii_case("sqlite3")
+        {
+            // The connection itself was opened with SQLite read_only=true.
+            // Retain a conservative lexical gate for diagnostics and reject
+            // multi-statement/mutation input before it reaches the engine.
+            validate_read_only_sql(&query, StatementScanDialect::Postgres)
+                .map_err(SidecarRequestError::tool)?;
+            self.execute_bounded_query(turn, request, &target, query)
+                .await?
+        } else if target.sidecar_read_only_enforced {
+            let dialect = dialect.ok_or_else(|| {
+                SidecarRequestError::tool("Agent read-only queries require a declared SQL dialect")
+            })?;
             validate_read_only_sql(&query, dialect).map_err(SidecarRequestError::tool)?;
-            let kind = database_kind_for_dialect(dialect);
+            self.execute_bounded_query(turn, request, &target, query)
+                .await?
+        } else if let Some(dialect) = dialect {
+            validate_read_only_sql(&query, dialect).map_err(SidecarRequestError::tool)?;
+            let kind = database_kind_for_dialect(dialect).ok_or_else(|| {
+                SidecarRequestError::tool(
+                    "This SQL dialect requires a driver-enforced read-only endpoint",
+                )
+            })?;
             let script = read_only_transaction_script(kind, &query);
             let mut results = self
                 .execute_bounded_query(turn, request, &target, script)
@@ -2616,15 +2778,25 @@ impl AgentHostInner {
             .ok_or_else(|| {
                 SidecarRequestError::tool("Explain Plan is unsupported for this driver")
             })?;
-        let kind = database_kind_for_dialect(dialect);
+        let kind = database_kind_for_dialect(dialect).ok_or_else(|| {
+            SidecarRequestError::tool(
+                "Explain Plan requires a driver-specific implementation for this SQL dialect",
+            )
+        })?;
         let (statement, format) = build_explain_statement(&query, kind, ExplainPlanMode::Estimate)
             .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
-        let script = read_only_transaction_script(kind, &statement);
+        let script = if target.sidecar_read_only_enforced {
+            statement
+        } else {
+            read_only_transaction_script(kind, &statement)
+        };
         let started_at = std::time::Instant::now();
         let mut results = self
             .execute_bounded_query(turn, request, &target, script)
             .await?;
-        strip_transaction_results(&mut results);
+        if !target.sidecar_read_only_enforced {
+            strip_transaction_results(&mut results);
+        }
         let plan = parse_explain_results(
             request.call_id.clone(),
             kind,
@@ -2654,7 +2826,7 @@ impl AgentHostInner {
             if let Some(database) = target
                 .database
                 .as_deref()
-                .filter(|_| is_explicit_database_scope_driver(&target.driver))
+                .filter(|_| target.capabilities.supports_database_catalogs)
             {
                 self.agent_connections
                     .query_database_with_context(
@@ -3711,9 +3883,12 @@ fn validate_stored_connection(
             "saved connection id is invalid"
         )));
     }
-    database_capabilities_for_driver(&connection.driver)
-        .map(|_| ())
-        .map_err(|error| SidecarRequestError::security(anyhow!(error.to_string())))
+    if !is_safe_driver_package_token(connection.driver.trim()) {
+        return Err(SidecarRequestError::security(anyhow!(
+            "saved connection driver is invalid"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_connection_config(
@@ -3726,11 +3901,16 @@ fn validate_connection_config(
             "saved connection configuration does not match its project identity"
         )));
     }
-    let stored_driver = database_capabilities_for_driver(&stored.driver)
-        .map_err(|error| SidecarRequestError::security(anyhow!(error.to_string())))?;
-    let configured_driver = database_capabilities_for_driver(&config.driver)
-        .map_err(|error| SidecarRequestError::security(anyhow!(error.to_string())))?;
-    if stored_driver.driver != configured_driver.driver {
+    let stored_driver = canonical_driver_name(&stored.driver)
+        .unwrap_or(stored.driver.trim())
+        .to_ascii_lowercase();
+    let configured_driver = canonical_driver_name(&config.driver)
+        .unwrap_or(config.driver.trim())
+        .to_ascii_lowercase();
+    if !is_safe_driver_package_token(&stored_driver)
+        || !is_safe_driver_package_token(&configured_driver)
+        || stored_driver != configured_driver
+    {
         return Err(SidecarRequestError::security(anyhow!(
             "saved connection driver does not match its configuration"
         )));
@@ -3738,7 +3918,14 @@ fn validate_connection_config(
     Ok(())
 }
 
-fn connection_url_from_config(driver: &str, config: &ConfigSavedConnection) -> Result<String> {
+fn connection_url_from_config(
+    capabilities: &DatabaseCapabilities,
+    config: &ConfigSavedConnection,
+) -> Result<String> {
+    let is_file_connection = matches!(
+        capabilities.connection_mode,
+        crate::core::dialect::DatabaseConnectionMode::File
+    );
     if let Some(value) = config
         .connection_url
         .as_deref()
@@ -3750,6 +3937,11 @@ fn connection_url_from_config(driver: &str, config: &ConfigSavedConnection) -> R
         })
     {
         let value = value.strip_prefix("jdbc:").unwrap_or(value);
+        // File-backed packages (SQLite and signed external implementations
+        // such as DuckDB) receive the raw location rather than a network URL.
+        if is_file_connection {
+            return Ok(value.to_string());
+        }
         let parsed = url::Url::parse(value).context("saved connection URL is invalid")?;
         if parsed.host_str().is_none() && parsed.scheme() != "redis" {
             return Err(anyhow!("saved connection URL must include a host"));
@@ -3757,7 +3949,22 @@ fn connection_url_from_config(driver: &str, config: &ConfigSavedConnection) -> R
         return Ok(value.to_string());
     }
 
-    let capabilities = database_capabilities_for_driver(driver)?;
+    if is_file_connection {
+        return config
+            .database
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                config
+                    .host
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("saved SQLite database file is required"));
+    }
     let host = config
         .host
         .as_deref()
@@ -3851,6 +4058,7 @@ fn resolve_prompt_connection<'a>(
         ("mongodb", ["mongodb", "mongo", "", "", ""]),
         ("postgres", ["postgresql", "postgres", "pgsql", "pg", ""]),
         ("mysql", ["mysql", "", "", "", ""]),
+        ("sqlite", ["sqlite", "sqlite3", "", "", ""]),
         ("redis", ["redis", "", "", "", ""]),
     ]
     .into_iter()
@@ -3900,10 +4108,11 @@ fn is_ascii_identifier_character(value: char) -> bool {
     value.is_ascii_alphanumeric() || value == '_'
 }
 
-fn database_kind_for_dialect(dialect: StatementScanDialect) -> DatabaseKind {
+fn database_kind_for_dialect(dialect: StatementScanDialect) -> Option<DatabaseKind> {
     match dialect {
-        StatementScanDialect::Postgres => DatabaseKind::Postgres,
-        StatementScanDialect::Mysql => DatabaseKind::Mysql,
+        StatementScanDialect::Postgres => Some(DatabaseKind::Postgres),
+        StatementScanDialect::Mysql => Some(DatabaseKind::Mysql),
+        StatementScanDialect::SqlServer => None,
     }
 }
 
@@ -3913,13 +4122,6 @@ fn read_only_transaction_script(kind: DatabaseKind, sql: &str) -> String {
         DatabaseKind::Mysql => "START TRANSACTION READ ONLY;",
     };
     format!("{begin}\n{}\n;\nROLLBACK;", sql.trim())
-}
-
-fn is_explicit_database_scope_driver(driver: &str) -> bool {
-    matches!(
-        driver.trim().to_ascii_lowercase().as_str(),
-        "postgres" | "postgresql" | "pgsql" | "psql"
-    )
 }
 
 fn validate_native_read_only_query(driver: &str, query: &str) -> std::result::Result<(), String> {
@@ -5206,6 +5408,7 @@ mod tests {
             stored_connection("es-1", "New Elasticsearch Connection", "elasticsearch"),
             stored_connection("mongo-1", "New MongoDB Connection", "mongodb"),
             stored_connection("mysql-1", "Pkulaw-test", "mysql"),
+            stored_connection("sqlite-1", "Local analytics", "sqlite"),
         ];
 
         assert_eq!(
@@ -5222,6 +5425,11 @@ mod tests {
             resolve_prompt_connection(&connections, "查询 Pkulaw-test")
                 .map(|connection| connection.id.as_str()),
             Some("mysql-1")
+        );
+        assert_eq!(
+            resolve_prompt_connection(&connections, "查询 SQLite 本地库中的 entries")
+                .map(|connection| connection.id.as_str()),
+            Some("sqlite-1")
         );
     }
 
@@ -5700,6 +5908,7 @@ mod tests {
             project_id: "project".to_string(),
             name: "Postgres".to_string(),
             driver: "postgres".to_string(),
+            driver_package_version: None,
             url: String::new(),
             host: Some("db.internal".to_string()),
             port: Some(5432),
@@ -5713,10 +5922,42 @@ mod tests {
             icon: None,
             color: None,
         };
-        let url = connection_url_from_config("postgres", &config).unwrap();
+        let capabilities = database_capabilities_for_driver("postgres").unwrap();
+        let url = connection_url_from_config(&capabilities, &config).unwrap();
         assert!(url.starts_with("postgres://user%40example.com:p%40ss%2Fword@db.internal:5432/"));
         assert!(url.contains("app%20data"));
         assert!(url.contains("sslmode=require"));
+    }
+
+    #[test]
+    fn sqlite_connection_url_uses_file_target_without_a_network_host() {
+        let config = ConfigSavedConnection {
+            id: "connection".to_string(),
+            project_id: "project".to_string(),
+            name: "SQLite".to_string(),
+            driver: "sqlite".to_string(),
+            driver_package_version: None,
+            url: "sqlite:///tmp/workspace.db".to_string(),
+            host: None,
+            port: None,
+            user: None,
+            password: None,
+            database: None,
+            connection_url: None,
+            ssl_mode: None,
+            ssh_tunnel: None,
+            tags: None,
+            icon: None,
+            color: None,
+        };
+        assert_eq!(
+            connection_url_from_config(
+                &database_capabilities_for_driver("sqlite").unwrap(),
+                &config,
+            )
+            .unwrap(),
+            "sqlite:///tmp/workspace.db"
+        );
     }
 
     #[test]

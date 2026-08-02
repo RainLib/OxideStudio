@@ -2,10 +2,13 @@ import {
   AlertCircle,
   Check,
   CheckCircle2,
+  Download,
   Eye,
   EyeOff,
+  FolderOpen,
   Loader2,
   Palette,
+  RefreshCw,
   RotateCcw,
 } from "lucide-react";
 import {
@@ -34,18 +37,30 @@ import {
 } from "@/lib/connectionUrlParser";
 import {
   databaseDriverProfile,
+  connectionUrlTemplateForDriver,
   defaultConnectionIcon,
   defaultDatabaseCapabilities,
   defaultDatabaseName,
   defaultDatabasePort,
 } from "@/lib/databaseDialect";
 import { cn } from "@/lib/utils";
-import { type DatabaseDriver } from "@/services/tauri";
+import {
+  dataSourceDriverChoices,
+  type DataSourceDriverAvailability,
+} from "@/features/database-drivers";
+import {
+  databaseService,
+  type DatabaseCapabilities,
+  type DatabaseDriverCatalogEntry,
+  type DatabaseDriver,
+  type DatabaseDriverInstallation,
+} from "@/services/tauri";
 import {
   useConnectionStore,
   type ConnectionConfig,
 } from "@/store/useConnectionStore";
 import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
+import { useSettingsStore } from "@/store/useSettingsStore";
 
 const CONNECTION_COLORS = [
   "#d9904f",
@@ -73,6 +88,38 @@ const fieldClass =
   "h-7 w-full rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 text-[12px] text-[hsl(var(--wb-text))] outline-none transition-colors placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]";
 const labelClass =
   "flex h-7 items-center justify-end pr-3 text-[11px] text-[hsl(var(--wb-text-muted))]";
+const ACTIVE_DRIVER_PACKAGE_VALUE = "__oxide_active_driver_package__";
+
+function signedCatalogReleaseForDriver(
+  entries: DatabaseDriverCatalogEntry[],
+  driver: DatabaseDriver,
+) {
+  return (
+    entries.find(
+      (entry) =>
+        entry.driverId.toLowerCase() === driver.toLowerCase() &&
+        Boolean(entry.archiveSha256),
+    ) || null
+  );
+}
+
+function normalizeSignedCatalogUrl(value: string) {
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 512) return null;
+  try {
+    const url = new URL(normalized);
+    return url.protocol === "https:" &&
+      Boolean(url.hostname) &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash
+      ? url.toString()
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 function uniqueConnections(
   connections: ConnectionConfig[],
@@ -263,25 +310,130 @@ export function ConnectionForm({
   const [showSshPassphrase, setShowSshPassphrase] = useState(false);
   const [status, setStatus] = useState<ConnectionStatus>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isRefreshingDriverStatus, setIsRefreshingDriverStatus] =
+    useState(false);
+  const [isInstallingDriver, setIsInstallingDriver] = useState(false);
+  const [catalogRelease, setCatalogRelease] =
+    useState<DatabaseDriverCatalogEntry | null>(null);
+  const [isCatalogInstallSetupOpen, setIsCatalogInstallSetupOpen] =
+    useState(false);
+  const [catalogUrlInput, setCatalogUrlInput] = useState("");
+  const [driverPackages, setDriverPackages] = useState<
+    DatabaseDriverInstallation[]
+  >([]);
+  const [resolvedCapabilities, setResolvedCapabilities] =
+    useState<DatabaseCapabilities | null>(null);
   const driverProfiles = useDatabaseDriverCatalogStore(
     (state) => state.profiles,
+  );
+  const driverCatalogStatus = useDatabaseDriverCatalogStore(
+    (state) => state.status,
   );
   const loadDatabaseDriverCatalog = useDatabaseDriverCatalogStore(
     (state) => state.load,
   );
+  const refreshDatabaseDriverCatalog = useDatabaseDriverCatalogStore(
+    (state) => state.refresh,
+  );
+  const driverCatalogUrl = useSettingsStore(
+    (state) => state.settings.drivers.catalogUrl,
+  );
+  const driverStorePath = useSettingsStore(
+    (state) => state.settings.drivers.storePath,
+  );
+  const updateSettings = useSettingsStore((state) => state.updateSettings);
 
   useEffect(() => {
     void loadDatabaseDriverCatalog();
   }, [loadDatabaseDriverCatalog]);
 
   useEffect(() => {
+    if (driverCatalogStatus !== "ready") {
+      return;
+    }
+    let active = true;
+    void databaseService
+      .listDatabaseDriverInstallations()
+      .then((installations) => {
+        if (active) setDriverPackages(installations);
+      })
+      .catch(() => {
+        if (active) setDriverPackages([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [driverCatalogStatus]);
+
+  useEffect(() => {
     setStatus(null);
     setSection("general");
-  }, [selectedConnection?.id]);
+  }, [selectedConnection?.id, selectedConnection?.driver]);
+
+  useEffect(() => {
+    if (!selectedConnection) {
+      setResolvedCapabilities(null);
+      return;
+    }
+    let active = true;
+    setResolvedCapabilities(null);
+    void databaseService
+      .getDatabaseCapabilities(
+        selectedConnection.driver,
+        selectedConnection.driverPackageVersion,
+      )
+      .then((nextCapabilities) => {
+        if (active) setResolvedCapabilities(nextCapabilities);
+      })
+      .catch((error) => {
+        console.warn(
+          "Failed to load the selected driver package capabilities",
+          error,
+        );
+        if (active) {
+          setResolvedCapabilities(
+            defaultDatabaseCapabilities(selectedConnection.driver),
+          );
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedConnection?.driver, selectedConnection?.driverPackageVersion, selectedConnection?.id]);
+
+  useEffect(() => {
+    const driver = selectedConnection?.driver;
+    const catalogUrl = driverCatalogUrl.trim();
+    if (!driver || !catalogUrl) {
+      setCatalogRelease(null);
+      return;
+    }
+    let active = true;
+    void databaseService
+      .getExternalDatabaseDriverCatalog(catalogUrl)
+      .then((result) => {
+        if (!active) return;
+        setCatalogRelease(signedCatalogReleaseForDriver(result.catalog.packages, driver));
+      })
+      .catch(() => {
+        if (active) setCatalogRelease(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [driverCatalogUrl, selectedConnection?.driver]);
+
+  useEffect(() => {
+    setCatalogUrlInput(driverCatalogUrl);
+  }, [driverCatalogUrl]);
 
   const dataSources = useMemo(
     () => uniqueConnections(connections, selectedConnection),
     [connections, selectedConnection],
+  );
+  const driverChoices = useMemo(
+    () => dataSourceDriverChoices(driverProfiles, driverPackages),
+    [driverPackages, driverProfiles],
   );
 
   if (!selectedConnection) {
@@ -293,20 +445,63 @@ export function ConnectionForm({
   }
 
   const profile = databaseDriverProfile(selectedConnection.driver);
-  const editableDriverProfiles = driverProfiles.some(
-    (item) => item.driver === selectedConnection.driver,
-  )
-    ? driverProfiles
-    : [profile, ...driverProfiles];
-  const capabilities = defaultDatabaseCapabilities(selectedConnection.driver);
+  const selectedDriverChoice = driverChoices.find(
+    (choice) => choice.driver === selectedConnection.driver,
+  );
+  const selectedDriverAvailability: DataSourceDriverAvailability =
+    selectedDriverChoice?.availability || "available";
+  const selectedDriverLabel = selectedDriverChoice?.label || profile.menuLabel;
+  const canUseSelectedDriver = selectedDriverAvailability === "available";
+  const capabilities =
+    resolvedCapabilities || defaultDatabaseCapabilities(selectedConnection.driver);
+  const isFileBased = capabilities.connectionMode === "file";
+  const supportsConnectionDatabase =
+    capabilities.supportsConnectionDatabase !== false;
+  const fileDriver = selectedConnection.driver.toLowerCase();
+  const fileExtension =
+    fileDriver === "duckdb" ? "duckdb" : fileDriver === "sqlite" ? "sqlite" : "db";
+  const formSections: ReadonlyArray<readonly [FormSection, string]> =
+    isFileBased
+      ? [["general", "General"], ["advanced", "Advanced"]]
+      : [
+          ["general", "General"],
+          ["ssl", "SSH/SSL"],
+          ["advanced", "Advanced"],
+        ];
+  const installedDriverPackages = driverPackages.filter(
+    (installation) =>
+      installation.distribution === "external" &&
+      installation.driver.toLowerCase() ===
+        selectedConnection.driver.toLowerCase() &&
+      installation.status === "ready" &&
+      Boolean(installation.packageVersion),
+  );
+  // A Java package without an activated, verified managed runtime is installed
+  // but not connectable. Do not offer it as a pin: selecting it would save a
+  // connection that can only fail before the sidecar handshake.
+  const availableDriverPackages = installedDriverPackages.filter(
+    (installation) => installation.runtimeReady !== false,
+  );
+  const unavailableDriverPackages = installedDriverPackages.filter(
+    (installation) => installation.runtimeReady === false,
+  );
+  const selectedDriverPackage = availableDriverPackages.find((installation) =>
+    selectedConnection.driverPackageVersion
+      ? installation.packageVersion === selectedConnection.driverPackageVersion
+      : installation.active,
+  );
+  const connectionUrlTemplate =
+    selectedDriverPackage?.connectionUrlTemplate ||
+    connectionUrlTemplateForDriver(selectedConnection.driver);
   const generatedUrl = buildConnectionUrl({
     driver: selectedConnection.driver,
     host: selectedConnection.host,
     port: selectedConnection.port,
     user: selectedConnection.user,
     password: selectedConnection.password,
-    database: selectedConnection.database,
+    database: supportsConnectionDatabase ? selectedConnection.database : "",
     sslMode: selectedConnection.sslMode || "disable",
+    connectionUrlTemplate,
   });
   const displayedUrl = selectedConnection.connectionUrl?.trim() || generatedUrl;
   const sshTunnel = {
@@ -368,6 +563,7 @@ export function ConnectionForm({
         selectedConnection.icon === previousDefaultIcon
           ? undefined
           : selectedConnection.icon,
+      driverPackageVersion: undefined,
       connectionUrl: "",
     });
     setStatus(null);
@@ -375,10 +571,11 @@ export function ConnectionForm({
 
   const createDataSource = (driver: DatabaseDriver) => {
     createNewConnection();
+    const nextChoice = driverChoices.find((choice) => choice.driver === driver);
     const nextProfile = databaseDriverProfile(driver);
     updateConnectionConfig({
       driver,
-      name: `New ${nextProfile.menuLabel} Connection`,
+      name: `New ${nextChoice?.label || nextProfile.menuLabel} Connection`,
       port: defaultDatabasePort(driver) || undefined,
       database: defaultDatabaseName(driver),
       icon: undefined,
@@ -405,7 +602,178 @@ export function ConnectionForm({
     setStatus(null);
   };
 
+  const refreshDriverStatus = async () => {
+    setIsRefreshingDriverStatus(true);
+    try {
+      await refreshDatabaseDriverCatalog();
+      const installations = await databaseService.listDatabaseDriverInstallations();
+      setDriverPackages(installations);
+    } catch (error) {
+      setStatus({
+        type: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Could not refresh driver status.",
+      });
+    } finally {
+      setIsRefreshingDriverStatus(false);
+    }
+  };
+
+  const installSelectedDriver = async () => {
+    if (!selectedConnection) return;
+    setIsInstallingDriver(true);
+    setStatus({ type: "loading", message: "Installing signed driver package..." });
+    try {
+      if (selectedDriverAvailability === "activationRequired") {
+        const inactivePackage = driverPackages.find(
+          (installation) =>
+            installation.driver.toLowerCase() ===
+              selectedConnection.driver.toLowerCase() &&
+            installation.distribution === "external" &&
+            installation.status === "ready" &&
+            installation.runtimeReady !== false &&
+            installation.packageVersion,
+        );
+        if (!inactivePackage?.packageVersion) {
+          throw new Error("No verified installed package is available to activate.");
+        }
+        await databaseService.activateExternalDatabaseDriver(
+          selectedConnection.driver,
+          inactivePackage.packageVersion,
+        );
+      } else if (catalogRelease && driverCatalogUrl.trim()) {
+        await databaseService.installExternalDatabaseDriverFromCatalog(
+          driverCatalogUrl.trim(),
+          catalogRelease.driverId,
+          catalogRelease.packageVersion,
+          true,
+        );
+      } else {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const packageDirectory = await open({
+          directory: true,
+          multiple: false,
+          title: `Choose Signed ${selectedDriverLabel} Driver Package`,
+        });
+        if (typeof packageDirectory !== "string") {
+          setStatus(null);
+          return;
+        }
+        await databaseService.installExternalDatabaseDriver(packageDirectory, true);
+      }
+      await refreshDriverStatus();
+      setStatus({
+        type: "success",
+        message: `${selectedDriverLabel} is installed and ready to use.`,
+      });
+    } catch (error) {
+      setStatus({
+        type: "error",
+        message:
+          error instanceof Error ? error.message : "Could not install the driver package.",
+      });
+    } finally {
+      setIsInstallingDriver(false);
+    }
+  };
+
+  const installSelectedDriverFromCatalogUrl = async () => {
+    if (!selectedConnection) return;
+    const catalogUrl = normalizeSignedCatalogUrl(catalogUrlInput);
+    if (!catalogUrl) {
+      setStatus({
+        type: "error",
+        message: "Enter a signed HTTPS catalog URL without credentials, query parameters, or fragments.",
+      });
+      return;
+    }
+    setIsInstallingDriver(true);
+    setStatus({ type: "loading", message: "Checking the signed driver catalog..." });
+    try {
+      const result = await databaseService.getExternalDatabaseDriverCatalog(
+        catalogUrl,
+      );
+      const release = signedCatalogReleaseForDriver(
+        result.catalog.packages,
+        selectedConnection.driver,
+      );
+      if (!release) {
+        throw new Error(
+          `The signed catalog has no downloadable ${selectedDriverLabel} package.`,
+        );
+      }
+      await updateSettings({
+        drivers: { catalogUrl: result.sourceUrl, storePath: driverStorePath },
+      });
+      setCatalogRelease(release);
+      setStatus({ type: "loading", message: "Downloading and verifying signed driver package..." });
+      await databaseService.installExternalDatabaseDriverFromCatalog(
+        result.sourceUrl,
+        release.driverId,
+        release.packageVersion,
+        true,
+      );
+      await refreshDriverStatus();
+      setIsCatalogInstallSetupOpen(false);
+      setStatus({
+        type: "success",
+        message: `${selectedDriverLabel} is installed and ready to use.`,
+      });
+    } catch (error) {
+      setStatus({
+        type: "error",
+        message:
+          error instanceof Error ? error.message : "Could not install the driver package.",
+      });
+    } finally {
+      setIsInstallingDriver(false);
+    }
+  };
+
+  const selectDriverPackage = (value: string) => {
+    const packageVersion =
+      value === ACTIVE_DRIVER_PACKAGE_VALUE ? undefined : value;
+    const nextPackage = availableDriverPackages.find((installation) =>
+      packageVersion
+        ? installation.packageVersion === packageVersion
+        : installation.active,
+    );
+    const nextTemplate = nextPackage?.connectionUrlTemplate;
+    updateConnectionConfig({
+      driverPackageVersion: packageVersion,
+      // Persist a template-generated value at the moment a version is picked.
+      // That makes a connection pin independent from a later active-package
+      // change which may use a different JDBC grammar.
+      ...(nextTemplate && !selectedConnection.connectionUrl?.trim()
+        ? {
+            connectionUrl: buildConnectionUrl({
+              driver: selectedConnection.driver,
+              host: selectedConnection.host,
+              port: selectedConnection.port,
+              user: selectedConnection.user,
+              password: selectedConnection.password,
+              database: supportsConnectionDatabase
+                ? selectedConnection.database
+                : "",
+              sslMode: selectedConnection.sslMode || "disable",
+              connectionUrlTemplate: nextTemplate,
+            }),
+          }
+        : {}),
+    });
+    setStatus(null);
+  };
+
   const handleTest = async () => {
+    if (!canUseSelectedDriver) {
+      setStatus({
+        type: "error",
+        message: "Install and activate this driver before testing the connection.",
+      });
+      return;
+    }
     setStatus({ type: "loading", message: "Testing connection..." });
     try {
       const error = await testConnection(selectedConnection);
@@ -423,6 +791,13 @@ export function ConnectionForm({
   };
 
   const handleApply = async () => {
+    if (!canUseSelectedDriver) {
+      setStatus({
+        type: "error",
+        message: "Install and activate this driver before saving the connection.",
+      });
+      return;
+    }
     setIsSaving(true);
     try {
       await saveConnection(selectedConnection);
@@ -438,6 +813,13 @@ export function ConnectionForm({
   };
 
   const handleConfirm = async () => {
+    if (!canUseSelectedDriver) {
+      setStatus({
+        type: "error",
+        message: "Install and activate this driver before connecting.",
+      });
+      return;
+    }
     setIsSaving(true);
     try {
       await saveConnection(selectedConnection);
@@ -462,7 +844,7 @@ export function ConnectionForm({
       <DataSourceList
         dataSources={dataSources}
         selectedConnectionId={selectedConnection.id}
-        driverProfiles={driverProfiles}
+        driverChoices={driverChoices}
         onSelect={selectConnection}
         onCreate={createDataSource}
       />
@@ -495,18 +877,12 @@ export function ConnectionForm({
             aria-label="Data source name"
           />
           <span className="shrink-0 text-[10px] uppercase wb-muted">
-            {capabilities.displayName}
+            {selectedDriverLabel}
           </span>
         </header>
 
         <nav className="flex h-9 shrink-0 items-end gap-1 border-b border-[hsl(var(--wb-border-subtle))] px-3">
-          {(
-            [
-              ["general", "General"],
-              ["ssl", "SSH/SSL"],
-              ["advanced", "Advanced"],
-            ] as const
-          ).map(([value, label]) => (
+          {formSections.map(([value, label]) => (
             <button
               type="button"
               key={value}
@@ -523,6 +899,111 @@ export function ConnectionForm({
           ))}
         </nav>
 
+        {!canUseSelectedDriver && (
+          <div
+            role="status"
+            className="shrink-0 border-b border-amber-400/25 bg-amber-400/10 text-[10px] text-amber-100"
+          >
+            <div className="flex min-h-9 items-center gap-2 px-3">
+              <AlertCircle size={13} className="shrink-0 text-amber-400" />
+              <span className="min-w-0 flex-1">
+                {selectedDriverAvailability === "activationRequired"
+                  ? `${selectedDriverLabel} is installed but not active. Activate its signed package before testing or saving this data source.`
+                  : `${selectedDriverLabel} needs a signed driver package before this data source can be tested or saved.`}
+              </span>
+              <button
+                type="button"
+                className="wb-text-button flex h-6 shrink-0 items-center gap-1 px-1 text-[10px] text-amber-200 hover:text-amber-50"
+                disabled={isInstallingDriver}
+                onClick={() => void installSelectedDriver()}
+              >
+                {isInstallingDriver ? (
+                  <Loader2 size={11} className="animate-spin" />
+                ) : selectedDriverAvailability === "activationRequired" ? (
+                  <Check size={11} />
+                ) : catalogRelease ? (
+                  <Download size={11} />
+                ) : (
+                  <FolderOpen size={11} />
+                )}
+                {selectedDriverAvailability === "activationRequired"
+                  ? "Activate driver"
+                  : catalogRelease
+                    ? "Download & install"
+                    : "Install package…"}
+              </button>
+              {selectedDriverAvailability === "installationRequired" &&
+                !catalogRelease && (
+                  <button
+                    type="button"
+                    className="wb-text-button h-6 shrink-0 px-1 text-[10px] text-amber-200 hover:text-amber-50"
+                    disabled={isInstallingDriver}
+                    onClick={() => setIsCatalogInstallSetupOpen((open) => !open)}
+                  >
+                    Download from catalog…
+                  </button>
+                )}
+              <button
+                type="button"
+                className="wb-icon-button h-6 w-6 shrink-0 text-amber-200 hover:text-amber-50"
+                title="Refresh driver status"
+                aria-label="Refresh driver status"
+                disabled={isRefreshingDriverStatus}
+                onClick={() => void refreshDriverStatus()}
+              >
+                <RefreshCw
+                  size={12}
+                  className={cn(isRefreshingDriverStatus && "animate-spin")}
+                />
+              </button>
+            </div>
+            {isCatalogInstallSetupOpen &&
+              selectedDriverAvailability === "installationRequired" &&
+              !catalogRelease && (
+                <div className="flex min-h-9 items-center gap-2 border-t border-amber-400/20 px-3">
+                  <label
+                    className="shrink-0 text-[10px] text-amber-100"
+                    htmlFor="connection-driver-catalog-url"
+                  >
+                    Signed catalog
+                  </label>
+                  <input
+                    id="connection-driver-catalog-url"
+                    type="url"
+                    inputMode="url"
+                    autoComplete="url"
+                    className="h-6 min-w-0 flex-1 rounded-[3px] border border-amber-300/35 bg-[hsl(var(--wb-editor))] px-2 font-mono text-[10px] text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
+                    placeholder="https://drivers.example.com/catalog.json"
+                    value={catalogUrlInput}
+                    onChange={(event) => setCatalogUrlInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void installSelectedDriverFromCatalogUrl();
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="wb-text-button h-6 shrink-0 px-1 text-[10px] text-amber-100 hover:text-amber-50 disabled:opacity-50"
+                    disabled={isInstallingDriver}
+                    onClick={() => void installSelectedDriverFromCatalogUrl()}
+                  >
+                    {isInstallingDriver ? "Downloading…" : "Download & install"}
+                  </button>
+                  <button
+                    type="button"
+                    className="wb-text-button h-6 shrink-0 px-1 text-[10px] text-amber-200 hover:text-amber-50"
+                    disabled={isInstallingDriver}
+                    onClick={() => setIsCatalogInstallSetupOpen(false)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+          </div>
+        )}
+
         <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
           {section === "general" && (
             <div className="mx-auto w-full max-w-[720px] px-6 py-4">
@@ -535,18 +1016,64 @@ export function ConnectionForm({
               </div>
               <div className="grid grid-cols-[132px_minmax(0,1fr)] gap-y-2">
               <label className={labelClass} htmlFor="connection-host">
-                Host
+                {isFileBased ? "File" : "Host"}
               </label>
-              <div className="grid grid-cols-[minmax(0,1fr)_116px] gap-2">
+              <div
+                className={cn(
+                  !isFileBased && "grid grid-cols-[minmax(0,1fr)_116px] gap-2",
+                )}
+              >
                 <input
                   id="connection-host"
-                  value={selectedConnection.host || ""}
+                  value={
+                    isFileBased
+                      ? selectedConnection.database || ""
+                      : selectedConnection.host || ""
+                  }
                   onChange={(event) =>
-                    updateField("host", event.target.value, true)
+                    updateField(
+                      isFileBased ? "database" : "host",
+                      event.target.value,
+                      true,
+                    )
                   }
                   className={fieldClass}
-                  placeholder="localhost"
+                  placeholder={
+                    isFileBased
+                      ? `:memory: or /path/to/database.${fileExtension}`
+                      : "localhost"
+                  }
                 />
+                {isFileBased && (
+                  <button
+                    type="button"
+                    className="wb-text-button mt-1 h-6 px-1 text-[11px]"
+                    onClick={async () => {
+                      const { open } = await import("@tauri-apps/plugin-dialog");
+                      const file = await open({
+                        multiple: false,
+                        directory: false,
+                        filters: [
+                          {
+                            name: `${capabilities.displayName} databases`,
+                            extensions:
+                              fileDriver === "duckdb"
+                                ? ["duckdb", "ddb", "db"]
+                                : fileDriver === "sqlite"
+                                  ? ["db", "sqlite", "sqlite3", "db3"]
+                                  : ["db"],
+                          },
+                        ],
+                      });
+                      if (typeof file === "string") {
+                        updateField("database", file, true);
+                      }
+                    }}
+                  >
+                    Choose database file…
+                  </button>
+                )}
+                {!isFileBased && (
                 <div className="grid grid-cols-[30px_minmax(0,1fr)] items-center gap-2">
                   <span className="text-right text-[11px] wb-muted">Port</span>
                   <input
@@ -568,8 +1095,11 @@ export function ConnectionForm({
                     aria-label="Port"
                   />
                 </div>
+                )}
               </div>
 
+              {!isFileBased && (
+              <>
               <label className={labelClass} htmlFor="connection-user">
                 User
               </label>
@@ -606,7 +1136,11 @@ export function ConnectionForm({
                   {showPassword ? <EyeOff size={12} /> : <Eye size={12} />}
                 </button>
               </div>
+              </>
+              )}
 
+              {!isFileBased && supportsConnectionDatabase && (
+              <>
               <label className={labelClass} htmlFor="connection-database">
                 Database
               </label>
@@ -621,6 +1155,51 @@ export function ConnectionForm({
                   defaultDatabaseName(selectedConnection.driver) || "database"
                 }
               />
+              </>
+              )}
+
+              {availableDriverPackages.length > 0 && (
+                <>
+                  <label className={labelClass} htmlFor="connection-driver-package">
+                    Driver package
+                  </label>
+                  <Select
+                    value={
+                      selectedConnection.driverPackageVersion ||
+                      ACTIVE_DRIVER_PACKAGE_VALUE
+                    }
+                    onValueChange={selectDriverPackage}
+                  >
+                    <SelectTrigger id="connection-driver-package" className={fieldClass}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                      <SelectItem value={ACTIVE_DRIVER_PACKAGE_VALUE}>
+                        Active package (recommended)
+                      </SelectItem>
+                      {availableDriverPackages.map((installation) => (
+                        <SelectItem
+                          key={installation.packageVersion}
+                          value={installation.packageVersion || "active"}
+                        >
+                          Pin {installation.packageVersion}
+                          {installation.active ? " · active" : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </>
+              )}
+              {unavailableDriverPackages.length > 0 && (
+                <p
+                  className="col-start-2 text-[10px] text-[hsl(var(--wb-warning))]"
+                  role="status"
+                >
+                  {unavailableDriverPackages.length === 1
+                    ? "An installed JDBC driver package needs a signed Java runtime before it can be selected."
+                    : "Some installed JDBC driver packages need a signed Java runtime before they can be selected."}
+                </p>
+              )}
 
               <label className={labelClass} htmlFor="connection-url">
                 URL
@@ -647,6 +1226,17 @@ export function ConnectionForm({
                 <p className="col-start-2 text-[10px] wb-muted">
                   Elasticsearch 6.x, 7.x, and 8.x are detected automatically.
                   Choose an SSL mode to use HTTPS.
+                </p>
+              )}
+              {connectionUrlTemplate && (
+                <p className="col-start-2 text-[10px] wb-muted">
+                  This signed driver package supplies the URL grammar. You can
+                  edit the generated value; it is sent to the package unchanged.
+                </p>
+              )}
+              {isFileBased && (
+                <p className="col-start-2 text-[10px] wb-muted">
+                  Use a local {capabilities.displayName} file path or <code>:memory:</code>. SSH and SSL are not used for local files.
                 </p>
               )}
               </div>
@@ -890,9 +1480,14 @@ export function ConnectionForm({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
-                  {editableDriverProfiles.map((item) => (
-                    <SelectItem key={item.driver} value={item.driver}>
-                      {item.menuLabel}
+                  {driverChoices.map((choice) => (
+                    <SelectItem key={choice.driver} value={choice.driver}>
+                      {choice.label}
+                      {choice.availability === "activationRequired"
+                        ? " · activate driver"
+                        : choice.availability === "installationRequired"
+                          ? " · install driver"
+                          : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -926,7 +1521,7 @@ export function ConnectionForm({
               type="button"
               className="wb-text-button h-7 border border-[hsl(var(--wb-border))] px-3 text-[12px] text-[hsl(var(--wb-text))]"
               onClick={() => void handleTest()}
-              disabled={status?.type === "loading"}
+              disabled={status?.type === "loading" || !canUseSelectedDriver}
             >
               {status?.type === "loading" ? (
                 <Loader2 size={13} className="animate-spin" />
@@ -965,7 +1560,7 @@ export function ConnectionForm({
               type="button"
               className="wb-text-button h-7 border border-[hsl(var(--wb-border))] px-3 text-[12px] text-[hsl(var(--wb-text))]"
               onClick={() => void handleApply()}
-              disabled={isSaving}
+              disabled={isSaving || !canUseSelectedDriver}
             >
               Apply
             </button>
@@ -973,7 +1568,11 @@ export function ConnectionForm({
               type="button"
               className="wb-primary-button h-7 min-w-[64px] justify-center text-[12px]"
               onClick={() => void handleConfirm()}
-              disabled={isSaving || !selectedConnection.name.trim()}
+              disabled={
+                isSaving ||
+                !canUseSelectedDriver ||
+                !selectedConnection.name.trim()
+              }
             >
               {isSaving ? <Loader2 size={13} className="animate-spin" /> : "OK"}
             </button>

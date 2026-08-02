@@ -27,6 +27,7 @@ interface UsePostgresDatabaseDiscoveryOptions {
   projectId: string;
   connectionId: string | null;
   driver: DatabaseDriver | null | undefined;
+  canBrowseDatabaseCatalogs?: boolean;
   isConnectionReady: boolean;
   refreshVersion: number;
 }
@@ -54,15 +55,16 @@ export function usePostgresDatabaseDiscovery({
   projectId,
   connectionId,
   driver,
+  canBrowseDatabaseCatalogs = false,
   isConnectionReady,
   refreshVersion,
 }: UsePostgresDatabaseDiscoveryOptions): PostgresDatabaseDiscoveryState {
   const identity = useMemo<PostgresDatabaseCatalogIdentity | null>(
     () =>
-      connectionId && driver === "postgres"
-        ? { projectId, connectionId, driver: "postgres" }
+      connectionId && driver && canBrowseDatabaseCatalogs
+        ? { projectId, connectionId, driver }
         : null,
-    [connectionId, driver, projectId]
+    [canBrowseDatabaseCatalogs, connectionId, driver, projectId]
   );
   const scopeKey = identity ? discoveryKey(identity) : null;
   const [state, setState] = useState<PostgresDatabaseDiscoveryState>(

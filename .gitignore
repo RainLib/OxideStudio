@@ -11,6 +11,18 @@ node_modules
 dist
 dist-ssr
 *.local
+
+# Reproducible frontend, test, and Rust build artifacts
+*.tsbuildinfo
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+.vitest/
+.vite/
+src-tauri/target/
+# Standalone driver packages build in their own Cargo workspaces.
+src-tauri/crates/**/target/
 src-tauri/tauri.release.conf.json
 src-tauri/binaries/oxide-agent-host-*
 src-tauri/binaries/oxide-agent-*

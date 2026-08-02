@@ -1,3 +1,4 @@
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invokeWithInterceptors } from "./client";
 import type {
   AlterTableColumn,
@@ -12,7 +13,17 @@ import type {
   TableExportFormat,
   TableExportResult,
   TableImportFormat,
+  TableCsvImportOptions,
+  TableCsvImportPreview,
+  TableJsonImportPreview,
+  TableXlsxImportPreview,
   TableImportResult,
+  TableDataTransferPreview,
+  TableDataTransferRequest,
+  TableDataTransferResult,
+  TableDataTransferProgress,
+  TableDataTransferTargetPlan,
+  TableDataTransferTargetPlanRequest,
   TableFilter,
   TableSort,
   TablePageResult,
@@ -20,6 +31,9 @@ import type {
   TableIndexChangeResult,
   TableConstraintChangeResult,
 } from "./types";
+
+export const TABLE_DATA_TRANSFER_PROGRESS_EVENT =
+  "table-data-transfer://progress";
 
 export async function previewTablePage(
   connectionId: string,
@@ -113,7 +127,8 @@ export async function importTableData(
   filePath: string,
   format: TableImportFormat,
   firstRowHeader = true,
-  databaseName?: string
+  databaseName?: string,
+  csvOptions?: TableCsvImportOptions,
 ): Promise<TableImportResult> {
   return invokeWithInterceptors<TableImportResult>("import_table_data", {
     connectionId,
@@ -124,7 +139,98 @@ export async function importTableData(
     format,
     firstRowHeader,
     database: databaseName,
+    csvOptions,
   });
+}
+
+export async function previewTableCsvImport(
+  filePath: string,
+): Promise<TableCsvImportPreview> {
+  return invokeWithInterceptors<TableCsvImportPreview>(
+    "preview_table_csv_import",
+    { filePath },
+  );
+}
+
+export async function previewTableJsonImport(
+  filePath: string,
+): Promise<TableJsonImportPreview> {
+  return invokeWithInterceptors<TableJsonImportPreview>(
+    "preview_table_json_import",
+    { filePath },
+  );
+}
+
+export async function previewTableXlsxImport(
+  filePath: string,
+): Promise<TableXlsxImportPreview> {
+  return invokeWithInterceptors<TableXlsxImportPreview>(
+    "preview_table_xlsx_import",
+    { filePath },
+  );
+}
+
+/**
+ * Plans a bounded database-to-database table copy. The returned confirmation
+ * token must be explicitly typed into the transfer dialog before execution.
+ */
+export async function previewTableDataTransfer(
+  request: TableDataTransferRequest,
+): Promise<TableDataTransferPreview> {
+  return invokeWithInterceptors<TableDataTransferPreview>(
+    "preview_table_data_transfer",
+    { request },
+  );
+}
+
+/**
+ * Generates a reviewed, target-dialect CREATE TABLE plan from source metadata.
+ * The table is not created until the separately bound confirmation is sent.
+ */
+export async function previewTableDataTransferTarget(
+  request: TableDataTransferTargetPlanRequest,
+): Promise<TableDataTransferTargetPlan> {
+  return invokeWithInterceptors<TableDataTransferTargetPlan>(
+    "preview_table_data_transfer_target",
+    { request },
+  );
+}
+
+export async function createTableDataTransferTarget(
+  request: TableDataTransferTargetPlanRequest,
+  confirmationToken: string,
+): Promise<CreateTableResult> {
+  return invokeWithInterceptors<CreateTableResult>(
+    "create_table_data_transfer_target",
+    { request, confirmationToken },
+  );
+}
+
+export async function executeTableDataTransfer(
+  request: TableDataTransferRequest,
+  confirmationToken: string,
+): Promise<TableDataTransferResult> {
+  return invokeWithInterceptors<TableDataTransferResult>(
+    "execute_table_data_transfer",
+    { request, confirmationToken },
+  );
+}
+
+export async function cancelTableDataTransfer(
+  transferId: string,
+): Promise<string> {
+  return invokeWithInterceptors<string>("cancel_table_data_transfer", {
+    transferId,
+  });
+}
+
+export async function listenTableDataTransferProgress(
+  listener: (progress: TableDataTransferProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<TableDataTransferProgress>(
+    TABLE_DATA_TRANSFER_PROGRESS_EVENT,
+    (event) => listener(event.payload),
+  );
 }
 
 export async function renameTable(
@@ -517,7 +623,16 @@ export async function refreshMaterializedView(
 
 export const tableService = {
   previewTablePage,
+  previewTableDataTransfer,
+  previewTableDataTransferTarget,
+  createTableDataTransferTarget,
+  executeTableDataTransfer,
+  cancelTableDataTransfer,
+  listenTableDataTransferProgress,
   exportTableData,
+  previewTableCsvImport,
+  previewTableJsonImport,
+  previewTableXlsxImport,
   importTableData,
   mutateTableRows,
   createTable,

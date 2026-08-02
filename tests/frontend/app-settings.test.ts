@@ -11,6 +11,8 @@ describe("app settings workbench layout", () => {
   it("keeps UI, editor, and data grid typography aligned by default", () => {
     expect(DEFAULT_APP_SETTINGS.appearance.uiFontSize).toBe(12);
     expect(DEFAULT_APP_SETTINGS.appearance.locale).toBe("system");
+    expect(DEFAULT_APP_SETTINGS.appearance.stylePreset).toBe("oxide");
+    expect(DEFAULT_APP_SETTINGS.appearance.accent).toBe("blue");
     expect(DEFAULT_APP_SETTINGS.editor.fontSize).toBe(12);
     expect(DEFAULT_APP_SETTINGS.dataGrid.fontSize).toBe(12);
   });
@@ -66,10 +68,38 @@ describe("app settings workbench layout", () => {
 
     expect(settings.appearance.uiFontSize).toBe(20);
     expect(settings.appearance.locale).toBe("system");
+    expect(settings.appearance.stylePreset).toBe("oxide");
+    expect(settings.appearance.fontFamily).toBe("system");
     expect(settings.editor.fontSize).toBe(10);
     expect(settings.dataGrid.fontSize).toBe(20);
     expect(settings.dataGrid.rowHeight).toBe(22);
     expect(settings.dataGrid.zoomPercent).toBe(160);
+  });
+
+  it("keeps supported appearance customization and safely rejects invalid values", () => {
+    const settings = normalizeAppSettings({
+      appearance: {
+        stylePreset: "terminal",
+        accent: "teal",
+        fontFamily: "mono",
+        density: "comfortable",
+        chromeGradient: "subtle",
+        reduceMotion: true,
+      },
+    });
+
+    expect(settings.appearance).toMatchObject({
+      stylePreset: "terminal",
+      accent: "teal",
+      fontFamily: "mono",
+      density: "comfortable",
+      chromeGradient: "subtle",
+      reduceMotion: true,
+    });
+    expect(
+      normalizeAppSettings({ appearance: { accent: "neon", density: "large" } })
+        .appearance,
+    ).toMatchObject({ accent: "blue", density: "compact" });
   });
 
   it("keeps supported explicit application locales", () => {
@@ -143,11 +173,46 @@ describe("app settings workbench layout", () => {
     });
   });
 
+  it("persists only an HTTPS credential-free driver catalog location", () => {
+    expect(
+      normalizeAppSettings({
+        drivers: { catalogUrl: "https://drivers.example.com/catalog.json" },
+      }).drivers.catalogUrl,
+    ).toBe("https://drivers.example.com/catalog.json");
+    expect(
+      normalizeAppSettings({
+        drivers: { catalogUrl: "http://drivers.example.com/catalog.json" },
+      }).drivers.catalogUrl,
+    ).toBe("");
+    expect(
+      normalizeAppSettings({
+        drivers: {
+          catalogUrl: "https://user:password@drivers.example.com/catalog.json",
+        },
+      }).drivers.catalogUrl,
+    ).toBe("");
+  });
+
+  it("preserves the restart-applied Driver Store location", () => {
+    expect(
+      normalizeAppSettings({
+        drivers: {
+          catalogUrl: "https://drivers.example.com/catalog.json",
+          storePath: "/Volumes/Workspace/OxideDrivers",
+        },
+      }).drivers,
+    ).toEqual({
+      catalogUrl: "https://drivers.example.com/catalog.json",
+      storePath: "/Volumes/Workspace/OxideDrivers",
+    });
+  });
+
   it("normalizes SQL completion casing, aliases, and local usage ranking", () => {
     expect(DEFAULT_APP_SETTINGS.editor.sqlCompletion).toEqual({
       keywordCase: "upper",
       tableAlias: "none",
       rankByUsage: true,
+      appendSpace: true,
     });
     expect(
       normalizeAppSettings({
@@ -156,6 +221,7 @@ describe("app settings workbench layout", () => {
             keywordCase: "lower",
             tableAlias: "initials",
             rankByUsage: false,
+            appendSpace: false,
           },
         },
       }).editor.sqlCompletion,
@@ -163,6 +229,7 @@ describe("app settings workbench layout", () => {
       keywordCase: "lower",
       tableAlias: "initials",
       rankByUsage: false,
+      appendSpace: false,
     });
     expect(
       normalizeAppSettings({
@@ -171,6 +238,7 @@ describe("app settings workbench layout", () => {
             keywordCase: "invalid",
             tableAlias: "verbose",
             rankByUsage: "yes",
+            appendSpace: "yes",
           },
         },
       }).editor.sqlCompletion,

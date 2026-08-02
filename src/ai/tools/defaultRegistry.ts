@@ -12,6 +12,7 @@ import {
 } from "@/services/lsp";
 import type { Diagnostic } from "@/services/lsp/types";
 import type {
+  DatabaseDataModel,
   DatabaseDriver,
   ExplainPlan,
   QueryResult,
@@ -29,10 +30,10 @@ import {
   type EditorSelectionState,
 } from "@/store/useTabStore";
 import {
-  lspLanguageId,
+  lspLanguageIdForCapabilities,
   normalizeDatabaseDriverName,
   previewTableQuery,
-  supportsLspLanguageId,
+  supportsLspCapabilities,
 } from "@/lib/databaseDialect";
 import {
   collectionDeleteQueryTemplateForCapabilities,
@@ -168,8 +169,17 @@ export function createWorkspaceAiToolAdapters(): AiToolAdapters {
           driver: connection.driver,
         })),
 
-    getConnectionCapabilities: (driver) =>
-      databaseService.getDatabaseCapabilities(driver),
+    getConnectionCapabilities: (driver, connectionId) => {
+      const connection = connectionId
+        ? useConnectionStore
+            .getState()
+            .connections.find((candidate) => candidate.id === connectionId)
+        : undefined;
+      return databaseService.getDatabaseCapabilities(
+        driver,
+        connection?.driverPackageVersion,
+      );
+    },
 
     getActiveTab: () => {
       const tabState = useTabStore.getState();
@@ -612,7 +622,11 @@ async function getLspCompletions(
   if (!driver) {
     throw new Error(`Connection driver is not available for ${connectionId}`);
   }
-  if (!supportsLspLanguageId(driver)) {
+  const capabilities = await databaseService.getDatabaseCapabilities(
+    driver,
+    connection?.driverPackageVersion,
+  );
+  if (!supportsLspCapabilities(capabilities)) {
     throw new Error(`${driver} does not support LSP completions`);
   }
 
@@ -620,14 +634,19 @@ async function getLspCompletions(
   const activeTab = tabState.tabs.find(
     (tab) => tab.id === tabState.activeTabId,
   );
-  const languageId = input.languageId || lspLanguageId(driver);
+  const languageId =
+    input.languageId || lspLanguageIdForCapabilities(capabilities);
   const uri =
     input.uri ||
     (activeTab
       ? getLspDocumentUri(activeTab.id, driver, languageId)
       : getLspDocumentUri(context.requestId, driver, languageId));
   const text = input.text ?? activeTab?.sql ?? "";
-  const descriptor = await ensureLspSession({ connectionId, driver });
+  const descriptor = await ensureLspSession({
+    connectionId,
+    driver,
+    capabilities,
+  });
   if (!descriptor) {
     throw new Error(`${driver} does not have an enabled built-in LSP profile`);
   }
@@ -969,7 +988,7 @@ async function describeObject(
 }
 
 function collectionKind(
-  dataModel: "relational" | "document" | "keyValue" | "search",
+  dataModel: DatabaseDataModel,
 ): AiObjectKind {
   if (dataModel === "keyValue") return "key";
   if (dataModel === "search") return "index";
@@ -1006,7 +1025,10 @@ async function resolveMetadataTarget(
     context.activeNamespace ||
     useSchemaStore.getState().currentSchema ||
     "";
-  const capabilities = await databaseService.getDatabaseCapabilities(driver);
+  const capabilities = await databaseService.getDatabaseCapabilities(
+    driver,
+    connection?.driverPackageVersion,
+  );
   return { connectionId, namespace, driver, capabilities };
 }
 
@@ -1188,7 +1210,13 @@ async function executeWorkspaceExplainPlan(
     context,
     "query.explain",
   );
-  const capabilities = await databaseService.getDatabaseCapabilities(driver);
+  const connection = useConnectionStore
+    .getState()
+    .connections.find((candidate) => candidate.id === connectionId);
+  const capabilities = await databaseService.getDatabaseCapabilities(
+    driver,
+    connection?.driverPackageVersion,
+  );
   if (!capabilities.supportsExplainPlan) {
     throw new Error(
       `${capabilities.displayName} does not support Explain Plan`,

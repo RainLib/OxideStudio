@@ -3,6 +3,7 @@ import {
   binaryByteLength,
   formatJsonDraft,
   inferValueEditorKind,
+  parseJsonPreview,
   parseValueEditorDraft,
   valueEditorDraft,
   valueEditorState,
@@ -56,6 +57,18 @@ describe("value editor model", () => {
         nullable: true,
       }),
     ).toMatchObject({ ok: false });
+  });
+
+  it("parses bounded JSON only for the read-only tree preview", () => {
+    expect(parseJsonPreview('{"role":"admin","tags":["a"]}')).toEqual({
+      ok: true,
+      value: { role: "admin", tags: ["a"] },
+    });
+    expect(parseJsonPreview("{broken")).toMatchObject({ ok: false });
+    expect(parseJsonPreview("x".repeat(1_000_001))).toEqual({
+      ok: false,
+      error: "JSON is too large for the tree preview. Use the text view instead.",
+    });
   });
 
   it("validates binary hex and reports byte length", () => {

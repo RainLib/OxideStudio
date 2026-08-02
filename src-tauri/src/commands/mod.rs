@@ -5,6 +5,7 @@ pub mod cache;
 /// 将所有 Tauri commands 按功能模块组织
 pub mod connection;
 pub mod database;
+pub mod database_admin;
 pub mod lsp;
 pub mod project_files;
 pub mod project_git;
@@ -23,6 +24,7 @@ pub use ai::*;
 pub use cache::*;
 pub use connection::*;
 pub use database::*;
+pub use database_admin::*;
 pub use lsp::*;
 pub use project_files::*;
 pub use project_git::*;

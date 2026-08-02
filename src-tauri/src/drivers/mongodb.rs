@@ -17,6 +17,11 @@ pub struct MongoDbDriver {
     default_database: String,
     active_database: Mutex<String>,
     client: Mutex<Option<Client>>,
+    // `buildInfo` is sampled during connection setup and deliberately kept
+    // separate from query execution. The LSP schema configuration can then
+    // apply MongoDB's version-gated aggregation completions without issuing
+    // another privileged command whenever an editor tab is opened.
+    server_version: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +60,7 @@ impl MongoDbDriver {
             default_database: mongodb_default_database(url),
             active_database: Mutex::new(mongodb_default_database(url)),
             client: Mutex::new(None),
+            server_version: Mutex::new(None),
         }
     }
 
@@ -252,15 +258,32 @@ impl DatabaseDriver for MongoDbDriver {
             .await
             .context("MongoDB ping failed")?;
 
+        // `buildInfo` is available on supported MongoDB server versions, but
+        // a narrowly scoped account may not have permission to read it. A
+        // missing version must never make an otherwise valid connection fail:
+        // the language server will use its conservative compatibility set.
+        let server_version = client
+            .database("admin")
+            .run_command(doc! { "buildInfo": 1 })
+            .await
+            .ok()
+            .and_then(|response| mongodb_server_version(&response));
+
         *self.client.lock().await = Some(client);
         *self.active_database.lock().await = default_database;
+        *self.server_version.lock().await = server_version;
         Ok(())
     }
 
     async fn disconnect(&self) -> Result<()> {
         *self.client.lock().await = None;
         *self.active_database.lock().await = self.default_database.clone();
+        *self.server_version.lock().await = None;
         Ok(())
+    }
+
+    async fn server_version(&self) -> Option<String> {
+        self.server_version.lock().await.clone()
     }
 
     async fn ping(&self) -> Result<()> {
@@ -452,11 +475,17 @@ fn parse_mongodb_commands(input: &str) -> Result<Vec<MongoCommandInput>> {
         return Ok(Vec::new());
     }
 
-    let value: Value = serde_json::from_str(input).context("MongoDB commands must be JSON")?;
-    let values = match value {
-        Value::Array(values) => values,
-        value => vec![value],
-    };
+    let parsed_values = serde_json::Deserializer::from_str(input)
+        .into_iter::<Value>()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("MongoDB commands must be JSON")?;
+    let values = parsed_values
+        .into_iter()
+        .flat_map(|value| match value {
+            Value::Array(values) => values,
+            value => vec![value],
+        })
+        .collect::<Vec<_>>();
 
     values
         .into_iter()
@@ -861,6 +890,15 @@ fn mongodb_default_database(url: &str) -> String {
         .to_string()
 }
 
+fn mongodb_server_version(response: &Document) -> Option<String> {
+    response
+        .get_str("version")
+        .ok()
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+        .map(str::to_string)
+}
+
 fn validate_mongodb_database_name(value: &str) -> Result<String> {
     let value = value.trim();
     if value.is_empty() {
@@ -889,6 +927,16 @@ mod tests {
             mongodb_default_database("mongodb://localhost:27017"),
             "admin"
         );
+    }
+
+    #[test]
+    fn extracts_server_version_from_build_info_response() {
+        assert_eq!(
+            mongodb_server_version(&doc! { "version": "5.3.2-enterprise" }),
+            Some("5.3.2-enterprise".to_string())
+        );
+        assert_eq!(mongodb_server_version(&doc! { "version": "  " }), None);
+        assert_eq!(mongodb_server_version(&doc! { "ok": 1 }), None);
     }
 
     #[test]
@@ -974,6 +1022,20 @@ mod tests {
                 {"collection":"users","find":{}},
                 {"collection":"users","countDocuments":{"active":true}}
             ]"#,
+        )
+        .unwrap();
+
+        assert_eq!(commands.len(), 2);
+        assert!(commands[0].find.is_some());
+        assert!(commands[1].count_documents.is_some());
+    }
+
+    #[test]
+    fn parses_whitespace_separated_json_commands() {
+        let commands = parse_mongodb_commands(
+            r#"{"collection":"users","find":{}}
+
+               {"collection":"users","countDocuments":{"active":true}}"#,
         )
         .unwrap();
 
@@ -1126,11 +1188,13 @@ mod tests {
     async fn disconnect_clears_client_and_resets_active_database() {
         let driver = MongoDbDriver::new("mongodb://localhost:27017/app");
         *driver.active_database.lock().await = "analytics".to_string();
+        *driver.server_version.lock().await = Some("7.0.8".to_string());
 
         driver.disconnect().await.unwrap();
 
         assert!(driver.client.lock().await.is_none());
         assert_eq!(driver.active_database.lock().await.as_str(), "app");
+        assert_eq!(driver.server_version().await, None);
         assert!(driver.ping().await.is_err());
     }
 }

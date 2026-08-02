@@ -1,0 +1,90 @@
+export type LspDocumentSyncClient = {
+  didOpen: (
+    uri: string,
+    text: string,
+    version: number,
+    languageId: string,
+  ) => Promise<void>;
+  didChange: (uri: string, text: string, version: number) => Promise<void>;
+};
+
+export type LspTextModel = {
+  getValue: () => string;
+};
+
+/** One FIFO tail per virtual LSP document URI. */
+export type LspDocumentSyncChains = Map<string, Promise<void>>;
+
+/**
+ * Queue a document operation after every prior operation for the same URI.
+ *
+ * The returned promise preserves the task failure for UI telemetry, while the
+ * stored tail always settles successfully so one transient transport failure
+ * cannot poison all later edits for that document.
+ */
+export function enqueueLspDocumentSync<T>(
+  chains: LspDocumentSyncChains,
+  uri: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = chains.get(uri) || Promise.resolve();
+  const result = previous.catch(() => undefined).then(task);
+  const continuation = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  chains.set(uri, continuation);
+  void continuation.finally(() => {
+    if (chains.get(uri) === continuation) chains.delete(uri);
+  });
+  return result;
+}
+
+/**
+ * Bring the LSP shadow document up to date before a latency-sensitive request.
+ *
+ * Monaco change notifications are intentionally debounced elsewhere. Completion
+ * cannot wait for that debounce because doing so lets a request observe the
+ * previous model revision. This coordinator is kept independent of React and
+ * Monaco so all completion entry points can share the same ordering contract.
+ */
+export async function syncLspModelBeforeCompletion(options: {
+  uri: string;
+  model: LspTextModel;
+  languageId: string;
+  client: LspDocumentSyncClient;
+  openedDocuments: Set<string>;
+  documentVersions: Map<string, number>;
+  documentTexts?: Map<string, string>;
+}) {
+  const {
+    uri,
+    model,
+    languageId,
+    client,
+    openedDocuments,
+    documentVersions,
+    documentTexts,
+  } = options;
+  const text = model.getValue();
+  if (openedDocuments.has(uri) && documentTexts?.get(uri) === text) return;
+
+  const version = (documentVersions.get(uri) || 0) + 1;
+
+  if (openedDocuments.has(uri)) {
+    await client.didChange(uri, text, version);
+    // Treat the local shadow state as committed only after the server accepts
+    // the revision. Otherwise the next completion request would incorrectly
+    // skip the document change after a transient LSP restart.
+    documentVersions.set(uri, version);
+    documentTexts?.set(uri, text);
+    return;
+  }
+
+  await client.didOpen(uri, text, version, languageId);
+  // `didOpen` can fail when the session is restarting. Do not mark it opened
+  // until it succeeds, or a retry would send `didChange` to no document.
+  openedDocuments.add(uri);
+  documentVersions.set(uri, version);
+  documentTexts?.set(uri, text);
+}

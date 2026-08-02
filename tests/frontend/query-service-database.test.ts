@@ -101,7 +101,49 @@ describe("query service database scope", () => {
     );
   });
 
-  it("imports a SQL script in the selected database and schema", async () => {
+  it("passes an active package's editor language to syntax validation", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: { valid: true, driver: "trino", statementCount: 1, diagnostics: [] },
+    });
+
+    await queryService.validateSqlSyntax("trino", "SELECT 1", "sql");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("validate_sql_syntax", {
+      driver: "trino",
+      sql: "SELECT 1",
+      lspLanguageId: "sql",
+    });
+  });
+
+  it("passes a reviewed server parser separately from generic SQL document language", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: { valid: true, driver: "doris", statementCount: 1, diagnostics: [] },
+    });
+
+    await queryService.validateSqlSyntax("doris", "SELECT `id` FROM `orders`", "sql", "mysql");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("validate_sql_syntax", {
+      driver: "doris",
+      sql: "SELECT `id` FROM `orders`",
+      lspLanguageId: "sql",
+      lspServerDialect: "mysql",
+    });
+  });
+
+  it("previews then imports a reviewed SQL script in the selected database and schema", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: {
+        fileName: "seed.sql",
+        totalBytes: 120,
+        statementCount: 3,
+        statementPreview: ["CREATE TABLE seed (id integer)"],
+        truncated: false,
+        reviewDigest: "reviewed-script-digest",
+      },
+    });
     mocks.invoke.mockResolvedValueOnce({
       success: true,
       data: {
@@ -111,18 +153,26 @@ describe("query service database scope", () => {
       },
     });
 
+    const preview = await queryService.previewSqlScriptImport("postgres-1", "/tmp/seed.sql");
     await queryService.importSqlScript(
       "postgres-1",
       "/tmp/seed.sql",
+      preview.reviewDigest,
       "public",
       "analytics",
     );
+
+    expect(mocks.invoke).toHaveBeenNthCalledWith(1, "preview_sql_script_import", {
+      connectionId: "postgres-1",
+      filePath: "/tmp/seed.sql",
+    });
 
     expect(mocks.invoke).toHaveBeenCalledWith("import_sql_script", {
       connectionId: "postgres-1",
       filePath: "/tmp/seed.sql",
       schema: "public",
       database: "analytics",
+      reviewDigest: "reviewed-script-digest",
     });
   });
 

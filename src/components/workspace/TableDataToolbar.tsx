@@ -14,13 +14,26 @@ import {
   Undo2,
   Upload,
   Download,
+  ArrowRightLeft,
+  ChevronDown,
+  FileSpreadsheet,
+  Rows3,
 } from "lucide-react";
 import type { ReactNode } from "react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 interface TableDataToolbarProps {
   isExecuting: boolean;
   readOnly: boolean;
+  /** A safe alternate presentation that intentionally does not accept edits. */
+  viewOnly?: boolean;
   exportDisabled?: boolean;
+  transferDisabled?: boolean;
   editingEnabled: boolean;
   hasEdits: boolean;
   editedCellCount: number;
@@ -35,7 +48,13 @@ interface TableDataToolbarProps {
   onFitColumns: () => void;
   onResetColumns: () => void;
   onToggleEditing: () => void;
-  onImport: () => void;
+  transposed?: boolean;
+  transposeDisabled?: boolean;
+  onToggleTranspose?: () => void;
+  onImportCsv: () => void;
+  onImportJson: () => void;
+  onImportXlsx: () => void;
+  onTransfer?: () => void;
   onExportCsv: () => void;
   onExportJson: () => void;
   onExportSql: () => void;
@@ -44,7 +63,9 @@ interface TableDataToolbarProps {
 export function TableDataToolbar({
   isExecuting,
   readOnly,
+  viewOnly = false,
   exportDisabled = false,
+  transferDisabled = false,
   editingEnabled,
   hasEdits,
   editedCellCount,
@@ -59,12 +80,25 @@ export function TableDataToolbar({
   onFitColumns,
   onResetColumns,
   onToggleEditing,
-  onImport,
+  transposed = false,
+  transposeDisabled = false,
+  onToggleTranspose,
+  onImportCsv,
+  onImportJson,
+  onImportXlsx,
+  onTransfer = () => undefined,
   onExportCsv,
   onExportJson,
   onExportSql,
 }: TableDataToolbarProps) {
-  const mutationDisabled = isExecuting || readOnly || !editingEnabled;
+  const mutationDisabled = isExecuting || readOnly || viewOnly || !editingEnabled;
+  const editingTitle = readOnly
+    ? "This object is read-only"
+    : viewOnly
+      ? "Transpose view is read-only; return to the grid to edit"
+      : editingEnabled
+        ? "Editing enabled"
+        : "Enable editing";
 
   return (
     <div className="wb-table-commandbar h-8 border-b border-[hsl(var(--wb-border-subtle))] px-1.5">
@@ -96,7 +130,7 @@ export function TableDataToolbar({
               title="Submit changes to the database"
               aria-label="Submit changes"
               onClick={onSave}
-              disabled={readOnly || isExecuting}
+              disabled={readOnly || viewOnly || isExecuting}
             >
               <Check size={12} />
               Submit {editedCellCount + newRowCount}
@@ -133,24 +167,72 @@ export function TableDataToolbar({
         <ToolbarButton title="Reset column layout" onClick={onResetColumns}>
           <RotateCcw size={14} />
         </ToolbarButton>
+        {onToggleTranspose && (
+          <ToolbarButton
+            title={
+              transposed
+                ? "Show standard grid"
+                : transposeDisabled
+                  ? "Submit or revert changes before transposing"
+                  : "Transpose rows and columns"
+            }
+            onClick={onToggleTranspose}
+            disabled={isExecuting || transposeDisabled}
+            active={transposed}
+          >
+            <Rows3 size={14} />
+          </ToolbarButton>
+        )}
       </div>
 
       <div className="flex shrink-0 items-center gap-0.5">
         <ToolbarSeparator />
         <ToolbarButton
-          title={readOnly ? "This object is read-only" : editingEnabled ? "Editing enabled" : "Enable editing"}
+          title={editingTitle}
           onClick={onToggleEditing}
-          disabled={readOnly}
-          active={editingEnabled && !readOnly}
+          disabled={readOnly || viewOnly}
+          active={editingEnabled && !readOnly && !viewOnly}
         >
-          {editingEnabled && !readOnly ? (
+          {editingEnabled && !readOnly && !viewOnly ? (
             <LockKeyholeOpen size={14} />
           ) : (
             <LockKeyhole size={14} />
           )}
         </ToolbarButton>
-        <ToolbarButton title="Import CSV" onClick={onImport} disabled={mutationDisabled}>
-          <Upload size={14} />
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              className="inline-flex h-6 shrink-0 items-center gap-0.5 rounded-[3px] px-1.5 wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-focus))] disabled:pointer-events-none disabled:opacity-40"
+              title="Import data"
+              aria-label="Import data"
+              disabled={mutationDisabled}
+            >
+              <Upload size={14} />
+              <ChevronDown size={10} />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="wb-menu-content min-w-36">
+            <DropdownMenuItem className="wb-menu-item" onSelect={onImportCsv}>
+              <Upload className="mr-2 h-3.5 w-3.5" />
+              Import CSV…
+            </DropdownMenuItem>
+            <DropdownMenuItem className="wb-menu-item" onSelect={onImportJson}>
+              <FileJson className="mr-2 h-3.5 w-3.5" />
+              Import JSON…
+            </DropdownMenuItem>
+            <DropdownMenuItem className="wb-menu-item" onSelect={onImportXlsx}>
+              <FileSpreadsheet className="mr-2 h-3.5 w-3.5" />
+              Import XLSX…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <ToolbarButton
+          title="Transfer data to another table"
+          onClick={onTransfer}
+          disabled={isExecuting || transferDisabled}
+        >
+          <ArrowRightLeft size={14} />
         </ToolbarButton>
         <ToolbarButton
           title="Export CSV"

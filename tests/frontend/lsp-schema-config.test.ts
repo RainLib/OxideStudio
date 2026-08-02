@@ -1,11 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   defaultDatabaseCapabilities,
   lspLanguageId,
   normalizeLspDialect,
+  resetRuntimeDatabaseCatalogForTests,
   supportsLspLanguageId,
+  syncExternalDatabaseDriverProfiles,
 } from "@/lib/databaseDialect";
-import { getLspDocumentUri } from "@/services/lsp/document";
+import { builtInLspProfileForDriver } from "@/services/lsp/profiles";
+import {
+  getLspDocumentUri,
+  getLspProjectDocumentUri,
+  parseLspProjectDocumentUri,
+} from "@/services/lsp/document";
 import {
   assignLspObjectSourceLocations,
   collectionToLspTableDefinition,
@@ -138,6 +145,8 @@ function cloneSchema(schema: LspSchemaDefinition): LspSchemaDefinition {
 }
 
 describe("LSP schema config", () => {
+  afterEach(() => resetRuntimeDatabaseCatalogForTests());
+
   it("maps Redis keys to LSP table-shaped objects", () => {
     const table = collectionToLspTableDefinition(
       defaultDatabaseCapabilities("redis"),
@@ -296,6 +305,17 @@ describe("LSP schema config", () => {
         lspLanguageId("elasticsearch")
       )
     ).toBe("oxide://query/tab%2Fsearch.elasticsearch.elasticsearch");
+
+    const projectUri = getLspProjectDocumentUri(
+      "project/one",
+      "queries/report.sql",
+    );
+    expect(projectUri).toBe("oxide://project/project%2Fone/queries/report.sql");
+    expect(parseLspProjectDocumentUri(projectUri)).toEqual({
+      projectId: "project/one",
+      relativePath: "queries/report.sql",
+    });
+    expect(parseLspProjectDocumentUri("oxide://project/only-project.sql")).toBeNull();
   });
 
   it("does not treat generic sql as a concrete LSP dialect", () => {
@@ -305,11 +325,101 @@ describe("LSP schema config", () => {
     expect(normalizeLspDialect("sql", "mysql")).toBe("mysql");
   });
 
+  it("starts the bundled generic SQL session for a verified external relation driver", () => {
+    syncExternalDatabaseDriverProfiles([
+      {
+        driver: "oracle",
+        displayName: "Oracle Database",
+        clientLibrary: "fixture",
+        clientVersion: "1.0",
+        distribution: "external",
+        updatePolicy: "independent",
+        independentlyUpdatable: true,
+        serverVersionPolicy: "declared-by-package",
+        implementation: "isolated driver sidecar",
+        packageVersion: "1.0.0",
+        protocolVersion: "1.0",
+        active: true,
+        status: "ready",
+        capabilities: {
+          ...defaultDatabaseCapabilities("postgres"),
+          driver: "oracle",
+          displayName: "Oracle Database",
+          lspLanguageId: "oracle",
+        },
+      },
+    ]);
+
+    expect(builtInLspProfileForDriver("oracle")).toMatchObject({
+      driver: "oracle",
+      languageId: "sql",
+      documentLanguageId: "sql",
+      serverDialect: "postgres",
+    });
+  });
+
+  it("uses a connection-pinned capability contract when creating an LSP profile", () => {
+    expect(
+      builtInLspProfileForDriver("oracle", {
+        ...defaultDatabaseCapabilities("postgres"),
+        driver: "oracle",
+        displayName: "Oracle pinned package",
+        lspLanguageId: "clickhouse",
+      }),
+    ).toMatchObject({
+      driver: "oracle",
+      languageId: "clickhouse",
+      documentLanguageId: "sql",
+      serverDialect: "clickhouse",
+    });
+  });
+
+  it("starts generic SQL intelligence for an explicitly SQL-shaped non-relational package", () => {
+    expect(
+      builtInLspProfileForDriver("questdb", {
+        ...defaultDatabaseCapabilities("postgres"),
+        driver: "questdb",
+        displayName: "QuestDB",
+        dataModel: "timeSeries",
+        lspLanguageId: "sql",
+        supportsSqlQuery: true,
+        supportsTableBrowsing: true,
+        supportsTableRowMutation: false,
+        supportsTableDdl: false,
+      }),
+    ).toMatchObject({
+      driver: "questdb",
+      languageId: "sql",
+      documentLanguageId: "sql",
+      serverDialect: "postgres",
+    });
+  });
+
+  it("keeps a MySQL-compatible package's generic document language separate from its parser", () => {
+    expect(
+      builtInLspProfileForDriver("doris", {
+        ...defaultDatabaseCapabilities("postgres"),
+        driver: "doris",
+        displayName: "Apache Doris",
+        lspLanguageId: "sql",
+        lspServerDialect: "mysql",
+      }),
+    ).toMatchObject({
+      driver: "doris",
+      languageId: "sql",
+      documentLanguageId: "sql",
+      serverDialect: "mysql",
+    });
+  });
+
   it("captures the complete semantic schema metadata in its signature", () => {
     const baseline = signatureSchema();
     const baselineSignature = lspSchemaSignature([baseline]);
     const mutations: Array<(schema: LspSchemaDefinition) => void> = [
       (schema) => (schema.database = "audit"),
+      (schema) => (schema.driver = "mysql"),
+      (schema) => (schema.server_version = "8.0.38"),
+      (schema) => (schema.snapshot_revision = 42),
       (schema) => (schema.tables[0]!.comment = "Changed"),
       (schema) => (schema.tables[0]!.columns[0]!.data_type = "bigint"),
       (schema) => (schema.tables[0]!.columns[0]!.nullable = true),

@@ -198,6 +198,21 @@ pub struct ParameterizedStatement {
     pub params: Vec<QueryParameter>,
 }
 
+/// Semantic top-level namespace creation request. Native drivers may compile
+/// this into their bounded dialect SQL; external drivers pass the intent to
+/// their verified sidecar so the host never guesses vendor syntax.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseCreateRequest {
+    pub name: String,
+    pub charset: Option<String>,
+    pub collation: Option<String>,
+    pub owner: Option<String>,
+    /// External sidecars use the signed capability label to decide whether
+    /// this is a schema or database request; the Host never infers SQL.
+    pub namespace_kind: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TableInfo {
     pub name: String,

@@ -1,0 +1,16 @@
+[package]
+name = "oxide-driver-rqlite"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Independently updateable RQLite HTTP driver for OxideStudio"
+
+[[bin]]
+name = "oxide-driver-rqlite"
+path = "src/main.rs"
+
+[dependencies]
+oxide-driver-protocol = { path = "../oxide-driver-protocol" }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde_json = "1"

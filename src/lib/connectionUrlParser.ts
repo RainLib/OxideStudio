@@ -4,7 +4,10 @@
 
 import {
   connectionUrlScheme,
+  connectionUrlTemplateForDriver,
+  defaultDatabaseCapabilities,
   defaultDatabasePort,
+  isFileBasedDatabaseDriver,
   normalizeDatabaseDriverName,
   sslModeParamAliases,
   sslModeParamName,
@@ -33,8 +36,15 @@ function escapeRegExp(value: string) {
 export function normalizeConnectionUrlForDriver(
   driver: DatabaseDriver,
   connectionUrl: string,
+  options: { preserveJdbcPrefix?: boolean } = {},
 ) {
-  let url = stripJdbcPrefix(connectionUrl.trim());
+  const template = connectionUrlTemplateForDriver(driver);
+  const preservesJdbcTransport =
+    options.preserveJdbcPrefix ||
+    template?.toLocaleLowerCase().startsWith("jdbc:") === true;
+  let url = preservesJdbcTransport
+    ? connectionUrl.trim()
+    : stripJdbcPrefix(connectionUrl.trim());
   const profileSslParamName = sslModeParamName(driver);
 
   for (const alias of sslModeParamAliases(driver)) {
@@ -126,13 +136,32 @@ export function parseConnectionUrl(
     const isHttpProtocol = ["http", "https"].includes(
       rawProtocol.toLowerCase(),
     );
+    // HTTP(S) is a transport, not an Elasticsearch-only dialect. External
+    // sidecars such as RQLite keep their driver identity when the user pastes
+    // the server's documented HTTP endpoint into that driver's form. With no
+    // selected form, preserve the historical Elasticsearch default.
     const driver = isHttpProtocol
-      ? preferredDriver === undefined || preferredDriver === "elasticsearch"
-        ? "elasticsearch"
-        : null
+      ? preferredDriver ?? "elasticsearch"
       : normalizeDatabaseDriverName(rawProtocol);
     if (!driver) {
       return null;
+    }
+    if (isFileBasedDatabaseDriver(driver)) {
+      const scheme = connectionUrlScheme(driver);
+      const schemePattern = new RegExp(`^${escapeRegExp(scheme)}:`, "i");
+      let database = input.replace(schemePattern, "");
+      if (database === ":memory:") {
+        return { driver, database };
+      }
+      // `duckdb:///tmp/data.duckdb` and `sqlite:///tmp/data.sqlite` retain
+      // their leading slash. The generic URL parser intentionally drops it
+      // when mapping pathname to a database name, which would turn an
+      // absolute local path into a relative one when the form is reopened.
+      if (database.startsWith("//")) database = database.slice(2);
+      return {
+        driver,
+        database: database ? decodeURIComponent(database) : undefined,
+      };
     }
     const protocolPattern = new RegExp(`^${escapeRegExp(rawProtocol)}:`, "i");
     const urlObj = new URL(
@@ -206,6 +235,8 @@ export function buildConnectionUrl(config: {
   password?: string;
   database?: string;
   sslMode?: string;
+  /** A signed external-package template overrides the generic URL renderer. */
+  connectionUrlTemplate?: string | null;
 }): string {
   const {
     driver,
@@ -216,6 +247,37 @@ export function buildConnectionUrl(config: {
     database = "",
     sslMode,
   } = config;
+
+  const template =
+    config.connectionUrlTemplate?.trim() || connectionUrlTemplateForDriver(driver);
+  if (template) {
+    return template.replace(
+      /\{(host|port|database|user|password)\}/gu,
+      (_match, key: "host" | "port" | "database" | "user" | "password") => {
+        if (key === "host") return host;
+        if (key === "port") return String(port || defaultDatabasePort(driver));
+        // A signed package author owns this grammar. JDBC database paths such
+        // as `hive/default` and Oracle service names must not be normalized as
+        // one generic URL path component.
+        if (key === "database") return database;
+        if (key === "user") return user;
+        return password;
+      },
+    );
+  }
+
+  // File-backed engines deliberately do not inherit the network URL builder:
+  // `sqlite://localhost/path` would silently create a file named `path` and
+  // make the connection form look like it needs a server.
+  if (isFileBasedDatabaseDriver(driver)) {
+    const scheme = connectionUrlScheme(driver);
+    const file = (database || host || ":memory:").trim();
+    if (file === ":memory:" || file === `${scheme}::memory:`) {
+      return `${scheme}::memory:`;
+    }
+    if (file.toLowerCase().startsWith(`${scheme.toLowerCase()}:`)) return file;
+    return file.startsWith("/") ? `${scheme}://${file}` : `${scheme}:///${file}`;
+  }
 
   const actualPort = port || defaultDatabasePort(driver);
 
@@ -238,7 +300,10 @@ export function buildConnectionUrl(config: {
     url += `:${actualPort}`;
   }
 
-  if (database) {
+  if (
+    database &&
+    defaultDatabaseCapabilities(driver).supportsConnectionDatabase !== false
+  ) {
     url += `/${encodeURIComponent(database)}`;
   }
 

@@ -17,15 +17,20 @@ import {
 } from "@/components/ui/select";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { databaseService } from "@/services/tauri";
-import type { DatabaseCapabilities } from "@/services/tauri";
+import type {
+  DatabaseCapabilities,
+  DatabaseDriverInstallation,
+} from "@/services/tauri";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import {
   DEFAULT_DATABASE_DRIVER,
   defaultDatabaseCapabilities,
+  normalizeDatabaseDriverName,
 } from "@/lib/databaseDialect";
 import { createNamespaceDdl } from "@/lib/databaseNamespaceDdl";
 import { useProjectStore } from "@/store/useProjectStore";
 import { refreshPostgresDatabaseCatalog } from "@/services/postgresDatabaseCatalogCache";
+import { connectionUsesExternalDriverPackage } from "@/features/database-drivers";
 
 interface CreateDatabaseDialogProps {
   isOpen: boolean;
@@ -62,6 +67,11 @@ export function CreateDatabaseDialog({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<DatabaseCapabilities | null>(null);
+  const [capabilityResolutionError, setCapabilityResolutionError] = useState<string | null>(null);
+  const [driverInstallations, setDriverInstallations] = useState<
+    DatabaseDriverInstallation[] | null
+  >(null);
+  const [driverResolutionError, setDriverResolutionError] = useState<string | null>(null);
 
   const connections = useConnectionStore((state) => state.connections);
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
@@ -69,22 +79,72 @@ export function CreateDatabaseDialog({
   const setCurrentSchema = useSchemaStore((state) => state.setCurrentSchema);
   const connection = connections.find((item) => item.id === activeConnectionId);
   const driver = connection?.driver || DEFAULT_DATABASE_DRIVER;
+  const normalizedDriver = normalizeDatabaseDriverName(driver) || driver;
   const activeCapabilities = capabilities || defaultDatabaseCapabilities(driver);
+  const isCapabilitiesLoading =
+    capabilities === null || driverInstallations === null;
+  const canCreateNamespace =
+    !isCapabilitiesLoading &&
+    !capabilityResolutionError &&
+    !driverResolutionError &&
+    activeCapabilities.supportsCreateDatabase === true;
   const namespaceLabel = activeCapabilities.namespaceLabel || "database";
   const titleNamespaceLabel =
     namespaceLabel.charAt(0).toUpperCase() + namespaceLabel.slice(1);
-  const isPostgres = driver === "postgres";
-  const isMysql = driver === "mysql";
+  // Connection aliases must use the same canonical dialect as the Host.
+  // MariaDB is a MySQL-family example: its capability form and preview must
+  // not silently degrade simply because the saved connection uses an alias.
+  const isPostgres = normalizedDriver === "postgres";
+  const isMysql = normalizedDriver === "mysql";
+  const usesExternalDriverPackage = connectionUsesExternalDriverPackage(
+    driver,
+    connection?.driverPackageVersion,
+    driverInstallations || [],
+  );
+  const hasHostGeneratedPreview =
+    (isPostgres || isMysql) && !usesExternalDriverPackage;
+  const supportsOwner = activeCapabilities.supportsCreateDatabaseOwner === true;
+  const supportsCharset = activeCapabilities.supportsCreateDatabaseCharset === true;
+  const supportsCollation = activeCapabilities.supportsCreateDatabaseCollation === true;
   const ddl = useMemo(
-    () =>
-      createNamespaceDdl({
-        driver,
+    () => {
+      if (isCapabilitiesLoading) {
+        return "-- Loading the verified driver capability contract before creating a namespace.";
+      }
+      if (capabilityResolutionError) {
+        return "-- The active driver capability contract could not be verified. Namespace creation is disabled.";
+      }
+      if (!activeCapabilities.supportsCreateDatabase) {
+        return `-- ${activeCapabilities.displayName} does not declare namespace creation for this connection.\n-- Install or activate a driver package that explicitly supports this operation.`;
+      }
+      if (!hasHostGeneratedPreview) {
+        return databaseName.trim()
+          ? `-- ${activeCapabilities.displayName} will validate and create “${databaseName.trim()}” inside its verified driver runtime.\n-- No host-generated SQL is used for this database family.`
+          : "-- Enter a name to review the driver-managed creation request.";
+      }
+      return createNamespaceDdl({
+        driver: normalizedDriver,
         name: databaseName,
         owner: isPostgres ? owner : undefined,
         charset: isMysql ? charset : undefined,
         collation: isMysql ? collation : undefined,
-      }),
-    [charset, collation, databaseName, driver, isMysql, isPostgres, owner]
+      });
+    },
+    [
+      activeCapabilities.displayName,
+      capabilityResolutionError,
+      activeCapabilities.supportsCreateDatabase,
+      charset,
+      collation,
+      databaseName,
+      driver,
+      hasHostGeneratedPreview,
+      isCapabilitiesLoading,
+      isMysql,
+      isPostgres,
+      normalizedDriver,
+      owner,
+    ]
   );
 
   useEffect(() => {
@@ -100,19 +160,50 @@ export function CreateDatabaseDialog({
   useEffect(() => {
     let cancelled = false;
     setCapabilities(null);
+    setCapabilityResolutionError(null);
     void databaseService
-      .getDatabaseCapabilities(driver)
+      .getDatabaseCapabilities(driver, connection?.driverPackageVersion)
       .then((value) => {
         if (!cancelled) setCapabilities(value);
       })
       .catch((nextError) => {
-        console.warn("Failed to load database capabilities", nextError);
-        if (!cancelled) setCapabilities(defaultDatabaseCapabilities(driver));
+        if (!cancelled) {
+          setCapabilities(defaultDatabaseCapabilities(driver));
+          setCapabilityResolutionError(
+            nextError instanceof Error
+              ? nextError.message
+              : "Unable to verify the active driver capability contract.",
+          );
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [driver]);
+  }, [connection?.driverPackageVersion, driver]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDriverInstallations(null);
+    setDriverResolutionError(null);
+    void databaseService
+      .listDatabaseDriverInstallations()
+      .then((installations) => {
+        if (!cancelled) setDriverInstallations(installations);
+      })
+      .catch((nextError) => {
+        if (!cancelled) {
+          setDriverInstallations([]);
+          setDriverResolutionError(
+            nextError instanceof Error
+              ? nextError.message
+              : "Unable to verify the active driver package.",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connection?.driverPackageVersion, normalizedDriver]);
 
   const handleCharsetChange = (nextCharset: string) => {
     const normalized = nextCharset === "__default" ? "" : nextCharset;
@@ -123,6 +214,18 @@ export function CreateDatabaseDialog({
   const handleCreate = async (event: FormEvent) => {
     event.preventDefault();
     const name = databaseName.trim();
+    if (isCapabilitiesLoading) {
+      setError("Driver capabilities are still loading. Please wait before creating a namespace.");
+      return;
+    }
+    if (capabilityResolutionError) {
+      setError("The active driver capability contract could not be verified. Reopen this dialog and try again.");
+      return;
+    }
+    if (driverResolutionError) {
+      setError("The active driver package could not be verified. Reopen this dialog and try again.");
+      return;
+    }
     if (!activeCapabilities.supportsCreateDatabase) {
       setError(`${activeCapabilities.displayName} ${namespaceLabel} creation is not supported.`);
       return;
@@ -139,19 +242,26 @@ export function CreateDatabaseDialog({
         activeConnectionId,
         driver,
         name,
-        activeCapabilities.supportsCreateDatabaseCharset ? charset : undefined,
-        activeCapabilities.supportsCreateDatabaseCharset ? collation : undefined,
-        isPostgres ? owner.trim() || undefined : undefined
+        supportsCharset ? charset || undefined : undefined,
+        supportsCollation ? collation || undefined : undefined,
+        supportsOwner ? owner.trim() || undefined : undefined
       );
-      if (isPostgres) {
+      // The persisted catalog cache keeps its historical PostgreSQL name,
+      // but it is driver-scoped and backs every capability-declared
+      // catalog provider. Refresh it for an external database/catalog create
+      // too; loading only the current connection's schemas would leave the
+      // new namespace invisible until a later manual refresh.
+      if (isPostgres || activeCapabilities.supportsDatabaseCatalogs) {
         await refreshPostgresDatabaseCatalog({
           projectId: activeProjectId,
           connectionId: activeConnectionId,
-          driver: "postgres",
+          driver: isPostgres ? "postgres" : driver,
         });
       } else {
         await loadSchemas(activeConnectionId, true);
-        await setCurrentSchema(name);
+        if (!activeCapabilities.supportsDatabaseCatalogs) {
+          await setCurrentSchema(name);
+        }
       }
       onCreated?.(name);
       onClose();
@@ -202,7 +312,7 @@ export function CreateDatabaseDialog({
                   disabled={isSubmitting}
                 />
 
-                {isPostgres && (
+                {supportsOwner && (
                   <>
                     <label htmlFor="namespace-owner" className={labelClass}>Authorization</label>
                     <div>
@@ -215,13 +325,13 @@ export function CreateDatabaseDialog({
                         disabled={isSubmitting}
                       />
                       <p className="mt-1 text-[10px] wb-muted">
-                        Optional role that will own the schema.
+                        Optional owner / authorization principal for the new {namespaceLabel}.
                       </p>
                     </div>
                   </>
                 )}
 
-                {activeCapabilities.supportsCreateDatabaseCharset && (
+                {supportsCharset && isMysql && (
                   <>
                     <span className={labelClass}>Character set</span>
                     <Select value={charset || "__default"} onValueChange={handleCharsetChange} disabled={isSubmitting}>
@@ -246,6 +356,34 @@ export function CreateDatabaseDialog({
                     </Select>
                   </>
                 )}
+
+                {supportsCharset && !isMysql && (
+                  <>
+                    <label htmlFor="namespace-charset" className={labelClass}>Character set</label>
+                    <input
+                      id="namespace-charset"
+                      value={charset}
+                      onChange={(event) => setCharset(event.target.value)}
+                      className={fieldClass}
+                      placeholder="Driver default"
+                      disabled={isSubmitting}
+                    />
+                  </>
+                )}
+
+                {supportsCollation && !isMysql && (
+                  <>
+                    <label htmlFor="namespace-collation" className={labelClass}>Collation</label>
+                    <input
+                      id="namespace-collation"
+                      value={collation}
+                      onChange={(event) => setCollation(event.target.value)}
+                      className={fieldClass}
+                      placeholder="Driver default"
+                      disabled={isSubmitting}
+                    />
+                  </>
+                )}
               </div>
 
               {error && (
@@ -254,18 +392,24 @@ export function CreateDatabaseDialog({
                   <span>{error}</span>
                 </div>
               )}
+              {(capabilityResolutionError || driverResolutionError) && (
+                <div className="mt-4 flex items-start gap-2 rounded-[4px] bg-amber-400/10 px-2.5 py-2 text-[11px] text-amber-200" role="alert">
+                  <AlertCircle size={13} className="mt-0.5 shrink-0" />
+                  <span>Unable to verify the active driver capability contract. Creation remains disabled until it can be read.</span>
+                </div>
+              )}
             </section>
 
             <section className="flex min-w-0 flex-col bg-[hsl(var(--wb-editor))]">
               <div className="flex h-9 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] px-3">
                 <span className="flex items-center gap-1.5 text-[11px] font-medium">
                   <Code2 size={13} className="text-[hsl(var(--wb-accent))]" />
-                  SQL Preview
+                  {hasHostGeneratedPreview ? "SQL Preview" : "Driver request"}
                 </span>
                 <button
                   type="button"
                   className="wb-icon-button h-6 w-6"
-                  title="Copy SQL"
+                  title={hasHostGeneratedPreview ? "Copy SQL" : "Copy request preview"}
                   onClick={() => void navigator.clipboard.writeText(ddl)}
                 >
                   <Copy size={12} />
@@ -274,6 +418,19 @@ export function CreateDatabaseDialog({
               <pre className="min-h-0 flex-1 whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-5 text-[hsl(var(--wb-text))]">
                 {ddl}
               </pre>
+              <div className="border-t border-[hsl(var(--wb-border-subtle))] px-3 py-2 text-[10px] text-[hsl(var(--wb-text-muted))]">
+                {isCapabilitiesLoading
+                  ? "Verifying the active driver package…"
+                  : capabilityResolutionError
+                    ? "The active driver capability contract could not be verified."
+                  : driverResolutionError
+                    ? "The active driver package could not be verified."
+                  : canCreateNamespace
+                    ? usesExternalDriverPackage
+                      ? "Creation is enabled by the verified driver runtime; OxideStudio does not generate Host SQL for this package."
+                      : "Creation is enabled by the active driver capability contract."
+                    : "Creation is unavailable for the active driver capability contract."}
+              </div>
             </section>
           </div>
 
@@ -281,7 +438,22 @@ export function CreateDatabaseDialog({
             <button type="button" className="wb-text-button h-7 px-3 text-[11px]" onClick={onClose} disabled={isSubmitting}>
               Cancel
             </button>
-            <button type="submit" className="wb-primary-button h-7 min-w-[96px] justify-center px-3 text-[11px]" disabled={isSubmitting || !databaseName.trim()}>
+            <button
+              type="submit"
+              className="wb-primary-button h-7 min-w-[96px] justify-center px-3 text-[11px]"
+              disabled={isSubmitting || !databaseName.trim() || !canCreateNamespace}
+              title={
+                isCapabilitiesLoading
+                  ? "Verifying driver capabilities"
+                  : capabilityResolutionError
+                    ? "The active driver capability contract could not be verified"
+                  : driverResolutionError
+                    ? "The active driver package could not be verified"
+                  : canCreateNamespace
+                    ? undefined
+                    : "The active driver does not support namespace creation"
+              }
+            >
               {isSubmitting ? <Loader2 size={12} className="animate-spin" /> : `Create ${titleNamespaceLabel}`}
             </button>
           </DialogFooter>

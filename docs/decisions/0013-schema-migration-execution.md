@@ -1,4 +1,4 @@
-# ADR-0013: Fingerprint-bound PostgreSQL migration execution
+# ADR-0013: Fingerprint-bound schema migration execution
 
 - Status: Accepted
 - Date: 2026-07-26
@@ -24,7 +24,7 @@ Generated preflight checks carry a machine-readable assertion:
 
 Query errors, missing result columns, and non-numeric count values block execution. Journal records contain only status and bounded observations such as counts or row counts; duplicate key values and other returned business data are not persisted.
 
-For PostgreSQL, the backend flattens the freshly recomputed ordered changes into the existing database-scoped parameterized batch API. That driver owns `BEGIN`, executes all statements on one connection, rolls back on the first error, and commits only after every statement succeeds. A failed batch reports zero committed statements. Automatic apply is rejected for MySQL because its DDL auto-commit behavior cannot provide the same atomic contract.
+For PostgreSQL, the backend flattens the freshly recomputed ordered changes into the existing database-scoped parameterized batch API. That driver owns `BEGIN`, executes all statements on one connection, rolls back on the first error, and commits only after every statement succeeds. A failed batch reports zero committed statements. For MySQL, the caller must acknowledge a separate non-transactional approval. The backend executes one reviewed statement at a time and persists the journal after each successful statement. On failure it reports the exact number of statements that may already have committed; it never labels this path atomic or rolled back.
 
 After commit, Rust captures the live target again and compares it with the desired source. The journal distinguishes `succeeded` from `verificationFailed`; a committed migration is never relabeled as rolled back when only recapture or comparison failed.
 
@@ -35,8 +35,10 @@ Execution records are upserted into the project/connection-scoped MetaStore reso
 ## Consequences
 
 - PostgreSQL now has an explicit confirm → refresh/recompute → preflight → atomic apply → post-verify lifecycle.
+- MySQL has an explicit confirm → refresh/recompute → preflight → sequential, journaled apply → post-verify lifecycle, with partial commit risk visible before execution.
 - Stale artifacts and tampered snapshot contents cannot reach DDL execution through this command.
 - Transaction failure and post-commit verification failure are represented separately.
-- A process crash can leave a durable `running` record. PostgreSQL rolls back an interrupted open transaction, but automatic startup reconciliation of interrupted journals is not yet implemented.
-- MySQL keeps review/preflight/open-in-console only; automatic apply remains blocked until an equally honest execution and recovery contract exists.
-- Rename inference, schema mapping, complete view/routine/trigger/sequence/grant source, full cross-object dependency capture, and an independent server dry-run remain P1 work.
+- A process crash can leave a durable `running` record. The next journal read now converts records that are not active in the current process to `interrupted`, with an explicit recapture-and-review requirement; it never attempts to resume them. A currently executing migration is tracked in-process so it is not falsely converted by a concurrent journal refresh.
+- MySQL cannot provide PostgreSQL-style rollback. An interrupted journal reports the number of statements durably recorded before the interruption, but recovery remains a fresh snapshot/diff workflow rather than automatic replay.
+- Snapshots from different drivers can now be compared as a metadata-only review plan when they share an explicit schema mapping. It shows missing/changed relations, columns, indexes and constraints, but contains no SQL and cannot pass the migration execution gate. Cross-driver type mapping, DDL generation and data copy remain separate conformance-gated workflows.
+- Rename inference, complete view/routine/trigger/sequence/grant source, full cross-object dependency capture, cross-driver type mapping, and an independent server dry-run remain P1 work.

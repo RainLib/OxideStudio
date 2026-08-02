@@ -24,26 +24,64 @@ export interface ApiErrorPayload {
  * 数据库驱动类型
  */
 export type KnownDatabaseDriver =
-  "postgres" | "mysql" | "redis" | "elasticsearch" | "mongodb";
+  | "postgres"
+  | "mysql"
+  | "sqlite"
+  | "redis"
+  | "elasticsearch"
+  | "mongodb";
 export type DatabaseDriver = KnownDatabaseDriver | (string & {});
 export type DatabaseDataModel =
-  "relational" | "document" | "keyValue" | "search";
+  | "relational"
+  | "document"
+  | "keyValue"
+  | "search"
+  | "graph"
+  | "wideColumn"
+  | "timeSeries"
+  | "coordination"
+  | "queue";
+export type DatabaseConnectionMode = "network" | "file";
 
 export interface DatabaseCapabilities {
   driver: DatabaseDriver;
   displayName: string;
   dataModel: DatabaseDataModel;
+  connectionMode?: DatabaseConnectionMode;
   lspLanguageId: string;
+  /**
+   * Optional concrete parser baseline for a generic `sql` editor document.
+   * This is supplied only by a signed driver capability contract.
+   */
+  lspServerDialect?: string | null;
   namespaceLabel: string;
   identifierQuote: string;
   defaultPort: number;
   supportsSqlQuery: boolean;
   supportsTableBrowsing: boolean;
+  supportsTableRowMutation: boolean;
+  /** Cross-connection table transfer is separately verified from Grid editing. */
+  supportsTableDataTransfer?: boolean;
+  supportsTableDdl: boolean;
+  /** The bounded Table Editor implements ALTER COLUMN for this driver. */
+  supportsColumnAlteration?: boolean;
+  /** The bounded Table Editor can rename an existing index for this driver. */
+  supportsIndexRename?: boolean;
+  /** The bounded Table Editor can alter existing constraints for this driver. */
+  supportsConstraintAlteration?: boolean;
   supportsCollectionBrowsing: boolean;
   supportsKeyValueBrowsing: boolean;
   supportsSchemas: boolean;
+  /** The connection can expose more than one database/catalog in Explorer. */
+  supportsDatabaseCatalogs?: boolean;
+  /** Whether this connection's URL and form accept a database/catalog segment. */
+  supportsConnectionDatabase?: boolean;
   supportsCreateDatabase: boolean;
+  /** Creation can optionally set an owner / authorization principal. */
+  supportsCreateDatabaseOwner?: boolean;
   supportsCreateDatabaseCharset: boolean;
+  /** Creation can optionally set an explicit collation. */
+  supportsCreateDatabaseCollation?: boolean;
   supportsColumnComments: boolean;
   supportsInlineColumnComments: boolean;
   supportsRenameDatabase: boolean;
@@ -64,7 +102,7 @@ export interface DatabaseCapabilities {
 }
 
 export interface DatabaseDriverInstallation {
-  driver: DatabaseDriver;
+  driver: string;
   displayName: string;
   clientLibrary: string;
   clientVersion: string;
@@ -73,6 +111,157 @@ export interface DatabaseDriverInstallation {
   independentlyUpdatable: boolean;
   serverVersionPolicy: "detected-at-connection" | string;
   implementation: string;
+  /** Package runtime shown by Driver Manager, for example Native or managed Java 21. */
+  runtime?: string;
+  /** JDBC packages are launchable only when their managed Java runtime is active and verified. */
+  runtimeReady?: boolean | null;
+  packageVersion?: string | null;
+  protocolVersion?: string | null;
+  active?: boolean;
+  canRollback?: boolean;
+  status?: "ready" | "incompatible" | "untrusted" | "invalid";
+  statusMessage?: string | null;
+  /** Signed package template for JDBC/vendor-specific connection URLs. */
+  connectionUrlTemplate?: string | null;
+  capabilities?: DatabaseCapabilities | null;
+}
+
+export interface DatabaseDriverActivationState {
+  current: string;
+  previous?: string | null;
+}
+
+export interface DatabaseDriverStoreInfo {
+  activePath: string;
+  /** True after a migration: the copied store becomes active on restart. */
+  restartRequired: boolean;
+}
+
+/**
+ * Aggregated, connection-owned external driver processes. Intentionally does
+ * not include connection names, URLs, credentials, query text, or stderr.
+ */
+export interface DatabaseDriverRuntimeSummary {
+  driver: string;
+  packageVersion: string;
+  connectionCount: number;
+  processIds: number[];
+  /** Connected entries whose sidecar PID is no longer observable. */
+  unavailableProcessCount: number;
+  /** Registered external connections whose owned sidecar has exited. */
+  unhealthyConnectionCount: number;
+}
+
+export interface ManagedJavaRuntimeInstallation {
+  javaMajor: number;
+  runtimeVersion: string;
+  target: string;
+  active: boolean;
+  status: "ready" | "incompatible" | "untrusted" | "invalid";
+  statusMessage?: string | null;
+}
+
+export interface DatabaseDriverProbeResult {
+  driver: string;
+  packageVersion: string;
+  protocolVersion: string;
+  supportsMetadata: boolean;
+  supportsQuery: boolean;
+  supportsCancellation: boolean;
+  supportsTransactions: boolean;
+  supportsDatabaseScopedQueries: boolean;
+  supportsDatabaseCreation: boolean;
+  /** Effective Grid editing after manifest + sidecar transaction verification. */
+  supportsTableRowMutation: boolean;
+  /** Effective cross-connection table transfer after package/runtime verification. */
+  supportsTableDataTransfer: boolean;
+  /** Required before Agent queries can be delegated to an external sidecar. */
+  supportsAgentReadOnlyEnforcement: boolean;
+  supportsReferencingForeignKeys: boolean;
+}
+
+export interface DatabaseDriverCatalogEntry {
+  driverId: string;
+  displayName: string;
+  packageVersion: string;
+  protocolVersion: string;
+  downloadUrl: string;
+  /** Enables verified in-app installation only when the signed catalog binds this archive digest. */
+  archiveSha256?: string | null;
+  supportedTargets: string[];
+  serverVersionRange?: string | null;
+  releaseNotesUrl?: string | null;
+  /** Signed discovery metadata; package import remains required to execute. */
+  capabilities?: DatabaseCapabilities | null;
+  /** Signed release coverage only; it does not grant execution permission. */
+  conformance?: DatabaseDriverConformance | null;
+}
+
+export interface DatabaseDriverConformance {
+  connect: string[];
+  metadata: string[];
+  query: string[];
+  cancellation: string[];
+  mutations: string[];
+  migration: string[];
+  /** Versions that passed source paging, type mapping, and partial-commit transfer fixtures. */
+  dataTransfer?: string[];
+}
+
+export interface DatabaseDriverCatalog {
+  catalog: {
+    schemaVersion: number;
+    generatedAt?: string | null;
+    packages: DatabaseDriverCatalogEntry[];
+  };
+  sourceUrl: string;
+}
+
+export interface DatabaseAdminSession {
+  id: string;
+  user?: string | null;
+  host?: string | null;
+  database?: string | null;
+  state?: string | null;
+  statement?: string | null;
+  wait?: string | null;
+  durationSeconds?: number | null;
+}
+
+export interface DatabaseAdminUser {
+  name: string;
+  host?: string | null;
+  canLogin?: boolean | null;
+  isSuperuser?: boolean | null;
+  authenticationPlugin?: string | null;
+}
+
+export interface CreateDatabaseAdminUserRequest {
+  name: string;
+  password?: string;
+  host?: string;
+  canLogin?: boolean;
+  confirmed: boolean;
+}
+
+export interface UpdateDatabaseAdminPasswordRequest {
+  name: string;
+  password: string;
+  host?: string;
+  confirmed: boolean;
+}
+
+export interface SetDatabaseAdminLoginRequest {
+  name: string;
+  host?: string;
+  canLogin: boolean;
+  confirmed: boolean;
+}
+
+export interface DeleteDatabaseAdminUserRequest {
+  name: string;
+  host?: string;
+  confirmed: boolean;
 }
 
 /**
@@ -192,7 +381,24 @@ export interface TableExportResult {
   rowsExported: number;
 }
 
-export type TableImportFormat = "csv" | "json";
+export type TableImportFormat = "csv" | "json" | "xlsx";
+
+/**
+ * A reviewed CSV import plan. The same shape is used by the browser preview
+ * and the native streaming importer, so a mapped preview cannot silently be
+ * written with a different header or empty-value interpretation.
+ */
+export interface TableCsvColumnMapping {
+  sourceIndex: number;
+  targetColumn: string | null;
+}
+
+export interface TableCsvImportOptions {
+  delimiter?: string;
+  firstRowHeader?: boolean;
+  columnMapping?: TableCsvColumnMapping[];
+  emptyFieldsAsNull?: boolean;
+}
 
 export interface TableImportResult {
   filePath: string;
@@ -200,10 +406,146 @@ export interface TableImportResult {
   batches: number;
 }
 
+/** A bounded, read-only prefix used to review a CSV selected by the desktop picker. */
+export interface TableCsvImportPreview {
+  fileName: string;
+  bytes: number[];
+  totalBytes: number;
+  truncated: boolean;
+}
+
+/** A bounded, structured sample used to review a JSON/JSONL import before it writes. */
+export interface TableJsonImportPreview {
+  fileName: string;
+  totalBytes: number;
+  sourceColumns: string[];
+  sampleRows: Array<Record<string, unknown>>;
+  /** `null` for large streaming JSONL/NDJSON sources. */
+  totalRows: number | null;
+  truncated: boolean;
+}
+
+/** A bounded, structured preview of the first worksheet in an XLSX file. */
+export interface TableXlsxImportPreview {
+  fileName: string;
+  totalBytes: number;
+  sheetName: string;
+  sourceColumns: string[];
+  sampleRows: Array<Record<string, unknown>>;
+  totalRows: number;
+  truncated: boolean;
+}
+
+export interface TableDataTransferEndpoint {
+  connectionId: string;
+  driver: DatabaseDriver;
+  schema: string;
+  table: string;
+  database?: string;
+}
+
+export type TableDataTransferMode = "append" | "overwrite";
+
+export interface TableDataTransferRequest {
+  transferId: string;
+  source: TableDataTransferEndpoint;
+  target: TableDataTransferEndpoint;
+  mode?: TableDataTransferMode;
+  maxRows?: number;
+  batchSize?: number;
+}
+
+export interface TableDataTransferColumnMapping {
+  source: string;
+  target: string;
+  /** Retained for compatibility; this is the target parameter binding type. */
+  dataType: string;
+  sourceDataType: string;
+  targetDataType: string;
+  compatibility: "exact" | "safe" | "review" | "unsupported";
+  conversion:
+    | "none"
+    | "targetBinding"
+    | "stringifyJson"
+    | "stringifyScalar";
+  reason: string;
+}
+
+export interface TableDataTransferPreview {
+  mode: TableDataTransferMode;
+  mappedColumns: TableDataTransferColumnMapping[];
+  skippedSourceColumns: string[];
+  previewRows: number;
+  maxRows: number;
+  batchSize: number;
+  targetRowsToDelete?: number | null;
+  canExecute: boolean;
+  confirmationToken: string;
+  warnings: string[];
+}
+
+export interface TableDataTransferTargetPlanRequest {
+  source: TableDataTransferEndpoint;
+  target: TableDataTransferEndpoint;
+}
+
+export interface TableDataTransferTargetColumn {
+  name: string;
+  sourceDataType: string;
+  targetDataType: string;
+  targetLength?: string | null;
+  isPrimaryKey: boolean;
+  isNotNull: boolean;
+  reason: string;
+}
+
+export interface TableDataTransferTargetPlan {
+  columns: TableDataTransferTargetColumn[];
+  statements: string[];
+  confirmationToken: string;
+  warnings: string[];
+}
+
+export interface TableDataTransferResult {
+  rowsTransferred: number;
+  batches: number;
+  limitReached: boolean;
+  mappedColumns: TableDataTransferColumnMapping[];
+}
+
+export type TableDataTransferProgressStatus =
+  | "running"
+  | "done"
+  | "cancelled"
+  | "error";
+
+export interface TableDataTransferProgress {
+  transferId: string;
+  rowsTransferred: number;
+  maxRows: number;
+  batches: number;
+  status: TableDataTransferProgressStatus;
+  terminal: boolean;
+  message?: string | null;
+}
+
 export interface SqlScriptImportResult {
   filePath: string;
   statementsExecuted: number;
   rowsAffected: number;
+}
+
+/**
+ * Bounded script details returned by the native preflight. The digest binds a
+ * user's review to the exact on-disk contents that will later be executed.
+ */
+export interface SqlScriptImportPreview {
+  fileName: string;
+  totalBytes: number;
+  statementCount: number;
+  statementPreview: string[];
+  truncated: boolean;
+  reviewDigest: string;
 }
 
 export interface SqlStatementSelection {
@@ -322,6 +664,7 @@ export interface SavedConnection {
   projectId?: string;
   name: string;
   driver: DatabaseDriver;
+  driverPackageVersion?: string;
   url: string;
   host?: string;
   port?: number;
@@ -334,6 +677,12 @@ export interface SavedConnection {
   tags?: string[];
   icon?: string;
   color?: string;
+}
+
+/** A desktop-picked external connection configuration, before it is parsed or saved. */
+export interface ConnectionImportFile {
+  fileName: string;
+  content: string;
 }
 
 /**
@@ -414,6 +763,18 @@ export interface SchemaRelationSnapshot {
   constraints: ConstraintInfo[];
 }
 
+/**
+ * Review-only routine metadata. Definitions are intentionally not captured,
+ * because snapshot diffs must never synthesize dialect-specific routine DDL.
+ */
+export interface SchemaRoutineSnapshot {
+  name: string;
+  routineType?: string | null;
+  parameters: FunctionParameterInfo[];
+  returnType: string;
+  description?: string | null;
+}
+
 export interface SchemaSnapshot {
   version: number;
   id: string;
@@ -426,6 +787,8 @@ export interface SchemaSnapshot {
   schemaName: string;
   capturedAt: number;
   relations: SchemaRelationSnapshot[];
+  /** Absent on snapshots saved before routine signatures were introduced. */
+  routines?: SchemaRoutineSnapshot[];
   warnings: string[];
 }
 
@@ -442,7 +805,10 @@ export type SchemaChangeKind =
   | "indexModify"
   | "constraintAdd"
   | "constraintDrop"
-  | "constraintModify";
+  | "constraintModify"
+  | "routineCreate"
+  | "routineDrop"
+  | "routineModify";
 export type SchemaChangePhase =
   | "dropDependencies"
   | "dropRelations"
@@ -507,6 +873,7 @@ export interface SchemaDiffPlan {
 
 export type SchemaMigrationStatus =
   | "running"
+  | "interrupted"
   | "blocked"
   | "failed"
   | "verificationFailed"
@@ -576,6 +943,7 @@ export interface ExecuteSchemaMigrationRequest {
   confirmationTarget: string;
   allowReview: boolean;
   allowDestructive: boolean;
+  allowNonTransactional: boolean;
 }
 
 export interface FunctionParameterInfo {

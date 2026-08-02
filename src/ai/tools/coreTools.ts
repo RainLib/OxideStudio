@@ -19,7 +19,7 @@ import type {
 import { evaluateSqlExecutionIntent } from "@/lib/sqlExecutionGate";
 import {
   supportedDatabaseDriverProfiles,
-  supportsLspLanguageId,
+  supportsLspCapabilities,
 } from "@/lib/databaseDialect";
 import { listRegisteredDatabaseProviders } from "@/providers";
 import { buildRedisGetCommand } from "./nativeMutationBuilders";
@@ -398,7 +398,7 @@ function aiToolHintsForCapabilities(capabilities: DatabaseCapabilities) {
     destructive.push("search.deleteDocument");
   }
 
-  if (supportsLspLanguageId(capabilities.driver)) {
+  if (supportsLspCapabilities(capabilities)) {
     lsp.push("lsp.getCompletions", "lsp.explainDiagnostics");
     read.push(...lsp);
   }
@@ -769,7 +769,10 @@ function explainQueryTool(adapters: AiToolAdapters): AiToolDefinition {
         context.activeDriver,
       );
       if (!driver) throw new Error("A connection driver is required");
-      const capabilities = await adapters.getConnectionCapabilities(driver);
+      const capabilities = await adapters.getConnectionCapabilities(
+        driver,
+        connectionId,
+      );
       if (!capabilities.supportsExplainPlan) {
         throw new Error(
           `${capabilities.displayName} does not support Explain Plan`,
@@ -1077,7 +1080,10 @@ function getKeyValueTool(adapters: AiToolAdapters): AiToolDefinition {
       if (!driver) {
         throw new Error("Connection driver is required for key.getValue");
       }
-      const capabilities = await adapters.getConnectionCapabilities(driver);
+      const capabilities = await adapters.getConnectionCapabilities(
+        driver,
+        connectionId,
+      );
       if (capabilities.dataModel !== "keyValue") {
         throw new Error(
           `${capabilities.displayName} does not support key-value reads`,

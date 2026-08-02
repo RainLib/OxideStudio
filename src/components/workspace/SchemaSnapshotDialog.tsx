@@ -3,6 +3,7 @@ import {
   AlertCircle,
   Camera,
   Database,
+  FileCode2,
   GitCompareArrows,
   Loader2,
   Network,
@@ -21,12 +22,20 @@ import {
   compareSnapshotToLive,
   deleteSchemaSnapshot,
   listSchemaSnapshots,
+  saveSchemaSnapshot,
   type SchemaSnapshotIdentity,
 } from "@/services/schemaSnapshotStore";
 import type { SchemaSnapshot } from "@/services/tauri/types";
+import { projectFilesService } from "@/services/tauri";
 import { cn } from "@/lib/utils";
 import { useTabStore } from "@/store/useTabStore";
 import { useTaskStore } from "@/store/useTaskStore";
+import { useProjectStore } from "@/store/useProjectStore";
+import {
+  createProjectDdlSnapshot,
+  isProjectDdlSnapshot,
+  projectDdlSnapshotSources,
+} from "@/features/schema-diff/model/projectDdlSnapshot";
 
 interface SchemaSnapshotDialogProps {
   open: boolean;
@@ -34,15 +43,23 @@ interface SchemaSnapshotDialogProps {
   onClose: () => void;
 }
 
+const ALL_PROJECT_DDL_SOURCES = "__oxide_all_project_sql__";
+
 export function SchemaSnapshotDialog({
   open,
   identity,
   onClose,
 }: SchemaSnapshotDialogProps) {
   const [snapshots, setSnapshots] = useState<SchemaSnapshot[]>([]);
+  const [projectDdlDocuments, setProjectDdlDocuments] = useState<
+    Array<{ relativePath: string; content: string }>
+  >([]);
+  const [selectedProjectDdlPath, setSelectedProjectDdlPath] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [operation, setOperation] = useState<"capture" | "compare" | null>(null);
+  const [operation, setOperation] = useState<
+    "capture" | "compare" | "import" | null
+  >(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -50,11 +67,27 @@ export function SchemaSnapshotDialog({
   const openSchemaDiagramTab = useTabStore(
     (state) => state.openSchemaDiagramTab,
   );
+  const activeProjectRoot = useProjectStore(
+    (state) =>
+      state.projects.find((project) => project.id === state.activeProjectId)
+        ?.root_path || null,
+  );
   const { startTask, finishTask, failTask } = useTaskStore();
+  const supportsRestorePlan =
+    identity?.driver === "postgres" || identity?.driver === "mysql";
+  const objectLabel = supportsRestorePlan ? "relations" : "objects";
   const selected = useMemo(
     () => snapshots.find((snapshot) => snapshot.id === selectedId) || null,
     [selectedId, snapshots],
   );
+  const selectedIsProjectDdl = Boolean(selected && isProjectDdlSnapshot(selected));
+  const selectedProjectDdlSources = useMemo(
+    () => (selected && isProjectDdlSnapshot(selected)
+      ? projectDdlSnapshotSources(selected)
+      : []),
+    [selected],
+  );
+  const selectedSupportsRestorePlan = supportsRestorePlan && !selectedIsProjectDdl;
 
   useEffect(() => {
     if (!open || !identity) return;
@@ -81,6 +114,41 @@ export function SchemaSnapshotDialog({
     };
   }, [identity, open]);
 
+  useEffect(() => {
+    if (!open || !identity || !activeProjectRoot) {
+      setProjectDdlDocuments([]);
+      setSelectedProjectDdlPath("");
+      return;
+    }
+    let cancelled = false;
+    void projectFilesService
+      .getLspDocuments({
+        projectId: identity.projectId,
+        expectedRoot: activeProjectRoot,
+      })
+      .then((documents) => {
+        if (cancelled) return;
+        setProjectDdlDocuments(documents);
+        setSelectedProjectDdlPath((current) =>
+          current === ALL_PROJECT_DDL_SOURCES ||
+          documents.some((document) => document.relativePath === current)
+            ? current
+            : documents.length > 0
+              ? ALL_PROJECT_DDL_SOURCES
+              : "",
+        );
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setProjectDdlDocuments([]);
+          setSelectedProjectDdlPath("");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectRoot, identity, open]);
+
   if (!identity) return null;
 
   const capture = async () => {
@@ -101,7 +169,54 @@ export function SchemaSnapshotDialog({
       setSelectedId(snapshot.id);
       finishTask(
         taskId,
-        `${snapshot.relations.length.toLocaleString()} relations captured`,
+        `${snapshot.relations.length.toLocaleString()} ${objectLabel} captured`,
+      );
+    } catch (nextError) {
+      const message = nextError instanceof Error ? nextError.message : String(nextError);
+      setError(message);
+      failTask(taskId, message);
+    } finally {
+      setOperation(null);
+    }
+  };
+
+  const importProjectDdl = async () => {
+    if (operation || !selectedProjectDdlPath) return;
+    const documents = selectedProjectDdlPath === ALL_PROJECT_DDL_SOURCES
+      ? [...projectDdlDocuments].sort((left, right) =>
+        left.relativePath.localeCompare(right.relativePath),
+      )
+      : projectDdlDocuments.filter(
+        (candidate) => candidate.relativePath === selectedProjectDdlPath,
+      );
+    if (documents.length === 0) return;
+    const sourceLabel = documents.length === 1
+      ? documents[0]!.relativePath
+      : `${documents.length} project SQL files`;
+    const taskId = startTask({
+      kind: "introspection",
+      title: `Parse project DDL`,
+      detail: sourceLabel,
+    });
+    setOperation("import");
+    setError(null);
+    try {
+      const snapshot = createProjectDdlSnapshot(
+        identity,
+        documents.map((document) => document.relativePath),
+        documents
+          .map((document) => `-- ${document.relativePath}\n${document.content}`)
+          .join("\n\n"),
+      );
+      await saveSchemaSnapshot(snapshot);
+      setSnapshots((current) => [
+        snapshot,
+        ...current.filter((candidate) => candidate.id !== snapshot.id),
+      ]);
+      setSelectedId(snapshot.id);
+      finishTask(
+        taskId,
+        `${snapshot.relations.length.toLocaleString()} relations parsed for review`,
       );
     } catch (nextError) {
       const message = nextError instanceof Error ? nextError.message : String(nextError);
@@ -179,7 +294,7 @@ export function SchemaSnapshotDialog({
             </span>
             <div>
               <DialogTitle className="text-[13px] tracking-normal">
-                Schema snapshots · {identity.schemaName}
+                {supportsRestorePlan ? "Schema" : "Metadata"} snapshots · {identity.schemaName}
               </DialogTitle>
               <DialogDescription className="text-[10px] text-[hsl(var(--wb-text-muted))]">
                 {identity.connectionName}
@@ -237,7 +352,7 @@ export function SchemaSnapshotDialog({
                       </span>
                       <span className="mt-1 flex items-center gap-1.5 text-[9px] wb-muted">
                         <Database size={9} />
-                        {snapshot.relations.length.toLocaleString()} relations
+                        {snapshot.relations.length.toLocaleString()} {objectLabel}
                       </span>
                     </button>
                     <button
@@ -292,14 +407,76 @@ export function SchemaSnapshotDialog({
             </div>
 
             <div className="mt-4 rounded-[5px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised)/0.4)] p-3 text-[9px] leading-4 wb-muted">
-              The generated plan describes how to make the live target match the selected snapshot. It opens as a read-only artifact first. OxideStudio does not execute migration SQL from this dialog.
+              {selectedIsProjectDdl
+                ? "This baseline is inferred from bounded project SQL. It can reveal drift and generate a review diff, but cannot be applied automatically."
+                : supportsRestorePlan
+                ? "The generated plan describes how to make the live target match the selected snapshot. It opens as a read-only artifact first. OxideStudio does not execute migration SQL from this dialog."
+                : "Document and search snapshots preserve collection or index fields and indexes for drift review and diagrams. Restore plans remain disabled because these stores require driver-specific migration commands."}
+            </div>
+
+            <div className="mt-3 rounded-[5px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised)/0.32)] p-3">
+              <div className="flex items-center gap-1.5 text-[10px] font-medium">
+                <FileCode2 size={12} className="text-[hsl(var(--wb-accent))]" />
+                Project DDL baseline
+              </div>
+              <p className="mt-1 text-[9px] leading-4 wb-muted">
+                Parses portable CREATE TABLE / INDEX metadata from one bounded project SQL file or the bounded eligible set. The result is review-only until a dialect parser validates the full source contract.
+              </p>
+              <div className="mt-2 flex items-center gap-2">
+                <select
+                  aria-label="Project DDL source"
+                  value={selectedProjectDdlPath}
+                  onChange={(event) => setSelectedProjectDdlPath(event.target.value)}
+                  disabled={busy || projectDdlDocuments.length === 0}
+                  className="h-7 min-w-0 flex-1 rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 font-mono text-[10px] text-[hsl(var(--wb-text))] outline-none focus:border-[hsl(var(--wb-accent)/0.65)] disabled:opacity-50"
+                >
+                  {projectDdlDocuments.length === 0 ? (
+                    <option value="">No project SQL files available</option>
+                  ) : (
+                    <>
+                      <option value={ALL_PROJECT_DDL_SOURCES}>
+                        All eligible project SQL files ({projectDdlDocuments.length})
+                      </option>
+                      {projectDdlDocuments.map((document) => (
+                        <option key={document.relativePath} value={document.relativePath}>
+                          {document.relativePath}
+                        </option>
+                      ))}
+                    </>
+                  )}
+                </select>
+                <button
+                  type="button"
+                  className="wb-text-button h-7 shrink-0 gap-1.5 px-2.5 text-[10px]"
+                  disabled={busy || !selectedProjectDdlPath}
+                  onClick={() => void importProjectDdl()}
+                >
+                  {operation === "import" ? <Loader2 size={11} className="animate-spin" /> : <FileCode2 size={11} />}
+                  Create baseline
+                </button>
+              </div>
             </div>
 
             {selected && (
               <div className="mt-4 grid grid-cols-[120px_minmax(0,1fr)] gap-y-2 text-[10px]">
                 <span className="wb-muted">Captured</span>
                 <span>{formatTimestamp(selected.capturedAt)}</span>
-                <span className="wb-muted">Relations</span>
+                {selectedIsProjectDdl && (
+                  <>
+                    <span className="wb-muted">Source mode</span>
+                    <span>Project DDL · review-only</span>
+                    <span className="wb-muted">Source files</span>
+                    <span
+                      className="truncate font-mono text-[9px]"
+                      title={selectedProjectDdlSources.join("\n")}
+                    >
+                      {selectedProjectDdlSources.length === 1
+                        ? selectedProjectDdlSources[0] || "Project SQL"
+                        : `${selectedProjectDdlSources.length} bounded project SQL files`}
+                    </span>
+                  </>
+                )}
+                <span className="wb-muted">{supportsRestorePlan ? "Relations" : "Objects"}</span>
                 <span>{selected.relations.length.toLocaleString()}</span>
                 <span className="wb-muted">Driver</span>
                 <span>{selected.driver}</span>
@@ -325,7 +502,7 @@ export function SchemaSnapshotDialog({
             onClick={() => void capture()}
           >
             {operation === "capture" ? <Loader2 size={12} className="animate-spin" /> : <Camera size={12} />}
-            Capture current schema
+            Capture current {supportsRestorePlan ? "schema" : "metadata"}
           </button>
           <div className="flex gap-2">
             <button type="button" className="wb-text-button h-7 px-3 text-[10px]" disabled={busy} onClick={onClose}>
@@ -343,10 +520,15 @@ export function SchemaSnapshotDialog({
               type="button"
               className="wb-primary-button h-7 min-w-[132px] justify-center gap-1.5 px-3 text-[10px]"
               disabled={!selected || busy}
+              title={
+                supportsRestorePlan
+                  ? "Compare the selected schema snapshot with live metadata"
+                  : "Compare document or search metadata without generating restore commands"
+              }
               onClick={() => void compare()}
             >
               {operation === "compare" ? <Loader2 size={12} className="animate-spin" /> : <GitCompareArrows size={12} />}
-              Preview restore plan
+              {selectedSupportsRestorePlan ? "Preview restore plan" : "Preview metadata diff"}
             </button>
           </div>
         </DialogFooter>

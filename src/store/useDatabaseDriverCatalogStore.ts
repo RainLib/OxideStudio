@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   registerRuntimeDatabaseCatalog,
+  syncExternalDatabaseDriverProfiles,
   supportedDatabaseDriverProfiles,
   type DatabaseDriverProfile,
 } from "@/lib/databaseDialect";
@@ -14,6 +15,7 @@ interface DatabaseDriverCatalogState {
   status: DatabaseDriverCatalogStatus;
   error: string | null;
   load: () => Promise<void>;
+  refresh: () => Promise<void>;
 }
 
 let pendingLoad: Promise<void> | null = null;
@@ -29,13 +31,17 @@ export const useDatabaseDriverCatalogStore = create<DatabaseDriverCatalogState>(
       const loadPromise = (async () => {
         set({ status: "loading", error: null });
         try {
-          const capabilities = await databaseService.listDatabaseCapabilities();
+          const [capabilities, installations] = await Promise.all([
+            databaseService.listDatabaseCapabilities(),
+            databaseService.listDatabaseDriverInstallations(),
+          ]);
           if (capabilities.length === 0) {
             throw new Error(
               "The backend returned an empty database driver catalog",
             );
           }
           registerRuntimeDatabaseCatalog(capabilities);
+          syncExternalDatabaseDriverProfiles(installations);
           set({
             profiles: supportedDatabaseDriverProfiles(),
             status: "ready",
@@ -53,6 +59,10 @@ export const useDatabaseDriverCatalogStore = create<DatabaseDriverCatalogState>(
       })();
       pendingLoad = loadPromise;
       await loadPromise;
+    },
+    refresh: async () => {
+      set({ status: "idle", error: null });
+      await get().load();
     },
   }),
 );

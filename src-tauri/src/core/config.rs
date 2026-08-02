@@ -67,6 +67,8 @@ pub struct SavedConnection {
     pub project_id: String,
     pub name: String,
     pub driver: String,
+    #[serde(default)]
+    pub driver_package_version: Option<String>,
     pub url: String,
     pub host: Option<String>,
     pub port: Option<u16>,
@@ -142,6 +144,51 @@ impl ConfigManager {
     pub fn settings_path(&self) -> String {
         self.settings_path.to_string_lossy().into_owned()
     }
+
+    /// Resolve the independently updateable driver registry before it is
+    /// constructed. A migrated store becomes active only on the next launch;
+    /// this prevents the running process from changing the filesystem root of
+    /// packages that may still own live sidecars.
+    pub fn driver_package_store_path(&self, default_root: PathBuf) -> PathBuf {
+        let Ok(settings) = self.load_settings() else {
+            return default_root;
+        };
+        let Some(value) = settings
+            .get("drivers")
+            .and_then(Value::as_object)
+            .and_then(|drivers| drivers.get("storePath"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return default_root;
+        };
+        let candidate = PathBuf::from(value);
+        if !candidate.is_absolute() || candidate.parent().is_none() {
+            return default_root;
+        }
+        candidate
+    }
+
+    pub fn set_driver_package_store_path(&self, path: &std::path::Path) -> Result<(), String> {
+        if !path.is_absolute() {
+            return Err("Driver store path must be absolute".to_string());
+        }
+        let mut settings = self.load_settings()?;
+        let root = settings
+            .as_object_mut()
+            .ok_or_else(|| "settings.json must contain an object".to_string())?;
+        let drivers = root
+            .entry("drivers")
+            .or_insert_with(|| Value::Object(Default::default()))
+            .as_object_mut()
+            .ok_or_else(|| "settings.drivers must contain an object".to_string())?;
+        drivers.insert(
+            "storePath".to_string(),
+            Value::String(path.to_string_lossy().into_owned()),
+        );
+        self.save_settings(&settings)
+    }
 }
 
 #[cfg(test)]
@@ -175,5 +222,28 @@ mod tests {
         assert_eq!(config.port, 22);
         assert_eq!(config.auth_method, "password");
         assert!(config.strict_host_key_checking);
+    }
+
+    #[test]
+    fn configured_driver_store_requires_an_absolute_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ConfigManager {
+            config_path: directory.path().join("config.json"),
+            settings_path: directory.path().join("settings.json"),
+        };
+        let fallback = directory.path().join("fallback");
+        manager
+            .save_settings(&serde_json::json!({
+                "drivers": { "storePath": "relative/drivers" }
+            }))
+            .unwrap();
+        assert_eq!(
+            manager.driver_package_store_path(fallback.clone()),
+            fallback
+        );
+
+        let configured = directory.path().join("driver-store");
+        manager.set_driver_package_store_path(&configured).unwrap();
+        assert_eq!(manager.driver_package_store_path(fallback), configured);
     }
 }

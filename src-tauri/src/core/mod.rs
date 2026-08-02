@@ -2,6 +2,8 @@ pub mod cache;
 pub mod config;
 pub mod dialect;
 pub mod driver;
+pub mod driver_package;
+pub mod driver_sidecar;
 pub mod error;
 pub mod explain;
 pub mod manager;

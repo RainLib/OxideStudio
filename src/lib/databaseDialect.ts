@@ -1,6 +1,7 @@
 import type {
   DatabaseCapabilities,
   DatabaseDriver,
+  DatabaseDriverInstallation,
   KnownDatabaseDriver,
 } from "@/services/tauri/types";
 
@@ -11,6 +12,8 @@ export type DatabaseDriverProfile = {
   menuLabel: string;
   defaultDatabase: string;
   urlScheme: string;
+  /** Present only when an active signed package owns a non-generic URL grammar. */
+  connectionUrlTemplate?: string | null;
   protocolAliases: string[];
   sslModeParamName: string;
   sslModeParamAliases: string[];
@@ -22,6 +25,10 @@ export type DatabaseDriverProfile = {
 
 export const DEFAULT_DATABASE_DRIVER: DatabaseDriver = "postgres";
 const DEFAULT_LSP_DIALECT = "postgres";
+// Only bundled SQLite has a static transport declaration. Every external
+// package, including DuckDB, must carry its own signed connection-mode
+// capability rather than acquiring file access from its display/driver ID.
+const NATIVE_FILE_BASED_DATABASE_DRIVERS = new Set(["sqlite"]);
 const SUPPORTED_LSP_DIALECTS = new Set([
   "mysql",
   "postgres",
@@ -29,9 +36,60 @@ const SUPPORTED_LSP_DIALECTS = new Set([
   "elasticsearch-eql",
   "elasticsearch-dsl",
   "clickhouse",
+  "sqlite",
+  "duckdb",
   "redis",
   "mongodb",
   "json",
+]);
+// Only dialects implemented by the bundled SQL language server are valid as
+// an explicit server baseline. Provider languages (Mongo, Redis, JSON, ES)
+// keep their own completion route and must not be supplied as a SQL parser.
+const SUPPORTED_SQL_LSP_SERVER_DIALECTS = new Set([
+  "postgres",
+  "mysql",
+  "sqlite",
+  "duckdb",
+  "hive",
+  "clickhouse",
+  // Reviewed compatibility identities. The bundled server resolves each one
+  // to an explicit parser baseline; retaining the vendor id keeps sessions,
+  // status, and future dedicated parser upgrades product-specific.
+  "access",
+  "cockroachdb",
+  "dameng",
+  "databend",
+  "doris",
+  "exasol",
+  "firebird",
+  "gaussdb",
+  "gbase",
+  "goldendb",
+  "greenplum",
+  "h2",
+  "highgo",
+  "informix",
+  "iris",
+  "kingbase",
+  "kwdb",
+  "manticoresearch",
+  "oceanbase-oracle",
+  "opengauss",
+  "oracle",
+  "questdb",
+  "redshift",
+  "sqlserver",
+  "starrocks",
+  "sundb",
+  "tidb",
+  "timescaledb",
+  "turso",
+  "vastbase",
+  "vertica",
+  "cloudflare-d1",
+  "xugu",
+  "yashandb",
+  "yugabytedb",
 ]);
 
 const DATABASE_DRIVER_PROFILES: Record<
@@ -59,11 +117,20 @@ const DATABASE_DRIVER_PROFILES: Record<
       defaultPort: 5432,
       supportsSqlQuery: true,
       supportsTableBrowsing: true,
+      supportsTableRowMutation: true,
+      supportsTableDataTransfer: true,
+      supportsTableDdl: true,
+      supportsColumnAlteration: true,
+      supportsIndexRename: true,
+      supportsConstraintAlteration: true,
       supportsCollectionBrowsing: false,
       supportsKeyValueBrowsing: false,
       supportsSchemas: true,
+      supportsDatabaseCatalogs: true,
       supportsCreateDatabase: true,
+      supportsCreateDatabaseOwner: true,
       supportsCreateDatabaseCharset: false,
+      supportsCreateDatabaseCollation: false,
       supportsColumnComments: true,
       supportsInlineColumnComments: false,
       supportsRenameDatabase: true,
@@ -93,6 +160,7 @@ const DATABASE_DRIVER_PROFILES: Record<
         "DECIMAL",
         "REAL",
         "DOUBLE PRECISION",
+        "BYTEA",
         "JSONB",
         "UUID",
       ],
@@ -119,11 +187,19 @@ const DATABASE_DRIVER_PROFILES: Record<
       defaultPort: 3306,
       supportsSqlQuery: true,
       supportsTableBrowsing: true,
+      supportsTableRowMutation: true,
+      supportsTableDataTransfer: true,
+      supportsTableDdl: true,
+      supportsColumnAlteration: true,
+      supportsIndexRename: true,
+      supportsConstraintAlteration: true,
       supportsCollectionBrowsing: false,
       supportsKeyValueBrowsing: false,
       supportsSchemas: true,
       supportsCreateDatabase: true,
+      supportsCreateDatabaseOwner: false,
       supportsCreateDatabaseCharset: true,
+      supportsCreateDatabaseCollation: true,
       supportsColumnComments: true,
       supportsInlineColumnComments: true,
       supportsRenameDatabase: false,
@@ -158,6 +234,72 @@ const DATABASE_DRIVER_PROFILES: Record<
       ],
     },
   },
+  sqlite: {
+    driver: "sqlite",
+    menuLabel: "SQLite",
+    defaultDatabase: ":memory:",
+    urlScheme: "sqlite",
+    protocolAliases: ["sqlite", "sqlite3"],
+    sslModeParamName: "sslmode",
+    sslModeParamAliases: [],
+    defaultIcon: "Database",
+    iconClassName: "text-sky-400",
+    defaultAccentClassName:
+      "bg-sky-500/10 text-sky-600 dark:text-sky-400 group-hover:bg-sky-500/20",
+    capabilities: {
+      displayName: "SQLite",
+      dataModel: "relational",
+      connectionMode: "file",
+      lspLanguageId: "sqlite",
+      namespaceLabel: "schema",
+      identifierQuote: '"',
+      defaultPort: 0,
+      supportsSqlQuery: true,
+      supportsTableBrowsing: true,
+      supportsTableRowMutation: true,
+      supportsTableDataTransfer: true,
+      supportsTableDdl: true,
+      supportsColumnAlteration: false,
+      supportsIndexRename: false,
+      supportsConstraintAlteration: false,
+      supportsCollectionBrowsing: false,
+      supportsKeyValueBrowsing: false,
+      supportsSchemas: true,
+      supportsCreateDatabase: false,
+      supportsCreateDatabaseOwner: false,
+      supportsCreateDatabaseCharset: false,
+      supportsCreateDatabaseCollation: false,
+      supportsColumnComments: false,
+      supportsInlineColumnComments: false,
+      supportsRenameDatabase: false,
+      supportsViews: true,
+      supportsReplaceView: false,
+      supportsMaterializedViews: false,
+      supportsTableIndexes: true,
+      supportsTableConstraints: true,
+      supportsForeignKeys: true,
+      supportsCheckConstraints: true,
+      supportsFunctions: false,
+      supportsTransactions: true,
+      supportsQueryCancellation: false,
+      // The native driver can execute EXPLAIN, but the shared explain-plan
+      // renderer has no SQLite plan adapter yet. Do not expose a broken action.
+      supportsExplainPlan: false,
+      autoIncrementKeyword: "AUTOINCREMENT",
+      defaultPrimaryKeyType: "INTEGER",
+      commonDataTypes: [
+        "INTEGER",
+        "REAL",
+        "TEXT",
+        "BLOB",
+        "NUMERIC",
+        "BOOLEAN",
+        "DATE",
+        "DATETIME",
+        "JSON",
+      ],
+    },
+  },
   redis: {
     driver: "redis",
     menuLabel: "Redis",
@@ -179,11 +321,15 @@ const DATABASE_DRIVER_PROFILES: Record<
       defaultPort: 6379,
       supportsSqlQuery: false,
       supportsTableBrowsing: false,
+      supportsTableRowMutation: false,
+      supportsTableDdl: false,
       supportsCollectionBrowsing: false,
       supportsKeyValueBrowsing: true,
       supportsSchemas: true,
       supportsCreateDatabase: false,
+      supportsCreateDatabaseOwner: false,
       supportsCreateDatabaseCharset: false,
+      supportsCreateDatabaseCollation: false,
       supportsColumnComments: false,
       supportsInlineColumnComments: false,
       supportsRenameDatabase: false,
@@ -224,11 +370,15 @@ const DATABASE_DRIVER_PROFILES: Record<
       defaultPort: 9200,
       supportsSqlQuery: false,
       supportsTableBrowsing: false,
+      supportsTableRowMutation: false,
+      supportsTableDdl: false,
       supportsCollectionBrowsing: true,
       supportsKeyValueBrowsing: false,
       supportsSchemas: false,
       supportsCreateDatabase: false,
+      supportsCreateDatabaseOwner: false,
       supportsCreateDatabaseCharset: false,
+      supportsCreateDatabaseCollation: false,
       supportsColumnComments: false,
       supportsInlineColumnComments: false,
       supportsRenameDatabase: false,
@@ -280,18 +430,22 @@ const DATABASE_DRIVER_PROFILES: Record<
       defaultPort: 27017,
       supportsSqlQuery: false,
       supportsTableBrowsing: false,
+      supportsTableRowMutation: false,
+      supportsTableDdl: false,
       supportsCollectionBrowsing: true,
       supportsKeyValueBrowsing: false,
       supportsSchemas: true,
       supportsCreateDatabase: false,
+      supportsCreateDatabaseOwner: false,
       supportsCreateDatabaseCharset: false,
+      supportsCreateDatabaseCollation: false,
       supportsColumnComments: false,
       supportsInlineColumnComments: false,
       supportsRenameDatabase: false,
       supportsViews: false,
       supportsReplaceView: false,
       supportsMaterializedViews: false,
-      supportsTableIndexes: false,
+      supportsTableIndexes: true,
       supportsTableConstraints: false,
       supportsForeignKeys: false,
       supportsCheckConstraints: false,
@@ -320,6 +474,7 @@ const DATABASE_DRIVER_PROFILES: Record<
 
 const runtimeCapabilities = new Map<string, DatabaseCapabilities>();
 const runtimeDriverProfiles = new Map<string, DatabaseDriverProfile>();
+const externalRuntimeDriverKeys = new Set<string>();
 let authoritativeDriverKeys: Set<string> | null = null;
 
 function capabilitiesKey(driver: DatabaseDriver | string) {
@@ -332,11 +487,25 @@ function cloneCapabilities(
   return {
     ...capabilities,
     dataModel: capabilities.dataModel || "relational",
+    connectionMode:
+      capabilities.connectionMode ??
+      (NATIVE_FILE_BASED_DATABASE_DRIVERS.has(capabilitiesKey(capabilities.driver))
+        ? "file"
+        : "network"),
     supportsSqlQuery: capabilities.supportsSqlQuery ?? true,
     supportsTableBrowsing: capabilities.supportsTableBrowsing ?? true,
+    supportsTableRowMutation: capabilities.supportsTableRowMutation ?? false,
+    supportsTableDataTransfer: capabilities.supportsTableDataTransfer ?? false,
+    supportsTableDdl: capabilities.supportsTableDdl ?? false,
+    supportsColumnAlteration: capabilities.supportsColumnAlteration ?? false,
+    supportsIndexRename: capabilities.supportsIndexRename ?? false,
+    supportsConstraintAlteration:
+      capabilities.supportsConstraintAlteration ?? false,
     supportsCollectionBrowsing:
       capabilities.supportsCollectionBrowsing ?? false,
     supportsKeyValueBrowsing: capabilities.supportsKeyValueBrowsing ?? false,
+    supportsDatabaseCatalogs: capabilities.supportsDatabaseCatalogs ?? false,
+    supportsConnectionDatabase: capabilities.supportsConnectionDatabase ?? true,
     supportsExplainPlan: capabilities.supportsExplainPlan ?? false,
     commonDataTypes: [...capabilities.commonDataTypes],
   };
@@ -352,12 +521,31 @@ function cloneDriverProfile(
     capabilities: {
       ...profile.capabilities,
       dataModel: profile.capabilities.dataModel || "relational",
+      connectionMode:
+        profile.capabilities.connectionMode ??
+        (NATIVE_FILE_BASED_DATABASE_DRIVERS.has(capabilitiesKey(profile.driver))
+          ? "file"
+          : "network"),
       supportsSqlQuery: profile.capabilities.supportsSqlQuery ?? true,
       supportsTableBrowsing: profile.capabilities.supportsTableBrowsing ?? true,
+      supportsTableRowMutation:
+        profile.capabilities.supportsTableRowMutation ?? false,
+      supportsTableDataTransfer:
+        profile.capabilities.supportsTableDataTransfer ?? false,
+      supportsTableDdl: profile.capabilities.supportsTableDdl ?? false,
+      supportsColumnAlteration:
+        profile.capabilities.supportsColumnAlteration ?? false,
+      supportsIndexRename: profile.capabilities.supportsIndexRename ?? false,
+      supportsConstraintAlteration:
+        profile.capabilities.supportsConstraintAlteration ?? false,
       supportsCollectionBrowsing:
         profile.capabilities.supportsCollectionBrowsing ?? false,
       supportsKeyValueBrowsing:
         profile.capabilities.supportsKeyValueBrowsing ?? false,
+      supportsDatabaseCatalogs:
+        profile.capabilities.supportsDatabaseCatalogs ?? false,
+      supportsConnectionDatabase:
+        profile.capabilities.supportsConnectionDatabase ?? true,
       supportsExplainPlan: profile.capabilities.supportsExplainPlan ?? false,
       commonDataTypes: [...profile.capabilities.commonDataTypes],
     },
@@ -411,9 +599,56 @@ export function registerRuntimeDatabaseCatalog(
   );
 }
 
+/**
+ * Makes verified, active external packages selectable without pretending that
+ * every possible package is a built-in driver. Package handshake capabilities
+ * still gate operations at runtime; this profile only supplies the connection
+ * form.
+ */
+export function syncExternalDatabaseDriverProfiles(
+  installations: DatabaseDriverInstallation[],
+) {
+  for (const key of externalRuntimeDriverKeys) {
+    runtimeDriverProfiles.delete(key);
+  }
+  externalRuntimeDriverKeys.clear();
+
+  for (const installation of installations) {
+    if (
+      installation.distribution !== "external" ||
+      installation.status !== "ready" ||
+      !installation.active ||
+      installation.runtimeReady === false ||
+      !installation.driver.trim()
+    ) {
+      continue;
+    }
+    const profile = fallbackDatabaseDriverProfile(installation.driver);
+    const declaredCapabilities = installation.capabilities
+      ? cloneCapabilities(installation.capabilities)
+      : profile.capabilities;
+    const key = capabilitiesKey(installation.driver);
+    runtimeDriverProfiles.set(key, {
+      ...profile,
+      menuLabel: installation.displayName || profile.menuLabel,
+      connectionUrlTemplate: installation.connectionUrlTemplate,
+      capabilities: {
+        ...declaredCapabilities,
+        displayName: installation.displayName || declaredCapabilities.displayName,
+      },
+    });
+    externalRuntimeDriverKeys.add(key);
+    authoritativeDriverKeys?.add(key);
+  }
+}
+
 export function resetRuntimeDatabaseCatalogForTests() {
   authoritativeDriverKeys = null;
   runtimeCapabilities.clear();
+  for (const key of externalRuntimeDriverKeys) {
+    runtimeDriverProfiles.delete(key);
+  }
+  externalRuntimeDriverKeys.clear();
 }
 
 export function registerDatabaseDriverProfile(
@@ -455,29 +690,40 @@ function fallbackDatabaseDriverProfile(
     capabilities: {
       displayName,
       dataModel: "relational",
+      connectionMode: NATIVE_FILE_BASED_DATABASE_DRIVERS.has(capabilitiesKey(driver))
+        ? "file"
+        : "network",
       lspLanguageId: "sql",
       namespaceLabel: "schema",
       identifierQuote: '"',
       defaultPort: 0,
-      supportsSqlQuery: true,
-      supportsTableBrowsing: true,
+      // Unknown ids are not a usable driver contract. An active signed
+      // package replaces this profile with its declared capabilities.
+      supportsSqlQuery: false,
+      supportsTableBrowsing: false,
+      supportsTableRowMutation: false,
+      supportsTableDdl: false,
       supportsCollectionBrowsing: false,
       supportsKeyValueBrowsing: false,
       supportsSchemas: true,
+      supportsDatabaseCatalogs: false,
+      supportsConnectionDatabase: true,
       supportsCreateDatabase: false,
+      supportsCreateDatabaseOwner: false,
       supportsCreateDatabaseCharset: false,
+      supportsCreateDatabaseCollation: false,
       supportsColumnComments: false,
       supportsInlineColumnComments: false,
       supportsRenameDatabase: false,
-      supportsViews: true,
+      supportsViews: false,
       supportsReplaceView: false,
       supportsMaterializedViews: false,
-      supportsTableIndexes: true,
-      supportsTableConstraints: true,
-      supportsForeignKeys: true,
+      supportsTableIndexes: false,
+      supportsTableConstraints: false,
+      supportsForeignKeys: false,
       supportsCheckConstraints: false,
       supportsFunctions: false,
-      supportsTransactions: true,
+      supportsTransactions: false,
       supportsQueryCancellation: false,
       supportsExplainPlan: false,
       autoIncrementKeyword: null,
@@ -553,12 +799,25 @@ export function defaultDatabasePort(driver: DatabaseDriver) {
   return databaseDriverProfile(driver).capabilities.defaultPort;
 }
 
+/**
+ * File-backed engines do not use host/port, SSH or TLS form controls. Keep
+ * this explicit instead of inferring it from port 0: external packages may
+ * legitimately use a dynamic or non-network transport without being files.
+ */
+export function isFileBasedDatabaseDriver(driver: DatabaseDriver) {
+  return databaseDriverProfile(driver).capabilities.connectionMode === "file";
+}
+
 export function defaultDatabaseName(driver: DatabaseDriver) {
   return databaseDriverProfile(driver).defaultDatabase;
 }
 
 export function connectionUrlScheme(driver: DatabaseDriver) {
   return databaseDriverProfile(driver).urlScheme;
+}
+
+export function connectionUrlTemplateForDriver(driver: DatabaseDriver) {
+  return databaseDriverProfile(driver).connectionUrlTemplate?.trim() || null;
 }
 
 export function sslModeParamName(driver: DatabaseDriver) {
@@ -584,6 +843,9 @@ export function defaultDatabaseCapabilities(
   return {
     driver,
     ...capabilities,
+    supportsDatabaseCatalogs: capabilities.supportsDatabaseCatalogs ?? false,
+    supportsConnectionDatabase:
+      capabilities.supportsConnectionDatabase ?? true,
     commonDataTypes: [...capabilities.commonDataTypes],
   };
 }
@@ -608,6 +870,26 @@ export function supportsTableWorkspace(
 ) {
   return (
     isRelationalDataModel(capabilities) && capabilities.supportsTableBrowsing
+  );
+}
+
+/**
+ * Metadata made available to SQL completion is deliberately broader than the
+ * editable Data Grid. A signed SQL-shaped time-series package may expose
+ * relation-like measurements and columns for completion without being a
+ * relational table editor. The package must opt into both table browsing and
+ * a supported SQL LSP route; a generic non-relational package cannot acquire
+ * catalog metadata merely by returning table-shaped data.
+ */
+export function supportsSqlRelationMetadataLsp(
+  capabilities: Pick<
+    DatabaseCapabilities,
+    "dataModel" | "lspLanguageId" | "supportsSqlQuery" | "supportsTableBrowsing"
+  >,
+) {
+  return (
+    capabilities.supportsTableBrowsing &&
+    supportsLspCapabilities(capabilities)
   );
 }
 
@@ -749,9 +1031,20 @@ export function supportsAutoIncrementForDataType(
   return false;
 }
 
+function quoteIdentifierWithDelimiter(quote: string, identifier: string) {
+  // The runtime driver contract intentionally stores one identifier quote value.
+  // Square brackets are the only asymmetric dialect delimiter we accept, so keep
+  // its closing delimiter and escaping rules here instead of generating `[name[`.
+  if (quote === "[") {
+    return "[" + identifier.split("]").join("]]") + "]";
+  }
+
+  return `${quote}${identifier.split(quote).join(quote + quote)}${quote}`;
+}
+
 export function quoteIdentifier(driver: DatabaseDriver, identifier: string) {
   const quote = databaseDriverProfile(driver).capabilities.identifierQuote;
-  return `${quote}${identifier.split(quote).join(quote + quote)}${quote}`;
+  return quoteIdentifierWithDelimiter(quote, identifier);
 }
 
 export function quoteIdentifierWithCapabilities(
@@ -759,7 +1052,7 @@ export function quoteIdentifierWithCapabilities(
   identifier: string,
 ) {
   const quote = capabilities.identifierQuote || '"';
-  return `${quote}${identifier.split(quote).join(quote + quote)}${quote}`;
+  return quoteIdentifierWithDelimiter(quote, identifier);
 }
 
 export function qualifiedTableName(
@@ -781,26 +1074,118 @@ export function previewTableQuery(
 }
 
 export function lspLanguageId(driver: DatabaseDriver) {
-  const dialect = configuredLspLanguageId(driver);
+  return lspLanguageIdForCapabilities(defaultDatabaseCapabilities(driver));
+}
+
+export function lspLanguageIdForCapabilities(
+  capabilities: Pick<
+    DatabaseCapabilities,
+    "dataModel" | "lspLanguageId" | "supportsSqlQuery"
+  >,
+) {
+  const dialect = configuredLspLanguageIdForCapabilities(capabilities);
   if (!dialect) return DEFAULT_LSP_DIALECT;
   return SUPPORTED_LSP_DIALECTS.has(dialect)
     ? normalizeLspDialect(dialect)
-    : dialect;
+    : supportsGenericSqlLspCapabilities(capabilities)
+      ? "sql"
+      : dialect;
+}
+
+/**
+ * The bundled server accepts concrete dialect names, not a generic `sql`
+ * dialect. Keep `sql` as the document/editor language, but configure the
+ * server with its stable PostgreSQL-compatible baseline so file schema
+ * mappings and completion resolve against the same live document URI.
+ */
+export function lspServerDialectForCapabilities(
+  capabilities: Pick<
+    DatabaseCapabilities,
+    "dataModel" | "lspLanguageId" | "lspServerDialect" | "supportsSqlQuery"
+  >,
+) {
+  const languageId = lspLanguageIdForCapabilities(capabilities);
+  const declaredServerDialect = (capabilities.lspServerDialect || "")
+    .trim()
+    .toLowerCase();
+  // Signed packages may choose a reviewed server parser for a generic SQL
+  // document. This lets MySQL-compatible engines preserve their grammar while
+  // status/UI still state “SQL generic”, rather than claiming full native
+  // diagnostics for the upstream product.
+  if (
+    languageId === "sql" &&
+    SUPPORTED_SQL_LSP_SERVER_DIALECTS.has(declaredServerDialect)
+  ) {
+    return declaredServerDialect;
+  }
+  return languageId === "sql" ? DEFAULT_LSP_DIALECT : languageId;
 }
 
 export function configuredLspLanguageId(driver: DatabaseDriver) {
-  return databaseDriverProfile(driver)
-    .capabilities.lspLanguageId.trim()
-    .toLowerCase();
+  return configuredLspLanguageIdForCapabilities(
+    defaultDatabaseCapabilities(driver),
+  );
+}
+
+export function configuredLspLanguageIdForCapabilities(
+  capabilities: Pick<DatabaseCapabilities, "lspLanguageId">,
+) {
+  return capabilities.lspLanguageId.trim().toLowerCase();
 }
 
 export function supportsLspLanguageId(driver: DatabaseDriver) {
-  const dialect = configuredLspLanguageId(driver);
-  return SUPPORTED_LSP_DIALECTS.has(dialect);
+  return supportsLspCapabilities(defaultDatabaseCapabilities(driver));
+}
+
+export function supportsLspCapabilities(
+  capabilities: Pick<
+    DatabaseCapabilities,
+    "dataModel" | "lspLanguageId" | "supportsSqlQuery"
+  >,
+) {
+  const dialect = configuredLspLanguageIdForCapabilities(capabilities);
+  return (
+    SUPPORTED_LSP_DIALECTS.has(dialect) ||
+    supportsGenericSqlLspCapabilities(capabilities)
+  );
+}
+
+/**
+ * dbx has many declarative dialect descriptors, while a downloaded Oxide
+ * driver package can only claim a parser we ship. A relation-oriented package
+ * with SQL query capability therefore falls back to the bundled generic SQL
+ * completion path until a dedicated dialect is introduced. A non-relational
+ * package can opt into that same path only with an explicit signed `sql`
+ * language identity (for SQL-shaped time-series engines); its data model still
+ * keeps it out of the relational grid and DDL UI.
+ */
+function supportsGenericSqlLspCapabilities(
+  capabilities: Pick<
+    DatabaseCapabilities,
+    "dataModel" | "lspLanguageId" | "supportsSqlQuery"
+  >,
+) {
+  const dialect = configuredLspLanguageIdForCapabilities(capabilities);
+  return (
+    capabilities.supportsSqlQuery &&
+    (capabilities.dataModel === "relational" || dialect === "sql")
+  );
 }
 
 export function queryEditorLanguageId(driver: DatabaseDriver) {
-  const capabilities = databaseDriverProfile(driver).capabilities;
+  return queryEditorLanguageIdForCapabilities(defaultDatabaseCapabilities(driver));
+}
+
+export function queryEditorLanguageIdForCapabilities(
+  capabilities: Pick<DatabaseCapabilities, "dataModel" | "lspLanguageId">,
+) {
+  // A non-relational package can explicitly opt into a SQL console (for
+  // example QuestDB or Manticore Search). Keep this check before the generic
+  // search/document route so the signed package contract, not the broad data
+  // model label, decides the editor syntax.
+  if (configuredLspLanguageIdForCapabilities(capabilities) === "sql") {
+    return "sql";
+  }
   if (
     capabilities.dataModel === "document" ||
     capabilities.dataModel === "search"
@@ -810,7 +1195,10 @@ export function queryEditorLanguageId(driver: DatabaseDriver) {
   if (capabilities.dataModel === "keyValue") {
     return "plaintext";
   }
-  return "sql";
+  // A non-relational package may still be SQL-shaped (for example QuestDB).
+  // It needs an explicit signed `sql` LSP identity to opt in; no product gets
+  // SQL syntax merely from being a new/unknown data model.
+  return capabilities.dataModel === "relational" ? "sql" : "plaintext";
 }
 
 export function normalizeLspDialect(

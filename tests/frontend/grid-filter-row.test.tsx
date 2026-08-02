@@ -1,7 +1,7 @@
 /**
  * @vitest-environment happy-dom
  */
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GridFilterRow } from "@/components/workspace/GridFilterRow";
@@ -129,5 +129,67 @@ describe("GridFilterRow", () => {
     });
     expect(onSqlFilterChange).toHaveBeenCalledWith("status = ");
     expect(container.querySelector('[role="listbox"]')).not.toBeNull();
+  });
+
+  it("places the caret inside an accepted LIKE pattern snippet", async () => {
+    function ControlledFilterRow() {
+      const [filter, setFilter] = useState("name LIKE ");
+      return (
+        <GridFilterRow
+          columns={[
+            {
+              id: "name",
+              title: "name",
+              width: 120,
+              dataType: "varchar",
+            } as never,
+          ]}
+          mode="sql"
+          visualFilters={[]}
+          sqlFilter={filter}
+          onModeChange={vi.fn()}
+          onVisualFiltersChange={vi.fn()}
+          onSqlFilterChange={setFilter}
+          onSearch={vi.fn()}
+          driver="postgres"
+          tabId="table-users"
+          schemaName="public"
+          tableName="users"
+        />
+      );
+    }
+
+    container = document.createElement("div");
+    document.body.appendChild(container);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<ControlledFilterRow />);
+    });
+
+    const input = container.querySelector("input")!;
+    await act(async () => {
+      input.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          code: "Space",
+          key: " ",
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    const pattern = Array.from(container.querySelectorAll('[role="option"]')).find(
+      (option) => option.textContent?.includes("'%…%'"),
+    );
+    expect(pattern).toBeDefined();
+
+    await act(async () => {
+      pattern?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+
+    expect(input.value).toBe("name LIKE '%%' ");
+    expect(input.selectionStart).toBe("name LIKE '%".length);
+    expect(input.selectionEnd).toBe("name LIKE '%".length);
   });
 });

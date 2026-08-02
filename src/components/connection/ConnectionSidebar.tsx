@@ -6,11 +6,11 @@ import { useWorkspaceStore } from "@/store/useWorkspaceStore";
 import { Button } from "@/components/ui/button";
 import { Plus, Search, X, Filter } from "lucide-react";
 import * as LucideIcons from "lucide-react";
+import { ConnectionGlyph } from "@/components/icons/ConnectionGlyph";
 import { cn } from "@/lib/utils";
 import { useState, useMemo } from "react";
 import {
   defaultConnectionAccentClassName,
-  defaultConnectionIcon,
 } from "@/lib/databaseDialect";
 
 interface ConnectionSidebarProps {
@@ -96,11 +96,11 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
       );
     }
 
-    // Default Fallback
-    const DefaultIcon =
-      (LucideIcons as any)[defaultConnectionIcon(conn.driver)] ||
-      LucideIcons.Database;
-    return <DefaultIcon size={22} strokeWidth={1.5} />;
+    // The default must share the same brand identity as Data Sources,
+    // Connection Form and Explorer. Otherwise a MySQL connection can render
+    // as a generic monitor in this older sidebar while every other surface
+    // correctly shows the MySQL mark.
+    return <ConnectionGlyph driver={conn.driver} size={22} />;
   };
 
   return (

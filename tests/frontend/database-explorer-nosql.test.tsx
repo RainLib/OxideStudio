@@ -75,6 +75,7 @@ vi.mock("@/services/tauri", () => ({
     testConnection: vi.fn(async () => undefined),
   },
   databaseService: {
+    listDatabaseDriverInstallations: vi.fn(async () => []),
     getDatabaseCapabilities: vi.fn(async () => ({
       driver: "redis",
       displayName: "Redis",

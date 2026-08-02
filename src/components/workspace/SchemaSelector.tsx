@@ -1,5 +1,6 @@
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
+import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
 import { Check, ChevronDown, Database, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
@@ -58,17 +59,27 @@ export function SchemaSelector({
   const activeConnection = connections.find(
     (item) => item.id === effectiveConnectionId
   );
-  const capabilities = defaultDatabaseCapabilities(
-    activeConnection?.driver || DEFAULT_DATABASE_DRIVER
+  // The catalog store updates after a signed external driver package is
+  // installed or activated. Subscribing makes the selector re-evaluate its
+  // capabilities without requiring a connection or editor remount.
+  const driverCatalogStatus = useDatabaseDriverCatalogStore(
+    (state) => state.status,
   );
-  const selectsPostgresDatabase =
-    activeConnection?.driver === "postgres" && Boolean(onDatabaseChange);
-  const namespaceLabel = selectsPostgresDatabase
+  const capabilities = useMemo(
+    () =>
+      defaultDatabaseCapabilities(
+        activeConnection?.driver || DEFAULT_DATABASE_DRIVER,
+      ),
+    [activeConnection?.driver, driverCatalogStatus],
+  );
+  const selectsDatabaseCatalog =
+    Boolean(onDatabaseChange) && capabilities.supportsDatabaseCatalogs;
+  const namespaceLabel = selectsDatabaseCatalog
     ? "database"
     : capabilities.namespaceLabel || "schema";
   const namespaceLabelPlural = pluralizeNamespaceLabel(namespaceLabel);
-  const options = selectsPostgresDatabase ? databases : schemas;
-  const selectedValue = selectsPostgresDatabase ? currentDatabase : currentSchema;
+  const options = selectsDatabaseCatalog ? databases : schemas;
+  const selectedValue = selectsDatabaseCatalog ? currentDatabase : currentSchema;
   const filteredOptions = useMemo(() => {
     return filterAndSortNamespaceOptions(options, searchQuery);
   }, [options, searchQuery]);
@@ -93,10 +104,10 @@ export function SchemaSelector({
       <PopoverTrigger asChild>
         <button
           type="button"
-          disabled={selectsPostgresDatabase && databaseSelectionDisabled}
+          disabled={selectsDatabaseCatalog && databaseSelectionDisabled}
           className="wb-schema-selector wb-text-button h-6 max-w-[220px] gap-1.5 px-1.5 text-[11px] font-medium text-[hsl(var(--wb-text))] disabled:cursor-not-allowed disabled:opacity-50"
           title={
-            selectsPostgresDatabase && databaseSelectionDisabled
+            selectsDatabaseCatalog && databaseSelectionDisabled
               ? "Finish the active transaction before changing database"
               : `Target ${namespaceLabel}`
           }
@@ -126,7 +137,7 @@ export function SchemaSelector({
         </div>
         <div className="flex h-5 items-center justify-between px-2 text-[10px] wb-muted">
           <span>{filteredOptions.length} {namespaceLabelPlural}</span>
-          {selectsPostgresDatabase && isDatabaseRefreshing && (
+          {selectsDatabaseCatalog && isDatabaseRefreshing && (
             <span role="status">Refreshing…</span>
           )}
         </div>
@@ -140,7 +151,7 @@ export function SchemaSelector({
                 option === selectedValue && "bg-[hsl(var(--wb-active))]"
               )}
               onClick={() => {
-                if (selectsPostgresDatabase) {
+                if (selectsDatabaseCatalog) {
                   onDatabaseChange?.(option);
                 } else {
                   onSchemaChange(option);

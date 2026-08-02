@@ -131,6 +131,7 @@ function replaceProjectWorkspace(
       hasConnectionDisplayCache: true,
       activeConnectionId: initialConnectionId,
       connectedConnectionIds: [],
+      connectionRuntimeStates: {},
       isConnected: false,
       selectedConnection: null,
       isLoading: false,

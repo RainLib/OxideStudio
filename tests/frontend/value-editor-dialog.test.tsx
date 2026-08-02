@@ -146,6 +146,23 @@ describe("ValueEditorDialog", () => {
     expect(button("Close")).toBeTruthy();
   });
 
+  it("inspects valid JSON as a read-only tree without replacing the staging draft", async () => {
+    const { onStageValue } = await renderDialog(baseTarget);
+    await act(async () => button("Tree").click());
+
+    expect(document.body.textContent).toContain("$");
+    expect(document.body.textContent).toContain("role");
+    expect(document.body.textContent).toContain('"admin"');
+    expect(
+      document.body.querySelector('[aria-label="Show JSON text"]')?.getAttribute(
+        "aria-pressed",
+      ),
+    ).toBe("true");
+
+    await act(async () => button("Stage change").click());
+    expect(onStageValue).toHaveBeenCalledWith({ role: "admin" });
+  });
+
   it("can open after mounting without a target", async () => {
     await act(async () => {
       root = createRoot(container);

@@ -13,6 +13,7 @@ import { databaseService, tableService } from "@/services/tauri";
 import type { DatabaseCapabilities, DatabaseDriver } from "@/services/tauri";
 import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
 import { useSchemaStore } from "@/store/useSchemaStore";
+import { useConnectionStore } from "@/store/useConnectionStore";
 import { invalidateTableMetadata } from "@/services/tableMetadataCache";
 
 interface CreateViewDialogProps {
@@ -49,6 +50,9 @@ export function CreateViewDialog({
   );
 
   const { loadTables, bumpMetadataVersion } = useSchemaStore();
+  const connection = useConnectionStore((state) =>
+    state.connections.find((item) => item.id === connectionId),
+  );
   const activeCapabilities =
     capabilities.driver === driver
       ? capabilities
@@ -63,7 +67,7 @@ export function CreateViewDialog({
     setCapabilities(fallback);
 
     databaseService
-      .getDatabaseCapabilities(driver)
+      .getDatabaseCapabilities(driver, connection?.driverPackageVersion)
       .then((nextCapabilities) => {
         if (!cancelled) setCapabilities(nextCapabilities);
       })
@@ -75,7 +79,7 @@ export function CreateViewDialog({
     return () => {
       cancelled = true;
     };
-  }, [driver]);
+  }, [connection?.driverPackageVersion, driver]);
 
   useEffect(() => {
     if (!isOpen) return;

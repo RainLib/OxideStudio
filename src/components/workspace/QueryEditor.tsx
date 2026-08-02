@@ -7,7 +7,6 @@ import {
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { EditorActionBar } from "./EditorActionBar";
-import { QUERY_EDITOR_OPTIONS } from "./queryEditorOptions";
 import { ThemeContext } from "@/theme/ThemeProvider";
 import Editor, { DiffEditor, useMonaco } from "@monaco-editor/react";
 import { listen } from "@tauri-apps/api/event";
@@ -19,19 +18,24 @@ import {
   useContext,
   useMemo,
 } from "react";
-import { connectionService, queryService } from "@/services/tauri";
+import {
+  connectionService,
+  databaseService,
+  queryService,
+  type DatabaseCapabilities,
+  type TableInfo,
+} from "@/services/tauri";
 import { useLspClient } from "@/hooks/useLspClient";
 import {
   DEFAULT_DATABASE_DRIVER,
   defaultDatabaseCapabilities,
   lspLanguageId,
-  queryEditorLanguageId,
-  supportsLspLanguageId,
+  lspLanguageIdForCapabilities,
+  lspServerDialectForCapabilities,
 } from "@/lib/databaseDialect";
 import {
   completionFilterText,
   completionInsertText,
-  completionSortText,
   filterCompletionsForSqlContext,
   isCompletedSqlContextKeyword,
   sqlContextKeywordBeforeCursor,
@@ -47,16 +51,10 @@ import {
 import {
   extractLspDocumentIdentity,
   extractSqlDocumentTabId,
-  getLspDocumentUri,
   LSP_NOTIFICATION_EVENT,
 } from "@/services/lsp";
 import { transactionService } from "@/services/tauri";
-import type {
-  Diagnostic,
-  LspServerNotification,
-  PublishDiagnosticsParams,
-  Range as LspRange,
-} from "@/services/lsp";
+import type { LspServerNotification } from "@/services/lsp";
 import {
   APP_EVENT_RUN_QUERY,
   APP_EVENT_RUN_CURRENT,
@@ -69,9 +67,7 @@ import {
 import { editorExecutionConfirmation } from "@/lib/sqlExecutionGate";
 import {
   completionUsageScope,
-  completionUsageScore,
   recordCompletionUsage,
-  usageRankedCompletionSortText,
 } from "@/lib/completionUsage";
 import { StatusBarPortal } from "./StatusBarPortal";
 import {
@@ -92,20 +88,30 @@ import {
 import { saveProjectFileTab } from "@/lib/projectFileTabs";
 import { useProjectFilesStore } from "@/store/useProjectFilesStore";
 import { useProjectStore } from "@/store/useProjectStore";
-import { revealLspDatabaseDefinition } from "@/lib/lspNavigation";
+import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
+import { useLspSemanticStatusStore } from "@/store/useLspSemanticStatusStore";
+import {
+  revealLspDatabaseDefinition,
+  revealLspProjectDefinition,
+} from "@/lib/lspNavigation";
+import { lspSemanticStatusPresentation } from "@/lib/lspSemanticStatus";
 import { useTaskStore } from "@/store/useTaskStore";
 import { usePostgresDatabaseDiscovery } from "@/hooks/usePostgresDatabaseDiscovery";
-import { postgresConnectionDatabaseName } from "./PostgresDatabaseTree";
+import { connectionCatalogDatabaseName } from "./PostgresDatabaseTree";
 import { useAiSettingsStore } from "@/store/useAiSettingsStore";
-import {
-  projectFileLanguage,
-  projectFileModelUri,
-} from "@/lib/projectFileLanguage";
 import { extractSqlParameters } from "@/lib/sqlParameters";
 import { SqlParametersPanel } from "./SqlParametersPanel";
+import { SqlScriptImportDialog } from "./SqlScriptImportDialog";
 import { aiService } from "@/services/tauri/ai.service";
 import { projectFilesService } from "@/services/tauri/project-files.service";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
+import { cachedSqlRelationForFieldCompletion } from "@/lib/queryEditorCachedCompletion";
+import {
+  buildQueryEditorTableHoverMarkdown,
+  findQueryEditorHoverTable,
+  isSqlRelationIdentifierContext,
+  sqlIdentifierAtColumn,
+} from "@/lib/queryEditorTableHover";
 import { ProjectFileImagePreview } from "./ProjectFileImagePreview";
 import { openProjectFileInEditor } from "@/lib/projectFileOpen";
 import {
@@ -154,11 +160,37 @@ import {
   validateElasticsearchConsole,
 } from "@/lib/elasticsearchConsole";
 import type { ElasticsearchAnalysisResponse } from "@/workers/elasticsearchAnalysis.worker";
-import type { ElasticsearchMajorVersion } from "@/lib/elasticsearchConsole";
+import type { ElasticsearchServerVersion } from "@/lib/elasticsearchConsole";
+import type { SqlScriptImportPreview } from "@/services/tauri/types";
 import {
   shouldOfferMongoDbCompletions,
   shouldTriggerMongoDbCompletions,
 } from "@/lib/mongodbCompletion";
+import {
+  completionSuggestionsOrCached,
+  buildQueryEditorOptions,
+  appendSqlCompletionSpace,
+  currentStatementLineFrames,
+  elasticsearchJsonStringCompletionRange,
+  editorDocumentIdentity,
+  enqueueLspDocumentSync,
+  flattenLspSelectionRanges,
+  isPublishDiagnosticsParams,
+  lspDiagnosticToMonacoMarker,
+  lspCompletionItemsToMonacoSuggestions,
+  lspDocumentationForMonaco,
+  mergeCatalogNames,
+  mergeCompletionFallbackSuggestions,
+  mongodbCommandRangeAtCursor,
+  queryTransactionExecutionId,
+  parseElasticsearchConsoleServerVersion,
+  selectedOrFullEditorText,
+  sqlSyntaxFallbackCompletions,
+  sqlCompletionItemType,
+  syncLspModelBeforeCompletion,
+  toMonacoRange,
+  toMonacoWorkspaceEdit,
+} from "@/features/query-editor";
 
 type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
@@ -168,6 +200,15 @@ type ParameterExecutionRequest = {
   sql: string;
   transactionId?: string;
 };
+type PendingSqlScriptImport = {
+  connectionId: string;
+  filePath: string;
+  schema?: string;
+  database?: string;
+  target: string;
+  preview: SqlScriptImportPreview;
+  taskId: string;
+};
 const LSP_PROVIDER_LANGUAGES = [
   "sql",
   "json",
@@ -175,54 +216,47 @@ const LSP_PROVIDER_LANGUAGES = [
   ELASTICSEARCH_CONSOLE_LANGUAGE_ID,
 ] as const;
 const RECORD_COMPLETION_USAGE_COMMAND = "oxide.sqlCompletion.recordUsage";
+const RELATION_COMPLETION_CONTEXTS = new Set([
+  "from",
+  "join",
+  "into",
+  "update",
+  "table",
+  "truncate",
+  "describe",
+  "desc",
+]);
 
-function isSupportedLspModelUri(uri: string) {
-  const identity = extractLspDocumentIdentity(uri);
-  return Boolean(identity?.driver && supportsLspLanguageId(identity.driver));
-}
-
-function lspDocumentationValue(
-  documentation: string | { value?: string } | undefined
-) {
-  if (!documentation) return undefined;
-  return typeof documentation === "string"
-    ? documentation
-    : documentation.value
-      ? { value: documentation.value }
-      : undefined;
-}
-
-function toMonacoWorkspaceEdit(monaco: any, edit: {
-  changes?: Record<string, Array<{ range: LspRange; newText: string }>>;
-}) {
-  return {
-    edits: Object.entries(edit.changes || {}).flatMap(([uri, textEdits]) =>
-      textEdits.map((textEdit) => {
-        const resource = monaco.Uri.parse(uri);
-        return {
-          resource,
-          textEdit: {
-            range: toMonacoRange(monaco, textEdit.range),
-            text: textEdit.newText,
-          },
-          versionId: monaco.editor.getModel(resource)?.getVersionId(),
-        };
-      })
-    ),
-  };
-}
-
-function flattenLspSelectionRanges(
+export function cachedRelationCompletionSuggestions(
   monaco: any,
-  selection: { range: LspRange; parent?: any } | undefined
+  model: any,
+  position: any,
+  tables: TableInfo[],
 ) {
-  const ranges = [];
-  let current = selection;
-  while (current) {
-    ranges.push({ range: toMonacoRange(monaco, current.range) });
-    current = current.parent;
+  const textBeforeCursor = model.getValueInRange(
+    new monaco.Range(1, 1, position.lineNumber, position.column),
+  );
+  if (!RELATION_COMPLETION_CONTEXTS.has(sqlContextKeywordBeforeCursor(textBeforeCursor) || "")) {
+    return [];
   }
-  return ranges;
+  const word = model.getWordUntilPosition(position);
+  const range = new monaco.Range(
+    position.lineNumber,
+    word.startColumn,
+    position.lineNumber,
+    word.endColumn,
+  );
+  return tables.map((table) => ({
+    label: table.name,
+    kind: monaco.languages.CompletionItemKind.Struct,
+    detail: "Cached database object",
+    documentation: table.comment
+      ? { value: table.comment }
+      : { value: "Available from cached database metadata." },
+    insertText: table.name,
+    sortText: `0:${table.name.toLocaleLowerCase()}`,
+    range,
+  }));
 }
 
 function createInlineCompletionRequestId() {
@@ -260,93 +294,6 @@ function toMonacoKeybinding(monaco: any, binding: string) {
     (parts.includes("mod") ? monaco.KeyMod.CtrlCmd : 0) |
     (parts.includes("alt") ? monaco.KeyMod.Alt : 0) |
     (parts.includes("shift") ? monaco.KeyMod.Shift : 0)
-  );
-}
-
-function isPublishDiagnosticsParams(
-  value: unknown,
-): value is PublishDiagnosticsParams {
-  if (!value || typeof value !== "object") return false;
-  const params = value as PublishDiagnosticsParams;
-  return typeof params.uri === "string" && Array.isArray(params.diagnostics);
-}
-
-function toMonacoRange(monaco: any, range: LspRange) {
-  return new monaco.Range(
-    range.start.line + 1,
-    range.start.character + 1,
-    range.end.line + 1,
-    range.end.character + 1,
-  );
-}
-
-function toMarkerSeverity(monaco: any, severity?: number) {
-  switch (severity) {
-    case 1:
-      return monaco.MarkerSeverity.Error;
-    case 2:
-      return monaco.MarkerSeverity.Warning;
-    case 3:
-      return monaco.MarkerSeverity.Info;
-    case 4:
-      return monaco.MarkerSeverity.Hint;
-    default:
-      return monaco.MarkerSeverity.Warning;
-  }
-}
-
-function toMarker(monaco: any, diagnostic: Diagnostic) {
-  const startLineNumber = diagnostic.range.start.line + 1;
-  const startColumn = diagnostic.range.start.character + 1;
-  const endLineNumber = diagnostic.range.end.line + 1;
-  let endColumn = diagnostic.range.end.character + 1;
-
-  if (startLineNumber === endLineNumber && endColumn <= startColumn) {
-    endColumn = startColumn + 1;
-  }
-
-  return {
-    severity: toMarkerSeverity(monaco, diagnostic.severity),
-    code:
-      diagnostic.code === undefined ? undefined : String(diagnostic.code),
-    message: diagnostic.message,
-    source: diagnostic.source || "sql-lsp",
-    startLineNumber,
-    startColumn,
-    endLineNumber,
-    endColumn,
-  };
-}
-
-function elasticsearchJsonStringCompletionRange(
-  monaco: any,
-  model: any,
-  position: any,
-) {
-  const lineBeforeCursor = model
-    .getLineContent(position.lineNumber)
-    .slice(0, position.column - 1);
-  const lineAfterCursor = model
-    .getLineContent(position.lineNumber)
-    .slice(position.column - 1);
-  const stringFragment = lineBeforeCursor.match(/"[\w.@*-]*$/u)?.[0];
-  if (stringFragment) {
-    return new monaco.Range(
-      position.lineNumber,
-      lineBeforeCursor.length - stringFragment.length + 1,
-      position.lineNumber,
-      lineAfterCursor.startsWith('"')
-        ? position.column + 1
-        : position.column,
-    );
-  }
-
-  const word = model.getWordUntilPosition(position);
-  return new monaco.Range(
-    position.lineNumber,
-    word.startColumn,
-    position.lineNumber,
-    word.endColumn,
   );
 }
 
@@ -397,49 +344,6 @@ function mongodbJsonStringCompletionRange(
   );
 }
 
-type LspDocumentSyncClient = {
-  didOpen: (
-    uri: string,
-    text: string,
-    version: number,
-    languageId: string,
-  ) => Promise<void>;
-  didChange: (uri: string, text: string, version: number) => Promise<void>;
-};
-
-export async function syncLspModelBeforeCompletion(options: {
-  uri: string;
-  model: { getValue: () => string };
-  languageId: string;
-  client: LspDocumentSyncClient;
-  openedDocuments: Set<string>;
-  documentVersions: Map<string, number>;
-  documentTexts?: Map<string, string>;
-}) {
-  const {
-    uri,
-    model,
-    languageId,
-    client,
-    openedDocuments,
-    documentVersions,
-    documentTexts,
-  } = options;
-  const text = model.getValue();
-  if (openedDocuments.has(uri) && documentTexts?.get(uri) === text) return;
-  const version = (documentVersions.get(uri) || 0) + 1;
-  documentVersions.set(uri, version);
-  documentTexts?.set(uri, text);
-
-  if (openedDocuments.has(uri)) {
-    await client.didChange(uri, text, version);
-    return;
-  }
-
-  openedDocuments.add(uri);
-  await client.didOpen(uri, text, version, languageId);
-}
-
 interface QueryEditorProps {
   tabId?: string | null;
   isActivePane?: boolean;
@@ -480,6 +384,7 @@ export function QueryEditor({
   );
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const currentSchema = useSchemaStore((state) => state.currentSchema);
+  const schemaTables = useSchemaStore((state) => state.tables);
   const metadataVersion = useSchemaStore((state) => state.metadataVersion);
   const loadSchemas = useSchemaStore((state) => state.loadSchemas);
   const loadTables = useSchemaStore((state) => state.loadTables);
@@ -511,10 +416,13 @@ export function QueryEditor({
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
   const [parameterExecution, setParameterExecution] =
     useState<ParameterExecutionRequest | null>(null);
+  const [pendingSqlScriptImport, setPendingSqlScriptImport] =
+    useState<PendingSqlScriptImport | null>(null);
+  const [isSqlScriptImporting, setIsSqlScriptImporting] = useState(false);
   const [inlineCompletionStatus, setInlineCompletionStatus] =
     useState<InlineCompletionStatus>("off");
-  const [elasticsearchMajorVersion, setElasticsearchMajorVersion] =
-    useState<ElasticsearchMajorVersion | undefined>();
+  const [elasticsearchServerVersion, setElasticsearchServerVersion] =
+    useState<ElasticsearchServerVersion | undefined>();
   // const dropdownRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<any>(null);
   const [mountedEditor, setMountedEditor] = useState<any>(null);
@@ -543,6 +451,9 @@ export function QueryEditor({
   >(new Map());
   const documentVersionsRef = useRef<Map<string, number>>(new Map());
   const documentTextsRef = useRef<Map<string, string>>(new Map());
+  const documentSyncChainsRef = useRef<Map<string, Promise<void>>>(new Map());
+  const activeLspDocumentUriRef = useRef<string | null>(null);
+  const lastLspSessionKeyRef = useRef<string | null>(null);
   const completionRequestGenerationRef = useRef<Map<string, number>>(new Map());
   const inlineCompletionCacheRef = useRef(new InlineCompletionCache());
   const inlineCompletionAbortRef = useRef<AbortController | null>(null);
@@ -564,6 +475,12 @@ export function QueryEditor({
   const elasticsearchFieldCacheRef = useRef<
     Map<string, Array<{ name: string; dataType: string }>>
   >(new Map());
+  const sqlFieldCacheRef = useRef<
+    Map<
+      string,
+      Array<{ name: string; dataType: string; comment?: string | null }>
+    >
+  >(new Map());
   const pendingElasticsearchSqlRef = useRef<{
     tabId: string;
     value: string;
@@ -578,77 +495,115 @@ export function QueryEditor({
   const activeConnection = connections.find(
     (c) => c.id === effectiveConnectionId,
   );
+  // External driver profiles are registered asynchronously. Keep capability
+  // dependent editor controls (catalog selector and LSP language) reactive
+  // when an installed package becomes active.
+  const driverCatalogStatus = useDatabaseDriverCatalogStore(
+    (state) => state.status,
+  );
   const driver = activeConnection?.driver || DEFAULT_DATABASE_DRIVER;
-  const configuredPostgresDatabase =
-    activeConnection?.driver === "postgres"
-      ? postgresConnectionDatabaseName(activeConnection)
+  const [connectionCapabilities, setConnectionCapabilities] = useState<{
+    connectionId: string;
+    capabilities: DatabaseCapabilities;
+  } | null>(null);
+  useEffect(() => {
+    if (!activeConnection) {
+      setConnectionCapabilities(null);
+      return;
+    }
+    let cancelled = false;
+    setConnectionCapabilities(null);
+    void databaseService
+      .getDatabaseCapabilities(
+        activeConnection.driver,
+        activeConnection.driverPackageVersion,
+      )
+      .then((nextCapabilities) => {
+        if (!cancelled) {
+          setConnectionCapabilities({
+            connectionId: activeConnection.id,
+            capabilities: nextCapabilities,
+          });
+        }
+      })
+      .catch((error) => {
+        console.warn("Failed to load query-editor driver capabilities", error);
+        if (!cancelled) {
+          setConnectionCapabilities({
+            connectionId: activeConnection.id,
+            capabilities: defaultDatabaseCapabilities(activeConnection.driver),
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeConnection?.driver,
+    activeConnection?.driverPackageVersion,
+    activeConnection?.id,
+    driverCatalogStatus,
+  ]);
+  const capabilities = useMemo(() => {
+    const resolvedCapabilities =
+      connectionCapabilities &&
+      connectionCapabilities.connectionId === activeConnection?.id
+        ? connectionCapabilities.capabilities
+        : null;
+    return resolvedCapabilities?.driver.toLowerCase() === driver.toLowerCase()
+      ? resolvedCapabilities
+      : defaultDatabaseCapabilities(driver);
+  }, [activeConnection?.id, connectionCapabilities, driver]);
+  const canBrowseDatabaseCatalogs = Boolean(
+    capabilities.supportsDatabaseCatalogs,
+  );
+  // Network catalog drivers retain one configured database on the connection.
+  // File-backed engines such as DuckDB return an empty value here and discover
+  // their primary catalog through metadata instead.
+  const configuredCatalogDatabase =
+    activeConnection && canBrowseDatabaseCatalogs
+      ? connectionCatalogDatabaseName(activeConnection)
       : null;
   const postgresDatabaseDiscovery = usePostgresDatabaseDiscovery({
     projectId: activeProjectId,
     connectionId: effectiveConnectionId || null,
     driver: activeConnection?.driver,
+    canBrowseDatabaseCatalogs,
     isConnectionReady: Boolean(
       effectiveConnectionId &&
       connectedConnectionIds.includes(effectiveConnectionId),
     ),
     refreshVersion: metadataVersion,
   });
-  const postgresDatabases = useMemo(() => {
-    if (!configuredPostgresDatabase) return [];
+  const catalogDatabases = useMemo(() => {
+    if (!canBrowseDatabaseCatalogs) return [];
     const discovered =
       postgresDatabaseDiscovery.connectionId === effectiveConnectionId
         ? postgresDatabaseDiscovery.databases
         : [];
-    return [configuredPostgresDatabase, ...discovered]
-      .filter(
-        (database, index, rows) =>
-          Boolean(database) && rows.indexOf(database) === index,
-      )
-      .sort((left, right) =>
-        left.localeCompare(right, undefined, {
-          sensitivity: "base",
-          numeric: true,
-        }),
-      );
+    return mergeCatalogNames(configuredCatalogDatabase, discovered);
   }, [
-    configuredPostgresDatabase,
+    canBrowseDatabaseCatalogs,
+    configuredCatalogDatabase,
     effectiveConnectionId,
     postgresDatabaseDiscovery.connectionId,
     postgresDatabaseDiscovery.databases,
   ]);
-  const isProjectFilePreview = Boolean(activeTab?.filePreview);
-  const activeProjectFileLanguage =
-    activeTab?.fileRelativePath && !isProjectFilePreview
-      ? projectFileLanguage(activeTab.fileRelativePath, driver)
-      : null;
-  const isElasticsearchEql =
-    driver === "elasticsearch" &&
-    activeTab?.queryLanguage === "elasticsearch-eql";
-  const documentLanguageId =
-    activeProjectFileLanguage?.lspLanguageId ||
-    (isElasticsearchEql ? "elasticsearch-eql" : lspLanguageId(driver));
-  const documentUri = activeTab
-    ? activeProjectFileLanguage && !activeProjectFileLanguage.usesDatabaseLsp
-      ? projectFileModelUri(activeTab.id, activeProjectFileLanguage)
-      : getLspDocumentUri(activeTab.id, driver, documentLanguageId)
-    : "";
-  const editorLanguageId =
-    activeProjectFileLanguage?.editorLanguageId ||
-    (isElasticsearchEql
-      ? "plaintext"
-      : driver === "elasticsearch"
-        ? ELASTICSEARCH_CONSOLE_LANGUAGE_ID
-        : queryEditorLanguageId(driver));
-  const canUseLsp =
-    !isProjectFilePreview &&
-    !activeTab?.agentFileDiffPreview &&
-    !activeTab?.gitFileDiffPreview &&
-    !isElasticsearchEql &&
-    supportsLspLanguageId(driver) &&
-    (!activeProjectFileLanguage || activeProjectFileLanguage.usesDatabaseLsp);
-  const isElasticsearchConsole =
-    driver === "elasticsearch" &&
-    activeTab?.queryLanguage !== "elasticsearch-eql";
+  const documentIdentity = useMemo(
+    () => editorDocumentIdentity({ tab: activeTab, driver, capabilities }),
+    [activeTab, capabilities, driver],
+  );
+  const {
+    isProjectFilePreview,
+    projectFileLanguage: activeProjectFileLanguage,
+    documentLanguageId,
+    documentUri,
+    editorLanguageId,
+    canUseLsp,
+    usesGenericSqlLsp,
+    isElasticsearchConsole,
+  } = documentIdentity;
+  const isMongoDbConsole = documentLanguageId === "mongodb";
   const preferredElasticsearchIndex = isElasticsearchConsole
     ? activeTab?.tableName || activeTab?.targetSchema || undefined
     : undefined;
@@ -666,7 +621,7 @@ export function QueryEditor({
       !effectiveConnectionId ||
       !connectedConnectionIds.includes(effectiveConnectionId)
     ) {
-      setElasticsearchMajorVersion(undefined);
+      setElasticsearchServerVersion(undefined);
       return;
     }
 
@@ -674,13 +629,12 @@ export function QueryEditor({
       .getServerVersion(effectiveConnectionId)
       .then((version) => {
         if (cancelled) return;
-        const major = Number.parseInt(version?.split(".")[0] || "", 10);
-        setElasticsearchMajorVersion(
-          major === 6 || major === 7 || major === 8 ? major : undefined,
+        setElasticsearchServerVersion(
+          parseElasticsearchConsoleServerVersion(version),
         );
       })
       .catch(() => {
-        if (!cancelled) setElasticsearchMajorVersion(undefined);
+        if (!cancelled) setElasticsearchServerVersion(undefined);
       });
 
     return () => {
@@ -690,13 +644,13 @@ export function QueryEditor({
 
   useEffect(() => {
     const model = mountedEditor?.getModel?.() as
-      | { __oxideElasticsearchMajorVersion?: ElasticsearchMajorVersion }
+      | { __oxideElasticsearchServerVersion?: ElasticsearchServerVersion }
       | undefined;
     if (!model) return;
-    model.__oxideElasticsearchMajorVersion = isElasticsearchConsole
-      ? elasticsearchMajorVersion
+    model.__oxideElasticsearchServerVersion = isElasticsearchConsole
+      ? elasticsearchServerVersion
       : undefined;
-  }, [elasticsearchMajorVersion, isElasticsearchConsole, mountedEditor]);
+  }, [elasticsearchServerVersion, isElasticsearchConsole, mountedEditor]);
 
   const commitPendingElasticsearchSql = useCallback(() => {
     if (pendingElasticsearchSqlTimerRef.current !== null) {
@@ -755,7 +709,6 @@ export function QueryEditor({
     !activeTab?.agentFileDiffPreview &&
     !activeTab?.gitFileDiffPreview &&
     (!activeProjectFileLanguage || activeProjectFileLanguage.executable);
-  const capabilities = defaultDatabaseCapabilities(driver);
   const supportsTransactions =
     capabilities.supportsTransactions && !activeTab?.databaseName;
   const monaco = useMonaco();
@@ -768,8 +721,16 @@ export function QueryEditor({
   } = useLspClient({
     connectionId: effectiveConnectionId,
     driver,
+    capabilities,
     enabled: Boolean(activeTab && effectiveConnectionId && canUseLsp),
   });
+  const lspSemanticStatus = useLspSemanticStatusStore((state) =>
+    effectiveConnectionId ? state.byConnectionId[effectiveConnectionId] : undefined,
+  );
+  const lspSemanticPresentation = lspSemanticStatusPresentation(lspSemanticStatus);
+  const visibleLspSemanticPresentation = lspReady
+    ? lspSemanticPresentation
+    : null;
   const activeTransactionState = activeTab
     ? transactionStates[activeTab.id] || "idle"
     : "idle";
@@ -1040,30 +1001,74 @@ export function QueryEditor({
   };
 
   useEffect(() => {
-    if (!lspReady || !activeTab || !documentUri || !canUseLsp) return;
-
-    const previousVersion = documentVersionsRef.current.get(documentUri) || 0;
-    const version = previousVersion + 1;
-    documentVersionsRef.current.set(documentUri, version);
-    documentTextsRef.current.set(documentUri, activeDocumentSql);
-
-    const owner = documentSessionsRef.current.get(documentUri);
-    if (owner?.sessionKey === lspSessionKey) {
-      void lspClient.didChange(documentUri, activeDocumentSql, version);
-    } else {
-      if (owner) void owner.client.didClose(documentUri);
-      openedDocumentsRef.current.add(documentUri);
-      documentSessionsRef.current.set(documentUri, {
-        sessionKey: lspSessionKey,
-        client: lspClient,
-      });
-      void lspClient.didOpen(
-        documentUri,
-        activeDocumentSql,
-        version,
-        documentLanguageId,
-      );
+    if (!lspReady || !activeTab || !documentUri || !canUseLsp) {
+      activeLspDocumentUriRef.current = null;
+      return;
     }
+    activeLspDocumentUriRef.current = documentUri;
+
+    // A connection can be pinned to a driver package whose LSP dialect differs
+    // from the current catalog default. Close that tab's former virtual model
+    // before opening the new URI so the server never keeps two dialects for
+    // one editor tab alive at once.
+    for (const staleUri of Array.from(openedDocumentsRef.current)) {
+      const staleIdentity = extractLspDocumentIdentity(staleUri);
+      if (staleUri === documentUri || staleIdentity?.tabId !== activeTab.id) {
+        continue;
+      }
+      openedDocumentsRef.current.delete(staleUri);
+      documentVersionsRef.current.delete(staleUri);
+      documentTextsRef.current.delete(staleUri);
+      documentSyncChainsRef.current.delete(staleUri);
+      completionRequestGenerationRef.current.delete(staleUri);
+      const staleOwner = documentSessionsRef.current.get(staleUri);
+      documentSessionsRef.current.delete(staleUri);
+      if (staleOwner) void staleOwner.client.didClose(staleUri);
+    }
+
+    // Serialize writes to a URI. A fast typing burst becomes didOpen(text 1)
+    // followed by didChange(text 2), rather than racing didOpen calls that
+    // share a version. The helper commits local shadow state only after the
+    // LSP accepts the write, so a restart remains retryable.
+    void enqueueLspDocumentSync(
+      documentSyncChainsRef.current,
+      documentUri,
+      async () => {
+        if (activeLspDocumentUriRef.current !== documentUri) return;
+        const owner = documentSessionsRef.current.get(documentUri);
+        if (owner?.sessionKey !== lspSessionKey) {
+          documentSessionsRef.current.delete(documentUri);
+          if (owner) {
+            await owner.client.didClose(documentUri).catch(() => undefined);
+          }
+        }
+
+        await syncLspModelBeforeCompletion({
+          uri: documentUri,
+          model: { getValue: () => activeDocumentSql },
+          languageId: documentLanguageId,
+          client: lspClient,
+          openedDocuments: openedDocumentsRef.current,
+          documentVersions: documentVersionsRef.current,
+          documentTexts: documentTextsRef.current,
+        });
+
+        if (
+          activeLspDocumentUriRef.current === documentUri &&
+          openedDocumentsRef.current.has(documentUri)
+        ) {
+          documentSessionsRef.current.set(documentUri, {
+            sessionKey: lspSessionKey,
+            client: lspClient,
+          });
+        }
+      },
+    )
+      .catch((error) => {
+        // Completion retries the exact failed revision through the same
+        // coordinator; a transient LSP restart must not tear down Monaco.
+        console.debug("[LSP] Deferred document synchronization failed:", error);
+      });
   }, [
     activeTab?.id,
     activeDocumentSql,
@@ -1073,42 +1078,40 @@ export function QueryEditor({
     lspClient,
     lspReady,
     lspSessionKey,
+    driverCatalogStatus,
   ]);
 
   useEffect(() => {
     if (lspReady) return;
+    activeLspDocumentUriRef.current = null;
     for (const [uri, owner] of documentSessionsRef.current) {
-      if (owner.sessionKey !== lspSessionKey) continue;
       documentSessionsRef.current.delete(uri);
       openedDocumentsRef.current.delete(uri);
       documentVersionsRef.current.delete(uri);
       documentTextsRef.current.delete(uri);
+      documentSyncChainsRef.current.delete(uri);
       completionRequestGenerationRef.current.delete(uri);
+      void owner.client.didClose(uri).catch(() => undefined);
     }
   }, [lspReady, lspSessionKey]);
 
   useEffect(() => {
     if (!lspReady) return;
 
-    const currentDocumentUris = new Set(
+    const currentDocumentTabIds = new Set(
       tabs
         .filter((tab) => tab.type === "query")
-        .map((tab) => {
-          const tabConnectionId = tab.connectionId || activeConnectionId;
-          const tabConnection = connections.find(
-            (connection) => connection.id === tabConnectionId,
-          );
-          const tabDriver = tabConnection?.driver || DEFAULT_DATABASE_DRIVER;
-          return getLspDocumentUri(tab.id, tabDriver, lspLanguageId(tabDriver));
-        }),
+        .map((tab) => tab.id),
     );
 
     for (const uri of Array.from(openedDocumentsRef.current)) {
-      if (currentDocumentUris.has(uri)) continue;
+      const identity = extractLspDocumentIdentity(uri);
+      if (identity && currentDocumentTabIds.has(identity.tabId)) continue;
 
       openedDocumentsRef.current.delete(uri);
       documentVersionsRef.current.delete(uri);
       documentTextsRef.current.delete(uri);
+      documentSyncChainsRef.current.delete(uri);
       completionRequestGenerationRef.current.delete(uri);
       const owner = documentSessionsRef.current.get(uri);
       documentSessionsRef.current.delete(uri);
@@ -1121,7 +1124,7 @@ export function QueryEditor({
         }
       }
     }
-  }, [activeConnectionId, connections, lspReady, monaco, tabs]);
+  }, [lspReady, monaco, tabs]);
 
   useEffect(() => {
     return () => {
@@ -1138,14 +1141,24 @@ export function QueryEditor({
       documentSessionsRef.current.clear();
       documentVersionsRef.current.clear();
       documentTextsRef.current.clear();
+      documentSyncChainsRef.current.clear();
       completionRequestGenerationRef.current.clear();
     };
   }, [monaco]);
 
   useEffect(() => {
+    const previousSessionKey = lastLspSessionKeyRef.current;
+    lastLspSessionKeyRef.current = lspSessionKey;
+    if (!previousSessionKey || previousSessionKey === lspSessionKey) return;
+    for (const [uri, owner] of documentSessionsRef.current) {
+      if (owner.sessionKey === lspSessionKey) continue;
+      documentSessionsRef.current.delete(uri);
+      void owner.client.didClose(uri).catch(() => undefined);
+    }
     openedDocumentsRef.current.clear();
     documentVersionsRef.current.clear();
     documentTextsRef.current.clear();
+    documentSyncChainsRef.current.clear();
     completionRequestGenerationRef.current.clear();
   }, [lspSessionKey]);
 
@@ -1190,6 +1203,7 @@ export function QueryEditor({
 
   useEffect(() => {
     elasticsearchFieldCacheRef.current.clear();
+    sqlFieldCacheRef.current.clear();
   }, [effectiveConnectionId, metadataVersion]);
 
   useEffect(() => {
@@ -1394,7 +1408,11 @@ export function QueryEditor({
 
   // Register LSP providers (completion, hover, navigation, formatting)
   useEffect(() => {
-    if (!isActivePane || !monaco || !lspReady) return;
+    // Keep cached relation completion available while the semantic server is
+    // starting or recovering. It is deliberately limited to existing Explorer
+    // metadata and relation-only SQL contexts; the full LSP still owns fields,
+    // keywords, diagnostics, and every vendor-specific proposal once ready.
+    if (!isActivePane || !monaco) return;
 
     console.log("[QueryEditor] Registering LSP providers");
 
@@ -1406,6 +1424,11 @@ export function QueryEditor({
       driver,
     ]);
     const rankByUsage = editorSettings.sqlCompletion.rankByUsage;
+    // Monaco providers are global per language. Scope them to the document
+    // owned by this editor instance so a background tab cannot be served by
+    // the active connection's LSP client or its pinned driver package.
+    const isCurrentLspModelUri = (uri: string) =>
+      uri === documentUri && canUseLsp;
     const usageCommandDisposable = monaco.editor.registerCommand(
       RECORD_COMPLETION_USAGE_COMMAND,
       (_accessor: unknown, scope: string, label: string) => {
@@ -1427,9 +1450,187 @@ export function QueryEditor({
           context: any,
           token: { isCancellationRequested?: boolean },
         ) => {
+          const cachedRelationSuggestions = () => {
+            const identity = extractLspDocumentIdentity(model.uri.toString());
+            if (identity?.driver === "elasticsearch" || identity?.driver === "elastic" || identity?.driver === "mongodb") {
+              return [];
+            }
+            return cachedRelationCompletionSuggestions(
+              monaco,
+              model,
+              position,
+              schemaTables,
+            );
+          };
+          const cachedFieldSuggestions = async () => {
+            const identity = extractLspDocumentIdentity(model.uri.toString());
+            if (
+              !effectiveConnectionId ||
+              identity?.driver === "elasticsearch" ||
+              identity?.driver === "elastic" ||
+              identity?.driver === "mongodb"
+            ) {
+              return [];
+            }
+            const textBeforeCursor = model.getValueInRange(
+              new monaco.Range(1, 1, position.lineNumber, position.column),
+            );
+            if (
+              RELATION_COMPLETION_CONTEXTS.has(
+                sqlContextKeywordBeforeCursor(textBeforeCursor) || "",
+              )
+            ) {
+              return [];
+            }
+            const relation = cachedSqlRelationForFieldCompletion(textBeforeCursor);
+            if (!relation) return [];
+
+            const word = model.getWordUntilPosition(position);
+            const range = new monaco.Range(
+              position.lineNumber,
+              word.startColumn,
+              position.lineNumber,
+              word.endColumn,
+            );
+            // A CTE shadows physical objects with the same name. Only an
+            // explicit CTE column list is losslessly available to this
+            // fallback; otherwise wait for the language service instead of
+            // querying unrelated table metadata.
+            if (relation.isCte) {
+              return (relation.cteColumns || []).map((column) => ({
+                label: column,
+                kind: monaco.languages.CompletionItemKind.Field,
+                detail: "CTE column",
+                documentation: {
+                  value: `Column declared by CTE ${relation.table}.`,
+                },
+                insertText: column,
+                sortText: `0:${column.toLocaleLowerCase()}`,
+                range,
+              }));
+            }
+
+            const schema =
+              relation.schema ||
+              activeTab?.targetSchema ||
+              currentSchema ||
+              activeTab?.databaseName ||
+              undefined;
+            // Table metadata is namespace-scoped. Do not turn an ambiguous
+            // unqualified relation into a request with a fabricated schema:
+            // the normal relation/keyword fallback remains available until
+            // the editor has a concrete namespace context.
+            if (!schema) return [];
+            const databaseName =
+              relation.database || activeTab?.databaseName || undefined;
+            const cacheKey = [
+              activeProjectId || "local",
+              effectiveConnectionId,
+              driver,
+              databaseName || "",
+              schema,
+              relation.table,
+            ].join("\u0000");
+            let columns = sqlFieldCacheRef.current.get(cacheKey);
+            if (!columns) {
+              try {
+                const metadata = await loadTableMetadata({
+                  projectId: activeProjectId || undefined,
+                  connectionId: effectiveConnectionId,
+                  driver,
+                  databaseName,
+                  schema,
+                  table: relation.table,
+                  includeIndexes: false,
+                  includeConstraints: false,
+                });
+                columns = metadata.columns.map((column) => ({
+                  name: column.name,
+                  dataType: column.data_type || "column",
+                  comment: column.comment,
+                }));
+                sqlFieldCacheRef.current.set(cacheKey, columns);
+              } catch (error) {
+                console.debug(
+                  `[QueryEditor] Cached field metadata unavailable for ${relation.table}`,
+                  error,
+                );
+                return [];
+              }
+            }
+            if (token?.isCancellationRequested) return [];
+            return columns.map((column) => ({
+              label: column.name,
+              kind: monaco.languages.CompletionItemKind.Field,
+              detail: `Cached ${column.dataType}`,
+              documentation: column.comment
+                ? { value: column.comment }
+                : { value: `Column from cached metadata for ${relation.table}.` },
+              insertText: column.name,
+              sortText: `0:${column.name.toLocaleLowerCase()}`,
+              range,
+            }));
+          };
+          const cachedSuggestions = async () => {
+            const fields = await cachedFieldSuggestions();
+            return fields.length > 0 ? fields : cachedRelationSuggestions();
+          };
+          const fallbackSuggestions = async () => {
+            const cached = await cachedSuggestions();
+            const textBeforeCursor = model.getValueInRange(
+              new monaco.Range(1, 1, position.lineNumber, position.column),
+            );
+            const word = model.getWordUntilPosition(position);
+            const range = new monaco.Range(
+              position.lineNumber,
+              word.startColumn,
+              position.lineNumber,
+              word.endColumn,
+            );
+            const typedWord = model.getValueInRange(range);
+            const nextCharacter = model
+              .getLineContent(position.lineNumber)
+              .slice(position.column - 1, position.column);
+            const completedContextKeyword =
+              isCompletedSqlContextKeyword(typedWord);
+            const insertRange = completedContextKeyword
+              ? new monaco.Range(
+                  position.lineNumber,
+                  position.column,
+                  position.lineNumber,
+                  position.column,
+                )
+              : range;
+            const syntax = sqlSyntaxFallbackCompletions(textBeforeCursor).map((item) => ({
+              label: item.label,
+              kind: toMonacoCompletionKind(monaco, item.kind),
+              detail: item.detail || "SQL syntax",
+              documentation: { value: "Available SQL syntax for the current clause." },
+              // Use the same completed-keyword replacement semantics as a
+              // live LSP response. In particular, an offline/restarting LSP
+              // must append ` DISTINCT` after a typed `SELECT`, not replace
+              // the statement keyword with the fallback proposal.
+              insertText: appendSqlCompletionSpace(
+                completionInsertText(item, completedContextKeyword),
+                {
+                  enabled: editorSettings.sqlCompletion.appendSpace,
+                  itemType: sqlCompletionItemType(item),
+                  nextCharacter,
+                },
+              ),
+              filterText: completionFilterText(
+                item,
+                typedWord,
+                completedContextKeyword,
+              ),
+              sortText: item.sortText || `9:${item.label}`,
+              range: insertRange,
+            }));
+            return mergeCompletionFallbackSuggestions(cached, syntax);
+          };
           try {
             const uri = model.uri.toString();
-            if (!isSupportedLspModelUri(uri)) return { suggestions: [] };
+            if (!isCurrentLspModelUri(uri)) return { suggestions: [] };
             const modelVersion = model.getVersionId();
             const requestGeneration =
               (completionRequestGenerationRef.current.get(uri) || 0) + 1;
@@ -1463,9 +1664,15 @@ export function QueryEditor({
               // catalog sync and cannot leak fields from another index.
               return { suggestions: [] };
             }
-            const languageId = identity?.driver
-              ? lspLanguageId(identity.driver)
-              : "sql";
+            if (!lspReady) {
+              return { suggestions: await fallbackSuggestions() };
+            }
+            const languageId =
+              identity?.driver?.toLowerCase() === driver.toLowerCase()
+                ? documentLanguageId
+                : identity?.driver
+                  ? lspLanguageId(identity.driver)
+                  : "sql";
             await syncLspModelBeforeCompletion({
               uri,
               model,
@@ -1504,6 +1711,9 @@ export function QueryEditor({
               word.endColumn,
             );
             const typedWord = model.getValueInRange(range);
+            const nextCharacter = model
+              .getLineContent(position.lineNumber)
+              .slice(position.column - 1, position.column);
             const completedContextKeyword =
               isCompletedSqlContextKeyword(typedWord);
             const textBeforeCursor = model.getValueInRange(
@@ -1527,6 +1737,18 @@ export function QueryEditor({
                     preferredElasticsearchIndex,
                 )
               : filterCompletionsForSqlContext(items, sqlContextKeyword);
+            // SQL LSPs commonly return field names after `WHERE column` but
+            // omit operators, and the context filter deliberately removes
+            // unrelated operators. Merge the small grammar layer afterwards
+            // so a partial live result cannot hide `=`, `IN`, `LIKE`, or the
+            // next boolean connector. Non-SQL console languages keep their
+            // own grammar and are not mixed with this fallback.
+            const completionItems = elasticsearchContext || isMongoDbDocument
+              ? filteredItems
+              : mergeCompletionFallbackSuggestions(
+                  filteredItems,
+                  sqlSyntaxFallbackCompletions(textBeforeCursor),
+                );
             const lineBeforeCursor = model
               .getLineContent(position.lineNumber)
               .slice(0, position.column - 1);
@@ -1555,50 +1777,40 @@ export function QueryEditor({
               ? mongodbJsonStringCompletionRange(monaco, model, position)
               : insertRange;
 
-            // Convert LSP completion items to Monaco format
-            const suggestions = filteredItems.map((item) => ({
-              label: item.label,
-              kind: toMonacoCompletionKind(monaco, item.kind),
-              detail: item.detail,
-              documentation: item.documentation,
-              insertText: completionInsertText(item, completedContextKeyword),
-              sortText: rankByUsage
-                ? usageRankedCompletionSortText(
-                    completionSortText(item),
-                    completionUsageScore(usageScope, item.label),
-                  )
-                : completionSortText(item),
-              filterText: completionFilterText(
-                item,
-                typedWord,
-                completedContextKeyword,
-              ),
-              preselect: item.preselect,
-              command: rankByUsage
-                ? {
-                    id: RECORD_COMPLETION_USAGE_COMMAND,
-                    title: "Record SQL completion usage",
-                    arguments: [usageScope, item.label],
-                  }
-                : undefined,
-              insertTextRules:
-                item.insertTextFormat === 2
-                  ? monaco.languages.CompletionItemInsertTextRule
-                      .InsertAsSnippet
-                  : undefined,
-              range: item.textEdit
-                ? toMonacoRange(monaco, item.textEdit.range)
-                : elasticsearchContext
-                  ? elasticsearchInsertRange
-                  : isMongoDbDocument
-                    ? mongodbInsertRange
-                    : insertRange,
-            }));
+            const suggestions = lspCompletionItemsToMonacoSuggestions({
+              monaco,
+              items: completionItems,
+              typedWord,
+              completedContextKeyword,
+              defaultRange: elasticsearchContext
+                ? elasticsearchInsertRange
+                : isMongoDbDocument
+                  ? mongodbInsertRange
+                  : insertRange,
+              rankByUsage,
+              usageScope,
+              recordUsageCommand: RECORD_COMPLETION_USAGE_COMMAND,
+              appendSpace: editorSettings.sqlCompletion.appendSpace,
+              nextCharacter,
+            });
 
-            return { suggestions };
+            // A healthy language server can still return no proposals while
+            // metadata is being refreshed, a newly opened document has not
+            // reached its first semantic pass, or a generic dialect cannot
+            // classify a vendor extension. Preserve the same conservative
+            // cache fallback used during startup in that narrow case. It only
+            // returns an unambiguous relation's columns or existing Explorer
+            // objects, so an empty LSP response never turns into cross-schema
+            // guessing.
+            return {
+              suggestions: await completionSuggestionsOrCached(
+                suggestions,
+                fallbackSuggestions,
+              ),
+            };
           } catch (error) {
             console.error("[LSP] Completion failed:", error);
-            return { suggestions: [] };
+            return { suggestions: await fallbackSuggestions() };
           }
         },
       }),
@@ -1608,19 +1820,89 @@ export function QueryEditor({
       monaco.languages.registerHoverProvider(language, {
         provideHover: async (model: any, position: any) => {
           const uri = model.uri.toString();
-          if (!isSupportedLspModelUri(uri)) return null;
+          if (!isCurrentLspModelUri(uri)) return null;
+          const hoverModelVersion = model.getVersionId();
+          try {
+            const identity = extractLspDocumentIdentity(uri);
+            await syncLspModelBeforeCompletion({
+              uri,
+              model,
+              languageId:
+                identity?.driver?.toLowerCase() === driver.toLowerCase()
+                  ? documentLanguageId
+                  : identity?.driver
+                    ? lspLanguageId(identity.driver)
+                    : "sql",
+              client: lspClient,
+              openedDocuments: openedDocumentsRef.current,
+              documentVersions: documentVersionsRef.current,
+              documentTexts: documentTextsRef.current,
+            });
+          } catch {
+            // Keep the cached server hover available during a transient sync
+            // failure; metadata hover below remains independent and cached.
+          }
+          if (model.getVersionId() !== hoverModelVersion) return null;
+          const line = model.getLineContent(position.lineNumber);
+          const identifier = sqlIdentifierAtColumn(line, position.column);
+          const relation =
+            effectiveConnectionId &&
+            capabilities.supportsTableBrowsing &&
+            isSqlRelationIdentifierContext(line, position.column)
+              ? findQueryEditorHoverTable(schemaTables, identifier)
+              : null;
+          const hoverSchema = activeTab?.targetSchema || currentSchema;
+          const hoverConnectionId = effectiveConnectionId;
+          const modelVersion = model.getVersionId();
+          const [lspHover, metadata] = await Promise.all([
+            lspClient
+              .getHover(uri, position.lineNumber - 1, position.column - 1)
+              .catch(() => null),
+            relation && hoverSchema && hoverConnectionId
+              ? loadTableMetadata({
+                  projectId: activeProjectId || undefined,
+                  connectionId: hoverConnectionId,
+                  driver,
+                  databaseName: activeTab?.databaseName || undefined,
+                  schema: hoverSchema,
+                  table: relation.name,
+                  includeIndexes: true,
+                  includeConstraints: false,
+                }).catch(() => null)
+              : Promise.resolve(null),
+          ]);
+          if (model.getVersionId() !== modelVersion) return null;
 
-          const hover = await lspClient.getHover(
-            uri,
-            position.lineNumber - 1,
-            position.column - 1,
-          );
-
-          if (!hover) return null;
-
+          const contents = [
+            ...(metadata
+              ? [
+                  {
+                    value: buildQueryEditorTableHoverMarkdown({
+                      schema: hoverSchema,
+                      table: { name: relation!.name, tableType: relation!.type },
+                      columns: metadata.columns,
+                      indexes: metadata.indexes,
+                    }),
+                  },
+                ]
+              : []),
+            ...(lspHover ? [{ value: lspHover.contents }] : []),
+          ];
+          if (contents.length === 0) return null;
+          const word = model.getWordAtPosition(position);
+          const fallbackRange = word
+            ? new monaco.Range(
+                position.lineNumber,
+                word.startColumn,
+                position.lineNumber,
+                word.endColumn,
+              )
+            : undefined;
           return {
-            contents: [{ value: hover.contents }],
-            range: hover.range ? toMonacoRange(monaco, hover.range) : undefined,
+            contents,
+            range: lspHover?.range
+              ? toMonacoRange(monaco, lspHover.range)
+              : fallbackRange,
           };
         },
       }),
@@ -1630,7 +1912,7 @@ export function QueryEditor({
       monaco.languages.registerDefinitionProvider(language, {
         provideDefinition: async (model: any, position: any) => {
           const uri = model.uri.toString();
-          if (!isSupportedLspModelUri(uri)) return [];
+          if (!isCurrentLspModelUri(uri)) return [];
 
           const locations = await lspClient.getDefinitions(
             uri,
@@ -1644,6 +1926,14 @@ export function QueryEditor({
               await revealLspDatabaseDefinition(
                 location.uri,
                 activeProjectId || "local"
+              )
+            ) {
+              continue;
+            }
+            if (
+              await revealLspProjectDefinition(
+                location.uri,
+                activeProjectId || "local",
               )
             ) {
               continue;
@@ -1662,7 +1952,7 @@ export function QueryEditor({
       monaco.languages.registerReferenceProvider(language, {
         provideReferences: async (model: any, position: any) => {
           const uri = model.uri.toString();
-          if (!isSupportedLspModelUri(uri)) return [];
+          if (!isCurrentLspModelUri(uri)) return [];
 
           const locations = await lspClient.getReferences(
             uri,
@@ -1682,7 +1972,7 @@ export function QueryEditor({
       monaco.languages.registerDocumentFormattingEditProvider(language, {
         provideDocumentFormattingEdits: async (model: any, options: any) => {
           const uri = model.uri.toString();
-          if (!isSupportedLspModelUri(uri)) return [];
+          if (!isCurrentLspModelUri(uri)) return [];
 
           const edits = await lspClient.formatDocument(
             uri,
@@ -1706,7 +1996,7 @@ export function QueryEditor({
           options: any
         ) => {
           const uri = model.uri.toString();
-          if (!isSupportedLspModelUri(uri)) return [];
+          if (!isCurrentLspModelUri(uri)) return [];
           const edits = await lspClient.formatRange(
             uri,
             {
@@ -1736,7 +2026,7 @@ export function QueryEditor({
         signatureHelpRetriggerCharacters: [","],
         provideSignatureHelp: async (model: any, position: any) => {
           const uri = model.uri.toString();
-          if (!isSupportedLspModelUri(uri)) return null;
+          if (!isCurrentLspModelUri(uri)) return null;
           const help = await lspClient.getSignatureHelp(
             uri,
             position.lineNumber - 1,
@@ -1747,10 +2037,10 @@ export function QueryEditor({
             value: {
               signatures: help.signatures.map((signature) => ({
                 label: signature.label,
-                documentation: lspDocumentationValue(signature.documentation),
+                documentation: lspDocumentationForMonaco(signature.documentation),
                 parameters: (signature.parameters || []).map((parameter) => ({
                   label: parameter.label,
-                  documentation: lspDocumentationValue(parameter.documentation),
+                  documentation: lspDocumentationForMonaco(parameter.documentation),
                 })),
                 activeParameter: signature.activeParameter,
               })),
@@ -1767,7 +2057,7 @@ export function QueryEditor({
       monaco.languages.registerRenameProvider(language, {
         resolveRenameLocation: async (model: any, position: any) => {
           const uri = model.uri.toString();
-          if (!isSupportedLspModelUri(uri)) {
+          if (!isCurrentLspModelUri(uri)) {
             return {
               range: new monaco.Range(
                 position.lineNumber,
@@ -1830,7 +2120,7 @@ export function QueryEditor({
             context: any
           ) => {
             const uri = model.uri.toString();
-            if (!isSupportedLspModelUri(uri)) {
+            if (!isCurrentLspModelUri(uri)) {
               return { actions: [], dispose: () => undefined };
             }
             const actions = await lspClient.getCodeActions(
@@ -1897,7 +2187,7 @@ export function QueryEditor({
         displayName: "Database symbols",
         provideDocumentSymbols: async (model: any) => {
           const uri = model.uri.toString();
-          if (!isSupportedLspModelUri(uri)) return [];
+          if (!isCurrentLspModelUri(uri)) return [];
           const symbols = await lspClient.getDocumentSymbols(uri);
           const convertSymbol = (symbol: any): any => ({
             name: symbol.name,
@@ -1917,7 +2207,7 @@ export function QueryEditor({
       monaco.languages.registerFoldingRangeProvider(language, {
         provideFoldingRanges: async (model: any) => {
           const uri = model.uri.toString();
-          if (!isSupportedLspModelUri(uri)) return [];
+          if (!isCurrentLspModelUri(uri)) return [];
           return (await lspClient.getFoldingRanges(uri)).map((range) => ({
             start: range.startLine + 1,
             end: range.endLine + 1,
@@ -1930,7 +2220,7 @@ export function QueryEditor({
       monaco.languages.registerSelectionRangeProvider(language, {
         provideSelectionRanges: async (model: any, positions: any[]) => {
           const uri = model.uri.toString();
-          if (!isSupportedLspModelUri(uri)) return [];
+          if (!isCurrentLspModelUri(uri)) return [];
           const selections = await lspClient.getSelectionRanges(
             uri,
             positions.map((position) => ({
@@ -1963,7 +2253,7 @@ export function QueryEditor({
           token: { isCancellationRequested?: boolean }
         ) => {
           const uri = model.uri.toString();
-          if (!isSupportedLspModelUri(uri)) {
+          if (!isCurrentLspModelUri(uri)) {
             return { data: new Uint32Array() };
           }
           const result = await lspClient.getSemanticTokens(uri);
@@ -1984,7 +2274,7 @@ export function QueryEditor({
         displayName: "Database parameter hints",
         provideInlayHints: async (model: any, range: any) => {
           const uri = model.uri.toString();
-          if (!isSupportedLspModelUri(uri)) {
+          if (!isCurrentLspModelUri(uri)) {
             return { hints: [], dispose: () => undefined };
           }
           const hints = await lspClient.getInlayHints(uri, {
@@ -2014,7 +2304,7 @@ export function QueryEditor({
                 hint.kind === 1
                   ? monaco.languages.InlayHintKind.Type
                   : monaco.languages.InlayHintKind.Parameter,
-              tooltip: lspDocumentationValue(hint.tooltip),
+              tooltip: lspDocumentationForMonaco(hint.tooltip),
               textEdits: hint.textEdits?.map((edit) => ({
                 range: toMonacoRange(monaco, edit.range),
                 text: edit.newText,
@@ -2058,7 +2348,12 @@ export function QueryEditor({
     activeTab?.databaseName,
     activeTab?.targetSchema,
     currentSchema,
+    schemaTables,
     driver,
+    driverCatalogStatus,
+    canUseLsp,
+    documentLanguageId,
+    documentUri,
     effectiveConnectionId,
     editorSettings.sqlCompletion.rankByUsage,
   ]);
@@ -2101,7 +2396,6 @@ export function QueryEditor({
           if (
             disposed ||
             uri !== documentUri ||
-            !isSupportedLspModelUri(uri) ||
             (context.selectedSuggestionInfo && !isElasticsearchConsole)
           ) {
             return { items: [] };
@@ -2156,7 +2450,7 @@ export function QueryEditor({
               value,
               offset,
               preferredElasticsearchIndex,
-              elasticsearchMajorVersion,
+              elasticsearchServerVersion,
             );
             if (consoleText) {
               setInlineCompletionStatus("local");
@@ -2450,7 +2744,7 @@ export function QueryEditor({
     inlineCompletionModel,
     inlineCompletionProtocol,
     isElasticsearchConsole,
-    elasticsearchMajorVersion,
+    elasticsearchServerVersion,
     isActivePane,
     lspClient,
     lspReady,
@@ -2489,7 +2783,9 @@ export function QueryEditor({
       monaco.editor.setModelMarkers(
         model,
         "sql-lsp",
-        diagnostics.map((diagnostic) => toMarker(monaco, diagnostic)),
+        diagnostics.map((diagnostic) =>
+          lspDiagnosticToMonacoMarker(monaco, diagnostic),
+        ),
       );
     }).then((cleanup) => {
       if (disposed) {
@@ -2585,11 +2881,13 @@ export function QueryEditor({
   };
 
   const transactionIdForExecution = () =>
-    supportsTransactions &&
-    transactionMode === "manual" &&
-    activeTransactionState === "active"
-      ? getTransactionId() || undefined
-      : undefined;
+    queryTransactionExecutionId({
+      supportsTransactions,
+      transactionMode,
+      transactionState: activeTransactionState,
+      connectionId: effectiveConnectionId,
+      tabId: activeTab?.id,
+    });
 
   const requestParameterizedExecution = (
     sql: string,
@@ -2616,12 +2914,7 @@ export function QueryEditor({
     const editor = editorRef.current;
     const selection = editor?.getSelection();
     const model = editor?.getModel();
-    if (!selection || !model) return activeTab?.sql || "";
-
-    const selectedText = model.getValueInRange(selection);
-    return selectedText && selectedText.trim()
-      ? selectedText
-      : model.getValue();
+    return selectedOrFullEditorText(model, selection, activeTab?.sql || "");
   };
 
   const currentElasticsearchRequest = (editor: any, model: any) => {
@@ -2671,41 +2964,66 @@ export function QueryEditor({
       filters: [{ name: "SQL scripts", extensions: ["sql"] }],
     });
     if (typeof selected !== "string") return;
-    const pathParts = selected.split(/[\\/]/);
-    const fileName = pathParts[pathParts.length - 1] || "SQL script";
-    if (
-      !window.confirm(
-        `Run "${fileName}" against the selected data source?\n\nThe script may create, update, or delete data. OxideStudio will execute it using the active database and schema.`,
-      )
-    ) {
-      return;
-    }
-
+    const selectedFileName = selected.split(/[\\/]/).pop() || "SQL script";
     const taskStore = useTaskStore.getState();
     const taskId = taskStore.startTask({
       kind: "import",
-      title: `Import ${fileName}`,
+      title: `Review ${selectedFileName}`,
       detail: activeConnection?.name || effectiveConnectionId,
     });
+    let preview;
     try {
-      const imported = await queryService.importSqlScript(
+      preview = await queryService.previewSqlScriptImport(
         effectiveConnectionId,
         selected,
-        activeTab.targetSchema ?? currentSchema ?? undefined,
-        activeTab.databaseName,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      taskStore.failTask(taskId, message, "SQL script review failed");
+      return;
+    }
+    taskStore.setTaskWaiting(taskId, "Awaiting SQL script review");
+    setPendingSqlScriptImport({
+      connectionId: effectiveConnectionId,
+      filePath: selected,
+      schema: activeTab.targetSchema ?? currentSchema ?? undefined,
+      database: activeTab.databaseName,
+      target: activeConnection?.name || effectiveConnectionId,
+      preview,
+      taskId,
+    });
+  };
+
+  const handleConfirmSqlScriptImport = async () => {
+    const pending = pendingSqlScriptImport;
+    if (!pending) return;
+    const taskStore = useTaskStore.getState();
+    setIsSqlScriptImporting(true);
+    taskStore.setTaskRunning(pending.taskId, pending.target);
+    taskStore.updateTask(pending.taskId, { title: `Import ${pending.preview.fileName}` });
+    try {
+      const imported = await queryService.importSqlScript(
+        pending.connectionId,
+        pending.filePath,
+        pending.preview.reviewDigest,
+        pending.schema,
+        pending.database,
       );
       taskStore.finishTask(
-        taskId,
+        pending.taskId,
         `${imported.statementsExecuted.toLocaleString()} statements · ${imported.rowsAffected.toLocaleString()} rows affected`,
       );
-      await loadSchemas(effectiveConnectionId, true);
-      const schemaToRefresh = activeTab.targetSchema ?? currentSchema;
+      await loadSchemas(pending.connectionId, true);
+      const schemaToRefresh = pending.schema;
       if (schemaToRefresh) {
-        await loadTables(effectiveConnectionId, schemaToRefresh, true);
+        await loadTables(pending.connectionId, schemaToRefresh, true);
       }
       bumpMetadataVersion();
+      setPendingSqlScriptImport(null);
     } catch (error: any) {
-      taskStore.failTask(taskId, error?.message || String(error));
+      taskStore.failTask(pending.taskId, error?.message || String(error));
+    } finally {
+      setIsSqlScriptImporting(false);
     }
   };
 
@@ -2844,6 +3162,23 @@ export function QueryEditor({
       const position = editorRef.current.getPosition();
       if (!position) return;
       const fullQuery = model.getValue();
+      if (isMongoDbConsole) {
+        const command = mongodbCommandRangeAtCursor(
+          fullQuery,
+          model.getOffsetAt(position),
+        );
+        if (!command?.text.trim()) return;
+        if (requestParameterizedExecution(command.text, transactionId)) return;
+        if (!confirmEditorExecution(command.text)) return;
+        runTabQuery(
+          activeTab.id,
+          effectiveConnectionId,
+          command.text,
+          transactionId,
+          command.from,
+        );
+        return;
+      }
       let currentStatement: string;
       let currentStatementStartOffset: number | undefined;
       try {
@@ -3057,10 +3392,10 @@ export function QueryEditor({
   };
 
   const handleDatabaseChange = (database: string) => {
-    if (!activeTab || !configuredPostgresDatabase) return;
+    if (!activeTab || !canBrowseDatabaseCatalogs) return;
     setTargetDatabase(
       activeTab.id,
-      database === configuredPostgresDatabase ? null : database,
+      database === configuredCatalogDatabase ? null : database,
     );
   };
 
@@ -3450,20 +3785,7 @@ export function QueryEditor({
 
   const { mode } = (useContext(ThemeContext) as any) || { mode: "dark" };
   const editorOptions = useMemo(
-    () => ({
-      ...QUERY_EDITOR_OPTIONS,
-      fontSize: editorSettings.fontSize,
-      tabSize: editorSettings.tabSize,
-      wordWrap: editorSettings.wordWrap,
-      minimap: { enabled: editorSettings.minimap },
-      glyphMargin: isElasticsearchConsole,
-      inlineSuggest: { enabled: editorSettings.inlineCompletion.enabled },
-      lineNumbers:
-        editorSettings.keybindingMode === "vim" &&
-        editorSettings.vim.relativeLineNumbers
-          ? ("relative" as const)
-          : ("on" as const),
-    }),
+    () => buildQueryEditorOptions(editorSettings, isElasticsearchConsole),
     [
       editorSettings.fontSize,
       editorSettings.keybindingMode,
@@ -3649,7 +3971,7 @@ export function QueryEditor({
 
     if (
       !canExecuteDocument ||
-      !capabilities.supportsSqlQuery ||
+      (!capabilities.supportsSqlQuery && !isMongoDbConsole) ||
       !effectiveConnectionId ||
       isElasticsearchConsole
     ) {
@@ -3667,24 +3989,17 @@ export function QueryEditor({
           );
         return;
       }
-      const start = model.getPositionAt(startOffset);
-      const end = model.getPositionAt(Math.max(startOffset, endOffset - 1));
-      const decorations = [];
-      for (let line = start.lineNumber; line <= end.lineNumber; line += 1) {
-        const edgeClasses = [
-          line === start.lineNumber ? "oxide-current-statement-start" : "",
-          line === end.lineNumber ? "oxide-current-statement-end" : "",
-        ]
-          .filter(Boolean)
-          .join(" ");
-        decorations.push({
-          range: new monaco.Range(line, 1, line, 1),
+      const decorations = currentStatementLineFrames(
+        model,
+        startOffset,
+        endOffset,
+      ).map((frame) => ({
+          range: new monaco.Range(frame.lineNumber, 1, frame.lineNumber, 1),
           options: {
             isWholeLine: true,
-            className: `oxide-current-statement-line ${edgeClasses}`,
+            className: frame.className,
           },
-        });
-      }
+        }));
       currentStatementDecorationIdsRef.current = mountedEditor.deltaDecorations(
         currentStatementDecorationIdsRef.current,
         decorations,
@@ -3712,6 +4027,15 @@ export function QueryEditor({
         }
         const position = mountedEditor.getPosition();
         if (!position) return;
+        if (isMongoDbConsole) {
+          const command = mongodbCommandRangeAtCursor(
+            currentModel.getValue(),
+            currentModel.getOffsetAt(position),
+          );
+          if (command) decorate(command.from, command.to);
+          else decorate(0, 0);
+          return;
+        }
         const requestId = currentStatementRequestRef.current + 1;
         currentStatementRequestRef.current = requestId;
         try {
@@ -3750,6 +4074,7 @@ export function QueryEditor({
     documentUri,
     effectiveConnectionId,
     isElasticsearchConsole,
+    isMongoDbConsole,
     monaco,
     mountedEditor,
   ]);
@@ -3763,6 +4088,21 @@ export function QueryEditor({
       onFocusCapture={onActivate}
       onPointerDown={onActivate}
     >
+      <SqlScriptImportDialog
+        open={Boolean(pendingSqlScriptImport)}
+        preview={pendingSqlScriptImport?.preview || null}
+        target={pendingSqlScriptImport?.target || "selected data source"}
+        isSubmitting={isSqlScriptImporting}
+        onClose={() => {
+          if (pendingSqlScriptImport) {
+            useTaskStore
+              .getState()
+              .cancelTask(pendingSqlScriptImport.taskId, "SQL script review cancelled");
+          }
+          setPendingSqlScriptImport(null);
+        }}
+        onImport={handleConfirmSqlScriptImport}
+      />
       {activeTab.agentFileDiffPreview ? (
         <AgentFileDiffReviewBar preview={activeTab.agentFileDiffPreview} />
       ) : activeTab.gitFileDiffPreview ? (
@@ -3814,14 +4154,19 @@ export function QueryEditor({
           connectionId={effectiveConnectionId}
           currentSchema={activeTab.targetSchema ?? currentSchema}
           onSchemaChange={handleSchemaChange}
-          databases={driver === "postgres" ? postgresDatabases : undefined}
+          databases={
+            canBrowseDatabaseCatalogs ? catalogDatabases : undefined
+          }
           currentDatabase={
-            driver === "postgres"
-              ? activeTab.databaseName || configuredPostgresDatabase
+            canBrowseDatabaseCatalogs
+              ? activeTab.databaseName ||
+                configuredCatalogDatabase ||
+                catalogDatabases[0] ||
+                null
               : null
           }
           onDatabaseChange={
-            driver === "postgres" ? handleDatabaseChange : undefined
+            canBrowseDatabaseCatalogs ? handleDatabaseChange : undefined
           }
           isDatabaseRefreshing={postgresDatabaseDiscovery.isRefreshing}
           databaseSelectionDisabled={activeTransactionState === "active"}
@@ -3923,6 +4268,8 @@ export function QueryEditor({
                   return queryService.validateSqlSyntax(
                     driver,
                     virtualDocument.text,
+                    lspLanguageIdForCapabilities(capabilities),
+                    lspServerDialectForCapabilities(capabilities),
                   );
                 }
               : undefined
@@ -4135,26 +4482,41 @@ export function QueryEditor({
                   `${
                     isElasticsearchConsole
                       ? "Elasticsearch DSL completion"
+                      : usesGenericSqlLsp
+                        ? "Generic SQL completion: catalog objects are available, but vendor-specific syntax diagnostics are not claimed"
                       : "SQL language service"
-                  }: ${lspStatus}`
+                  }: ${lspStatus}${
+                    visibleLspSemanticPresentation
+                      ? ` — ${visibleLspSemanticPresentation.title}`
+                      : ""
+                  }`
                 }
               >
                 <span
                   className={cn(
                     "h-1.5 w-1.5 rounded-full",
-                    lspReady
-                      ? "bg-emerald-400"
-                      : lspStatus === "error"
+                    lspStatus === "error"
                         ? "bg-red-400"
+                        : !lspReady || visibleLspSemanticPresentation?.attention
+                          ? "bg-amber-400"
+                          : lspReady
+                            ? "bg-emerald-400"
                         : "bg-amber-400",
                   )}
                 />
-                {isElasticsearchConsole ? "DSL" : "SQL"}{" "}
+                {isElasticsearchConsole
+                  ? "DSL"
+                  : usesGenericSqlLsp
+                    ? "SQL generic"
+                    : "SQL"}{" "}
                 {lspReady
                   ? "ready"
                   : lspStatus === "error"
                     ? "error"
                     : "starting"}
+                {visibleLspSemanticPresentation
+                  ? ` · ${visibleLspSemanticPresentation.label}`
+                  : ""}
               </span>
             )}
           </div>

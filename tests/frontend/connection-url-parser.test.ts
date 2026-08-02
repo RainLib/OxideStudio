@@ -54,3 +54,45 @@ describe("Elasticsearch connection URLs", () => {
     expect(url.searchParams.get("request_cache")).toBe("true");
   });
 });
+
+describe("file-backed SQL connection URLs", () => {
+  it("keeps local file and in-memory paths out of the network URL builder", () => {
+    expect(
+      buildConnectionUrl({ driver: "sqlite", database: ":memory:" }),
+    ).toBe("sqlite::memory:");
+    expect(
+      buildConnectionUrl({
+        driver: "sqlite",
+        database: "/tmp/oxide.sqlite",
+      }),
+    ).toBe("sqlite:///tmp/oxide.sqlite");
+    expect(parseConnectionUrl("sqlite:///tmp/oxide.sqlite")).toMatchObject({
+      driver: "sqlite",
+      database: "/tmp/oxide.sqlite",
+    });
+  });
+});
+
+describe("signed external driver URL templates", () => {
+  it("renders JDBC grammar without reducing it to the generic URL shape", () => {
+    expect(
+      buildConnectionUrl({
+        driver: "trino",
+        host: "query.example.test",
+        port: 8443,
+        database: "hive/default",
+        connectionUrlTemplate: "jdbc:trino://{host}:{port}/{database}",
+      }),
+    ).toBe("jdbc:trino://query.example.test:8443/hive/default");
+  });
+
+  it("keeps a package-pinned JDBC prefix for the sidecar", () => {
+    expect(
+      normalizeConnectionUrlForDriver(
+        "oracle",
+        "jdbc:oracle:thin:@db.example.test:1521/ORCLPDB1",
+        { preserveJdbcPrefix: true },
+      ),
+    ).toBe("jdbc:oracle:thin:@db.example.test:1521/ORCLPDB1");
+  });
+});

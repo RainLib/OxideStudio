@@ -109,6 +109,12 @@ WebView 与 Rust 之间仍使用 `@tauri-apps/api/core` 的 `invoke()` 和 Tauri
 
 `src/lib/databaseDialect.ts` 定义前端 `DatabaseDriverProfile` 与离线 fallback capabilities。应用启动后非阻塞调用后端 `list_database_capabilities`，把该完整列表注册为当前构建的权威 driver catalog；Connection Form、Database Explorer 新建菜单和 AI `provider.list` 共用 `useDatabaseDriverCatalogStore`/同一 catalog。单 driver 的 `get_database_capabilities` 只更新能力，不得把未在完整列表中的 driver 误当成可创建。命令不可用或返回失败时保留内置 fallback，且不能阻塞主界面。`src/providers/` 将下列扩展点组合成 provider 注册：
 
+`src/features/database-drivers/model/referenceDriverCatalog.ts` 是另一层只读的产品覆盖
+目录，用于 Driver Manager 审核 70+ 发布目标。它不参与可连接驱动选择；一个条目必须经过
+签名 package 的安装、验证、激活（JDBC 还需受管理 Java runtime）后，才由后端 capability
+catalog 暴露给前端。这样产品路线图与可执行驱动、连接固定的 package 版本、Editor/LSP
+能力快照始终保持明确边界。
+
 - 驱动显示信息和连接参数；
 - 数据库对象的创建、预览、删除查询模板；
 - AI 工具族；
@@ -173,7 +179,7 @@ WebView，全文诊断和 gutter 请求索引在专用 Web Worker 中 debounce �
 后端：表数据通过参数化事务批次导入，CSV、
 JSON 和 SQL `INSERT` 导出采用有界分页写盘，SQL dump 导入保留脚本自身的事务语义。
 
-SQLite 和 SQL Server 当前没有运行时 driver；Cargo 中的 `sqlx/sqlite` feature 只服务本地 `MetaStore`，不代表可连接 SQLite 数据源。任何面向用户或 AI 的支持列表都以后端 `list_database_capabilities` 为权威来源，前端 profile 只提供显示/连接表单信息和离线降级。
+SQLite 现在使用独立的原生 `sqlx-sqlite` 数据源驱动：本地文件和 `:memory:` 均可连接，Explorer 可读取表、视图、列、索引和外键，编辑器可执行脚本并通过 SQLite LSP profile 获取 schema-aware completion；表/视图创建、表名/列名变更、列增删、索引增删、清空和删除由 SQLite 专用 DDL builder 执行，不复用 PostgreSQL DDL。`sqlite::memory:` 强制单连接池，避免同一会话被拆到不同的内存数据库。SQLite 暂不公布 Explain Plan、结构迁移执行或 Agent 只读事务包装能力，直至其专用的安全与渲染适配器完成。SQL Server 仍无内置运行时驱动，应通过已签名的外部 driver package 接入。任何面向用户或 AI 的支持列表都以后端 `list_database_capabilities` 为权威来源，前端 profile 只提供显示/连接表单信息和离线降级。
 
 ### 4.4 本地持久化
 
@@ -254,7 +260,7 @@ Schema baseline 不读取可变的 Explorer 展示树，而是调用 Rust `captu
 
 `compare_schema_snapshots` 把 source 定义为 desired、fresh live target 定义为 actual，并在 Rust 纯领域层生成稳定 change、风险、可逆性、warning 和 dialect SQL。支持对象通过 dependency graph 拓扑排序并携带 phase/order/dependsOn；外键脱离 `CREATE TABLE`，changed index/constraint 拆为 drop/recreate。无法完整重建、依赖被阻断或出现 cycle 时清除 runnable SQL，而不是猜测或添加 `CASCADE`。artifact 另有 NOT NULL/UNIQUE/FK/drop 等只读 preflight surface。PostgreSQL migration preview 以 `ROLLBACK` 结束，MySQL 明示 DDL auto-commit。AI action 通过 `tabId + schemaDiffId + schemaChangeId` 定位精确 change。
 
-PostgreSQL 的显式 Apply 不接收前端 SQL：Rust 校验 snapshot 内容与 fingerprint、approved plan id、typed schema 和分级批准，再重新抓取 live target 并重算计划。机器可判定的 preflight 失败会阻断；通过后复用 driver 的 database-scoped 原子 batch，失败自动回滚。提交后再次抓取并 diff，区分 succeeded 与 committed-but-verification-failed；执行前生成的 reverse plan 只有在全量可逆且无 blocked change 时才作为 ROLLBACK-guarded artifact 发布。运行中、阻断、失败、复验失败和成功状态写入项目/连接级 MetaStore journal，结果不保存业务行值。MySQL 自动 Apply 因 DDL auto-commit 继续由后端拒绝。完整边界见 [ADR-0005](decisions/0005-schema-snapshot-diff.md)、[ADR-0006](decisions/0006-migration-dependency-preflight.md) 与 [ADR-0013](decisions/0013-schema-migration-execution.md)。
+PostgreSQL 的显式 Apply 不接收前端 SQL：Rust 校验 snapshot 内容与 fingerprint、approved plan id、typed schema 和分级批准，再重新抓取 live target 并重算计划。机器可判定的 preflight 失败会阻断；通过后复用 driver 的 database-scoped 原子 batch，失败自动回滚。MySQL 使用同一重新校验和 preflight 边界，但必须有额外的非事务确认；DDL 逐条执行、每条成功后写入 journal，失败保留可能已提交的精确进度，不能被描述为可回滚事务。两者提交后都再次抓取并 diff，区分 succeeded 与 committed-but-verification-failed；执行前生成的 reverse plan 只有在全量可逆且无 blocked change 时才作为 ROLLBACK-guarded artifact 发布。运行中、阻断、失败、复验失败、意外中断和成功状态写入项目/连接级 MetaStore journal；来自旧进程的 `running` 条目会被标成不可恢复的 `interrupted`，要求重新抓取 live schema，结果不保存业务行值。完整边界见 [ADR-0005](decisions/0005-schema-snapshot-diff.md)、[ADR-0006](decisions/0006-migration-dependency-preflight.md) 与 [ADR-0013](decisions/0013-schema-migration-execution.md)。
 
 Schema Diagram 复用同一完整 snapshot，不从可变 Explorer tree 重建结构。前端领域层把 in-schema FK 规范化为保留复合列映射的 edge，以 parent → child 做确定性分层布局；cycle 不会导致节点丢失。每个 connection/database/schema 复用一个 artifact tab，刷新 snapshot 时只保留仍存在的选中 relation。搜索、keys-only、列数上限、zoom/Fit 是视图投影；跨 schema/快照外 FK 只计入 external 数量，不伪造目标节点。双击 relation 通过稳定身份联动 Explorer。边界见 [ADR-0014](decisions/0014-schema-diagram-artifact.md)。
 

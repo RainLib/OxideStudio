@@ -155,13 +155,77 @@ describe("SchemaDiffView migration confirmation", () => {
     expect(mocks.executeMigration).not.toHaveBeenCalled();
   });
 
-  it("keeps automatic apply disabled for MySQL DDL", async () => {
+  it("requires an explicit partial-commit acknowledgement for MySQL DDL", async () => {
     await renderPlan("mysql");
+    const apply = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Apply reviewed plan"),
+    );
+
+    expect(apply?.disabled).toBe(false);
+    expect(apply?.title).toContain("each reviewed statement");
+    await act(async () => apply?.click());
+    expect(container.textContent).toContain("Confirm non-transactional migration");
+    expect(container.textContent).toContain("may leave earlier statements applied");
+
+    const run = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Run preflight & apply"),
+    );
+    const schemaInput = container.querySelector<HTMLInputElement>('input[type="text"]');
+    const approvals = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
+    await act(async () => {
+      if (schemaInput) {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          "value",
+        )?.set?.call(schemaInput, "Production / app / public");
+        schemaInput.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      approvals.forEach((approval) => approval.click());
+    });
+    expect(approvals).toHaveLength(3);
+    expect(run?.disabled).toBe(false);
+  });
+
+  it("keeps MariaDB's reviewed migration flow aligned with the backend alias", async () => {
+    const mariaPlan: SchemaDiffPlan = {
+      ...plan("mysql"),
+      id: "plan-mariadb",
+      driver: "mariadb",
+    };
+    const mariaTarget: SchemaSnapshot = {
+      ...target("mysql"),
+      driver: "mariadb",
+    };
+    useTabStore.getState().openSchemaDiffTab(mariaPlan, source, mariaTarget);
+    await act(async () => {
+      root.render(<SchemaDiffView />);
+    });
+
+    const apply = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Apply reviewed plan"),
+    );
+    expect(apply?.disabled).toBe(false);
+    await act(async () => apply?.click());
+    expect(container.textContent).toContain("Confirm non-transactional migration");
+  });
+
+  it("keeps project DDL baselines review-only even when the target is PostgreSQL", async () => {
+    const offlineSource: SchemaSnapshot = {
+      ...source,
+      id: "project-ddl-source",
+      fingerprint: "offline-fingerprint",
+      warnings: ["OFFLINE_PROJECT_DDL_REVIEW_ONLY", "Source: db/schema.sql"],
+    };
+    useTabStore.getState().openSchemaDiffTab(plan("postgres"), offlineSource, target("postgres"));
+    await act(async () => {
+      root.render(<SchemaDiffView />);
+    });
+
     const apply = [...container.querySelectorAll("button")].find((button) =>
       button.textContent?.includes("Apply safely"),
     );
-
     expect(apply?.disabled).toBe(true);
-    expect(apply?.title).toContain("PostgreSQL transactional DDL");
+    expect(apply?.title).toContain("Project DDL baselines are review-only");
+    expect(container.textContent).toContain("Capture a live baseline before creating an executable migration");
   });
 });

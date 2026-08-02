@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oxidestudio.local/schemas/database-driver-package-v1.json",
+  "title": "OxideStudio Database Driver Package Manifest",
+  "description": "The exact manifest.json bytes must be accompanied by a trusted Minisign detached signature named manifest.json.minisig.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "packageId",
+    "packageVersion",
+    "protocolVersion",
+    "driverId",
+    "displayName",
+    "clientLibrary",
+    "clientVersion",
+    "entrypoint",
+    "sha256"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "packageId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,96}$"
+    },
+    "packageVersion": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,96}$"
+    },
+    "protocolVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "driverId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,96}$"
+    },
+    "displayName": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "clientLibrary": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "clientVersion": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "entrypoint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "not": { "pattern": "(^/)|(^[A-Za-z]:)|(^|[\\/])\\.\\.([\\/]|$)" }
+    },
+    "sha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+    "runtime": {
+      "description": "Optional signed launch contract. Omitted packages are native executables. Java packages run only with OxideStudio's managed Java 21 runtime, never a JVM resolved from PATH.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "properties": { "kind": { "const": "native" } }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "javaMajor", "mainClass"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "java" },
+            "javaMajor": { "const": 21 },
+            "mainClass": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9_$.]+$" },
+            "classpath": {
+              "type": "array", "maxItems": 128, "uniqueItems": true,
+              "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["path", "sha256"],
+                "properties": {
+                  "path": { "type": "string", "minLength": 1, "maxLength": 240, "not": { "pattern": "(^/)|(^[A-Za-z]:)|(^|[\\/])\\.\\.([\\/]|$)" } },
+                  "sha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "supportedTargets": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 96 }
+    },
+    "serverVersionRange": {
+      "description": "Optional explicit comparator range, for example >= 6 < 9. The Host validates the detected server version after sidecar connect.",
+      "type": ["string", "null"],
+      "maxLength": 512
+    },
+    "connectionUrlTemplate": {
+      "description": "Signed form template. Allowed placeholders: {host}, {port}, {database}, {user}, {password}.",
+      "type": ["string", "null"],
+      "maxLength": 512
+    },
+    "capabilities": {
+      "description": "Signed feature contract consumed by the connection form, Explorer and LSP routing. Omit only for legacy packages; omitted packages receive a conservative relational fallback.",
+      "type": ["object", "null"],
+      "required": [
+        "driver", "displayName", "dataModel", "lspLanguageId", "namespaceLabel", "identifierQuote", "defaultPort",
+        "supportsSqlQuery", "supportsTableBrowsing", "supportsCollectionBrowsing", "supportsKeyValueBrowsing", "supportsSchemas",
+        "supportsCreateDatabase", "supportsCreateDatabaseCharset", "supportsColumnComments", "supportsInlineColumnComments",
+        "supportsRenameDatabase", "supportsViews", "supportsReplaceView", "supportsMaterializedViews", "supportsTableIndexes",
+        "supportsTableConstraints", "supportsForeignKeys", "supportsCheckConstraints", "supportsFunctions", "supportsTransactions",
+        "supportsQueryCancellation", "supportsExplainPlan", "autoIncrementKeyword", "defaultPrimaryKeyType", "commonDataTypes"
+      ],
+      "properties": {
+        "supportsCreateDatabaseOwner": { "type": "boolean", "default": false },
+        "supportsCreateDatabaseCollation": { "type": "boolean", "default": false },
+        "driver": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "dataModel": { "enum": ["relational", "document", "keyValue", "search", "graph", "wideColumn", "timeSeries", "coordination", "queue"] },
+        "connectionMode": {
+          "enum": ["network", "file"],
+          "description": "Optional for v1 compatibility. File packages render a path/:memory: form and never expose SSH/SSL controls."
+        },
+        "lspLanguageId": { "type": "string", "minLength": 1, "maxLength": 96 },
+        "lspServerDialect": {
+          "description": "Optional reviewed parser baseline for a generic sql document. Must be one of the bundled SQL dialects.",
+          "enum": ["postgres", "mysql", "sqlite", "duckdb", "hive", "clickhouse"]
+        },
+        "namespaceLabel": { "type": "string", "minLength": 1, "maxLength": 96 },
+        "defaultPort": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "supportsTableRowMutation": {
+          "type": "boolean",
+          "description": "Optional for v1 package compatibility. An omitted value defaults to false and never enables Grid mutations."
+        },
+        "supportsTableDataTransfer": {
+          "type": "boolean",
+          "description": "Optional for v1 package compatibility. An omitted value defaults to false and never enables cross-connection table transfer. It is intentionally separate from interactive Grid mutation."
+        },
+        "supportsTableDdl": {
+          "type": "boolean",
+          "description": "Optional for v1 package compatibility. An omitted value defaults to false and never enables Table Editor DDL."
+        },
+        "supportsDatabaseCatalogs": {
+          "type": "boolean",
+          "description": "Optional for v1 package compatibility. When true, Explorer may enumerate catalog/database nodes and issue catalog-scoped metadata requests."
+        },
+        "supportsConnectionDatabase": {
+          "type": "boolean",
+          "default": true,
+          "description": "Optional for v1 package compatibility. When false, the connection form does not render or append a database/catalog URL segment."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "supportsTableRowMutation": { "const": true } },
+            "required": ["supportsTableRowMutation"]
+          },
+          "then": {
+            "properties": { "supportsTransactions": { "const": true } },
+            "required": ["supportsTransactions"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "supportsTableDataTransfer": { "const": true } },
+            "required": ["supportsTableDataTransfer"]
+          },
+          "then": {
+            "properties": {
+              "dataModel": { "const": "relational" },
+              "supportsTableBrowsing": { "const": true },
+              "supportsTransactions": { "const": true },
+              "lspLanguageId": { "enum": ["postgres", "mysql", "sqlite", "duckdb"] }
+            },
+            "required": ["dataModel", "supportsTableBrowsing", "supportsTransactions", "lspLanguageId"]
+          }
+        }
+      ],
+      "additionalProperties": true
+    }
+  }
+}

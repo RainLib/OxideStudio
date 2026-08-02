@@ -3,10 +3,15 @@ import { tableService } from "@/services/tauri/table.service";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
+  listen: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: mocks.invoke,
+}));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: mocks.listen,
 }));
 
 describe("table service database scope", () => {
@@ -105,6 +110,243 @@ describe("table service database scope", () => {
       format: "json",
       firstRowHeader: true,
       database: "analytics",
+      csvOptions: undefined,
     });
+  });
+
+  it("passes an explicit reviewed CSV plan to the native streaming importer", async () => {
+    await tableService.importTableData(
+      "postgres-1",
+      "postgres",
+      "public",
+      "users",
+      "/tmp/users.csv",
+      "csv",
+      true,
+      "analytics",
+      {
+        delimiter: ";",
+        firstRowHeader: true,
+        columnMapping: [
+          { sourceIndex: 0, targetColumn: "id" },
+          { sourceIndex: 1, targetColumn: null },
+        ],
+        emptyFieldsAsNull: true,
+      },
+    );
+
+    expect(mocks.invoke).toHaveBeenCalledWith("import_table_data", {
+      connectionId: "postgres-1",
+      driver: "postgres",
+      schema: "public",
+      table: "users",
+      filePath: "/tmp/users.csv",
+      format: "csv",
+      firstRowHeader: true,
+      database: "analytics",
+      csvOptions: {
+        delimiter: ";",
+        firstRowHeader: true,
+        columnMapping: [
+          { sourceIndex: 0, targetColumn: "id" },
+          { sourceIndex: 1, targetColumn: null },
+        ],
+        emptyFieldsAsNull: true,
+      },
+    });
+  });
+
+  it("requests a bounded native CSV preview before a reviewed streaming import", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: {
+        fileName: "users.csv",
+        bytes: [101, 109, 97, 105, 108],
+        totalBytes: 5,
+        truncated: false,
+      },
+    });
+
+    await tableService.previewTableCsvImport("/tmp/users.csv");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("preview_table_csv_import", {
+      filePath: "/tmp/users.csv",
+    });
+  });
+
+  it("requests a structured JSON preview before a reviewed import", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: {
+        fileName: "users.json",
+        totalBytes: 32,
+        sourceColumns: ["id", "email"],
+        sampleRows: [{ id: 1, email: "reader@example.test" }],
+        totalRows: 1,
+        truncated: false,
+      },
+    });
+
+    await tableService.previewTableJsonImport("/tmp/users.json");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("preview_table_json_import", {
+      filePath: "/tmp/users.json",
+    });
+  });
+
+  it("requests a structured XLSX preview before a reviewed import", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: {
+        fileName: "users.xlsx",
+        totalBytes: 128,
+        sheetName: "Users",
+        sourceColumns: ["id", "email"],
+        sampleRows: [{ id: 1, email: "reader@example.test" }],
+        totalRows: 1,
+        truncated: false,
+      },
+    });
+
+    await tableService.previewTableXlsxImport("/tmp/users.xlsx");
+
+    expect(mocks.invoke).toHaveBeenCalledWith("preview_table_xlsx_import", {
+      filePath: "/tmp/users.xlsx",
+    });
+  });
+
+  it("keeps database-to-database copies behind an explicit preview and confirmation token", async () => {
+    const request = {
+      transferId: "transfer-test-0001",
+      source: {
+        connectionId: "source",
+        driver: "postgres" as const,
+        schema: "public",
+        table: "users",
+      },
+      target: {
+        connectionId: "target",
+        driver: "mysql" as const,
+        schema: "app",
+        table: "users_copy",
+      },
+      maxRows: 500,
+      batchSize: 100,
+      mode: "overwrite" as const,
+    };
+    mocks.invoke
+      .mockResolvedValueOnce({
+        success: true,
+        data: { confirmationToken: "TRANSFER A13F9C", mappedColumns: [] },
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        data: { rowsTransferred: 2, batches: 1, limitReached: false },
+      });
+
+    await tableService.previewTableDataTransfer(request);
+    await tableService.executeTableDataTransfer(request, "TRANSFER A13F9C");
+
+    expect(mocks.invoke).toHaveBeenNthCalledWith(
+      1,
+      "preview_table_data_transfer",
+      { request },
+    );
+    expect(mocks.invoke).toHaveBeenNthCalledWith(
+      2,
+      "execute_table_data_transfer",
+      { request, confirmationToken: "TRANSFER A13F9C" },
+    );
+  });
+
+  it("reviews and confirms creation of an empty transfer target separately from row copying", async () => {
+    const request = {
+      source: {
+        connectionId: "source",
+        driver: "postgres" as const,
+        database: "source_db",
+        schema: "public",
+        table: "users",
+      },
+      target: {
+        connectionId: "target",
+        driver: "mysql" as const,
+        database: "target_db",
+        schema: "app",
+        table: "users_copy",
+      },
+    };
+    mocks.invoke
+      .mockResolvedValueOnce({
+        success: true,
+        data: {
+          confirmationToken: "CREATE A13F9C21",
+          columns: [],
+          statements: ["CREATE TABLE `app`.`users_copy` (`id` BIGINT);"],
+          warnings: [],
+        },
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        data: {
+          table: "users_copy",
+          statements: ["CREATE TABLE `app`.`users_copy` (`id` BIGINT);"],
+        },
+      });
+
+    await tableService.previewTableDataTransferTarget(request);
+    await tableService.createTableDataTransferTarget(
+      request,
+      "CREATE A13F9C21",
+    );
+
+    expect(mocks.invoke).toHaveBeenNthCalledWith(
+      1,
+      "preview_table_data_transfer_target",
+      { request },
+    );
+    expect(mocks.invoke).toHaveBeenNthCalledWith(
+      2,
+      "create_table_data_transfer_target",
+      { request, confirmationToken: "CREATE A13F9C21" },
+    );
+  });
+
+  it("cancels a transfer by its stable id and filters progress payloads in the caller", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: "Transfer cancellation requested",
+    });
+    const unlisten = vi.fn();
+    mocks.listen.mockResolvedValueOnce(unlisten);
+    const progress = vi.fn();
+
+    await tableService.cancelTableDataTransfer("transfer-test-0001");
+    const stop = await tableService.listenTableDataTransferProgress(progress);
+
+    expect(mocks.invoke).toHaveBeenCalledWith("cancel_table_data_transfer", {
+      transferId: "transfer-test-0001",
+    });
+    expect(mocks.listen).toHaveBeenCalledWith(
+      "table-data-transfer://progress",
+      expect.any(Function),
+    );
+    const eventListener = mocks.listen.mock.calls[0]?.[1] as
+      | ((event: { payload: unknown }) => void)
+      | undefined;
+    eventListener?.({
+      payload: {
+        transferId: "transfer-test-0001",
+        rowsTransferred: 250,
+        maxRows: 1000,
+        batches: 1,
+        status: "running",
+        terminal: false,
+      },
+    });
+    expect(progress).toHaveBeenCalledWith(
+      expect.objectContaining({ rowsTransferred: 250, status: "running" }),
+    );
+    expect(stop).toBe(unlisten);
   });
 });

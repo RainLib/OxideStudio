@@ -340,6 +340,7 @@ export type AiToolAdapters = {
   listConnections: () => Promise<AiConnectionSummary[]> | AiConnectionSummary[];
   getConnectionCapabilities: (
     driver: DatabaseDriver,
+    connectionId?: string | null,
   ) => Promise<DatabaseCapabilities> | DatabaseCapabilities;
   listProjectFiles?: (input: { directory?: string | null }) => Promise<unknown[]> | unknown[];
   readProjectFile?: (input: { path: string }) => Promise<unknown> | unknown;

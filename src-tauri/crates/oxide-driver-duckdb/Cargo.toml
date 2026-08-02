@@ -1,0 +1,16 @@
+[package]
+name = "oxide-driver-duckdb"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Independently updateable DuckDB driver for OxideStudio"
+
+[[bin]]
+name = "oxide-driver-duckdb"
+path = "src/main.rs"
+
+[dependencies]
+duckdb = { version = "1.3.2", features = ["bundled"] }
+oxide-driver-protocol = { path = "../oxide-driver-protocol" }
+serde_json = "1"

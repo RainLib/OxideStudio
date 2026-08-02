@@ -47,12 +47,25 @@ export function isManagedConnection(
 
 export type { ConnectionDisplaySummary } from "@/startup/dataSourceDisplayCache";
 
+export type ConnectionRuntimeStatus =
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "error";
+
+export interface ConnectionRuntimeState {
+  status: ConnectionRuntimeStatus;
+  message?: string;
+  updatedAt: number;
+}
+
 interface ConnectionState {
   connections: ConnectionConfig[];
   connectionDisplayCache: ConnectionDisplaySummary[];
   hasConnectionDisplayCache: boolean;
   activeConnectionId: string | null;
   connectedConnectionIds: string[];
+  connectionRuntimeStates: Record<string, ConnectionRuntimeState>;
   isConnected: boolean;
   isLoading: boolean;
   loadError: string | null;
@@ -64,6 +77,8 @@ interface ConnectionState {
   createNewConnection: () => ConnectionConfig;
   updateConnectionConfig: (updates: Partial<ConnectionConfig>) => void;
   saveConnection: (config: ConnectionConfig) => Promise<void>;
+  /** Persist imported local data sources as one replacement write. */
+  importConnections: (configs: ConnectionConfig[]) => Promise<void>;
   removeConnection: (id: string) => Promise<void>;
   addConnection: (config: Omit<ConnectionConfig, "id">) => Promise<void>;
   testConnection: (config: ConnectionConfig) => Promise<string | null>;
@@ -74,7 +89,12 @@ interface ConnectionState {
 
 function connectionUrlForConfig(config: ConnectionConfig) {
   if (config.connectionUrl && config.connectionUrl.trim()) {
-    return normalizeConnectionUrlForDriver(config.driver, config.connectionUrl);
+    return normalizeConnectionUrlForDriver(config.driver, config.connectionUrl, {
+      // A connection pinned to an external package may use JDBC's nested
+      // scheme (`jdbc:oracle:...`). Preserve it instead of rewriting it for
+      // a bundled driver that happens to share the product name.
+      preserveJdbcPrefix: Boolean(config.driverPackageVersion),
+    });
   }
 
   return buildConnectionUrl({
@@ -104,6 +124,20 @@ let pendingConnectionLoad: {
   projectId: string;
   promise: Promise<void>;
 } | null = null;
+
+function beginConnectionRuntime(
+  states: Record<string, ConnectionRuntimeState>,
+  connectionId: string,
+) {
+  return Object.fromEntries(
+    Object.entries(states).map(([id, state]) => [
+      id,
+      id !== connectionId && state.status === "connecting"
+        ? { status: "idle" as const, updatedAt: Date.now() }
+        : state,
+    ]),
+  ) as Record<string, ConnectionRuntimeState>;
+}
 
 function activeProjectId() {
   try {
@@ -150,6 +184,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   hasConnectionDisplayCache: initialConnectionDisplayCache !== null,
   activeConnectionId: null,
   connectedConnectionIds: [],
+  connectionRuntimeStates: {},
   isConnected: false,
   isLoading: true,
   loadError: null,
@@ -179,6 +214,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         const connectedConnectionIds = get().connectedConnectionIds.filter(
           (id) => connections.some((connection) => connection.id === id),
         );
+        const connectionRuntimeStates = Object.fromEntries(
+          Object.entries(get().connectionRuntimeStates).filter(([id]) =>
+            connections.some((connection) => connection.id === id),
+          ),
+        );
 
         set({
           connections,
@@ -191,6 +231,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             ? activeConnectionId
             : null,
           connectedConnectionIds,
+          connectionRuntimeStates,
           isConnected: Boolean(
             activeConnectionExists &&
             activeConnectionId &&
@@ -311,6 +352,31 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     );
   },
 
+  importConnections: async (configs) => {
+    if (!configs.length) return;
+    if (configs.some(isManagedConnection)) {
+      throw new Error(
+        "Managed data sources cannot be imported into local connection storage.",
+      );
+    }
+    const imported = configs.map(scopeConnectionToActiveProject);
+    const state = get();
+    const updatedConnections = [...state.connections, ...imported];
+
+    // Use the same complete-list write as normal saves, but commit all imported
+    // candidates together so a failed write cannot leave a partial import.
+    await connectionService.saveConnections(updatedConnections, activeProjectId());
+    set({
+      connections: updatedConnections,
+      connectionDisplayCache: writeConnectionDisplayCache(
+        activeProjectId(),
+        updatedConnections,
+      ),
+      hasConnectionDisplayCache: true,
+      selectedConnection: imported[imported.length - 1] || state.selectedConnection,
+    });
+  },
+
   removeConnection: async (id) => {
     const state = get();
     const connectionToRemove = state.connections.find(
@@ -330,6 +396,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const connectedConnectionIds = state.connectedConnectionIds.filter(
       (connectionId) => connectionId !== id,
     );
+    const connectionRuntimeStates = { ...state.connectionRuntimeStates };
+    delete connectionRuntimeStates[id];
     const activeConnectionId =
       state.activeConnectionId === id
         ? (connectedConnectionIds[0] ?? null)
@@ -343,6 +411,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       hasConnectionDisplayCache: true,
       activeConnectionId,
       connectedConnectionIds,
+      connectionRuntimeStates,
       isConnected: Boolean(
         activeConnectionId &&
         connectedConnectionIds.includes(activeConnectionId),
@@ -380,6 +449,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         hasConnectionDisplayCache: true,
         activeConnectionId: state.activeConnectionId,
         connectedConnectionIds: state.connectedConnectionIds,
+        connectionRuntimeStates: state.connectionRuntimeStates,
         isConnected: state.isConnected,
         selectedConnection: state.selectedConnection,
       });
@@ -398,11 +468,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       return "Managed data sources are tested by the enterprise Gateway.";
     }
     try {
-      await connectionService.testConnection(
-        config.driver,
-        connectionUrlForConfig(config),
-        enabledSshTunnel(config),
-      );
+      const connectionUrl = connectionUrlForConfig(config);
+      const sshTunnel = enabledSshTunnel(config);
+      if (config.driverPackageVersion) {
+        await connectionService.testConnection(
+          config.driver,
+          connectionUrl,
+          sshTunnel,
+          config.driverPackageVersion,
+        );
+      } else {
+        await connectionService.testConnection(
+          config.driver,
+          connectionUrl,
+          sshTunnel,
+        );
+      }
       return null;
     } catch (e: any) {
       return e.message || String(e);
@@ -420,9 +501,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           latestConnectAttempt += 1;
           pending.attemptId = latestConnectAttempt;
         }
+        set((state) => ({
+          connectionRuntimeStates: {
+            ...beginConnectionRuntime(
+              state.connectionRuntimeStates,
+              config.id,
+            ),
+            [config.id]: { status: "connecting", updatedAt: Date.now() },
+          },
+        }));
         return pending.promise;
       }
       latestConnectAttempt += 1;
+      set((state) => ({
+        connectionRuntimeStates: {
+          ...beginConnectionRuntime(state.connectionRuntimeStates, config.id),
+          [config.id]: { status: "connecting", updatedAt: Date.now() },
+        },
+      }));
       const flight: PendingConnect = {
         attemptId: latestConnectAttempt,
         promise: Promise.resolve(null),
@@ -454,6 +550,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               new Set([...get().connectedConnectionIds, config.id]),
             ),
             isConnected: true,
+            connectionRuntimeStates: {
+              ...get().connectionRuntimeStates,
+              [config.id]: { status: "connected", updatedAt: Date.now() },
+            },
           });
           return null;
         } catch (error) {
@@ -463,7 +563,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           ) {
             return null;
           }
-          return error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
+          set((state) => ({
+            connectionRuntimeStates: {
+              ...state.connectionRuntimeStates,
+              [config.id]: {
+                status: "error",
+                message,
+                updatedAt: Date.now(),
+              },
+            },
+          }));
+          return message;
         } finally {
           if (pendingConnects.get(scopeKey) === flight) {
             pendingConnects.delete(scopeKey);
@@ -485,10 +597,28 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         latestConnectAttempt += 1;
         pending.attemptId = latestConnectAttempt;
       }
+      set((state) => ({
+        connectionRuntimeStates: {
+          ...beginConnectionRuntime(
+            state.connectionRuntimeStates,
+            scopedConfig.id,
+          ),
+          [scopedConfig.id]: { status: "connecting", updatedAt: Date.now() },
+        },
+      }));
       return pending.promise;
     }
 
     latestConnectAttempt += 1;
+    set((state) => ({
+      connectionRuntimeStates: {
+        ...beginConnectionRuntime(
+          state.connectionRuntimeStates,
+          scopedConfig.id,
+        ),
+        [scopedConfig.id]: { status: "connecting", updatedAt: Date.now() },
+      },
+    }));
     const flight: PendingConnect = {
       attemptId: latestConnectAttempt,
       promise: Promise.resolve(null),
@@ -496,12 +626,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     flight.promise = (async () => {
       try {
-        await connectionService.connect(
-          scopedConfig.id,
-          scopedConfig.driver,
-          connectionUrlForConfig(scopedConfig),
-          enabledSshTunnel(scopedConfig),
-        );
+        const connectionUrl = connectionUrlForConfig(scopedConfig);
+        const sshTunnel = enabledSshTunnel(scopedConfig);
+        if (scopedConfig.driverPackageVersion) {
+          await connectionService.connect(
+            scopedConfig.id,
+            scopedConfig.driver,
+            connectionUrl,
+            sshTunnel,
+            scopedConfig.driverPackageVersion,
+          );
+        } else {
+          await connectionService.connect(
+            scopedConfig.id,
+            scopedConfig.driver,
+            connectionUrl,
+            sshTunnel,
+          );
+        }
 
         if (
           flight.attemptId !== latestConnectAttempt ||
@@ -533,6 +675,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             new Set([...get().connectedConnectionIds, scopedConfig.id]),
           ),
           isConnected: true,
+          connectionRuntimeStates: {
+            ...get().connectionRuntimeStates,
+            [scopedConfig.id]: {
+              status: "connected",
+              updatedAt: Date.now(),
+            },
+          },
         });
 
         return null;
@@ -543,7 +692,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         ) {
           return null;
         }
-        return e.message || String(e);
+        const message = e.message || String(e);
+        set((state) => ({
+          connectionRuntimeStates: {
+            ...state.connectionRuntimeStates,
+            [scopedConfig.id]: {
+              status: "error",
+              message,
+              updatedAt: Date.now(),
+            },
+          },
+        }));
+        return message;
       } finally {
         if (pendingConnects.get(scopeKey) === flight) {
           pendingConnects.delete(scopeKey);
@@ -588,7 +748,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const schemaStore = useSchemaStore.getState();
       schemaStore.snapshotActiveMetadata();
       schemaStore.restoreConnectionSnapshot(id);
-      set({ activeConnectionId: id, isConnected: true });
+      set((state) => ({
+        activeConnectionId: id,
+        isConnected: true,
+        connectionRuntimeStates: {
+          ...state.connectionRuntimeStates,
+          [id]: { status: "connected", updatedAt: Date.now() },
+        },
+      }));
       return Promise.resolve(null);
     }
 
@@ -627,11 +794,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     } else {
       schemaStore.clearActiveMetadata();
     }
-    set({
+    set((state) => ({
       activeConnectionId: connectedConnectionIds[0] ?? null,
       connectedConnectionIds,
       isConnected: connectedConnectionIds.length > 0,
-    });
+      connectionRuntimeStates: connectionId
+        ? {
+            ...state.connectionRuntimeStates,
+            [connectionId]: { status: "idle", updatedAt: Date.now() },
+          }
+        : state.connectionRuntimeStates,
+    }));
   },
 }));
 

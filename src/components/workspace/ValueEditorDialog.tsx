@@ -4,6 +4,8 @@ import {
   Braces,
   CalendarClock,
   Check,
+  ChevronDown,
+  ChevronRight,
   CircleSlash2,
   Clipboard,
   FileText,
@@ -30,6 +32,7 @@ import {
   valueEditorDraft,
   valueEditorState,
   valueEditorSupportsEmpty,
+  parseJsonPreview,
   type ValueEditorKind,
   type ValueEditorState,
 } from "@/lib/valueEditor";
@@ -152,6 +155,9 @@ export function ValueEditorDialog({
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [jsonPresentation, setJsonPresentation] = useState<"text" | "tree">(
+    "text",
+  );
 
   useEffect(() => {
     if (!open || !target) return;
@@ -159,6 +165,7 @@ export function ValueEditorDialog({
     setDraft(valueEditorDraft(target.value, kind));
     setError(null);
     setCopied(false);
+    setJsonPresentation("text");
   }, [kind, open, target]);
 
   useEffect(() => {
@@ -184,6 +191,14 @@ export function ValueEditorDialog({
   );
   const canUseEmpty = valueEditorSupportsEmpty(kind);
   const editorLanguage = kind === "json" ? "json" : "plaintext";
+  const jsonPreview = useMemo(
+    () =>
+      kind === "json" && semanticState === "value"
+        ? parseJsonPreview(draft)
+        : null,
+    [draft, kind, semanticState],
+  );
+  const canShowJsonTree = jsonPreview?.ok === true;
 
   if (!target) return null;
 
@@ -405,6 +420,35 @@ export function ValueEditorDialog({
                     >
                       Compact
                     </button>
+                    <button
+                      type="button"
+                      className={cn(
+                        toolbarButtonVariants({ size: "sm" }),
+                        jsonPresentation === "tree" &&
+                          "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]",
+                      )}
+                      title={
+                        canShowJsonTree
+                          ? jsonPresentation === "tree"
+                            ? "Show JSON text"
+                            : "Inspect JSON as a tree"
+                          : jsonPreview?.error || "JSON tree is unavailable"
+                      }
+                      aria-label={
+                        jsonPresentation === "tree"
+                          ? "Show JSON text"
+                          : "Inspect JSON as a tree"
+                      }
+                      aria-pressed={jsonPresentation === "tree"}
+                      disabled={!canShowJsonTree}
+                      onClick={() =>
+                        setJsonPresentation((current) =>
+                          current === "tree" ? "text" : "tree",
+                        )
+                      }
+                    >
+                      Tree
+                    </button>
                   </>
                 )}
                 <button
@@ -485,6 +529,10 @@ export function ValueEditorDialog({
                     </span>
                   </label>
                 </div>
+              ) : kind === "json" &&
+                jsonPresentation === "tree" &&
+                jsonPreview?.ok ? (
+                <JsonTreePreview value={jsonPreview.value} />
               ) : (
                 <Editor
                   height="100%"
@@ -585,4 +633,105 @@ function StatePlaceholder({
       </div>
     </div>
   );
+}
+
+const JSON_TREE_CHILD_LIMIT = 500;
+
+function JsonTreePreview({ value }: { value: unknown }) {
+  return (
+    <div className="h-full overflow-auto px-3 py-3 font-mono text-[11px] leading-5 text-[hsl(var(--wb-text))]">
+      <JsonTreeNode label="$" value={value} depth={0} />
+    </div>
+  );
+}
+
+function JsonTreeNode({
+  label,
+  value,
+  depth,
+}: {
+  label: string;
+  value: unknown;
+  depth: number;
+}) {
+  const entries = jsonTreeEntries(value);
+  const expandable = entries !== null;
+  const [expanded, setExpanded] = useState(depth < 1);
+
+  if (!expandable) {
+    return (
+      <div className="break-all" style={{ paddingLeft: depth * 14 }}>
+        <span className="text-[hsl(var(--wb-text-muted))]">{label}: </span>
+        <span className={jsonPrimitiveClass(value)}>{jsonPrimitiveText(value)}</span>
+      </div>
+    );
+  }
+
+  const summary = Array.isArray(value)
+    ? `[${entries.length}${entries.length === 1 ? " item" : " items"}]`
+    : `{${entries.length}${entries.length === 1 ? " property" : " properties"}}`;
+  const visibleEntries = entries.slice(0, JSON_TREE_CHILD_LIMIT);
+
+  return (
+    <div>
+      <button
+        type="button"
+        className="flex min-h-5 items-center gap-1 break-all text-left hover:text-[hsl(var(--wb-accent))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]"
+        style={{ paddingLeft: depth * 14 }}
+        aria-expanded={expanded}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        {expanded ? (
+          <ChevronDown size={12} aria-hidden="true" />
+        ) : (
+          <ChevronRight size={12} aria-hidden="true" />
+        )}
+        <span className="text-[hsl(var(--wb-text-muted))]">{label}</span>
+        <span className="text-[hsl(var(--wb-text-secondary))]">{summary}</span>
+      </button>
+      {expanded && (
+        <div>
+          {visibleEntries.map(([key, child]) => (
+            <JsonTreeNode
+              key={key}
+              label={key}
+              value={child}
+              depth={depth + 1}
+            />
+          ))}
+          {entries.length > JSON_TREE_CHILD_LIMIT && (
+            <div
+              className="text-[hsl(var(--wb-text-muted))]"
+              style={{ paddingLeft: (depth + 1) * 14 }}
+            >
+              {entries.length - JSON_TREE_CHILD_LIMIT} more items. Use the text view to inspect all values.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function jsonTreeEntries(value: unknown): Array<[string, unknown]> | null {
+  if (Array.isArray(value)) {
+    return value.map((item, index) => [String(index), item]);
+  }
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>);
+  }
+  return null;
+}
+
+function jsonPrimitiveText(value: unknown) {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (value === null) return "null";
+  return String(value);
+}
+
+function jsonPrimitiveClass(value: unknown) {
+  if (value === null) return "text-[hsl(var(--wb-text-muted))]";
+  if (typeof value === "string") return "text-[hsl(var(--wb-accent))]";
+  if (typeof value === "boolean") return "text-[hsl(var(--wb-success))]";
+  return "text-[hsl(var(--wb-warning))]";
 }

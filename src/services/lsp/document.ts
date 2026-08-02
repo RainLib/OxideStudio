@@ -5,6 +5,11 @@ export type LspDocumentIdentity = {
   driver: DatabaseDriver;
 };
 
+export type LspProjectDocumentIdentity = {
+  projectId: string;
+  relativePath: string;
+};
+
 export function getLspDocumentUri(
   tabId: string,
   driver: DatabaseDriver,
@@ -18,6 +23,47 @@ export function getLspDocumentUri(
 
 export function getSqlDocumentUri(tabId: string, driver: DatabaseDriver) {
   return getLspDocumentUri(tabId, driver, "sql");
+}
+
+/**
+ * Stable URI for a saved project SQL file. The project id scopes the document
+ * without leaking an absolute local path to the language service.
+ */
+export function getLspProjectDocumentUri(
+  projectId: string,
+  relativePath: string,
+  _languageId = "sql",
+) {
+  const path = relativePath
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  return `oxide://project/${encodeURIComponent(projectId)}/${path}`;
+}
+
+export function parseLspProjectDocumentUri(
+  uri: string,
+): LspProjectDocumentIdentity | null {
+  try {
+    const value = new URL(uri);
+    if (value.protocol !== "oxide:" || value.hostname !== "project") {
+      return null;
+    }
+    const segments = value.pathname
+      .split("/")
+      .filter(Boolean)
+      .map((segment) => decodeURIComponent(segment));
+    const projectId = decodeURIComponent(value.pathname.split("/")[1] || "").trim();
+    if (!projectId || segments.length < 2) return null;
+    const relativePath = segments.slice(1).join("/");
+    if (!relativePath || relativePath.split("/").some((segment) => segment === "..")) {
+      return null;
+    }
+    return { projectId, relativePath };
+  } catch {
+    return null;
+  }
 }
 
 export function extractLspDocumentIdentity(

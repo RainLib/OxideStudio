@@ -9,14 +9,22 @@ import {
   defaultDatabaseCapabilities,
   resetRuntimeDatabaseCatalogForTests,
 } from "@/lib/databaseDialect";
-import { resetDatabaseDriverCatalogStoreForTests } from "@/store/useDatabaseDriverCatalogStore";
+import {
+  resetDatabaseDriverCatalogStoreForTests,
+  useDatabaseDriverCatalogStore,
+} from "@/store/useDatabaseDriverCatalogStore";
 import {
   useConnectionStore,
   type ConnectionConfig,
 } from "@/store/useConnectionStore";
+import { useSettingsStore } from "@/store/useSettingsStore";
 
 const mocks = vi.hoisted(() => ({
   listDatabaseCapabilities: vi.fn(),
+  listDatabaseDriverInstallations: vi.fn(),
+  getDatabaseCapabilities: vi.fn(),
+  getExternalDatabaseDriverCatalog: vi.fn(),
+  installExternalDatabaseDriverFromCatalog: vi.fn(),
   connectionService: {
     connect: vi.fn(),
     testConnection: vi.fn(),
@@ -29,11 +37,17 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/services/tauri", () => ({
   databaseService: {
     listDatabaseCapabilities: mocks.listDatabaseCapabilities,
+    listDatabaseDriverInstallations: mocks.listDatabaseDriverInstallations,
+    getDatabaseCapabilities: mocks.getDatabaseCapabilities,
+    getExternalDatabaseDriverCatalog: mocks.getExternalDatabaseDriverCatalog,
+    installExternalDatabaseDriverFromCatalog:
+      mocks.installExternalDatabaseDriverFromCatalog,
   },
   connectionService: mocks.connectionService,
 }));
 
 const initialConnectionState = useConnectionStore.getState();
+const initialSettingsState = useSettingsStore.getState();
 
 function selectedConnection(): ConnectionConfig {
   return {
@@ -77,6 +91,10 @@ describe("ConnectionForm", () => {
     mocks.listDatabaseCapabilities.mockResolvedValue([
       defaultDatabaseCapabilities("postgres"),
     ]);
+    mocks.listDatabaseDriverInstallations.mockResolvedValue([]);
+    mocks.getDatabaseCapabilities.mockResolvedValue(
+      defaultDatabaseCapabilities("postgres"),
+    );
     testConnection = vi.fn(async () => null);
     saveConnection = vi.fn(async () => undefined);
     connect = vi.fn(async () => null);
@@ -95,6 +113,17 @@ describe("ConnectionForm", () => {
       connect,
       updateConnectionConfig: vi.fn(),
     });
+    useSettingsStore.setState({
+      ...initialSettingsState,
+      settings: {
+        ...initialSettingsState.settings,
+        drivers: {
+          ...initialSettingsState.settings.drivers,
+          catalogUrl: "",
+        },
+      },
+      updateSettings: vi.fn(async () => undefined),
+    });
   });
 
   afterEach(() => {
@@ -102,6 +131,7 @@ describe("ConnectionForm", () => {
     root = null;
     container.remove();
     useConnectionStore.setState(initialConnectionState, true);
+    useSettingsStore.setState(initialSettingsState, true);
   });
 
   it("keeps testing as a non-submit action without saving or connecting", async () => {
@@ -161,6 +191,182 @@ describe("ConnectionForm", () => {
     expect(onSubmit).not.toHaveBeenCalled();
     expect(saveConnection).not.toHaveBeenCalled();
     expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("uses the connection-pinned package capability while keeping credentials for drivers without a database URL segment", async () => {
+    const connection = selectedConnection();
+    connection.driverPackageVersion = "2.4.0";
+    useConnectionStore.setState({ selectedConnection: connection });
+    mocks.getDatabaseCapabilities.mockResolvedValueOnce({
+      ...defaultDatabaseCapabilities("postgres"),
+      supportsConnectionDatabase: false,
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<ConnectionForm />);
+      await flushAsyncWork();
+    });
+
+    expect(mocks.getDatabaseCapabilities).toHaveBeenCalledWith(
+      "postgres",
+      "2.4.0",
+    );
+    expect(container.querySelector("#connection-database")).toBeNull();
+    expect(container.querySelector("#connection-user")).not.toBeNull();
+    expect(container.querySelector("#connection-password")).not.toBeNull();
+  });
+
+  it("does not offer a JDBC package that has no verified managed runtime", async () => {
+    mocks.listDatabaseDriverInstallations.mockResolvedValue([
+      {
+        driver: "postgres",
+        displayName: "PostgreSQL JDBC",
+        clientLibrary: "pgjdbc",
+        clientVersion: "42.7",
+        distribution: "external",
+        updatePolicy: "independent",
+        independentlyUpdatable: true,
+        serverVersionPolicy: "declared-by-package",
+        implementation: "isolated JDBC driver sidecar",
+        packageVersion: "42.7.0",
+        protocolVersion: "1.0",
+        active: true,
+        status: "ready",
+        runtimeReady: false,
+      },
+    ]);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<ConnectionForm />);
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain("needs a signed Java runtime");
+    expect(container.textContent).not.toContain("Active package (recommended)");
+  });
+
+  it("keeps an uninstalled catalogue product discoverable but blocks connection actions", async () => {
+    useConnectionStore.setState({
+      connections: [],
+      selectedConnection: {
+        ...selectedConnection(),
+        driver: "oracle",
+        name: "Oracle",
+        port: 1521,
+      },
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<ConnectionForm />);
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain("Oracle Database needs a signed driver package");
+    expect(buttonWithText(container, "Test Connection")?.disabled).toBe(true);
+    expect(buttonWithText(container, "Install package…")).toBeTruthy();
+    expect(buttonWithText(container, "Download from catalog…")).toBeTruthy();
+
+    await act(async () => {
+      buttonWithText(container, "Download from catalog…")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(
+      container.querySelector("#connection-driver-catalog-url"),
+    ).not.toBeNull();
+    expect(buttonWithText(container, "Download & install")).toBeTruthy();
+  });
+
+  it("downloads a missing signed driver from the connection page", async () => {
+    useConnectionStore.setState({
+      connections: [],
+      selectedConnection: {
+        ...selectedConnection(),
+        driver: "oracle",
+        name: "Oracle",
+        port: 1521,
+      },
+    });
+    mocks.getExternalDatabaseDriverCatalog.mockResolvedValue({
+      sourceUrl: "https://drivers.example.com/catalog.json",
+      catalog: {
+        packages: [
+          {
+            driverId: "oracle",
+            packageVersion: "23.0.0",
+            archiveSha256: "a".repeat(64),
+          },
+        ],
+      },
+    });
+    mocks.installExternalDatabaseDriverFromCatalog.mockResolvedValue({
+      displayName: "Oracle Database",
+      packageVersion: "23.0.0",
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<ConnectionForm />);
+      await flushAsyncWork();
+    });
+    await act(async () => {
+      buttonWithText(container, "Download from catalog…")?.click();
+    });
+    const input = container.querySelector<HTMLInputElement>(
+      "#connection-driver-catalog-url",
+    )!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(input, "https://drivers.example.com/catalog.json");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      buttonWithText(container, "Download & install")?.click();
+      await flushAsyncWork();
+    });
+
+    expect(mocks.getExternalDatabaseDriverCatalog).toHaveBeenCalledWith(
+      "https://drivers.example.com/catalog.json",
+    );
+    expect(mocks.installExternalDatabaseDriverFromCatalog).toHaveBeenCalledWith(
+      "https://drivers.example.com/catalog.json",
+      "oracle",
+      "23.0.0",
+      true,
+    );
+    expect(useSettingsStore.getState().updateSettings).toHaveBeenCalledWith({
+      drivers: {
+        catalogUrl: "https://drivers.example.com/catalog.json",
+        storePath: initialSettingsState.settings.drivers.storePath,
+      },
+    });
+  });
+
+  it("refreshes selectable package pins after the driver catalog refreshes", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<ConnectionForm />);
+      await flushAsyncWork();
+    });
+    const callsBeforeRefresh = mocks.listDatabaseDriverInstallations.mock.calls.length;
+
+    await act(async () => {
+      useDatabaseDriverCatalogStore.setState({ status: "loading" });
+      await flushAsyncWork();
+      useDatabaseDriverCatalogStore.setState({ status: "ready" });
+      await flushAsyncWork();
+    });
+
+    expect(mocks.listDatabaseDriverInstallations.mock.calls.length).toBeGreaterThan(
+      callsBeforeRefresh,
+    );
   });
 
   it("invalidates an imported URL when a connection field changes", async () => {

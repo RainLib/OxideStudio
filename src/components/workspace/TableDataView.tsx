@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { confirmDiscardTableChanges, useTabStore } from "@/store/useTabStore";
 import {
   ensureConnectionReady,
@@ -8,6 +8,7 @@ import { useProjectStore } from "@/store/useProjectStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTaskStore } from "@/store/useTaskStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
+import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
 import { databaseService, schemaService, tableService } from "@/services/tauri";
 import { loadTableDdl, loadTableMetadata } from "@/services/tableMetadataCache";
 import type {
@@ -16,8 +17,12 @@ import type {
   DatabaseCapabilities,
   ForeignKeyReferenceInfo,
   IndexInfo,
+  TableCsvImportOptions,
+  TableJsonImportPreview,
+  TableXlsxImportPreview,
   TableExportFormat,
 } from "@/services/tauri/types";
+import { isTauri } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   DataGrid,
@@ -42,15 +47,27 @@ import {
 import { CreateConstraintDialog } from "./CreateConstraintDialog";
 import { CreateIndexDialog } from "./CreateIndexDialog";
 import { CsvImportDialog } from "./CsvImportDialog";
+import { JsonImportDialog } from "./JsonImportDialog";
+import { TableDataTransferDialog } from "./TableDataTransferDialog";
 import {
   DEFAULT_DATABASE_DRIVER,
   canAlterRelationStructure,
   canManageRelationIndexes,
   defaultDatabaseCapabilities,
+  isRelationalDataModel,
   isReadOnlyRelationObject,
 } from "@/lib/databaseDialect";
 import { stepGridZoom } from "@/lib/dataGridView";
 import { cn } from "@/lib/utils";
+import {
+  APP_EVENT_REQUEST_TABLE_CSV_IMPORT,
+  APP_EVENT_REQUEST_TABLE_JSON_IMPORT,
+  APP_EVENT_REQUEST_TABLE_XLSX_IMPORT,
+  type TableCsvImportRequest,
+  type TableJsonImportRequest,
+  type TableXlsxImportRequest,
+} from "@/lib/actionEvents";
+import { transposeQueryResult } from "@/features/data-grid";
 
 export function TableDataView() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -82,27 +99,43 @@ export function TableDataView() {
   const tabConnectionId = activeTab?.connectionId || activeConnectionId;
   const activeConnection = connections.find((c) => c.id === tabConnectionId);
   const driver = activeConnection?.driver || DEFAULT_DATABASE_DRIVER;
-  const [capabilities, setCapabilities] = useState<DatabaseCapabilities>(() =>
-    defaultDatabaseCapabilities(driver),
+  const driverCatalogStatus = useDatabaseDriverCatalogStore(
+    (state) => state.status,
   );
+  const [connectionCapabilities, setConnectionCapabilities] = useState<{
+    connectionId: string;
+    capabilities: DatabaseCapabilities;
+  } | null>(null);
+  const resolvedCapabilities =
+    connectionCapabilities &&
+    connectionCapabilities.connectionId === activeConnection?.id
+      ? connectionCapabilities.capabilities
+      : null;
   const activeCapabilities =
-    capabilities.driver === driver
-      ? capabilities
+    resolvedCapabilities?.driver === driver
+      ? resolvedCapabilities
       : defaultDatabaseCapabilities(driver);
-  const isNativeObjectPreview =
-    activeCapabilities.dataModel === "document" ||
-    activeCapabilities.dataModel === "keyValue" ||
-    activeCapabilities.dataModel === "search";
+  // New package data models (graph, time-series, queue, etc.) must never
+  // accidentally enter the mutable relational grid while their dedicated
+  // workspace is still unavailable.
+  // Older cached capability responses may predate `dataModel`; the backend
+  // normalizes those to relational, but preserve the same fallback in the UI
+  // while the fresh capability request is still resolving.
+  const isNativeObjectPreview = Boolean(activeCapabilities.dataModel) &&
+    !isRelationalDataModel(activeCapabilities);
   const isSearchObjectPreview = activeCapabilities.dataModel === "search";
   const isCrossDatabasePreview = Boolean(activeTab?.databaseName);
   const isReadOnlyRelation = isReadOnlyRelationObject(activeTab?.objectType);
   const isTableReadOnly = isReadOnlyRelation || isNativeObjectPreview;
   const canManageIndexes =
     !isCrossDatabasePreview &&
+    activeCapabilities.supportsTableDdl &&
     activeCapabilities.supportsTableIndexes &&
     canManageRelationIndexes(activeTab?.objectType);
   const canManageConstraints =
     !isCrossDatabasePreview &&
+    activeCapabilities.supportsTableDdl &&
+    activeCapabilities.supportsConstraintAlteration &&
     activeCapabilities.supportsTableConstraints &&
     canAlterRelationStructure(activeTab?.objectType);
   const [fallbackColumns, setFallbackColumns] = useState<
@@ -127,8 +160,23 @@ export function TableDataView() {
   const [isIndexSubmitting, setIsIndexSubmitting] = useState(false);
   const [isConstraintDialogOpen, setIsConstraintDialogOpen] = useState(false);
   const [isConstraintSubmitting, setIsConstraintSubmitting] = useState(false);
-  const [csvImportFile, setCsvImportFile] = useState<File | null>(null);
+  const [csvImportSource, setCsvImportSource] = useState<{
+    file: File;
+    nativePath?: string;
+    previewTruncated?: boolean;
+  } | null>(null);
+  const [jsonImportSource, setJsonImportSource] = useState<{
+    nativePath: string;
+    preview: TableJsonImportPreview;
+  } | null>(null);
+  const [xlsxImportSource, setXlsxImportSource] = useState<{
+    nativePath: string;
+    preview: TableXlsxImportPreview;
+  } | null>(null);
+  const [isTransferDialogOpen, setIsTransferDialogOpen] = useState(false);
   const [isCsvImportSubmitting, setIsCsvImportSubmitting] = useState(false);
+  const [isJsonImportSubmitting, setIsJsonImportSubmitting] = useState(false);
+  const [isXlsxImportSubmitting, setIsXlsxImportSubmitting] = useState(false);
   const [isEditingEnabled, setIsEditingEnabled] = useState(
     !dataGridSettings.readOnlyByDefault,
   );
@@ -137,9 +185,163 @@ export function TableDataView() {
   );
   const [gridSelectionSummary, setGridSelectionSummary] =
     useState<DataGridSelectionSummary>({ selectedRowCount: 0 });
+  const [transposedTabIds, setTransposedTabIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const structureRequestRef = useRef(0);
   const ddlRequestRef = useRef(0);
   const isGridReadOnly = isTableReadOnly || !isEditingEnabled;
+
+  const openCsvImportPicker = async () => {
+    if (!isTauri()) {
+      importInputRef.current?.click();
+      return;
+    }
+
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "CSV data", extensions: ["csv"] }],
+    });
+    if (typeof selected !== "string") return;
+
+    try {
+      const preview = await tableService.previewTableCsvImport(selected);
+      const bytes = new Uint8Array(preview.bytes);
+      const file = new File([bytes], preview.fileName, { type: "text/csv" });
+      setCsvImportSource({
+        file,
+        nativePath: selected,
+        previewTruncated: preview.truncated,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      useTabStore.setState((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === activeTab?.id ? { ...tab, error: `CSV preview failed: ${message}` } : tab,
+        ),
+      }));
+    }
+  };
+
+  const openJsonImportPicker = async () => {
+    if (!isTauri()) return;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "JSON data", extensions: ["json", "jsonl", "ndjson"] }],
+    });
+    if (typeof selected !== "string") return;
+    try {
+      const preview = await tableService.previewTableJsonImport(selected);
+      setJsonImportSource({ nativePath: selected, preview });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      useTabStore.setState((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === activeTab?.id ? { ...tab, error: `JSON preview failed: ${message}` } : tab,
+        ),
+      }));
+    }
+  };
+
+  const openXlsxImportPicker = async () => {
+    if (!isTauri()) return;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Excel workbook", extensions: ["xlsx"] }],
+    });
+    if (typeof selected !== "string") return;
+    try {
+      const preview = await tableService.previewTableXlsxImport(selected);
+      setXlsxImportSource({ nativePath: selected, preview });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      useTabStore.setState((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === activeTab?.id ? { ...tab, error: `XLSX preview failed: ${message}` } : tab,
+        ),
+      }));
+    }
+  };
+
+  useEffect(() => {
+    const requestCsvImport = (
+      event: Event,
+    ) => {
+      const detail = (event as CustomEvent<TableCsvImportRequest>).detail;
+      if (
+        !detail ||
+        detail.connectionId !== tabConnectionId ||
+        detail.schema !== activeTab?.schemaName ||
+        detail.table !== activeTab?.tableName ||
+        detail.database !== activeTab?.databaseName ||
+        isTableReadOnly ||
+        activeTab?.isExecuting
+      ) {
+        return;
+      }
+      void openCsvImportPicker();
+    };
+    window.addEventListener(APP_EVENT_REQUEST_TABLE_CSV_IMPORT, requestCsvImport);
+    return () =>
+      window.removeEventListener(
+        APP_EVENT_REQUEST_TABLE_CSV_IMPORT,
+        requestCsvImport,
+      );
+  }, [activeTab?.databaseName, activeTab?.isExecuting, activeTab?.schemaName, activeTab?.tableName, isTableReadOnly, tabConnectionId]);
+
+  useEffect(() => {
+    const requestXlsxImport = (event: Event) => {
+      const detail = (event as CustomEvent<TableXlsxImportRequest>).detail;
+      if (
+        !detail ||
+        detail.connectionId !== tabConnectionId ||
+        detail.schema !== activeTab?.schemaName ||
+        detail.table !== activeTab?.tableName ||
+        detail.database !== activeTab?.databaseName ||
+        isTableReadOnly ||
+        activeTab?.isExecuting
+      ) {
+        return;
+      }
+      void openXlsxImportPicker();
+    };
+    window.addEventListener(APP_EVENT_REQUEST_TABLE_XLSX_IMPORT, requestXlsxImport);
+    return () =>
+      window.removeEventListener(
+        APP_EVENT_REQUEST_TABLE_XLSX_IMPORT,
+        requestXlsxImport,
+      );
+  }, [activeTab?.databaseName, activeTab?.isExecuting, activeTab?.schemaName, activeTab?.tableName, isTableReadOnly, tabConnectionId]);
+
+  useEffect(() => {
+    const requestJsonImport = (event: Event) => {
+      const detail = (event as CustomEvent<TableJsonImportRequest>).detail;
+      if (
+        !detail ||
+        detail.connectionId !== tabConnectionId ||
+        detail.schema !== activeTab?.schemaName ||
+        detail.table !== activeTab?.tableName ||
+        detail.database !== activeTab?.databaseName ||
+        isTableReadOnly ||
+        activeTab?.isExecuting
+      ) {
+        return;
+      }
+      void openJsonImportPicker();
+    };
+    window.addEventListener(APP_EVENT_REQUEST_TABLE_JSON_IMPORT, requestJsonImport);
+    return () =>
+      window.removeEventListener(
+        APP_EVENT_REQUEST_TABLE_JSON_IMPORT,
+        requestJsonImport,
+      );
+  }, [activeTab?.databaseName, activeTab?.isExecuting, activeTab?.schemaName, activeTab?.tableName, isTableReadOnly, tabConnectionId]);
 
   useEffect(() => {
     setIsEditingEnabled(!dataGridSettings.readOnlyByDefault);
@@ -153,22 +355,43 @@ export function TableDataView() {
   useEffect(() => {
     let cancelled = false;
     const fallback = defaultDatabaseCapabilities(driver);
-    setCapabilities(fallback);
+    if (!activeConnection) {
+      setConnectionCapabilities(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    setConnectionCapabilities(null);
 
     databaseService
-      .getDatabaseCapabilities(driver)
+      .getDatabaseCapabilities(driver, activeConnection?.driverPackageVersion)
       .then((nextCapabilities) => {
-        if (!cancelled) setCapabilities(nextCapabilities);
+        if (!cancelled) {
+          setConnectionCapabilities({
+            connectionId: activeConnection.id,
+            capabilities: nextCapabilities,
+          });
+        }
       })
       .catch((error) => {
         console.error("Failed to load database capabilities:", error);
-        if (!cancelled) setCapabilities(fallback);
+        if (!cancelled) {
+          setConnectionCapabilities({
+            connectionId: activeConnection.id,
+            capabilities: fallback,
+          });
+        }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [driver]);
+  }, [
+    activeConnection?.driverPackageVersion,
+    activeConnection?.id,
+    driver,
+    driverCatalogStatus,
+  ]);
 
   const refreshStructure = useCallback(
     async (force = false) => {
@@ -327,7 +550,8 @@ export function TableDataView() {
 
   useEffect(() => {
     ddlRequestRef.current += 1;
-    setCsvImportFile(null);
+    setCsvImportSource(null);
+    setIsTransferDialogOpen(false);
     setShowDdl(false);
     setShowStructure(false);
     setTableDdl("");
@@ -374,7 +598,14 @@ export function TableDataView() {
 
   if (!activeTab || activeTab.type !== "table") return null;
 
-  const result = activeTab?.results?.[0];
+  const resultIndex = activeTab?.activeResultIndex ?? 0;
+  const result =
+    activeTab?.results?.[resultIndex] ?? activeTab?.results?.[0];
+  const isTransposed = Boolean(activeTab && transposedTabIds.has(activeTab.id));
+  const transposedResult = useMemo(
+    () => (isTransposed && result ? transposeQueryResult(result) : undefined),
+    [isTransposed, result],
+  );
   const csvImportColumns: ColumnInfo[] =
     metadataColumns.length > 0
       ? metadataColumns
@@ -559,7 +790,11 @@ export function TableDataView() {
     }
   };
 
-  const handleImportCsvRows = async (rows: Array<Record<string, unknown>>) => {
+  const handleImportCsvRows = async (
+    rows: Array<Record<string, unknown>>,
+    csvOptions: TableCsvImportOptions,
+    sourceEncoding: string,
+  ) => {
     if (
       !tabConnectionId ||
       !activeTab.tableName ||
@@ -567,21 +802,39 @@ export function TableDataView() {
       activeTab.isExecuting ||
       isTableReadOnly ||
       isCsvImportSubmitting ||
-      !csvImportFile
+      !csvImportSource
     ) {
       return;
     }
     const taskId = startTask({
       kind: "import",
-      title: `Import ${csvImportFile.name}`,
+      title: `Import ${csvImportSource.file.name}`,
       detail: activeTab.tableName,
     });
     setIsCsvImportSubmitting(true);
     updateTask(taskId, {
       detail: `${rows.length.toLocaleString()} rows validated; committing transaction`,
     });
+    let rowsImported = rows.length;
     try {
-      if (activeTab.databaseName) {
+      // csv::Reader streams UTF-8 only. Preserve the reviewed decoder's
+      // semantics for UTF-16/GB18030 sources by using the already typed,
+      // bounded browser rows instead of claiming the native stream accepted
+      // an encoding it cannot parse.
+      if (csvImportSource.nativePath && sourceEncoding === "utf-8") {
+        const imported = await tableService.importTableData(
+          tabConnectionId,
+          driver,
+          activeTab.schemaName,
+          activeTab.tableName,
+          csvImportSource.nativePath,
+          "csv",
+          csvOptions.firstRowHeader ?? true,
+          activeTab.databaseName,
+          csvOptions,
+        );
+        rowsImported = imported.rowsImported;
+      } else if (activeTab.databaseName) {
         await tableService.mutateTableRows(
           tabConnectionId,
           driver,
@@ -607,9 +860,9 @@ export function TableDataView() {
       setIsCsvImportSubmitting(false);
       return;
     }
-    const importedRowCount = rows.length.toLocaleString();
+    const importedRowCount = rowsImported.toLocaleString();
     finishTask(taskId, `${importedRowCount} rows imported`);
-    setCsvImportFile(null);
+    setCsvImportSource(null);
     setIsCsvImportSubmitting(false);
     if (
       !confirmDiscardTableChanges(
@@ -660,6 +913,116 @@ export function TableDataView() {
       updateTask(taskId, {
         detail: `${importedRowCount} rows imported; refresh failed — click Refresh`,
       });
+    }
+  };
+
+  const handleImportJsonRows = async () => {
+    if (
+      !tabConnectionId ||
+      !activeTab.tableName ||
+      !activeTab.schemaName ||
+      activeTab.isExecuting ||
+      isTableReadOnly ||
+      isJsonImportSubmitting ||
+      !jsonImportSource
+    ) {
+      return;
+    }
+    const taskId = startTask({
+      kind: "import",
+      title: `Import ${jsonImportSource.preview.fileName}`,
+      detail: activeTab.tableName,
+    });
+    setIsJsonImportSubmitting(true);
+    updateTask(taskId, { detail: "JSON preview approved; committing transaction" });
+    try {
+      const imported = await tableService.importTableData(
+        tabConnectionId,
+        driver,
+        activeTab.schemaName,
+        activeTab.tableName,
+        jsonImportSource.nativePath,
+        "json",
+        true,
+        activeTab.databaseName,
+      );
+      const importedRowCount = imported.rowsImported.toLocaleString();
+      finishTask(taskId, `${importedRowCount} rows imported`);
+      setJsonImportSource(null);
+      if (
+        !confirmDiscardTableChanges(
+          activeTab.id,
+          "refresh the table after importing JSON rows",
+        )
+      ) {
+        updateTask(taskId, {
+          detail: `${importedRowCount} rows imported; refresh skipped to preserve drafts`,
+        });
+        return;
+      }
+      await loadTablePage(activeTab.id, page, undefined, undefined, {
+        discardDraftsConfirmed: true,
+      });
+    } catch (error) {
+      failTask(taskId, error instanceof Error ? error.message : String(error));
+      console.error("JSON import failed:", error);
+    } finally {
+      setIsJsonImportSubmitting(false);
+    }
+  };
+
+  const handleImportXlsxRows = async () => {
+    if (
+      !tabConnectionId ||
+      !activeTab.tableName ||
+      !activeTab.schemaName ||
+      activeTab.isExecuting ||
+      isTableReadOnly ||
+      isXlsxImportSubmitting ||
+      !xlsxImportSource
+    ) {
+      return;
+    }
+    const taskId = startTask({
+      kind: "import",
+      title: `Import ${xlsxImportSource.preview.fileName}`,
+      detail: activeTab.tableName,
+    });
+    setIsXlsxImportSubmitting(true);
+    updateTask(taskId, { detail: "XLSX preview approved; committing transaction" });
+    try {
+      const imported = await tableService.importTableData(
+        tabConnectionId,
+        driver,
+        activeTab.schemaName,
+        activeTab.tableName,
+        xlsxImportSource.nativePath,
+        "xlsx",
+        true,
+        activeTab.databaseName,
+      );
+      const importedRowCount = imported.rowsImported.toLocaleString();
+      finishTask(taskId, `${importedRowCount} rows imported`);
+      setXlsxImportSource(null);
+      if (
+        !confirmDiscardTableChanges(
+          activeTab.id,
+          "refresh the table after importing XLSX rows",
+        )
+      ) {
+        updateTask(taskId, {
+          detail: `${importedRowCount} rows imported; refresh skipped to preserve drafts`,
+        });
+        return;
+      }
+      await loadTablePage(activeTab.id, page, undefined, undefined, {
+        discardDraftsConfirmed: true,
+      });
+    } catch (error) {
+      failTask(taskId, error instanceof Error ? error.message : String(error));
+      console.error("XLSX import failed:", error);
+    } finally {
+      setIsXlsxImportSubmitting(false);
     }
   };
 
@@ -738,6 +1101,7 @@ export function TableDataView() {
       !activeTab.tableName ||
       !activeTab.schemaName ||
       !canManageIndexes ||
+      !activeCapabilities.supportsIndexRename ||
       index.is_primary
     ) {
       return;
@@ -981,25 +1345,72 @@ export function TableDataView() {
           const file = event.currentTarget.files?.[0];
           event.currentTarget.value = "";
           if (file) {
-            setCsvImportFile(file);
+            setCsvImportSource({ file });
           }
         }}
       />
 
       <CsvImportDialog
-        open={csvImportFile !== null}
-        file={csvImportFile}
+        open={csvImportSource !== null}
+        file={csvImportSource?.file || null}
         tableName={activeTab.tableName || "table"}
         columns={csvImportColumns}
         isSubmitting={isCsvImportSubmitting}
-        onClose={() => setCsvImportFile(null)}
+        isNativeSource={Boolean(csvImportSource?.nativePath)}
+        nativePreviewTruncated={csvImportSource?.previewTruncated}
+        onClose={() => setCsvImportSource(null)}
         onImport={handleImportCsvRows}
       />
+
+      <JsonImportDialog
+        open={jsonImportSource !== null}
+        preview={jsonImportSource?.preview || null}
+        format="JSON"
+        tableName={activeTab.tableName || "table"}
+        columns={csvImportColumns}
+        isSubmitting={isJsonImportSubmitting}
+        onClose={() => setJsonImportSource(null)}
+        onImport={handleImportJsonRows}
+      />
+
+      <JsonImportDialog
+        open={xlsxImportSource !== null}
+        preview={xlsxImportSource?.preview || null}
+        format="XLSX"
+        tableName={activeTab.tableName || "table"}
+        columns={csvImportColumns}
+        isSubmitting={isXlsxImportSubmitting}
+        onClose={() => setXlsxImportSource(null)}
+        onImport={handleImportXlsxRows}
+      />
+
+      {tabConnectionId && activeTab.schemaName && activeTab.tableName && (
+        <TableDataTransferDialog
+          open={isTransferDialogOpen}
+          source={{
+            connectionId: tabConnectionId,
+            driver,
+            schema: activeTab.schemaName,
+            table: activeTab.tableName,
+            database: activeTab.databaseName || undefined,
+          }}
+          sourceCapabilities={activeCapabilities}
+          connections={connections}
+          onClose={() => setIsTransferDialogOpen(false)}
+          onTransferred={handleRefresh}
+        />
+      )}
 
       <TableDataToolbar
         isExecuting={activeTab.isExecuting}
         readOnly={isTableReadOnly}
+        viewOnly={isTransposed}
         exportDisabled={isCrossDatabasePreview || isNativeObjectPreview}
+        transferDisabled={
+          isCrossDatabasePreview ||
+          isNativeObjectPreview ||
+          !activeCapabilities.supportsTableDataTransfer
+        }
         editingEnabled={isEditingEnabled}
         hasEdits={hasEdits}
         editedCellCount={activeTab.pendingEdits?.size || 0}
@@ -1014,7 +1425,20 @@ export function TableDataView() {
         onFitColumns={() => dataGridRef.current?.fitColumns()}
         onResetColumns={() => resetColumnLayout(activeTab.id)}
         onToggleEditing={() => setIsEditingEnabled((value) => !value)}
-        onImport={() => importInputRef.current?.click()}
+        transposed={isTransposed}
+        transposeDisabled={!result || hasEdits}
+        onToggleTranspose={() => {
+          setTransposedTabIds((previous) => {
+            const next = new Set(previous);
+            if (next.has(activeTab.id)) next.delete(activeTab.id);
+            else next.add(activeTab.id);
+            return next;
+          });
+        }}
+        onImportCsv={() => void openCsvImportPicker()}
+        onImportJson={() => void openJsonImportPicker()}
+        onImportXlsx={() => void openXlsxImportPicker()}
+        onTransfer={() => setIsTransferDialogOpen(true)}
         onExportCsv={() => void handleExport("csv")}
         onExportJson={() => void handleExport("json")}
         onExportSql={() => void handleExport("sql")}
@@ -1024,6 +1448,7 @@ export function TableDataView() {
       {!isNativeObjectPreview &&
         !showStructure &&
         !showDdl &&
+        !isTransposed &&
         (result || fallbackColumns.length > 0) && (
           <GridFilterRow
             columns={columns}
@@ -1038,7 +1463,9 @@ export function TableDataView() {
             onSearch={handleSearch}
             connectionId={tabConnectionId}
             driver={driver}
+            capabilities={activeCapabilities}
             tabId={activeTab.id}
+            databaseName={activeTab.databaseName}
             schemaName={activeTab.schemaName}
             tableName={activeTab.tableName}
             sortColumn={activeTab.gridState?.sortColumn}
@@ -1189,13 +1616,19 @@ export function TableDataView() {
                     variant="ghost"
                     size="icon"
                     className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
-                    disabled={!canManageIndexes || index.is_primary}
+                    disabled={
+                      !canManageIndexes ||
+                      index.is_primary ||
+                      !activeCapabilities.supportsIndexRename
+                    }
                     onClick={() => void handleRenameIndex(index)}
                     title={
                       !canManageIndexes
                         ? "Index changes are not available for this object"
                         : index.is_primary
                           ? "Primary indexes are managed through constraints"
+                          : !activeCapabilities.supportsIndexRename
+                            ? "This driver requires recreating indexes to rename"
                           : "Rename index"
                     }
                   >
@@ -1301,6 +1734,8 @@ export function TableDataView() {
             ref={dataGridRef}
             overrideColumns={fallbackColumns}
             readOnly={isGridReadOnly || activeTab.isExecuting}
+            resultOverride={transposedResult}
+            transposed={isTransposed}
             zoomPercent={gridZoomPercent}
             onSelectionSummaryChange={setGridSelectionSummary}
             tableConstraints={tableConstraints}
