@@ -36,6 +36,17 @@ database target until its relevant queue entries pass.
   a product-specific capability contract and source-DDL conformance fixture
   exist.
 
+## Connection configuration import
+
+- Validate DataGrip, DBeaver, and Navicat XML/NCX fixtures containing quoted
+  attribute values, IPv6 endpoints, unsupported products, duplicate names,
+  encrypted/opaque password fields, folder/group metadata, and sensitive URL
+  parameters. Imported objects must contain no credential, token, SSH-key, or
+  local-driver-path material.
+- Define and verify an explicit duplicate-connection merge policy before
+  enabling automatic merge; until then imported candidates must remain a
+  user-reviewed set with deterministic renamed local entries.
+
 ## External driver runtime telemetry
 
 - Verify launch and observed-exit counters with a controlled sidecar crash,

@@ -172,4 +172,32 @@ describe("external connection import", () => {
     });
     expect(result.candidates[0]).not.toHaveProperty("password");
   });
+
+  it("parses Navicat NCX endpoint fields without reading password data", () => {
+    const content = `<Connections>
+      <Connection Id="nav-1" ConnName="Reporting" ConnType="PostgreSQL"
+        Host="pg.example.test" Port="5432" Database="analytics" UserName="reader"
+        Password="opaque-navicat-value" Folder="Warehouse" />
+    </Connections>`;
+    expect(detectConnectionImportSource("connections.ncx", content)).toBe("navicat");
+    const result = parseConnectionImport("navicat", content);
+
+    expect(result.candidates[0]).toMatchObject({
+      id: "navicat:nav-1",
+      source: "navicat",
+      name: "Reporting",
+      driver: "postgres",
+      host: "pg.example.test",
+      port: 5432,
+      database: "analytics",
+      user: "reader",
+    });
+    expect(result.candidates[0]).not.toHaveProperty("password");
+    expect(result.candidates[0]?.warnings).toContain(
+      "Navicat password data was not imported.",
+    );
+    expect(result.candidates[0]?.warnings).toContain(
+      "Navicat folder/group placement was not imported.",
+    );
+  });
 });

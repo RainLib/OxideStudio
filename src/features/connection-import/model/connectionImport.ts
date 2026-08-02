@@ -1,6 +1,6 @@
 import type { DatabaseDriver } from "@/services/tauri/types";
 
-export type ConnectionImportSource = "datagrip" | "dbeaver";
+export type ConnectionImportSource = "datagrip" | "dbeaver" | "navicat";
 
 export type ConnectionImportCandidate = {
   id: string;
@@ -30,12 +30,16 @@ export function detectConnectionImportSource(
     const payload = JSON.parse(content) as { format?: unknown };
     if (payload.format === "datagrip-import") return "datagrip";
     if (payload.format === "dbeaver-import") return "dbeaver";
+    if (payload.format === "navicat-import") return "navicat";
   } catch {
     // Raw XML and JSON files intentionally use the filename fallback below.
   }
-  return fileName.toLocaleLowerCase().endsWith(".xml")
-    ? "datagrip"
-    : "dbeaver";
+  const normalizedFileName = fileName.toLocaleLowerCase();
+  if (normalizedFileName.endsWith(".ncx")) return "navicat";
+  if (/\b(?:ConnName|ConnType|UserName)=/iu.test(content) && /<Connections?\b/iu.test(content)) {
+    return "navicat";
+  }
+  return normalizedFileName.endsWith(".xml") ? "datagrip" : "dbeaver";
 }
 
 const DRIVER_ALIASES: Record<string, DatabaseDriver> = {
@@ -312,9 +316,66 @@ function parseDataGrip(content: string): ConnectionImportParseResult {
   return { candidates, diagnostics: candidates.length ? [] : ["No DataGrip data sources were found."] };
 }
 
+/**
+ * Navicat's older export format is XML/NCX. Passwords in those files are
+ * encrypted or opaque product fields, so this parser never reads them; it
+ * only imports the non-secret endpoint attributes required to recreate a
+ * connection manually.
+ */
+function parseNavicat(content: string): ConnectionImportParseResult {
+  const candidates: ConnectionImportCandidate[] = [];
+  const blocks = content.matchAll(/<Connection\b([^>]*)\/?\s*>/giu);
+  for (const [index, match] of Array.from(blocks).entries()) {
+    const attributes = match[1] || "";
+    const rawUrl =
+      xmlAttribute(attributes, "ConnectionUrl") ||
+      xmlAttribute(attributes, "Url") ||
+      xmlAttribute(attributes, "URI");
+    const endpoint = parseConnectionUrl(rawUrl);
+    const product =
+      xmlAttribute(attributes, "ConnType") ||
+      xmlAttribute(attributes, "Driver") ||
+      xmlAttribute(attributes, "DbType");
+    const imported = candidate({
+      id: `navicat:${xmlAttribute(attributes, "Id") || xmlAttribute(attributes, "UUID") || index}`,
+      source: "navicat",
+      name:
+        xmlAttribute(attributes, "ConnName") ||
+        xmlAttribute(attributes, "Name") ||
+        endpoint.database ||
+        endpoint.host ||
+        "Imported Navicat connection",
+      driver: normalizeDriver([product, rawUrl].join(" ")),
+      host: xmlAttribute(attributes, "Host") || endpoint.host || undefined,
+      port: number(xmlAttribute(attributes, "Port") || endpoint.port),
+      database:
+        xmlAttribute(attributes, "Database") ||
+        xmlAttribute(attributes, "DatabaseName") ||
+        endpoint.database ||
+        undefined,
+      user:
+        xmlAttribute(attributes, "UserName") ||
+        xmlAttribute(attributes, "User") ||
+        endpoint.user ||
+        undefined,
+      connectionUrl: endpoint.connectionUrl,
+    }, containsSensitiveUrlMaterial(rawUrl));
+    if (xmlAttribute(attributes, "Password")) {
+      imported.warnings.push("Navicat password data was not imported.");
+    }
+    if (xmlAttribute(attributes, "Folder") || xmlAttribute(attributes, "Group")) {
+      imported.warnings.push("Navicat folder/group placement was not imported.");
+    }
+    candidates.push(imported);
+  }
+  return { candidates, diagnostics: candidates.length ? [] : ["No Navicat connections were found."] };
+}
+
 export function parseConnectionImport(
   source: ConnectionImportSource,
   content: string,
 ): ConnectionImportParseResult {
-  return source === "dbeaver" ? parseDbeaver(content) : parseDataGrip(content);
+  if (source === "dbeaver") return parseDbeaver(content);
+  if (source === "navicat") return parseNavicat(content);
+  return parseDataGrip(content);
 }

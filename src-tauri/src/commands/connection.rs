@@ -35,8 +35,8 @@ pub async fn import_connection_config_file(
     let (sender, receiver) = oneshot::channel();
     app.dialog()
         .file()
-        .add_filter("Connection configuration", &["xml", "json"])
-        .set_title("Import DataGrip or DBeaver connections")
+        .add_filter("Connection configuration", &["xml", "json", "ncx"])
+        .set_title("Import DataGrip, DBeaver, or Navicat connections")
         .pick_file(move |selection| {
             let _ = sender.send(selection);
         });

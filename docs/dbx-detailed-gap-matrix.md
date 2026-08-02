@@ -83,7 +83,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 | G03 | 未对齐：expression cell/default preview | DBX grid edit adapter、cell generation 与 bulk edit modules | 普通 typed cell mutation | 表达式必须显式切换；generated/default 在提交预览中区分“不发送”“NULL”“表达式”。 |
 | G04 | 未对齐：全量数据 compare | DBX `dataGrid/dataCompare.ts` 与批量数据工具 | 仅 loaded-page compare | 后端 keyset 分页、稳定 key、断点、冲突/重复 key 报告和可恢复 artifact。 |
 | I01 | 部分对齐：CSV/JSON/XLSX import | `crates/dbx-core/src/table_import.rs`；`TableImportDialog.vue`；`lib/table/tableImport.ts` | preview、mapping、原生事务流式导入已存在 | 增加 reject-row 文件、错误行隔离、resume token、mapping snapshot 和失败报告。 |
-| I02 | 未对齐：Navicat 等连接导入 | `lib/imports/navicatImport.ts`、`dbeaverImport.ts`、`datagripImport.ts` | DataGrip、DBeaver 已有 | 加 Navicat；folder/group、重复项 merge 和 unsupported field diagnostics。 |
+| I02 | 部分对齐：连接导入 | `lib/imports/navicatImport.ts`、`dbeaverImport.ts`、`datagripImport.ts` | DataGrip、DBeaver 与 Navicat XML/NCX 已有；Navicat 仅读取非敏感 endpoint 属性，密码/令牌/本地路径永不导入，folder/group 会显示诊断。 | 补重复项 merge 策略、更多 Navicat 版本/加密导出格式，以及 SSH/TLS/代理等不支持字段的逐项诊断。 |
 | X01 | 部分对齐：流式 export | `crates/dbx-core/src/table_export.rs`、`database_export.rs`；`useDataGridExport.ts`；`table_export.rs` | CSV/JSON/SQL 导出已有，但长任务能力较窄 | bounded channel/backpressure、查询取消、不完整文件清理、编码/BOM、progress 与最终审计报告。 |
 | T01 | 部分对齐：单表 transfer | `crates/dbx-core/src/transfer.rs:5734 transfer_table`；`DataTransferDialog.vue` | 单表 preview/确认/type map/事务/取消/append/overwrite | 保持同一 target transaction；失败和取消必须回滚；源端 query cancellation 有 fixture。 |
 | T02 | 本轮已对齐：主键 upsert | `transfer.rs:2984 generate_upsert`、`:3515 keyset_pagination_sql` | `commands/table.rs:build_upsert_mutation`；Transfer Dialog | 仅 bundled PG/MySQL/SQLite；目标必须有完整映射的 PK；token 绑定 key；外置包默认拒绝。 |
