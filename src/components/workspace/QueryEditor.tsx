@@ -9,6 +9,7 @@ import { useSettingsStore } from "@/store/useSettingsStore";
 import { EditorActionBar } from "./EditorActionBar";
 import { ThemeContext } from "@/theme/ThemeProvider";
 import Editor, { DiffEditor, useMonaco } from "@monaco-editor/react";
+import type { Selection } from "monaco-editor";
 import { listen } from "@tauri-apps/api/event";
 import {
   useCallback,
@@ -3779,7 +3780,7 @@ export function QueryEditor({
       const model = mountedEditor.getModel();
       const selections = mountedEditor
         .getSelections()
-        ?.filter((selection) => !selection.isEmpty());
+        ?.filter((selection: Selection) => !selection.isEmpty());
       if (!model || !selections?.length) return;
       // Intentions are all-or-nothing across cursors: leaving one selected
       // identifier unmodified would make a batch edit look successful while

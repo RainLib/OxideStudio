@@ -22,10 +22,10 @@ export function unquoteSqlIdentifierSelection(selection: string): string | null 
   if (parts.length === 0) return null;
   const unquoted = parts.map((part) => {
     if (/^"(?:[^"]|"")+"$/.test(part)) {
-      return part.slice(1, -1).replaceAll('""', '"');
+      return part.slice(1, -1).replace(/""/g, '"');
     }
-    if (/^`[^`]+`$/.test(part)) return part.slice(1, -1).replaceAll("``", "`");
-    if (/^\[[^\]]+\]$/.test(part)) return part.slice(1, -1).replaceAll("]]", "]");
+    if (/^`[^`]+`$/.test(part)) return part.slice(1, -1).replace(/``/g, "`");
+    if (/^\[[^\]]+\]$/.test(part)) return part.slice(1, -1).replace(/\]\]/g, "]");
     return null;
   });
   return unquoted.some((part) => part === null) ? null : unquoted.join(".");
@@ -43,7 +43,7 @@ export function sqlInListFromClipboard(clipboard: string): string | null {
     if (/^null$/i.test(value)) return "NULL";
     if (/^(true|false)$/i.test(value)) return value.toUpperCase();
     if (/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(value)) return value;
-    return `'${value.replaceAll("'", "''")}'`;
+    return `'${value.replace(/'/g, "''")}'`;
   });
   return `(${literals.join(", ")})`;
 }
