@@ -946,6 +946,30 @@ export function TableDataView() {
       // bounded browser rows instead of claiming the native stream accepted
       // an encoding it cannot parse.
       if (csvImportSource.nativePath && sourceEncoding === "utf-8") {
+        updateTask(taskId, { detail: "Running full-file CSV preflight" });
+        const preflight = await tableService.preflightTableCsvImport(
+          tabConnectionId,
+          driver,
+          activeTab.schemaName,
+          activeTab.tableName,
+          csvImportSource.nativePath,
+          csvOptions.firstRowHeader ?? true,
+          activeTab.databaseName,
+          csvOptions,
+          csvImportSource.contentDigest,
+        );
+        if (preflight.rejectedRows > 0) {
+          const locations = preflight.issues
+            .slice(0, 5)
+            .map((issue) => issue.rowNumber)
+            .join(", ");
+          throw new Error(
+            `CSV preflight rejected ${preflight.rejectedRows.toLocaleString()} row(s)${locations ? ` (for example: ${locations})` : ""}. Strict import was not started.`,
+          );
+        }
+        updateTask(taskId, {
+          detail: `${preflight.acceptedRows.toLocaleString()} rows preflighted; committing transaction`,
+        });
         const imported = await tableService.importTableData(
           tabConnectionId,
           driver,

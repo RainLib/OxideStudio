@@ -204,3 +204,6 @@ database target until its relevant queue entries pass.
   report-store failure must not turn an already-committed import into failure.
 - Reject-row artifacts, per-row error isolation, resume tokens, and reports
   for browser-only non-UTF-8 CSV fallback remain implementation gaps.
+- Verify UTF-8 native CSV confirmation performs the full-file preflight before
+  opening a transaction. A rejected row must stop strict import, expose only
+  bounded row numbers/error codes, and leave no target rows committed.
