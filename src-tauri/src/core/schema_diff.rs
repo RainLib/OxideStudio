@@ -298,12 +298,15 @@ pub fn compare_schema_snapshots(
         );
         return Ok(plan);
     }
-    // SQLite snapshots are fully useful for drift review and diagrams, but
-    // applying a generic migration plan would be unsafe because many ALTER
-    // operations require a rebuild-table workflow. Keep comparison read-only
-    // until that dedicated planner exists.
-    if !target_spec.supports_table_browsing || target_spec.driver == "sqlite" {
+    if !target_spec.supports_table_browsing {
         return compare_metadata_snapshots(source, target, generated_at, target_spec.driver);
+    }
+    // SQLite alters that touch a table definition have to rebuild the table.
+    // Generate a bounded, review-only rebuild artifact instead of pretending
+    // its generic ALTER support is equivalent to PostgreSQL or MySQL. The
+    // command layer deliberately keeps SQLite execution disabled.
+    if target_spec.driver == "sqlite" {
+        return compare_sqlite_schema_snapshots(source, target, generated_at);
     }
     let kind = DatabaseKind::from_str(target_spec.driver)?;
     let target_schema = target.schema_name.as_str();
@@ -592,6 +595,638 @@ fn compare_metadata_snapshots(
             warnings
         },
     })
+}
+
+/// Builds a SQLite-specific rebuild *review* plan. SQLite can only add a
+/// narrow class of columns directly; changing a table definition safely needs
+/// a replacement table, a bounded copy of the columns that still exist, and
+/// recreation of compatible indexes. This module intentionally does not make
+/// the generated SQL executable through the migration command: a backup,
+/// foreign-key check, and live-engine validation are mandatory first.
+fn compare_sqlite_schema_snapshots(
+    source: &SchemaSnapshot,
+    target: &SchemaSnapshot,
+    generated_at: i64,
+) -> Result<SchemaDiffPlan> {
+    let source_relations = relation_map(&source.relations);
+    let target_relations = relation_map(&target.relations);
+    let mut relation_names = source_relations
+        .keys()
+        .chain(target_relations.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    relation_names.sort();
+    relation_names.dedup();
+
+    let mut changes = Vec::new();
+    let mut warnings = source
+        .warnings
+        .iter()
+        .chain(target.warnings.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    warnings.push(
+        "SQLite plans are rebuild-review artifacts only. Automatic apply remains disabled until backup, foreign-key, rollback, and live-engine validation are implemented."
+            .to_string(),
+    );
+
+    for relation_name in relation_names {
+        match (
+            source_relations.get(&relation_name),
+            target_relations.get(&relation_name),
+        ) {
+            (Some(source_relation), None) => {
+                let (sql, relation_warnings) = sqlite_create_relation_sql(source_relation, &relation_name);
+                warnings.extend(relation_warnings);
+                let mut create = change(
+                    SchemaChangeKind::RelationCreate,
+                    SchemaChangeRisk::Review,
+                    &target.schema_name,
+                    &relation_name,
+                    source_relation.object_type.clone(),
+                    None,
+                    format!("Review creation of SQLite relation {relation_name}"),
+                    sql,
+                    false,
+                    true,
+                );
+                create.phase = SchemaChangePhase::ManualReview;
+                create.blocked_reason = Some(
+                    "SQLite creation is supplied for review only; automatic apply is disabled."
+                        .to_string(),
+                );
+                changes.push(create);
+            }
+            (None, Some(target_relation)) => {
+                let mut drop = change(
+                    SchemaChangeKind::RelationDrop,
+                    SchemaChangeRisk::Destructive,
+                    &target.schema_name,
+                    &relation_name,
+                    target_relation.object_type.clone(),
+                    None,
+                    format!("Review removal of target-only SQLite relation {relation_name}"),
+                    Vec::new(),
+                    false,
+                    true,
+                );
+                drop.phase = SchemaChangePhase::ManualReview;
+                drop.blocked_reason = Some(
+                    "SQLite relation removal requires a backup and foreign-key dependency review."
+                        .to_string(),
+                );
+                changes.push(drop);
+            }
+            (Some(source_relation), Some(target_relation))
+                if sqlite_relation_requires_rebuild(source_relation, target_relation) =>
+            {
+                // Keep the child-level drift visible in the UI, then add one
+                // table-level artifact that describes the only safe SQLite
+                // strategy for applying those changes as a unit.
+                compare_metadata_children(
+                    &target.schema_name,
+                    source_relation,
+                    target_relation,
+                    &mut changes,
+                );
+                let (sql, relation_warnings) = sqlite_rebuild_relation_sql(
+                    source,
+                    target,
+                    source_relation,
+                    target_relation,
+                );
+                warnings.extend(relation_warnings);
+                let mut rebuild = change(
+                    SchemaChangeKind::RelationModify,
+                    SchemaChangeRisk::Review,
+                    &target.schema_name,
+                    &relation_name,
+                    source_relation.object_type.clone(),
+                    None,
+                    format!("Review SQLite rebuild for {relation_name}"),
+                    sql,
+                    false,
+                    true,
+                );
+                rebuild.phase = SchemaChangePhase::ManualReview;
+                rebuild.blocked_reason = Some(
+                    "SQLite rebuild plans must be reviewed, backed up, and foreign-key checked before manual execution; automatic apply is disabled."
+                        .to_string(),
+                );
+                changes.push(rebuild);
+            }
+            (Some(source_relation), Some(target_relation)) if source_relation != target_relation => {
+                // SQLite does not persist column comments. Keep descriptor
+                // drift visible without manufacturing a destructive rebuild
+                // for metadata that cannot change the physical table.
+                compare_metadata_children(
+                    &target.schema_name,
+                    source_relation,
+                    target_relation,
+                    &mut changes,
+                );
+            }
+            (Some(_), Some(_)) | (None, None) => {}
+        }
+    }
+
+    compare_routines(
+        &source.routines,
+        &target.routines,
+        &target.schema_name,
+        &mut changes,
+        &mut warnings,
+    );
+    compare_schema_objects(
+        &source.schema_objects,
+        &target.schema_objects,
+        &target.schema_name,
+        &mut changes,
+        &mut warnings,
+    );
+    for (order, change) in changes.iter_mut().enumerate() {
+        change.order = order + 1;
+    }
+    warnings.sort();
+    warnings.dedup();
+    let summary = summarize_changes(&changes);
+    let id = stable_id(
+        "sqlite-schema-diff",
+        &format!(
+            "sqlite-schema-diff:{}:{}:{}",
+            source.fingerprint, target.fingerprint, target.schema_name
+        ),
+    );
+
+    Ok(SchemaDiffPlan {
+        id,
+        source_snapshot_id: source.id.clone(),
+        target_snapshot_id: target.id.clone(),
+        driver: "sqlite".to_string(),
+        target_connection_id: target.connection_id.clone(),
+        target_database_name: target.database_name.clone(),
+        target_schema_name: target.schema_name.clone(),
+        generated_at,
+        transactional: false,
+        summary,
+        migration_sql: render_sqlite_rebuild_migration_sql(source, target, &changes, &warnings),
+        preflight_checks: Vec::new(),
+        preflight_sql: "-- SQLite rebuild preflight is intentionally manual until its backup and foreign-key checks have a verified runtime contract.\n".to_string(),
+        warnings,
+        changes,
+    })
+}
+
+fn sqlite_quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn sqlite_object_is_table(relation: &SchemaRelationSnapshot) -> bool {
+    let flags = relation_flags(relation.object_type.as_deref());
+    !flags.is_view && !flags.is_materialized_view && !flags.is_foreign_table
+}
+
+fn sqlite_relation_requires_rebuild(
+    source: &SchemaRelationSnapshot,
+    target: &SchemaRelationSnapshot,
+) -> bool {
+    if source.object_type != target.object_type
+        || source.indexes != target.indexes
+        || source.constraints != target.constraints
+        || source.columns.len() != target.columns.len()
+    {
+        return true;
+    }
+    let target_columns = target
+        .columns
+        .iter()
+        .map(|column| (column.name.as_str(), column))
+        .collect::<BTreeMap<_, _>>();
+    source.columns.iter().any(|source_column| {
+        let Some(target_column) = target_columns.get(source_column.name.as_str()) else {
+            return true;
+        };
+        source_column.data_type != target_column.data_type
+            || source_column.is_nullable != target_column.is_nullable
+            || source_column.is_primary_key != target_column.is_primary_key
+            || source_column.is_unique != target_column.is_unique
+            || source_column.is_indexed != target_column.is_indexed
+            || source_column.is_auto_increment != target_column.is_auto_increment
+            || source_column.default_value != target_column.default_value
+    })
+}
+
+fn sqlite_sql_fragment_is_safe(fragment: &str) -> bool {
+    !fragment.contains('\0') && !fragment.contains(';')
+}
+
+fn sqlite_column_definition(column: &ColumnInfo) -> Result<String, String> {
+    let data_type = column.data_type.trim();
+    if data_type.is_empty() || !sqlite_sql_fragment_is_safe(data_type) {
+        return Err(format!(
+            "Column {} has an empty or unsafe SQLite type declaration.",
+            column.name
+        ));
+    }
+    let mut definition = format!("{} {data_type}", sqlite_quote_identifier(&column.name));
+    if column.is_auto_increment {
+        if column.is_primary_key && data_type.eq_ignore_ascii_case("INTEGER") {
+            definition.push_str(" PRIMARY KEY AUTOINCREMENT");
+        } else {
+            return Err(format!(
+                "Column {} requests AUTOINCREMENT but SQLite only permits it on an INTEGER PRIMARY KEY.",
+                column.name
+            ));
+        }
+    }
+    if let Some(default_value) = column.default_value.as_deref() {
+        if !sqlite_sql_fragment_is_safe(default_value) {
+            return Err(format!(
+                "Column {} has an unsafe default expression that cannot be placed in a rebuild artifact.",
+                column.name
+            ));
+        }
+        definition.push_str(" DEFAULT ");
+        definition.push_str(default_value.trim());
+    }
+    if !column.is_nullable {
+        definition.push_str(" NOT NULL");
+    }
+    Ok(definition)
+}
+
+fn sqlite_constraint_clause(
+    relation: &SchemaRelationSnapshot,
+    constraint: &ConstraintInfo,
+) -> Result<String, String> {
+    let normalized = constraint.constraint_type.to_ascii_uppercase();
+    let valid_columns = relation
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<BTreeSet<_>>();
+    if (!normalized.contains("CHECK") && constraint.columns.is_empty())
+        || constraint
+            .columns
+            .iter()
+            .any(|column| !valid_columns.contains(column.as_str()))
+    {
+        return Err(format!(
+            "Constraint {}.{} references columns not present in the desired table.",
+            relation.name, constraint.name
+        ));
+    }
+    let name = if constraint.name.trim().is_empty() {
+        String::new()
+    } else {
+        format!("CONSTRAINT {} ", sqlite_quote_identifier(&constraint.name))
+    };
+    let columns = constraint
+        .columns
+        .iter()
+        .map(|column| sqlite_quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if normalized.contains("PRIMARY") {
+        return Ok(format!("{name}PRIMARY KEY ({columns})"));
+    }
+    if normalized.contains("UNIQUE") {
+        return Ok(format!("{name}UNIQUE ({columns})"));
+    }
+    if normalized.contains("FOREIGN") {
+        let referenced_table = constraint.referenced_table.as_deref().ok_or_else(|| {
+            format!(
+                "Foreign key {}.{} is missing its referenced table.",
+                relation.name, constraint.name
+            )
+        })?;
+        if constraint.referenced_columns.is_empty()
+            || constraint.referenced_columns.len() != constraint.columns.len()
+        {
+            return Err(format!(
+                "Foreign key {}.{} has an incomplete referenced-column mapping.",
+                relation.name, constraint.name
+            ));
+        }
+        let referenced_columns = constraint
+            .referenced_columns
+            .iter()
+            .map(|column| sqlite_quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(format!(
+            "{name}FOREIGN KEY ({columns}) REFERENCES {} ({referenced_columns})",
+            sqlite_quote_identifier(referenced_table)
+        ));
+    }
+    if normalized.contains("CHECK") {
+        let definition = constraint
+            .definition
+            .as_deref()
+            .map(str::trim)
+            .filter(|definition| {
+                !definition.is_empty() && sqlite_sql_fragment_is_safe(definition)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "CHECK constraint {}.{} needs its exact source definition.",
+                    relation.name, constraint.name
+                )
+            })?;
+        let uppercase_definition = definition.to_ascii_uppercase();
+        if uppercase_definition.starts_with("CONSTRAINT ") {
+            return Ok(definition.to_string());
+        }
+        let definition = if uppercase_definition.starts_with("CHECK") {
+            definition.to_string()
+        } else {
+            format!("CHECK ({definition})")
+        };
+        return Ok(format!("{name}{definition}"));
+    }
+    Err(format!(
+        "Constraint {}.{} has an unsupported SQLite constraint type {}.",
+        relation.name, constraint.name, constraint.constraint_type
+    ))
+}
+
+fn sqlite_create_index_sql(
+    relation: &SchemaRelationSnapshot,
+    table_name: &str,
+    index: &IndexInfo,
+) -> Result<String, String> {
+    let valid_columns = relation
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let index_type = index.index_type.as_deref().map(str::trim);
+    let supported_index_type = index_type
+        .is_none_or(|value| value.is_empty() || value.eq_ignore_ascii_case("BTREE"));
+    if index.columns.is_empty()
+        || index
+            .columns
+            .iter()
+            .any(|column| !valid_columns.contains(column.as_str()))
+        || !supported_index_type
+    {
+        return Err(format!(
+            "Index {}.{} is expression-based, has an unsupported type, or references an unavailable column.",
+            relation.name, index.name
+        ));
+    }
+    let columns = index
+        .columns
+        .iter()
+        .map(|column| sqlite_quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        "CREATE {}INDEX {} ON {} ({});",
+        if index.is_unique { "UNIQUE " } else { "" },
+        sqlite_quote_identifier(&index.name),
+        sqlite_quote_identifier(table_name),
+        columns
+    ))
+}
+
+fn sqlite_create_relation_sql(
+    relation: &SchemaRelationSnapshot,
+    table_name: &str,
+) -> (Vec<String>, Vec<String>) {
+    if !sqlite_object_is_table(relation) {
+        return (
+            Vec::new(),
+            vec![format!(
+                "SQLite relation {} is a view or unsupported object and requires exact source DDL.",
+                relation.name
+            )],
+        );
+    }
+    if relation.columns.is_empty() {
+        return (
+            Vec::new(),
+            vec![format!(
+                "SQLite relation {} has no captured columns, so no CREATE TABLE artifact was generated.",
+                relation.name
+            )],
+        );
+    }
+    let mut warnings = Vec::new();
+    let mut definitions = Vec::new();
+    for column in &relation.columns {
+        match sqlite_column_definition(column) {
+            Ok(definition) => definitions.push(format!("  {definition}")),
+            Err(warning) => warnings.push(warning),
+        }
+    }
+    let has_auto_increment_primary = relation
+        .columns
+        .iter()
+        .any(|column| column.is_auto_increment && column.is_primary_key);
+    let has_primary_constraint = relation.constraints.iter().any(|constraint| {
+        constraint
+            .constraint_type
+            .to_ascii_uppercase()
+            .contains("PRIMARY")
+    });
+    for constraint in &relation.constraints {
+        match sqlite_constraint_clause(relation, constraint) {
+            Ok(clause) => definitions.push(format!("  {clause}")),
+            Err(warning) => warnings.push(warning),
+        }
+    }
+    if !has_primary_constraint && !has_auto_increment_primary {
+        let primary_columns = relation
+            .columns
+            .iter()
+            .filter(|column| column.is_primary_key)
+            .map(|column| sqlite_quote_identifier(&column.name))
+            .collect::<Vec<_>>();
+        if !primary_columns.is_empty() {
+            definitions.push(format!("  PRIMARY KEY ({})", primary_columns.join(", ")));
+        }
+    }
+    if !warnings.is_empty() {
+        return (Vec::new(), warnings);
+    }
+    let mut sql = vec![format!(
+        "CREATE TABLE {} (\n{}\n);",
+        sqlite_quote_identifier(table_name),
+        definitions.join(",\n")
+    )];
+    let constraint_names = relation
+        .constraints
+        .iter()
+        .map(|constraint| constraint.name.as_str())
+        .collect::<BTreeSet<_>>();
+    for index in relation
+        .indexes
+        .iter()
+        .filter(|index| !index.is_primary && !constraint_names.contains(index.name.as_str()))
+    {
+        match sqlite_create_index_sql(relation, table_name, index) {
+            Ok(index_sql) => sql.push(index_sql),
+            Err(warning) => warnings.push(warning),
+        }
+    }
+    if !warnings.is_empty() {
+        sql.clear();
+    }
+    (sql, warnings)
+}
+
+fn sqlite_rebuild_relation_sql(
+    source: &SchemaSnapshot,
+    target: &SchemaSnapshot,
+    source_relation: &SchemaRelationSnapshot,
+    target_relation: &SchemaRelationSnapshot,
+) -> (Vec<String>, Vec<String>) {
+    if !sqlite_object_is_table(source_relation) || !sqlite_object_is_table(target_relation) {
+        return (
+            Vec::new(),
+            vec![format!(
+                "SQLite relation {} changes object type or is a view; an exact source-DDL migration is required.",
+                source_relation.name
+            )],
+        );
+    }
+    let rebuild_suffix = &hex_digest(
+        format!(
+            "{}:{}:{}",
+            source.fingerprint, target.fingerprint, source_relation.name
+        )
+        .as_bytes(),
+    )[..12];
+    let temporary_table = format!("__oxide_rebuild_{}_{}", source_relation.name, rebuild_suffix);
+    let (create_sql, mut warnings) = sqlite_create_relation_sql(source_relation, &temporary_table);
+    if create_sql.is_empty() {
+        return (Vec::new(), warnings);
+    }
+    let target_columns = target_relation
+        .columns
+        .iter()
+        .map(|column| (column.name.as_str(), column))
+        .collect::<BTreeMap<_, _>>();
+    let preserved_columns = source_relation
+        .columns
+        .iter()
+        .filter(|source_column| target_columns.contains_key(source_column.name.as_str()))
+        .collect::<Vec<_>>();
+    if preserved_columns.is_empty() {
+        warnings.push(format!(
+            "SQLite rebuild for {} has no same-name columns to copy; manually provide a data transformation before execution.",
+            source_relation.name
+        ));
+        return (Vec::new(), warnings);
+    }
+    for source_column in &source_relation.columns {
+        if !target_columns.contains_key(source_column.name.as_str())
+            && !source_column.is_nullable
+            && source_column.default_value.is_none()
+        {
+            warnings.push(format!(
+                "SQLite rebuild for {} adds required column {} without a default; provide a backfill expression before execution.",
+                source_relation.name, source_column.name
+            ));
+        }
+    }
+    for source_column in &preserved_columns {
+        if let Some(target_column) = target_columns.get(source_column.name.as_str()) {
+            if source_column.data_type != target_column.data_type {
+                warnings.push(format!(
+                    "SQLite rebuild for {} copies {} without an explicit type conversion; review affinity and data-loss behavior.",
+                    source_relation.name, source_column.name
+                ));
+            }
+        }
+    }
+    if !warnings.is_empty() {
+        return (Vec::new(), warnings);
+    }
+    let copied_columns = preserved_columns
+        .iter()
+        .map(|column| sqlite_quote_identifier(&column.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut sql = vec![
+        "-- REVIEW ONLY: take a verified backup and inspect PRAGMA foreign_key_check before running any rebuild steps.".to_string(),
+        "PRAGMA foreign_keys = OFF;".to_string(),
+        "BEGIN IMMEDIATE;".to_string(),
+    ];
+    sql.extend(create_sql.into_iter().filter(|statement| {
+        !statement.starts_with("CREATE INDEX") && !statement.starts_with("CREATE UNIQUE INDEX")
+    }));
+    sql.push(format!(
+        "INSERT INTO {} ({copied_columns}) SELECT {copied_columns} FROM {};",
+        sqlite_quote_identifier(&temporary_table),
+        sqlite_quote_identifier(&target_relation.name)
+    ));
+    sql.push(format!("DROP TABLE {};", sqlite_quote_identifier(&target_relation.name)));
+    sql.push(format!(
+        "ALTER TABLE {} RENAME TO {};",
+        sqlite_quote_identifier(&temporary_table),
+        sqlite_quote_identifier(&source_relation.name)
+    ));
+    let constraint_names = source_relation
+        .constraints
+        .iter()
+        .map(|constraint| constraint.name.as_str())
+        .collect::<BTreeSet<_>>();
+    for index in source_relation
+        .indexes
+        .iter()
+        .filter(|index| !index.is_primary && !constraint_names.contains(index.name.as_str()))
+    {
+        match sqlite_create_index_sql(source_relation, &source_relation.name, index) {
+            Ok(index_sql) => sql.push(index_sql),
+            Err(warning) => warnings.push(warning),
+        }
+    }
+    if !warnings.is_empty() {
+        return (Vec::new(), warnings);
+    }
+    sql.extend([
+        "PRAGMA foreign_key_check;".to_string(),
+        "COMMIT;".to_string(),
+        "PRAGMA foreign_keys = ON;".to_string(),
+    ]);
+    (sql, warnings)
+}
+
+fn render_sqlite_rebuild_migration_sql(
+    source: &SchemaSnapshot,
+    target: &SchemaSnapshot,
+    changes: &[SchemaChange],
+    warnings: &[String],
+) -> String {
+    let mut lines = vec![
+        "-- OxideStudio SQLite schema rebuild review".to_string(),
+        format!("-- Desired source: {} / {}", source.connection_name, source.schema_name),
+        format!("-- Actual target: {} / {}", target.connection_name, target.schema_name),
+        "-- This artifact is not executable through OxideStudio. Take a verified backup and validate a copy first.".to_string(),
+        "-- Run PRAGMA foreign_key_check before and after every manually reviewed rebuild.".to_string(),
+    ];
+    for warning in warnings {
+        lines.push(format!("-- WARNING: {warning}"));
+    }
+    lines.push(String::new());
+    if changes.is_empty() {
+        lines.push("-- No schema differences detected.".to_string());
+    }
+    for change in changes {
+        lines.push(format!("-- Step {}: {}", change.order, change.summary));
+        if let Some(reason) = change.blocked_reason.as_deref() {
+            lines.push(format!("-- BLOCKED: {reason}"));
+        }
+        if change.sql.is_empty() {
+            lines.push("-- MANUAL REVIEW REQUIRED: no complete rebuild SQL was generated.".to_string());
+        } else {
+            lines.extend(change.sql.iter().cloned());
+        }
+        lines.push(String::new());
+    }
+    lines.join("\n")
 }
 
 fn routine_map(routines: &[SchemaRoutineSnapshot]) -> BTreeMap<String, &SchemaRoutineSnapshot> {
@@ -3403,7 +4038,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_snapshots_produce_metadata_only_diffs() {
+    fn sqlite_snapshots_produce_blocked_rebuild_review_artifacts() {
         let mut source = snapshot(
             "desired",
             vec![
@@ -3430,8 +4065,16 @@ mod tests {
             .changes
             .iter()
             .any(|change| change.kind == SchemaChangeKind::ColumnAdd));
-        assert!(plan.changes.iter().all(|change| change.sql.is_empty()));
-        assert!(plan.migration_sql.contains("Metadata-only comparison"));
+        let rebuild = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::RelationModify)
+            .expect("SQLite table drift should produce a rebuild artifact");
+        assert!(rebuild.manual_review);
+        assert!(rebuild.blocked_reason.is_some());
+        assert!(rebuild.sql.iter().any(|sql| sql.contains("CREATE TABLE")));
+        assert!(plan.migration_sql.contains("BEGIN IMMEDIATE"));
+        assert!(plan.migration_sql.contains("PRAGMA foreign_key_check"));
     }
 
     #[test]

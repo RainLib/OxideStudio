@@ -94,7 +94,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 | T07 | 部分对齐：持久化 transfer report | `useExportTracker.ts` 有后台任务、失败明细上限和终态；DBX 当前主要是会话级任务 | `TableDataTransferReport` 已按项目和目标连接保存 terminal report；单表与多表执行都写入逐对象终态。Transfer 对话框显示目标的最近历史，并且仅在当前源端点/库/schema/表完全一致时可用历史记录预填一次重试。重试会生成新 transfer id，且仍强制重新 preview/确认。overwrite 成功后会在提交后只读核对目标行数；并发写入或无法读取时只标为 `needsReview`，绝不伪装为失败或触发第二次写入。报告包含哈希 plan digest、端点标识、模式、行数、批次、终态和安全错误摘要，不保存 URL/凭据/SQL/参数/行值 | append 的稳定 baseline 验证，以及真实多表迁移报告 fixture 仍待完成；不保存行值或凭据。 |
 | M01 | 部分对齐：schema snapshot/diff | `crates/dbx-core/src/schema.rs`、`schema_diff.rs`；`components/diff/*` | relation/index/constraint/routine signature snapshot/diff；新增 descriptor-only `schemaObjects` 快照及 create/drop/modify 差异，PostgreSQL sequence/trigger/domain/enum/composite/range/multirange/extension/partition 在可见时进入快照。所有 descriptor 对象均无 DDL、无 preflight、强制 manual-review。 | 补逐产品 event/synonym/package，以及具有受审核 source/DDL conformance 后才可能开放的可执行对象迁移。 |
 | M02 | 部分对齐：migration apply | DBX `SchemaDiffDeployStep.vue`、`deployTxResult.ts` | PG transactional；MySQL journal + post verify；其余 review-only | sidecar 协议增加 semantic `plan/preflight/apply/verify` 前，不给外置包发送 Host DDL。 |
-| M03 | 未对齐：SQLite rebuild planner | DBX SQLite schema/transfer 与 backup 实现可作行为参考 | SQLite schema diff review-only | 生成临时表→复制→索引/约束→rename 的有界计划；执行前备份和 FK check，失败恢复。 |
+| M03 | 部分对齐：SQLite rebuild review planner | DBX SQLite schema/transfer 与 backup 实现可作行为参考 | SQLite schema diff 现生成临时表→同名列复制→rename→兼容索引重建→`foreign_key_check` 的受限审阅产物；所有变化均 manual-review 且自动 apply 继续禁用。 | 验证备份、外键依赖/失败恢复、类型转换与完整 DDL 保真后，才可评估受控执行。 |
 | M04 | 未对齐：跨产品 schema mapping | `transfer.rs:map_column_type`、`generate_create_table_ddl`、`convert_cross_family_object_ddl` | 创建单目标表已有受限类型映射 | 只从显式 mapping profile 生成；unsupported/review 类型不得自动执行。 |
 
 ## 6. 架构与测试差距
@@ -132,7 +132,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 1. 多表 transfer plan、FK 拓扑排序、cycle policy。
 2. sequence/identity/ownership preview 与 post-verify。
 3. 持久化 transfer report；import reject rows/resume；export backpressure/cancel/cleanup。
-4. SQLite rebuild planner；随后扩展签名 sidecar semantic migration 协议。
+4. SQLite rebuild 的 backup/FK/rollback runtime contract；随后扩展签名 sidecar semantic migration 协议。
 
 ### 批次 4：Explorer 与 Admin
 

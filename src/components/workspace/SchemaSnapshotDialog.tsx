@@ -75,7 +75,8 @@ export function SchemaSnapshotDialog({
   const { startTask, finishTask, failTask } = useTaskStore();
   const supportsRestorePlan =
     identity?.driver === "postgres" || identity?.driver === "mysql";
-  const objectLabel = supportsRestorePlan ? "relations" : "objects";
+  const supportsSchemaReviewPlan = supportsRestorePlan || identity?.driver === "sqlite";
+  const objectLabel = supportsSchemaReviewPlan ? "relations" : "objects";
   const selected = useMemo(
     () => snapshots.find((snapshot) => snapshot.id === selectedId) || null,
     [selectedId, snapshots],
@@ -87,7 +88,7 @@ export function SchemaSnapshotDialog({
       : []),
     [selected],
   );
-  const selectedSupportsRestorePlan = supportsRestorePlan && !selectedIsProjectDdl;
+  const selectedSupportsRestorePlan = supportsSchemaReviewPlan && !selectedIsProjectDdl;
 
   useEffect(() => {
     if (!open || !identity) return;
@@ -294,7 +295,7 @@ export function SchemaSnapshotDialog({
             </span>
             <div>
               <DialogTitle className="text-[13px] tracking-normal">
-                {supportsRestorePlan ? "Schema" : "Metadata"} snapshots · {identity.schemaName}
+                {supportsSchemaReviewPlan ? "Schema" : "Metadata"} snapshots · {identity.schemaName}
               </DialogTitle>
               <DialogDescription className="text-[10px] text-[hsl(var(--wb-text-muted))]">
                 {identity.connectionName}
@@ -411,6 +412,8 @@ export function SchemaSnapshotDialog({
                 ? "This baseline is inferred from bounded project SQL. It can reveal drift and generate a review diff, but cannot be applied automatically."
                 : supportsRestorePlan
                 ? "The generated plan describes how to make the live target match the selected snapshot. It opens as a read-only artifact first. OxideStudio does not execute migration SQL from this dialog."
+                : identity?.driver === "sqlite"
+                ? "SQLite differences generate a read-only rebuild review artifact. It may include a temporary table, preserved-column copy, index recreation, and foreign-key checks, but automatic apply remains disabled."
                 : "Document and search snapshots preserve collection or index fields and indexes for drift review and diagrams. Restore plans remain disabled because these stores require driver-specific migration commands."}
             </div>
 
@@ -476,7 +479,7 @@ export function SchemaSnapshotDialog({
                     </span>
                   </>
                 )}
-                <span className="wb-muted">{supportsRestorePlan ? "Relations" : "Objects"}</span>
+                <span className="wb-muted">{supportsSchemaReviewPlan ? "Relations" : "Objects"}</span>
                 <span>{selected.relations.length.toLocaleString()}</span>
                 <span className="wb-muted">Driver</span>
                 <span>{selected.driver}</span>
@@ -502,7 +505,7 @@ export function SchemaSnapshotDialog({
             onClick={() => void capture()}
           >
             {operation === "capture" ? <Loader2 size={12} className="animate-spin" /> : <Camera size={12} />}
-            Capture current {supportsRestorePlan ? "schema" : "metadata"}
+            Capture current {supportsSchemaReviewPlan ? "schema" : "metadata"}
           </button>
           <div className="flex gap-2">
             <button type="button" className="wb-text-button h-7 px-3 text-[10px]" disabled={busy} onClick={onClose}>
@@ -523,12 +526,18 @@ export function SchemaSnapshotDialog({
               title={
                 supportsRestorePlan
                   ? "Compare the selected schema snapshot with live metadata"
+                  : identity?.driver === "sqlite"
+                  ? "Compare the selected schema snapshot and generate a blocked rebuild review"
                   : "Compare document or search metadata without generating restore commands"
               }
               onClick={() => void compare()}
             >
               {operation === "compare" ? <Loader2 size={12} className="animate-spin" /> : <GitCompareArrows size={12} />}
-              {selectedSupportsRestorePlan ? "Preview restore plan" : "Preview metadata diff"}
+              {selectedSupportsRestorePlan
+                ? identity?.driver === "sqlite"
+                  ? "Preview rebuild plan"
+                  : "Preview restore plan"
+                : "Preview metadata diff"}
             </button>
           </div>
         </DialogFooter>

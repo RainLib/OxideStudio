@@ -207,3 +207,17 @@ database target until its relevant queue entries pass.
 - Verify UTF-8 native CSV confirmation performs the full-file preflight before
   opening a transaction. A rejected row must stop strict import, expose only
   bounded row numbers/error codes, and leave no target rows committed.
+
+## SQLite rebuild review plans
+
+- Validate generated rebuild artifacts against copies of SQLite databases with
+  quoted identifiers, primary/unique/foreign/check constraints, compatible
+  indexes, added nullable columns, dropped columns, and affinity-changing
+  columns. The plan must retain only same-name source columns and recreate
+  compatible indexes after the rename.
+- Confirm each plan remains blocked from automatic execution and that the UI
+  labels it as a rebuild review. Before any future apply capability, require a
+  verified backup/restore path, pre/post `PRAGMA foreign_key_check`, failure
+  recovery, and an explicit policy for required-column backfills, type
+  conversions, expression/partial indexes, triggers, virtual tables, and
+  views.
