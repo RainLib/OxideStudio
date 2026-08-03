@@ -204,4 +204,16 @@ describe("SQL analysis helpers", () => {
       []
     );
   });
+
+  it("keeps CTE names out of relation metadata while retaining catalog-qualified relations", () => {
+    expect(
+      extractRelationReferences(
+        "WITH orders AS (SELECT * FROM archive.sales.orders) SELECT * FROM orders JOIN live.public.customers c ON true",
+        "postgres",
+      ),
+    ).toEqual([
+      { database: "archive", schema: "sales", table: "orders" },
+      { database: "live", schema: "public", table: "customers" },
+    ]);
+  });
 });
