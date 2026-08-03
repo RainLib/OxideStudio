@@ -13,6 +13,7 @@ import type {
   DatabaseAdminLockWait,
   DatabaseAdminMetric,
   DatabaseAdminRoleMembership,
+  DatabaseAdminTablePrivilege,
   DatabaseAdminSession,
   DatabaseAdminUser,
   DatabaseDriver,
@@ -20,7 +21,7 @@ import type {
 import { Activity, BarChart3, GitFork, Lock, RefreshCw, Shield, Trash2, Unlock, UserPlus, Users } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-type AdminView = "sessions" | "metrics" | "locks" | "users" | "roles";
+type AdminView = "sessions" | "metrics" | "locks" | "users" | "roles" | "privileges";
 type AccountForm = "create" | "password" | null;
 
 interface DatabaseAdministrationDialogProps {
@@ -77,6 +78,7 @@ export function DatabaseAdministrationDialog({
   const [lockWaits, setLockWaits] = useState<DatabaseAdminLockWait[]>([]);
   const [users, setUsers] = useState<DatabaseAdminUser[]>([]);
   const [roleMemberships, setRoleMemberships] = useState<DatabaseAdminRoleMembership[]>([]);
+  const [tablePrivileges, setTablePrivileges] = useState<DatabaseAdminTablePrivilege[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isMutating, setIsMutating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -113,6 +115,8 @@ export function DatabaseAdministrationDialog({
         setLockWaits(await databaseService.listDatabaseAdminLockWaits(connectionId, driver));
       } else if (view === "roles") {
         setRoleMemberships(await databaseService.listDatabaseAdminRoleMemberships(connectionId, driver));
+      } else if (view === "privileges") {
+        setTablePrivileges(await databaseService.listDatabaseAdminTablePrivileges(connectionId, driver));
       } else {
         setUsers(await databaseService.listDatabaseAdminUsers(connectionId, driver));
       }
@@ -351,6 +355,13 @@ export function DatabaseAdministrationDialog({
               >
                 <GitFork size={13} /> Roles
               </button>
+              <button
+                type="button"
+                className={cn("wb-toolbar-button h-7 gap-1.5 px-2 text-[11px]", view === "privileges" && "wb-toolbar-button-active")}
+                onClick={() => setView("privileges")}
+              >
+                <Shield size={13} /> Privileges
+              </button>
               <div className="flex-1" />
               {view === "users" && (
                 <button type="button" className="wb-icon-button h-6 w-6" title="Create account" onClick={openCreate}>
@@ -373,6 +384,8 @@ export function DatabaseAdministrationDialog({
                 lockWaits.length === 0 ? <EmptyState label="No visible blocking lock waits" /> : <LockWaitRows waits={lockWaits} />
               ) : view === "roles" ? (
                 roleMemberships.length === 0 ? <EmptyState label="No visible role memberships" /> : <RoleMembershipRows memberships={roleMemberships} />
+              ) : view === "privileges" ? (
+                tablePrivileges.length === 0 ? <EmptyState label="No visible table privileges" /> : <TablePrivilegeRows privileges={tablePrivileges} />
               ) : (
                 users.length === 0 ? <EmptyState label="No database accounts returned" /> : <UserRows users={users} onPassword={openPassword} onLogin={handleLogin} onDelete={handleDeleteUser} disabled={isMutating} />
               )}
@@ -414,6 +427,20 @@ function RoleMembershipRows({ memberships }: { memberships: DatabaseAdminRoleMem
           <span className="min-w-0 flex-1 truncate font-medium text-[hsl(var(--wb-text))]">{membership.role}</span>
           <span className="wb-muted">member</span>
           <span className="min-w-0 flex-1 truncate text-right wb-muted">{membership.member}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TablePrivilegeRows({ privileges }: { privileges: DatabaseAdminTablePrivilege[] }) {
+  return (
+    <div className="divide-y divide-[hsl(var(--wb-border-subtle))]">
+      {privileges.map((privilege) => (
+        <div key={`${privilege.grantee}:${privilege.schema}:${privilege.table}:${privilege.privilege}`} className="flex min-w-0 items-center gap-2 px-3 py-2 text-[11px]">
+          <Shield size={13} className="shrink-0 text-emerald-400/80" />
+          <div className="min-w-0 flex-1"><div className="truncate font-medium text-[hsl(var(--wb-text))]">{privilege.schema}.{privilege.table}</div><div className="truncate text-[10px] wb-muted">{privilege.grantee}</div></div>
+          <span className="shrink-0 rounded border border-[hsl(var(--wb-border-subtle))] px-1.5 py-0.5 text-[10px] wb-muted">{privilege.privilege}</span>
         </div>
       ))}
     </div>

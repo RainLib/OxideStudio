@@ -152,6 +152,12 @@ database target until its relevant queue entries pass.
   and member names retain account host qualifiers where applicable, no SQL or
   grants are returned, and a missing metadata privilege is surfaced visibly.
 
+## Visible table privileges
+
+- Verify the bounded PostgreSQL and MySQL/MariaDB table-privilege views with
+  ordinary and privilege-restricted roles. Ensure grantee, schema, table, and
+  privilege remain visible, while no grant mutation is offered by the UI.
+
 ## PostgreSQL routine source
 
 - Verify overloaded functions and procedures, quoted schema/routine names,
