@@ -6,6 +6,7 @@ import { useTabStore } from "@/store/useTabStore";
 import { tableService } from "@/services/tauri";
 import type {
   TableExportFormat,
+  TableExportEncoding,
   TableImportFormat,
 } from "@/services/tauri/types";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -168,7 +169,8 @@ export function useTableOperations() {
 
   const exportTableData = async (
     tableName: string,
-    format: TableExportFormat = "csv"
+    format: TableExportFormat = "csv",
+    encoding: TableExportEncoding = "utf8",
   ) => {
     if (!activeConnectionId || !currentSchema || activeTableExportRef.current) return;
     const driver = getDriver();
@@ -190,7 +192,7 @@ export function useTableOperations() {
         currentSchema,
         tableName,
         format,
-        { exportId, projectId: activeProjectId },
+        { exportId, projectId: activeProjectId, encoding },
       );
       console.log(
         `Exported ${exported.rowsExported} rows from ${tableName} to ${exported.filePath}`

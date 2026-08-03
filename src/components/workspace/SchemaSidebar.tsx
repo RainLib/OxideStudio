@@ -3892,6 +3892,17 @@ export function SchemaSidebar() {
                               className={menuItemClass}
                               onClick={() =>
                                 void runForSchema(schema, () =>
+                                  exportTableData(table.name, "csv", "utf8Bom"),
+                                )
+                              }
+                            >
+                              <Download className="mr-2 h-3.5 w-3.5" />
+                              Export CSV (UTF-8 BOM)
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void runForSchema(schema, () =>
                                   exportTableData(table.name, "json"),
                                 )
                               }

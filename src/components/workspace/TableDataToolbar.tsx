@@ -58,6 +58,7 @@ interface TableDataToolbarProps {
   onImportXlsx: () => void;
   onTransfer?: () => void;
   onExportCsv: () => void;
+  onExportCsvBom: () => void;
   onExportJson: () => void;
   onExportSql: () => void;
   onCancelExport?: () => void;
@@ -92,6 +93,7 @@ export function TableDataToolbar({
   onImportXlsx,
   onTransfer = () => undefined,
   onExportCsv,
+  onExportCsvBom,
   onExportJson,
   onExportSql,
   onCancelExport,
@@ -254,6 +256,13 @@ export function TableDataToolbar({
           disabled={isExecuting || exportDisabled || isExporting}
         >
           <Download size={14} />
+        </ToolbarButton>
+        <ToolbarButton
+          title="Export CSV with UTF-8 BOM"
+          onClick={onExportCsvBom}
+          disabled={isExecuting || exportDisabled || isExporting}
+        >
+          <FileSpreadsheet size={14} />
         </ToolbarButton>
         <ToolbarButton
           title="Export JSON"

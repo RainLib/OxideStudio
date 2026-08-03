@@ -88,6 +88,16 @@ pub enum TableExportFormat {
     Sql,
 }
 
+/// Output encoding is intentionally narrow until each additional encoding has
+/// a complete escaping and conformance contract. UTF-8 BOM is offered for
+/// spreadsheet-oriented CSV consumers that otherwise mis-detect UTF-8.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TableExportEncoding {
+    Utf8,
+    Utf8Bom,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableExportResult {
@@ -119,6 +129,7 @@ pub struct TableExportReport {
     pub schema: String,
     pub table: String,
     pub format: TableExportFormat,
+    pub encoding: TableExportEncoding,
     pub rows_exported: u64,
     pub batches: u64,
     pub status: TableExportReportStatus,
@@ -5575,6 +5586,7 @@ pub async fn export_table_data(
     schema: String,
     table: String,
     format: TableExportFormat,
+    encoding: Option<TableExportEncoding>,
     filter_sql: Option<String>,
     filters: Option<Vec<TableFilter>>,
     sort: Option<TableSort>,
@@ -5583,6 +5595,13 @@ pub async fn export_table_data(
 ) -> Result<Response<TableExportResult>, String> {
     let mut cancel_rx = cancellation.register(&export_id, &connection_id).await?;
     let started_at = current_table_timestamp_millis();
+    let encoding = encoding.unwrap_or(TableExportEncoding::Utf8);
+    if matches!(encoding, TableExportEncoding::Utf8Bom)
+        && !matches!(format, TableExportFormat::Csv)
+    {
+        cancellation.take(&export_id).await;
+        return Err("UTF-8 BOM output is supported only for CSV exports".to_string());
+    }
     let progress_rows = AtomicU64::new(0);
     let progress_batches = AtomicU64::new(0);
     let result: Result<TableExportResult, String> = async {
@@ -5639,6 +5658,9 @@ pub async fn export_table_data(
         let mut temporary_file = ExportTemporaryFile::create(&file_path)?;
         let file = File::create(&temporary_file.path).map_err(|e| e.to_string())?;
         let mut writer = BufWriter::new(file);
+        if matches!(encoding, TableExportEncoding::Utf8Bom) {
+            writer.write_all(b"\xEF\xBB\xBF").map_err(|e| e.to_string())?;
+        }
 
         let mut offset = 0_u64;
         let mut rows_exported = 0_u64;
@@ -5867,6 +5889,7 @@ pub async fn export_table_data(
             schema: schema.clone(),
             table: table.clone(),
             format,
+            encoding,
             rows_exported,
             batches,
             status: report_status,

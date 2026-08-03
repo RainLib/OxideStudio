@@ -426,6 +426,7 @@ export interface TableSort {
 }
 
 export type TableExportFormat = "csv" | "json" | "sql";
+export type TableExportEncoding = "utf8" | "utf8Bom";
 
 export interface TableExportResult {
   exportId: string;
@@ -457,6 +458,7 @@ export interface TableExportReport {
   schema: string;
   table: string;
   format: TableExportFormat;
+  encoding: TableExportEncoding;
   rowsExported: number;
   batches: number;
   status: TableExportReportStatus;

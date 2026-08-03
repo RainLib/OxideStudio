@@ -11,6 +11,7 @@ import type {
   TableRowDelete,
   TableRowUpdate,
   TableExportFormat,
+  TableExportEncoding,
   TableExportProgress,
   TableExportReport,
   TableExportResult,
@@ -53,6 +54,7 @@ export function createTableExportId(): string {
 export interface TableExportOptions {
   exportId?: string;
   projectId?: string;
+  encoding?: TableExportEncoding;
 }
 
 export async function previewTablePage(
@@ -131,6 +133,7 @@ export async function exportTableData(
     connectionId,
     exportId,
     projectId: options.projectId,
+    encoding: options.encoding,
     driver,
     schema,
     table,

@@ -21,6 +21,7 @@ import type {
   TableJsonImportPreview,
   TableXlsxImportPreview,
   TableExportFormat,
+  TableExportEncoding,
   TableExportReport,
 } from "@/services/tauri/types";
 import { isTauri } from "@tauri-apps/api/core";
@@ -816,7 +817,10 @@ export function TableDataView() {
     }
   };
 
-  const handleExport = async (format: TableExportFormat) => {
+  const handleExport = async (
+    format: TableExportFormat,
+    encoding: TableExportEncoding = "utf8",
+  ) => {
     if (
       !tabConnectionId ||
       !activeTab.tableName ||
@@ -854,7 +858,7 @@ export function TableDataView() {
         activeTab.schemaName,
         activeTab.tableName,
         format,
-        { exportId, projectId: activeProjectId },
+        { exportId, projectId: activeProjectId, encoding },
         activeTab.tableFilterSql || undefined,
         activeTab.tableFilters || undefined,
         sort,
@@ -1567,6 +1571,7 @@ export function TableDataView() {
         onImportXlsx={() => void openXlsxImportPicker()}
         onTransfer={() => setIsTransferDialogOpen(true)}
         onExportCsv={() => void handleExport("csv")}
+        onExportCsvBom={() => void handleExport("csv", "utf8Bom")}
         onExportJson={() => void handleExport("json")}
         onExportSql={() => void handleExport("sql")}
         onCancelExport={() => void handleCancelExport()}
@@ -1577,7 +1582,7 @@ export function TableDataView() {
           className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 py-1 text-[10px] wb-muted"
           title={recentExportReport.error || "Latest export audit record"}
         >
-          Latest export: {recentExportReport.status} · {recentExportReport.format.toUpperCase()} · {recentExportReport.rowsExported.toLocaleString()} rows · {recentExportReport.batches.toLocaleString()} batches
+          Latest export: {recentExportReport.status} · {recentExportReport.format.toUpperCase()} · {recentExportReport.encoding === "utf8Bom" ? "UTF-8 BOM" : "UTF-8"} · {recentExportReport.rowsExported.toLocaleString()} rows · {recentExportReport.batches.toLocaleString()} batches
         </div>
       )}
 
