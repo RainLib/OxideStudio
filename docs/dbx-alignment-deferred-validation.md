@@ -74,9 +74,15 @@ database target until its relevant queue entries pass.
 - Exercise invalid, duplicate, already-completed, and replayed export IDs.
   Verify they cannot cancel or receive progress for another export or
   connection.
-- Backpressure, encoding/BOM selection, resume semantics, Explorer cancellation
-  UI, and durable export audit reports remain implementation gaps and therefore
-  cannot yet be validated as supported behavior.
+- Verify a successful, cancelled, and failed export each create exactly one
+  project-and-connection-scoped report with the expected ID, object identity,
+  format, counts and terminal status. Confirm the report excludes file paths,
+  SQL, filters, parameters, row values, URLs, credentials, and raw driver
+  errors; a report-store failure must not turn an already-finalized export into
+  a failed export.
+- Backpressure, encoding/BOM selection, resume semantics, and Explorer
+  cancellation UI remain implementation gaps and therefore cannot yet be
+  validated as supported behavior.
 
 ## Reviewed table-import file binding
 

@@ -21,6 +21,7 @@ import type {
   TableJsonImportPreview,
   TableXlsxImportPreview,
   TableExportFormat,
+  TableExportReport,
 } from "@/services/tauri/types";
 import { isTauri } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -102,6 +103,8 @@ export function TableDataView() {
     exportId: string;
     taskId: string;
   } | null>(null);
+  const [recentExportReport, setRecentExportReport] =
+    useState<TableExportReport | null>(null);
   const dataGridSettings = useSettingsStore((state) => state.settings.dataGrid);
   const defaultPageSize = dataGridSettings.pageSize;
   const activeTab = tabs.find((t) => t.id === activeTabId);
@@ -306,6 +309,39 @@ export function TableDataView() {
       unlisten?.();
     };
   }, [updateTask]);
+
+  useEffect(() => {
+    let active = true;
+    if (
+      !activeProjectId ||
+      !tabConnectionId ||
+      !activeTab?.schemaName ||
+      !activeTab.tableName
+    ) {
+      setRecentExportReport(null);
+      return () => {
+        active = false;
+      };
+    }
+    void tableService
+      .listTableExportReports(activeProjectId, tabConnectionId, 20)
+      .then((reports) => {
+        if (!active) return;
+        setRecentExportReport(
+          reports.find(
+            (report) =>
+              report.schema === activeTab.schemaName &&
+              report.table === activeTab.tableName,
+          ) || null,
+        );
+      })
+      .catch(() => {
+        if (active) setRecentExportReport(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeProjectId, activeTab?.schemaName, activeTab?.tableName, tabConnectionId]);
 
   useEffect(() => {
     const requestCsvImport = (
@@ -818,17 +854,24 @@ export function TableDataView() {
         activeTab.schemaName,
         activeTab.tableName,
         format,
+        { exportId, projectId: activeProjectId },
         activeTab.tableFilterSql || undefined,
         activeTab.tableFilters || undefined,
         sort,
-        5000,
-        undefined,
-        exportId,
       );
       finishTask(
         taskId,
         `${exported.rowsExported.toLocaleString()} rows to ${format.toUpperCase()}`,
       );
+      if (exported.reportId && activeProjectId) {
+        void tableService
+          .listTableExportReports(activeProjectId, tabConnectionId, 20)
+          .then((reports) => {
+            const report = reports.find((item) => item.id === exported.reportId);
+            if (report) setRecentExportReport(report);
+          })
+          .catch(() => undefined);
+      }
       await revealItemInDir(exported.filePath);
     } catch (error) {
       const code =
@@ -1528,6 +1571,15 @@ export function TableDataView() {
         onExportSql={() => void handleExport("sql")}
         onCancelExport={() => void handleCancelExport()}
       />
+
+      {recentExportReport && (
+        <div
+          className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 py-1 text-[10px] wb-muted"
+          title={recentExportReport.error || "Latest export audit record"}
+        >
+          Latest export: {recentExportReport.status} · {recentExportReport.format.toUpperCase()} · {recentExportReport.rowsExported.toLocaleString()} rows · {recentExportReport.batches.toLocaleString()} batches
+        </div>
+      )}
 
       {/* Query Builder Filter Row */}
       {!isNativeObjectPreview &&

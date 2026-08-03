@@ -234,6 +234,7 @@ pub fn run() {
             commands::table::list_table_data_transfer_reports,
             commands::table::export_table_data,
             commands::table::cancel_table_export,
+            commands::table::list_table_export_reports,
             commands::table::preview_table_csv_import,
             commands::table::preview_table_json_import,
             commands::table::preview_table_xlsx_import,

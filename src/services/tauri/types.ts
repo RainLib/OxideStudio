@@ -432,6 +432,8 @@ export interface TableExportResult {
   filePath: string;
   rowsExported: number;
   batches: number;
+  /** Present only when a valid project ID was supplied and local audit storage succeeded. */
+  reportId?: string | null;
 }
 
 export interface TableExportProgress {
@@ -441,6 +443,26 @@ export interface TableExportProgress {
   terminal: boolean;
   status: "running" | "done" | "cancelled" | "error";
   message?: string | null;
+}
+
+export type TableExportReportStatus = "done" | "cancelled" | "error";
+
+/** No file path, SQL, filters, parameters, row values, URLs, or credentials are stored. */
+export interface TableExportReport {
+  id: string;
+  projectId: string;
+  exportId: string;
+  connectionId: string;
+  driver: string;
+  schema: string;
+  table: string;
+  format: TableExportFormat;
+  rowsExported: number;
+  batches: number;
+  status: TableExportReportStatus;
+  startedAt: number;
+  finishedAt: number;
+  error?: string | null;
 }
 
 export type TableImportFormat = "csv" | "json" | "xlsx";

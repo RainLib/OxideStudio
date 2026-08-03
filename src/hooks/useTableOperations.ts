@@ -1,5 +1,6 @@
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
+import { useProjectStore } from "@/store/useProjectStore";
 import { useTabStore } from "@/store/useTabStore";
 import { tableService } from "@/services/tauri";
 import type {
@@ -20,6 +21,7 @@ export function useTableOperations() {
   const { activeConnectionId, connections } = useConnectionStore();
   const currentSchema = useSchemaStore((state) => state.currentSchema);
   const loadTables = useSchemaStore((state) => state.loadTables);
+  const activeProjectId = useProjectStore((state) => state.activeProjectId);
 
   const getDriver = () => {
     const conn = connections.find((c) => c.id === activeConnectionId);
@@ -146,7 +148,8 @@ export function useTableOperations() {
         driver,
         currentSchema,
         tableName,
-        format
+        format,
+        { projectId: activeProjectId },
       );
       console.log(
         `Exported ${exported.rowsExported} rows from ${tableName} to ${exported.filePath}`

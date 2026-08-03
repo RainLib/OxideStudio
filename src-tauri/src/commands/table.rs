@@ -66,6 +66,8 @@ const TABLE_DATA_TRANSFER_CANCELLED: &str = "TABLE_DATA_TRANSFER_CANCELLED";
 const TABLE_DATA_TRANSFER_REPORT_PARENT_ID: &str = "table-data-transfer-reports-v1";
 const TABLE_DATA_TRANSFER_REPORT_KIND: &str = "TABLE_DATA_TRANSFER_REPORT";
 const TABLE_EXPORT_CANCELLED: &str = "TABLE_EXPORT_CANCELLED";
+const TABLE_EXPORT_REPORT_PARENT_ID: &str = "table-export-reports-v1";
+const TABLE_EXPORT_REPORT_KIND: &str = "TABLE_EXPORT_REPORT";
 const MAX_POSTGRES_ROUTINE_SOURCE_CHARS: usize = 262_144;
 const MAX_POSTGRES_ROUTINE_SOURCE_OVERLOADS: usize = 20;
 
@@ -93,6 +95,36 @@ pub struct TableExportResult {
     pub file_path: String,
     pub rows_exported: u64,
     pub batches: u64,
+    pub report_id: Option<String>,
+}
+
+/// Terminal status persisted for an export audit record. The report never
+/// contains a file path, SQL, filter, parameter, row value, URL, or credential.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TableExportReportStatus {
+    Done,
+    Cancelled,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableExportReport {
+    pub id: String,
+    pub project_id: String,
+    pub export_id: String,
+    pub connection_id: String,
+    pub driver: String,
+    pub schema: String,
+    pub table: String,
+    pub format: TableExportFormat,
+    pub rows_exported: u64,
+    pub batches: u64,
+    pub status: TableExportReportStatus,
+    pub started_at: i64,
+    pub finished_at: i64,
+    pub error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -3189,6 +3221,43 @@ async fn persist_table_data_transfer_report(
         .map_err(|error| format!("Could not persist table transfer report: {error}"))
 }
 
+fn normalized_table_export_project_id(project_id: Option<&str>) -> Option<String> {
+    let project_id = project_id?.trim();
+    if project_id.is_empty()
+        || project_id.len() > 128
+        || project_id.chars().any(|value| value.is_control())
+    {
+        return None;
+    }
+    Some(project_id.to_string())
+}
+
+fn table_export_report_id(export_id: &str) -> String {
+    format!("table-export-report-{export_id}")
+}
+
+async fn persist_table_export_report(
+    meta_store: &MetaStore,
+    report: &TableExportReport,
+) -> Result<(), String> {
+    let metadata = serde_json::to_value(report)
+        .map_err(|error| format!("Could not serialize table export report: {error}"))?;
+    let resource = Resource {
+        id: report.id.clone(),
+        project_id: report.project_id.clone(),
+        connection_id: report.connection_id.clone(),
+        parent_id: Some(TABLE_EXPORT_REPORT_PARENT_ID.to_string()),
+        kind: TABLE_EXPORT_REPORT_KIND.to_string(),
+        name: format!("{}:{}:{}", report.started_at, report.schema, report.table),
+        metadata,
+        last_updated: current_table_timestamp_millis(),
+    };
+    meta_store
+        .save_resources(&report.project_id, &[resource])
+        .await
+        .map_err(|error| format!("Could not persist table export report: {error}"))
+}
+
 fn normalized_transfer_batch_size(value: Option<u32>) -> u32 {
     value
         .unwrap_or(DEFAULT_TRANSFER_BATCH_SIZE)
@@ -5498,8 +5567,10 @@ pub async fn export_table_data(
     app: AppHandle,
     manager: State<'_, ConnectionManager>,
     cancellation: State<'_, TableExportCancellationState>,
+    meta_store: State<'_, MetaStore>,
     connection_id: String,
     export_id: String,
+    project_id: Option<String>,
     driver: String,
     schema: String,
     table: String,
@@ -5511,6 +5582,7 @@ pub async fn export_table_data(
     max_rows: Option<u64>,
 ) -> Result<Response<TableExportResult>, String> {
     let mut cancel_rx = cancellation.register(&export_id, &connection_id).await?;
+    let started_at = current_table_timestamp_millis();
     let progress_rows = AtomicU64::new(0);
     let progress_batches = AtomicU64::new(0);
     let result: Result<TableExportResult, String> = async {
@@ -5731,6 +5803,7 @@ pub async fn export_table_data(
             file_path: file_path.display().to_string(),
             rows_exported,
             batches,
+            report_id: None,
         })
     }
     .await;
@@ -5769,6 +5842,48 @@ pub async fn export_table_data(
         },
     );
 
+    let mut result = result;
+    if let Some(project_id) = normalized_table_export_project_id(project_id.as_deref()) {
+        let (report_status, report_error) = match &result {
+            Ok(_) => (TableExportReportStatus::Done, None),
+            Err(error) if cancellation_requested || error.contains(TABLE_EXPORT_CANCELLED) => (
+                TableExportReportStatus::Cancelled,
+                Some("Export cancelled; partial file removed.".to_string()),
+            ),
+            Err(_) => (
+                TableExportReportStatus::Error,
+                Some("Export failed; partial file removed.".to_string()),
+            ),
+        };
+        let report_id = table_export_report_id(&export_id);
+        let report = TableExportReport {
+            id: report_id.clone(),
+            project_id,
+            export_id: export_id.clone(),
+            connection_id: connection_id.clone(),
+            driver: canonical_driver_name(&driver)
+                .unwrap_or_else(|| driver.trim())
+                .to_ascii_lowercase(),
+            schema: schema.clone(),
+            table: table.clone(),
+            format,
+            rows_exported,
+            batches,
+            status: report_status,
+            started_at,
+            finished_at: current_table_timestamp_millis(),
+            error: report_error,
+        };
+        match persist_table_export_report(meta_store.inner(), &report).await {
+            Ok(()) => {
+                if let Ok(export) = result.as_mut() {
+                    export.report_id = Some(report_id);
+                }
+            }
+            Err(error) => tracing::warn!(error = %error, "table export report was not persisted"),
+        }
+    }
+
     match result {
         Ok(export) => Ok(Response::ok(export)),
         Err(error) if cancellation_requested || error.contains(TABLE_EXPORT_CANCELLED) => {
@@ -5806,6 +5921,34 @@ pub async fn cancel_table_export(
         }
         .to_string(),
     ))
+}
+
+/// Lists privacy-bounded terminal export reports for one project connection.
+/// Report metadata deliberately excludes output file paths and query contents.
+#[tauri::command]
+pub async fn list_table_export_reports(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+    connection_id: String,
+    limit: Option<usize>,
+) -> Result<Response<Vec<TableExportReport>>, String> {
+    let project_id = normalized_table_export_project_id(Some(&project_id))
+        .ok_or_else(|| "A valid project id is required to read table export reports.".to_string())?;
+    let mut reports = meta_store
+        .get_children(
+            &project_id,
+            Some(TABLE_EXPORT_REPORT_PARENT_ID),
+            &connection_id,
+        )
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|resource| resource.kind == TABLE_EXPORT_REPORT_KIND)
+        .filter_map(|resource| serde_json::from_value::<TableExportReport>(resource.metadata).ok())
+        .collect::<Vec<_>>();
+    reports.sort_by(|left, right| right.started_at.cmp(&left.started_at));
+    reports.truncate(limit.unwrap_or(20).clamp(1, 100));
+    Ok(Response::ok(reports))
 }
 
 fn validate_import_file(path: &Path, format: TableImportFormat) -> Result<(), String> {

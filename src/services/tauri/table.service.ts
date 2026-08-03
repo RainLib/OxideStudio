@@ -12,6 +12,7 @@ import type {
   TableRowUpdate,
   TableExportFormat,
   TableExportProgress,
+  TableExportReport,
   TableExportResult,
   TableImportFormat,
   TableCsvImportOptions,
@@ -47,6 +48,11 @@ export function createTableExportId(): string {
   return randomId
     ? `table-export-${randomId}`
     : `table-export-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export interface TableExportOptions {
+  exportId?: string;
+  projectId?: string;
 }
 
 export async function previewTablePage(
@@ -113,16 +119,18 @@ export async function exportTableData(
   schema: string,
   table: string,
   format: TableExportFormat = "csv",
+  options: TableExportOptions = {},
   filterSql?: string,
   filters?: TableFilter[],
   sort?: TableSort,
   pageSize = 5000,
   maxRows?: number,
-  exportId = createTableExportId(),
 ): Promise<TableExportResult> {
+  const exportId = options.exportId || createTableExportId();
   return invokeWithInterceptors<TableExportResult>("export_table_data", {
     connectionId,
     exportId,
+    projectId: options.projectId,
     driver,
     schema,
     table,
@@ -171,6 +179,18 @@ export async function listenTableExportProgress(
   return listen<TableExportProgress>(TABLE_EXPORT_PROGRESS_EVENT, (event) =>
     listener(event.payload),
   );
+}
+
+export async function listTableExportReports(
+  projectId: string,
+  connectionId: string,
+  limit = 20,
+): Promise<TableExportReport[]> {
+  return invokeWithInterceptors<TableExportReport[]>("list_table_export_reports", {
+    projectId,
+    connectionId,
+    limit,
+  });
 }
 
 export async function previewTableCsvImport(
@@ -711,6 +731,7 @@ export const tableService = {
   exportTableData,
   cancelTableExport,
   listenTableExportProgress,
+  listTableExportReports,
   previewTableCsvImport,
   previewTableJsonImport,
   previewTableXlsxImport,
