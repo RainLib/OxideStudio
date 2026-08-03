@@ -61,6 +61,8 @@ pub const TABLE_DATA_TRANSFER_PROGRESS_EVENT: &str = "table-data-transfer://prog
 const TABLE_DATA_TRANSFER_CANCELLED: &str = "TABLE_DATA_TRANSFER_CANCELLED";
 const TABLE_DATA_TRANSFER_REPORT_PARENT_ID: &str = "table-data-transfer-reports-v1";
 const TABLE_DATA_TRANSFER_REPORT_KIND: &str = "TABLE_DATA_TRANSFER_REPORT";
+const MAX_POSTGRES_ROUTINE_SOURCE_CHARS: usize = 262_144;
+const MAX_POSTGRES_ROUTINE_SOURCE_OVERLOADS: usize = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -7781,6 +7783,57 @@ pub async fn get_view_definition(
             true,
             Some(error_context),
         )),
+    }
+}
+
+/// Reads PostgreSQL routine source through the server's own definition
+/// renderer. FunctionInfo does not yet carry an OID/identity-arguments token,
+/// so overloads are deliberately returned as a bounded list instead of
+/// guessing a single one. External packages are excluded: host catalog SQL is
+/// not a substitute for an explicit sidecar source-definition protocol.
+#[tauri::command]
+pub async fn get_postgres_routine_definitions(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    schema: String,
+    routine: String,
+) -> Result<Response<Vec<String>>, String> {
+    let result: Result<Vec<String>, String> = async {
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "routine definition introspection")
+            .await?;
+        let routine = routine.trim();
+        if routine.is_empty() {
+            return Err("Routine name is required".to_string());
+        }
+        let sql = format!(
+            "SELECT LEFT(pg_get_functiondef(p.oid), {MAX_POSTGRES_ROUTINE_SOURCE_CHARS}) AS definition \\
+             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \\
+             WHERE n.nspname = $1 AND p.proname = $2 AND p.prokind IN ('f', 'p') \\
+             ORDER BY pg_get_function_identity_arguments(p.oid) LIMIT {MAX_POSTGRES_ROUTINE_SOURCE_OVERLOADS}"
+        );
+        let results = manager
+            .query_parameterized(
+                &connection_id,
+                &sql,
+                &[
+                    QueryParameter { value: Value::String(schema.trim().to_string()), data_type: Some("text".to_string()) },
+                    QueryParameter { value: Value::String(routine.to_string()), data_type: Some("text".to_string()) },
+                ],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let definitions = results
+            .first()
+            .map(|result| result.rows.iter().filter_map(|row| row.first().and_then(value_to_string)).collect())
+            .unwrap_or_default();
+        if definitions.is_empty() {
+            return Err("Routine definition not found or not visible to this role".to_string());
+        }
+        Ok(definitions)
+    }.await;
+    match result {
+        Ok(definitions) => Ok(Response::ok(definitions)),
+        Err(error) => Ok(Response::err("GET_POSTGRES_ROUTINE_DEFINITION_ERROR", &error)),
     }
 }
 

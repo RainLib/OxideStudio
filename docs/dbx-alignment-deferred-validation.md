@@ -151,3 +151,10 @@ database target until its relevant queue entries pass.
   supported MariaDB/legacy MySQL `mysql.roles_mapping` fixture. Confirm role
   and member names retain account host qualifiers where applicable, no SQL or
   grants are returned, and a missing metadata privilege is surfaced visibly.
+
+## PostgreSQL routine source
+
+- Verify overloaded functions and procedures, quoted schema/routine names,
+  permission-restricted routines, source values above the per-definition
+  bound, and absence of source access for external driver packages. The menu
+  must copy source only and never expose migration or mutation actions.

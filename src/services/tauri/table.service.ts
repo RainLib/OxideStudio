@@ -642,6 +642,19 @@ export async function getViewDefinition(
   });
 }
 
+/** PostgreSQL-only, bounded source definitions. Multiple overloads may match. */
+export async function getPostgresRoutineDefinitions(
+  connectionId: string,
+  schema: string,
+  routine: string,
+): Promise<string[]> {
+  return invokeWithInterceptors<string[]>("get_postgres_routine_definitions", {
+    connectionId,
+    schema,
+    routine,
+  });
+}
+
 export async function refreshMaterializedView(
   connectionId: string,
   driver: DatabaseDriver,
@@ -697,5 +710,6 @@ export const tableService = {
   renameTable,
   getTableDdl,
   getViewDefinition,
+  getPostgresRoutineDefinitions,
   refreshMaterializedView,
 };

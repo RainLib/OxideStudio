@@ -58,7 +58,7 @@ import {
   useDatabaseNavigationStore,
 } from "@/lib/databaseNavigation";
 import { useTableOperations } from "@/hooks/useTableOperations";
-import { databaseService, queryService, schemaService } from "@/services/tauri";
+import { databaseService, getPostgresRoutineDefinitions, queryService, schemaService } from "@/services/tauri";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
 import type {
   CollectionInfo,
@@ -2798,6 +2798,16 @@ export function SchemaSidebar() {
               >
                 Copy call template
               </ContextMenuItem>
+              {activeConnectionId && ["postgres", "postgresql", "pgsql"].includes(activeDriver.toLowerCase()) && (
+                <ContextMenuItem
+                  className={menuItemClass}
+                  onClick={() => void getPostgresRoutineDefinitions(activeConnectionId, schema, routine.name)
+                    .then((definitions) => copyText(definitions.join("\n\n")))
+                    .catch((error) => window.alert(`Failed to load routine definition: ${error instanceof Error ? error.message : String(error)}`))}
+                >
+                  Copy source definition
+                </ContextMenuItem>
+              )}
             </ContextMenuContent>
           </ContextMenu>
         );

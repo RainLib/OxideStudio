@@ -255,6 +255,7 @@ pub fn run() {
             commands::table::drop_table,
             commands::table::rename_table,
             commands::table::get_view_definition,
+            commands::table::get_postgres_routine_definitions,
             commands::table::refresh_materialized_view,
             commands::table::get_table_ddl,
             // Transaction commands
