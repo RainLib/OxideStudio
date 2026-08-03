@@ -18,6 +18,7 @@ import type {
   TableImportFormat,
   TableCsvImportOptions,
   TableCsvImportPreview,
+  TableCsvImportPreflight,
   TableJsonImportPreview,
   TableXlsxImportPreview,
   TableImportResult,
@@ -186,6 +187,17 @@ export async function importTableData(
     database: databaseName,
     csvOptions,
     expectedFileDigest,
+  });
+}
+
+export async function preflightTableCsvImport(
+  connectionId: string, driver: DatabaseDriver, schema: string, table: string,
+  filePath: string, firstRowHeader = true, databaseName?: string,
+  csvOptions?: TableCsvImportOptions, expectedFileDigest?: string,
+): Promise<TableCsvImportPreflight> {
+  return invokeWithInterceptors<TableCsvImportPreflight>("preflight_table_csv_import", {
+    connectionId, driver, schema, table, filePath, firstRowHeader,
+    database: databaseName, csvOptions, expectedFileDigest,
   });
 }
 
@@ -765,6 +777,7 @@ export const tableService = {
   listenTableExportProgress,
   listTableExportReports,
   previewTableCsvImport,
+  preflightTableCsvImport,
   previewTableJsonImport,
   previewTableXlsxImport,
   importTableData,

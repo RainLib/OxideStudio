@@ -238,6 +238,7 @@ pub fn run() {
             commands::table::preview_table_csv_import,
             commands::table::preview_table_json_import,
             commands::table::preview_table_xlsx_import,
+            commands::table::preflight_table_csv_import,
             commands::table::import_table_data,
             commands::table::list_table_import_reports,
             commands::table::mutate_table_rows,

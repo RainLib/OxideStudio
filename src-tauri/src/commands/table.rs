@@ -267,6 +267,26 @@ pub struct TableImportReport {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableImportRowIssue {
+    pub row_number: u64,
+    pub code: String,
+}
+
+/// A bounded, read-only full-file CSV preflight. Issues intentionally expose
+/// row positions and stable categories only, never source values or SQL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableCsvImportPreflight {
+    pub mapping_digest: String,
+    pub total_rows: u64,
+    pub accepted_rows: u64,
+    pub rejected_rows: u64,
+    pub issues: Vec<TableImportRowIssue>,
+    pub issues_truncated: bool,
+}
+
 /// Bytes returned to the desktop review dialog. This read-only command
 /// validates the selected CSV path and limits the renderer payload; it is
 /// paired with the existing desktop import command rather than a general file
@@ -6816,6 +6836,73 @@ fn is_json_lines_path(path: &Path) -> bool {
             .as_deref(),
         Some("jsonl" | "ndjson")
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn preflight_table_csv_import(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    driver: String,
+    schema: String,
+    table: String,
+    database: Option<String>,
+    file_path: String,
+    first_row_header: Option<bool>,
+    csv_options: Option<TableCsvImportOptions>,
+    expected_file_digest: Option<String>,
+) -> Result<Response<TableCsvImportPreflight>, String> {
+    let kind = table_data_dialect_for_connection(&manager, &connection_id, &driver, true).await?;
+    let path = PathBuf::from(file_path.trim());
+    validate_import_file(&path, TableImportFormat::Csv)?;
+    verify_import_file_digest(&path, expected_file_digest.as_deref())?;
+    let database = database.as_deref();
+    let columns = column_lookup(
+        get_target_columns(&manager, &connection_id, database, &schema, &table)
+            .await
+            .map_err(|error| error.to_string())?,
+    );
+    let has_headers = csv_options
+        .as_ref()
+        .and_then(|options| options.first_row_header)
+        .or(first_row_header)
+        .unwrap_or(true);
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(has_headers)
+        .delimiter(csv_delimiter(csv_options.as_ref())?)
+        .from_path(&path)
+        .map_err(|error| error.to_string())?;
+    let source_columns = if has_headers {
+        reader.headers().map_err(|error| error.to_string())?.iter()
+            .map(|value| value.trim().to_string()).collect::<Vec<_>>()
+    } else {
+        columns.keys().cloned().collect::<Vec<_>>()
+    };
+    let headers = resolve_csv_import_columns(&source_columns, &columns, csv_options.as_ref())?;
+    let empty_fields_as_null = csv_options.as_ref().and_then(|options| options.empty_fields_as_null).unwrap_or(false);
+    let mut total_rows = 0_u64;
+    let mut accepted_rows = 0_u64;
+    let mut rejected_rows = 0_u64;
+    let mut issues = Vec::new();
+    for (index, record) in reader.records().enumerate() {
+        total_rows += 1;
+        let row_number = index as u64 + if has_headers { 2 } else { 1 };
+        let valid = record
+            .map_err(|_| ())
+            .and_then(|record| csv_record_values(&headers, &record, empty_fields_as_null).map_err(|_| ()))
+            .and_then(|row| build_insert_mutation(kind, &schema, &table, &columns, &row).map(|_| ()).map_err(|_| ()))
+            .is_ok();
+        if valid { accepted_rows += 1; } else {
+            rejected_rows += 1;
+            if issues.len() < 100 { issues.push(TableImportRowIssue { row_number, code: "ROW_INVALID".to_string() }); }
+        }
+    }
+    Ok(Response::ok(TableCsvImportPreflight {
+        mapping_digest: table_import_mapping_digest(TableImportFormat::Csv, first_row_header, csv_options.as_ref())?,
+        total_rows, accepted_rows, rejected_rows,
+        issues_truncated: rejected_rows > issues.len() as u64,
+        issues,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
