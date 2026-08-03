@@ -80,9 +80,11 @@ database target until its relevant queue entries pass.
   SQL, filters, parameters, row values, URLs, credentials, and raw driver
   errors; a report-store failure must not turn an already-finalized export into
   a failed export.
-- Backpressure, encoding/BOM selection, resume semantics, and Explorer
-  cancellation UI remain implementation gaps and therefore cannot yet be
-  validated as supported behavior.
+- Verify cancellation from both the table-data toolbar and the Explorer table
+  context menu reaches the same export ID and produces one cancelled terminal
+  report. Backpressure, encoding/BOM selection, and resume semantics remain
+  implementation gaps and therefore cannot yet be validated as supported
+  behavior.
 
 ## Reviewed table-import file binding
 

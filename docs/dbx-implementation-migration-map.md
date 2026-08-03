@@ -213,7 +213,7 @@ WHERE 与 SORT 输入不是普通文本框。应复用同一个 dialect/metadata
 ### 7.3 P2：完善数据生命周期
 
 - [x] CSV/JSON/XLSX/SQL import 已统一为 preview 后 native execution；SQL import 使用专用审阅窗口、方言分句预览和执行前 digest 复检。
-- [ ] Export 已补稳定任务 ID、进度、backend/cooperative cancellation、原子产物与脱敏终态审计；仍需背压、编码/BOM、resume 与 Explorer 取消入口。
+- [ ] Export 已补稳定任务 ID、进度、backend/cooperative cancellation、原子产物、脱敏终态审计与 Explorer/表数据页取消入口；仍需背压、编码/BOM 与 resume。
 - [x] 跨库 transfer 已把基础类型兼容性、显式转换、unsupported 阻止、确认 digest 与整次事务 rollback 变成可审阅 plan。
 - [x] Transfer 已提供稳定 ID、批次进度、源端 backend cancellation、协作式取消与取消后整次事务回滚。
 - [x] Transfer overwrite 已使用事务内 DELETE、目标行数硬上限、确认摘要绑定与执行时 affected-row 复检，避免 TRUNCATE 隐式提交。

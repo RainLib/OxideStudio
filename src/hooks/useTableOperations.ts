@@ -1,4 +1,5 @@
 import { useConnectionStore } from "@/store/useConnectionStore";
+import { useEffect, useRef, useState } from "react";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useTabStore } from "@/store/useTabStore";
@@ -22,6 +23,42 @@ export function useTableOperations() {
   const currentSchema = useSchemaStore((state) => state.currentSchema);
   const loadTables = useSchemaStore((state) => state.loadTables);
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
+  const activeTableExportRef = useRef<{
+    exportId: string;
+    taskId: string;
+    tableName: string;
+  } | null>(null);
+  const [activeTableExport, setActiveTableExport] = useState<{
+    exportId: string;
+    taskId: string;
+    tableName: string;
+  } | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void tableService
+      .listenTableExportProgress((progress) => {
+        const activeExport = activeTableExportRef.current;
+        if (!activeExport || activeExport.exportId !== progress.exportId) return;
+        useTaskStore.getState().updateTask(activeExport.taskId, {
+          detail: progress.message
+            ? `${progress.rowsExported.toLocaleString()} rows in ${progress.batches.toLocaleString()} batches · ${progress.message}`
+            : `${progress.rowsExported.toLocaleString()} rows in ${progress.batches.toLocaleString()} batches`,
+        });
+      })
+      .then((stopListening) => {
+        if (disposed) stopListening();
+        else unlisten = stopListening;
+      })
+      .catch((error) => {
+        console.error("Failed to listen for Explorer export progress:", error);
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   const getDriver = () => {
     const conn = connections.find((c) => c.id === activeConnectionId);
@@ -133,7 +170,7 @@ export function useTableOperations() {
     tableName: string,
     format: TableExportFormat = "csv"
   ) => {
-    if (!activeConnectionId || !currentSchema) return;
+    if (!activeConnectionId || !currentSchema || activeTableExportRef.current) return;
     const driver = getDriver();
     const taskStore = useTaskStore.getState();
     const taskId = taskStore.startTask({
@@ -141,6 +178,10 @@ export function useTableOperations() {
       title: `Export ${tableName}`,
       detail: format.toUpperCase(),
     });
+    const exportId = tableService.createTableExportId();
+    const exportTask = { exportId, taskId, tableName };
+    activeTableExportRef.current = exportTask;
+    setActiveTableExport(exportTask);
 
     try {
       const exported = await tableService.exportTableData(
@@ -149,7 +190,7 @@ export function useTableOperations() {
         currentSchema,
         tableName,
         format,
-        { projectId: activeProjectId },
+        { exportId, projectId: activeProjectId },
       );
       console.log(
         `Exported ${exported.rowsExported} rows from ${tableName} to ${exported.filePath}`
@@ -159,9 +200,44 @@ export function useTableOperations() {
         `${exported.rowsExported.toLocaleString()} rows to ${format.toUpperCase()}`
       );
       await revealItemInDir(exported.filePath);
-    } catch (e: any) {
-      taskStore.failTask(taskId, e?.message || String(e));
-      console.error("Export failed:", e);
+    } catch (error) {
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? String(error.code)
+          : "";
+      if (code === "TABLE_EXPORT_CANCELLED") {
+        taskStore.cancelTask(taskId, "Export cancelled; partial file removed");
+      } else {
+        taskStore.failTask(
+          taskId,
+          error instanceof Error ? error.message : String(error),
+        );
+        console.error("Export failed:", error);
+      }
+    } finally {
+      if (activeTableExportRef.current?.exportId === exportId) {
+        activeTableExportRef.current = null;
+        setActiveTableExport(null);
+      }
+    }
+  };
+
+  const cancelActiveTableExport = async () => {
+    const activeExport = activeTableExportRef.current;
+    if (!activeExport) return;
+    useTaskStore
+      .getState()
+      .updateTask(activeExport.taskId, { detail: "Cancellation requested…" });
+    try {
+      await tableService.cancelTableExport(activeExport.exportId);
+    } catch (error) {
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? String(error.code)
+          : "";
+      if (code !== "TABLE_EXPORT_NOT_FOUND") {
+        console.error("Failed to cancel Explorer export:", error);
+      }
     }
   };
 
@@ -282,6 +358,8 @@ export function useTableOperations() {
     dropTable,
     renameTable,
     exportTableData,
+    activeTableExport,
+    cancelActiveTableExport,
     importTableData,
     getTableDdl,
     getViewDefinition,

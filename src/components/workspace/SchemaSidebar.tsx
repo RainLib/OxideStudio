@@ -574,6 +574,8 @@ export function SchemaSidebar() {
     dropTable,
     renameTable,
     exportTableData,
+    activeTableExport,
+    cancelActiveTableExport,
     importTableData,
     getTableDdl,
     getViewDefinition,
@@ -3908,6 +3910,15 @@ export function SchemaSidebar() {
                               <Download className="mr-2 h-3.5 w-3.5" />
                               Export SQL Inserts
                             </ContextMenuItem>
+                            {activeTableExport?.tableName === table.name && (
+                              <ContextMenuItem
+                                className={cn(menuItemClass, "text-destructive")}
+                                onClick={() => void cancelActiveTableExport()}
+                              >
+                                <X className="mr-2 h-3.5 w-3.5" />
+                                Cancel active export
+                              </ContextMenuItem>
+                            )}
                           </ContextMenuSubContent>
                         </ContextMenuSub>
                         <ContextMenuSeparator className={menuSeparatorClass} />
