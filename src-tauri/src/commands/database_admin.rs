@@ -50,6 +50,18 @@ pub struct DatabaseAdminRoleMembership {
     pub member: String,
 }
 
+/// A bounded, read-only table privilege row. This is visibility only: grant
+/// changes remain unavailable until a reviewed diff/confirmation contract is
+/// introduced.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseAdminTablePrivilege {
+    pub grantee: String,
+    pub schema: String,
+    pub table: String,
+    pub privilege: String,
+}
+
 /// A deliberately small, read-only server metric. Values remain strings so a
 /// driver cannot lose precision when returning counters larger than a JS safe
 /// integer. `available: false` is an explicit capability/permission downgrade,
@@ -277,6 +289,19 @@ fn postgres_role_memberships_sql() -> &'static str {
      JOIN pg_roles role ON role.oid = membership.roleid \
      JOIN pg_roles member ON member.oid = membership.member \
      ORDER BY role.rolname, member.rolname LIMIT 200"
+}
+
+fn table_privileges_sql(kind: DatabaseKind) -> &'static str {
+    match kind {
+        DatabaseKind::Postgres => "SELECT grantee, table_schema AS schema_name, table_name, privilege_type \
+            FROM information_schema.role_table_grants \
+            WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
+            ORDER BY grantee, table_schema, table_name, privilege_type LIMIT 200",
+        DatabaseKind::Mysql => "SELECT GRANTEE AS grantee, TABLE_SCHEMA AS schema_name, TABLE_NAME AS table_name, PRIVILEGE_TYPE AS privilege_type \
+            FROM information_schema.TABLE_PRIVILEGES \
+            WHERE TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys') \
+            ORDER BY GRANTEE, TABLE_SCHEMA, TABLE_NAME, PRIVILEGE_TYPE LIMIT 200",
+    }
 }
 
 fn metrics_sql(kind: DatabaseKind) -> &'static str {
@@ -714,6 +739,31 @@ pub async fn list_database_admin_role_memberships(
             "DATABASE_ADMIN_ROLE_MEMBERSHIPS_ERROR",
             &error,
         )),
+    }
+}
+
+#[tauri::command]
+pub async fn list_database_admin_table_privileges(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    driver: String,
+) -> Result<Response<Vec<DatabaseAdminTablePrivilege>>, String> {
+    let result: Result<Vec<DatabaseAdminTablePrivilege>, String> = async {
+        ensure_host_database_admin_allowed(&manager, &connection_id).await?;
+        let result = primary_result(
+            manager.query(&connection_id, table_privileges_sql(admin_kind(&driver)?), None, None, None)
+                .await.map_err(|error| error.to_string())?,
+        )?;
+        Ok(result.rows.iter().take(ADMIN_RESULT_LIMIT).filter_map(|row| Some(DatabaseAdminTablePrivilege {
+            grantee: value_string(result_row(&result, row, "grantee"))?,
+            schema: value_string(result_row(&result, row, "schema_name"))?,
+            table: value_string(result_row(&result, row, "table_name"))?,
+            privilege: value_string(result_row(&result, row, "privilege_type"))?,
+        })).collect())
+    }.await;
+    match result {
+        Ok(privileges) => Ok(Response::ok(privileges)),
+        Err(error) => Ok(Response::err("DATABASE_ADMIN_TABLE_PRIVILEGES_ERROR", &error)),
     }
 }
 

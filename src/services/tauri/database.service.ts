@@ -7,6 +7,7 @@ import type {
   DatabaseAdminLockWait,
   DatabaseAdminUser,
   DatabaseAdminRoleMembership,
+  DatabaseAdminTablePrivilege,
   CreateDatabaseAdminUserRequest,
   ConnectionDatabaseCapabilityContext,
   DeleteDatabaseAdminUserRequest,
@@ -309,6 +310,16 @@ export async function listDatabaseAdminRoleMemberships(
   );
 }
 
+export async function listDatabaseAdminTablePrivileges(
+  connectionId: string,
+  driver: DatabaseDriver,
+): Promise<DatabaseAdminTablePrivilege[]> {
+  return invokeWithInterceptors<DatabaseAdminTablePrivilege[]>(
+    "list_database_admin_table_privileges",
+    { connectionId, driver },
+  );
+}
+
 export async function createDatabaseAdminUser(
   connectionId: string,
   driver: DatabaseDriver,
@@ -424,6 +435,7 @@ export const databaseService = {
   terminateDatabaseAdminSession,
   listDatabaseAdminUsers,
   listDatabaseAdminRoleMemberships,
+  listDatabaseAdminTablePrivileges,
   createDatabaseAdminUser,
   updateDatabaseAdminUserPassword,
   setDatabaseAdminUserLogin,

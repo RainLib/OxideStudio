@@ -521,6 +521,13 @@ export interface DatabaseAdminRoleMembership {
   member: string;
 }
 
+export interface DatabaseAdminTablePrivilege {
+  grantee: string;
+  schema: string;
+  table: string;
+  privilege: string;
+}
+
 export interface DatabaseAdminMetric {
   key: string;
   label: string;
