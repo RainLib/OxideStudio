@@ -487,9 +487,32 @@ export interface TableCsvImportOptions {
 }
 
 export interface TableImportResult {
+  importId: string;
   filePath: string;
   rowsImported: number;
   batches: number;
+  reportId?: string | null;
+}
+
+export type TableImportReportStatus = "done" | "error";
+
+/** No source path/digest, SQL, row values, URL, credential, or raw error is stored. */
+export interface TableImportReport {
+  id: string;
+  projectId: string;
+  importId: string;
+  connectionId: string;
+  driver: string;
+  schema: string;
+  table: string;
+  format: TableImportFormat;
+  mappingDigest: string;
+  rowsImported: number;
+  batches: number;
+  status: TableImportReportStatus;
+  startedAt: number;
+  finishedAt: number;
+  error?: string | null;
 }
 
 /** A bounded, read-only prefix used to review a CSV selected by the desktop picker. */

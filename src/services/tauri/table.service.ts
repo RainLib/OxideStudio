@@ -21,6 +21,7 @@ import type {
   TableJsonImportPreview,
   TableXlsxImportPreview,
   TableImportResult,
+  TableImportReport,
   TableDataTransferPreview,
   TableDataTransferRequest,
   TableDataTransferBatchPlan,
@@ -55,6 +56,18 @@ export interface TableExportOptions {
   exportId?: string;
   projectId?: string;
   encoding?: TableExportEncoding;
+}
+
+export interface TableImportOptions {
+  importId?: string;
+  projectId?: string;
+}
+
+export function createTableImportId(): string {
+  const randomId = globalThis.crypto?.randomUUID?.();
+  return randomId
+    ? `table-import-${randomId}`
+    : `table-import-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export async function previewTablePage(
@@ -157,9 +170,13 @@ export async function importTableData(
   databaseName?: string,
   csvOptions?: TableCsvImportOptions,
   expectedFileDigest?: string,
+  options: TableImportOptions = {},
 ): Promise<TableImportResult> {
+  const importId = options.importId || createTableImportId();
   return invokeWithInterceptors<TableImportResult>("import_table_data", {
     connectionId,
+    importId,
+    projectId: options.projectId,
     driver,
     schema,
     table,
@@ -169,6 +186,18 @@ export async function importTableData(
     database: databaseName,
     csvOptions,
     expectedFileDigest,
+  });
+}
+
+export async function listTableImportReports(
+  projectId: string,
+  connectionId: string,
+  limit = 20,
+): Promise<TableImportReport[]> {
+  return invokeWithInterceptors<TableImportReport[]>("list_table_import_reports", {
+    projectId,
+    connectionId,
+    limit,
   });
 }
 
@@ -739,6 +768,8 @@ export const tableService = {
   previewTableJsonImport,
   previewTableXlsxImport,
   importTableData,
+  createTableImportId,
+  listTableImportReports,
   mutateTableRows,
   createTable,
   createView,

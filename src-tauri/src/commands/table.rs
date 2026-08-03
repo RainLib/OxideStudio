@@ -68,6 +68,8 @@ const TABLE_DATA_TRANSFER_REPORT_KIND: &str = "TABLE_DATA_TRANSFER_REPORT";
 const TABLE_EXPORT_CANCELLED: &str = "TABLE_EXPORT_CANCELLED";
 const TABLE_EXPORT_REPORT_PARENT_ID: &str = "table-export-reports-v1";
 const TABLE_EXPORT_REPORT_KIND: &str = "TABLE_EXPORT_REPORT";
+const TABLE_IMPORT_REPORT_PARENT_ID: &str = "table-import-reports-v1";
+const TABLE_IMPORT_REPORT_KIND: &str = "TABLE_IMPORT_REPORT";
 const MAX_POSTGRES_ROUTINE_SOURCE_CHARS: usize = 262_144;
 const MAX_POSTGRES_ROUTINE_SOURCE_OVERLOADS: usize = 20;
 
@@ -229,9 +231,40 @@ pub struct TableCsvImportOptions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableImportResult {
+    pub import_id: String,
     pub file_path: String,
     pub rows_imported: u64,
     pub batches: u64,
+    pub report_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TableImportReportStatus {
+    Done,
+    Error,
+}
+
+/// A terminal import audit record. Source paths, source digests, SQL, row
+/// values, credentials, URLs, and raw driver errors are deliberately omitted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableImportReport {
+    pub id: String,
+    pub project_id: String,
+    pub import_id: String,
+    pub connection_id: String,
+    pub driver: String,
+    pub schema: String,
+    pub table: String,
+    pub format: TableImportFormat,
+    pub mapping_digest: String,
+    pub rows_imported: u64,
+    pub batches: u64,
+    pub status: TableImportReportStatus,
+    pub started_at: i64,
+    pub finished_at: i64,
+    pub error: Option<String>,
 }
 
 /// Bytes returned to the desktop review dialog. This read-only command
@@ -3267,6 +3300,54 @@ async fn persist_table_export_report(
         .save_resources(&report.project_id, &[resource])
         .await
         .map_err(|error| format!("Could not persist table export report: {error}"))
+}
+
+fn validate_table_import_id(import_id: &str) -> Result<String, String> {
+    let import_id = import_id.trim();
+    if !(8..=128).contains(&import_id.len())
+        || !import_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("Invalid table import id".to_string());
+    }
+    Ok(import_id.to_string())
+}
+
+fn table_import_mapping_digest(
+    format: TableImportFormat,
+    first_row_header: Option<bool>,
+    csv_options: Option<&TableCsvImportOptions>,
+) -> Result<String, String> {
+    let snapshot = serde_json::to_vec(&(format, first_row_header, csv_options))
+        .map_err(|error| format!("Could not serialize table import mapping: {error}"))?;
+    Ok(format!("{:x}", Sha256::digest(snapshot)))
+}
+
+fn table_import_report_id(import_id: &str) -> String {
+    format!("table-import-report-{import_id}")
+}
+
+async fn persist_table_import_report(
+    meta_store: &MetaStore,
+    report: &TableImportReport,
+) -> Result<(), String> {
+    let metadata = serde_json::to_value(report)
+        .map_err(|error| format!("Could not serialize table import report: {error}"))?;
+    let resource = Resource {
+        id: report.id.clone(),
+        project_id: report.project_id.clone(),
+        connection_id: report.connection_id.clone(),
+        parent_id: Some(TABLE_IMPORT_REPORT_PARENT_ID.to_string()),
+        kind: TABLE_IMPORT_REPORT_KIND.to_string(),
+        name: format!("{}:{}:{}", report.started_at, report.schema, report.table),
+        metadata,
+        last_updated: current_table_timestamp_millis(),
+    };
+    meta_store
+        .save_resources(&report.project_id, &[resource])
+        .await
+        .map_err(|error| format!("Could not persist table import report: {error}"))
 }
 
 fn normalized_transfer_batch_size(value: Option<u32>) -> u32 {
@@ -6889,7 +6970,10 @@ fn json_import_rows(path: &Path) -> Result<Vec<BTreeMap<String, Value>>, String>
 #[tauri::command]
 pub async fn import_table_data(
     manager: State<'_, ConnectionManager>,
+    meta_store: State<'_, MetaStore>,
     connection_id: String,
+    import_id: String,
+    project_id: Option<String>,
     driver: String,
     schema: String,
     table: String,
@@ -6900,6 +6984,13 @@ pub async fn import_table_data(
     csv_options: Option<TableCsvImportOptions>,
     expected_file_digest: Option<String>,
 ) -> Result<Response<TableImportResult>, String> {
+    let import_id = validate_table_import_id(&import_id)?;
+    let started_at = current_table_timestamp_millis();
+    let mapping_digest = table_import_mapping_digest(
+        format,
+        first_row_header,
+        csv_options.as_ref(),
+    )?;
     let result: Result<TableImportResult, String> = async {
         // Import uses the same bounded parameterized row-mutation path as
         // grid edits and exports. SQLite/DuckDB are deliberately supported by
@@ -6950,9 +7041,11 @@ pub async fn import_table_data(
             )
             .await?;
             return Ok(TableImportResult {
+                import_id: import_id.clone(),
                 file_path: path.display().to_string(),
                 rows_imported,
                 batches,
+                report_id: None,
             });
         }
         if matches!(format, TableImportFormat::Json) && is_json_lines_path(&path) {
@@ -6968,9 +7061,11 @@ pub async fn import_table_data(
             )
             .await?;
             return Ok(TableImportResult {
+                import_id: import_id.clone(),
                 file_path: path.display().to_string(),
                 rows_imported,
                 batches,
+                report_id: None,
             });
         }
         let source_rows = match format {
@@ -7012,17 +7107,91 @@ pub async fn import_table_data(
         .await?;
 
         Ok(TableImportResult {
+            import_id: import_id.clone(),
             file_path: path.display().to_string(),
             rows_imported,
             batches,
+            report_id: None,
         })
     }
     .await;
+
+    let mut result = result;
+    if let Some(project_id) = normalized_table_export_project_id(project_id.as_deref()) {
+        let (status, rows_imported, batches, error) = match &result {
+            Ok(imported) => (
+                TableImportReportStatus::Done,
+                imported.rows_imported,
+                imported.batches,
+                None,
+            ),
+            Err(_) => (
+                TableImportReportStatus::Error,
+                0,
+                0,
+                Some("Import failed and the transaction was rolled back when supported.".to_string()),
+            ),
+        };
+        let report_id = table_import_report_id(&import_id);
+        let report = TableImportReport {
+            id: report_id.clone(),
+            project_id,
+            import_id: import_id.clone(),
+            connection_id: connection_id.clone(),
+            driver: canonical_driver_name(&driver)
+                .unwrap_or_else(|| driver.trim())
+                .to_ascii_lowercase(),
+            schema: schema.clone(),
+            table: table.clone(),
+            format,
+            mapping_digest,
+            rows_imported,
+            batches,
+            status,
+            started_at,
+            finished_at: current_table_timestamp_millis(),
+            error,
+        };
+        match persist_table_import_report(meta_store.inner(), &report).await {
+            Ok(()) => {
+                if let Ok(imported) = result.as_mut() {
+                    imported.report_id = Some(report_id);
+                }
+            }
+            Err(error) => tracing::warn!(error = %error, "table import report was not persisted"),
+        }
+    }
 
     match result {
         Ok(imported) => Ok(Response::ok(imported)),
         Err(error) => Ok(Response::err("IMPORT_TABLE_DATA_ERROR", &error)),
     }
+}
+
+#[tauri::command]
+pub async fn list_table_import_reports(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+    connection_id: String,
+    limit: Option<usize>,
+) -> Result<Response<Vec<TableImportReport>>, String> {
+    let project_id = normalized_table_export_project_id(Some(&project_id))
+        .ok_or_else(|| "A valid project id is required to read table import reports.".to_string())?;
+    let mut reports = meta_store
+        .get_children(
+            &project_id,
+            Some(TABLE_IMPORT_REPORT_PARENT_ID),
+            &connection_id,
+        )
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|resource| resource.kind == TABLE_IMPORT_REPORT_KIND)
+        .filter_map(|resource| serde_json::from_value::<TableImportReport>(resource.metadata).ok())
+        .collect::<Vec<_>>();
+    reports.sort_by(|left, right| right.started_at.cmp(&left.started_at));
+    reports.truncate(limit.unwrap_or(20).clamp(1, 100));
+    Ok(Response::ok(reports))
 }
 
 #[allow(clippy::too_many_arguments)]

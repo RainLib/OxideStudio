@@ -192,3 +192,15 @@ database target until its relevant queue entries pass.
   permission-restricted routines, source values above the per-definition
   bound, and absence of source access for external driver packages. The menu
   must copy source only and never expose migration or mutation actions.
+
+## Table import mapping audit
+
+- For CSV imports with explicit mappings and defaults, verify one terminal
+  project-and-connection-scoped report contains the expected import ID,
+  object, format, mapping digest, counts, and status. Repeat for JSON, JSONL,
+  and XLSX, whose digest represents implicit mapping mode.
+- Verify successful and failed imports never persist source paths, source-file
+  digests, SQL, row values, URLs, credentials, or raw driver errors. A local
+  report-store failure must not turn an already-committed import into failure.
+- Reject-row artifacts, per-row error isolation, resume tokens, and reports
+  for browser-only non-UTF-8 CSV fallback remain implementation gaps.

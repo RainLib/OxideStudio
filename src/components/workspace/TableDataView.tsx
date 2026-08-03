@@ -957,6 +957,7 @@ export function TableDataView() {
           activeTab.databaseName,
           csvOptions,
           csvImportSource.contentDigest,
+          { projectId: activeProjectId },
         );
         rowsImported = imported.rowsImported;
       } else if (activeTab.databaseName) {
@@ -1072,6 +1073,7 @@ export function TableDataView() {
         activeTab.databaseName,
         undefined,
         jsonImportSource.preview.contentDigest,
+        { projectId: activeProjectId },
       );
       const importedRowCount = imported.rowsImported.toLocaleString();
       finishTask(taskId, `${importedRowCount} rows imported`);
@@ -1129,6 +1131,7 @@ export function TableDataView() {
         activeTab.databaseName,
         undefined,
         xlsxImportSource.preview.contentDigest,
+        { projectId: activeProjectId },
       );
       const importedRowCount = imported.rowsImported.toLocaleString();
       finishTask(taskId, `${importedRowCount} rows imported`);

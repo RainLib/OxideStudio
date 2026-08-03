@@ -279,6 +279,11 @@ export function useTableOperations() {
         tableName,
         selected,
         format,
+        true,
+        undefined,
+        undefined,
+        undefined,
+        { projectId: activeProjectId },
       );
       taskStore.finishTask(
         taskId,
