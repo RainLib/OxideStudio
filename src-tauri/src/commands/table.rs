@@ -19,7 +19,10 @@ use std::{
     io::{BufRead, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -58,9 +61,11 @@ const DEFAULT_TRANSFER_BATCH_SIZE: u32 = 250;
 const MAX_TRANSFER_BATCH_SIZE: u32 = 500;
 const MAX_TRANSFER_OVERWRITE_ROWS: u64 = 100_000;
 pub const TABLE_DATA_TRANSFER_PROGRESS_EVENT: &str = "table-data-transfer://progress";
+pub const TABLE_EXPORT_PROGRESS_EVENT: &str = "table-export://progress";
 const TABLE_DATA_TRANSFER_CANCELLED: &str = "TABLE_DATA_TRANSFER_CANCELLED";
 const TABLE_DATA_TRANSFER_REPORT_PARENT_ID: &str = "table-data-transfer-reports-v1";
 const TABLE_DATA_TRANSFER_REPORT_KIND: &str = "TABLE_DATA_TRANSFER_REPORT";
+const TABLE_EXPORT_CANCELLED: &str = "TABLE_EXPORT_CANCELLED";
 const MAX_POSTGRES_ROUTINE_SOURCE_CHARS: usize = 262_144;
 const MAX_POSTGRES_ROUTINE_SOURCE_OVERLOADS: usize = 20;
 
@@ -84,8 +89,70 @@ pub enum TableExportFormat {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableExportResult {
+    pub export_id: String,
     pub file_path: String,
     pub rows_exported: u64,
+    pub batches: u64,
+}
+
+#[derive(Clone)]
+struct TableExportCancellationHandle {
+    connection_id: String,
+    sender: watch::Sender<bool>,
+}
+
+#[derive(Default)]
+pub struct TableExportCancellationState(
+    Arc<AsyncMutex<HashMap<String, TableExportCancellationHandle>>>,
+);
+
+impl TableExportCancellationState {
+    async fn register(
+        &self,
+        export_id: &str,
+        connection_id: &str,
+    ) -> Result<watch::Receiver<bool>, String> {
+        if export_id.trim().is_empty()
+            || export_id.len() > 128
+            || !export_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("Invalid table export id".to_string());
+        }
+        let (sender, receiver) = watch::channel(false);
+        let mut active = self.0.lock().await;
+        if active.contains_key(export_id) {
+            return Err(format!("Table export is already active: {export_id}"));
+        }
+        active.insert(
+            export_id.to_string(),
+            TableExportCancellationHandle {
+                connection_id: connection_id.to_string(),
+                sender,
+            },
+        );
+        Ok(receiver)
+    }
+
+    async fn cancellation_handle(&self, export_id: &str) -> Option<TableExportCancellationHandle> {
+        self.0.lock().await.get(export_id).cloned()
+    }
+
+    async fn take(&self, export_id: &str) {
+        self.0.lock().await.remove(export_id);
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableExportProgress {
+    pub export_id: String,
+    pub rows_exported: u64,
+    pub batches: u64,
+    pub terminal: bool,
+    pub status: String,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -5430,7 +5497,9 @@ pub async fn preview_table_page(
 pub async fn export_table_data(
     app: AppHandle,
     manager: State<'_, ConnectionManager>,
+    cancellation: State<'_, TableExportCancellationState>,
     connection_id: String,
+    export_id: String,
     driver: String,
     schema: String,
     table: String,
@@ -5441,6 +5510,9 @@ pub async fn export_table_data(
     page_size: Option<u32>,
     max_rows: Option<u64>,
 ) -> Result<Response<TableExportResult>, String> {
+    let mut cancel_rx = cancellation.register(&export_id, &connection_id).await?;
+    let progress_rows = AtomicU64::new(0);
+    let progress_batches = AtomicU64::new(0);
     let result: Result<TableExportResult, String> = async {
         let kind =
             table_data_dialect_for_connection(&manager, &connection_id, &driver, false).await?;
@@ -5501,6 +5573,7 @@ pub async fn export_table_data(
         let mut columns: Vec<String> = Vec::new();
         let mut wrote_json_row = false;
         let mut wrote_csv_header = false;
+        let mut batches = 0_u64;
 
         if matches!(format, TableExportFormat::Json) {
             writer.write_all(b"[").map_err(|e| e.to_string())?;
@@ -5514,6 +5587,11 @@ pub async fn export_table_data(
         }
 
         loop {
+            if *cancel_rx.borrow() {
+                return Err(format!(
+                    "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
+                ));
+            }
             let limit = match max_rows {
                 Some(max_rows) => {
                     let remaining = max_rows.saturating_sub(rows_exported);
@@ -5533,17 +5611,39 @@ pub async fn export_table_data(
                 limit,
                 offset,
             );
-            let mut results = if use_parameterized_query {
-                manager
-                    .query_parameterized(&connection_id, &page_sql, &params)
-                    .await
-                    .map_err(|e| e.to_string())?
+            let query_result = if use_parameterized_query {
+                tokio::select! {
+                    result = manager.query_parameterized(&connection_id, &page_sql, &params) => result,
+                    changed = cancel_rx.changed() => {
+                        let _ = changed;
+                        return Err(format!(
+                            "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
+                        ));
+                    }
+                }
             } else {
-                manager
-                    .query(&connection_id, &page_sql, None, None, None)
-                    .await
-                    .map_err(|e| e.to_string())?
+                tokio::select! {
+                    result = manager.query(
+                        &connection_id,
+                        &page_sql,
+                        None,
+                        None,
+                        Some(export_id.clone()),
+                    ) => result,
+                    changed = cancel_rx.changed() => {
+                        let _ = changed;
+                        return Err(format!(
+                            "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
+                        ));
+                    }
+                }
             };
+            if *cancel_rx.borrow() {
+                return Err(format!(
+                    "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
+                ));
+            }
+            let mut results = query_result.map_err(|error| error.to_string())?;
             let result = results
                 .drain(..)
                 .next()
@@ -5599,6 +5699,20 @@ pub async fn export_table_data(
             let page_rows = result.rows.len() as u64;
             rows_exported += page_rows;
             offset += page_rows;
+            batches += 1;
+            progress_rows.store(rows_exported, Ordering::Relaxed);
+            progress_batches.store(batches, Ordering::Relaxed);
+            let _ = app.emit(
+                TABLE_EXPORT_PROGRESS_EVENT,
+                TableExportProgress {
+                    export_id: export_id.clone(),
+                    rows_exported,
+                    batches,
+                    terminal: false,
+                    status: "running".to_string(),
+                    message: None,
+                },
+            );
 
             if page_rows < limit as u64 {
                 break;
@@ -5613,16 +5727,85 @@ pub async fn export_table_data(
         temporary_file.finalize(&file_path)?;
 
         Ok(TableExportResult {
+            export_id: export_id.clone(),
             file_path: file_path.display().to_string(),
             rows_exported,
+            batches,
         })
     }
     .await;
 
+    let cancellation_requested = *cancel_rx.borrow();
+    cancellation.take(&export_id).await;
+    let (rows_exported, batches, status, message) = match &result {
+        Ok(export) => (
+            export.rows_exported,
+            export.batches,
+            "done",
+            Some("Export completed".to_string()),
+        ),
+        Err(error) if cancellation_requested || error.contains(TABLE_EXPORT_CANCELLED) => (
+            progress_rows.load(Ordering::Relaxed),
+            progress_batches.load(Ordering::Relaxed),
+            "cancelled",
+            Some("Export cancelled; partial file removed".to_string()),
+        ),
+        Err(_) => (
+            progress_rows.load(Ordering::Relaxed),
+            progress_batches.load(Ordering::Relaxed),
+            "error",
+            Some("Export failed; partial file removed".to_string()),
+        ),
+    };
+    let _ = app.emit(
+        TABLE_EXPORT_PROGRESS_EVENT,
+        TableExportProgress {
+            export_id: export_id.clone(),
+            rows_exported,
+            batches,
+            terminal: true,
+            status: status.to_string(),
+            message,
+        },
+    );
+
     match result {
         Ok(export) => Ok(Response::ok(export)),
+        Err(error) if cancellation_requested || error.contains(TABLE_EXPORT_CANCELLED) => {
+            Ok(Response::err(
+                TABLE_EXPORT_CANCELLED,
+                "Export cancelled and the partial file was removed.",
+            ))
+        }
         Err(error) => Ok(Response::err("EXPORT_TABLE_DATA_ERROR", &error)),
     }
+}
+
+#[tauri::command]
+pub async fn cancel_table_export(
+    manager: State<'_, ConnectionManager>,
+    cancellation: State<'_, TableExportCancellationState>,
+    export_id: String,
+) -> Result<Response<String>, String> {
+    let Some(handle) = cancellation.cancellation_handle(export_id.trim()).await else {
+        return Ok(Response::err(
+            "TABLE_EXPORT_NOT_FOUND",
+            &format!("Table export is not active: {}", export_id.trim()),
+        ));
+    };
+    let _ = handle.sender.send(true);
+    let backend_cancelled = manager
+        .cancel_query(&handle.connection_id, export_id.trim())
+        .await
+        .unwrap_or(false);
+    Ok(Response::ok(
+        if backend_cancelled {
+            "Export cancellation requested on the database backend"
+        } else {
+            "Export cancellation requested"
+        }
+        .to_string(),
+    ))
 }
 
 fn validate_import_file(path: &Path, format: TableImportFormat) -> Result<(), String> {

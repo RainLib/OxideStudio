@@ -18,6 +18,7 @@ import {
   ChevronDown,
   FileSpreadsheet,
   Rows3,
+  Square,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import {
@@ -33,6 +34,7 @@ interface TableDataToolbarProps {
   /** A safe alternate presentation that intentionally does not accept edits. */
   viewOnly?: boolean;
   exportDisabled?: boolean;
+  isExporting?: boolean;
   transferDisabled?: boolean;
   editingEnabled: boolean;
   hasEdits: boolean;
@@ -58,6 +60,7 @@ interface TableDataToolbarProps {
   onExportCsv: () => void;
   onExportJson: () => void;
   onExportSql: () => void;
+  onCancelExport?: () => void;
 }
 
 export function TableDataToolbar({
@@ -65,6 +68,7 @@ export function TableDataToolbar({
   readOnly,
   viewOnly = false,
   exportDisabled = false,
+  isExporting = false,
   transferDisabled = false,
   editingEnabled,
   hasEdits,
@@ -90,6 +94,7 @@ export function TableDataToolbar({
   onExportCsv,
   onExportJson,
   onExportSql,
+  onCancelExport,
 }: TableDataToolbarProps) {
   const mutationDisabled = isExecuting || readOnly || viewOnly || !editingEnabled;
   const editingTitle = readOnly
@@ -234,24 +239,33 @@ export function TableDataToolbar({
         >
           <ArrowRightLeft size={14} />
         </ToolbarButton>
+        {isExporting && onCancelExport && (
+          <ToolbarButton
+            title="Cancel active export"
+            onClick={onCancelExport}
+            danger
+          >
+            <Square size={12} fill="currentColor" />
+          </ToolbarButton>
+        )}
         <ToolbarButton
           title="Export CSV"
           onClick={onExportCsv}
-          disabled={isExecuting || exportDisabled}
+          disabled={isExecuting || exportDisabled || isExporting}
         >
           <Download size={14} />
         </ToolbarButton>
         <ToolbarButton
           title="Export JSON"
           onClick={onExportJson}
-          disabled={isExecuting || exportDisabled}
+          disabled={isExecuting || exportDisabled || isExporting}
         >
           <FileJson size={14} />
         </ToolbarButton>
         <ToolbarButton
           title="Export SQL inserts"
           onClick={onExportSql}
-          disabled={isExecuting || exportDisabled}
+          disabled={isExecuting || exportDisabled || isExporting}
         >
           <FileCode2 size={14} />
         </ToolbarButton>

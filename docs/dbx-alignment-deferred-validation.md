@@ -56,8 +56,27 @@ database target until its relevant queue entries pass.
   sibling `.partial` file must be removed on every error path.
 - Verify a completed export is visible at the returned final path and its
   content is complete for each supported format. Cancellation, progress,
-  backpressure, encoding/BOM, and durable report behavior remain separate
-  implementation gaps.
+  backpressure, encoding/BOM, and durable report behavior are verified in the
+  separate cases below.
+
+## Table export cancellation and progress
+
+- Start CSV, JSON, and SQL exports large enough to span multiple pages. Verify
+  each progress event is scoped by the stable export ID, rows and batches are
+  monotonic, and exactly one terminal `done` event matches the command result.
+- Cancel an unparameterized export while its tracked database query is active.
+  Verify backend cancellation is requested, the command returns
+  `TABLE_EXPORT_CANCELLED`, the task becomes cancelled, and no final or sibling
+  `.partial` file remains.
+- Repeat cancellation with structured filters so the parameterized query path
+  exits through the cooperative watch channel. Verify cancellation during a
+  query and between pages both preserve the last reported row/batch counts.
+- Exercise invalid, duplicate, already-completed, and replayed export IDs.
+  Verify they cannot cancel or receive progress for another export or
+  connection.
+- Backpressure, encoding/BOM selection, resume semantics, Explorer cancellation
+  UI, and durable export audit reports remain implementation gaps and therefore
+  cannot yet be validated as supported behavior.
 
 ## Reviewed table-import file binding
 

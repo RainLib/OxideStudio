@@ -92,7 +92,16 @@ export function TableDataView() {
   const bumpMetadataVersion = useSchemaStore(
     (state) => state.bumpMetadataVersion,
   );
-  const { startTask, updateTask, finishTask, failTask } = useTaskStore();
+  const { startTask, updateTask, finishTask, failTask, cancelTask } =
+    useTaskStore();
+  const activeTableExportRef = useRef<{
+    exportId: string;
+    taskId: string;
+  } | null>(null);
+  const [activeTableExport, setActiveTableExport] = useState<{
+    exportId: string;
+    taskId: string;
+  } | null>(null);
   const dataGridSettings = useSettingsStore((state) => state.settings.dataGrid);
   const defaultPageSize = dataGridSettings.pageSize;
   const activeTab = tabs.find((t) => t.id === activeTabId);
@@ -270,6 +279,33 @@ export function TableDataView() {
       }));
     }
   };
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void tableService
+      .listenTableExportProgress((progress) => {
+        const activeExport = activeTableExportRef.current;
+        if (!activeExport || activeExport.exportId !== progress.exportId) return;
+        const progressDetail = `${progress.rowsExported.toLocaleString()} rows in ${progress.batches.toLocaleString()} batches`;
+        updateTask(activeExport.taskId, {
+          detail: progress.message
+            ? `${progressDetail} · ${progress.message}`
+            : progressDetail,
+        });
+      })
+      .then((stopListening) => {
+        if (disposed) stopListening();
+        else unlisten = stopListening;
+      })
+      .catch((error) => {
+        console.error("Failed to listen for table export progress:", error);
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [updateTask]);
 
   useEffect(() => {
     const requestCsvImport = (
@@ -750,6 +786,7 @@ export function TableDataView() {
       !activeTab.tableName ||
       !activeTab.schemaName ||
       activeTab.isExecuting ||
+      activeTableExportRef.current ||
       isCrossDatabasePreview ||
       isNativeObjectPreview
     ) {
@@ -769,6 +806,10 @@ export function TableDataView() {
       title: `Export ${activeTab.tableName}`,
       detail: format.toUpperCase(),
     });
+    const exportId = tableService.createTableExportId();
+    const exportTask = { exportId, taskId };
+    activeTableExportRef.current = exportTask;
+    setActiveTableExport(exportTask);
 
     try {
       const exported = await tableService.exportTableData(
@@ -780,6 +821,9 @@ export function TableDataView() {
         activeTab.tableFilterSql || undefined,
         activeTab.tableFilters || undefined,
         sort,
+        5000,
+        undefined,
+        exportId,
       );
       finishTask(
         taskId,
@@ -787,8 +831,39 @@ export function TableDataView() {
       );
       await revealItemInDir(exported.filePath);
     } catch (error) {
-      failTask(taskId, error instanceof Error ? error.message : String(error));
-      console.error("Table export failed:", error);
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? String(error.code)
+          : "";
+      const message = error instanceof Error ? error.message : String(error);
+      if (code === "TABLE_EXPORT_CANCELLED") {
+        cancelTask(taskId, "Export cancelled; partial file removed");
+      } else {
+        failTask(taskId, message);
+        console.error("Table export failed:", error);
+      }
+    } finally {
+      if (activeTableExportRef.current?.exportId === exportId) {
+        activeTableExportRef.current = null;
+        setActiveTableExport(null);
+      }
+    }
+  };
+
+  const handleCancelExport = async () => {
+    const activeExport = activeTableExportRef.current;
+    if (!activeExport) return;
+    updateTask(activeExport.taskId, { detail: "Cancellation requested…" });
+    try {
+      await tableService.cancelTableExport(activeExport.exportId);
+    } catch (error) {
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? String(error.code)
+          : "";
+      if (code !== "TABLE_EXPORT_NOT_FOUND") {
+        console.error("Failed to cancel table export:", error);
+      }
     }
   };
 
@@ -1414,6 +1489,7 @@ export function TableDataView() {
         readOnly={isTableReadOnly}
         viewOnly={isTransposed}
         exportDisabled={isCrossDatabasePreview || isNativeObjectPreview}
+        isExporting={Boolean(activeTableExport)}
         transferDisabled={
           isCrossDatabasePreview ||
           isNativeObjectPreview ||
@@ -1450,6 +1526,7 @@ export function TableDataView() {
         onExportCsv={() => void handleExport("csv")}
         onExportJson={() => void handleExport("json")}
         onExportSql={() => void handleExport("sql")}
+        onCancelExport={() => void handleCancelExport()}
       />
 
       {/* Query Builder Filter Row */}

@@ -93,6 +93,7 @@ pub fn run() {
             app.manage(ParserState(Mutex::new(SqlParser::new())));
             app.manage(QueryCancellationState::default());
             app.manage(commands::table::TableDataTransferCancellationState::default());
+            app.manage(commands::table::TableExportCancellationState::default());
             app.manage(commands::ai::AiCancellationState::default());
             app.manage(enterprise::EnterpriseClient::new(app.handle()));
             // AgentHostManager is side-effect free here. The sidecar and
@@ -232,6 +233,7 @@ pub fn run() {
             commands::table::cancel_table_data_transfer,
             commands::table::list_table_data_transfer_reports,
             commands::table::export_table_data,
+            commands::table::cancel_table_export,
             commands::table::preview_table_csv_import,
             commands::table::preview_table_json_import,
             commands::table::preview_table_xlsx_import,

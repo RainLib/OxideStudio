@@ -11,6 +11,7 @@ import type {
   TableRowDelete,
   TableRowUpdate,
   TableExportFormat,
+  TableExportProgress,
   TableExportResult,
   TableImportFormat,
   TableCsvImportOptions,
@@ -39,6 +40,14 @@ import type {
 
 export const TABLE_DATA_TRANSFER_PROGRESS_EVENT =
   "table-data-transfer://progress";
+export const TABLE_EXPORT_PROGRESS_EVENT = "table-export://progress";
+
+export function createTableExportId(): string {
+  const randomId = globalThis.crypto?.randomUUID?.();
+  return randomId
+    ? `table-export-${randomId}`
+    : `table-export-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 export async function previewTablePage(
   connectionId: string,
@@ -108,10 +117,12 @@ export async function exportTableData(
   filters?: TableFilter[],
   sort?: TableSort,
   pageSize = 5000,
-  maxRows?: number
+  maxRows?: number,
+  exportId = createTableExportId(),
 ): Promise<TableExportResult> {
   return invokeWithInterceptors<TableExportResult>("export_table_data", {
     connectionId,
+    exportId,
     driver,
     schema,
     table,
@@ -148,6 +159,18 @@ export async function importTableData(
     csvOptions,
     expectedFileDigest,
   });
+}
+
+export async function cancelTableExport(exportId: string): Promise<string> {
+  return invokeWithInterceptors<string>("cancel_table_export", { exportId });
+}
+
+export async function listenTableExportProgress(
+  listener: (progress: TableExportProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<TableExportProgress>(TABLE_EXPORT_PROGRESS_EVENT, (event) =>
+    listener(event.payload),
+  );
 }
 
 export async function previewTableCsvImport(
@@ -674,6 +697,7 @@ export async function refreshMaterializedView(
 }
 
 export const tableService = {
+  createTableExportId,
   previewTablePage,
   previewTableDataTransfer,
   previewTableDataTransferBatchPlan,
@@ -685,6 +709,8 @@ export const tableService = {
   listTableDataTransferReports,
   listenTableDataTransferProgress,
   exportTableData,
+  cancelTableExport,
+  listenTableExportProgress,
   previewTableCsvImport,
   previewTableJsonImport,
   previewTableXlsxImport,

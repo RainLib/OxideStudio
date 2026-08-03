@@ -428,8 +428,19 @@ export interface TableSort {
 export type TableExportFormat = "csv" | "json" | "sql";
 
 export interface TableExportResult {
+  exportId: string;
   filePath: string;
   rowsExported: number;
+  batches: number;
+}
+
+export interface TableExportProgress {
+  exportId: string;
+  rowsExported: number;
+  batches: number;
+  terminal: boolean;
+  status: "running" | "done" | "cancelled" | "error";
+  message?: string | null;
 }
 
 export type TableImportFormat = "csv" | "json" | "xlsx";
