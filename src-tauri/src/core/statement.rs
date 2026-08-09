@@ -393,21 +393,15 @@ fn skip_balanced_parentheses(sql: &str, mut index: usize) -> Option<usize> {
         }
 
         if sql[index..].starts_with("/*") {
-            if let Some(end) = sql[index + 2..].find("*/") {
-                index += end + 4;
-            } else {
-                return None;
-            }
+            let end = sql[index + 2..].find("*/")?;
+            index += end + 4;
             continue;
         }
 
         if let Some(tag) = dollar_quote_at(sql, index) {
             let search_start = index + tag.len();
-            if let Some(end) = sql[search_start..].find(tag) {
-                index = search_start + end + tag.len();
-            } else {
-                return None;
-            }
+            let end = sql[search_start..].find(tag)?;
+            index = search_start + end + tag.len();
             continue;
         }
 

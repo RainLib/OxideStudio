@@ -928,7 +928,7 @@ pub async fn list_schema_migration_journal(
             persist_journal_or_warn(meta_store.inner(), entry).await;
         }
     }
-    entries.sort_by(|left, right| right.started_at.cmp(&left.started_at));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.started_at));
     entries.truncate(limit.unwrap_or(20).clamp(1, 100));
     Ok(Response::ok(entries))
 }

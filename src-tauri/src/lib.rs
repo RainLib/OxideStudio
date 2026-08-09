@@ -101,16 +101,16 @@ pub fn run() {
             app.manage(agent::AgentHostManager::new(app.handle()));
 
             // Platform-specific window configuration
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(_window) = app.get_webview_window("main") {
                 #[cfg(target_os = "macos")]
                 {
                     use tauri::TitleBarStyle;
-                    let _ = window.set_title_bar_style(TitleBarStyle::Overlay);
+                    let _ = _window.set_title_bar_style(TitleBarStyle::Overlay);
                 }
 
                 #[cfg(target_os = "windows")]
                 {
-                    let _ = window.set_decorations(false);
+                    let _ = _window.set_decorations(false);
                 }
             }
 

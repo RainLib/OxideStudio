@@ -5576,7 +5576,7 @@ pub async fn list_table_data_transfer_reports(
         })
         .collect::<Vec<_>>();
     let mut reports = reports;
-    reports.sort_by(|left, right| right.started_at.cmp(&left.started_at));
+    reports.sort_by_key(|report| std::cmp::Reverse(report.started_at));
     reports.truncate(limit.unwrap_or(20).clamp(1, 100));
     Ok(Response::ok(reports))
 }
@@ -6135,7 +6135,7 @@ pub async fn list_table_export_reports(
         .filter(|resource| resource.kind == TABLE_EXPORT_REPORT_KIND)
         .filter_map(|resource| serde_json::from_value::<TableExportReport>(resource.metadata).ok())
         .collect::<Vec<_>>();
-    reports.sort_by(|left, right| right.started_at.cmp(&left.started_at));
+    reports.sort_by_key(|report| std::cmp::Reverse(report.started_at));
     reports.truncate(limit.unwrap_or(20).clamp(1, 100));
     Ok(Response::ok(reports))
 }
@@ -7367,7 +7367,7 @@ pub async fn list_table_import_reports(
         .filter(|resource| resource.kind == TABLE_IMPORT_REPORT_KIND)
         .filter_map(|resource| serde_json::from_value::<TableImportReport>(resource.metadata).ok())
         .collect::<Vec<_>>();
-    reports.sort_by(|left, right| right.started_at.cmp(&left.started_at));
+    reports.sort_by_key(|report| std::cmp::Reverse(report.started_at));
     reports.truncate(limit.unwrap_or(20).clamp(1, 100));
     Ok(Response::ok(reports))
 }
