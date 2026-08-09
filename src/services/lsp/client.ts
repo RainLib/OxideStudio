@@ -455,13 +455,17 @@ class LspClient {
   async getCodeActions(
     uri: string,
     range: Range,
-    diagnostics: unknown[] = []
+    diagnostics: unknown[] = [],
+    only?: string[],
   ): Promise<LspCodeAction[]> {
     return (
       (await this.request<LspCodeAction[] | null>("textDocument/codeAction", {
         textDocument: { uri },
         range,
-        context: { diagnostics },
+        context: {
+          diagnostics,
+          ...(only?.length ? { only } : {}),
+        },
       })) || []
     );
   }

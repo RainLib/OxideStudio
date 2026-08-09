@@ -180,6 +180,15 @@ explicit deferred validation task rather than an implicit release check.
   IN-list values containing quotes, NULLs, numbers, and a 1,000-value bound.
 - Repeat those intention cases with multiple selections, including one invalid
   selection; the all-or-nothing edit must leave the entire document unchanged.
+- Exercise LSP qualify/unqualify intentions against real PostgreSQL/MySQL
+  metadata with duplicate column names, self joins, CTE projections, quoted
+  aliases and schema-qualified tables. Unqualify must disappear when another
+  visible source exposes the same column; batch qualify must skip ambiguous
+  fields and remain bounded to 256 KiB of selected SQL.
+- Profile automatic Monaco lightbulb requests on a large real console. Moving
+  the caret or requesting quick fixes/refactor rewrites must not invoke full
+  document formatting; an explicit source action and normal Format Document
+  must still produce the dialect formatter edit.
 - Validate the generic JDBC agent against H2 plus vendor packages after a JDK
   and signed vendor jars are available; record results as conformance evidence
   rather than local claims.

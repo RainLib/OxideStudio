@@ -97,10 +97,12 @@ dbx 仅用于观察交互、能力覆盖和测试组合，不是 OxideStudio 的
    provider、执行、参数、搜索、当前语句装饰、拖放、状态和 UI，难以局部测试。
 3. 补全 provider 的集成测试偏少，更多测试集中在纯 helper；缺两条真实文档、
    不同光标位置、取消、过期响应和 text edit 映射的组合测试。
-4. LSP 已提供格式化、`SELECT *` 展开和危险 mutation 的 `WHERE 1 = 0` 安全 guard
-   code actions；编辑器另提供多选区原子 quote/unquote identifier 与 clipboard→`IN (...)`
-   intention。仍缺 metadata 驱动的列清单/JOIN/WHERE 重写 preview、更复杂的结构化多光标编辑、
-   可配置 dialect inspection profile 和项目级 scratch/console 组织。
+4. LSP 已提供格式化、`SELECT *` 展开、危险 mutation 的 `WHERE 1 = 0` 安全 guard，
+   以及 metadata 驱动的字段 qualify/unqualify 和选区 batch qualify code actions；
+   编辑器另提供多选区原子 quote/unquote identifier 与 clipboard→`IN (...)` intention。
+   普通 lightbulb 请求不会再计算整文档格式化。仍缺 JOIN/WHERE 重写 preview、
+   generated/hidden 列策略、更复杂的结构化多光标编辑、可配置 dialect inspection profile
+   和项目级 scratch/console 组织。
 
 本轮已在 LSP server 增加高置信度软边界：空行后的顶层语句关键字会获得独立
 completion scope，同时保护 CTE、INSERT SELECT、EXPLAIN、CREATE body、

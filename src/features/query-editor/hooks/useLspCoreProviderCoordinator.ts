@@ -279,6 +279,7 @@ export function registerLspCoreProviders({
               source: marker.source,
               message: marker.message,
             })),
+            context.only ? [String(context.only)] : undefined,
           );
           return emptyDisposableResult({
             actions: actions.map((action) => ({

@@ -40,6 +40,7 @@ function coordinatorFixture() {
   const lspClient = {
     getReferences: vi.fn(async () => []),
     rename: vi.fn(async () => null),
+    getCodeActions: vi.fn(async () => []),
   } as unknown as LspClient;
 
   const coordinator = registerLspCoreProviders({
@@ -108,5 +109,28 @@ describe("LSP core provider coordinator", () => {
     });
     expect(lspClient.rename).not.toHaveBeenCalled();
     expect(monaco.languages.registerRenameProvider).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards an explicit code-action kind to avoid unrelated source work", async () => {
+    const { lspClient, monaco, providers } = coordinatorFixture();
+    const activeModel = {
+      uri: { toString: () => "oxide://query/active.postgres.sql" },
+    };
+    const range = new monaco.Range(2, 3, 2, 3);
+
+    await providers.get("codeAction").provideCodeActions(activeModel, range, {
+      markers: [],
+      only: "source",
+    });
+
+    expect(lspClient.getCodeActions).toHaveBeenCalledWith(
+      "oxide://query/active.postgres.sql",
+      {
+        start: { line: 1, character: 2 },
+        end: { line: 1, character: 2 },
+      },
+      [],
+      ["source"],
+    );
   });
 });
