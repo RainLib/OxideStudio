@@ -30,6 +30,10 @@ import {
   type CachedLspMetadata,
 } from "@/services/lsp/metadataCache";
 import { usesOnDemandOnlyLspColumnMetadata } from "@/services/lsp/metadataPolicy";
+import {
+  clearLspRelationshipIndex,
+  replaceLspRelationshipIndex,
+} from "@/services/lsp/relationshipIndex";
 import { dispatchLspConfiguration } from "@/services/lsp/configDispatch";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
 import {
@@ -262,6 +266,7 @@ export function LspConnectionSyncer() {
 
   useEffect(() => {
     tableMetadataCacheRef.current.clear();
+    clearLspRelationshipIndex();
     lastConfigRef.current = null;
   }, [activeConnectionId, metadataVersion]);
 
@@ -998,6 +1003,20 @@ export function LspConnectionSyncer() {
             );
             return;
           }
+
+          // Reuse the completed semantic metadata for FK-aware JOIN proposals.
+          // No additional schema scan is performed by the editor.
+          catalogs.forEach((catalog, schemaIndex) => {
+            replaceLspRelationshipIndex(
+              {
+                connectionId: activeConnectionId,
+                driver: connection.driver,
+                databaseName: catalog.databaseName || undefined,
+                schema: catalog.schemaName,
+              },
+              schemaDefinitions[schemaIndex]?.tables || [],
+            );
+          });
 
           // Build configuration matching Python script format
           const config = {

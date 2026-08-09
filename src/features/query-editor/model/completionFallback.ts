@@ -19,17 +19,33 @@ export async function completionSuggestionsOrCached<TLive, TCached>(
  * operators and clause keywords. Keep both at the same cursor position, but
  * never duplicate a label when a provider already supplied it.
  */
-export function mergeCompletionFallbackSuggestions<T extends { label: string }>(
-  primary: readonly T[],
-  secondary: readonly T[],
-): T[] {
-  const labels = new Set<string>();
-  const result: T[] = [];
-  for (const suggestion of [...primary, ...secondary]) {
-    const key = suggestion.label.trim().toLocaleLowerCase();
-    if (!key || labels.has(key)) continue;
-    labels.add(key);
+export function mergeCompletionFallbackSuggestions<
+  TPrimary extends { label: string; detail?: unknown },
+  TSecondary extends { label: string; detail?: unknown },
+>(
+  primary: readonly TPrimary[],
+  secondary: readonly TSecondary[],
+): Array<TPrimary | TSecondary> {
+  const identities = new Set<string>();
+  const primaryLabels = new Set<string>();
+  const result: Array<TPrimary | TSecondary> = [];
+  const append = (suggestion: TPrimary | TSecondary, isPrimary: boolean) => {
+    const label = suggestion.label.trim().toLocaleLowerCase();
+    if (!label || (!isPrimary && primaryLabels.has(label))) return;
+    const detail =
+      typeof suggestion.detail === "string"
+        ? suggestion.detail.trim().toLocaleLowerCase()
+        : "";
+    // Language servers commonly return one CompletionItem per overload. Keep
+    // those signature rows distinct, while a primary semantic result still
+    // suppresses a same-label grammar/cache fallback.
+    const identity = detail ? `${label}\u0000${detail}` : label;
+    if (identities.has(identity)) return;
+    identities.add(identity);
+    if (isPrimary) primaryLabels.add(label);
     result.push(suggestion);
-  }
+  };
+  primary.forEach((suggestion) => append(suggestion, true));
+  secondary.forEach((suggestion) => append(suggestion, false));
   return result;
 }

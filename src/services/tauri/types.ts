@@ -425,7 +425,7 @@ export interface TableSort {
   direction: "asc" | "desc";
 }
 
-export type TableExportFormat = "csv" | "json" | "sql";
+export type TableExportFormat = "csv" | "json" | "jsonl" | "sql" | "tsv";
 export type TableExportEncoding = "utf8" | "utf8Bom";
 
 export interface TableExportResult {
@@ -1145,6 +1145,24 @@ export interface SchemaDiffSummary {
   blocked: number;
 }
 
+export type SchemaConversionCompatibility =
+  | "safe"
+  | "review"
+  | "unsupported";
+
+export interface SchemaConversionIssue {
+  relationName: string;
+  columnName: string;
+  sourceDataType: string;
+  targetDataType?: string | null;
+  compatibility: SchemaConversionCompatibility;
+  reason: string;
+  /** Empty on persisted plans created before remediation guidance was added. */
+  remediation?: string;
+  /** True when target-owned input is required before executable DDL can exist. */
+  blocksAutomaticConversion?: boolean;
+}
+
 export interface SchemaDiffPlan {
   id: string;
   sourceSnapshotId: string;
@@ -1160,6 +1178,8 @@ export interface SchemaDiffPlan {
   migrationSql: string;
   preflightChecks: SchemaPreflightCheck[];
   preflightSql: string;
+  /** Missing only on persisted plans created before structured conversion review. */
+  conversionIssues?: SchemaConversionIssue[];
   warnings: string[];
 }
 

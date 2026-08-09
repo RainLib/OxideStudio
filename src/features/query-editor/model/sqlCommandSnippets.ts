@@ -8,14 +8,78 @@ const DEFAULT_ROW_LIMIT = 100;
 export type SqlCommandSnippetOptions = {
   driver?: string | null;
   supportsSqlQuery?: boolean;
+  keywordCase?: "upper" | "lower" | "preserve";
+  snippets?: readonly SqlSnippetSetting[];
 };
 
-type SqlCommandSnippet = {
+export type SqlSnippetSetting = {
+  id: string;
   prefix: string;
   label: string;
   detail: string;
-  body: (driver: string) => string;
+  body: string;
+  enabled: boolean;
 };
+
+const SQL_SNIPPET_KEYWORDS = [
+  "ALTER TABLE",
+  "CREATE TABLE",
+  "CREATE INDEX",
+  "NOT EXISTS",
+  "GROUP BY",
+  "ORDER BY",
+  "INSERT INTO",
+  "FETCH FIRST",
+  "ROWS ONLY",
+  "START TRANSACTION",
+  "BEGIN TRANSACTION",
+  "DELETE FROM",
+  "ADD COLUMN",
+  "SELECT",
+  "DISTINCT",
+  "UPDATE",
+  "VALUES",
+  "WHERE",
+  "FROM",
+  "LIMIT",
+  "ROWS",
+  "ROWNUM",
+  "FIRST",
+  "JOIN",
+  "WITH",
+  "AS",
+  "CASE",
+  "WHEN",
+  "THEN",
+  "ELSE",
+  "END",
+  "EXISTS",
+  "ADD",
+  "SET",
+  "COMMIT",
+  "ROLLBACK",
+  "EXPLAIN",
+  "SHOW TABLES",
+  "SHOW META",
+  "MATCH",
+  "FACET",
+  "CALL",
+] as const;
+
+function applySnippetKeywordCase(
+  body: string,
+  keywordCase: SqlCommandSnippetOptions["keywordCase"],
+) {
+  if (keywordCase !== "lower") return body;
+  return SQL_SNIPPET_KEYWORDS.reduce(
+    (sql, keyword) =>
+      sql.replace(
+        new RegExp(`\\b${keyword.replace(/ /g, "\\s+")}\\b`, "gu"),
+        (match) => match.toLowerCase(),
+      ),
+    body,
+  );
+}
 
 const TOP_LIMIT_DRIVERS = new Set([
   "sqlserver",
@@ -93,59 +157,198 @@ function addColumnBody(driver: string) {
   return "ALTER TABLE ${1:table}\nADD COLUMN ${2:column} ${3:type};";
 }
 
-const COMMON_SQL_COMMAND_SNIPPETS: readonly SqlCommandSnippet[] = [
+export const DEFAULT_SQL_COMMAND_SNIPPETS: readonly SqlSnippetSetting[] = [
   {
+    id: "builtin-sel",
     prefix: "sel",
-    label: "sel · select rows",
+    label: "select rows",
     detail: "Bounded SELECT template",
-    body: selectRowsBody,
+    body: "SELECT ${1:*}\nFROM ${2:table}\nLIMIT ${3:100};",
+    enabled: true,
   },
   {
+    id: "builtin-ins",
     prefix: "ins",
-    label: "ins · insert row",
+    label: "insert row",
     detail: "INSERT template",
-    body: () =>
-      "INSERT INTO ${1:table} (${2:columns})\nVALUES (${3:values});",
+    body: "INSERT INTO ${1:table} (${2:columns})\nVALUES (${3:values});",
+    enabled: true,
   },
   {
+    id: "builtin-upd",
     prefix: "upd",
-    label: "upd · update rows",
+    label: "update rows",
     detail: "UPDATE template with a WHERE guard",
-    body: updateRowsBody,
+    body: "UPDATE ${1:table}\nSET ${2:column} = ${3:value}\nWHERE ${4:condition};",
+    enabled: true,
   },
   {
+    id: "builtin-cte",
     prefix: "cte",
-    label: "cte · common table expression",
+    label: "common table expression",
     detail: "CTE query template",
-    body: () =>
-      "WITH ${1:name} AS (\n  SELECT ${2:*}\n  FROM ${3:table}\n)\nSELECT *\nFROM ${1:name};",
+    body: "WITH ${1:name} AS (\n  SELECT ${2:*}\n  FROM ${3:table}\n)\nSELECT *\nFROM ${1:name};",
+    enabled: true,
   },
   {
+    id: "builtin-join",
+    prefix: "join",
+    label: "join tables",
+    detail: "JOIN clause with linked placeholders",
+    body: "JOIN ${1:table} ON ${2:left_column} = ${3:right_column}",
+    enabled: true,
+  },
+  {
+    id: "builtin-case",
+    prefix: "case",
+    label: "case expression",
+    detail: "CASE expression",
+    body: "CASE\n  WHEN ${1:condition} THEN ${2:value}\n  ELSE ${3:default}\nEND",
+    enabled: true,
+  },
+  {
+    id: "builtin-ex",
+    prefix: "ex",
+    label: "exists subquery",
+    detail: "EXISTS predicate",
+    body: "EXISTS (\n  SELECT 1\n  FROM ${1:table}\n  WHERE ${2:condition}\n)",
+    enabled: true,
+  },
+  {
+    id: "builtin-nex",
+    prefix: "nex",
+    label: "not exists subquery",
+    detail: "NOT EXISTS predicate",
+    body: "NOT EXISTS (\n  SELECT 1\n  FROM ${1:table}\n  WHERE ${2:condition}\n)",
+    enabled: true,
+  },
+  {
+    id: "builtin-ct",
     prefix: "ct",
-    label: "ct · create table",
+    label: "create table",
     detail: "CREATE TABLE template",
-    body: () => "CREATE TABLE ${1:table} (\n  ${2:column} ${3:type}\n);",
+    body: "CREATE TABLE ${1:table} (\n  ${2:column} ${3:type}\n);",
+    enabled: true,
   },
   {
+    id: "builtin-at",
     prefix: "at",
-    label: "at · add column",
+    label: "add column",
     detail: "Dialect-aware ALTER TABLE template",
-    body: addColumnBody,
+    body: "ALTER TABLE ${1:table}\nADD COLUMN ${2:column} ${3:type};",
+    enabled: true,
   },
   {
-    prefix: "idx",
-    label: "idx · create index",
+    id: "builtin-ci",
+    prefix: "ci",
+    label: "create index",
     detail: "CREATE INDEX template",
-    body: () =>
-      "CREATE INDEX ${1:index_name}\nON ${2:table} (${3:column});",
+    body: "CREATE INDEX ${1:index_name}\nON ${2:table} (${3:column});",
+    enabled: true,
   },
   {
+    id: "builtin-del",
     prefix: "del",
-    label: "del · delete rows",
+    label: "delete rows",
     detail: "DELETE template with a WHERE guard",
-    body: () => "DELETE FROM ${1:table}\nWHERE ${2:condition};",
+    body: "DELETE FROM ${1:table}\nWHERE ${2:condition};",
+    enabled: true,
+  },
+  {
+    id: "builtin-tx",
+    prefix: "tx",
+    label: "transaction block",
+    detail: "Transaction with commit and rollback guidance",
+    body: "START TRANSACTION;\n\n${1:statement};\n\nCOMMIT;\n-- ROLLBACK;",
+    enabled: true,
+  },
+  {
+    id: "builtin-exp",
+    prefix: "exp",
+    label: "explain query",
+    detail: "EXPLAIN query template",
+    body: "EXPLAIN\nSELECT ${1:*}\nFROM ${2:table};",
+    enabled: true,
   },
 ];
+
+/** Additional templates exposed only by Manticore Search's SQL surface. */
+export const MANTICORE_SQL_COMMAND_SNIPPETS: readonly SqlSnippetSetting[] = [
+  {
+    id: "builtin-manticore-match",
+    prefix: "match",
+    label: "match query",
+    detail: "Manticore full-text MATCH predicate",
+    body: "MATCH('${1:query}')",
+    enabled: true,
+  },
+  {
+    id: "builtin-manticore-facet",
+    prefix: "facet",
+    label: "facet",
+    detail: "Manticore FACET clause",
+    body: "FACET ${1:column}",
+    enabled: true,
+  },
+  {
+    id: "builtin-manticore-show-meta",
+    prefix: "meta",
+    label: "show meta",
+    detail: "Inspect the previous Manticore query",
+    body: "SHOW META;",
+    enabled: true,
+  },
+  {
+    id: "builtin-manticore-show-tables",
+    prefix: "tables",
+    label: "show tables",
+    detail: "List Manticore tables",
+    body: "SHOW TABLES;",
+    enabled: true,
+  },
+  {
+    id: "builtin-manticore-call-pq",
+    prefix: "pq",
+    label: "call pq",
+    detail: "Run a Manticore percolate query",
+    body: "CALL PQ ('${1:pq}', ('{\"${2:title}\":\"${3:query}\"}'));",
+    enabled: true,
+  },
+];
+
+const BUILTIN_SQL_COMMAND_SNIPPETS = [
+  ...DEFAULT_SQL_COMMAND_SNIPPETS,
+  ...MANTICORE_SQL_COMMAND_SNIPPETS,
+];
+
+function isUnmodifiedBuiltinSnippet(snippet: SqlSnippetSetting) {
+  const defaultSnippet = BUILTIN_SQL_COMMAND_SNIPPETS.find(
+    (candidate) => candidate.id === snippet.id,
+  );
+  return Boolean(defaultSnippet && defaultSnippet.body === snippet.body);
+}
+
+function resolvedSnippetBody(snippet: SqlSnippetSetting, driver: string) {
+  // A user-edited built-in is custom SQL and must not be silently replaced by
+  // a dialect template. Only untouched defaults receive product adaptation.
+  if (!isUnmodifiedBuiltinSnippet(snippet)) {
+    return snippet.body;
+  }
+  switch (snippet.id) {
+    case "builtin-sel":
+      return selectRowsBody(driver);
+    case "builtin-upd":
+      return updateRowsBody(driver);
+    case "builtin-at":
+      return addColumnBody(driver);
+    case "builtin-tx":
+      return driver === "sqlserver"
+        ? snippet.body.replace("START TRANSACTION", "BEGIN TRANSACTION")
+        : snippet.body;
+    default:
+      return snippet.body;
+  }
+}
 
 /**
  * Recommend bounded, cursor-navigable command templates at a statement
@@ -162,11 +365,23 @@ export function sqlCommandSnippetCompletions(
 
   const prefix = trimmed.toLowerCase();
   const driver = normalizeDriver(options.driver);
-  return COMMON_SQL_COMMAND_SNIPPETS.filter(
+  const configuredSnippets = options.snippets ?? DEFAULT_SQL_COMMAND_SNIPPETS;
+  const snippets =
+    driver === "manticoresearch"
+      ? [
+          ...configuredSnippets,
+          ...MANTICORE_SQL_COMMAND_SNIPPETS.filter(
+            (candidate) =>
+              !configuredSnippets.some((snippet) => snippet.id === candidate.id),
+          ),
+        ]
+      : configuredSnippets;
+  return snippets.filter(
     (snippet) =>
-      !prefix ||
-      snippet.prefix.startsWith(prefix) ||
-      snippet.label.toLowerCase().startsWith(prefix),
+      snippet.enabled &&
+      (!prefix ||
+        snippet.prefix.toLowerCase().startsWith(prefix) ||
+        snippet.label.toLowerCase().startsWith(prefix)),
   ).map((snippet, index) => ({
     label: snippet.label,
     kind: CompletionItemKind.Snippet,
@@ -174,8 +389,13 @@ export function sqlCommandSnippetCompletions(
     documentation:
       "Common SQL command template adapted to the current database product.",
     filterText: `${snippet.prefix} ${snippet.label}`,
-    insertText: snippet.body(driver),
+    insertText: isUnmodifiedBuiltinSnippet(snippet)
+      ? applySnippetKeywordCase(
+          resolvedSnippetBody(snippet, driver),
+          options.keywordCase,
+        )
+      : snippet.body,
     insertTextFormat: 2,
-    sortText: `4:${String(index).padStart(2, "0")}:${snippet.prefix}`,
+    sortText: `${prefix === snippet.prefix.toLowerCase() ? "0" : "4"}:${String(index).padStart(2, "0")}:${snippet.prefix}`,
   }));
 }

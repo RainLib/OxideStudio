@@ -208,12 +208,13 @@ describe("app settings workbench layout", () => {
   });
 
   it("normalizes SQL completion casing, aliases, and local usage ranking", () => {
-    expect(DEFAULT_APP_SETTINGS.editor.sqlCompletion).toEqual({
+    expect(DEFAULT_APP_SETTINGS.editor.sqlCompletion).toMatchObject({
       keywordCase: "upper",
       tableAlias: "none",
       rankByUsage: true,
       appendSpace: true,
     });
+    expect(DEFAULT_APP_SETTINGS.editor.sqlCompletion.snippets.length).toBeGreaterThan(0);
     expect(
       normalizeAppSettings({
         editor: {
@@ -225,7 +226,7 @@ describe("app settings workbench layout", () => {
           },
         },
       }).editor.sqlCompletion,
-    ).toEqual({
+    ).toMatchObject({
       keywordCase: "lower",
       tableAlias: "initials",
       rankByUsage: false,

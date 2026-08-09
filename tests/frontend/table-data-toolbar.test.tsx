@@ -110,8 +110,7 @@ describe("TableDataToolbar", () => {
       "Submit changes",
       "This object is read-only",
       "Import data",
-      "Export CSV",
-      "Export JSON",
+      "Export table data",
     ]) {
       expect(
         container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)

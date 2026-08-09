@@ -29,6 +29,11 @@ export interface TextEdit {
   newText: string;
 }
 
+export interface MarkupContent {
+  kind?: "plaintext" | "markdown" | string;
+  value: string;
+}
+
 export interface WorkspaceEdit {
   changes?: Record<string, TextEdit[]>;
 }
@@ -107,13 +112,16 @@ export interface CompletionItem {
   label: string;
   kind?: number;
   detail?: string;
-  documentation?: string;
+  documentation?: string | MarkupContent;
   insertText?: string;
   insertTextFormat?: number;
   textEdit?: TextEdit;
+  additionalTextEdits?: TextEdit[];
   sortText?: string;
   filterText?: string;
   preselect?: boolean;
+  commitCharacters?: string[];
+  deprecated?: boolean;
 }
 
 export interface CompletionResponse {

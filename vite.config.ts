@@ -97,6 +97,9 @@ export default defineConfig(async () => ({
     // Workspace packages have their own test scripts. Keep the root suite
     // focused on OxideStudio and never collect tests from read-only reference
     // projects such as sources/dbx.
-    include: ["tests/**/*.{test,spec}.{ts,tsx}"],
+    include: [
+      "tests/**/*.{test,spec}.{ts,tsx}",
+      "src/**/*.{test,spec}.{ts,tsx}",
+    ],
   },
 }));

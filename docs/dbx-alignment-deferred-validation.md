@@ -4,19 +4,22 @@ Implementation work is intentionally being completed before these checks run.
 Do not mark a capability as production-ready or count it toward the 70+
 database target until its relevant queue entries pass.
 
-## Deferred database UI regression tests
+## Completed non-database checks (2026-08-10)
 
-- Reconcile the PostgreSQL remote database-content, CSV import, and
-  cross-database table-view fixtures with the current export/import progress
-  contract. Their mocks must include progress listeners and their assertions
-  must allow generated transfer IDs, project IDs, and optional file digests.
-- Keep this database-surface suite outside tag-release gating until the mock
-  contract is reconciled; tag releases still run deterministic release,
-  agent-contract, agent-host, frontend-build, and Rust quality checks.
-- Keep Rust database integration targets (including `live_database`) outside
-  tag-release gating until runnable database fixtures are supplied. Tag builds
-  run Rust unit tests only; integration tests remain an explicit deferred
-  validation task rather than an implicit linker-dependent release check.
+- `npm test`: 204 test files and 1,042 tests passed. PostgreSQL remote-content,
+  CSV import, cross-database table view, export progress and generated
+  operation-ID mocks now follow the current frontend contract.
+- `npm run build`: strict TypeScript, Vite production build and frontend bundle
+  verification passed; the verifier found one startup module and no static
+  import cycles.
+- `cargo test --manifest-path src-tauri/Cargo.toml core::schema_diff::tests --lib`:
+  25 schema diff and migration-planning unit tests passed.
+- Targeted Rust SQL/TSV export and type-conversion review tests passed.
+- `cargo fmt --manifest-path src-tauri/Cargo.toml` and `git diff --check` passed.
+
+Rust database integration targets (including `live_database`) remain outside
+tag-release gating until runnable database fixtures are supplied. They are an
+explicit deferred validation task rather than an implicit release check.
 
 ## Multi-table data transfer
 
@@ -235,3 +238,129 @@ database target until its relevant queue entries pass.
   recovery, and an explicit policy for required-column backfills, type
   conversions, expression/partial indexes, triggers, virtual tables, and
   views.
+
+## LSP completion protocol and SQL snippets
+
+- Verify PostgreSQL, MySQL, SQL Server, Oracle and ClickHouse completion items
+  that use plain `TextEdit`, LSP `InsertReplaceEdit`, `additionalTextEdits`,
+  commit characters, Markdown documentation and deprecated tags. Server edits
+  must remain authoritative and an older request must never overwrite a newer
+  model revision.
+- Verify built-in `sel`, `upd`, `at` and transaction snippets use the active
+  product syntax; custom edits to a built-in must remain byte-for-byte custom
+  and must not be silently dialect-rewritten.
+- Verify custom snippet add/edit/enable/disable/delete/default restoration,
+  duplicate trigger rejection, persistence across restart, and Monaco
+  placeholder navigation with Tab/Shift+Tab.
+- Verify function completions with zero, one, nested-type and multiple
+  parameters. A server-provided snippet/text edit or an existing opening
+  parenthesis must not receive a second argument list.
+- Verify same-name function overloads with distinct signatures remain separate
+  Monaco rows after semantic, JOIN and syntax fallback merges.
+- Observe the content-free 256-event telemetry window on real LSPs: latency,
+  P95, fallback, empty, discarded and error reasons must update without storing
+  SQL, identifiers, labels or completion payloads.
+
+## Cross-driver migration review notes
+
+- Compare PostgreSQL snapshots against MySQL/MariaDB and SQL Server targets
+  containing UUID, JSON/JSONB, arrays, bytea, timezone timestamps, network
+  types, intervals and serial/bigserial columns. Confirm deterministic mapping
+  notes identify lossy conversions and appear in both warnings and the review
+  artifact.
+- Confirm every cross-driver change remains metadata-only: no change may carry
+  executable SQL, no preflight may imply apply support, and
+  `execute_schema_migration` must continue rejecting the plan.
+- Verify unsupported source/target pairs receive an explicit “no deterministic
+  profile” warning rather than a guessed compatible dialect.
+- Verify each structured issue carries stable remediation text and that
+  `blocksAutomaticConversion` is true for lossy/custom/default/index decisions
+  requiring target-owned input, while safe deterministic mappings remain false.
+
+## Result and table export formats
+
+- Verify query-result CSV, UTF-8 BOM CSV, JSON, JSONL, TSV and SQL template
+  downloads with duplicate column names, quotes/newlines, NULL, booleans,
+  finite/non-finite numbers, nested JSON, binary values and empty results.
+- Verify table-mode CSV/CSV BOM/JSON/JSONL/TSV/SQL still use the Rust streaming task,
+  progress/cancellation/report path after the toolbar entry is consolidated.
+  Large tables must not be materialized in the webview.
+- XLSX export, Parquet/Arrow export and resumable/backpressured exports remain
+  implementation gaps and require their own large-file validation matrix.
+
+## FK-aware JOIN completion and completion hot path
+
+- Verify outgoing and incoming foreign-key JOIN proposals for single and
+  composite keys, multiple FKs to the same target, self references, quoted
+  identifiers, cross-schema references and aliases that collide with the
+  generated target alias.
+- Confirm the relationship index is replaced on connection/schema metadata
+  refresh, never mixes databases or connections, and reuses completed LSP
+  metadata without issuing an all-table scan from the editor.
+- Exercise SQL documents larger than 128 KiB. Semantic LSP completion must
+  remain authoritative, while the bounded fallback must not reuse a relation
+  from outside its retained context or regress cancellation/version checks.
+- Confirm only the active Monaco model language owns completion, hover,
+  navigation, formatting, semantic-token and inline-completion providers after
+  language/tab changes; no disposed background provider may answer a request.
+
+## Structured cross-driver conversion issues
+
+- Verify PostgreSQL to MySQL/MariaDB and SQL Server comparisons return stable
+  `conversionIssues` for arrays, UUID, JSON/JSONB, bytea, timezone timestamps,
+  network types, interval, serial types, cast/sequence defaults,
+  partial/expression/specialized indexes and explicit custom types, with the
+  expected target type and safe/review/unsupported classification.
+- Verify an unsupported driver pair emits one explicit unsupported profile
+  issue, remains review-only, and still produces no executable migration or
+  automatic preflight path. Old stored payloads without `conversionIssues`
+  must continue rendering with an empty list.
+
+## Schema diagram SVG and viewport culling
+
+- Export filtered and keys-only diagrams containing XML-sensitive relation,
+  column and constraint names. The SVG must open independently, preserve node
+  and edge geometry, and contain no unescaped source text.
+- Benchmark scroll, zoom, search, selected-edge highlighting and inspector
+  collapse with 1k/5k/10k relations. Viewport buckets and overscan must not
+  leave blank nodes after programmatic focus, resize or zoom changes.
+- Export PNG/JPG with dark, light and transparent backgrounds and both filtered
+  and full scopes. Confirm JPEG converts transparent to white, light exports
+  retain readable contrast, and canvases above 24 MP down-scale without changing
+  aspect ratio or exhausting the WebView.
+- Exercise Ctrl/Cmd/Shift multi-select, exclusive move-to-area, parent-first
+  auto-arrange, area removal and the 100-step undo/redo boundary. Area culling,
+  related-table focus and full export coordinates must remain consistent.
+- Verify selected+related and selected-area scope filters compose with text and
+  keys-only filters. A hidden selection must surface the recovery action, which
+  clears scope/search and centers the same relation without losing inspector state.
+
+## DBML review artifact import/export
+
+- Export tables with quoted names, composite primary/foreign keys, defaults,
+  expression indexes, views, checks, routine signatures and non-relation
+  schema descriptors. Validate the generated DBML with the ChartDB compiler
+  and confirm every unsupported/lossy object is retained as an in-file warning.
+- Round-trip the portable exported subset through the bounded importer,
+  including array types, defaults, named/composite indexes and composite FKs.
+  Malformed settings, duplicate tables/columns, missing FK sources and
+  cross-schema tables must produce diagnostics rather than guessed metadata.
+- Confirm the 8 MiB browser limit, saved-source label and offline sentinel.
+  Imported DBML must enter snapshot diff and must never enable Apply or become
+  direct executable migration input.
+- In the Diagram DBML Draft dialog, verify 250 ms diagnostics, native text
+  undo/redo, warning bounds and desired-draft → captured-snapshot diff direction.
+  Offline plans must disable both Apply and Open in console while retaining a
+  readable/copyable review artifact.
+
+## ChartDB metadata JSON import
+
+- Validate PostgreSQL/MySQL/MariaDB/SQLite/SQL Server/Oracle/ClickHouse and
+  CockroachDB metadata-query output against the strict importer, including the
+  valid `metadata_json_to_import` wrapper, composite PK/FK/index ordering,
+  arrays, precision/scale, identity, views, checks and custom-type warnings.
+- Confirm the 16 MiB browser bound, schema filtering, duplicate handling and
+  missing-table inference. Malformed JSON/wrappers must fail without permissive
+  quote rewriting or partial persistence.
+- Saved metadata imports must remain offline/review-only: diagram and live diff
+  are allowed, while Apply and direct DDL generation remain disabled.

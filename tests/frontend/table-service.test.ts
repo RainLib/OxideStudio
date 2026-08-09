@@ -78,6 +78,11 @@ describe("table service database scope", () => {
       "public",
       "users",
       "sql",
+      {
+        exportId: "table-export-test",
+        projectId: "project-1",
+        encoding: "utf8",
+      },
     );
     await tableService.importTableData(
       "postgres-1",
@@ -88,10 +93,19 @@ describe("table service database scope", () => {
       "json",
       true,
       "analytics",
+      undefined,
+      undefined,
+      {
+        importId: "table-import-test",
+        projectId: "project-1",
+      },
     );
 
     expect(mocks.invoke).toHaveBeenNthCalledWith(1, "export_table_data", {
       connectionId: "postgres-1",
+      exportId: "table-export-test",
+      projectId: "project-1",
+      encoding: "utf8",
       driver: "postgres",
       schema: "public",
       table: "users",
@@ -104,6 +118,8 @@ describe("table service database scope", () => {
     });
     expect(mocks.invoke).toHaveBeenNthCalledWith(2, "import_table_data", {
       connectionId: "postgres-1",
+      importId: "table-import-test",
+      projectId: "project-1",
       driver: "postgres",
       schema: "public",
       table: "users",
@@ -112,6 +128,7 @@ describe("table service database scope", () => {
       firstRowHeader: true,
       database: "analytics",
       csvOptions: undefined,
+      expectedFileDigest: undefined,
     });
   });
 
@@ -134,10 +151,17 @@ describe("table service database scope", () => {
         ],
         emptyFieldsAsNull: true,
       },
+      "sha256:test",
+      {
+        importId: "table-import-csv-test",
+        projectId: "project-1",
+      },
     );
 
     expect(mocks.invoke).toHaveBeenCalledWith("import_table_data", {
       connectionId: "postgres-1",
+      importId: "table-import-csv-test",
+      projectId: "project-1",
       driver: "postgres",
       schema: "public",
       table: "users",
@@ -154,6 +178,7 @@ describe("table service database scope", () => {
         ],
         emptyFieldsAsNull: true,
       },
+      expectedFileDigest: "sha256:test",
     });
   });
 

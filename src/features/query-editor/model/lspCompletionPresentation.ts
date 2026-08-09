@@ -9,9 +9,13 @@ import {
   usageRankedCompletionSortText,
 } from "@/lib/completionUsage";
 import type { CompletionItem } from "@/services/lsp/types";
-import { toMonacoRange } from "./lspMonacoAdapter";
+import {
+  lspDocumentationForMonaco,
+  toMonacoRange,
+} from "./lspMonacoAdapter";
 import {
   appendSqlCompletionSpace,
+  sqlFunctionCompletionInsertion,
   sqlCompletionItemType,
 } from "./sqlCompletionInsertion";
 
@@ -45,44 +49,59 @@ export function lspCompletionItemsToMonacoSuggestions({
   appendSpace,
   nextCharacter,
 }: LspCompletionPresentationOptions) {
-  return items.map((item) => ({
-    label: item.label,
-    kind: toMonacoCompletionKind(monaco, item.kind),
-    detail: item.detail,
-    documentation: item.documentation,
-    insertText: appendSqlCompletionSpace(
+  return items.map((item) => {
+    const spacedInsertText = appendSqlCompletionSpace(
       completionInsertText(item, completedContextKeyword),
       {
         enabled: appendSpace,
         itemType: sqlCompletionItemType(item),
         nextCharacter,
       },
-    ),
-    sortText: rankByUsage
-      ? usageRankedCompletionSortText(
-          completionSortText(item),
-          completionUsageScore(usageScope, item.label),
-        )
-      : completionSortText(item),
-    filterText: completionFilterText(
+    );
+    const functionInsertion = sqlFunctionCompletionInsertion(
       item,
-      typedWord,
-      completedContextKeyword,
-    ),
-    preselect: item.preselect,
-    command: rankByUsage
-      ? {
-          id: recordUsageCommand,
-          title: "Record SQL completion usage",
-          arguments: [usageScope, item.label],
-        }
-      : undefined,
-    insertTextRules:
-      item.insertTextFormat === 2
+      spacedInsertText,
+      nextCharacter,
+    );
+    return {
+      label: item.label,
+      kind: toMonacoCompletionKind(monaco, item.kind),
+      detail: item.detail,
+      documentation: lspDocumentationForMonaco(item.documentation),
+      insertText: functionInsertion.insertText,
+      sortText: rankByUsage
+        ? usageRankedCompletionSortText(
+            completionSortText(item),
+            completionUsageScore(usageScope, item.label),
+          )
+        : completionSortText(item),
+      filterText: completionFilterText(
+        item,
+        typedWord,
+        completedContextKeyword,
+      ),
+      preselect: item.preselect,
+      tags: item.deprecated
+        ? [monaco.languages.CompletionItemTag.Deprecated]
+        : undefined,
+      commitCharacters: item.commitCharacters,
+      additionalTextEdits: item.additionalTextEdits?.map((edit) => ({
+        range: toMonacoRange(monaco, edit.range),
+        text: edit.newText,
+      })),
+      command: rankByUsage
+        ? {
+            id: recordUsageCommand,
+            title: "Record SQL completion usage",
+            arguments: [usageScope, item.label],
+          }
+        : undefined,
+      insertTextRules: functionInsertion.insertAsSnippet
         ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
         : undefined,
-    range: item.textEdit
-      ? toMonacoRange(monaco, item.textEdit.range)
-      : defaultRange,
-  }));
+      range: item.textEdit
+        ? toMonacoRange(monaco, item.textEdit.range)
+        : defaultRange,
+    };
+  });
 }

@@ -1,4 +1,10 @@
 import type { AiPlannerKind } from "@/store/useAiSettingsStore";
+import {
+  DEFAULT_SQL_COMMAND_SNIPPETS,
+  type SqlSnippetSetting,
+} from "@/features/query-editor/model/sqlCommandSnippets";
+
+export type { SqlSnippetSetting };
 
 export type VimMappingMode = "all" | "normal" | "insert" | "visual";
 
@@ -21,6 +27,7 @@ export type SqlCompletionSettings = {
   tableAlias: "none" | "initials";
   rankByUsage: boolean;
   appendSpace: boolean;
+  snippets: SqlSnippetSetting[];
 };
 
 export type WorkbenchToolWindowId =
@@ -255,6 +262,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
       tableAlias: "none",
       rankByUsage: true,
       appendSpace: true,
+      snippets: DEFAULT_SQL_COMMAND_SNIPPETS.map((snippet) => ({ ...snippet })),
     },
     inlineCompletion: {
       enabled: false,
@@ -527,6 +535,11 @@ export function normalizeAppSettings(value: unknown): AppSettings {
           raw,
           ["editor", "sqlCompletion", "appendSpace"],
           defaults.editor.sqlCompletion.appendSpace,
+        ),
+        snippets: sqlSnippetsAt(
+          raw,
+          ["editor", "sqlCompletion", "snippets"],
+          defaults.editor.sqlCompletion.snippets,
         ),
       },
       inlineCompletion: {
@@ -964,6 +977,54 @@ function vimMappingsAt(
         lhs: lhs.trim(),
         rhs: rhs.trim(),
         recursive: item.recursive !== false,
+      },
+    ];
+  });
+}
+
+function sqlSnippetsAt(
+  value: Record<string, unknown>,
+  path: string[],
+  fallback: SqlSnippetSetting[],
+): SqlSnippetSetting[] {
+  const snippets = getAt(value, path);
+  if (!Array.isArray(snippets)) {
+    return fallback.map((snippet) => ({ ...snippet }));
+  }
+
+  const ids = new Set<string>();
+  const prefixes = new Set<string>();
+  return snippets.slice(0, 100).flatMap((item): SqlSnippetSetting[] => {
+    if (!isRecord(item)) return [];
+    const id = typeof item.id === "string" ? item.id.trim().slice(0, 120) : "";
+    const prefix =
+      typeof item.prefix === "string" ? item.prefix.trim().toLowerCase() : "";
+    const label = typeof item.label === "string" ? item.label.trim() : "";
+    const detail = typeof item.detail === "string" ? item.detail.trim() : "";
+    const body = typeof item.body === "string" ? item.body : "";
+    if (
+      !id ||
+      ids.has(id) ||
+      !/^[a-z_][a-z0-9_-]{0,31}$/u.test(prefix) ||
+      prefixes.has(prefix) ||
+      !label ||
+      label.length > 120 ||
+      detail.length > 240 ||
+      !body.trim() ||
+      body.length > 65_536
+    ) {
+      return [];
+    }
+    ids.add(id);
+    prefixes.add(prefix);
+    return [
+      {
+        id,
+        prefix,
+        label,
+        detail: detail || "Custom SQL snippet",
+        body,
+        enabled: item.enabled !== false,
       },
     ];
   });

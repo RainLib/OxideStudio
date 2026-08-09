@@ -45,6 +45,7 @@ import {
   redisSelectedDatabase,
 } from "@/lib/querySafety";
 import type { Diagnostic } from "@/services/lsp/types";
+import type { SchemaDiagramAreaHistory } from "@/lib/schemaDiagramAreas";
 import {
   extractQueryExecutionError,
   isMissingConnectionSession,
@@ -293,6 +294,9 @@ export interface TabData {
   selectedSchemaChangeId?: string | null;
   schemaDiagramSnapshot?: SchemaSnapshot;
   selectedDiagramRelationName?: string | null;
+  schemaDiagramAreaHistory?: SchemaDiagramAreaHistory;
+  selectedDiagramAreaId?: string | null;
+  selectedDiagramRelationNames?: string[];
   dataCompareLeft?: DataCompareSource;
   dataCompareRight?: DataCompareSource;
 }
@@ -740,6 +744,12 @@ interface TabState {
     tabId: string,
     relationName: string | null,
   ) => void;
+  setSchemaDiagramAreaHistory: (
+    tabId: string,
+    history: SchemaDiagramAreaHistory,
+  ) => void;
+  selectSchemaDiagramArea: (tabId: string, areaId: string | null) => void;
+  selectSchemaDiagramRelations: (tabId: string, relationNames: string[]) => void;
   openDataCompareTab: (leftTabId: string, rightTabId: string) => string | null;
   retargetTableTabs: (
     connectionId: string,
@@ -887,6 +897,25 @@ interface TabState {
     filters?: TableFilter[] | null,
     options?: TablePageLoadOptions,
   ) => Promise<boolean>;
+}
+
+function normalizeDiagramAreaHistory(
+  history: SchemaDiagramAreaHistory | undefined,
+  snapshot: SchemaSnapshot,
+): SchemaDiagramAreaHistory {
+  const relationNames = new Set(snapshot.relations.map((relation) => relation.name));
+  const normalize = (areas: SchemaDiagramAreaHistory["present"]) =>
+    areas.map((area) => ({
+      ...area,
+      relationNames: area.relationNames.filter((name) => relationNames.has(name)),
+    }));
+  return history
+    ? {
+        past: history.past.map(normalize),
+        present: normalize(history.present),
+        future: history.future.map(normalize),
+      }
+    : { past: [], present: [], future: [] };
 }
 
 export const useTabStore = create<TabState>((set, get) => ({
@@ -1167,6 +1196,15 @@ export const useTabStore = create<TabState>((set, get) => ({
                   )
                     ? tab.selectedDiagramRelationName
                     : snapshot.relations[0]?.name || null,
+                schemaDiagramAreaHistory: normalizeDiagramAreaHistory(
+                  tab.schemaDiagramAreaHistory,
+                  snapshot,
+                ),
+                selectedDiagramRelationNames: (
+                  tab.selectedDiagramRelationNames || []
+                ).filter((name) =>
+                  snapshot.relations.some((relation) => relation.name === name),
+                ),
               }
             : tab,
         ),
@@ -1188,6 +1226,11 @@ export const useTabStore = create<TabState>((set, get) => ({
       isPinned: false,
       schemaDiagramSnapshot: snapshot,
       selectedDiagramRelationName: snapshot.relations[0]?.name || null,
+      schemaDiagramAreaHistory: { past: [], present: [], future: [] },
+      selectedDiagramAreaId: null,
+      selectedDiagramRelationNames: snapshot.relations[0]?.name
+        ? [snapshot.relations[0].name]
+        : [],
     };
     set((state) => ({
       tabs: [...state.tabs, tab],
@@ -1201,6 +1244,32 @@ export const useTabStore = create<TabState>((set, get) => ({
       tabs: state.tabs.map((tab) =>
         tab.id === tabId
           ? { ...tab, selectedDiagramRelationName: relationName }
+          : tab,
+      ),
+    }));
+  },
+
+  setSchemaDiagramAreaHistory: (tabId, history) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId ? { ...tab, schemaDiagramAreaHistory: history } : tab,
+      ),
+    }));
+  },
+
+  selectSchemaDiagramArea: (tabId, areaId) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId ? { ...tab, selectedDiagramAreaId: areaId } : tab,
+      ),
+    }));
+  },
+
+  selectSchemaDiagramRelations: (tabId, relationNames) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId
+          ? { ...tab, selectedDiagramRelationNames: [...new Set(relationNames)] }
           : tab,
       ),
     }));

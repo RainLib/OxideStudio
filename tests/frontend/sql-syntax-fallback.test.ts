@@ -71,12 +71,12 @@ SELECT`;
     })[0];
 
     expect(snippet).toMatchObject({
-      label: "sel · select rows",
+      label: "select rows",
       insertTextFormat: 2,
       filterText: expect.stringContaining("sel"),
     });
     expect(snippet?.insertText).toContain("LIMIT ${3:100}");
-    expect(labels("sel")).toContain("sel · select rows");
+    expect(labels("sel")).toContain("select rows");
   });
 
   it("adapts bounded SELECT and ALTER templates to the product dialect", () => {

@@ -12,11 +12,20 @@ export type CachedSqlRelationReference = {
   alias?: string;
   /** A common table expression shadows a physical relation of the same name. */
   isCte?: boolean;
+  /** A closed FROM/JOIN subquery with a visible alias and derived columns. */
+  isDerived?: boolean;
   /** Only explicit CTE column lists are trusted by this lightweight fallback. */
   cteColumns?: string[];
 };
 
-const RELATION_KEYWORDS = new Set(["from", "join", "update", "into"]);
+export type CachedSqlJoinTargetContext = {
+  /** Relations that are already complete before the JOIN target being typed. */
+  sourceRelations: CachedSqlRelationReference[];
+  /** The possibly-qualified target fragment after the active JOIN keyword. */
+  targetFragment: string;
+};
+
+const RELATION_KEYWORDS = new Set(["from", "join", "update", "into", "apply"]);
 const SOFT_STATEMENT_KEYWORDS = new Set([
   "select",
   "with",
@@ -52,6 +61,8 @@ const NON_ALIAS_KEYWORDS = new Set([
   "right",
   "inner",
   "outer",
+  "lateral",
+  "apply",
   "full",
   "cross",
   "on",
@@ -354,7 +365,7 @@ const SQL_IDENTIFIER =
 const TRAILING_IDENTIFIER_FRAGMENT =
   '(?:"[^"]*|`[^`]*|\\[[^\\]]*|[A-Za-z_][\\w$]*)';
 const RELATION_MATCHER = new RegExp(
-  `\\b(from|join|update|into)\\s+(${SQL_IDENTIFIER}(?:\\.${SQL_IDENTIFIER})*)\\s*(?:as\\s+)?(${SQL_IDENTIFIER})?`,
+  `\\b(from|join|update|into|apply)\\s+(?:lateral\\s+)?(${SQL_IDENTIFIER}(?:\\.${SQL_IDENTIFIER})*)\\s*(?:as\\s+)?(${SQL_IDENTIFIER})?`,
   "gi",
 );
 const TRAILING_QUALIFIER = new RegExp(
@@ -364,6 +375,27 @@ const TRAILING_QUALIFIER = new RegExp(
 const CTE_DECLARATION_MATCHER = new RegExp(
   `(?:\\bwith\\b|,)\\s*(?:recursive\\s+)?(${SQL_IDENTIFIER})(?:\\s*\\(([^)]*)\\))?\\s+as\\s*\\(`,
   "gi",
+);
+const JOIN_TARGET_CONTEXT_MATCHER = new RegExp(
+  `\\b(?:(?:left|right|full|inner|outer|cross|natural)\\s+)*(?:join)\\s+((?:${SQL_IDENTIFIER}\\s*\\.\\s*)*(?:${TRAILING_IDENTIFIER_FRAGMENT})?)$`,
+  "i",
+);
+const SUBQUERY_RELATION_MATCHER = /\b(?:from|join|apply)\s+(?:lateral\s+)?\(/giu;
+const TABLE_FUNCTION_RELATION_MATCHER = new RegExp(
+  `\\b(?:from|join|apply)\\s+(?:lateral\\s+)?${SQL_IDENTIFIER}(?:\\.${SQL_IDENTIFIER})*\\s*\\(`,
+  "giu",
+);
+const COMPLETE_QUALIFIED_IDENTIFIER_MATCHER = new RegExp(
+  `^${SQL_IDENTIFIER}(?:\\s*\\.\\s*${SQL_IDENTIFIER})*$`,
+  "iu",
+);
+const TRAILING_AS_ALIAS_MATCHER = new RegExp(
+  `\\bas\\s+(${SQL_IDENTIFIER})\\s*$`,
+  "iu",
+);
+const TRAILING_IMPLICIT_ALIAS_MATCHER = new RegExp(
+  `\\s+(${SQL_IDENTIFIER})\\s*$`,
+  "iu",
 );
 
 function splitDelimitedIdentifiers(value: string) {
@@ -428,6 +460,144 @@ function cteDeclarations(source: string) {
   return declarations;
 }
 
+function matchingParenthesis(source: string, openOffset: number) {
+  let depth = 0;
+  for (let index = openOffset; index < source.length; index += 1) {
+    if (source[index] === "(") depth += 1;
+    else if (source[index] === ")") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+function topLevelSelectList(source: string, masked: string) {
+  const select = masked.match(/^\s*select\b/iu);
+  if (!select) return null;
+  const start = select[0].length;
+  let depth = 0;
+  for (let index = start; index < masked.length; index += 1) {
+    const character = masked[index];
+    if (character === "(") depth += 1;
+    else if (character === ")") depth = Math.max(0, depth - 1);
+    else if (
+      depth === 0 &&
+      /^from\b/iu.test(masked.slice(index)) &&
+      (index === 0 || /\s/u.test(masked[index - 1]!))
+    ) {
+      return source.slice(start, index).replace(/^\s*distinct\b/iu, "");
+    }
+  }
+  return source.slice(start).replace(/^\s*distinct\b/iu, "");
+}
+
+function splitTopLevelExpressions(source: string) {
+  const expressions: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: '"' | "`" | "[" | "'" | null = null;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!;
+    const next = source[index + 1];
+    if (quote === "[") {
+      if (character === "]") {
+        if (next === "]") index += 1;
+        else quote = null;
+      }
+      continue;
+    }
+    if (quote) {
+      if (character === quote) {
+        if (next === quote) index += 1;
+        else quote = null;
+      }
+      continue;
+    }
+    if (["\"", "`", "[", "'"].includes(character)) {
+      quote = character as '"' | "`" | "[" | "'";
+    } else if (character === "(") depth += 1;
+    else if (character === ")") depth = Math.max(0, depth - 1);
+    else if (character === "," && depth === 0) {
+      expressions.push(source.slice(start, index));
+      start = index + 1;
+    }
+  }
+  expressions.push(source.slice(start));
+  return expressions;
+}
+
+function derivedColumnName(expression: string) {
+  const trimmed = expression.trim();
+  if (!trimmed || trimmed === "*" || trimmed.endsWith(".*")) return null;
+  const explicitAlias = trimmed.match(TRAILING_AS_ALIAS_MATCHER)?.[1];
+  if (explicitAlias) return unquoteIdentifier(explicitAlias);
+  const implicitAlias = trimmed.match(TRAILING_IMPLICIT_ALIAS_MATCHER)?.[1];
+  if (implicitAlias) return unquoteIdentifier(implicitAlias);
+  const identifier = splitQualifiedIdentifier(trimmed);
+  return identifier && COMPLETE_QUALIFIED_IDENTIFIER_MATCHER.test(trimmed)
+    ? identifier.table
+    : null;
+}
+
+function derivedSubqueryRelations(source: string, masked: string) {
+  const relations: CachedSqlRelationReference[] = [];
+  for (const match of masked.matchAll(SUBQUERY_RELATION_MATCHER)) {
+    const openOffset = (match.index || 0) + match[0].lastIndexOf("(");
+    const closeOffset = matchingParenthesis(masked, openOffset);
+    if (closeOffset < 0) continue;
+    const aliasMatch = source
+      .slice(closeOffset + 1)
+      .match(new RegExp(`^\\s*(?:as\\s+)?(${SQL_IDENTIFIER})`, "iu"));
+    const alias = aliasMatch?.[1] ? unquoteIdentifier(aliasMatch[1]) : "";
+    if (!alias || NON_ALIAS_KEYWORDS.has(alias.toLocaleLowerCase())) continue;
+    const selectList = topLevelSelectList(
+      source.slice(openOffset + 1, closeOffset),
+      masked.slice(openOffset + 1, closeOffset),
+    );
+    const columns = selectList
+      ? splitTopLevelExpressions(selectList)
+          .map(derivedColumnName)
+          .filter((column): column is string => Boolean(column))
+      : [];
+    relations.push({
+      table: alias,
+      alias,
+      isDerived: true,
+      cteColumns: [...new Set(columns)],
+    });
+  }
+  return relations;
+}
+
+function tableFunctionRelations(source: string, masked: string) {
+  const relations: CachedSqlRelationReference[] = [];
+  for (const match of masked.matchAll(TABLE_FUNCTION_RELATION_MATCHER)) {
+    const openOffset = (match.index || 0) + match[0].lastIndexOf("(");
+    const closeOffset = matchingParenthesis(masked, openOffset);
+    if (closeOffset < 0) continue;
+    const aliasMatch = source
+      .slice(closeOffset + 1)
+      .match(
+        new RegExp(
+          `^\\s*(?:as\\s+)?(${SQL_IDENTIFIER})(?:\\s*\\(([^)]*)\\))?`,
+          "iu",
+        ),
+      );
+    const alias = aliasMatch?.[1] ? unquoteIdentifier(aliasMatch[1]) : "";
+    if (!alias || NON_ALIAS_KEYWORDS.has(alias.toLocaleLowerCase())) continue;
+    relations.push({
+      table: alias,
+      alias,
+      isDerived: true,
+      cteColumns: aliasMatch?.[2]
+        ? splitDelimitedIdentifiers(aliasMatch[2])
+        : [],
+    });
+  }
+  return relations;
+}
+
 export function cachedSqlRelationsBeforeCursor(
   textBeforeCursor: string,
 ): CachedSqlRelationReference[] {
@@ -452,7 +622,34 @@ export function cachedSqlRelationsBeforeCursor(
           : undefined,
     });
   }
+  relations.push(
+    ...derivedSubqueryRelations(statement.source, statement.masked),
+    ...tableFunctionRelations(statement.source, statement.masked),
+  );
   return relations;
+}
+
+/**
+ * Returns the active JOIN target and only the relations that precede it.
+ * Keeping the target fragment out of the relation list matters while users
+ * type `JOIN cust`: the incomplete `cust` token must never be mistaken for a
+ * metadata source and trigger a speculative database lookup.
+ */
+export function cachedSqlJoinTargetContext(
+  textBeforeCursor: string,
+): CachedSqlJoinTargetContext | null {
+  const statement = currentTopLevelStatementBeforeCursor(textBeforeCursor);
+  const match = statement.masked.match(JOIN_TARGET_CONTEXT_MATCHER);
+  if (!match) return null;
+
+  const maskedTarget = match[1] || "";
+  const targetStart = statement.masked.length - maskedTarget.length;
+  const sourceBeforeTarget = statement.source.slice(0, targetStart);
+  const targetFragment = statement.source.slice(targetStart).trim();
+  const sourceRelations = cachedSqlRelationsBeforeCursor(sourceBeforeTarget);
+  if (sourceRelations.length === 0) return null;
+
+  return { sourceRelations, targetFragment };
 }
 
 /**

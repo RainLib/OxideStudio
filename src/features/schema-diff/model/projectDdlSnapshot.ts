@@ -283,7 +283,7 @@ function parseConstraint(entry: string, table: string, warnings: Set<string>): C
   if (unique) return { name, constraint_type: "UNIQUE", columns: columnList(unique[1] || ""), referenced_columns: [] };
   const foreign = value.match(/^FOREIGN\s+KEY\s*\(([^)]*)\)\s+REFERENCES\s+([^\s(]+)\s*\(([^)]*)\)/i);
   if (foreign) {
-    const reference = normalizeRelationName(foreign[2] || "", "");
+    const reference = normalizeReferencedRelation(foreign[2] || "");
     const [referencedSchema, referencedTable] = reference?.includes(".")
       ? reference.split(/\.(?=[^.]+$)/)
       : [undefined, reference];
@@ -321,8 +321,19 @@ function parseColumn(entry: string, warnings: Set<string>): ColumnInfo | null {
 
 function normalizeRelationName(value: string, fallbackSchema: string) {
   const segments = value.trim().split(".").map(normalizeIdentifier).filter(Boolean);
-  if (segments.length === 1) return fallbackSchema ? `${normalizeIdentifier(fallbackSchema)}.${segments[0]}` : segments[0];
-  if (segments.length === 2) return segments.join(".");
+  if (segments.length === 1) return segments[0];
+  if (
+    segments.length === 2 &&
+    (!fallbackSchema || segments[0] === normalizeIdentifier(fallbackSchema))
+  ) {
+    return segments[1];
+  }
+  return null;
+}
+
+function normalizeReferencedRelation(value: string) {
+  const segments = value.trim().split(".").map(normalizeIdentifier).filter(Boolean);
+  if (segments.length === 1 || segments.length === 2) return segments.join(".");
   return null;
 }
 

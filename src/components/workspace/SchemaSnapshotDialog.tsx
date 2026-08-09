@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   Camera,
@@ -8,6 +8,7 @@ import {
   Loader2,
   Network,
   Trash2,
+  Upload,
 } from "lucide-react";
 import {
   Dialog,
@@ -36,6 +37,14 @@ import {
   isProjectDdlSnapshot,
   projectDdlSnapshotSources,
 } from "@/features/schema-diff/model/projectDdlSnapshot";
+import {
+  createSchemaDbmlSnapshot,
+  isSchemaDbmlSnapshot,
+} from "@/features/schema-diff/model/schemaDbmlImport";
+import {
+  createChartDbMetadataSnapshot,
+  isChartDbMetadataSnapshot,
+} from "@/features/schema-diff/model/chartDbMetadataImport";
 
 interface SchemaSnapshotDialogProps {
   open: boolean;
@@ -63,6 +72,8 @@ export function SchemaSnapshotDialog({
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const dbmlInputRef = useRef<HTMLInputElement>(null);
+  const metadataInputRef = useRef<HTMLInputElement>(null);
   const openSchemaDiffTab = useTabStore((state) => state.openSchemaDiffTab);
   const openSchemaDiagramTab = useTabStore(
     (state) => state.openSchemaDiagramTab,
@@ -82,13 +93,19 @@ export function SchemaSnapshotDialog({
     [selectedId, snapshots],
   );
   const selectedIsProjectDdl = Boolean(selected && isProjectDdlSnapshot(selected));
+  const selectedIsDbml = Boolean(selected && isSchemaDbmlSnapshot(selected));
+  const selectedIsMetadata = Boolean(
+    selected && isChartDbMetadataSnapshot(selected),
+  );
+  const selectedIsOffline =
+    selectedIsProjectDdl || selectedIsDbml || selectedIsMetadata;
   const selectedProjectDdlSources = useMemo(
     () => (selected && isProjectDdlSnapshot(selected)
       ? projectDdlSnapshotSources(selected)
       : []),
     [selected],
   );
-  const selectedSupportsRestorePlan = supportsSchemaReviewPlan && !selectedIsProjectDdl;
+  const selectedSupportsRestorePlan = supportsSchemaReviewPlan && !selectedIsOffline;
 
   useEffect(() => {
     if (!open || !identity) return;
@@ -225,6 +242,88 @@ export function SchemaSnapshotDialog({
       failTask(taskId, message);
     } finally {
       setOperation(null);
+    }
+  };
+
+  const importDbml = async (file: File | undefined) => {
+    if (!file || operation) return;
+    if (file.size > 8 * 1024 * 1024) {
+      setError("DBML review import is limited to 8 MiB per file.");
+      if (dbmlInputRef.current) dbmlInputRef.current.value = "";
+      return;
+    }
+    const taskId = startTask({
+      kind: "introspection",
+      title: "Parse DBML baseline",
+      detail: file.name,
+    });
+    setOperation("import");
+    setError(null);
+    try {
+      const snapshot = createSchemaDbmlSnapshot(identity, file.name, await file.text());
+      if (snapshot.relations.length === 0) {
+        throw new Error("No supported DBML Table block was found.");
+      }
+      await saveSchemaSnapshot(snapshot);
+      setSnapshots((current) => [
+        snapshot,
+        ...current.filter((candidate) => candidate.id !== snapshot.id),
+      ]);
+      setSelectedId(snapshot.id);
+      finishTask(
+        taskId,
+        `${snapshot.relations.length.toLocaleString()} DBML relations parsed for review`,
+      );
+    } catch (nextError) {
+      const message = nextError instanceof Error ? nextError.message : String(nextError);
+      setError(message);
+      failTask(taskId, message);
+    } finally {
+      setOperation(null);
+      if (dbmlInputRef.current) dbmlInputRef.current.value = "";
+    }
+  };
+
+  const importMetadataJson = async (file: File | undefined) => {
+    if (!file || operation) return;
+    if (file.size > 16 * 1024 * 1024) {
+      setError("Metadata JSON review import is limited to 16 MiB per file.");
+      if (metadataInputRef.current) metadataInputRef.current.value = "";
+      return;
+    }
+    const taskId = startTask({
+      kind: "introspection",
+      title: "Parse metadata JSON baseline",
+      detail: file.name,
+    });
+    setOperation("import");
+    setError(null);
+    try {
+      const snapshot = createChartDbMetadataSnapshot(
+        identity,
+        file.name,
+        await file.text(),
+      );
+      if (snapshot.relations.length === 0) {
+        throw new Error("No target-schema relation metadata was found.");
+      }
+      await saveSchemaSnapshot(snapshot);
+      setSnapshots((current) => [
+        snapshot,
+        ...current.filter((candidate) => candidate.id !== snapshot.id),
+      ]);
+      setSelectedId(snapshot.id);
+      finishTask(
+        taskId,
+        `${snapshot.relations.length.toLocaleString()} metadata relations parsed for review`,
+      );
+    } catch (nextError) {
+      const message = nextError instanceof Error ? nextError.message : String(nextError);
+      setError(message);
+      failTask(taskId, message);
+    } finally {
+      setOperation(null);
+      if (metadataInputRef.current) metadataInputRef.current.value = "";
     }
   };
 
@@ -408,8 +507,8 @@ export function SchemaSnapshotDialog({
             </div>
 
             <div className="mt-4 rounded-[5px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised)/0.4)] p-3 text-[9px] leading-4 wb-muted">
-              {selectedIsProjectDdl
-                ? "This baseline is inferred from bounded project SQL. It can reveal drift and generate a review diff, but cannot be applied automatically."
+              {selectedIsOffline
+                ? `This baseline is inferred from bounded ${selectedIsDbml ? "DBML" : selectedIsMetadata ? "metadata JSON" : "project SQL"}. It can reveal drift and generate a review diff, but cannot be applied automatically.`
                 : supportsRestorePlan
                 ? "The generated plan describes how to make the live target match the selected snapshot. It opens as a read-only artifact first. OxideStudio does not execute migration SQL from this dialog."
                 : identity?.driver === "sqlite"
@@ -458,22 +557,64 @@ export function SchemaSnapshotDialog({
                   Create baseline
                 </button>
               </div>
+              <div className="mt-2 flex items-center gap-2 border-t border-[hsl(var(--wb-border-subtle))] pt-2">
+                <input
+                  ref={dbmlInputRef}
+                  type="file"
+                  accept=".dbml,text/plain"
+                  className="hidden"
+                  onChange={(event) => void importDbml(event.currentTarget.files?.[0])}
+                />
+                <input
+                  ref={metadataInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  className="hidden"
+                  onChange={(event) =>
+                    void importMetadataJson(event.currentTarget.files?.[0])
+                  }
+                />
+                <p className="min-w-0 flex-1 text-[9px] leading-4 wb-muted">
+                  Import bounded DBML as a review-only baseline; unsupported semantics remain warnings.
+                </p>
+                <button
+                  type="button"
+                  className="wb-text-button h-7 shrink-0 gap-1.5 px-2.5 text-[10px]"
+                  disabled={busy}
+                  onClick={() => dbmlInputRef.current?.click()}
+                >
+                  {operation === "import" ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />}
+                  Import DBML
+                </button>
+                <button
+                  type="button"
+                  className="wb-text-button h-7 shrink-0 gap-1.5 px-2.5 text-[10px]"
+                  disabled={busy}
+                  onClick={() => metadataInputRef.current?.click()}
+                  title="Import ChartDB metadata-query JSON as a review-only baseline"
+                >
+                  {operation === "import" ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />}
+                  Metadata JSON
+                </button>
+              </div>
             </div>
 
             {selected && (
               <div className="mt-4 grid grid-cols-[120px_minmax(0,1fr)] gap-y-2 text-[10px]">
                 <span className="wb-muted">Captured</span>
                 <span>{formatTimestamp(selected.capturedAt)}</span>
-                {selectedIsProjectDdl && (
+                {selectedIsOffline && (
                   <>
                     <span className="wb-muted">Source mode</span>
-                    <span>Project DDL · review-only</span>
+                    <span>{selectedIsDbml ? "DBML" : selectedIsMetadata ? "Metadata JSON" : "Project DDL"} · review-only</span>
                     <span className="wb-muted">Source files</span>
                     <span
                       className="truncate font-mono text-[9px]"
-                      title={selectedProjectDdlSources.join("\n")}
+                      title={selectedIsDbml || selectedIsMetadata ? selected.warnings.find((warning) => warning.startsWith("Source: "))?.slice(8) : selectedProjectDdlSources.join("\n")}
                     >
-                      {selectedProjectDdlSources.length === 1
+                      {selectedIsDbml || selectedIsMetadata
+                        ? selected.warnings.find((warning) => warning.startsWith("Source: "))?.slice(8) || (selectedIsDbml ? "Imported DBML" : "Imported metadata JSON")
+                        : selectedProjectDdlSources.length === 1
                         ? selectedProjectDdlSources[0] || "Project SQL"
                         : `${selectedProjectDdlSources.length} bounded project SQL files`}
                     </span>

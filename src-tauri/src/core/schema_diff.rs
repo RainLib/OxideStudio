@@ -198,6 +198,29 @@ pub struct SchemaDiffSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub enum SchemaConversionCompatibility {
+    Safe,
+    Review,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaConversionIssue {
+    pub relation_name: String,
+    pub column_name: String,
+    pub source_data_type: String,
+    pub target_data_type: Option<String>,
+    pub compatibility: SchemaConversionCompatibility,
+    pub reason: String,
+    #[serde(default)]
+    pub remediation: String,
+    #[serde(default)]
+    pub blocks_automatic_conversion: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct SchemaDiffPlan {
     pub id: String,
     pub source_snapshot_id: String,
@@ -213,6 +236,8 @@ pub struct SchemaDiffPlan {
     pub migration_sql: String,
     pub preflight_checks: Vec<SchemaPreflightCheck>,
     pub preflight_sql: String,
+    #[serde(default)]
+    pub conversion_issues: Vec<SchemaConversionIssue>,
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -274,14 +299,7 @@ pub fn compare_schema_snapshots(
         if source.driver != target.driver {
             let mut plan =
                 compare_metadata_snapshots(source, target, generated_at, &target.driver)?;
-            plan.warnings.push(format!(
-                "Cross-driver comparison {} -> {} is review-only. Type mapping, DDL generation, and automatic apply are disabled.",
-                source.driver, target.driver
-            ));
-            plan.migration_sql = format!(
-                "-- Cross-driver metadata comparison: {} -> {}.\n-- No migration commands were generated.\n",
-                source.driver, target.driver
-            );
+            annotate_cross_driver_review(&mut plan, source, target);
             return Ok(plan);
         }
         return compare_metadata_snapshots(source, target, generated_at, &target.driver);
@@ -289,14 +307,7 @@ pub fn compare_schema_snapshots(
     if source_spec.driver != target_spec.driver {
         let mut plan =
             compare_metadata_snapshots(source, target, generated_at, target_spec.driver)?;
-        plan.warnings.push(format!(
-            "Cross-driver comparison {} -> {} is review-only. Type mapping, DDL generation, and automatic apply are disabled.",
-            source.driver, target.driver
-        ));
-        plan.migration_sql = format!(
-            "-- Cross-driver metadata comparison: {} -> {}.\n-- No migration commands were generated.\n",
-            source.driver, target.driver
-        );
+        annotate_cross_driver_review(&mut plan, source, target);
         return Ok(plan);
     }
     if !target_spec.supports_table_browsing {
@@ -488,8 +499,339 @@ pub fn compare_schema_snapshots(
         migration_sql,
         preflight_checks,
         preflight_sql,
+        conversion_issues: Vec::new(),
         warnings,
     })
+}
+
+fn normalized_driver_family(driver: &str) -> String {
+    let normalized = driver.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "postgresql" | "pgsql" => "postgres".to_string(),
+        "mariadb" => "mysql".to_string(),
+        "mssql" | "sql_server" => "sqlserver".to_string(),
+        _ => normalized,
+    }
+}
+
+fn normalized_type_base(data_type: &str) -> String {
+    data_type
+        .trim()
+        .trim_end_matches("[]")
+        .split('(')
+        .next()
+        .unwrap_or(data_type)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn postgres_conversion_note(data_type: &str, target_driver: &str) -> Option<(String, bool)> {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    let is_array = normalized.ends_with("[]") || normalized.starts_with("array<");
+    let base = normalized_type_base(&normalized);
+    if is_array {
+        let target_type = if target_driver == "mysql" {
+            "JSON"
+        } else {
+            "NVARCHAR(MAX) JSON"
+        };
+        return Some((
+            format!(
+                "{data_type} -> {target_type}; array operators and indexes require manual redesign"
+            ),
+            true,
+        ));
+    }
+    let mapping = match target_driver {
+        "mysql" => match base.as_str() {
+            "uuid" => ("CHAR(36); validate UUID format and indexes", false),
+            "jsonb" => ("JSON; GIN/operator semantics are not preserved", true),
+            "bytea" => ("LONGBLOB", false),
+            "boolean" | "bool" => ("BOOLEAN/TINYINT(1)", false),
+            "timestamp with time zone" | "timestamptz" => (
+                "DATETIME(6); normalize timezone values before transfer",
+                true,
+            ),
+            "inet" | "cidr" | "macaddr" | "macaddr8" => (
+                "VARCHAR; network validation/operators are not preserved",
+                true,
+            ),
+            "interval" => ("VARCHAR; interval arithmetic is not preserved", true),
+            "serial" => ("INTEGER AUTO_INCREMENT; review sequence ownership", true),
+            "bigserial" => ("BIGINT AUTO_INCREMENT; review sequence ownership", true),
+            _ => return None,
+        },
+        "sqlserver" => match base.as_str() {
+            "uuid" => ("UNIQUEIDENTIFIER", false),
+            "json" | "jsonb" => (
+                "NVARCHAR(MAX); add ISJSON validation and redesign JSON indexes",
+                true,
+            ),
+            "bytea" => ("VARBINARY(MAX)", false),
+            "boolean" | "bool" => ("BIT", false),
+            "timestamp with time zone" | "timestamptz" => ("DATETIMEOFFSET", false),
+            "timestamp without time zone" | "timestamp" => ("DATETIME2", false),
+            "inet" | "cidr" | "macaddr" | "macaddr8" => (
+                "NVARCHAR; network validation/operators are not preserved",
+                true,
+            ),
+            "interval" => ("NVARCHAR; interval arithmetic is not preserved", true),
+            "serial" => ("INT IDENTITY; review sequence ownership", true),
+            "bigserial" => ("BIGINT IDENTITY; review sequence ownership", true),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some((format!("{data_type} -> {}", mapping.0), mapping.1))
+}
+
+fn postgres_default_requires_cross_driver_review(default_value: &str) -> bool {
+    let normalized = default_value.trim().to_ascii_lowercase();
+    normalized.contains("::")
+        || normalized.contains("nextval(")
+        || normalized.contains("currval(")
+        || normalized.contains("setval(")
+        || normalized.contains("gen_random_uuid(")
+        || normalized.contains("uuid_generate_")
+        || normalized.contains("current_setting(")
+}
+
+fn postgres_index_requires_cross_driver_review(index: &IndexInfo) -> bool {
+    let index_type = index
+        .index_type
+        .as_deref()
+        .unwrap_or("btree")
+        .trim()
+        .to_ascii_lowercase();
+    let definition = index
+        .definition
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let special_method = !index_type.is_empty() && index_type != "btree";
+    let partial = definition.contains(" where ");
+    let expression = index.columns.iter().any(|column| {
+        column.contains('(')
+            || column.contains(')')
+            || column.contains("::")
+            || column.contains(' ')
+    });
+    special_method || partial || expression
+}
+
+fn postgres_type_looks_custom(data_type: &str) -> bool {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    normalized == "user-defined"
+        || normalized.starts_with("user-defined ")
+        || normalized.starts_with("enum ")
+        || normalized.starts_with("domain ")
+        || normalized.contains('"')
+        || normalized_type_base(&normalized).contains('.')
+}
+
+fn cross_driver_conversion_issues(
+    source: &SchemaSnapshot,
+    target: &SchemaSnapshot,
+) -> Vec<SchemaConversionIssue> {
+    let source_driver = normalized_driver_family(&source.driver);
+    let target_driver = normalized_driver_family(&target.driver);
+    if source_driver != "postgres" || !matches!(target_driver.as_str(), "mysql" | "sqlserver") {
+        return vec![SchemaConversionIssue {
+            relation_name: "*".to_string(),
+            column_name: "*".to_string(),
+            source_data_type: "*".to_string(),
+            target_data_type: None,
+            compatibility: SchemaConversionCompatibility::Unsupported,
+            reason: format!(
+                "No deterministic type-mapping profile is installed for {} -> {}; every column type requires manual review.",
+                source.driver, target.driver
+            ),
+            remediation: "Install a signed target-owned semantic migration profile or define and review every target type mapping.".to_string(),
+            blocks_automatic_conversion: true,
+        }];
+    }
+
+    let mut issues = Vec::new();
+    for relation in &source.relations {
+        for column in &relation.columns {
+            if let Some((mapping, lossy)) =
+                postgres_conversion_note(&column.data_type, &target_driver)
+            {
+                let mapped = mapping
+                    .strip_prefix(&format!("{} -> ", column.data_type))
+                    .unwrap_or(mapping.as_str());
+                let mut mapping_parts = mapped.splitn(2, ';');
+                let target_data_type = mapping_parts.next().unwrap_or(mapped).trim();
+                let mapping_reason = mapping_parts.next().map(str::trim).unwrap_or("");
+                let reason = match (mapping_reason.is_empty(), lossy) {
+                    (true, true) => "Target-side validation is required.".to_string(),
+                    (true, false) => "Deterministic target type mapping.".to_string(),
+                    (false, true) => {
+                        format!("{mapping_reason}; target-side validation is required")
+                    }
+                    (false, false) => mapping_reason.to_string(),
+                };
+                issues.push(SchemaConversionIssue {
+                    relation_name: relation.name.clone(),
+                    column_name: column.name.clone(),
+                    source_data_type: column.data_type.clone(),
+                    target_data_type: Some(target_data_type.to_string()),
+                    compatibility: if lossy {
+                        SchemaConversionCompatibility::Review
+                    } else {
+                        SchemaConversionCompatibility::Safe
+                    },
+                    reason,
+                    remediation: if lossy {
+                        format!(
+                            "Confirm the {} representation, value range, null/default behavior, and round-trip expectations.",
+                            target.driver
+                        )
+                    } else {
+                        format!(
+                            "Verify the deterministic mapping against the installed {} driver capability profile.",
+                            target.driver
+                        )
+                    },
+                    blocks_automatic_conversion: lossy,
+                });
+            } else if postgres_type_looks_custom(&column.data_type) {
+                issues.push(SchemaConversionIssue {
+                    relation_name: relation.name.clone(),
+                    column_name: column.name.clone(),
+                    source_data_type: column.data_type.clone(),
+                    target_data_type: None,
+                    compatibility: SchemaConversionCompatibility::Unsupported,
+                    reason: format!(
+                        "Custom PostgreSQL type requires an explicit {} type and value-conversion policy.",
+                        target.driver
+                    ),
+                    remediation: format!(
+                        "Define a target-owned {} type plus a deterministic value conversion before generating DDL.",
+                        target.driver
+                    ),
+                    blocks_automatic_conversion: true,
+                });
+            }
+            if let Some(default_value) = column.default_value.as_deref() {
+                if postgres_default_requires_cross_driver_review(default_value) {
+                    issues.push(SchemaConversionIssue {
+                        relation_name: relation.name.clone(),
+                        column_name: column.name.clone(),
+                        source_data_type: format!("DEFAULT {default_value}"),
+                        target_data_type: None,
+                        compatibility: SchemaConversionCompatibility::Review,
+                        reason: format!(
+                            "PostgreSQL default expression requires a target-owned {} rewrite.",
+                            target.driver
+                        ),
+                        remediation: format!(
+                            "Replace the default with a semantically equivalent {} expression and verify generated values.",
+                            target.driver
+                        ),
+                        blocks_automatic_conversion: true,
+                    });
+                }
+            }
+        }
+        for index in &relation.indexes {
+            if postgres_index_requires_cross_driver_review(index) {
+                let index_type = index.index_type.as_deref().unwrap_or("btree");
+                issues.push(SchemaConversionIssue {
+                    relation_name: relation.name.clone(),
+                    column_name: format!("index:{}", index.name),
+                    source_data_type: format!("{} INDEX", index_type.to_ascii_uppercase()),
+                    target_data_type: None,
+                    compatibility: SchemaConversionCompatibility::Review,
+                    reason: format!(
+                        "PostgreSQL partial, expression, or specialized index semantics require a target-owned {} design.",
+                        target.driver
+                    ),
+                    remediation: format!(
+                        "Choose an equivalent {} index strategy, or explicitly accept the indexing behavior loss.",
+                        target.driver
+                    ),
+                    blocks_automatic_conversion: true,
+                });
+            }
+        }
+    }
+    issues.sort_by(|left, right| {
+        (
+            &left.relation_name,
+            &left.column_name,
+            &left.source_data_type,
+        )
+            .cmp(&(
+                &right.relation_name,
+                &right.column_name,
+                &right.source_data_type,
+            ))
+    });
+    issues.dedup();
+    issues
+}
+
+fn cross_driver_conversion_note(issue: &SchemaConversionIssue) -> String {
+    if issue.relation_name == "*" && issue.column_name == "*" {
+        return issue.reason.clone();
+    }
+    format!(
+        "{}{}.{}: {} -> {}{}",
+        if issue.compatibility == SchemaConversionCompatibility::Review {
+            "LOSSY "
+        } else {
+            ""
+        },
+        issue.relation_name,
+        issue.column_name,
+        issue.source_data_type,
+        issue.target_data_type.as_deref().unwrap_or("unmapped"),
+        if issue.reason.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", issue.reason)
+        }
+    )
+}
+
+fn annotate_cross_driver_review(
+    plan: &mut SchemaDiffPlan,
+    source: &SchemaSnapshot,
+    target: &SchemaSnapshot,
+) {
+    let issues = cross_driver_conversion_issues(source, target);
+    let notes = issues
+        .iter()
+        .map(cross_driver_conversion_note)
+        .collect::<Vec<_>>();
+    plan.conversion_issues = issues;
+    plan.warnings.push(format!(
+        "Cross-driver comparison {} -> {} is review-only. Automatic DDL generation and apply are disabled.",
+        source.driver, target.driver
+    ));
+    plan.warnings.extend(notes.iter().cloned());
+    plan.warnings.sort();
+    plan.warnings.dedup();
+
+    let mut artifact = vec![
+        format!(
+            "-- Cross-driver metadata comparison: {} -> {}.",
+            source.driver, target.driver
+        ),
+        "-- No migration commands were generated or executed.".to_string(),
+        "-- Deterministic conversion review notes:".to_string(),
+    ];
+    if notes.is_empty() {
+        artifact.push("--   No special mappings detected in captured columns.".to_string());
+    } else {
+        artifact.extend(notes.iter().map(|note| format!("--   {note}")));
+    }
+    artifact.push("-- Build and revalidate a target-driver plan before any execution.".to_string());
+    artifact.push(String::new());
+    plan.migration_sql = artifact.join("\n");
 }
 
 fn compare_metadata_snapshots(
@@ -585,6 +927,7 @@ fn compare_metadata_snapshots(
             .to_string(),
         preflight_checks: Vec::new(),
         preflight_sql: String::new(),
+        conversion_issues: Vec::new(),
         warnings: {
             let mut warnings = vec![
                 "This driver requires review-specific schema handling; automatic restore is disabled."
@@ -772,6 +1115,7 @@ fn compare_sqlite_schema_snapshots(
         migration_sql: render_sqlite_rebuild_migration_sql(source, target, &changes, &warnings),
         preflight_checks: Vec::new(),
         preflight_sql: "-- SQLite rebuild preflight is intentionally manual until its backup and foreign-key checks have a verified runtime contract.\n".to_string(),
+        conversion_issues: Vec::new(),
         warnings,
         changes,
     })
@@ -3645,6 +3989,56 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("review-only")));
+    }
+
+    #[test]
+    fn postgres_cross_driver_review_lists_deterministic_lossy_mappings() {
+        let mut source = snapshot(
+            "desired",
+            vec![
+                column("id", "uuid", false),
+                column("tags", "text[]", true),
+                column("created_at", "timestamptz", false),
+                column("status", "\"public\".\"order_state\"", false),
+            ],
+        );
+        source.relations[0].columns[2].default_value =
+            Some("now()::timestamp with time zone".to_string());
+        source.relations[0].indexes.push(IndexInfo {
+            name: "users_tags_gin".to_string(),
+            columns: vec!["tags".to_string()],
+            is_unique: false,
+            is_primary: false,
+            index_type: Some("gin".to_string()),
+            definition: Some("CREATE INDEX users_tags_gin ON users USING gin (tags)".to_string()),
+        });
+        source = finalize_schema_snapshot(source).unwrap();
+        let mut target = snapshot("actual", vec![column("id", "char(36)", false)]);
+        target.driver = "mysql".to_string();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+
+        assert!(plan.migration_sql.contains("uuid -> CHAR(36)"));
+        assert!(plan.migration_sql.contains("LOSSY users.tags"));
+        assert!(plan.migration_sql.contains("DATETIME(6)"));
+        assert!(plan
+            .conversion_issues
+            .iter()
+            .any(|issue| issue.source_data_type.starts_with("DEFAULT ")));
+        assert!(plan
+            .conversion_issues
+            .iter()
+            .any(|issue| issue.column_name == "index:users_tags_gin"));
+        assert!(plan
+            .conversion_issues
+            .iter()
+            .any(|issue| issue.column_name == "status"
+                && issue.compatibility == SchemaConversionCompatibility::Unsupported));
+        assert!(plan.changes.iter().all(|change| change.sql.is_empty()));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("target-side validation is required")));
     }
 
     #[test]

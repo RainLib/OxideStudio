@@ -28,8 +28,8 @@ describe("project DDL schema snapshot", () => {
 
     expect(parsed.warnings).toEqual([]);
     expect(parsed.relations.map((relation) => relation.name)).toEqual([
-      "public.orders",
-      "public.users",
+      "orders",
+      "users",
     ]);
     const orders = parsed.relations[0]!;
     expect(orders.columns.find((column) => column.name === "id")?.is_primary_key).toBe(true);

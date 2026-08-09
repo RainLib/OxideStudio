@@ -285,6 +285,9 @@ export function TableDataView() {
   };
 
   useEffect(() => {
+    if (typeof tableService.listenTableExportProgress !== "function") {
+      return;
+    }
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void tableService
@@ -317,7 +320,8 @@ export function TableDataView() {
       !activeProjectId ||
       !tabConnectionId ||
       !activeTab?.schemaName ||
-      !activeTab.tableName
+      !activeTab.tableName ||
+      typeof tableService.listTableExportReports !== "function"
     ) {
       setRecentExportReport(null);
       return () => {
@@ -1600,7 +1604,9 @@ export function TableDataView() {
         onExportCsv={() => void handleExport("csv")}
         onExportCsvBom={() => void handleExport("csv", "utf8Bom")}
         onExportJson={() => void handleExport("json")}
+        onExportJsonl={() => void handleExport("jsonl")}
         onExportSql={() => void handleExport("sql")}
+        onExportTsv={() => void handleExport("tsv")}
         onCancelExport={() => void handleCancelExport()}
       />
 

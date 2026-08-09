@@ -52,6 +52,7 @@ export interface SchemaDiagramOptions {
   query?: string;
   keysOnly?: boolean;
   maxColumns?: number;
+  relationNames?: ReadonlySet<string>;
 }
 
 const NODE_WIDTH = 240;
@@ -185,7 +186,11 @@ export function buildSchemaDiagram(
   const maxColumns = Math.max(1, Math.min(50, options.maxColumns || 18));
   const allEdges = relationshipEdges(snapshot);
   const visibleRelations = snapshot.relations
-    .filter((relation) => matchesQuery(query, relation.name, relation.columns))
+    .filter(
+      (relation) =>
+        (!options.relationNames || options.relationNames.has(relation.name)) &&
+        matchesQuery(query, relation.name, relation.columns),
+    )
     .sort((left, right) => left.name.localeCompare(right.name));
   const visibleNames = new Set(visibleRelations.map((relation) => relation.name));
   const edges = allEdges.filter(
@@ -288,6 +293,18 @@ export function buildSchemaDiagram(
     totalRelationshipCount: allEdges.length,
     externalRelationshipCount,
   };
+}
+
+export function schemaDiagramRelatedRelationNames(
+  snapshot: SchemaSnapshot,
+  relationName: string,
+) {
+  const related = new Set([relationName]);
+  for (const edge of relationshipEdges(snapshot)) {
+    if (edge.sourceRelation === relationName) related.add(edge.targetRelation);
+    if (edge.targetRelation === relationName) related.add(edge.sourceRelation);
+  }
+  return related;
 }
 
 export function diagramColumnOffset(node: SchemaDiagramNode, columnName?: string) {

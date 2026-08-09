@@ -20,6 +20,8 @@ import { requestDatabaseObjectReveal } from "@/lib/databaseNavigation";
 import { normalizeDatabaseDriverName } from "@/lib/databaseDialect";
 import { cn } from "@/lib/utils";
 import { isProjectDdlSnapshot } from "@/features/schema-diff/model/projectDdlSnapshot";
+import { isSchemaDbmlSnapshot } from "@/features/schema-diff/model/schemaDbmlImport";
+import { isChartDbMetadataSnapshot } from "@/features/schema-diff/model/chartDbMetadataImport";
 import { schemaService } from "@/services/tauri/schema.service";
 import type {
   SchemaChange,
@@ -134,6 +136,7 @@ export function SchemaDiffView() {
   const destructiveChangeCount = plan.changes.filter(
     (change) => change.risk === "destructive" || !change.reversible,
   ).length;
+  const conversionIssues = plan.conversionIssues || [];
   // The backend resolves aliases (for example `mariadb`) through the dialect
   // registry before it executes a migration. Mirror that decision here so the
   // confirmation surface cannot hide a reviewed, executable family plan.
@@ -141,8 +144,17 @@ export function SchemaDiffView() {
   const isNonTransactionalPlan =
     normalizedPlanDriver === "mysql" && !plan.transactional;
   const isOfflineProjectDdlSource = isProjectDdlSnapshot(source);
+  const isOfflineDbmlSource = isSchemaDbmlSnapshot(source);
+  const isOfflineMetadataSource = isChartDbMetadataSnapshot(source);
+  const isOfflineSource =
+    isOfflineProjectDdlSource || isOfflineDbmlSource || isOfflineMetadataSource;
+  const offlineSourceLabel = isOfflineDbmlSource
+    ? "DBML"
+    : isOfflineMetadataSource
+      ? "Metadata JSON"
+      : "Project DDL";
   const supportsSafeApply =
-    !isOfflineProjectDdlSource &&
+    !isOfflineSource &&
     ((normalizedPlanDriver === "postgres" && plan.transactional) ||
       isNonTransactionalPlan);
   const currentJournal = execution || recentExecutions[0] || null;
@@ -165,7 +177,7 @@ export function SchemaDiffView() {
   };
 
   const openInConsole = () => {
-    if (!previewSql || previewSurface === "run") return;
+    if (!previewSql || previewSurface === "run" || isOfflineSource) return;
     const surfaceName = previewSurface === "migration"
       ? "migration"
       : previewSurface === "preflight"
@@ -277,16 +289,19 @@ export function SchemaDiffView() {
             className="wb-text-button h-7 gap-1.5 px-2.5 text-[10px]"
             onClick={openInConsole}
             title={
-              previewSurface === "migration" && plan.summary.blocked > 0
+              isOfflineSource
+                ? `${offlineSourceLabel} review artifacts cannot open a runnable console.`
+                : previewSurface === "migration" && plan.summary.blocked > 0
                 ? "Resolve blocked changes before opening a runnable migration console"
                 : undefined
             }
             disabled={
-              previewSurface === "run" || previewSurface === "rollback"
+              isOfflineSource ||
+              (previewSurface === "run" || previewSurface === "rollback"
                 ? !previewSql
                 : previewSurface === "migration"
                 ? plan.changes.length === 0 || plan.summary.blocked > 0
-                : plan.preflightChecks.length === 0
+                : plan.preflightChecks.length === 0)
             }
           >
             <TerminalSquare size={12} />
@@ -307,8 +322,8 @@ export function SchemaDiffView() {
             }
             title={
               !supportsSafeApply
-                ? isOfflineProjectDdlSource
-                  ? "Project DDL baselines are review-only. Capture a live snapshot before applying a migration."
+                ? isOfflineSource
+                  ? `${offlineSourceLabel} baselines are review-only. Capture a live snapshot before applying a migration.`
                   : "Automatic apply is available for PostgreSQL transactions and explicitly acknowledged MySQL DDL"
                 : plan.summary.blocked > 0
                   ? "Resolve blocked changes before applying"
@@ -323,10 +338,10 @@ export function SchemaDiffView() {
         </div>
       </header>
 
-      {isOfflineProjectDdlSource && (
+      {isOfflineSource && (
         <div className="flex shrink-0 items-center gap-2 border-b border-amber-400/20 bg-amber-400/[0.045] px-4 py-2 text-[9px] text-amber-100/90">
           <AlertTriangle size={12} className="shrink-0 text-amber-300" />
-          Project DDL baselines can be compared and reviewed, but cannot be applied. Capture a live baseline before creating an executable migration.
+          {offlineSourceLabel} baselines can be compared and reviewed, but cannot be applied. Capture a live baseline before creating an executable migration.
         </div>
       )}
 
@@ -547,6 +562,66 @@ export function SchemaDiffView() {
                     : "Metadata comparison · apply is unavailable"}
             </span>
           </div>
+
+          {conversionIssues.length > 0 && (
+            <details className="group shrink-0 border-b border-sky-400/20 bg-sky-400/5 text-[9px]">
+              <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-sky-200 marker:hidden">
+                <GitCompareArrows size={11} />
+                <span className="font-medium">
+                  {conversionIssues.length} structured type conversion review
+                  {conversionIssues.length === 1 ? "" : "s"}
+                </span>
+                <span className="ml-auto text-sky-200/65 group-open:hidden">
+                  Expand mappings
+                </span>
+                <span className="ml-auto hidden text-sky-200/65 group-open:inline">
+                  Collapse mappings
+                </span>
+              </summary>
+              <div className="max-h-40 overflow-auto border-t border-sky-400/15">
+                {conversionIssues.map((issue, index) => (
+                  <div
+                    key={`${issue.relationName}:${issue.columnName}:${index}`}
+                    className="grid grid-cols-[minmax(120px,0.65fr)_minmax(160px,0.8fr)_minmax(260px,1.5fr)] gap-3 border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2 last:border-b-0"
+                  >
+                    <span className="truncate font-mono text-sky-100">
+                      {issue.relationName === "*"
+                        ? "All captured columns"
+                        : `${issue.relationName}.${issue.columnName}`}
+                    </span>
+                    <span className="truncate font-mono text-sky-200/75">
+                      {issue.sourceDataType} → {issue.targetDataType || "unmapped"}
+                    </span>
+                    <span
+                      className={cn(
+                        "min-w-0",
+                        issue.compatibility === "unsupported"
+                          ? "text-red-300"
+                          : issue.compatibility === "review"
+                            ? "text-amber-300"
+                            : "text-emerald-300",
+                      )}
+                      title={[issue.reason, issue.remediation].filter(Boolean).join("\n")}
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <span className="truncate">{issue.reason}</span>
+                        {issue.blocksAutomaticConversion && (
+                          <span className="shrink-0 rounded-[3px] border border-red-400/25 px-1 py-0.5 text-[7px] uppercase tracking-wide text-red-300">
+                            blocks DDL
+                          </span>
+                        )}
+                      </span>
+                      {issue.remediation && (
+                        <span className="mt-0.5 block truncate text-[8px] text-[hsl(var(--wb-text-muted))]">
+                          Resolve: {issue.remediation}
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
 
           {plan.warnings.length > 0 && (
             <div className="shrink-0 border-b border-amber-400/20 bg-amber-400/5 px-3 py-2 text-[9px] text-amber-200">

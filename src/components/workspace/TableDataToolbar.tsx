@@ -60,7 +60,9 @@ interface TableDataToolbarProps {
   onExportCsv: () => void;
   onExportCsvBom: () => void;
   onExportJson: () => void;
+  onExportJsonl: () => void;
   onExportSql: () => void;
+  onExportTsv: () => void;
   onCancelExport?: () => void;
 }
 
@@ -95,7 +97,9 @@ export function TableDataToolbar({
   onExportCsv,
   onExportCsvBom,
   onExportJson,
+  onExportJsonl,
   onExportSql,
+  onExportTsv,
   onCancelExport,
 }: TableDataToolbarProps) {
   const mutationDisabled = isExecuting || readOnly || viewOnly || !editingEnabled;
@@ -250,34 +254,46 @@ export function TableDataToolbar({
             <Square size={12} fill="currentColor" />
           </ToolbarButton>
         )}
-        <ToolbarButton
-          title="Export CSV"
-          onClick={onExportCsv}
-          disabled={isExecuting || exportDisabled || isExporting}
-        >
-          <Download size={14} />
-        </ToolbarButton>
-        <ToolbarButton
-          title="Export CSV with UTF-8 BOM"
-          onClick={onExportCsvBom}
-          disabled={isExecuting || exportDisabled || isExporting}
-        >
-          <FileSpreadsheet size={14} />
-        </ToolbarButton>
-        <ToolbarButton
-          title="Export JSON"
-          onClick={onExportJson}
-          disabled={isExecuting || exportDisabled || isExporting}
-        >
-          <FileJson size={14} />
-        </ToolbarButton>
-        <ToolbarButton
-          title="Export SQL inserts"
-          onClick={onExportSql}
-          disabled={isExecuting || exportDisabled || isExporting}
-        >
-          <FileCode2 size={14} />
-        </ToolbarButton>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              className="inline-flex h-6 shrink-0 items-center gap-0.5 rounded-[3px] px-1.5 wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-focus))] disabled:pointer-events-none disabled:opacity-40"
+              title="Export table data"
+              aria-label="Export table data"
+              disabled={isExecuting || exportDisabled || isExporting}
+            >
+              <Download size={14} />
+              <ChevronDown size={10} />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="wb-menu-content min-w-52">
+            <DropdownMenuItem className="wb-menu-item" onSelect={onExportCsv}>
+              <FileSpreadsheet className="mr-2 h-3.5 w-3.5" />
+              Export CSV (UTF-8)
+            </DropdownMenuItem>
+            <DropdownMenuItem className="wb-menu-item" onSelect={onExportCsvBom}>
+              <FileSpreadsheet className="mr-2 h-3.5 w-3.5" />
+              Export CSV (UTF-8 BOM / Excel)
+            </DropdownMenuItem>
+            <DropdownMenuItem className="wb-menu-item" onSelect={onExportJson}>
+              <FileJson className="mr-2 h-3.5 w-3.5" />
+              Export JSON
+            </DropdownMenuItem>
+            <DropdownMenuItem className="wb-menu-item" onSelect={onExportJsonl}>
+              <FileJson className="mr-2 h-3.5 w-3.5" />
+              Export JSON Lines
+            </DropdownMenuItem>
+            <DropdownMenuItem className="wb-menu-item" onSelect={onExportTsv}>
+              <FileSpreadsheet className="mr-2 h-3.5 w-3.5" />
+              Export TSV
+            </DropdownMenuItem>
+            <DropdownMenuItem className="wb-menu-item" onSelect={onExportSql}>
+              <FileCode2 className="mr-2 h-3.5 w-3.5" />
+              Export SQL INSERT statements
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </div>
   );

@@ -126,8 +126,22 @@ pub struct CompletionItem {
     pub filter_text: Option<String>,
     #[serde(default, rename = "textEdit", skip_serializing_if = "Option::is_none")]
     pub text_edit: Option<TextEdit>,
+    #[serde(
+        default,
+        rename = "additionalTextEdits",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub additional_text_edits: Option<Vec<TextEdit>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preselect: Option<bool>,
+    #[serde(
+        default,
+        rename = "commitCharacters",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub commit_characters: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
 }
 
 fn lsp_documentation_to_string(value: &Value) -> Option<String> {
@@ -169,7 +183,10 @@ fn parse_range(value: &Value) -> Option<Range> {
 
 fn parse_text_edit(value: &Value) -> Option<TextEdit> {
     Some(TextEdit {
-        range: parse_range(value.get("range")?)?,
+        // LSP 3.16+ also permits InsertReplaceEdit. Monaco accepts a single
+        // replacement range, so prefer the replace range when the server
+        // supplies separate insert/replace boundaries.
+        range: parse_range(value.get("range").or_else(|| value.get("replace"))?)?,
         new_text: value.get("newText")?.as_str()?.to_string(),
     })
 }
@@ -202,7 +219,32 @@ fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
         text_edit: item.get("textEdit").and_then(parse_text_edit),
+        additional_text_edits: item.get("additionalTextEdits").and_then(|value| {
+            let edits = value
+                .as_array()?
+                .iter()
+                .filter_map(parse_text_edit)
+                .collect::<Vec<_>>();
+            Some(edits)
+        }),
         preselect: item.get("preselect").and_then(|v| v.as_bool()),
+        commit_characters: item.get("commitCharacters").and_then(|value| {
+            Some(
+                value
+                    .as_array()?
+                    .iter()
+                    .filter_map(|character| character.as_str().map(str::to_string))
+                    .collect(),
+            )
+        }),
+        deprecated: item
+            .get("deprecated")
+            .and_then(|value| value.as_bool())
+            .or_else(|| {
+                item.get("tags")
+                    .and_then(|value| value.as_array())
+                    .map(|tags| tags.iter().any(|tag| tag.as_u64() == Some(1)))
+            }),
     })
 }
 
@@ -752,12 +794,25 @@ mod tests {
             "sortText": "1:calculate_score",
             "filterText": "calculate_score",
             "textEdit": {
-                "range": {
+                "insert": {
+                    "start": { "line": 0, "character": 7 },
+                    "end": { "line": 0, "character": 16 }
+                },
+                "replace": {
                     "start": { "line": 0, "character": 7 },
                     "end": { "line": 0, "character": 16 }
                 },
                 "newText": "public.calculate_score()"
             },
+            "additionalTextEdits": [{
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": 0 }
+                },
+                "newText": "-- generated\n"
+            }],
+            "commitCharacters": ["(", "."],
+            "tags": [1],
             "preselect": true
         });
 
@@ -784,6 +839,27 @@ mod tests {
                 new_text: "public.calculate_score()".to_string(),
             })
         );
+        assert_eq!(
+            parsed.additional_text_edits,
+            Some(vec![TextEdit {
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0
+                    },
+                },
+                new_text: "-- generated\n".to_string(),
+            }])
+        );
+        assert_eq!(
+            parsed.commit_characters,
+            Some(vec!["(".to_string(), ".".to_string()])
+        );
+        assert_eq!(parsed.deprecated, Some(true));
         assert_eq!(parsed.preselect, Some(true));
     }
 

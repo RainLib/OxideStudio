@@ -121,15 +121,22 @@ export function PostgresRemoteDatabaseContents({
     }));
 
     try {
+      const schemaObjectRequest =
+        typeof schemaService.getDatabaseSchemaObjects === "function"
+          ? schemaService
+              .getDatabaseSchemaObjects(connectionId, database, schema)
+              .then((objects) => ({ objects, error: null }))
+              .catch(() => ({
+                objects: [] as SchemaObjectInfo[],
+                error: "Schema object metadata is unavailable for this server role",
+              }))
+          : Promise.resolve({
+              objects: [] as SchemaObjectInfo[],
+              error: "Schema object metadata is unavailable in this application build",
+            });
       const [tables, objectResult] = await Promise.all([
         schemaService.getDatabaseTables(connectionId, database, schema),
-        schemaService
-          .getDatabaseSchemaObjects(connectionId, database, schema)
-          .then((objects) => ({ objects, error: null }))
-          .catch(() => ({
-            objects: [] as SchemaObjectInfo[],
-            error: "Schema object metadata is unavailable for this server role",
-          })),
+        schemaObjectRequest,
       ]);
       if (
         !mountedRef.current ||

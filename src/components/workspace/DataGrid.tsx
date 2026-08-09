@@ -49,16 +49,25 @@ import {
   Sparkles,
   CircleSlash2,
   CircleAlert,
+  ChevronDown,
+  FileCode2,
+  FileSpreadsheet,
   SquarePen,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { ColumnFilter, FilterOperator } from "./GridFilterRow";
 import {
-  exportToCsv,
-  exportToJson,
+  exportQueryResult,
   serializeQueryResultSelectionToTsv,
+  type QueryResultExportFormat,
 } from "@/lib/exportUtils";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { dataGridMetrics } from "@/lib/dataGridView";
 import { DataGridBusyIndicator } from "./DataGridBusyIndicator";
 import {
@@ -138,7 +147,10 @@ function rangeIndexes(start: number, length: number) {
   return Array.from({ length }, (_, index) => start + index);
 }
 
-function exportFilename(title: string | undefined, extension: "csv" | "json") {
+function exportFilename(
+  title: string | undefined,
+  extension: "csv" | "json" | "jsonl" | "tsv" | "sql",
+) {
   const safeTitle = (title || "query-result")
     .trim()
     .toLowerCase()
@@ -1122,15 +1134,20 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       }
     }, [copyIncludeHeaders, result]);
 
-    const handleExportCsv = useCallback(() => {
-      if (!result) return;
-      exportToCsv(result, exportFilename(activeTab?.title, "csv"));
-    }, [activeTab?.title, result]);
-
-    const handleExportJson = useCallback(() => {
-      if (!result) return;
-      exportToJson(result, exportFilename(activeTab?.title, "json"));
-    }, [activeTab?.title, result]);
+    const handleExport = useCallback(
+      (
+        format: QueryResultExportFormat,
+        extension: "csv" | "json" | "jsonl" | "tsv" | "sql",
+      ) => {
+        if (!result) return;
+        exportQueryResult(
+          result,
+          format,
+          exportFilename(activeTab?.title, extension),
+        );
+      },
+      [activeTab?.title, result],
+    );
 
     // Copy selected cells to clipboard
     const onCopy = useCallback(
@@ -2201,28 +2218,65 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               <Copy size={14} className="mr-1.5" />
               Copy
             </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 px-2 text-xs"
-              disabled={result.rows.length === 0}
-              onClick={handleExportCsv}
-              title="Export result as CSV"
-            >
-              <Download size={14} className="mr-1.5" />
-              CSV
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 px-2 text-xs"
-              disabled={result.rows.length === 0}
-              onClick={handleExportJson}
-              title="Export result as JSON"
-            >
-              <FileJson size={14} className="mr-1.5" />
-              JSON
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  disabled={result.rows.length === 0}
+                  title="Export query result"
+                >
+                  <Download size={14} className="mr-1.5" />
+                  Export
+                  <ChevronDown size={11} className="ml-1" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="wb-menu-content min-w-52">
+                <DropdownMenuItem
+                  className="wb-menu-item"
+                  onSelect={() => handleExport("csv", "csv")}
+                >
+                  <FileSpreadsheet className="mr-2 h-3.5 w-3.5" />
+                  CSV (UTF-8)
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="wb-menu-item"
+                  onSelect={() => handleExport("csvBom", "csv")}
+                >
+                  <FileSpreadsheet className="mr-2 h-3.5 w-3.5" />
+                  CSV (UTF-8 BOM / Excel)
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="wb-menu-item"
+                  onSelect={() => handleExport("json", "json")}
+                >
+                  <FileJson className="mr-2 h-3.5 w-3.5" />
+                  JSON array
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="wb-menu-item"
+                  onSelect={() => handleExport("jsonl", "jsonl")}
+                >
+                  <FileJson className="mr-2 h-3.5 w-3.5" />
+                  JSON Lines (JSONL)
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="wb-menu-item"
+                  onSelect={() => handleExport("tsv", "tsv")}
+                >
+                  <FileSpreadsheet className="mr-2 h-3.5 w-3.5" />
+                  TSV (Excel)
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="wb-menu-item"
+                  onSelect={() => handleExport("sql", "sql")}
+                >
+                  <FileCode2 className="mr-2 h-3.5 w-3.5" />
+                  SQL INSERT template
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         )}
 

@@ -8,7 +8,10 @@ import type {
 
 /** Converts protocol values into Monaco's one-based presentation model. */
 export function lspDocumentationForMonaco(
-  documentation: string | { value?: string } | undefined,
+  documentation:
+    | string
+    | { kind?: string; value?: string }
+    | undefined,
 ) {
   if (!documentation) return undefined;
   return typeof documentation === "string"

@@ -12,8 +12,11 @@ export {
 } from "./model/completionFallback";
 export { sqlSyntaxFallbackCompletions } from "./model/sqlSyntaxFallback";
 export {
+  DEFAULT_SQL_COMMAND_SNIPPETS,
+  MANTICORE_SQL_COMMAND_SNIPPETS,
   sqlCommandSnippetCompletions,
   type SqlCommandSnippetOptions,
+  type SqlSnippetSetting,
 } from "./model/sqlCommandSnippets";
 export {
   editorDocumentIdentity,
@@ -35,9 +38,24 @@ export {
 } from "./model/lspCompletionPresentation";
 export {
   appendSqlCompletionSpace,
+  sqlFunctionCompletionInsertion,
   sqlCompletionItemType,
   type SqlCompletionItemType,
 } from "./model/sqlCompletionInsertion";
+export {
+  sqlForeignKeyJoinCompletions,
+  sqlJoinConstraintsFromRelationshipIndex,
+  type SqlForeignKeyJoinCompletion,
+  type SqlForeignKeyJoinCompletionOptions,
+} from "./model/sqlJoinCompletion";
+export {
+  recordSqlCompletionTelemetry,
+  resetSqlCompletionTelemetryForTests,
+  sqlCompletionTelemetrySnapshot,
+  type SqlCompletionOutcome,
+  type SqlCompletionTelemetryEvent,
+  type SqlCompletionTelemetrySnapshot,
+} from "./model/sqlCompletionTelemetry";
 export {
   queryTransactionExecutionId,
   selectedOrFullEditorText,

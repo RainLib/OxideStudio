@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import packageJson from "../../package.json";
 
 const mocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
@@ -87,7 +88,7 @@ describe("app update service", () => {
   it("uses the package version in a browser and rejects update checks", async () => {
     mocks.isTauri.mockReturnValue(false);
 
-    await expect(getCurrentAppVersion()).resolves.toBe("0.1.2");
+    await expect(getCurrentAppVersion()).resolves.toBe(packageJson.version);
     await expect(checkForAppUpdate()).rejects.toBeInstanceOf(
       AppUpdateUnsupportedError
     );

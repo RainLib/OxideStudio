@@ -4,27 +4,56 @@ import {
   useMemo,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
 import {
   Check,
   Columns3,
   Crosshair,
+  Download,
   ExternalLink,
+  FileCode2,
+  FolderInput,
+  FolderPlus,
+  GitCompareArrows,
   KeyRound,
+  LayoutGrid,
   Minus,
   Network,
+  PanelRightClose,
+  PanelRightOpen,
   Plus,
+  Redo2,
   Search,
   Table2,
+  Undo2,
   X,
 } from "lucide-react";
 import {
   buildSchemaDiagram,
   diagramColumnOffset,
+  schemaDiagramRelatedRelationNames,
   type SchemaDiagramEdge,
   type SchemaDiagramNode,
 } from "@/lib/schemaDiagram";
+import {
+  rasterizeSchemaDiagramSvg,
+  serializeSchemaDiagramToSvg,
+  type SchemaDiagramRasterFormat,
+} from "@/lib/schemaDiagramSvg";
+import {
+  applySchemaDiagramAreas,
+  autoArrangeSchemaDiagramArea,
+  commitSchemaDiagramAreas,
+  createSchemaDiagramAreaHistory,
+  moveSchemaDiagramRelationsToArea,
+  redoSchemaDiagramAreas,
+  undoSchemaDiagramAreas,
+} from "@/lib/schemaDiagramAreas";
+import { downloadBlob, downloadText } from "@/lib/exportUtils";
+import { serializeSchemaSnapshotToDbml } from "@/features/schema-diff/model/schemaDbml";
+import { SchemaDbmlDraftDialog } from "./SchemaDbmlDraftDialog";
 import { requestDatabaseObjectReveal } from "@/lib/databaseNavigation";
 import { cn } from "@/lib/utils";
 import { useConnectionStore } from "@/store/useConnectionStore";
@@ -34,9 +63,26 @@ import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
 
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 1.6;
+const VIEWPORT_OVERSCAN = 320;
+const VIEWPORT_BUCKET = 160;
+const EMPTY_AREA_HISTORY = createSchemaDiagramAreaHistory();
+
+type DiagramViewportWindow = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
 
 export function SchemaDiagramView() {
-  const { tabs, activeTabId, selectSchemaDiagramRelation } = useTabStore();
+  const {
+    tabs,
+    activeTabId,
+    selectSchemaDiagramRelation,
+    setSchemaDiagramAreaHistory,
+    selectSchemaDiagramArea,
+    selectSchemaDiagramRelations,
+  } = useTabStore();
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const setActiveConnection = useConnectionStore((state) => state.setActiveConnection);
   const setActiveToolWindow = useWorkbenchLayoutStore(
@@ -44,20 +90,247 @@ export function SchemaDiagramView() {
   );
   const [query, setQuery] = useState("");
   const [keysOnly, setKeysOnly] = useState(false);
+  const [relationScope, setRelationScope] = useState<"all" | "related" | "area">("all");
   const [zoom, setZoom] = useState(1);
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
+  const [exportScope, setExportScope] = useState<"filtered" | "full">("filtered");
+  const [exportBackground, setExportBackground] = useState<"dark" | "light" | "transparent">("dark");
+  const [isRasterizing, setIsRasterizing] = useState(false);
+  const [dbmlDraftOpen, setDbmlDraftOpen] = useState(false);
   const viewportRef = useRef<HTMLDivElement>(null);
+  const viewportFrameRef = useRef<number | null>(null);
+  const [viewportWindow, setViewportWindow] =
+    useState<DiagramViewportWindow | null>(null);
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
   const snapshot = activeTab?.schemaDiagramSnapshot;
-  const layout = useMemo(
+  const areaHistory = activeTab?.schemaDiagramAreaHistory || EMPTY_AREA_HISTORY;
+  const selectedAreaId = activeTab?.selectedDiagramAreaId || "";
+  const activeSelectedRelationName = activeTab?.selectedDiagramRelationName || null;
+  const selectedRelationNames = useMemo(
+    () =>
+      new Set(
+        activeTab?.selectedDiagramRelationNames?.length
+          ? activeTab.selectedDiagramRelationNames
+          : activeTab?.selectedDiagramRelationName
+            ? [activeTab.selectedDiagramRelationName]
+            : [],
+      ),
+    [
+      activeTab?.selectedDiagramRelationName,
+      activeTab?.selectedDiagramRelationNames,
+    ],
+  );
+  const scopedRelationNames = useMemo(() => {
+    if (!snapshot || relationScope === "all") return undefined;
+    if (relationScope === "related") {
+      return activeSelectedRelationName
+        ? schemaDiagramRelatedRelationNames(snapshot, activeSelectedRelationName)
+        : new Set<string>();
+    }
+    return new Set(
+      areaHistory.present.find((area) => area.id === selectedAreaId)
+        ?.relationNames || [],
+    );
+  }, [
+    activeSelectedRelationName,
+    areaHistory.present,
+    relationScope,
+    selectedAreaId,
+    snapshot,
+  ]);
+  const baseLayout = useMemo(
     () =>
       snapshot
-        ? buildSchemaDiagram(snapshot, { query, keysOnly, maxColumns: 18 })
+        ? buildSchemaDiagram(snapshot, {
+            query,
+            keysOnly,
+            maxColumns: 18,
+            relationNames: scopedRelationNames,
+          })
         : null,
-    [keysOnly, query, snapshot],
+    [keysOnly, query, scopedRelationNames, snapshot],
   );
-  const fullLayout = useMemo(
-    () => (snapshot ? buildSchemaDiagram(snapshot, { maxColumns: 50 }) : null),
+  const fullBaseLayout = useMemo(
+    // Keep coordinates identical to the visible unfiltered layout. A second
+    // 50-column layout made related-table focus scroll to the wrong location
+    // and inflated work for wide schemas.
+    () => (snapshot ? buildSchemaDiagram(snapshot, { maxColumns: 18 }) : null),
     [snapshot],
+  );
+  const areaLayout = useMemo(
+    () =>
+      baseLayout
+        ? applySchemaDiagramAreas(baseLayout, areaHistory.present)
+        : null,
+    [areaHistory.present, baseLayout],
+  );
+  const fullAreaLayout = useMemo(
+    () =>
+      fullBaseLayout
+        ? applySchemaDiagramAreas(fullBaseLayout, areaHistory.present)
+        : null,
+    [areaHistory.present, fullBaseLayout],
+  );
+  const layout = areaLayout?.layout || null;
+  const fullLayout = fullAreaLayout?.layout || null;
+  const areaBounds = areaLayout?.areaBounds || [];
+
+  useEffect(() => {
+    setRelationScope("all");
+  }, [snapshot?.id]);
+
+  const exportSvg = useCallback(() => {
+    const exportLayout = exportScope === "full" ? fullLayout : layout;
+    if (!snapshot || !exportLayout) return;
+    const basename =
+      `${snapshot.connectionName}-${snapshot.schemaName}-diagram`
+        .replace(/[^A-Za-z0-9._-]+/gu, "-")
+        .replace(/^-+|-+$/gu, "") || "schema-diagram";
+    downloadText(
+      serializeSchemaDiagramToSvg(exportLayout, {
+        title: `${snapshot.connectionName} / ${snapshot.schemaName}`,
+        background:
+          exportBackground === "dark"
+            ? "#11151c"
+            : exportBackground === "light"
+              ? "#ffffff"
+              : "transparent",
+      }),
+      `${basename}.svg`,
+      "image/svg+xml;charset=utf-8",
+    );
+  }, [exportBackground, exportScope, fullLayout, layout, snapshot]);
+
+  const exportRaster = useCallback(async (format: SchemaDiagramRasterFormat) => {
+    const exportLayout = exportScope === "full" ? fullLayout : layout;
+    if (!snapshot || !exportLayout || isRasterizing) return;
+    const basename =
+      `${snapshot.connectionName}-${snapshot.schemaName}-diagram`
+        .replace(/[^A-Za-z0-9._-]+/gu, "-")
+        .replace(/^-+|-+$/gu, "") || "schema-diagram";
+    const background = format === "jpeg" && exportBackground === "transparent"
+      ? "#ffffff"
+      : exportBackground === "dark"
+        ? "#11151c"
+        : exportBackground === "light"
+          ? "#ffffff"
+          : "transparent";
+    setIsRasterizing(true);
+    try {
+      const svg = serializeSchemaDiagramToSvg(exportLayout, {
+        title: `${snapshot.connectionName} / ${snapshot.schemaName}`,
+        background,
+      });
+      const blob = await rasterizeSchemaDiagramSvg(
+        svg,
+        exportLayout.width,
+        exportLayout.height,
+        format,
+      );
+      downloadBlob(blob, `${basename}.${format === "jpeg" ? "jpg" : "png"}`);
+    } finally {
+      setIsRasterizing(false);
+    }
+  }, [exportBackground, exportScope, fullLayout, isRasterizing, layout, snapshot]);
+
+  const exportDbml = useCallback(() => {
+    if (!snapshot) return;
+    const basename =
+      `${snapshot.connectionName}-${snapshot.schemaName}-schema`
+        .replace(/[^A-Za-z0-9._-]+/gu, "-")
+        .replace(/^-+|-+$/gu, "") || "schema";
+    const artifact = serializeSchemaSnapshotToDbml(snapshot);
+    downloadText(
+      artifact.content,
+      `${basename}.dbml`,
+      "text/plain;charset=utf-8",
+    );
+  }, [snapshot]);
+
+  const updateViewportWindow = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    // DOM test environments and an initially hidden tab report a zero-sized
+    // viewport. Treat that as "not measured" so culling cannot hide valid
+    // relations before the first real ResizeObserver measurement.
+    if (viewport.clientWidth <= 0 || viewport.clientHeight <= 0) {
+      setViewportWindow(null);
+      return;
+    }
+    const logicalX = viewport.scrollLeft / zoom;
+    const logicalY = viewport.scrollTop / zoom;
+    const next = {
+      x:
+        Math.floor(logicalX / VIEWPORT_BUCKET) * VIEWPORT_BUCKET -
+        VIEWPORT_OVERSCAN,
+      y:
+        Math.floor(logicalY / VIEWPORT_BUCKET) * VIEWPORT_BUCKET -
+        VIEWPORT_OVERSCAN,
+      width: viewport.clientWidth / zoom + VIEWPORT_OVERSCAN * 2,
+      height: viewport.clientHeight / zoom + VIEWPORT_OVERSCAN * 2,
+    };
+    setViewportWindow((current) =>
+      current &&
+      current.x === next.x &&
+      current.y === next.y &&
+      current.width === next.width &&
+      current.height === next.height
+        ? current
+        : next,
+    );
+  }, [zoom]);
+
+  const scheduleViewportWindowUpdate = useCallback(() => {
+    if (viewportFrameRef.current !== null) return;
+    viewportFrameRef.current = window.requestAnimationFrame(() => {
+      viewportFrameRef.current = null;
+      updateViewportWindow();
+    });
+  }, [updateViewportWindow]);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    scheduleViewportWindowUpdate();
+    const resizeObserver = new ResizeObserver(scheduleViewportWindowUpdate);
+    resizeObserver.observe(viewport);
+    return () => {
+      resizeObserver.disconnect();
+      if (viewportFrameRef.current !== null) {
+        window.cancelAnimationFrame(viewportFrameRef.current);
+        viewportFrameRef.current = null;
+      }
+    };
+  }, [layout, scheduleViewportWindowUpdate]);
+
+  const viewportNodes = useMemo(() => {
+    if (!layout) return [];
+    const windowBounds = viewportWindow || {
+      x: -VIEWPORT_OVERSCAN,
+      y: -VIEWPORT_OVERSCAN,
+      width: 1600 + VIEWPORT_OVERSCAN * 2,
+      height: 1000 + VIEWPORT_OVERSCAN * 2,
+    };
+    return layout.nodes.filter(
+      (node) =>
+        node.x + node.width >= windowBounds.x &&
+        node.x <= windowBounds.x + windowBounds.width &&
+        node.y + node.height >= windowBounds.y &&
+        node.y <= windowBounds.y + windowBounds.height,
+    );
+  }, [layout, viewportWindow]);
+  const viewportRelationNames = useMemo(
+    () => new Set(viewportNodes.map((node) => node.relationName)),
+    [viewportNodes],
+  );
+  const viewportEdges = useMemo(
+    () =>
+      layout?.edges.filter(
+        (edge) =>
+          viewportRelationNames.has(edge.sourceRelation) ||
+          viewportRelationNames.has(edge.targetRelation),
+      ) || [],
+    [layout, viewportRelationNames],
   );
 
   const fitDiagram = useCallback(() => {
@@ -89,6 +362,12 @@ export function SchemaDiagramView() {
     (relation) => relation.name === activeTab.selectedDiagramRelationName,
   ) || null;
   const selectedName = selectedRelation?.name || null;
+  const selectedIsHidden = Boolean(
+    selectedName && !layout.nodes.some((node) => node.relationName === selectedName),
+  );
+  const selectedArea = areaHistory.present.find(
+    (area) => area.id === selectedAreaId,
+  ) || null;
   const relatedEdges = selectedName
     ? fullLayout.edges.filter(
         (edge) =>
@@ -96,8 +375,73 @@ export function SchemaDiagramView() {
       )
     : [];
 
-  const selectRelation = (relationName: string) => {
+  const selectRelation = (relationName: string, additive = false) => {
+    let next: Set<string>;
+    if (!additive) {
+      next = new Set([relationName]);
+    } else {
+      next = new Set(selectedRelationNames);
+      if (next.has(relationName)) next.delete(relationName);
+      else next.add(relationName);
+    }
+    selectSchemaDiagramRelations(activeTab.id, [...next]);
     selectSchemaDiagramRelation(activeTab.id, relationName);
+  };
+
+  const createArea = () => {
+    const sequence = areaHistory.present.length + 1;
+    const id = `area-${Date.now().toString(36)}-${sequence}`;
+    setSchemaDiagramAreaHistory(
+      activeTab.id,
+      commitSchemaDiagramAreas(areaHistory, [
+        ...areaHistory.present,
+        { id, name: `Area ${sequence}`, relationNames: [] },
+      ]),
+    );
+    selectSchemaDiagramArea(activeTab.id, id);
+  };
+
+  const removeSelectedArea = () => {
+    if (!selectedAreaId) return;
+    setSchemaDiagramAreaHistory(
+      activeTab.id,
+      commitSchemaDiagramAreas(
+        areaHistory,
+        areaHistory.present.filter((area) => area.id !== selectedAreaId),
+      ),
+    );
+    selectSchemaDiagramArea(activeTab.id, null);
+    if (relationScope === "area") setRelationScope("all");
+  };
+
+  const moveSelectionToArea = () => {
+    if (!selectedAreaId || selectedRelationNames.size === 0) return;
+    setSchemaDiagramAreaHistory(
+      activeTab.id,
+      commitSchemaDiagramAreas(
+        areaHistory,
+        moveSchemaDiagramRelationsToArea(
+          areaHistory.present,
+          [...selectedRelationNames],
+          selectedAreaId,
+        ),
+      ),
+    );
+  };
+
+  const autoArrangeSelectedArea = () => {
+    if (!selectedAreaId) return;
+    setSchemaDiagramAreaHistory(
+      activeTab.id,
+      commitSchemaDiagramAreas(
+        areaHistory,
+        autoArrangeSchemaDiagramArea(
+          areaHistory.present,
+          selectedAreaId,
+          fullLayout.edges,
+        ),
+      ),
+    );
   };
 
   const revealRelation = async (relationName: string) => {
@@ -116,6 +460,7 @@ export function SchemaDiagramView() {
 
   const focusRelatedRelation = (relationName: string) => {
     setQuery("");
+    setRelationScope("all");
     selectRelation(relationName);
     window.requestAnimationFrame(() => {
       const node = fullLayout.nodes.find(
@@ -210,6 +555,18 @@ export function SchemaDiagramView() {
           {keysOnly ? <Check size={10} /> : <KeyRound size={10} />}
           Keys only
         </button>
+        <select
+          aria-label="Diagram relation scope"
+          value={relationScope}
+          onChange={(event) =>
+            setRelationScope(event.target.value as "all" | "related" | "area")
+          }
+          className="h-6 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] px-1.5 text-[8px] outline-none focus:border-[hsl(var(--wb-accent)/0.55)]"
+        >
+          <option value="all">All relations</option>
+          <option value="related" disabled={!selectedName}>Selected + related</option>
+          <option value="area" disabled={!selectedArea}>Selected area</option>
+        </select>
         <span className="h-4 w-px bg-[hsl(var(--wb-border-subtle))]" />
         <button
           type="button"
@@ -242,14 +599,199 @@ export function SchemaDiagramView() {
         >
           <Crosshair size={10} /> Fit
         </button>
-        <span className="ml-auto text-[9px] wb-muted">
+        <select
+          aria-label="Diagram export scope"
+          value={exportScope}
+          onChange={(event) => setExportScope(event.target.value as "filtered" | "full")}
+          className="h-6 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] px-1 text-[8px] outline-none"
+        >
+          <option value="filtered">Filtered</option>
+          <option value="full">Full</option>
+        </select>
+        <select
+          aria-label="Diagram export background"
+          value={exportBackground}
+          onChange={(event) => setExportBackground(event.target.value as "dark" | "light" | "transparent")}
+          className="h-6 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] px-1 text-[8px] outline-none"
+        >
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+          <option value="transparent">Transparent</option>
+        </select>
+        <button
+          type="button"
+          className="wb-text-button h-6 gap-1.5 px-2 text-[9px]"
+          onClick={exportSvg}
+          disabled={layout.nodes.length === 0}
+          title="Export the current filtered diagram as SVG"
+        >
+          <Download size={10} /> SVG
+        </button>
+        <button
+          type="button"
+          className="wb-text-button h-6 px-2 text-[9px]"
+          onClick={() => void exportRaster("png")}
+          disabled={layout.nodes.length === 0 || isRasterizing}
+        >
+          PNG
+        </button>
+        <button
+          type="button"
+          className="wb-text-button h-6 px-2 text-[9px]"
+          onClick={() => void exportRaster("jpeg")}
+          disabled={layout.nodes.length === 0 || isRasterizing}
+          title={exportBackground === "transparent" ? "JPEG uses a white background" : undefined}
+        >
+          JPG
+        </button>
+        <button
+          type="button"
+          className="wb-text-button h-6 gap-1.5 px-2 text-[9px]"
+          onClick={exportDbml}
+          title="Export the complete snapshot as review-only DBML"
+        >
+          <FileCode2 size={10} /> DBML
+        </button>
+        <button
+          type="button"
+          className="wb-text-button h-6 gap-1.5 px-2 text-[9px]"
+          onClick={() => setDbmlDraftOpen(true)}
+          title="Edit a local DBML draft and open a review-only schema diff"
+        >
+          <GitCompareArrows size={10} /> Draft
+        </button>
+        <button
+          type="button"
+          className="wb-icon-button h-6 w-6"
+          onClick={() => setInspectorCollapsed((current) => !current)}
+          aria-label={
+            inspectorCollapsed
+              ? "Show diagram inspector"
+              : "Hide diagram inspector"
+          }
+          aria-pressed={!inspectorCollapsed}
+        >
+          {inspectorCollapsed ? (
+            <PanelRightOpen size={11} />
+          ) : (
+            <PanelRightClose size={11} />
+          )}
+        </button>
+        {selectedIsHidden && selectedName && (
+          <button
+            type="button"
+            className="ml-auto wb-text-button h-6 gap-1.5 px-2 text-[9px] text-amber-200"
+            onClick={() => focusRelatedRelation(selectedName)}
+            title="Clear search/scope filters and center the selected relation"
+          >
+            <Crosshair size={10} /> Show hidden selection
+          </button>
+        )}
+        <span className={cn("text-[9px] wb-muted", !selectedIsHidden && "ml-auto")}>
           {layout.nodes.length}/{layout.totalRelationCount} visible · double-click to reveal
         </span>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_260px]">
+      <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel)/0.72)] px-3">
+        <span className="mr-1 text-[8px] uppercase tracking-[0.12em] wb-muted">
+          Areas
+        </span>
+        <button
+          type="button"
+          className="wb-text-button h-6 gap-1.5 px-2 text-[9px]"
+          onClick={createArea}
+        >
+          <FolderPlus size={10} /> New
+        </button>
+        <select
+          aria-label="Selected diagram area"
+          value={selectedAreaId}
+          onChange={(event) =>
+            selectSchemaDiagramArea(activeTab.id, event.target.value || null)
+          }
+          disabled={areaHistory.present.length === 0}
+          className="h-6 min-w-32 max-w-44 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] px-1.5 text-[9px] outline-none focus:border-[hsl(var(--wb-accent)/0.55)] disabled:opacity-50"
+        >
+          <option value="">Select area</option>
+          {areaHistory.present.map((area) => (
+            <option key={area.id} value={area.id}>
+              {area.name} ({area.relationNames.length})
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className="wb-text-button h-6 gap-1.5 px-2 text-[9px]"
+          disabled={!selectedArea || selectedRelationNames.size === 0}
+          onClick={moveSelectionToArea}
+          title="Move the current selection to this area. Ctrl/Cmd-click or Shift-click tables to select several."
+        >
+          <FolderInput size={10} /> Move {selectedRelationNames.size || "selected"}
+        </button>
+        <button
+          type="button"
+          className="wb-text-button h-6 gap-1.5 px-2 text-[9px]"
+          disabled={!selectedArea || selectedArea.relationNames.length < 2}
+          onClick={autoArrangeSelectedArea}
+          title="Arrange parents before dependent tables inside this area"
+        >
+          <LayoutGrid size={10} /> Auto-arrange
+        </button>
+        <button
+          type="button"
+          className="wb-icon-button h-6 w-6"
+          disabled={!selectedArea}
+          onClick={removeSelectedArea}
+          aria-label="Remove selected area"
+          title="Remove area; contained relations remain on the diagram"
+        >
+          <X size={10} />
+        </button>
+        <span className="mx-1 h-4 w-px bg-[hsl(var(--wb-border-subtle))]" />
+        <button
+          type="button"
+          className="wb-icon-button h-6 w-6"
+          disabled={areaHistory.past.length === 0}
+          onClick={() =>
+            setSchemaDiagramAreaHistory(
+              activeTab.id,
+              undoSchemaDiagramAreas(areaHistory),
+            )
+          }
+          aria-label="Undo diagram area change"
+        >
+          <Undo2 size={10} />
+        </button>
+        <button
+          type="button"
+          className="wb-icon-button h-6 w-6"
+          disabled={areaHistory.future.length === 0}
+          onClick={() =>
+            setSchemaDiagramAreaHistory(
+              activeTab.id,
+              redoSchemaDiagramAreas(areaHistory),
+            )
+          }
+          aria-label="Redo diagram area change"
+        >
+          <Redo2 size={10} />
+        </button>
+        <span className="ml-auto text-[8px] wb-muted">
+          {areaHistory.present.length} area{areaHistory.present.length === 1 ? "" : "s"} · {selectedRelationNames.size} selected
+        </span>
+      </div>
+
+      <div
+        className={cn(
+          "grid min-h-0 flex-1",
+          inspectorCollapsed
+            ? "grid-cols-[minmax(0,1fr)]"
+            : "grid-cols-[minmax(0,1fr)_260px]",
+        )}
+      >
         <div
           ref={viewportRef}
+          onScroll={scheduleViewportWindowUpdate}
           className="min-h-0 overflow-auto bg-[radial-gradient(circle_at_center,hsl(var(--wb-border-subtle)/0.42)_0.75px,transparent_0.75px)] bg-[length:18px_18px]"
         >
           {layout.nodes.length === 0 ? (
@@ -269,17 +811,43 @@ export function SchemaDiagramView() {
                   transformOrigin: "top left",
                 }}
               >
+                {areaBounds.map((area) => (
+                  <div
+                    key={area.id}
+                    className={cn(
+                      "pointer-events-none absolute rounded-[8px] border border-dashed bg-violet-400/[0.025]",
+                      area.id === selectedAreaId
+                        ? "border-violet-400/60"
+                        : "border-violet-300/25",
+                    )}
+                    style={{
+                      left: area.x,
+                      top: area.y,
+                      width: area.width,
+                      height: area.height,
+                    }}
+                  >
+                    <span className="absolute left-3 top-2 text-[9px] font-medium text-violet-200/85">
+                      {area.name} · {area.visibleRelationCount}/{area.relationNames.length}
+                    </span>
+                  </div>
+                ))}
                 <DiagramEdges
                   nodes={layout.nodes}
-                  edges={layout.edges}
+                  edges={viewportEdges}
                   selectedRelation={selectedName}
                 />
-                {layout.nodes.map((node) => (
+                {viewportNodes.map((node) => (
                   <DiagramRelationNode
                     key={node.id}
                     node={node}
-                    selected={node.relationName === selectedName}
-                    onSelect={() => selectRelation(node.relationName)}
+                    selected={selectedRelationNames.has(node.relationName)}
+                    onSelect={(event) =>
+                      selectRelation(
+                        node.relationName,
+                        event.ctrlKey || event.metaKey || event.shiftKey,
+                      )
+                    }
                     onReveal={() => void revealRelation(node.relationName)}
                   />
                 ))}
@@ -288,6 +856,7 @@ export function SchemaDiagramView() {
           )}
         </div>
 
+        {!inspectorCollapsed && (
         <aside className="min-h-0 overflow-auto border-l border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel)/0.72)]">
           {selectedRelation ? (
             <>
@@ -351,7 +920,13 @@ export function SchemaDiagramView() {
             </div>
           )}
         </aside>
+        )}
       </div>
+      <SchemaDbmlDraftDialog
+        open={dbmlDraftOpen}
+        snapshot={snapshot}
+        onClose={() => setDbmlDraftOpen(false)}
+      />
     </div>
   );
 }
@@ -364,7 +939,7 @@ function DiagramRelationNode({
 }: {
   node: SchemaDiagramNode;
   selected: boolean;
-  onSelect: () => void;
+  onSelect: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   onReveal: () => void;
 }) {
   return (

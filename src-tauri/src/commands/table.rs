@@ -87,7 +87,9 @@ pub struct TablePageResult {
 pub enum TableExportFormat {
     Csv,
     Json,
+    Jsonl,
     Sql,
+    Tsv,
 }
 
 /// Output encoding is intentionally narrow until each additional encoding has
@@ -1093,6 +1095,19 @@ fn csv_escape(value: &Value) -> String {
     }
 }
 
+fn tsv_escape(value: &Value) -> String {
+    value_to_export_string(value)
+        .chars()
+        .map(|character| {
+            if matches!(character, '\t' | '\r' | '\n') {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 fn sanitize_file_part(value: &str) -> String {
     let sanitized: String = value
         .chars()
@@ -1128,7 +1143,9 @@ fn export_file_path(
     let extension = match format {
         TableExportFormat::Csv => "csv",
         TableExportFormat::Json => "json",
+        TableExportFormat::Jsonl => "jsonl",
         TableExportFormat::Sql => "sql",
+        TableExportFormat::Tsv => "tsv",
     };
     let schema = sanitize_file_part(schema);
     let table = sanitize_file_part(table);
@@ -5916,12 +5933,26 @@ pub async fn export_table_data(
                     .collect();
             }
 
-            if matches!(format, TableExportFormat::Csv) && !wrote_csv_header {
+            if matches!(format, TableExportFormat::Csv | TableExportFormat::Tsv)
+                && !wrote_csv_header
+            {
+                let delimiter = if matches!(format, TableExportFormat::Tsv) {
+                    "\t"
+                } else {
+                    ","
+                };
                 let header = columns
                     .iter()
-                    .map(|column| csv_escape(&Value::String(column.clone())))
+                    .map(|column| {
+                        let value = Value::String(column.clone());
+                        if matches!(format, TableExportFormat::Tsv) {
+                            tsv_escape(&value)
+                        } else {
+                            csv_escape(&value)
+                        }
+                    })
                     .collect::<Vec<_>>()
-                    .join(",");
+                    .join(delimiter);
                 writeln!(writer, "{header}").map_err(|e| e.to_string())?;
                 wrote_csv_header = true;
             }
@@ -5944,6 +5975,11 @@ pub async fn export_table_data(
                         serde_json::to_writer(&mut writer, &object).map_err(|e| e.to_string())?;
                         wrote_json_row = true;
                     }
+                    TableExportFormat::Jsonl => {
+                        let object = row_to_object(&columns, row);
+                        serde_json::to_writer(&mut writer, &object).map_err(|e| e.to_string())?;
+                        writer.write_all(b"\n").map_err(|e| e.to_string())?;
+                    }
                     TableExportFormat::Sql => {
                         writeln!(
                             writer,
@@ -5951,6 +5987,10 @@ pub async fn export_table_data(
                             sql_insert_statement(kind, &schema, &table, &columns, row)
                         )
                         .map_err(|e| e.to_string())?;
+                    }
+                    TableExportFormat::Tsv => {
+                        let line = row.iter().map(tsv_escape).collect::<Vec<_>>().join("\t");
+                        writeln!(writer, "{line}").map_err(|e| e.to_string())?;
                     }
                 }
             }
@@ -8809,7 +8849,7 @@ mod tests {
         table_data_transfer_plan_digest, table_data_transfer_report_id,
         transfer_confirmation_token, transfer_plan_can_execute, transfer_target_column_type,
         transfer_target_confirmation_token, transfer_type_mapping_assessment,
-        transfer_type_mapping_warnings, validate_table_data_transfer_id,
+        transfer_type_mapping_warnings, tsv_escape, validate_table_data_transfer_id,
         validate_table_data_transfer_overwrite_rows, validate_xlsx_headers,
         validated_raw_filter_sql, value_to_u64, view_definition_query, xlsx_cell_value,
         AlterColumnValueMode, AlterTableColumn, CreateTableColumn, RelationOperation,
@@ -10182,6 +10222,15 @@ SELECT id FROM users WHERE active;"#
         assert_eq!(csv_escape(&json!("a,b")), "\"a,b\"");
         assert_eq!(csv_escape(&json!("a\"b")), "\"a\"\"b\"");
         assert_eq!(csv_escape(&json!(null)), "");
+    }
+
+    #[test]
+    fn escapes_tsv_control_characters_without_materializing_rows() {
+        assert_eq!(
+            tsv_escape(&json!("first\tsecond\nthird")),
+            "first second third"
+        );
+        assert_eq!(tsv_escape(&json!(null)), "");
     }
 
     #[test]
