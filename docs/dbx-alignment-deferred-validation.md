@@ -286,6 +286,19 @@ explicit deferred validation task rather than an implicit release check.
   P95, fallback, empty, discarded and error reasons must update without storing
   SQL, identifiers, labels or completion payloads.
 
+## Query transaction controller
+
+- On transactional PostgreSQL/MySQL connections, verify manual Begin, query
+  execution with the named transaction ID, Commit, Rollback and switching back
+  to auto mode. Repeated toolbar clicks while an operation is pending must issue
+  exactly one backend request and expose a visible busy state.
+- Force Commit failure and confirm the editor remains in manual/active state.
+  Force only the post-commit metadata refresh to fail and confirm the transaction
+  is still shown as committed rather than retryable.
+- Close a tab, change its connection, revoke its transaction capability and close
+  the editor while a manual session exists. Each stale session must receive one
+  best-effort rollback without leaking its transaction ID to another tab.
+
 ## Cross-driver migration review notes
 
 - Compare PostgreSQL snapshots against MySQL/MariaDB and SQL Server targets

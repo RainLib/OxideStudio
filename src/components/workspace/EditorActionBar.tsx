@@ -47,6 +47,7 @@ import { QueryHistoryPanel } from "./QueryHistoryPanel";
 
 type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
+type TransactionOperation = "begin" | "commit" | "rollback" | null;
 
 interface EditorActionBarProps {
   connectionId?: string | null;
@@ -59,6 +60,7 @@ interface EditorActionBarProps {
   databaseSelectionDisabled?: boolean;
   transactionMode: TransactionMode;
   transactionState: TransactionState;
+  transactionOperation: TransactionOperation;
   onTransactionModeChange: (mode: TransactionMode) => void;
   onBeginTransaction: () => void;
   onCommitTransaction: () => void;
@@ -113,6 +115,7 @@ export function EditorActionBar({
   databaseSelectionDisabled,
   transactionMode,
   transactionState,
+  transactionOperation,
   onTransactionModeChange,
   onBeginTransaction,
   onCommitTransaction,
@@ -347,6 +350,7 @@ export function EditorActionBar({
           <TransactionControl
             mode={transactionMode}
             state={transactionState}
+            operation={transactionOperation}
             onModeChange={onTransactionModeChange}
             onBegin={onBeginTransaction}
             onCommit={onCommitTransaction}

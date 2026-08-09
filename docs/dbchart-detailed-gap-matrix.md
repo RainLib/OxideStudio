@@ -13,7 +13,7 @@
 
 - OxideStudio 的数据库产品目录、真实连接、SQL LSP、表数据流式导出和迁移执行安全边界已超过 ChartDB。
 - ChartDB 的优势集中在可编辑 ER 图、DBML 即时编译/差异预览、结构导入导出、跨方言转换告警、画布历史和区域组织。
-- SQL 智能提示的协议、snippet、函数参数、JOIN/外键推导和主要作用域 fallback 已补齐；剩余重点是扩大多方言语义 corpus，并继续把执行/事务 controller 从 `QueryEditor.tsx` 移出。
+- SQL 智能提示的协议、snippet、函数参数、JOIN/外键推导和主要作用域 fallback 已补齐；事务 controller 已从 `QueryEditor.tsx` 移出，剩余重点是扩大多方言语义 corpus 并迁出查询执行 controller。
 - 迁移侧最大的可迁移逻辑是“确定性类型映射 + 不支持特性清单”，而不是 ChartDB 的 AI 生成兜底。Oxide 的可执行迁移必须继续受 capability、预检、确认摘要和 journal 约束。
 
 ## 1. SQL Editor、LSP 与智能提示
@@ -28,7 +28,7 @@
 | L06 | 本阶段增强 | 基于 FK、别名、CTE 和子查询作用域生成 JOIN/字段候选 | DBX `apps/desktop/src/lib/sql/semantic/completion.ts`、`apps/desktop/src/lib/sql/sqlCompletion.ts:2909` | `sqlJoinCompletion.ts` 已按外键生成完整 `JOIN … ON …`，覆盖复合键、跨 schema、别名冲突、父→子反向关系和 keyword case；关系索引复用 LSP metadata。缓存 fallback 也识别 correlated outer alias、derived subquery、LATERAL/APPLY 与显式 table-function output columns；仍需扩大多方言语义 corpus |
 | L07 | 本阶段增强 | 补全触发与排序应避免“空列表、重复候选、过期响应覆盖新输入” | ChartDB trigger 字符位于 `src/components/code-snippet/dbml/dbml-completion-provider.ts:19`；DBX `lib/sql/sqlCompletionTriggerPolicy.ts`、`lib/common/pinyin.ts`、`lib/common/completionMatch.ts` | Oxide 已有请求 generation、model version、cancellation 检查和 overload-aware 去重；现在提供智能位置/名称前缀/仅手动三种触发模式，LSP 请求前门控；live LSP 与缓存候选合并，Unicode、拼音首字母、camel/fuzzy 排序覆盖对象/列/FK JOIN；`sqlCompletionTelemetry.ts` 只记录无内容的触发/延迟/结果原因 |
 | L08 | 本阶段增强 | SQL/DBML 编辑差异预览的细粒度防抖与可撤销应用 | ChartDB `src/pages/editor-page/side-panel/dbml-section/table-dbml/table-dbml.tsx:265` 使用 debounce，`:284` 应用，`:306` 撤销 | Diagram 的 DBML Draft 对当前 snapshot 生成文本，250ms 防抖解析 relation/warning，确认后只调用 snapshot compare 打开只读 diff；offline plan 同时禁用 Apply 和 Open in console。textarea 原生 undo 可用；仍缺逐项接受和结构化 schema CRUD history |
-| L09 | 本阶段增强 | `QueryEditor.tsx` 仍承载过多 provider、执行、事务和视图生命周期 | DBX 将 semantic、presentation、insertion、keymap 分文件；ChartDB 将 completion manager 单独封装 | completion/hover 已与 definition/reference/format/signature/rename/code-action/symbol/folding/selection/semantic/inlay provider 分离；拼音词典改为条件动态块后 QueryEditor 生产块由约 486 kB 降至 184.58 kB（gzip 56.47 kB）。仍需迁出 execution/transaction controller |
+| L09 | 本阶段增强 | `QueryEditor.tsx` 仍承载过多 provider、执行和视图生命周期 | DBX 将 semantic、presentation、insertion、keymap 分文件；ChartDB 将 completion manager 单独封装 | completion/provider 已分层，拼音词典改为条件动态块后 QueryEditor 生产块由约 486 kB 降至约 186 kB；命名事务现由 `useQueryTransactionController` 管理 stale-tab rollback、提交后 metadata refresh 与 busy 防重入，主组件减少约 146 行。仍需迁出 query/explain/import execution controller |
 
 ## 2. 数据库结构、导入与迁移
 
@@ -84,7 +84,8 @@
 - [x] 增加智能位置/名称前缀/仅手动三种补全触发策略，并在 IPC 前抑制无效自动请求。
 - [x] 增加 Unicode 与中文拼音首字母对象/列/FK JOIN 检索；拼音词典仅在命中中文 metadata 场景时动态加载。
 - [x] 增加空列清单 INSERT 全列/VALUES tab-stop snippet，以及单表、多表、`alias.*` 的 metadata 星号展开。
-- [ ] 扩大多方言语义 corpus，并继续迁出 QueryEditor execution/transaction controller。
+- [x] 把命名事务 session/lifecycle 从 QueryEditor 移入独立 controller，并为 Begin/Commit/Rollback 增加防重复操作和进行中反馈。
+- [ ] 扩大多方言语义 corpus，并继续迁出 QueryEditor query/explain/import execution controller。
 
 ### 阶段 B：迁移与结构格式
 

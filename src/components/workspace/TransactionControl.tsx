@@ -2,6 +2,7 @@ import {
   Check,
   ChevronDown,
   CirclePlay,
+  LoaderCircle,
   RotateCcw,
 } from "lucide-react";
 import {
@@ -17,10 +18,12 @@ import { cn } from "@/lib/utils";
 
 type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
+type TransactionOperation = "begin" | "commit" | "rollback" | null;
 
 interface TransactionControlProps {
   mode: TransactionMode;
   state: TransactionState;
+  operation: TransactionOperation;
   onModeChange: (mode: TransactionMode) => void;
   onBegin: () => void;
   onCommit: () => void;
@@ -35,19 +38,30 @@ const itemClass =
 export function TransactionControl({
   mode,
   state,
+  operation,
   onModeChange,
   onBegin,
   onCommit,
   onRollback,
 }: TransactionControlProps) {
+  const operationLabel = operation
+    ? `${operation === "begin" ? "Beginning" : operation === "commit" ? "Committing" : "Rolling back"} transaction…`
+    : null;
+  const isBusy = operation !== null;
+
   return (
-    <div className="flex h-full items-center gap-0.5">
+    <div
+      className="flex h-full items-center gap-0.5"
+      aria-busy={isBusy}
+      aria-label={operationLabel || "Transaction controls"}
+    >
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button
             type="button"
             className="wb-text-button h-6 gap-1 px-1.5 font-normal"
-            title="Transaction Mode"
+            title={operationLabel || "Transaction Mode"}
+            disabled={isBusy}
           >
             <span className="wb-muted">Tx:</span>
             <span>{mode === "auto" ? "Auto" : "Manual"}</span>
@@ -59,10 +73,18 @@ export function TransactionControl({
             value={mode}
             onValueChange={(value) => onModeChange(value as TransactionMode)}
           >
-            <DropdownMenuRadioItem value="auto" className={itemClass}>
+            <DropdownMenuRadioItem
+              value="auto"
+              className={itemClass}
+              disabled={isBusy}
+            >
               Auto-commit
             </DropdownMenuRadioItem>
-            <DropdownMenuRadioItem value="manual" className={itemClass}>
+            <DropdownMenuRadioItem
+              value="manual"
+              className={itemClass}
+              disabled={isBusy}
+            >
               Manual commit
             </DropdownMenuRadioItem>
           </DropdownMenuRadioGroup>
@@ -72,7 +94,7 @@ export function TransactionControl({
               <DropdownMenuItem
                 className={itemClass}
                 onClick={onBegin}
-                disabled={state === "active"}
+                disabled={isBusy || state === "active"}
               >
                 <CirclePlay size={13} className="mr-2" />
                 Begin Transaction
@@ -80,7 +102,7 @@ export function TransactionControl({
               <DropdownMenuItem
                 className={itemClass}
                 onClick={onCommit}
-                disabled={state !== "active"}
+                disabled={isBusy || state !== "active"}
               >
                 <Check size={13} className="mr-2" />
                 Commit
@@ -88,7 +110,7 @@ export function TransactionControl({
               <DropdownMenuItem
                 className={itemClass}
                 onClick={onRollback}
-                disabled={state !== "active"}
+                disabled={isBusy || state !== "active"}
               >
                 <RotateCcw size={13} className="mr-2" />
                 Rollback
@@ -103,26 +125,41 @@ export function TransactionControl({
           <span
             className={cn(
               "mx-1 h-1.5 w-1.5 rounded-full",
-              state === "active"
-                ? "bg-emerald-400"
-                : "bg-[hsl(var(--wb-text-muted))] opacity-45"
+              isBusy
+                ? "animate-pulse bg-amber-400"
+                : state === "active"
+                  ? "bg-emerald-400"
+                  : "bg-[hsl(var(--wb-text-muted))] opacity-45",
             )}
-            title={state === "active" ? "Transaction active" : "No transaction"}
+            title={
+              operationLabel ||
+              (state === "active" ? "Transaction active" : "No transaction")
+            }
           />
           <button
             type="button"
             className="wb-icon-button"
             onClick={state === "active" ? onCommit : onBegin}
-            title={state === "active" ? "Commit" : "Begin Transaction"}
+            disabled={isBusy}
+            title={
+              operationLabel ||
+              (state === "active" ? "Commit" : "Begin Transaction")
+            }
           >
-            {state === "active" ? <Check size={13} /> : <CirclePlay size={13} />}
+            {isBusy ? (
+              <LoaderCircle size={13} className="animate-spin" />
+            ) : state === "active" ? (
+              <Check size={13} />
+            ) : (
+              <CirclePlay size={13} />
+            )}
           </button>
           <button
             type="button"
             className="wb-icon-button"
             onClick={onRollback}
-            disabled={state !== "active"}
-            title="Rollback"
+            disabled={isBusy || state !== "active"}
+            title={operationLabel || "Rollback"}
           >
             <RotateCcw size={13} />
           </button>

@@ -92,3 +92,9 @@ export {
   sqlInListFromClipboard,
   unquoteSqlIdentifierSelection,
 } from "./model/sqlEditorIntentions";
+export {
+  useQueryTransactionController,
+  type QueryTransactionMode,
+  type QueryTransactionOperation,
+  type QueryTransactionState,
+} from "./hooks/useQueryTransactionController";

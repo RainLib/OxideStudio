@@ -44,18 +44,11 @@ import {
   toMonacoCompletionKind,
 } from "@/lib/lspCompletion";
 import {
-  collectStaleTransactionTabIds,
-  removeTransactionStates,
-  type QueryTransactionSession,
-  type QueryTransactionTabContext,
-} from "@/lib/queryTransactionLifecycle";
-import {
   extractLspDocumentIdentity,
   extractSqlDocumentTabId,
   LSP_NOTIFICATION_EVENT,
 } from "@/services/lsp";
 import { lspForeignKeyRelationships } from "@/services/lsp/relationshipIndex";
-import { transactionService } from "@/services/tauri";
 import type { LspServerNotification } from "@/services/lsp";
 import {
   APP_EVENT_RUN_QUERY,
@@ -198,7 +191,6 @@ import {
   mergeCatalogNames,
   mergeCompletionFallbackSuggestions,
   mongodbCommandRangeAtCursor,
-  queryTransactionExecutionId,
   parseElasticsearchConsoleServerVersion,
   selectedOrFullEditorText,
   quoteSqlIdentifierSelection,
@@ -214,10 +206,9 @@ import {
   toMonacoRange,
   toMonacoWorkspaceEdit,
   unquoteSqlIdentifierSelection,
+  useQueryTransactionController,
 } from "@/features/query-editor";
 
-type TransactionMode = "auto" | "manual";
-type TransactionState = "idle" | "active";
 type ParameterExecutionRequest = {
   tabId: string;
   connectionId: string;
@@ -470,11 +461,6 @@ export function QueryEditor({
   // const [saveName, setSaveName] = useState("");
   // const [isSaveOpen, setIsSaveOpen] = useState(false);
   // const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false);
-  const [transactionMode, setTransactionMode] =
-    useState<TransactionMode>("auto");
-  const [transactionStates, setTransactionStates] = useState<
-    Record<string, TransactionState>
-  >({});
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
   const [parameterExecution, setParameterExecution] =
     useState<ParameterExecutionRequest | null>(null);
@@ -552,10 +538,6 @@ export function QueryEditor({
     value: string;
   } | null>(null);
   const pendingElasticsearchSqlTimerRef = useRef<number | null>(null);
-  const activeTransactionsRef = useRef<Map<string, QueryTransactionSession>>(
-    new Map(),
-  );
-
   const activeTab = tabs.find((t) => t.id === effectiveTabId);
   const effectiveConnectionId = activeTab?.connectionId || activeConnectionId;
   const activeConnection = connections.find(
@@ -786,6 +768,28 @@ export function QueryEditor({
     (!activeProjectFileLanguage || activeProjectFileLanguage.executable);
   const supportsTransactions =
     capabilities.supportsTransactions && !activeTab?.databaseName;
+  const {
+    transactionMode,
+    transactionState: activeTransactionState,
+    transactionOperation,
+    transactionIdForExecution,
+    handleTransactionModeChange,
+    handleBeginTransaction,
+    handleCommitTransaction,
+    handleRollbackTransaction,
+  } = useQueryTransactionController({
+    tabs,
+    connections,
+    activeConnectionId,
+    activeTabId: activeTab?.id,
+    activeTargetSchema: activeTab?.targetSchema,
+    effectiveConnectionId,
+    currentSchema,
+    supportsTransactions,
+    loadSchemas,
+    loadTables,
+    bumpMetadataVersion,
+  });
   const monaco = useMonaco();
   const {
     isReady: lspReady,
@@ -806,9 +810,6 @@ export function QueryEditor({
   const visibleLspSemanticPresentation = lspReady
     ? lspSemanticPresentation
     : null;
-  const activeTransactionState = activeTab
-    ? transactionStates[activeTab.id] || "idle"
-    : "idle";
   const parameterTargetSql =
     activeTab?.editorSelection?.text?.trim() || activeTab?.sql || "";
   const parameterCount = useMemo(
@@ -1070,11 +1071,6 @@ export function QueryEditor({
     return () => disposable.dispose();
   }, [keymap, monaco]);
 
-  const getTransactionId = () => {
-    if (!activeTab || !effectiveConnectionId) return null;
-    return `${effectiveConnectionId}:${activeTab.id}`;
-  };
-
   useEffect(() => {
     if (!lspReady || !activeTab || !documentUri || !canUseLsp) {
       activeLspDocumentUriRef.current = null;
@@ -1239,61 +1235,10 @@ export function QueryEditor({
   }, [lspSessionKey]);
 
   useEffect(() => {
-    const contexts: QueryTransactionTabContext[] = tabs.map((tab) => {
-      const tabConnectionId = tab.connectionId || activeConnectionId || null;
-      const tabConnection = connections.find(
-        (connection) => connection.id === tabConnectionId,
-      );
-      const tabDriver = tabConnection?.driver || DEFAULT_DATABASE_DRIVER;
-
-      return {
-        tabId: tab.id,
-        connectionId: tabConnectionId,
-        supportsTransactions:
-          defaultDatabaseCapabilities(tabDriver).supportsTransactions,
-      };
-    });
-
-    const staleTabIds = collectStaleTransactionTabIds(
-      activeTransactionsRef.current,
-      contexts,
-    );
-
-    if (staleTabIds.length > 0) {
-      for (const tabId of staleTabIds) {
-        const session = activeTransactionsRef.current.get(tabId);
-        if (!session) continue;
-
-        void transactionService.rollbackTransaction(
-          session.connectionId,
-          session.transactionId,
-        );
-        activeTransactionsRef.current.delete(tabId);
-      }
-
-      setTransactionStates((state) =>
-        removeTransactionStates(state, staleTabIds),
-      );
-    }
-  }, [activeConnectionId, connections, tabs]);
-
-  useEffect(() => {
     elasticsearchFieldCacheRef.current.clear();
     sqlFieldCacheRef.current.clear();
     sqlJoinConstraintCacheRef.current.clear();
   }, [effectiveConnectionId, metadataVersion]);
-
-  useEffect(() => {
-    return () => {
-      for (const session of activeTransactionsRef.current.values()) {
-        void transactionService.rollbackTransaction(
-          session.connectionId,
-          session.transactionId,
-        );
-      }
-      activeTransactionsRef.current.clear();
-    };
-  }, []);
 
   // Mapping fields must remain available even while the full LSP catalog is
   // still synchronizing. Load only the index under the cursor and reuse the
@@ -3273,15 +3218,6 @@ export function QueryEditor({
     return window.confirm(confirmation.message || "Execute this query?");
   };
 
-  const transactionIdForExecution = () =>
-    queryTransactionExecutionId({
-      supportsTransactions,
-      transactionMode,
-      transactionState: activeTransactionState,
-      connectionId: effectiveConnectionId,
-      tabId: activeTab?.id,
-    });
-
   const requestParameterizedExecution = (
     sql: string,
     transactionId?: string,
@@ -4182,89 +4118,6 @@ export function QueryEditor({
     mountedEditor,
   ]);
 
-  const handleTransactionModeChange = (mode: TransactionMode) => {
-    if (!supportsTransactions) return;
-    setTransactionMode(mode);
-    if (mode === "auto" && activeTransactionState === "active") {
-      void handleCommitTransaction();
-    }
-  };
-
-  const handleBeginTransaction = async () => {
-    if (!supportsTransactions || !activeTab || !effectiveConnectionId) return;
-    const transactionId = getTransactionId();
-    if (!transactionId) return;
-
-    try {
-      await transactionService.beginTransaction(
-        effectiveConnectionId,
-        transactionId,
-        activeTab.targetSchema ?? currentSchema,
-      );
-      activeTransactionsRef.current.set(activeTab.id, {
-        connectionId: effectiveConnectionId,
-        transactionId,
-      });
-      setTransactionStates((state) => ({
-        ...state,
-        [activeTab.id]: "active",
-      }));
-    } catch (error) {
-      console.error("Begin transaction failed:", error);
-    }
-  };
-
-  const handleCommitTransaction = async () => {
-    if (!supportsTransactions) return;
-    if (!activeTab) return;
-    const session = activeTransactionsRef.current.get(activeTab.id);
-    if (!session) return;
-
-    try {
-      await transactionService.commitTransaction(
-        session.connectionId,
-        session.transactionId,
-      );
-      activeTransactionsRef.current.delete(activeTab.id);
-      setTransactionStates((state) => ({
-        ...state,
-        [activeTab.id]: "idle",
-      }));
-      await loadSchemas(session.connectionId, true);
-      const schemaToRefresh =
-        useSchemaStore.getState().currentSchema ||
-        activeTab.targetSchema ||
-        currentSchema;
-      if (schemaToRefresh) {
-        await loadTables(session.connectionId, schemaToRefresh, true);
-      }
-      bumpMetadataVersion();
-    } catch (error) {
-      console.error("Commit transaction failed:", error);
-    }
-  };
-
-  const handleRollbackTransaction = async () => {
-    if (!supportsTransactions) return;
-    if (!activeTab) return;
-    const session = activeTransactionsRef.current.get(activeTab.id);
-    if (!session) return;
-
-    try {
-      await transactionService.rollbackTransaction(
-        session.connectionId,
-        session.transactionId,
-      );
-      activeTransactionsRef.current.delete(activeTab.id);
-      setTransactionStates((state) => ({
-        ...state,
-        [activeTab.id]: "idle",
-      }));
-    } catch (error) {
-      console.error("Rollback transaction failed:", error);
-    }
-  };
-
   const { mode } = (useContext(ThemeContext) as any) || { mode: "dark" };
   const editorOptions = useMemo(
     () => buildQueryEditorOptions(editorSettings, isElasticsearchConsole),
@@ -4655,6 +4508,7 @@ export function QueryEditor({
           databaseSelectionDisabled={activeTransactionState === "active"}
           transactionMode={transactionMode}
           transactionState={activeTransactionState}
+          transactionOperation={transactionOperation}
           onTransactionModeChange={handleTransactionModeChange}
           onBeginTransaction={handleBeginTransaction}
           onCommitTransaction={handleCommitTransaction}
