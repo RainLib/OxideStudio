@@ -6,6 +6,7 @@ import {
   commitSchemaDiagramAreas,
   createSchemaDiagramAreaHistory,
   moveSchemaDiagramRelationsToArea,
+  removeSchemaDiagramRelationsFromAreas,
   redoSchemaDiagramAreas,
   undoSchemaDiagramAreas,
 } from "./schemaDiagramAreas";
@@ -77,5 +78,20 @@ describe("schema diagram areas", () => {
     expect(redoSchemaDiagramAreas(undoSchemaDiagramAreas(committed)).present).toEqual(
       arranged,
     );
+  });
+
+  it("removes a multi-selection from every area", () => {
+    expect(
+      removeSchemaDiagramRelationsFromAreas(
+        [
+          { id: "a", name: "Core", relationNames: ["users", "items"] },
+          { id: "b", name: "Sales", relationNames: ["orders"] },
+        ],
+        ["users", "orders"],
+      ),
+    ).toEqual([
+      { id: "a", name: "Core", relationNames: ["items"] },
+      { id: "b", name: "Sales", relationNames: [] },
+    ]);
   });
 });

@@ -50,6 +50,7 @@ import {
   commitSchemaDiagramAreas,
   createSchemaDiagramAreaHistory,
   moveSchemaDiagramRelationsToArea,
+  removeSchemaDiagramRelationsFromAreas,
   redoSchemaDiagramAreas,
   undoSchemaDiagramAreas,
 } from "@/lib/schemaDiagramAreas";
@@ -66,6 +67,16 @@ import { useConnectionStore } from "@/store/useConnectionStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 1.6;
@@ -393,61 +404,91 @@ export function SchemaDiagramView() {
     selectSchemaDiagramRelation(activeTab.id, relationName);
   };
 
-  const createArea = () => {
+  const createArea = (relationNames: readonly string[] = []) => {
     const sequence = areaHistory.present.length + 1;
     const id = `area-${Date.now().toString(36)}-${sequence}`;
-    setSchemaDiagramAreaHistory(
-      activeTab.id,
-      commitSchemaDiagramAreas(areaHistory, [
-        ...areaHistory.present,
-        { id, name: `Area ${sequence}`, relationNames: [] },
-      ]),
-    );
-    selectSchemaDiagramArea(activeTab.id, id);
-  };
-
-  const removeSelectedArea = () => {
-    if (!selectedAreaId) return;
+    const nextAreas = [
+      ...areaHistory.present,
+      { id, name: `Area ${sequence}`, relationNames: [] },
+    ];
     setSchemaDiagramAreaHistory(
       activeTab.id,
       commitSchemaDiagramAreas(
         areaHistory,
-        areaHistory.present.filter((area) => area.id !== selectedAreaId),
+        relationNames.length > 0
+          ? moveSchemaDiagramRelationsToArea(nextAreas, relationNames, id)
+          : nextAreas,
       ),
     );
-    selectSchemaDiagramArea(activeTab.id, null);
-    if (relationScope === "area") setRelationScope("all");
+    selectSchemaDiagramArea(activeTab.id, id);
   };
 
-  const moveSelectionToArea = () => {
-    if (!selectedAreaId || selectedRelationNames.size === 0) return;
+  const removeArea = (areaId: string) => {
+    if (!areaId) return;
+    setSchemaDiagramAreaHistory(
+      activeTab.id,
+      commitSchemaDiagramAreas(
+        areaHistory,
+        areaHistory.present.filter((area) => area.id !== areaId),
+      ),
+    );
+    if (selectedAreaId === areaId) {
+      selectSchemaDiagramArea(activeTab.id, null);
+      if (relationScope === "area") setRelationScope("all");
+    }
+  };
+
+  const moveRelationsToArea = (
+    areaId: string,
+    relationNames: readonly string[],
+  ) => {
+    if (!areaId || relationNames.length === 0) return;
     setSchemaDiagramAreaHistory(
       activeTab.id,
       commitSchemaDiagramAreas(
         areaHistory,
         moveSchemaDiagramRelationsToArea(
           areaHistory.present,
-          [...selectedRelationNames],
-          selectedAreaId,
+          relationNames,
+          areaId,
         ),
       ),
     );
   };
 
-  const autoArrangeSelectedArea = () => {
-    if (!selectedAreaId) return;
+  const removeRelationsFromAreas = (relationNames: readonly string[]) => {
+    if (relationNames.length === 0) return;
+    setSchemaDiagramAreaHistory(
+      activeTab.id,
+      commitSchemaDiagramAreas(
+        areaHistory,
+        removeSchemaDiagramRelationsFromAreas(
+          areaHistory.present,
+          relationNames,
+        ),
+      ),
+    );
+  };
+
+  const autoArrangeArea = (areaId: string) => {
+    if (!areaId) return;
     setSchemaDiagramAreaHistory(
       activeTab.id,
       commitSchemaDiagramAreas(
         areaHistory,
         autoArrangeSchemaDiagramArea(
           areaHistory.present,
-          selectedAreaId,
+          areaId,
           fullLayout.edges,
         ),
       ),
     );
   };
+
+  const removeSelectedArea = () => removeArea(selectedAreaId);
+  const moveSelectionToArea = () =>
+    moveRelationsToArea(selectedAreaId, [...selectedRelationNames]);
+  const autoArrangeSelectedArea = () => autoArrangeArea(selectedAreaId);
 
   const revealRelation = async (relationName: string) => {
     selectRelation(relationName);
@@ -714,7 +755,7 @@ export function SchemaDiagramView() {
         <button
           type="button"
           className="wb-text-button h-6 gap-1.5 px-2 text-[9px]"
-          onClick={createArea}
+          onClick={() => createArea()}
         >
           <FolderPlus size={10} /> New
         </button>
@@ -842,9 +883,36 @@ export function SchemaDiagramView() {
                       height: area.height,
                     }}
                   >
-                    <span className="absolute left-3 top-2 text-[9px] font-medium text-violet-200/85">
-                      {area.name} · {area.visibleRelationCount}/{area.relationNames.length}
-                    </span>
+                    <ContextMenu>
+                      <ContextMenuTrigger asChild>
+                        <button
+                          type="button"
+                          className="pointer-events-auto absolute left-2 top-1 rounded px-1 py-0.5 text-[9px] font-medium text-violet-200/85 outline-none hover:bg-violet-300/10 focus-visible:ring-1 focus-visible:ring-violet-300/60"
+                          onClick={() =>
+                            selectSchemaDiagramArea(activeTab.id, area.id)
+                          }
+                        >
+                          {area.name} · {area.visibleRelationCount}/
+                          {area.relationNames.length}
+                        </button>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent className="w-48 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                        <ContextMenuItem
+                          className="gap-2 text-[10px]"
+                          disabled={area.relationNames.length < 2}
+                          onClick={() => autoArrangeArea(area.id)}
+                        >
+                          <LayoutGrid size={11} /> Auto-arrange area
+                        </ContextMenuItem>
+                        <ContextMenuSeparator />
+                        <ContextMenuItem
+                          className="gap-2 text-[10px] text-red-300 focus:text-red-200"
+                          onClick={() => removeArea(area.id)}
+                        >
+                          <X size={11} /> Remove area
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
                   </div>
                 ))}
                 <DiagramEdges
@@ -864,6 +932,21 @@ export function SchemaDiagramView() {
                       )
                     }
                     onReveal={() => void revealRelation(node.relationName)}
+                    onContextSelect={() => {
+                      if (!selectedRelationNames.has(node.relationName)) {
+                        selectRelation(node.relationName);
+                      }
+                    }}
+                    contextRelationNames={
+                      selectedRelationNames.has(node.relationName) &&
+                      selectedRelationNames.size > 1
+                        ? [...selectedRelationNames]
+                        : [node.relationName]
+                    }
+                    areas={areaHistory.present}
+                    onCreateArea={createArea}
+                    onMoveToArea={moveRelationsToArea}
+                    onRemoveFromAreas={removeRelationsFromAreas}
                   />
                 ))}
               </div>
@@ -961,31 +1044,49 @@ function DiagramRelationNode({
   selected,
   onSelect,
   onReveal,
+  onContextSelect,
+  contextRelationNames,
+  areas,
+  onCreateArea,
+  onMoveToArea,
+  onRemoveFromAreas,
 }: {
   node: SchemaDiagramNode;
   selected: boolean;
   onSelect: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   onReveal: () => void;
+  onContextSelect: () => void;
+  contextRelationNames: string[];
+  areas: Array<{ id: string; name: string; relationNames: string[] }>;
+  onCreateArea: (relationNames: readonly string[]) => void;
+  onMoveToArea: (areaId: string, relationNames: readonly string[]) => void;
+  onRemoveFromAreas: (relationNames: readonly string[]) => void;
 }) {
+  const hasAssignedRelation = contextRelationNames.some((relationName) =>
+    areas.some((area) => area.relationNames.includes(relationName)),
+  );
   return (
-    <button
-      type="button"
-      data-schema-diagram-relation={node.relationName}
-      className={cn(
-        "absolute overflow-hidden rounded-[5px] border bg-[hsl(var(--wb-panel-raised))] text-left shadow-[0_5px_14px_rgba(0,0,0,0.22)] outline-none",
-        selected
-          ? "border-violet-400/70 ring-1 ring-violet-400/25"
-          : "border-[hsl(var(--wb-border))] hover:border-[hsl(var(--wb-accent)/0.5)]",
-      )}
-      style={{
-        left: node.x,
-        top: node.y,
-        width: node.width,
-        height: node.height,
-      }}
-      onClick={onSelect}
-      onDoubleClick={onReveal}
-    >
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <button
+          type="button"
+          data-schema-diagram-relation={node.relationName}
+          className={cn(
+            "absolute overflow-hidden rounded-[5px] border bg-[hsl(var(--wb-panel-raised))] text-left shadow-[0_5px_14px_rgba(0,0,0,0.22)] outline-none",
+            selected
+              ? "border-violet-400/70 ring-1 ring-violet-400/25"
+              : "border-[hsl(var(--wb-border))] hover:border-[hsl(var(--wb-accent)/0.5)]",
+          )}
+          style={{
+            left: node.x,
+            top: node.y,
+            width: node.width,
+            height: node.height,
+          }}
+          onClick={onSelect}
+          onDoubleClick={onReveal}
+          onContextMenu={onContextSelect}
+        >
       <span className="flex h-[38px] items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-3">
         <Table2 size={12} className="shrink-0 text-violet-300" />
         <span className="min-w-0 flex-1 truncate font-mono text-[10px] font-semibold">
@@ -1024,7 +1125,59 @@ function DiagramRelationNode({
           +{node.hiddenColumnCount} hidden column{node.hiddenColumnCount === 1 ? "" : "s"}
         </span>
       )}
-    </button>
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="w-56 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+        <ContextMenuItem className="gap-2 text-[10px]" onClick={onReveal}>
+          <ExternalLink size={11} /> Reveal in Explorer
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuSub>
+          <ContextMenuSubTrigger className="gap-2 text-[10px]">
+            <FolderInput size={11} /> Move {contextRelationNames.length} relation
+            {contextRelationNames.length === 1 ? "" : "s"} to area
+          </ContextMenuSubTrigger>
+          <ContextMenuSubContent className="max-h-72 w-52 overflow-y-auto border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+            <ContextMenuItem
+              className="gap-2 text-[10px]"
+              onClick={() => onCreateArea(contextRelationNames)}
+            >
+              <FolderPlus size={11} /> New area
+            </ContextMenuItem>
+            {areas.length > 0 && <ContextMenuSeparator />}
+            {areas.map((area) => {
+              const containsSelection = contextRelationNames.every((name) =>
+                area.relationNames.includes(name),
+              );
+              return (
+                <ContextMenuItem
+                  key={area.id}
+                  className="gap-2 text-[10px]"
+                  onClick={() => onMoveToArea(area.id, contextRelationNames)}
+                >
+                  <span className="h-2 w-2 rounded-full bg-violet-400/70" />
+                  <span className="min-w-0 flex-1 truncate">{area.name}</span>
+                  {containsSelection && <Check size={11} />}
+                </ContextMenuItem>
+              );
+            })}
+            {areas.length > 0 && (
+              <>
+                <ContextMenuSeparator />
+                <ContextMenuItem
+                  className="gap-2 text-[10px]"
+                  disabled={!hasAssignedRelation}
+                  onClick={() => onRemoveFromAreas(contextRelationNames)}
+                >
+                  <X size={11} /> No area
+                  {!hasAssignedRelation && <Check className="ml-auto" size={11} />}
+                </ContextMenuItem>
+              </>
+            )}
+          </ContextMenuSubContent>
+        </ContextMenuSub>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 

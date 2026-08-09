@@ -86,6 +86,17 @@ export function moveSchemaDiagramRelationsToArea(
   }));
 }
 
+export function removeSchemaDiagramRelationsFromAreas(
+  areas: SchemaDiagramArea[],
+  relationNames: readonly string[],
+) {
+  const removing = new Set(relationNames);
+  return areas.map((area) => ({
+    ...area,
+    relationNames: area.relationNames.filter((name) => !removing.has(name)),
+  }));
+}
+
 export function autoArrangeSchemaDiagramArea(
   areas: SchemaDiagramArea[],
   targetAreaId: string,

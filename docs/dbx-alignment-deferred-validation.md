@@ -460,7 +460,11 @@ explicit deferred validation task rather than an implicit release check.
   aspect ratio or exhausting the WebView.
 - Exercise Ctrl/Cmd/Shift multi-select, exclusive move-to-area, parent-first
   auto-arrange, area removal and the 100-step undo/redo boundary. Area culling,
-  related-table focus and full export coordinates must remain consistent.
+  related-table focus and full export coordinates must remain consistent. Repeat
+  move/new/no-area from a relation context menu and auto-arrange/remove from an
+  area-title context menu; right-clicking outside the current multi-selection
+  must target only that relation, while right-clicking inside it preserves the
+  entire selection.
 - Verify selected+related and selected-area scope filters compose with text and
   keys-only filters. A hidden selection must surface the recovery action, which
   clears scope/search and centers the same relation without losing inspector state.
