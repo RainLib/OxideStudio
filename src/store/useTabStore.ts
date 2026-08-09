@@ -214,6 +214,16 @@ export interface EditorSelectionState {
   endColumn: number;
 }
 
+export interface EditorViewportState {
+  scrollTop: number;
+  scrollLeft: number;
+}
+
+export interface EditorViewSelectionState {
+  anchor: number;
+  head: number;
+}
+
 export interface ProjectFileImagePreview {
   kind: "image";
   mediaType: string;
@@ -284,6 +294,8 @@ export interface TabData {
   tableFilterSql?: string | null;
   tableFilters?: TableFilter[] | null;
   editorSelection?: EditorSelectionState | null;
+  editorViewport?: EditorViewportState;
+  editorViewSelection?: EditorViewSelectionState;
   editorPatchPreview?: EditorPatchPreview | null;
   agentFileDiffPreview?: AgentFileDiffPreview | null;
   gitFileDiffPreview?: GitFileDiffPreview | null;
@@ -819,7 +831,9 @@ interface TabState {
   setEditorSelection: (
     id: string,
     selection: EditorSelectionState | null,
+    viewSelection?: EditorViewSelectionState,
   ) => void;
+  setEditorViewport: (id: string, viewport: EditorViewportState) => void;
   previewEditorPatch: (tabId: string, patch: EditorPatchPreview) => void;
   dismissEditorPatch: (tabId: string, patchId?: string) => void;
   applyEditorPatchPreview: (
@@ -907,6 +921,40 @@ interface TabState {
     filters?: TableFilter[] | null,
     options?: TablePageLoadOptions,
   ) => Promise<boolean>;
+}
+
+function editorSelectionsEqual(
+  left: EditorSelectionState | null | undefined,
+  right: EditorSelectionState | null,
+) {
+  return left === right || Boolean(
+    left && right &&
+      left.text === right.text &&
+      left.startLineNumber === right.startLineNumber &&
+      left.startColumn === right.startColumn &&
+      left.endLineNumber === right.endLineNumber &&
+      left.endColumn === right.endColumn,
+  ) || (!left && !right);
+}
+
+function editorViewSelectionsEqual(
+  left: EditorViewSelectionState | undefined,
+  right: EditorViewSelectionState,
+) {
+  return Boolean(
+    left && left.anchor === right.anchor && left.head === right.head,
+  );
+}
+
+function editorViewportsEqual(
+  left: EditorViewportState | undefined,
+  right: EditorViewportState,
+) {
+  return Boolean(
+    left &&
+      left.scrollTop === right.scrollTop &&
+      left.scrollLeft === right.scrollLeft,
+  );
 }
 
 function normalizeDiagramAreaHistory(
@@ -1861,12 +1909,44 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
   },
 
-  setEditorSelection: (id: string, selection: EditorSelectionState | null) => {
-    set((state) => ({
-      tabs: state.tabs.map((t) =>
-        t.id === id ? { ...t, editorSelection: selection } : t,
-      ),
-    }));
+  setEditorSelection: (id, selection, viewSelection) => {
+    set((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === id);
+      if (
+        !tab ||
+        (editorSelectionsEqual(tab.editorSelection, selection) &&
+          (viewSelection === undefined ||
+            editorViewSelectionsEqual(tab.editorViewSelection, viewSelection)))
+      ) {
+        return state;
+      }
+      return {
+        tabs: state.tabs.map((candidate) =>
+          candidate.id === id
+            ? {
+                ...candidate,
+                editorSelection: selection,
+                editorViewSelection:
+                  viewSelection ?? candidate.editorViewSelection,
+              }
+            : candidate,
+        ),
+      };
+    });
+  },
+
+  setEditorViewport: (id, viewport) => {
+    set((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === id);
+      if (!tab || editorViewportsEqual(tab.editorViewport, viewport)) return state;
+      return {
+        tabs: state.tabs.map((candidate) =>
+          candidate.id === id
+            ? { ...candidate, editorViewport: viewport }
+            : candidate,
+        ),
+      };
+    });
   },
 
   previewEditorPatch: (tabId, patch) => {

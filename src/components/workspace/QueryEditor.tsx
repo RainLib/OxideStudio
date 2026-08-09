@@ -176,6 +176,7 @@ import {
   useConsoleFileController,
   useLspCompletionProviderCoordinator,
   useCachedSqlCompletionSource,
+  useMonacoEditorViewState,
   useLspCoreProviderCoordinator,
   useLspHoverProviderCoordinator,
   useLspDocumentLifecycle,
@@ -297,6 +298,7 @@ export function QueryEditor({
     setTargetSchema,
     setTargetDatabase,
     setEditorSelection,
+    setEditorViewport,
     setLspDiagnostics,
     applyEditorPatchPreview,
     dismissEditorPatch,
@@ -344,7 +346,6 @@ export function QueryEditor({
   const [mountedEditor, setMountedEditor] = useState<any>(null);
   const effectiveTabId = tabId === undefined ? activeTabId : tabId;
   const activeTabIdRef = useRef<string | null>(effectiveTabId);
-  const selectionDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const elasticsearchSuggestDisposableRef = useRef<{
     dispose: () => void;
   } | null>(null);
@@ -798,10 +799,26 @@ export function QueryEditor({
     activeTabIdRef.current = effectiveTabId;
   }, [effectiveTabId]);
 
+  useMonacoEditorViewState({
+    editor: mountedEditor,
+    ownerKey: effectiveTabId ? `${effectiveTabId}\u0000${documentUri}` : "",
+    initialSelection: activeTab?.editorViewSelection,
+    initialViewport: activeTab?.editorViewport,
+    onCursorPositionChange: setCursorPosition,
+    onSelectionChange: (selection, viewSelection) => {
+      const currentTabId = activeTabIdRef.current;
+      if (currentTabId) {
+        setEditorSelection(currentTabId, selection, viewSelection);
+      }
+    },
+    onViewportChange: (viewport) => {
+      const currentTabId = activeTabIdRef.current;
+      if (currentTabId) setEditorViewport(currentTabId, viewport);
+    },
+  });
+
   useEffect(() => {
     if (!isProjectFilePreview) return;
-    selectionDisposableRef.current?.dispose();
-    selectionDisposableRef.current = null;
     elasticsearchSuggestDisposableRef.current?.dispose();
     elasticsearchSuggestDisposableRef.current = null;
     editorRef.current = null;
@@ -810,8 +827,6 @@ export function QueryEditor({
 
   useEffect(() => {
     return () => {
-      selectionDisposableRef.current?.dispose();
-      selectionDisposableRef.current = null;
       elasticsearchSuggestDisposableRef.current?.dispose();
       elasticsearchSuggestDisposableRef.current = null;
       if (elasticsearchSuggestTimerRef.current !== null) {
@@ -2834,45 +2849,11 @@ export function QueryEditor({
             deletedText && !insertedText,
           );
         });
-      selectionDisposableRef.current?.dispose();
-      selectionDisposableRef.current = editor.onDidChangeCursorSelection(
-        (event: any) => {
-          const tabId = activeTabIdRef.current;
-          const model = editor.getModel();
-          if (!tabId || !model || !event.selection) return;
-
-          setCursorPosition({
-            line: event.selection.positionLineNumber,
-            column: event.selection.positionColumn,
-          });
-
-          const selectedText = model.getValueInRange(event.selection);
-          setEditorSelection(
-            tabId,
-            selectedText.trim()
-              ? {
-                  text: selectedText,
-                  startLineNumber: event.selection.startLineNumber,
-                  startColumn: event.selection.startColumn,
-                  endLineNumber: event.selection.endLineNumber,
-                  endColumn: event.selection.endColumn,
-                }
-              : null,
-          );
-        },
-      );
-      const initialPosition = editor.getPosition();
-      if (initialPosition) {
-        setCursorPosition({
-          line: initialPosition.lineNumber,
-          column: initialPosition.column,
-        });
-      }
       monacoInstance.editor.setTheme(
         mode === "light" ? "vs" : "oxide-dark",
       );
     },
-    [editorSettings.keybindingMode, mode, setEditorSelection],
+    [editorSettings.keybindingMode, mode],
   );
 
   const handleEditorBeforeMount = useCallback((monacoInstance: any) => {

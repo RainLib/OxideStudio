@@ -28,7 +28,7 @@
 | L06 | 本阶段增强 | 基于 FK、别名、CTE 和子查询作用域生成 JOIN/字段候选 | DBX `apps/desktop/src/lib/sql/semantic/completion.ts`、`apps/desktop/src/lib/sql/semantic/model.ts:308-427`、`apps/desktop/src/lib/sql/sqlCompletion.ts:2909` | `sqlJoinCompletion.ts` 已按外键生成完整 `JOIN … ON …`；缓存 fallback 识别 correlated outer alias、derived subquery、LATERAL/APPLY 与显式 table-function output columns。Bundled LSP 的 local relation overlay 现原生覆盖 CTE/derived/table-function/correlation scope、`WITH ORDINALITY`、partial positional rename、JOIN 后逗号 source、LATERAL/APPLY 派生表与函数；相关子查询只按需解析被限定的外层 alias，未限定列不泄漏。前端传入的 `catalog` 现由 Rust Schema 保留，三/四段限定、SQL Server `database..table` 和跨 catalog 同名表按 catalog + schema + table 消歧；table hint 和真实 `lateral` 表名不会误判。单一 SQL-noise 缓冲区和 512 KiB 上限约束按键路径 |
 | L07 | 本阶段增强 | 补全触发与排序应避免“空列表、重复候选、过期响应覆盖新输入” | ChartDB trigger 字符位于 `src/components/code-snippet/dbml/dbml-completion-provider.ts:19`；DBX `lib/sql/sqlCompletionTriggerPolicy.ts`、`lib/common/pinyin.ts`、`lib/common/completionMatch.ts` | Oxide 已有请求 generation、model version、cancellation 检查和 overload-aware 去重；现在提供智能位置/名称前缀/仅手动三种触发模式，LSP 请求前门控；live LSP 与缓存候选合并，Unicode、拼音首字母、camel/fuzzy 排序覆盖对象/列/FK JOIN；`sqlCompletionTelemetry.ts` 只记录无内容的触发/延迟/结果原因 |
 | L08 | 本阶段增强 | SQL/DBML 编辑差异预览的细粒度防抖与可撤销应用 | ChartDB `src/pages/editor-page/side-panel/dbml-section/table-dbml/table-dbml.tsx:265` 使用 debounce，`:284` 应用，`:306` 撤销 | Diagram 的 DBML Draft 对当前 snapshot 生成文本，250ms 防抖解析 relation/warning，确认后只调用 snapshot compare 打开只读 diff；offline plan 同时禁用 Apply 和 Open in console。textarea 原生 undo 可用；仍缺逐项接受和结构化 schema CRUD history |
-| L09 | 本阶段增强 | `QueryEditor.tsx` 仍承载过多 provider 和视图生命周期 | DBX 将 semantic、presentation、insertion、execution target、keymap 分文件；ChartDB 将 completion manager 单独封装 | completion 已分层，事务、执行和文件 workflow 已有独立 controller；LSP virtual-document lifecycle 独立管理 owner/version/text/FIFO/session。稳定协议、completion 与 metadata hover 分别由 coordinator 统一注册和销毁。metadata-sensitive relation/CTE/derived-field/FK JOIN fallback 现由稳定 request factory 独立管理，只在 connection/driver/metadata revision 变化时清理字段与约束缓存；owner key 继续拒绝跨连接/schema/LSP 状态/设置边界的迟到结果。八阶段累计从 `QueryEditor.tsx` 移出约 1,550 行。仍需迁出剩余 view lifecycle |
+| L09 | 本阶段增强 | `QueryEditor.tsx` 仍承载过多 provider 和视图生命周期 | DBX 将 semantic、presentation、insertion、execution target、keymap 分文件；ChartDB 将 completion manager 单独封装 | completion 已分层，事务、执行和文件 workflow 已有独立 controller；LSP virtual-document lifecycle 独立管理 owner/version/text/FIFO/session。稳定协议、completion 与 metadata hover 分别由 coordinator 统一注册和销毁。metadata-sensitive relation/CTE/derived-field/FK JOIN fallback 由稳定 request factory 独立管理，只在 connection/driver/metadata revision 变化时清理缓存。新增独立 Monaco view-state lifecycle：tab 级保存/恢复滚动和方向性选区，offset 有界夹取，滚动按 rAF 合并，等值 store 写入不再通知；owner key 隔离 tab/model 重挂载。仍需迁出 current-statement decoration 与 Console auto-suggest lifecycle |
 
 ## 2. 数据库结构、导入与迁移
 
@@ -94,7 +94,8 @@
 - [x] 扩大 outer correlation、LATERAL/APPLY 多方言语义 corpus，并保持内外 scope 隔离。
 - [x] 扩大三/四段 catalog、SQL Server `database..table` 多方言语义 corpus，并阻止跨 catalog 同名 metadata 泄漏。
 - [x] 迁出 metadata-sensitive relation/field/FK JOIN completion source，并隔离其缓存失效边界。
-- [ ] 继续迁出 QueryEditor view lifecycle。
+- [x] 增加独立 Monaco view-state lifecycle，对齐 DBX 的 tab 级 viewport/selection 保存恢复和 rAF 滚动同步。
+- [ ] 继续迁出 current-statement decoration 与 Console auto-suggest lifecycle。
 
 ### 阶段 B：迁移与结构格式
 

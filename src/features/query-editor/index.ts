@@ -141,6 +141,13 @@ export {
   type CachedSqlCompletionSourceOptions,
 } from "./hooks/useCachedSqlCompletionSource";
 export {
+  attachMonacoEditorViewState,
+  normalizedEditorViewSelection,
+  useMonacoEditorViewState,
+  type MonacoEditorViewStateOptions,
+  type UseMonacoEditorViewStateOptions,
+} from "./hooks/useMonacoEditorViewState";
+export {
   resolveQueryExecutionTarget,
   type QueryExecutionKind,
   type QueryExecutionMode,

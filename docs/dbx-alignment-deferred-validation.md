@@ -70,6 +70,11 @@ database target until its relevant queue entries pass.
   declared CTE/derived fields and the existing SQL source parser; strict
   TypeScript passed without loading Monaco or a database. Live metadata cache,
   FK JOIN and provider combinations remain deferred below.
+- Monaco editor view state now has an isolated lifecycle matching the DBX tab
+  behavior. Two focused tests cover bounded selection restoration, directional
+  offsets and rAF-batched viewport updates; strict TypeScript passed. Manual
+  WebView checks for focus, split panes and delayed layout restoration remain
+  deferred below.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an
