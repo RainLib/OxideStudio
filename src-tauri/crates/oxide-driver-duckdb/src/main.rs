@@ -628,12 +628,20 @@ fn value_to_json(value: ValueRef<'_>) -> Value {
         ValueRef::UHugeInt(value) => Value::String(value.to_string()),
         ValueRef::Decimal(value) => Value::String(format!("{value:?}")),
         ValueRef::Text(value) => Value::String(String::from_utf8_lossy(value).into_owned()),
-        ValueRef::Blob(value) => {
-            Value::String(value.iter().map(|byte| format!("{byte:02x}")).collect())
-        }
-        ValueRef::Geometry(value) => {
-            Value::String(value.iter().map(|byte| format!("{byte:02x}")).collect())
-        }
+        ValueRef::Blob(value) => Value::String(format!(
+            "0x{}",
+            value
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        )),
+        ValueRef::Geometry(value) => Value::String(format!(
+            "0x{}",
+            value
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        )),
         ValueRef::Timestamp(unit, value) => Value::String(format!("{unit:?}:{value}")),
         ValueRef::Date32(value) => json!(value),
         ValueRef::Time64(unit, value) => Value::String(format!("{unit:?}:{value}")),

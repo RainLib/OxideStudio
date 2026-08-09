@@ -66,6 +66,8 @@ interface TableDataToolbarProps {
   onExportSql: () => void;
   onExportTsv: () => void;
   onExportXlsx: () => void;
+  onExportParquet: () => void;
+  onExportArrow: () => void;
   onCancelExport?: () => void;
 }
 
@@ -105,6 +107,8 @@ export function TableDataToolbar({
   onExportSql,
   onExportTsv,
   onExportXlsx,
+  onExportParquet,
+  onExportArrow,
   onCancelExport,
 }: TableDataToolbarProps) {
   const mutationDisabled = isExecuting || readOnly || viewOnly || !editingEnabled;
@@ -296,6 +300,18 @@ export function TableDataToolbar({
               <DropdownMenuItem className="wb-menu-item" onSelect={onExportXlsx}>
                 <FileSpreadsheet className="mr-2 h-3.5 w-3.5" />
                 Export Excel workbook (.xlsx)
+              </DropdownMenuItem>
+            )}
+            {supportsExport("parquet") && (
+              <DropdownMenuItem className="wb-menu-item" onSelect={onExportParquet}>
+                <FileCode2 className="mr-2 h-3.5 w-3.5" />
+                Export Apache Parquet (.parquet)
+              </DropdownMenuItem>
+            )}
+            {supportsExport("arrow") && (
+              <DropdownMenuItem className="wb-menu-item" onSelect={onExportArrow}>
+                <FileCode2 className="mr-2 h-3.5 w-3.5" />
+                Export Arrow IPC file (.arrow)
               </DropdownMenuItem>
             )}
             {supportsExport("json") && (

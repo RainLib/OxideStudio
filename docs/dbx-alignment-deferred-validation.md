@@ -485,8 +485,15 @@ explicit deferred validation task rather than an implicit release check.
   harness starts; rerun those tests in CI. Verify each signed
   `tableExportFormats` combination is intersected with the encoders compiled
   into the application and that an IPC caller cannot bypass the backend gate.
-  Parquet/Arrow encoders and stable-snapshot resumable exports remain
-  implementation gaps.
+  Arrow IPC and Snappy Parquet encoders now have compile-time coverage and
+  writer lifecycle tests. Validate native PostgreSQL/MySQL/SQLite and signed
+  DuckDB round trips for NULL, signed/unsigned large integers, non-finite
+  floats, date/timestamp/timezone, binary, DECIMAL, JSON, arrays, custom types,
+  empty tables, cancellation, footer integrity, source-type field metadata,
+  coercion notices, 50,000-row/64-MiB Parquet row-group bounds and atomic
+  finalization. Generic JDBC/RQLite must remain without Parquet/Arrow until a
+  canonical value-encoding conformance contract exists. Stable-snapshot
+  resumable export remains an implementation gap.
 
 ## FK-aware JOIN completion and completion hot path
 

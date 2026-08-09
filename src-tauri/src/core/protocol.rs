@@ -180,7 +180,7 @@ pub struct ExplainPlan {
     pub warnings: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ColumnDef {
     pub name: String,
     pub data_type: String,

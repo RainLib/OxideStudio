@@ -253,7 +253,9 @@ fn default_true() -> bool {
     true
 }
 
-pub const HOST_TABLE_EXPORT_FORMATS: &[&str] = &["csv", "json", "jsonl", "sql", "tsv", "xlsx"];
+pub const HOST_TABLE_EXPORT_FORMATS: &[&str] = &[
+    "csv", "json", "jsonl", "sql", "tsv", "xlsx", "parquet", "arrow",
+];
 pub const DECLARED_TABLE_EXPORT_FORMATS: &[&str] = &[
     "csv", "json", "jsonl", "sql", "tsv", "xlsx", "parquet", "arrow",
 ];

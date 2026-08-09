@@ -68,6 +68,8 @@ describe("database dialect capabilities", () => {
       "sql",
       "tsv",
       "xlsx",
+      "parquet",
+      "arrow",
     ]);
     expect(defaultDatabaseCapabilities("redis").tableExportFormats).toEqual([]);
     expect(

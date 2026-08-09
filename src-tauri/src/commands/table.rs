@@ -2,13 +2,26 @@ use crate::core::{
     dialect::{canonical_driver_name, database_spec_for_driver, DatabaseKind},
     manager::ConnectionManager,
     protocol::{
-        ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult,
-        Response,
+        ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter,
+        QueryResult, Response,
     },
     statement::{validate_sql_filter_expression, StatementScanDialect},
     store::{MetaStore, Resource},
 };
+use arrow_array::{
+    builder::BinaryBuilder, ArrayRef, BooleanArray, Date32Array, Float64Array, Int64Array,
+    RecordBatch, StringArray, TimestampMicrosecondArray, UInt64Array,
+};
+use arrow_ipc::writer::FileWriter as ArrowIpcFileWriter;
+use arrow_schema::{
+    DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema, TimeUnit,
+};
 use calamine::{open_workbook_auto, Data, Reader};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use parquet::{
+    arrow::ArrowWriter as ParquetArrowWriter, basic::Compression as ParquetCompression,
+    file::properties::WriterProperties,
+};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -75,6 +88,8 @@ const TABLE_EXPORT_WRITER_CLOSED: &str = "TABLE_EXPORT_WRITER_CLOSED";
 /// keeps memory bounded while allowing one page to be fetched as the previous
 /// page is encoded and flushed to the operating-system cache.
 const TABLE_EXPORT_BUFFERED_PAGES: usize = 2;
+const PARQUET_MAX_ROW_GROUP_ROWS: usize = 50_000;
+const PARQUET_MAX_ROW_GROUP_BYTES: usize = 64 * 1024 * 1024;
 const TABLE_EXPORT_REPORT_PARENT_ID: &str = "table-export-reports-v1";
 const TABLE_EXPORT_REPORT_KIND: &str = "TABLE_EXPORT_REPORT";
 const TABLE_IMPORT_REPORT_PARENT_ID: &str = "table-import-reports-v1";
@@ -94,9 +109,11 @@ pub struct TablePageResult {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TableExportFormat {
+    Arrow,
     Csv,
     Json,
     Jsonl,
+    Parquet,
     Sql,
     Tsv,
     Xlsx,
@@ -105,9 +122,11 @@ pub enum TableExportFormat {
 impl TableExportFormat {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Arrow => "arrow",
             Self::Csv => "csv",
             Self::Json => "json",
             Self::Jsonl => "jsonl",
+            Self::Parquet => "parquet",
             Self::Sql => "sql",
             Self::Tsv => "tsv",
             Self::Xlsx => "xlsx",
@@ -134,6 +153,20 @@ pub struct TableExportResult {
     pub rows_exported: u64,
     pub batches: u64,
     pub report_id: Option<String>,
+    /// Analytical formats retain the source type in Arrow field metadata when
+    /// no lossless native mapping exists. The UI surfaces these bounded,
+    /// schema-only notices; row values are never included.
+    #[serde(default)]
+    pub type_coercions: Vec<TableExportTypeCoercion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableExportTypeCoercion {
+    pub column: String,
+    pub source_type: String,
+    pub output_type: String,
+    pub reason: String,
 }
 
 /// Terminal status persisted for an export audit record. The report never
@@ -926,21 +959,38 @@ async fn table_export_dialect_for_connection(
     connection_id: &str,
     driver: &str,
     format: TableExportFormat,
-) -> Result<DatabaseKind, String> {
+) -> Result<TableExportDialect, String> {
     let package_capabilities = manager
         .package_capabilities(connection_id)
         .await
         .map_err(|error| error.to_string())?;
     if let Some(capabilities) = package_capabilities {
         ensure_table_export_format(&capabilities, format)?;
-        return reviewed_table_data_dialect(&capabilities, false);
+        let kind = reviewed_table_data_dialect(&capabilities, false)?;
+        let analytical_type_policy = if capabilities.driver.trim().eq_ignore_ascii_case("duckdb") {
+            AnalyticalTypePolicy::DuckDb
+        } else {
+            AnalyticalTypePolicy::ExternalText
+        };
+        return Ok(TableExportDialect {
+            kind,
+            analytical_type_policy,
+        });
     }
 
     let capabilities = database_spec_for_driver(driver)
         .map(|spec| spec.capabilities())
         .ok_or_else(|| format!("Unsupported database driver: {}", driver.trim()))?;
     ensure_table_export_format(&capabilities, format)?;
-    table_data_dialect(driver)
+    let analytical_type_policy = match canonical_driver_name(driver) {
+        Some("sqlite") => AnalyticalTypePolicy::SqliteDynamic,
+        Some("duckdb") => AnalyticalTypePolicy::DuckDb,
+        _ => AnalyticalTypePolicy::Native,
+    };
+    Ok(TableExportDialect {
+        kind: table_data_dialect(driver)?,
+        analytical_type_policy,
+    })
 }
 
 /// Resolve the dialect used by the bounded table-to-table transfer path.
@@ -1205,9 +1255,11 @@ fn export_file_path(
         .map_err(|e| e.to_string())?
         .as_secs();
     let extension = match format {
+        TableExportFormat::Arrow => "arrow",
         TableExportFormat::Csv => "csv",
         TableExportFormat::Json => "json",
         TableExportFormat::Jsonl => "jsonl",
+        TableExportFormat::Parquet => "parquet",
         TableExportFormat::Sql => "sql",
         TableExportFormat::Tsv => "tsv",
         TableExportFormat::Xlsx => "xlsx",
@@ -1465,6 +1517,7 @@ struct TableExportWriterContext {
     export_id: String,
     final_path: PathBuf,
     kind: DatabaseKind,
+    analytical_type_policy: AnalyticalTypePolicy,
     schema: String,
     table: String,
     format: TableExportFormat,
@@ -1475,13 +1528,534 @@ struct TableExportWriterContext {
 
 enum TableExportWriterMessage {
     Batch {
-        columns: Vec<String>,
+        columns: Vec<ColumnDef>,
         rows: Vec<Vec<Value>>,
     },
     /// A file is published only after this explicit terminal message. A closed
     /// channel means the producer failed or was cancelled and leaves the
     /// temporary-file guard responsible for cleanup.
     Finish,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnalyticalTypePolicy {
+    Native,
+    SqliteDynamic,
+    DuckDb,
+    ExternalText,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TableExportDialect {
+    kind: DatabaseKind,
+    analytical_type_policy: AnalyticalTypePolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AnalyticalColumnKind {
+    Boolean,
+    Date32,
+    Float64,
+    Int64,
+    TimestampMicrosecond { utc: bool },
+    UInt64,
+    Binary,
+    Utf8,
+}
+
+struct AnalyticalExportPlan {
+    schema: Arc<ArrowSchema>,
+    columns: Vec<ColumnDef>,
+    kinds: Vec<AnalyticalColumnKind>,
+    type_coercions: Vec<TableExportTypeCoercion>,
+}
+
+impl AnalyticalExportPlan {
+    fn new(type_policy: AnalyticalTypePolicy, columns: Vec<ColumnDef>) -> Self {
+        let mut fields = Vec::with_capacity(columns.len());
+        let mut kinds = Vec::with_capacity(columns.len());
+        let mut type_coercions = Vec::new();
+        for column in &columns {
+            let (kind, output_type, coercion_reason) =
+                analytical_column_kind(type_policy, &column.data_type);
+            let mut metadata = HashMap::new();
+            metadata.insert("oxide.sourceDataType".to_string(), column.data_type.clone());
+            metadata.insert(
+                "oxide.exportRepresentation".to_string(),
+                output_type.to_string(),
+            );
+            fields.push(
+                ArrowField::new(&column.name, analytical_arrow_data_type(&kind), true)
+                    .with_metadata(metadata),
+            );
+            if let Some(reason) = coercion_reason {
+                type_coercions.push(TableExportTypeCoercion {
+                    column: column.name.clone(),
+                    source_type: column.data_type.clone(),
+                    output_type: output_type.to_string(),
+                    reason: reason.to_string(),
+                });
+            }
+            kinds.push(kind);
+        }
+        Self {
+            schema: Arc::new(ArrowSchema::new(fields)),
+            columns,
+            kinds,
+            type_coercions,
+        }
+    }
+
+    fn record_batch(&self, rows: &[Vec<Value>]) -> Result<RecordBatch, String> {
+        if let Some((row_index, row)) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.len() != self.columns.len())
+        {
+            return Err(format!(
+                "Cannot encode analytical export row {}: expected {} columns but received {}; no row value was included in this error",
+                row_index + 1,
+                self.columns.len(),
+                row.len()
+            ));
+        }
+        let mut arrays = Vec::<ArrayRef>::with_capacity(self.columns.len());
+        for (column_index, (column, kind)) in self.columns.iter().zip(self.kinds.iter()).enumerate()
+        {
+            let array: ArrayRef = match kind {
+                AnalyticalColumnKind::Boolean => Arc::new(BooleanArray::from(
+                    rows.iter()
+                        .enumerate()
+                        .map(|(row_index, row)| {
+                            analytical_bool(analytical_value_at(row, column_index))
+                                .map_err(|_| analytical_value_error(row_index, column, "Boolean"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                )),
+                AnalyticalColumnKind::Date32 => Arc::new(Date32Array::from(
+                    rows.iter()
+                        .enumerate()
+                        .map(|(row_index, row)| {
+                            analytical_date32(analytical_value_at(row, column_index))
+                                .map_err(|_| analytical_value_error(row_index, column, "Date32"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                )),
+                AnalyticalColumnKind::Float64 => Arc::new(Float64Array::from(
+                    rows.iter()
+                        .enumerate()
+                        .map(|(row_index, row)| {
+                            analytical_f64(analytical_value_at(row, column_index))
+                                .map_err(|_| analytical_value_error(row_index, column, "Float64"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                )),
+                AnalyticalColumnKind::Int64 => Arc::new(Int64Array::from(
+                    rows.iter()
+                        .enumerate()
+                        .map(|(row_index, row)| {
+                            analytical_i64(analytical_value_at(row, column_index))
+                                .map_err(|_| analytical_value_error(row_index, column, "Int64"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                )),
+                AnalyticalColumnKind::TimestampMicrosecond { utc } => {
+                    let values = rows
+                        .iter()
+                        .enumerate()
+                        .map(|(row_index, row)| {
+                            analytical_timestamp_micros(
+                                analytical_value_at(row, column_index),
+                                *utc,
+                            )
+                            .map_err(|_| {
+                                analytical_value_error(row_index, column, "Timestamp(Microsecond)")
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let array = TimestampMicrosecondArray::from(values);
+                    if *utc {
+                        Arc::new(array.with_timezone("UTC"))
+                    } else {
+                        Arc::new(array)
+                    }
+                }
+                AnalyticalColumnKind::UInt64 => Arc::new(UInt64Array::from(
+                    rows.iter()
+                        .enumerate()
+                        .map(|(row_index, row)| {
+                            analytical_u64(analytical_value_at(row, column_index))
+                                .map_err(|_| analytical_value_error(row_index, column, "UInt64"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                )),
+                AnalyticalColumnKind::Binary => {
+                    let mut builder = BinaryBuilder::new();
+                    for (row_index, row) in rows.iter().enumerate() {
+                        match analytical_binary(analytical_value_at(row, column_index)) {
+                            Ok(Some(value)) => builder.append_value(value),
+                            Ok(None) => builder.append_null(),
+                            Err(()) => {
+                                return Err(analytical_value_error(row_index, column, "Binary"))
+                            }
+                        }
+                    }
+                    Arc::new(builder.finish())
+                }
+                AnalyticalColumnKind::Utf8 => Arc::new(StringArray::from(
+                    rows.iter()
+                        .map(|row| analytical_utf8(analytical_value_at(row, column_index)))
+                        .collect::<Vec<_>>(),
+                )),
+            };
+            arrays.push(array);
+        }
+        RecordBatch::try_new(Arc::clone(&self.schema), arrays)
+            .map_err(|error| format!("Could not build analytical export batch: {error}"))
+    }
+}
+
+enum AnalyticalExportWriter {
+    Arrow(ArrowIpcFileWriter<File>),
+    Parquet(ParquetArrowWriter<File>),
+}
+
+impl AnalyticalExportWriter {
+    fn new(
+        format: TableExportFormat,
+        file: File,
+        schema: Arc<ArrowSchema>,
+    ) -> Result<Self, String> {
+        match format {
+            TableExportFormat::Arrow => ArrowIpcFileWriter::try_new(file, schema.as_ref())
+                .map(Self::Arrow)
+                .map_err(|error| format!("Could not initialize Arrow IPC export: {error}")),
+            TableExportFormat::Parquet => {
+                let properties = WriterProperties::builder()
+                    .set_compression(ParquetCompression::SNAPPY)
+                    .set_max_row_group_row_count(Some(PARQUET_MAX_ROW_GROUP_ROWS))
+                    .set_max_row_group_bytes(Some(PARQUET_MAX_ROW_GROUP_BYTES))
+                    .build();
+                ParquetArrowWriter::try_new(file, schema, Some(properties))
+                    .map(Self::Parquet)
+                    .map_err(|error| format!("Could not initialize Parquet export: {error}"))
+            }
+            _ => Err("Analytical writer requires Arrow or Parquet format".to_string()),
+        }
+    }
+
+    fn write(&mut self, batch: &RecordBatch) -> Result<(), String> {
+        match self {
+            Self::Arrow(writer) => writer
+                .write(batch)
+                .map_err(|error| format!("Could not write Arrow IPC batch: {error}")),
+            Self::Parquet(writer) => writer
+                .write(batch)
+                .map_err(|error| format!("Could not write Parquet batch: {error}")),
+        }
+    }
+
+    fn finish(self) -> Result<(), String> {
+        let file = match self {
+            Self::Arrow(writer) => writer
+                .into_inner()
+                .map_err(|error| format!("Could not finalize Arrow IPC export: {error}"))?,
+            Self::Parquet(writer) => writer
+                .into_inner()
+                .map_err(|error| format!("Could not finalize Parquet export: {error}"))?,
+        };
+        file.sync_all().map_err(|error| error.to_string())
+    }
+}
+
+fn analytical_column_kind(
+    type_policy: AnalyticalTypePolicy,
+    source_type: &str,
+) -> (AnalyticalColumnKind, &'static str, Option<&'static str>) {
+    if matches!(type_policy, AnalyticalTypePolicy::SqliteDynamic) {
+        return (
+            AnalyticalColumnKind::Utf8,
+            "Utf8",
+            Some("SQLite permits mixed storage classes within a declared column; the exact textual/JSON representation is retained with source-type metadata."),
+        );
+    }
+    if matches!(type_policy, AnalyticalTypePolicy::ExternalText) {
+        return (
+            AnalyticalColumnKind::Utf8,
+            "Utf8",
+            Some("The external driver has no signed canonical analytical value mapping; the exact textual/JSON representation is retained with source-type metadata."),
+        );
+    }
+    let normalized = source_type.trim().to_ascii_uppercase();
+    let base = normalized
+        .split_once('(')
+        .map_or(normalized.as_str(), |(base, _)| base)
+        .trim();
+    let unsigned_base = base.strip_suffix(" UNSIGNED").unwrap_or(base).trim();
+    if matches!(base, "BOOL" | "BOOLEAN") {
+        return (AnalyticalColumnKind::Boolean, "Boolean", None);
+    }
+    if base == "DATE" {
+        return (AnalyticalColumnKind::Date32, "Date32", None);
+    }
+    if matches!(base, "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE") {
+        return (
+            AnalyticalColumnKind::TimestampMicrosecond { utc: true },
+            "Timestamp(Microsecond, UTC)",
+            None,
+        );
+    }
+    if matches!(
+        base,
+        "TIMESTAMP" | "TIMESTAMP WITHOUT TIME ZONE" | "DATETIME" | "DATETIME2"
+    ) {
+        return (
+            AnalyticalColumnKind::TimestampMicrosecond { utc: false },
+            "Timestamp(Microsecond)",
+            None,
+        );
+    }
+    if matches!(
+        base,
+        "REAL" | "FLOAT" | "FLOAT4" | "FLOAT8" | "DOUBLE" | "DOUBLE PRECISION"
+    ) {
+        return (AnalyticalColumnKind::Float64, "Float64", None);
+    }
+    let integer_type = matches!(
+        unsigned_base,
+        "TINYINT"
+            | "SMALLINT"
+            | "INT2"
+            | "MEDIUMINT"
+            | "INT"
+            | "INTEGER"
+            | "INT4"
+            | "BIGINT"
+            | "INT8"
+            | "SERIAL"
+            | "BIGSERIAL"
+            | "YEAR"
+    );
+    if matches!(base, "UTINYINT" | "USMALLINT" | "UINTEGER" | "UBIGINT")
+        || integer_type && normalized.contains("UNSIGNED")
+    {
+        return (AnalyticalColumnKind::UInt64, "UInt64", None);
+    }
+    if integer_type {
+        return (AnalyticalColumnKind::Int64, "Int64", None);
+    }
+    if matches!(
+        base,
+        "BYTEA" | "BLOB" | "BINARY" | "VARBINARY" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB"
+    ) {
+        return (AnalyticalColumnKind::Binary, "Binary", None);
+    }
+    if matches!(
+        base,
+        "CHAR"
+            | "CHARACTER"
+            | "CHARACTER VARYING"
+            | "VARCHAR"
+            | "VARCHAR2"
+            | "NVARCHAR"
+            | "NVARCHAR2"
+            | "TEXT"
+            | "TINYTEXT"
+            | "MEDIUMTEXT"
+            | "LONGTEXT"
+            | "BPCHAR"
+            | "NAME"
+            | "CITEXT"
+            | "XML"
+            | "STRING"
+            | "ENUM"
+            | "SET"
+            | "UUID"
+    ) {
+        return (AnalyticalColumnKind::Utf8, "Utf8", None);
+    }
+    (
+        AnalyticalColumnKind::Utf8,
+        "Utf8",
+        Some("No lossless native Arrow mapping is available; the exact textual/JSON representation is retained with source-type metadata."),
+    )
+}
+
+fn analytical_arrow_data_type(kind: &AnalyticalColumnKind) -> ArrowDataType {
+    match kind {
+        AnalyticalColumnKind::Boolean => ArrowDataType::Boolean,
+        AnalyticalColumnKind::Date32 => ArrowDataType::Date32,
+        AnalyticalColumnKind::Float64 => ArrowDataType::Float64,
+        AnalyticalColumnKind::Int64 => ArrowDataType::Int64,
+        AnalyticalColumnKind::TimestampMicrosecond { utc } => {
+            ArrowDataType::Timestamp(TimeUnit::Microsecond, utc.then(|| Arc::<str>::from("UTC")))
+        }
+        AnalyticalColumnKind::UInt64 => ArrowDataType::UInt64,
+        AnalyticalColumnKind::Binary => ArrowDataType::Binary,
+        AnalyticalColumnKind::Utf8 => ArrowDataType::Utf8,
+    }
+}
+
+fn analytical_value_at(row: &[Value], column_index: usize) -> &Value {
+    row.get(column_index).unwrap_or(&Value::Null)
+}
+
+fn analytical_value_error(row_index: usize, column: &ColumnDef, output_type: &str) -> String {
+    format!(
+        "Cannot encode export row {} column {} from {} as {output_type}; no row value was included in this error",
+        row_index + 1,
+        column.name,
+        column.data_type
+    )
+}
+
+fn analytical_bool(value: &Value) -> Result<Option<bool>, ()> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Bool(value) => Ok(Some(*value)),
+        Value::Number(value) if value.as_i64() == Some(0) => Ok(Some(false)),
+        Value::Number(value) if value.as_i64() == Some(1) => Ok(Some(true)),
+        Value::String(value) if value.eq_ignore_ascii_case("true") || value == "1" => {
+            Ok(Some(true))
+        }
+        Value::String(value) if value.eq_ignore_ascii_case("false") || value == "0" => {
+            Ok(Some(false))
+        }
+        _ => Err(()),
+    }
+}
+
+fn analytical_i64(value: &Value) -> Result<Option<i64>, ()> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Number(value) => value.as_i64().map(Some).ok_or(()),
+        Value::String(value) => value.parse::<i64>().map(Some).map_err(|_| ()),
+        _ => Err(()),
+    }
+}
+
+fn analytical_u64(value: &Value) -> Result<Option<u64>, ()> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Number(value) => value.as_u64().map(Some).ok_or(()),
+        Value::String(value) => value.parse::<u64>().map(Some).map_err(|_| ()),
+        _ => Err(()),
+    }
+}
+
+fn analytical_f64(value: &Value) -> Result<Option<f64>, ()> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Number(value) => value.as_f64().map(Some).ok_or(()),
+        Value::String(value) => match value.as_str() {
+            "Infinity" => Ok(Some(f64::INFINITY)),
+            "-Infinity" => Ok(Some(f64::NEG_INFINITY)),
+            "NaN" => Ok(Some(f64::NAN)),
+            _ => value.parse::<f64>().map(Some).map_err(|_| ()),
+        },
+        _ => Err(()),
+    }
+}
+
+fn analytical_date32(value: &Value) -> Result<Option<i32>, ()> {
+    if let Some(value) = value.as_i64() {
+        return i32::try_from(value).map(Some).map_err(|_| ());
+    }
+    let Value::String(value) = value else {
+        return if value.is_null() { Ok(None) } else { Err(()) };
+    };
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| ())?;
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid Unix epoch date");
+    i32::try_from((date - epoch).num_days())
+        .map(Some)
+        .map_err(|_| ())
+}
+
+fn analytical_timestamp_micros(value: &Value, utc: bool) -> Result<Option<i64>, ()> {
+    let Value::String(value) = value else {
+        return if value.is_null() { Ok(None) } else { Err(()) };
+    };
+    if let Some((unit, raw_value)) = value.split_once(':') {
+        let normalized_unit = unit.to_ascii_lowercase();
+        if matches!(
+            normalized_unit.as_str(),
+            "second"
+                | "seconds"
+                | "millisecond"
+                | "milliseconds"
+                | "microsecond"
+                | "microseconds"
+                | "nanosecond"
+                | "nanoseconds"
+        ) {
+            let raw_value = raw_value.parse::<i64>().map_err(|_| ())?;
+            let micros = match normalized_unit.as_str() {
+                "second" | "seconds" => raw_value.checked_mul(1_000_000),
+                "millisecond" | "milliseconds" => raw_value.checked_mul(1_000),
+                "microsecond" | "microseconds" => Some(raw_value),
+                "nanosecond" | "nanoseconds" if raw_value % 1_000 == 0 => Some(raw_value / 1_000),
+                _ => None,
+            };
+            return micros.map(Some).ok_or(());
+        }
+    }
+    if utc {
+        return DateTime::parse_from_rfc3339(value)
+            .map(|value| Some(value.with_timezone(&Utc).timestamp_micros()))
+            .map_err(|_| ());
+    }
+    [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+    ]
+    .iter()
+    .find_map(|format| NaiveDateTime::parse_from_str(value, format).ok())
+    .map(|value| Some(value.and_utc().timestamp_micros()))
+    .ok_or(())
+}
+
+fn analytical_binary(value: &Value) -> Result<Option<Vec<u8>>, ()> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(value) => {
+            let Some(hex) = value
+                .strip_prefix("\\x")
+                .or_else(|| value.strip_prefix("0x"))
+            else {
+                return Ok(Some(value.as_bytes().to_vec()));
+            };
+            if hex.len() % 2 != 0 {
+                return Err(());
+            }
+            (0..hex.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).map_err(|_| ()))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some)
+        }
+        Value::Array(values) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|value| u8::try_from(value).ok())
+                    .ok_or(())
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        _ => Err(()),
+    }
+}
+
+fn analytical_utf8(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Array(_) | Value::Object(_) => serde_json::to_string(value).ok(),
+    }
 }
 
 /// Blocking file and compression work is deliberately isolated from Tokio's
@@ -1498,6 +2072,7 @@ fn write_table_export_stream(
         export_id,
         final_path,
         kind,
+        analytical_type_policy,
         schema,
         table,
         format,
@@ -1507,10 +2082,25 @@ fn write_table_export_stream(
     } = context;
     let mut temporary_file = ExportTemporaryFile::create(&final_path)?;
     let file = File::create(&temporary_file.path).map_err(|error| error.to_string())?;
-    let (mut text_writer, mut xlsx_writer) = match format {
-        TableExportFormat::Xlsx => (None, Some(StreamingXlsxWriter::new(file))),
-        _ => (Some(BufWriter::new(file)), None),
+    let mut file = Some(file);
+    let mut text_writer = if matches!(
+        format,
+        TableExportFormat::Csv
+            | TableExportFormat::Json
+            | TableExportFormat::Jsonl
+            | TableExportFormat::Sql
+            | TableExportFormat::Tsv
+    ) {
+        Some(BufWriter::new(
+            file.take().expect("text export owns the output file"),
+        ))
+    } else {
+        None
     };
+    let mut xlsx_writer = matches!(format, TableExportFormat::Xlsx)
+        .then(|| StreamingXlsxWriter::new(file.take().expect("XLSX export owns the output file")));
+    let mut analytical_plan: Option<AnalyticalExportPlan> = None;
+    let mut analytical_writer: Option<AnalyticalExportWriter> = None;
     if matches!(encoding, TableExportEncoding::Utf8Bom) {
         text_writer
             .as_mut()
@@ -1519,7 +2109,8 @@ fn write_table_export_stream(
             .map_err(|error| error.to_string())?;
     }
 
-    let mut columns = Vec::<String>::new();
+    let mut columns = Vec::<ColumnDef>::new();
+    let mut column_names = Vec::<String>::new();
     let mut columns_initialized = false;
     let mut wrote_json_row = false;
     let mut wrote_delimited_header = false;
@@ -1562,21 +2153,37 @@ fn write_table_export_stream(
                 rows,
             } => {
                 if columns_initialized {
-                    if columns != batch_columns {
-                        return Err(
-                            "Export column metadata changed between database pages".to_string()
-                        );
+                    if columns
+                        .iter()
+                        .map(|column| column.name.as_str())
+                        .ne(batch_columns.iter().map(|column| column.name.as_str()))
+                    {
+                        return Err("Export columns changed between database pages".to_string());
                     }
                 } else {
                     columns = batch_columns;
+                    column_names = columns.iter().map(|column| column.name.clone()).collect();
                     columns_initialized = true;
+                    if matches!(
+                        format,
+                        TableExportFormat::Arrow | TableExportFormat::Parquet
+                    ) {
+                        let plan =
+                            AnalyticalExportPlan::new(analytical_type_policy, columns.clone());
+                        analytical_writer = Some(AnalyticalExportWriter::new(
+                            format,
+                            file.take().expect("analytical export owns the output file"),
+                            Arc::clone(&plan.schema),
+                        )?);
+                        analytical_plan = Some(plan);
+                    }
                 }
 
                 if matches!(format, TableExportFormat::Xlsx) && !wrote_xlsx_header {
                     xlsx_writer
                         .as_mut()
                         .expect("XLSX writer exists for XLSX exports")
-                        .write_header(&columns)?;
+                        .write_header(&column_names)?;
                     wrote_xlsx_header = true;
                 }
                 if matches!(format, TableExportFormat::Csv | TableExportFormat::Tsv)
@@ -1587,7 +2194,7 @@ fn write_table_export_stream(
                     } else {
                         ","
                     };
-                    let header = columns
+                    let header = column_names
                         .iter()
                         .map(|column| {
                             let value = Value::String(column.clone());
@@ -1609,69 +2216,89 @@ fn write_table_export_stream(
                     wrote_delimited_header = true;
                 }
 
-                for row in &rows {
-                    if *cancel_rx.borrow() {
-                        return Err(format!(
-                            "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
-                        ));
+                if matches!(
+                    format,
+                    TableExportFormat::Arrow | TableExportFormat::Parquet
+                ) {
+                    if !rows.is_empty() {
+                        let batch = analytical_plan
+                            .as_ref()
+                            .expect("analytical plan exists after column initialization")
+                            .record_batch(&rows)?;
+                        analytical_writer
+                            .as_mut()
+                            .expect("analytical writer exists after column initialization")
+                            .write(&batch)?;
                     }
-                    match format {
-                        TableExportFormat::Csv => {
-                            let line = row.iter().map(csv_escape).collect::<Vec<_>>().join(",");
-                            writeln!(
-                                text_writer
-                                    .as_mut()
-                                    .expect("text writer exists for CSV exports"),
-                                "{line}"
-                            )
-                            .map_err(|error| error.to_string())?;
+                } else {
+                    for row in &rows {
+                        if *cancel_rx.borrow() {
+                            return Err(format!(
+                                "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
+                            ));
                         }
-                        TableExportFormat::Json => {
-                            let writer = text_writer
-                                .as_mut()
-                                .expect("text writer exists for JSON exports");
-                            if wrote_json_row {
-                                writer.write_all(b",").map_err(|error| error.to_string())?;
+                        match format {
+                            TableExportFormat::Arrow | TableExportFormat::Parquet => {
+                                unreachable!("analytical batches are written outside the row loop")
                             }
-                            let object = row_to_object(&columns, row);
-                            serde_json::to_writer(&mut *writer, &object)
+                            TableExportFormat::Csv => {
+                                let line = row.iter().map(csv_escape).collect::<Vec<_>>().join(",");
+                                writeln!(
+                                    text_writer
+                                        .as_mut()
+                                        .expect("text writer exists for CSV exports"),
+                                    "{line}"
+                                )
                                 .map_err(|error| error.to_string())?;
-                            wrote_json_row = true;
-                        }
-                        TableExportFormat::Jsonl => {
-                            let writer = text_writer
-                                .as_mut()
-                                .expect("text writer exists for JSON Lines exports");
-                            let object = row_to_object(&columns, row);
-                            serde_json::to_writer(&mut *writer, &object)
+                            }
+                            TableExportFormat::Json => {
+                                let writer = text_writer
+                                    .as_mut()
+                                    .expect("text writer exists for JSON exports");
+                                if wrote_json_row {
+                                    writer.write_all(b",").map_err(|error| error.to_string())?;
+                                }
+                                let object = row_to_object(&column_names, row);
+                                serde_json::to_writer(&mut *writer, &object)
+                                    .map_err(|error| error.to_string())?;
+                                wrote_json_row = true;
+                            }
+                            TableExportFormat::Jsonl => {
+                                let writer = text_writer
+                                    .as_mut()
+                                    .expect("text writer exists for JSON Lines exports");
+                                let object = row_to_object(&column_names, row);
+                                serde_json::to_writer(&mut *writer, &object)
+                                    .map_err(|error| error.to_string())?;
+                                writer.write_all(b"\n").map_err(|error| error.to_string())?;
+                            }
+                            TableExportFormat::Sql => {
+                                writeln!(
+                                    text_writer
+                                        .as_mut()
+                                        .expect("text writer exists for SQL exports"),
+                                    "{}",
+                                    sql_insert_statement(kind, &schema, &table, &column_names, row)
+                                )
                                 .map_err(|error| error.to_string())?;
-                            writer.write_all(b"\n").map_err(|error| error.to_string())?;
-                        }
-                        TableExportFormat::Sql => {
-                            writeln!(
-                                text_writer
+                            }
+                            TableExportFormat::Tsv => {
+                                let line =
+                                    row.iter().map(tsv_escape).collect::<Vec<_>>().join("\t");
+                                writeln!(
+                                    text_writer
+                                        .as_mut()
+                                        .expect("text writer exists for TSV exports"),
+                                    "{line}"
+                                )
+                                .map_err(|error| error.to_string())?;
+                            }
+                            TableExportFormat::Xlsx => {
+                                xlsx_writer
                                     .as_mut()
-                                    .expect("text writer exists for SQL exports"),
-                                "{}",
-                                sql_insert_statement(kind, &schema, &table, &columns, row)
-                            )
-                            .map_err(|error| error.to_string())?;
-                        }
-                        TableExportFormat::Tsv => {
-                            let line = row.iter().map(tsv_escape).collect::<Vec<_>>().join("\t");
-                            writeln!(
-                                text_writer
-                                    .as_mut()
-                                    .expect("text writer exists for TSV exports"),
-                                "{line}"
-                            )
-                            .map_err(|error| error.to_string())?;
-                        }
-                        TableExportFormat::Xlsx => {
-                            xlsx_writer
-                                .as_mut()
-                                .expect("XLSX writer exists for XLSX exports")
-                                .write_row(row)?;
+                                    .expect("XLSX writer exists for XLSX exports")
+                                    .write_row(row)?;
+                            }
                         }
                     }
                 }
@@ -1717,6 +2344,26 @@ fn write_table_export_stream(
     if let Some(writer) = xlsx_writer.take() {
         writer.finish()?;
     }
+    if matches!(
+        format,
+        TableExportFormat::Arrow | TableExportFormat::Parquet
+    ) && analytical_writer.is_none()
+    {
+        let plan = AnalyticalExportPlan::new(analytical_type_policy, Vec::new());
+        analytical_writer = Some(AnalyticalExportWriter::new(
+            format,
+            file.take()
+                .expect("empty analytical export owns the output file"),
+            Arc::clone(&plan.schema),
+        )?);
+        analytical_plan = Some(plan);
+    }
+    if let Some(writer) = analytical_writer.take() {
+        writer.finish()?;
+    }
+    let type_coercions = analytical_plan
+        .map(|plan| plan.type_coercions)
+        .unwrap_or_default();
     temporary_file.finalize(&final_path)?;
 
     Ok(TableExportResult {
@@ -1725,6 +2372,7 @@ fn write_table_export_stream(
         rows_exported,
         batches,
         report_id: None,
+        type_coercions,
     })
 }
 
@@ -6371,12 +7019,21 @@ pub async fn export_table_data(
         return Err("UTF-8 BOM output is supported only for CSV exports".to_string());
     }
     if matches!(requested_encoding, TableExportEncoding::Binary)
-        && !matches!(format, TableExportFormat::Xlsx)
+        && !matches!(
+            format,
+            TableExportFormat::Arrow | TableExportFormat::Parquet | TableExportFormat::Xlsx
+        )
     {
         cancellation.take(&export_id).await;
-        return Err("Binary output encoding is supported only for XLSX exports".to_string());
+        return Err(
+            "Binary output encoding is supported only for Arrow, Parquet, and XLSX exports"
+                .to_string(),
+        );
     }
-    let encoding = if matches!(format, TableExportFormat::Xlsx) {
+    let encoding = if matches!(
+        format,
+        TableExportFormat::Arrow | TableExportFormat::Parquet | TableExportFormat::Xlsx
+    ) {
         TableExportEncoding::Binary
     } else {
         requested_encoding
@@ -6384,8 +7041,10 @@ pub async fn export_table_data(
     let progress_rows = Arc::new(AtomicU64::new(0));
     let progress_batches = Arc::new(AtomicU64::new(0));
     let result: Result<TableExportResult, String> = async {
-        let kind =
+        let export_dialect =
             table_export_dialect_for_connection(&manager, &connection_id, &driver, format).await?;
+        let kind = export_dialect.kind;
+        let analytical_type_policy = export_dialect.analytical_type_policy;
         let page_size = page_size
             .unwrap_or(DEFAULT_PAGE_SIZE)
             .clamp(1, MAX_PAGE_SIZE);
@@ -6400,12 +7059,27 @@ pub async fn export_table_data(
             })
             .filter(|filters| !filters.is_empty());
         let requested_sort = sort.as_ref().filter(|sort| !sort.column.trim().is_empty());
-        let metadata_required = structured_filters.is_some() || requested_sort.is_some();
-        let columns_metadata = match manager.get_columns(&connection_id, &schema, &table).await {
-            Ok(columns) => Some(column_lookup(columns)),
+        let analytical_export = matches!(
+            format,
+            TableExportFormat::Arrow | TableExportFormat::Parquet
+        );
+        let metadata_required =
+            structured_filters.is_some() || requested_sort.is_some() || analytical_export;
+        let table_columns = match manager.get_columns(&connection_id, &schema, &table).await {
+            Ok(columns) => Some(columns),
             Err(error) if metadata_required => return Err(error.to_string()),
             Err(_) => None,
         };
+        let columns_metadata = table_columns.clone().map(column_lookup);
+        let analytical_columns = table_columns.map(|columns| {
+            columns
+                .into_iter()
+                .map(|column| ColumnDef {
+                    name: column.name,
+                    data_type: column.data_type,
+                })
+                .collect::<Vec<_>>()
+        });
         let order_clause = if let Some(columns) = columns_metadata.as_ref() {
             build_table_order_by(kind, columns, requested_sort)?
         } else {
@@ -6450,6 +7124,7 @@ pub async fn export_table_data(
                         export_id: writer_export_id,
                         final_path: file_path,
                         kind,
+                        analytical_type_policy,
                         schema: writer_schema,
                         table: writer_table,
                         format,
@@ -6526,12 +7201,23 @@ pub async fn export_table_data(
                     .next()
                     .unwrap_or_else(|| QueryResult::rows(Vec::new(), Vec::new()));
                 let page_rows = result.rows.len() as u64;
-                let message = TableExportWriterMessage::Batch {
-                    columns: result
-                        .columns
+                let batch_columns = if let Some(columns) = analytical_columns.as_ref() {
+                    if columns
                         .iter()
-                        .map(|column| column.name.clone())
-                        .collect(),
+                        .map(|column| column.name.as_str())
+                        .ne(result.columns.iter().map(|column| column.name.as_str()))
+                    {
+                        return Err(
+                            "Analytical export query columns do not match table metadata"
+                                .to_string(),
+                        );
+                    }
+                    columns.clone()
+                } else {
+                    result.columns
+                };
+                let message = TableExportWriterMessage::Batch {
+                    columns: batch_columns,
                     rows: result.rows,
                 };
                 tokio::select! {
@@ -9371,6 +10057,7 @@ pub async fn get_table_ddl(
 #[cfg(test)]
 mod tests {
     use super::{
+        analytical_binary, analytical_column_kind, analytical_date32, analytical_timestamp_micros,
         apply_transfer_conversion, bounded_table_data_transfer_message,
         build_add_table_column_statements, build_alter_table_column_statements,
         build_create_check_constraint_statement, build_create_foreign_key_statement,
@@ -9405,11 +10092,12 @@ mod tests {
         validate_table_data_transfer_overwrite_rows, validate_xlsx_headers,
         validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
         xlsx_cell_value, xlsx_column_name, xlsx_escape_text, AlterColumnValueMode,
-        AlterTableColumn, CreateTableColumn, RelationOperation, StreamingXlsxWriter,
-        TableCsvColumnMapping, TableCsvImportOptions, TableDataTransferBatchPlanRequest,
-        TableDataTransferCancellationState, TableDataTransferColumnMapping,
-        TableDataTransferCompatibility, TableDataTransferConversion, TableDataTransferEndpoint,
-        TableDataTransferMode, TableDataTransferRequest, TableDataTransferTargetColumn,
+        AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy, CreateTableColumn,
+        RelationOperation, StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
+        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
+        TableDataTransferColumnMapping, TableDataTransferCompatibility,
+        TableDataTransferConversion, TableDataTransferEndpoint, TableDataTransferMode,
+        TableDataTransferRequest, TableDataTransferTargetColumn,
         TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
         TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
         TableFilter, TableRowUpdate, TableSort, MAX_JSON_IMPORT_PREVIEW_ROWS,
@@ -9420,8 +10108,8 @@ mod tests {
         driver::DatabaseDriver,
         manager::ConnectionManager,
         protocol::{
-            ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter,
-            QueryResult,
+            ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement,
+            QueryParameter, QueryResult,
         },
     };
     use anyhow::Result;
@@ -12173,25 +12861,36 @@ WITH DATA;"#
         );
     }
 
-    fn test_export_writer_context(final_path: PathBuf) -> TableExportWriterContext {
+    fn test_export_writer_context(
+        final_path: PathBuf,
+        format: TableExportFormat,
+    ) -> TableExportWriterContext {
         TableExportWriterContext {
             app: None,
             export_id: "export-test".to_string(),
             final_path,
             kind: DatabaseKind::Postgres,
+            analytical_type_policy: AnalyticalTypePolicy::Native,
             schema: "public".to_string(),
             table: "users".to_string(),
-            format: TableExportFormat::Jsonl,
-            encoding: TableExportEncoding::Utf8,
+            format,
+            encoding: if matches!(
+                format,
+                TableExportFormat::Arrow | TableExportFormat::Parquet
+            ) {
+                TableExportEncoding::Binary
+            } else {
+                TableExportEncoding::Utf8
+            },
             progress_rows: Arc::new(AtomicU64::new(0)),
             progress_batches: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    fn unique_export_test_path(label: &str) -> PathBuf {
+    fn unique_export_test_path(label: &str, extension: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "oxide-table-export-{label}-{}.jsonl",
-            uuid::Uuid::new_v4()
+            "oxide-table-export-{label}-{}.{extension}",
+            uuid::Uuid::new_v4(),
         ))
     }
 
@@ -12217,8 +12916,8 @@ WITH DATA;"#
 
     #[tokio::test(flavor = "multi_thread")]
     async fn export_writer_publishes_only_after_explicit_finish() {
-        let final_path = unique_export_test_path("finish");
-        let context = test_export_writer_context(final_path.clone());
+        let final_path = unique_export_test_path("finish", "jsonl");
+        let context = test_export_writer_context(final_path.clone(), TableExportFormat::Jsonl);
         let (sender, receiver) = mpsc::channel(2);
         let (_cancel_sender, cancel_rx) = watch::channel(false);
         let writer = tokio::task::spawn_blocking(move || {
@@ -12227,7 +12926,16 @@ WITH DATA;"#
 
         sender
             .send(TableExportWriterMessage::Batch {
-                columns: vec!["id".to_string(), "name".to_string()],
+                columns: vec![
+                    ColumnDef {
+                        name: "id".to_string(),
+                        data_type: "INTEGER".to_string(),
+                    },
+                    ColumnDef {
+                        name: "name".to_string(),
+                        data_type: "TEXT".to_string(),
+                    },
+                ],
                 rows: vec![vec![json!(1), json!("Ada")]],
             })
             .await
@@ -12249,8 +12957,8 @@ WITH DATA;"#
 
     #[tokio::test(flavor = "multi_thread")]
     async fn export_writer_removes_partial_when_producer_stops_without_finish() {
-        let final_path = unique_export_test_path("interrupted");
-        let context = test_export_writer_context(final_path.clone());
+        let final_path = unique_export_test_path("interrupted", "jsonl");
+        let context = test_export_writer_context(final_path.clone(), TableExportFormat::Jsonl);
         let (sender, receiver) = mpsc::channel(2);
         let (_cancel_sender, cancel_rx) = watch::channel(false);
         let writer = tokio::task::spawn_blocking(move || {
@@ -12259,7 +12967,10 @@ WITH DATA;"#
 
         sender
             .send(TableExportWriterMessage::Batch {
-                columns: vec!["id".to_string()],
+                columns: vec![ColumnDef {
+                    name: "id".to_string(),
+                    data_type: "INTEGER".to_string(),
+                }],
                 rows: vec![vec![json!(1)]],
             })
             .await
@@ -12270,6 +12981,116 @@ WITH DATA;"#
         assert!(error.contains("before completion"));
         assert!(!final_path.exists());
         assert!(matching_export_partials(&final_path).is_empty());
+    }
+
+    async fn assert_analytical_export_file(
+        format: TableExportFormat,
+        extension: &str,
+        magic: &[u8],
+    ) {
+        let final_path = unique_export_test_path(extension, extension);
+        let context = test_export_writer_context(final_path.clone(), format);
+        let (sender, receiver) = mpsc::channel(2);
+        let (_cancel_sender, cancel_rx) = watch::channel(false);
+        let writer = tokio::task::spawn_blocking(move || {
+            write_table_export_stream(context, receiver, cancel_rx)
+        });
+
+        sender
+            .send(TableExportWriterMessage::Batch {
+                columns: vec![
+                    ColumnDef {
+                        name: "id".to_string(),
+                        data_type: "BIGINT".to_string(),
+                    },
+                    ColumnDef {
+                        name: "enabled".to_string(),
+                        data_type: "BOOLEAN".to_string(),
+                    },
+                    ColumnDef {
+                        name: "amount".to_string(),
+                        data_type: "NUMERIC(38, 12)".to_string(),
+                    },
+                ],
+                rows: vec![vec![
+                    json!("9223372036854775807"),
+                    json!(true),
+                    json!("12345678901234567890.123456789012"),
+                ]],
+            })
+            .await
+            .unwrap();
+        sender.send(TableExportWriterMessage::Finish).await.unwrap();
+        drop(sender);
+
+        let result = writer.await.unwrap().unwrap();
+        assert_eq!(result.rows_exported, 1);
+        assert_eq!(result.batches, 1);
+        assert_eq!(result.type_coercions.len(), 1);
+        assert_eq!(result.type_coercions[0].column, "amount");
+        assert_eq!(result.type_coercions[0].source_type, "NUMERIC(38, 12)");
+        let contents = fs::read(&final_path).unwrap();
+        assert!(contents.starts_with(magic));
+        assert!(contents.ends_with(magic));
+        assert!(matching_export_partials(&final_path).is_empty());
+        fs::remove_file(final_path).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn arrow_export_writes_a_complete_ipc_file_with_type_metadata() {
+        assert_analytical_export_file(TableExportFormat::Arrow, "arrow", b"ARROW1").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parquet_export_writes_a_complete_file_with_type_metadata() {
+        assert_analytical_export_file(TableExportFormat::Parquet, "parquet", b"PAR1").await;
+    }
+
+    #[test]
+    fn analytical_type_plan_covers_native_and_duckdb_scalar_types() {
+        assert_eq!(
+            analytical_column_kind(AnalyticalTypePolicy::Native, "BIGINT UNSIGNED").0,
+            AnalyticalColumnKind::UInt64
+        );
+        assert_eq!(
+            analytical_column_kind(AnalyticalTypePolicy::DuckDb, "UBIGINT").0,
+            AnalyticalColumnKind::UInt64
+        );
+        assert_eq!(
+            analytical_column_kind(AnalyticalTypePolicy::Native, "TIMESTAMP WITH TIME ZONE",).0,
+            AnalyticalColumnKind::TimestampMicrosecond { utc: true }
+        );
+        assert_eq!(
+            analytical_column_kind(AnalyticalTypePolicy::Native, "MEDIUMBLOB").0,
+            AnalyticalColumnKind::Binary
+        );
+        let decimal = analytical_column_kind(AnalyticalTypePolicy::Native, "DECIMAL(38, 12)");
+        assert_eq!(decimal.0, AnalyticalColumnKind::Utf8);
+        assert!(decimal.2.is_some());
+        let sqlite = analytical_column_kind(AnalyticalTypePolicy::SqliteDynamic, "INTEGER");
+        assert_eq!(sqlite.0, AnalyticalColumnKind::Utf8);
+        assert!(sqlite.2.unwrap().contains("mixed storage classes"));
+    }
+
+    #[test]
+    fn analytical_value_conversions_accept_canonical_driver_representations() {
+        assert_eq!(analytical_date32(&json!(0)).unwrap(), Some(0));
+        assert_eq!(
+            analytical_timestamp_micros(&json!("Microsecond:123456"), false).unwrap(),
+            Some(123_456)
+        );
+        assert_eq!(
+            analytical_timestamp_micros(&json!("1970-01-01T00:00:01Z"), true).unwrap(),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            analytical_binary(&json!("0x00ff10")).unwrap(),
+            Some(vec![0x00, 0xff, 0x10])
+        );
+        assert_eq!(
+            analytical_binary(&json!("plain text")).unwrap(),
+            Some(b"plain text".to_vec())
+        );
     }
 
     #[test]

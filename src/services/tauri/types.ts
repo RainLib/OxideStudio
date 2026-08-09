@@ -447,11 +447,15 @@ export interface TableSort {
   direction: "asc" | "desc";
 }
 
-export type TableExportFormat = Exclude<
-  DatabaseTableExportFormat,
-  "parquet" | "arrow"
->;
+export type TableExportFormat = DatabaseTableExportFormat;
 export type TableExportEncoding = "utf8" | "utf8Bom" | "binary";
+
+export interface TableExportTypeCoercion {
+  column: string;
+  sourceType: string;
+  outputType: string;
+  reason: string;
+}
 
 export interface TableExportResult {
   exportId: string;
@@ -460,6 +464,8 @@ export interface TableExportResult {
   batches: number;
   /** Present only when a valid project ID was supplied and local audit storage succeeded. */
   reportId?: string | null;
+  /** Schema-only notices for analytical columns represented losslessly as UTF-8. */
+  typeCoercions: TableExportTypeCoercion[];
 }
 
 export interface TableExportProgress {

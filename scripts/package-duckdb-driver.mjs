@@ -34,7 +34,7 @@ const CAPABILITIES = {
   defaultPort: 0,
   supportsSqlQuery: true,
   supportsTableBrowsing: true,
-  tableExportFormats: ["csv", "json", "jsonl", "sql", "tsv", "xlsx"],
+  tableExportFormats: ["csv", "json", "jsonl", "sql", "tsv", "xlsx", "parquet", "arrow"],
   supportsTableRowMutation: false,
   // Copying a bounded table page through a target-side transaction is a
   // reviewed capability distinct from interactive Grid mutations.

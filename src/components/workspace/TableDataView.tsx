@@ -78,6 +78,8 @@ const HOST_TABLE_EXPORT_FORMATS: readonly TableExportFormat[] = [
   "sql",
   "tsv",
   "xlsx",
+  "parquet",
+  "arrow",
 ];
 
 export function TableDataView() {
@@ -880,9 +882,24 @@ export function TableDataView() {
         activeTab.tableFilters || undefined,
         sort,
       );
+      const coercionPreview = exported.typeCoercions
+        .slice(0, 3)
+        .map(
+          (coercion) =>
+            `${coercion.column} (${coercion.sourceType}→${coercion.outputType})`,
+        )
+        .join(", ");
+      const remainingCoercions = Math.max(
+        0,
+        exported.typeCoercions.length - 3,
+      );
+      const coercionDetail =
+        exported.typeCoercions.length > 0
+          ? `; UTF-8 with source metadata: ${coercionPreview}${remainingCoercions > 0 ? ` +${remainingCoercions.toLocaleString()} more` : ""}`
+          : "";
       finishTask(
         taskId,
-        `${exported.rowsExported.toLocaleString()} rows to ${format.toUpperCase()}`,
+        `${exported.rowsExported.toLocaleString()} rows to ${format.toUpperCase()}${coercionDetail}`,
       );
       if (exported.reportId && activeProjectId) {
         void tableService
@@ -1622,6 +1639,8 @@ export function TableDataView() {
         onExportSql={() => void handleExport("sql")}
         onExportTsv={() => void handleExport("tsv")}
         onExportXlsx={() => void handleExport("xlsx")}
+        onExportParquet={() => void handleExport("parquet", "binary")}
+        onExportArrow={() => void handleExport("arrow", "binary")}
         onCancelExport={() => void handleCancelExport()}
       />
 
@@ -1630,7 +1649,7 @@ export function TableDataView() {
           className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 py-1 text-[10px] wb-muted"
           title={recentExportReport.error || "Latest export audit record"}
         >
-          Latest export: {recentExportReport.status} · {recentExportReport.format.toUpperCase()} · {recentExportReport.encoding === "utf8Bom" ? "UTF-8 BOM" : recentExportReport.encoding === "binary" ? "Binary workbook" : "UTF-8"} · {recentExportReport.rowsExported.toLocaleString()} rows · {recentExportReport.batches.toLocaleString()} batches
+          Latest export: {recentExportReport.status} · {recentExportReport.format.toUpperCase()} · {recentExportReport.encoding === "utf8Bom" ? "UTF-8 BOM" : recentExportReport.encoding === "binary" ? "Binary" : "UTF-8"} · {recentExportReport.rowsExported.toLocaleString()} rows · {recentExportReport.batches.toLocaleString()} batches
         </div>
       )}
 
