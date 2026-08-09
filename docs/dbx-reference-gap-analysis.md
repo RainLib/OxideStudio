@@ -55,8 +55,9 @@ dbx 仅用于观察交互、能力覆盖和测试组合，不是 OxideStudio 的
   1. LSP 已有受限的项目 SQL 虚拟文档同步；主编辑器与补全共用按 URI 串行的确认后提交规则，
      `didOpen`/`didChange` 失败不会再错误提交本地 shadow revision，下一次补全会重试同一版本。
      Trino/PrestoSQL 保留全量对象名补全，但仅按需
-     读取当前/引用表的列元数据。仍缺真实值采样、跨控制台 symbol/reference index、migration/view
-     symbol 来源和进程级恢复遥测。
+     读取当前/引用表的列元数据。受限同步集合现在已有跨控制台 symbol/reference index，
+     migration/view/routine DDL 可作为只读 definition 来源，CTE rename 保持文档内作用域；仍缺
+     显式真实值采样、同步集合之外的可审计索引策略和大型项目生产遥测。
   2. Grid 已有加载页的只读转置视图；仍缺文档树/文本视图、表达式单元格、完整服务器数据比较和更细导入映射。
   3. Git 缺 stash、blame、merge、rebase、冲突工作台和托管平台 PR。
   4. Explorer 的对象类型、批量动作和各数据库版本能力覆盖不完整。
@@ -295,8 +296,9 @@ UTF-16/GB18030 等编码会明确保留在有界、已解码的预览提交路�
    路径的 `oxide://project` 虚拟文档同步到当前连接的本地 LSP，并映射到活动 schema；
    跳转到该 URI 会打开项目文件。同步排除隐藏目录、依赖目录与密钥命名文件，限制 128
    个文件、每文件 128 KiB、总计 5 MiB。未保存编辑内容仍由当前 Monaco 文档优先，避免
-   用磁盘版本覆盖用户草稿。下一步仍是迁移、view definition 与命名查询的真正 symbol/
-   reference index，而非无限制扫描项目目录。
+   用磁盘版本覆盖用户草稿。该集合现进入 LSP 的按内容缓存 symbol/reference graph：迁移和
+   view/routine definition 可导航，物理对象 usage 可跨文档查找与安全 rename，CTE 保持当前
+   文档作用域。下一步是验证大型真实项目并设计同步集合之外的显式索引策略，而非无限制扫描目录。
 5. **退化可见性不足**：metadata stale、LSP restart、catalog 未完成时，UI 应说明
    当前是 keyword-only、cache-only 还是 full semantic completion。
 

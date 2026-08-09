@@ -494,6 +494,28 @@ explicit deferred validation task rather than an implicit release check.
   Offline plans must disable both Apply and Open in console while retaining a
   readable/copyable review artifact.
 
+## Project SQL semantic index
+
+- Rebuild the bundled SQL LSP from the tracked submodule before application-level
+  testing and confirm `sql-lsp.manifest.json` records the same source revision
+  and checksum as the packaged executable.
+- Open a project at the renderer limits (128 allowlisted SQL files, 128 KiB per
+  file and 5 MiB total) and record cold-index and cache-hit latency for
+  `workspace/symbol`, references, definition and rename. Editing one document
+  must invalidate only that URI's cached index.
+- Verify table/view/function/procedure definitions and usages across
+  PostgreSQL, MySQL, Hive, ClickHouse and SQL Server-style qualified names.
+  Comments, literals, unrelated same-named columns, aliases and CTEs in another
+  statement or document must not leak into physical-object results.
+- Confirm `includeDeclaration: false`, quoted/non-ASCII UTF-16 rename ranges,
+  schema/project isolation, duplicate migration definitions and deterministic
+  result ordering. A document above 512 KiB, more than 256 open documents,
+  more than 10,000 occurrences or 2,000 results must degrade at the documented
+  boundary without hidden filesystem access.
+- Exercise CTE rename in one document and physical-object rename previews over
+  synchronized project files. No rename may be offered for an unknown routine
+  or relation without metadata or a project DDL definition.
+
 ## Structured diagram draft
 
 - Exercise relation create/rename/drop, column create/edit/drop, index, FK and
