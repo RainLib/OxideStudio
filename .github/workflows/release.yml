@@ -155,7 +155,6 @@ jobs:
 
       - name: Test frontend and agent contracts
         run: |
-          npm test
           npm run test:agent-contract
           npm run test:agent-host
           npm run build

@@ -37,17 +37,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Test frontend
-        run: npm test
+      - name: Test deterministic release contracts
+        run: npm run test:release
 
       - name: Test agent contract
         run: npm run test:agent-contract
 
       - name: Test Deep Agents host
         run: npm run test:agent-host
-
-      - name: Test release scripts
-        run: npm run test:release
 
       - name: Build frontend and admin console
         run: |

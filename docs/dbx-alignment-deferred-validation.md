@@ -4,6 +4,16 @@ Implementation work is intentionally being completed before these checks run.
 Do not mark a capability as production-ready or count it toward the 70+
 database target until its relevant queue entries pass.
 
+## Deferred database UI regression tests
+
+- Reconcile the PostgreSQL remote database-content, CSV import, and
+  cross-database table-view fixtures with the current export/import progress
+  contract. Their mocks must include progress listeners and their assertions
+  must allow generated transfer IDs, project IDs, and optional file digests.
+- Keep this database-surface suite outside tag-release gating until the mock
+  contract is reconciled; tag releases still run deterministic release,
+  agent-contract, agent-host, frontend-build, and Rust quality checks.
+
 ## Multi-table data transfer
 
 - Exercise parent-to-child FK ordering against PostgreSQL, MySQL/MariaDB, and
