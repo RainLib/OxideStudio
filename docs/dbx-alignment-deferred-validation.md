@@ -511,6 +511,11 @@ explicit deferred validation task rather than an implicit release check.
   same base snapshot fingerprint may restore. A stale fingerprint must remain
   visible but unapplied; rapid edits must persist in order, closing/reviewing
   must flush the newest version, and confirmed discard must remove the resource.
+- Drag a base-table source column onto a base-table target column across visible
+  viewport buckets. The draft must open on the source relation with a unique FK
+  name and exact endpoints, while malformed/oversized drag payloads, missing
+  columns, views and foreign tables do nothing. Keyboard-only FK creation must
+  remain available through the same form and neither path may execute DDL.
 
 ## ChartDB metadata JSON import
 

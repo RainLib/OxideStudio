@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type DragEvent as ReactDragEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
@@ -61,6 +62,11 @@ import {
   buildSchemaDiagramViewportIndex,
   querySchemaDiagramViewport,
 } from "@/lib/schemaDiagramViewport";
+import {
+  readSchemaDiagramColumnDrag,
+  writeSchemaDiagramColumnDrag,
+  type SchemaDiagramColumnEndpoint,
+} from "@/lib/schemaDiagramRelationshipDrag";
 import { downloadBlob, downloadText } from "@/lib/exportUtils";
 import { serializeSchemaSnapshotToDbml } from "@/features/schema-diff/model/schemaDbml";
 import { SchemaDbmlDraftDialog } from "./SchemaDbmlDraftDialog";
@@ -90,6 +96,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import type { SchemaStructuredDraftForeignKeySeed } from "./SchemaStructuredDraftDialog";
 
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 1.6;
@@ -135,6 +142,8 @@ export function SchemaDiagramView() {
   const [isRasterizing, setIsRasterizing] = useState(false);
   const [dbmlDraftOpen, setDbmlDraftOpen] = useState(false);
   const [structuredDraftOpen, setStructuredDraftOpen] = useState(false);
+  const [foreignKeySeed, setForeignKeySeed] =
+    useState<SchemaStructuredDraftForeignKeySeed | null>(null);
   const [renamingAreaId, setRenamingAreaId] = useState<string | null>(null);
   const [areaNameDraft, setAreaNameDraft] = useState("");
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -767,7 +776,10 @@ export function SchemaDiagramView() {
         <button
           type="button"
           className="wb-text-button h-6 gap-1.5 px-2 text-[9px]"
-          onClick={() => setStructuredDraftOpen(true)}
+          onClick={() => {
+            setForeignKeySeed(null);
+            setStructuredDraftOpen(true);
+          }}
           onPointerEnter={() => void loadSchemaStructuredDraftDialog()}
           onFocus={() => void loadSchemaStructuredDraftDialog()}
           title="Edit tables, columns, indexes and constraints in a local review-only draft"
@@ -1029,6 +1041,35 @@ export function SchemaDiagramView() {
                     onCreateArea={createArea}
                     onMoveToArea={moveRelationsToArea}
                     onRemoveFromAreas={removeRelationsFromAreas}
+                    onCreateRelationship={(source, target) => {
+                      const sourceRelation = snapshot.relations.find(
+                        (relation) => relation.name === source.relationName,
+                      );
+                      const targetRelation = snapshot.relations.find(
+                        (relation) => relation.name === target.relationName,
+                      );
+                      if (
+                        !sourceRelation ||
+                        !targetRelation ||
+                        !isDiagramRelationshipTable(sourceRelation.objectType) ||
+                        !isDiagramRelationshipTable(targetRelation.objectType) ||
+                        !sourceRelation.columns.some(
+                          (column) => column.name === source.columnName,
+                        ) ||
+                        !targetRelation.columns.some(
+                          (column) => column.name === target.columnName,
+                        )
+                      ) {
+                        return;
+                      }
+                      setForeignKeySeed({
+                        sourceRelation: source.relationName,
+                        sourceColumn: source.columnName,
+                        targetRelation: target.relationName,
+                        targetColumn: target.columnName,
+                      });
+                      setStructuredDraftOpen(true);
+                    }}
                   />
                 ))}
               </div>
@@ -1181,8 +1222,12 @@ export function SchemaDiagramView() {
           <SchemaStructuredDraftDialog
             open
             snapshot={snapshot}
-            initialRelationName={selectedName}
-            onClose={() => setStructuredDraftOpen(false)}
+            initialRelationName={foreignKeySeed?.sourceRelation || selectedName}
+            initialForeignKey={foreignKeySeed}
+            onClose={() => {
+              setStructuredDraftOpen(false);
+              setForeignKeySeed(null);
+            }}
           />
         </Suspense>
       )}
@@ -1201,6 +1246,7 @@ function DiagramRelationNode({
   onCreateArea,
   onMoveToArea,
   onRemoveFromAreas,
+  onCreateRelationship,
 }: {
   node: SchemaDiagramNode;
   selected: boolean;
@@ -1212,10 +1258,16 @@ function DiagramRelationNode({
   onCreateArea: (relationNames: readonly string[]) => void;
   onMoveToArea: (areaId: string, relationNames: readonly string[]) => void;
   onRemoveFromAreas: (relationNames: readonly string[]) => void;
+  onCreateRelationship: (
+    source: SchemaDiagramColumnEndpoint,
+    target: SchemaDiagramColumnEndpoint,
+  ) => void;
 }) {
+  const [dragTargetColumn, setDragTargetColumn] = useState<string | null>(null);
   const hasAssignedRelation = contextRelationNames.some((relationName) =>
     areas.some((area) => area.relationNames.includes(relationName)),
   );
+  const relationshipEligible = isDiagramRelationshipTable(node.objectType);
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -1255,7 +1307,53 @@ function DiagramRelationNode({
         node.columns.map((column) => (
           <span
             key={column.name}
-            className="flex h-[21px] items-center border-b border-[hsl(var(--wb-border-subtle)/0.72)] px-2.5 text-[8px] last:border-b-0"
+            draggable={relationshipEligible}
+            className={cn(
+              "group/column flex h-[21px] items-center border-b border-[hsl(var(--wb-border-subtle)/0.72)] px-2.5 text-[8px] last:border-b-0",
+              relationshipEligible && "cursor-grab active:cursor-grabbing",
+              dragTargetColumn === column.name &&
+                "bg-[hsl(var(--wb-active-strong))] ring-1 ring-inset ring-violet-400/45",
+            )}
+            title={
+              relationshipEligible
+                ? "Drag from a source column onto a target column to draft a foreign key"
+                : undefined
+            }
+            onDragStart={(event: ReactDragEvent<HTMLSpanElement>) => {
+              if (!relationshipEligible) return;
+              event.stopPropagation();
+              writeSchemaDiagramColumnDrag(event.dataTransfer, {
+                relationName: node.relationName,
+                columnName: column.name,
+              });
+            }}
+            onDragEnter={(event) => {
+              if (!relationshipEligible) return;
+              event.preventDefault();
+              setDragTargetColumn(column.name);
+            }}
+            onDragOver={(event) => {
+              if (!relationshipEligible) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "link";
+            }}
+            onDragLeave={() => {
+              setDragTargetColumn((current) =>
+                current === column.name ? null : current,
+              );
+            }}
+            onDrop={(event) => {
+              setDragTargetColumn(null);
+              if (!relationshipEligible) return;
+              event.preventDefault();
+              event.stopPropagation();
+              const source = readSchemaDiagramColumnDrag(event.dataTransfer);
+              if (!source) return;
+              onCreateRelationship(source, {
+                relationName: node.relationName,
+                columnName: column.name,
+              });
+            }}
           >
             <span className="flex w-8 shrink-0 items-center gap-0.5 font-mono text-[7px]">
               {column.primaryKey && <span className="text-amber-300">PK</span>}
@@ -1268,6 +1366,12 @@ function DiagramRelationNode({
               {column.dataType}
               {column.nullable ? " ?" : ""}
             </span>
+            {relationshipEligible && (
+              <Network
+                size={8}
+                className="ml-1 shrink-0 opacity-0 transition-opacity group-hover/column:opacity-60"
+              />
+            )}
           </span>
         ))
       )}
@@ -1411,6 +1515,13 @@ function shortObjectType(value?: string | null) {
   if (normalized.includes("VIEW")) return "VIEW";
   if (normalized.includes("FOREIGN")) return "FOREIGN";
   return "TABLE";
+}
+
+function isDiagramRelationshipTable(value?: string | null) {
+  const normalized = value?.toUpperCase() || "BASE TABLE";
+  return normalized.includes("TABLE") &&
+    !normalized.includes("VIEW") &&
+    !normalized.includes("FOREIGN");
 }
 
 function formatTimestamp(value: number) {

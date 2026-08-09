@@ -54,13 +54,22 @@ import {
 } from "@/services/schemaDiagramDraftStore";
 import type { SchemaRelationSnapshot, SchemaSnapshot } from "@/services/tauri/types";
 import { cn } from "@/lib/utils";
+import { suggestedSchemaDiagramForeignKeyName } from "@/lib/schemaDiagramRelationshipDrag";
 import { useTabStore } from "@/store/useTabStore";
 
 type SchemaStructuredDraftDialogProps = {
   open: boolean;
   snapshot: SchemaSnapshot;
   initialRelationName?: string | null;
+  initialForeignKey?: SchemaStructuredDraftForeignKeySeed | null;
   onClose: () => void;
+};
+
+export type SchemaStructuredDraftForeignKeySeed = {
+  sourceRelation: string;
+  sourceColumn: string;
+  targetRelation: string;
+  targetColumn: string;
 };
 
 const MAX_VISIBLE_RELATIONS = 500;
@@ -80,6 +89,7 @@ export function SchemaStructuredDraftDialog({
   open,
   snapshot,
   initialRelationName,
+  initialForeignKey,
   onClose,
 }: SchemaStructuredDraftDialogProps) {
   const openSchemaDiffTab = useTabStore((state) => state.openSchemaDiffTab);
@@ -119,6 +129,7 @@ export function SchemaStructuredDraftDialog({
   const persistenceGenerationRef = useRef(0);
   const persistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastPersistedRelationsRef = useRef<SchemaRelationSnapshot[] | null>(null);
+  const appliedForeignKeySeedRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -142,6 +153,7 @@ export function SchemaStructuredDraftDialog({
     setPersistenceNotice(null);
     setLastSavedAt(null);
     lastPersistedRelationsRef.current = null;
+    appliedForeignKeySeedRef.current = null;
 
     void loadSchemaDiagramDraft(snapshot)
       .then((draft) => {
@@ -231,6 +243,48 @@ export function SchemaStructuredDraftDialog({
     setCheckName("");
     setCheckDefinition("");
   }, [selectedRelation?.name]);
+
+  useEffect(() => {
+    if (!open || !persistenceReady || !initialForeignKey) return;
+    const seedKey = JSON.stringify(initialForeignKey);
+    if (appliedForeignKeySeedRef.current === seedKey) return;
+    const source = history.present.find(
+      (relation) => relation.name === initialForeignKey.sourceRelation,
+    );
+    const target = history.present.find(
+      (relation) => relation.name === initialForeignKey.targetRelation,
+    );
+    if (
+      !source?.columns.some(
+        (column) => column.name === initialForeignKey.sourceColumn,
+      ) ||
+      !target?.columns.some(
+        (column) => column.name === initialForeignKey.targetColumn,
+      )
+    ) {
+      appliedForeignKeySeedRef.current = seedKey;
+      setError(
+        "The dragged relationship references a column removed from the saved draft.",
+      );
+      return;
+    }
+    if (selectedName !== source.name) {
+      setSelectedName(source.name);
+      return;
+    }
+    setForeignKeyName(suggestedSchemaDiagramForeignKeyName(
+      source.constraints.map((constraint) => constraint.name),
+      {
+        relationName: initialForeignKey.sourceRelation,
+        columnName: initialForeignKey.sourceColumn,
+      },
+    ));
+    setForeignKeyColumns(initialForeignKey.sourceColumn);
+    setForeignKeyTarget(initialForeignKey.targetRelation);
+    setForeignKeyTargetColumns(initialForeignKey.targetColumn);
+    setError(null);
+    appliedForeignKeySeedRef.current = seedKey;
+  }, [history.present, initialForeignKey, open, persistenceReady, selectedName]);
 
   const enqueuePersist = useCallback((relations: SchemaRelationSnapshot[]) => {
     const generation = ++persistenceGenerationRef.current;
