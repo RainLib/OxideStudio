@@ -27,6 +27,11 @@ database target until its relevant queue entries pass.
   undo/redo and the offline snapshot marker. A Rust unit test confirms every
   Project DDL, DBML, metadata JSON and diagram-draft sentinel is rejected by
   the migration execution boundary.
+- The complete bundled LSP Rust suite passed after adding DBX semantic row
+  source coverage: 100 library tests plus all integration/doc targets. The
+  end-to-end process test now covers table functions, `WITH ORDINALITY`,
+  positional correlation-column merging, comma-separated sources after JOIN,
+  and SQL Server table hints. No live metadata source was used.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an
@@ -141,14 +146,19 @@ explicit deferred validation task rather than an implicit release check.
 - With a live external sidecar, verify the Driver Manager refreshes its
   process-health summary after an unexpected sidecar exit without exposing
   connection names, URLs, stderr, SQL, or credentials.
-- Run the SQL semantic corpus across the bundled LSP and Monaco fallback for
-  CTE shadowing, correlated subqueries, table functions, dialect quoting, and
-  INSERT value hints.
+- Run the remaining SQL semantic corpus across the bundled LSP and Monaco
+  fallback for outer correlated subqueries, LATERAL/APPLY, three-part catalog
+  qualification, alias/name collisions, dialect quoting, and INSERT value
+  hints. The bundled process contract already covers CTE/derived shadowing,
+  table functions, `WITH ORDINALITY`, positional correlation columns, JOIN
+  followed by comma sources, and SQL Server `(NOLOCK)`; repeat those cases
+  against real versioned metadata before marking driver families conformant.
 - On large real SQL consoles, verify CTE/derived projection completion stops
   local-relation discovery beyond the documented 512 KiB budget without
   blocking ordinary metadata completion. Comments, string/dollar literals and
   quoted identifiers containing `WITH`, `FROM` or `JOIN` must not create local
-  relations.
+  relations. Include many table-function/correlation sources to confirm the
+  single masked structural buffer prevents per-source whole-document rescans.
 - Exercise Monaco command-palette SQL intentions for quoted identifiers,
   escaped identifiers, malformed selections, clipboard permission denial, and
   IN-list values containing quotes, NULLs, numbers, and a 1,000-value bound.
