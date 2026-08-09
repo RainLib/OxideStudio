@@ -163,6 +163,7 @@ import {
   completionMatchScore,
   completionMatches,
   containsHan,
+  cachedCurrentStatementRangeAtOffset,
   currentStatementLineFrames,
   elasticsearchJsonStringCompletionRange,
   editorDocumentIdentity,
@@ -184,6 +185,7 @@ import {
   sqlCompletionIdentifierPrefix,
   sqlCompletionTriggerDecision,
   syncLspModelBeforeCompletion,
+  type CurrentStatementRangeCache,
   unquoteSqlIdentifierSelection,
   useConsoleFileController,
   useLspCompletionProviderCoordinator,
@@ -469,6 +471,10 @@ export function QueryEditor({
   const currentStatementDecorationIdsRef = useRef<string[]>([]);
   const currentStatementTimerRef = useRef<number | null>(null);
   const currentStatementRequestRef = useRef(0);
+  const currentStatementRangeCacheRef =
+    useRef<CurrentStatementRangeCache | null>(null);
+  const currentStatementRenderedRangeRef =
+    useRef<CurrentStatementRangeCache | null>(null);
   const elasticsearchRequestLinesRef = useRef<Set<number>>(new Set());
   const elasticsearchFieldCacheRef = useRef<
     Map<string, Array<{ name: string; dataType: string }>>
@@ -3275,6 +3281,8 @@ export function QueryEditor({
         currentStatementTimerRef.current = null;
       }
       currentStatementRequestRef.current += 1;
+      currentStatementRangeCacheRef.current = null;
+      currentStatementRenderedRangeRef.current = null;
       currentStatementDecorationIdsRef.current = mountedEditor.deltaDecorations(
         currentStatementDecorationIdsRef.current,
         [],
@@ -3294,11 +3302,23 @@ export function QueryEditor({
     const decorate = (startOffset: number, endOffset: number) => {
       const model = mountedEditor.getModel();
       if (!model || endOffset <= startOffset) {
+        currentStatementRenderedRangeRef.current = null;
         currentStatementDecorationIdsRef.current =
           mountedEditor.deltaDecorations(
             currentStatementDecorationIdsRef.current,
             [],
           );
+        return;
+      }
+      const modelVersion = model.getVersionId();
+      const renderedRange = currentStatementRenderedRangeRef.current;
+      if (
+        renderedRange !== null &&
+        renderedRange.modelVersion === modelVersion &&
+        renderedRange.startOffset === startOffset &&
+        renderedRange.endOffset === endOffset &&
+        currentStatementDecorationIdsRef.current.length > 0
+      ) {
         return;
       }
       const decorations = currentStatementLineFrames(
@@ -3316,63 +3336,111 @@ export function QueryEditor({
         currentStatementDecorationIdsRef.current,
         decorations,
       );
+      currentStatementRenderedRangeRef.current = {
+        modelVersion,
+        startOffset,
+        endOffset,
+      };
     };
 
     const resolve = () => {
       if (currentStatementTimerRef.current !== null) {
         window.clearTimeout(currentStatementTimerRef.current);
+        currentStatementTimerRef.current = null;
       }
       const model = mountedEditor.getModel();
       const selection = mountedEditor.getSelection();
       if (!model || !selection) return;
+      if (!selection.isEmpty()) {
+        currentStatementRequestRef.current += 1;
+        decorate(
+          model.getOffsetAt(selection.getStartPosition()),
+          model.getOffsetAt(selection.getEndPosition()),
+        );
+        return;
+      }
+      const position = mountedEditor.getPosition();
+      if (!position) return;
+      const offset = model.getOffsetAt(position);
+      if (isMongoDbConsole) {
+        currentStatementRequestRef.current += 1;
+        currentStatementRangeCacheRef.current = null;
+        const command = mongodbCommandRangeAtCursor(model.getValue(), offset);
+        if (command) decorate(command.from, command.to);
+        else decorate(0, 0);
+        return;
+      }
+      const cachedRange = cachedCurrentStatementRangeAtOffset(
+        currentStatementRangeCacheRef.current,
+        model.getVersionId(),
+        offset,
+      );
+      if (cachedRange) {
+        currentStatementRequestRef.current += 1;
+        decorate(cachedRange.startOffset, cachedRange.endOffset);
+        return;
+      }
+      const requestId = currentStatementRequestRef.current + 1;
+      currentStatementRequestRef.current = requestId;
+      const modelVersion = model.getVersionId();
       currentStatementTimerRef.current = window.setTimeout(async () => {
         currentStatementTimerRef.current = null;
         const currentModel = mountedEditor.getModel();
         const currentSelection = mountedEditor.getSelection();
-        if (!currentModel || currentModel !== model || !currentSelection) return;
-        if (!currentSelection.isEmpty()) {
-          decorate(
-            currentModel.getOffsetAt(currentSelection.getStartPosition()),
-            currentModel.getOffsetAt(currentSelection.getEndPosition()),
-          );
+        if (
+          currentStatementRequestRef.current !== requestId ||
+          !currentModel ||
+          currentModel !== model ||
+          currentModel.getVersionId() !== modelVersion ||
+          !currentSelection ||
+          !currentSelection.isEmpty()
+        ) {
           return;
         }
-        const position = mountedEditor.getPosition();
-        if (!position) return;
-        if (isMongoDbConsole) {
-          const command = mongodbCommandRangeAtCursor(
-            currentModel.getValue(),
-            currentModel.getOffsetAt(position),
-          );
-          if (command) decorate(command.from, command.to);
-          else decorate(0, 0);
-          return;
-        }
-        const requestId = currentStatementRequestRef.current + 1;
-        currentStatementRequestRef.current = requestId;
         try {
           const statement = await queryService.resolveSqlStatementAtCursor(
             effectiveConnectionId,
             currentModel.getValue(),
-            currentModel.getOffsetAt(position),
+            offset,
           );
           if (
             currentStatementRequestRef.current !== requestId ||
-            mountedEditor.getModel() !== currentModel
+            mountedEditor.getModel() !== currentModel ||
+            currentModel.getVersionId() !== modelVersion
           ) {
             return;
           }
-          if (statement) decorate(statement.startOffset, statement.endOffset);
-          else decorate(0, 0);
+          if (statement) {
+            currentStatementRangeCacheRef.current = {
+              modelVersion,
+              startOffset: statement.startOffset,
+              endOffset: statement.endOffset,
+            };
+            decorate(statement.startOffset, statement.endOffset);
+          } else {
+            currentStatementRangeCacheRef.current = null;
+            decorate(0, 0);
+          }
         } catch {
-          if (currentStatementRequestRef.current === requestId) decorate(0, 0);
+          if (
+            currentStatementRequestRef.current === requestId &&
+            mountedEditor.getModel() === currentModel &&
+            currentModel.getVersionId() === modelVersion
+          ) {
+            currentStatementRangeCacheRef.current = null;
+            decorate(0, 0);
+          }
         }
       }, 80);
     };
 
     const cursorDisposable = mountedEditor.onDidChangeCursorSelection(resolve);
     const contentDisposable = mountedEditor.onDidChangeModelContent(resolve);
-    const modelDisposable = mountedEditor.onDidChangeModel(resolve);
+    const modelDisposable = mountedEditor.onDidChangeModel(() => {
+      currentStatementRangeCacheRef.current = null;
+      currentStatementRenderedRangeRef.current = null;
+      resolve();
+    });
     resolve();
     return () => {
       cursorDisposable.dispose();

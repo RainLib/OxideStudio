@@ -81,8 +81,10 @@ export {
   type MongoDbCommandRange,
 } from "./model/mongodbCommandRanges";
 export {
+  cachedCurrentStatementRangeAtOffset,
   currentStatementLineFrames,
   type CurrentStatementLineFrame,
+  type CurrentStatementRangeCache,
   type OffsetPositionModel,
 } from "./model/currentStatementDecoration";
 export { elasticsearchJsonStringCompletionRange } from "./model/elasticsearchCompletionRange";

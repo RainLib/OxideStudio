@@ -7,6 +7,35 @@ export type CurrentStatementLineFrame = {
   className: string;
 };
 
+export type CurrentStatementRangeCache = {
+  modelVersion: number;
+  startOffset: number;
+  endOffset: number;
+};
+
+/**
+ * Reuses only a range returned by the authoritative backend scanner and only
+ * while the Monaco model version is unchanged.  A cursor on the exclusive end
+ * boundary is resolved again so adjacent statements and delimiters cannot
+ * inherit the previous frame.
+ */
+export function cachedCurrentStatementRangeAtOffset(
+  cache: CurrentStatementRangeCache | null,
+  modelVersion: number,
+  offset: number,
+) {
+  if (
+    !cache ||
+    cache.modelVersion !== modelVersion ||
+    cache.endOffset <= cache.startOffset ||
+    offset < cache.startOffset ||
+    offset >= cache.endOffset
+  ) {
+    return null;
+  }
+  return cache;
+}
+
 export function currentStatementLineFrames(
   model: OffsetPositionModel,
   startOffset: number,

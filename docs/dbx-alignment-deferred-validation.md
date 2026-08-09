@@ -189,6 +189,15 @@ explicit deferred validation task rather than an implicit release check.
   the caret or requesting quick fixes/refactor rewrites must not invoke full
   document formatting; an explicit source action and normal Format Document
   must still produce the dialect formatter edit.
+- Instrument current-statement framing in a large SQL console. The first cache
+  miss must issue one backend range request; moving inside that authoritative
+  range must issue no further request or duplicate decoration update. Moving to
+  its exclusive end, another statement, editing the model, swapping the model,
+  or changing the connection must re-resolve, and a late old response must not
+  repaint the newer cursor.
+- Verify a non-empty selection and Mongo command frame appear without the SQL
+  debounce delay, including rapid drag/cursor changes and empty-command gaps.
+  Frame geometry must stay correct at CRLF, wrapped-line and final-line edges.
 - Validate the generic JDBC agent against H2 plus vendor packages after a JDK
   and signed vendor jars are available; record results as conformance evidence
   rather than local claims.
