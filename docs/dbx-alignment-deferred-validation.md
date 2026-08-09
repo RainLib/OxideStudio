@@ -52,6 +52,11 @@ database target until its relevant queue entries pass.
   ref. Focused tests cover disposal, live usage-ranking changes and stale owner
   rejection; a strict production build confirms metadata or snippet refreshes
   no longer require global Monaco provider re-registration.
+- The signature-help alignment suite passed without database access: 127 LSP
+  library tests, 12 process-protocol tests and 9 schema contract tests. It
+  covers SQL-noise-safe nested calls, qualified Unicode routines, optional
+  labels, stable overload ranking, dialect fallback, server-version catalog
+  gates and ClickHouse parameter groups.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an
@@ -172,6 +177,14 @@ explicit deferred validation task rather than an implicit release check.
   table functions, `WITH ORDINALITY`, positional correlation columns, JOIN
   followed by comma sources, and SQL Server `(NOLOCK)`; repeat those cases
   against real versioned metadata before marking driver families conformant.
+- Against real PostgreSQL/MySQL/SQLite/SQL Server/ClickHouse versions, verify
+  signature help preserves database-reported overload order, default/optional
+  arguments, variadic routines, quoted routine names and procedures. Confirm
+  live metadata always overrides the static fallback, SQL Server JSON gates
+  match supported server versions, and ClickHouse ordinary/parametric calls
+  select the correct parameter group. Profile the 64 KiB scan and 50-overload
+  limits on large consoles; crossing either bound must fail quietly without
+  blocking completion.
 - On large real SQL consoles, verify CTE/derived projection completion stops
   local-relation discovery beyond the documented 512 KiB budget without
   blocking ordinary metadata completion. Comments, string/dollar literals and
