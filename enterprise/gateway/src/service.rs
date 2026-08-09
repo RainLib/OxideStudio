@@ -17,7 +17,7 @@ use oxide_studio_lib::{
 };
 use sqlparser::{
     ast::{ObjectName, Visit, Visitor},
-    dialect::{MySqlDialect, PostgreSqlDialect},
+    dialect::{MsSqlDialect, MySqlDialect, PostgreSqlDialect},
     parser::Parser,
 };
 use std::{
@@ -500,6 +500,9 @@ fn authorize_sql_relations(
         }
         oxide_studio_lib::core::statement::StatementScanDialect::Postgres => {
             Parser::parse_sql(&PostgreSqlDialect {}, sql)
+        }
+        oxide_studio_lib::core::statement::StatementScanDialect::SqlServer => {
+            Parser::parse_sql(&MsSqlDialect {}, sql)
         }
     }
     .map_err(|_| {
