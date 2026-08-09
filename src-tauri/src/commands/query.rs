@@ -7,7 +7,7 @@ use crate::core::{
     protocol::{ExplainPlan, ExplainPlanMode, QueryResult, Response},
     statement::{
         split_sql_statement_spans_with_soft_boundaries, split_sql_statements,
-        validate_read_only_sql, StatementScanDialect,
+        validate_read_only_sql, SqlStatementSpan, StatementScanDialect,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,7 @@ const MAX_CONSOLE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DATABASE_ERROR_IDENTIFIER_CHARS: usize = 512;
 const MAX_SQL_SYNTAX_VALIDATION_CHARS: usize = 500_000;
 const MAX_SQL_SYNTAX_DIAGNOSTIC_CHARS: usize = 1_000;
+const MAX_CACHED_STATEMENT_RANGES: usize = 10_000;
 
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -232,12 +233,21 @@ pub struct ConsoleFileExportResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SqlStatementRange {
+    pub start_offset: usize,
+    pub end_offset: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SqlStatementSelection {
     pub sql: String,
     pub start_offset: usize,
     pub end_offset: usize,
     pub statement_index: usize,
     pub statement_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement_ranges: Option<Vec<SqlStatementRange>>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -417,6 +427,29 @@ fn byte_offset_to_utf16_offset(value: &str, byte_offset: usize) -> usize {
     value[..byte_offset.min(value.len())].encode_utf16().count()
 }
 
+fn sql_statement_ranges_utf16(
+    sql: &str,
+    statements: &[SqlStatementSpan<'_>],
+) -> Vec<SqlStatementRange> {
+    let mut previous_byte_offset = 0;
+    let mut utf16_offset = 0;
+    statements
+        .iter()
+        .map(|statement| {
+            utf16_offset += sql[previous_byte_offset..statement.start]
+                .encode_utf16()
+                .count();
+            let start_offset = utf16_offset;
+            utf16_offset += sql[statement.start..statement.end].encode_utf16().count();
+            previous_byte_offset = statement.end;
+            SqlStatementRange {
+                start_offset,
+                end_offset: utf16_offset,
+            }
+        })
+        .collect()
+}
+
 fn sql_statement_at_cursor(
     sql: &str,
     dialect: StatementScanDialect,
@@ -439,12 +472,25 @@ fn sql_statement_at_cursor(
         })
         .unwrap_or(statements.len() - 1);
     let statement = statements[statement_index];
+    let statement_ranges = (statements.len() <= MAX_CACHED_STATEMENT_RANGES)
+        .then(|| sql_statement_ranges_utf16(sql, &statements));
+    let (start_offset, end_offset) = statement_ranges
+        .as_ref()
+        .and_then(|ranges| ranges.get(statement_index))
+        .map(|range| (range.start_offset, range.end_offset))
+        .unwrap_or_else(|| {
+            (
+                byte_offset_to_utf16_offset(sql, statement.start),
+                byte_offset_to_utf16_offset(sql, statement.end),
+            )
+        });
     Some(SqlStatementSelection {
         sql: statement.text.to_string(),
-        start_offset: byte_offset_to_utf16_offset(sql, statement.start),
-        end_offset: byte_offset_to_utf16_offset(sql, statement.end),
+        start_offset,
+        end_offset,
         statement_index,
         statement_count: statements.len(),
+        statement_ranges,
     })
 }
 
@@ -1395,11 +1441,31 @@ mod tests {
         assert_eq!(selected.sql, "-- next\nSELECT 2");
         assert_eq!(selected.statement_index, 1);
         assert_eq!(selected.statement_count, 2);
+        let ranges = selected
+            .statement_ranges
+            .as_ref()
+            .expect("ordinary documents should return cacheable statement ranges");
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[1].start_offset, selected.start_offset);
+        assert_eq!(ranges[1].end_offset, selected.end_offset);
+        assert_eq!(ranges[0].start_offset, 0);
+        assert_eq!(ranges[0].end_offset, "SELECT '🚀;'".encode_utf16().count());
         assert_eq!(
             &sql[utf16_offset_to_byte_offset(sql, selected.start_offset)
                 ..utf16_offset_to_byte_offset(sql, selected.end_offset)],
             selected.sql
         );
+    }
+
+    #[test]
+    fn statement_range_cache_is_bounded_for_large_documents() {
+        let sql = "SELECT 1;\n".repeat(MAX_CACHED_STATEMENT_RANGES + 1);
+        let selected = sql_statement_at_cursor(&sql, StatementScanDialect::Postgres, 0)
+            .expect("large SQL documents should still resolve the current statement");
+
+        assert_eq!(selected.statement_count, MAX_CACHED_STATEMENT_RANGES + 1);
+        assert!(selected.statement_ranges.is_none());
+        assert_eq!(selected.sql, "SELECT 1");
     }
 
     #[test]

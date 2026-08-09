@@ -4,25 +4,37 @@ import { cachedCurrentStatementRangeAtOffset } from "./currentStatementDecoratio
 describe("current statement range cache", () => {
   const cache = {
     modelVersion: 7,
-    startOffset: 10,
-    endOffset: 24,
+    ranges: [
+      { startOffset: 10, endOffset: 24 },
+      { startOffset: 30, endOffset: 40 },
+    ],
   };
 
-  it("reuses an authoritative range while the cursor stays inside it", () => {
-    expect(cachedCurrentStatementRangeAtOffset(cache, 7, 10)).toBe(cache);
-    expect(cachedCurrentStatementRangeAtOffset(cache, 7, 23)).toBe(cache);
+  it("reuses authoritative ranges across the whole model version", () => {
+    expect(cachedCurrentStatementRangeAtOffset(cache, 7, 10)).toBe(cache.ranges[0]);
+    expect(cachedCurrentStatementRangeAtOffset(cache, 7, 23)).toBe(cache.ranges[0]);
+    expect(cachedCurrentStatementRangeAtOffset(cache, 7, 31)).toBe(cache.ranges[1]);
   });
 
-  it("invalidates on edits and statement boundaries", () => {
-    expect(cachedCurrentStatementRangeAtOffset(cache, 8, 12)).toBeNull();
-    expect(cachedCurrentStatementRangeAtOffset(cache, 7, 9)).toBeNull();
+  it("uses backend-compatible whitespace fallback but re-resolves exact ends", () => {
+    expect(cachedCurrentStatementRangeAtOffset(cache, 7, 9)).toBe(cache.ranges[0]);
+    expect(cachedCurrentStatementRangeAtOffset(cache, 7, 25)).toBe(cache.ranges[1]);
+    expect(cachedCurrentStatementRangeAtOffset(cache, 7, 41)).toBe(cache.ranges[1]);
     expect(cachedCurrentStatementRangeAtOffset(cache, 7, 24)).toBeNull();
+    expect(cachedCurrentStatementRangeAtOffset(cache, 7, 40)).toBeNull();
+  });
+
+  it("invalidates after an edit", () => {
+    expect(cachedCurrentStatementRangeAtOffset(cache, 8, 12)).toBeNull();
   });
 
   it("rejects empty or reversed ranges", () => {
     expect(
       cachedCurrentStatementRangeAtOffset(
-        { modelVersion: 7, startOffset: 10, endOffset: 10 },
+        {
+          modelVersion: 7,
+          ranges: [{ startOffset: 10, endOffset: 10 }],
+        },
         7,
         10,
       ),

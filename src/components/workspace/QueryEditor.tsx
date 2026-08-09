@@ -185,6 +185,7 @@ import {
   sqlCompletionIdentifierPrefix,
   sqlCompletionTriggerDecision,
   syncLspModelBeforeCompletion,
+  type CurrentStatementRange,
   type CurrentStatementRangeCache,
   unquoteSqlIdentifierSelection,
   useConsoleFileController,
@@ -474,7 +475,7 @@ export function QueryEditor({
   const currentStatementRangeCacheRef =
     useRef<CurrentStatementRangeCache | null>(null);
   const currentStatementRenderedRangeRef =
-    useRef<CurrentStatementRangeCache | null>(null);
+    useRef<(CurrentStatementRange & { modelVersion: number }) | null>(null);
   const elasticsearchRequestLinesRef = useRef<Set<number>>(new Set());
   const elasticsearchFieldCacheRef = useRef<
     Map<string, Array<{ name: string; dataType: string }>>
@@ -3411,10 +3412,17 @@ export function QueryEditor({
             return;
           }
           if (statement) {
+            const ranges = statement.statementRanges?.length
+              ? statement.statementRanges
+              : [
+                  {
+                    startOffset: statement.startOffset,
+                    endOffset: statement.endOffset,
+                  },
+                ];
             currentStatementRangeCacheRef.current = {
               modelVersion,
-              startOffset: statement.startOffset,
-              endOffset: statement.endOffset,
+              ranges,
             };
             decorate(statement.startOffset, statement.endOffset);
           } else {

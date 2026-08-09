@@ -75,8 +75,9 @@ dbx 仅用于观察交互、能力覆盖和测试组合，不是 OxideStudio 的
   查询伪装成 SQL。
 - SQL 参数、查询历史、保存查询、格式化、诊断、导航、hover、补全和 Vim 模式。
 - 当前语句执行在 Rust 中使用 driver-aware scanner，能正确处理 UTF-16 光标偏移。
-- 当前语句边框只在当前 Monaco 版本首次 miss 时请求 Rust 权威范围；范围内光标移动复用缓存，
-  选区和 Mongo command frame 同步更新，相同范围不会重复写入 Monaco decorations。
+- 当前语句边框只在当前 Monaco 版本首次 miss 时请求 Rust 权威范围集；最多 10,000 条语句会
+  一次返回并在整份文档内复用，选区和 Mongo command frame 同步更新，相同范围不会重复写入
+  Monaco decorations。超大文档自动降级为只缓存当前范围。
 - 执行结果与编辑模型分离，支持查询取消、事务和结果面板。
 
 ### 与 dbx/DataGrip 的差距
@@ -105,9 +106,10 @@ dbx 仅用于观察交互、能力覆盖和测试组合，不是 OxideStudio 的
    普通 lightbulb 请求不会再计算整文档格式化。仍缺 JOIN/WHERE 重写 preview、
    generated/hidden 列策略、更复杂的结构化多光标编辑、可配置 dialect inspection profile
    和项目级 scratch/console 组织。
-5. 当前 SQL frame 缓存只保留最近一条后端权威范围；这已消除同语句内逐次光标移动的
-   IPC 和 decoration churn，但尚未达到 DBX 对整份文档范围的版本化缓存。继续扩展时应复用
-   Rust scanner 的结构化结果，不能在 Monaco 热路径复制另一套 SQL 分句器。
+5. 当前 SQL frame 已对齐 DBX 的版本化整文档范围缓存：Rust scanner 在首次 miss 时返回最多
+   10,000 个有序 UTF-16 范围，同一 model version 内跨语句和空白移动不再产生 IPC；精确
+   exclusive end、文档编辑、模型/连接切换会重新解析。超过上限时只返回当前权威范围，避免
+   无界协议负载；Monaco 热路径没有复制第二套 SQL 分句器。
 
 本轮已在 LSP server 增加高置信度软边界：空行后的顶层语句关键字会获得独立
 completion scope，同时保护 CTE、INSERT SELECT、EXPLAIN、CREATE body、

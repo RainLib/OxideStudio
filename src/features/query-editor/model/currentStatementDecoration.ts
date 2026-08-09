@@ -7,33 +7,37 @@ export type CurrentStatementLineFrame = {
   className: string;
 };
 
-export type CurrentStatementRangeCache = {
-  modelVersion: number;
+export type CurrentStatementRange = {
   startOffset: number;
   endOffset: number;
 };
 
+export type CurrentStatementRangeCache = {
+  modelVersion: number;
+  ranges: readonly CurrentStatementRange[];
+};
+
 /**
- * Reuses only a range returned by the authoritative backend scanner and only
- * while the Monaco model version is unchanged.  A cursor on the exclusive end
- * boundary is resolved again so adjacent statements and delimiters cannot
- * inherit the previous frame.
+ * Reuses only ranges returned by the authoritative backend scanner and only
+ * while the Monaco model version is unchanged. A cursor on an exclusive end
+ * boundary is resolved again; whitespace before/between/after ranges follows
+ * the backend's first-next/last fallback without copying SQL parsing rules.
  */
 export function cachedCurrentStatementRangeAtOffset(
   cache: CurrentStatementRangeCache | null,
   modelVersion: number,
   offset: number,
 ) {
-  if (
-    !cache ||
-    cache.modelVersion !== modelVersion ||
-    cache.endOffset <= cache.startOffset ||
-    offset < cache.startOffset ||
-    offset >= cache.endOffset
-  ) {
-    return null;
+  if (!cache || cache.modelVersion !== modelVersion) return null;
+  let lastRange: CurrentStatementRange | null = null;
+  for (const range of cache.ranges) {
+    if (range.endOffset <= range.startOffset) continue;
+    if (offset === range.endOffset) return null;
+    if (offset >= range.startOffset && offset < range.endOffset) return range;
+    if (offset < range.startOffset) return range;
+    lastRange = range;
   }
-  return cache;
+  return lastRange;
 }
 
 export function currentStatementLineFrames(

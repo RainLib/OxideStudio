@@ -84,6 +84,7 @@ export {
   cachedCurrentStatementRangeAtOffset,
   currentStatementLineFrames,
   type CurrentStatementLineFrame,
+  type CurrentStatementRange,
   type CurrentStatementRangeCache,
   type OffsetPositionModel,
 } from "./model/currentStatementDecoration";

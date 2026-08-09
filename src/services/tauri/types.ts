@@ -821,6 +821,12 @@ export interface SqlStatementSelection {
   endOffset: number;
   statementIndex: number;
   statementCount: number;
+  statementRanges?: SqlStatementRange[];
+}
+
+export interface SqlStatementRange {
+  startOffset: number;
+  endOffset: number;
 }
 
 export interface SqlSyntaxDiagnostic {
