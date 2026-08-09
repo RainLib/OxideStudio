@@ -17,6 +17,7 @@ fn main() {
     tonic_prost_build::configure()
         .build_server(false)
         .build_client(true)
+        .protoc_arg("--experimental_allow_proto3_optional")
         .compile_protos(
             &["../enterprise/gateway/proto/oxide_gateway.proto"],
             &["../enterprise/gateway/proto"],
