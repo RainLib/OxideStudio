@@ -32,7 +32,12 @@ const output = join(
   "binaries",
   `oxide-agent-host-${triple}${extension}`,
 );
-const temporaryOutput = `${output}.tmp-${process.pid}-${randomUUID()}`;
+// pkg adds `.exe` whenever a Windows output path does not end in that
+// extension. Keep the temporary suffix before `.exe`, otherwise pkg writes a
+// different file than the smoke check and atomic rename expect.
+const temporaryOutput = extension
+  ? `${output.slice(0, -extension.length)}.tmp-${process.pid}-${randomUUID()}${extension}`
+  : `${output}.tmp-${process.pid}-${randomUUID()}`;
 const lockDirectory = `${output}.package-lock`;
 const releaseLock = await acquirePackageLock(lockDirectory);
 
@@ -87,7 +92,7 @@ try {
       "--binary",
       temporaryOutput,
       "--max-startup-ms",
-      process.env.OXIDE_AGENT_HOST_MAX_STARTUP_MS?.trim() || "2000",
+      process.env.OXIDE_AGENT_HOST_MAX_STARTUP_MS?.trim() || "5000",
       "--max-rss-mb",
       process.env.OXIDE_AGENT_HOST_MAX_RSS_MB?.trim() || "200",
     ],

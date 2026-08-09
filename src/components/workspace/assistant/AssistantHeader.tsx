@@ -1,14 +1,16 @@
-import { Sparkles, SquarePen } from "lucide-react";
+import { Sparkles, SquarePen, X } from "lucide-react";
 import { useI18n } from "@/i18n";
 
 interface AssistantHeaderProps {
   isRunning: boolean;
   onNewChat: () => void;
+  onHide: () => void;
 }
 
 export function AssistantHeader({
   isRunning,
   onNewChat,
+  onHide,
 }: AssistantHeaderProps) {
   const { t } = useI18n();
   return (
@@ -23,16 +25,27 @@ export function AssistantHeader({
         </span>
       </div>
 
-      <button
-        type="button"
-        className="wb-tool-header-actions wb-icon-button h-6 w-6"
-        onClick={onNewChat}
-        disabled={isRunning}
-        title={t("assistant.newChat")}
-        aria-label={t("assistant.newChatAria")}
-      >
-        <SquarePen size={12} />
-      </button>
+      <div className="wb-tool-header-actions flex items-center gap-0.5">
+        <button
+          type="button"
+          className="wb-icon-button h-6 w-6"
+          onClick={onNewChat}
+          disabled={isRunning}
+          title={t("assistant.newChat")}
+          aria-label={t("assistant.newChatAria")}
+        >
+          <SquarePen size={12} />
+        </button>
+        <button
+          type="button"
+          className="wb-icon-button h-6 w-6"
+          onClick={onHide}
+          title="Hide Assistant"
+          aria-label="Hide Assistant"
+        >
+          <X size={12} />
+        </button>
+      </div>
     </header>
   );
 }

@@ -104,6 +104,8 @@ fn write_and_sync(file: &mut fs::File, contents: &[u8]) -> std::io::Result<()> {
 }
 
 fn protect_private_file(path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

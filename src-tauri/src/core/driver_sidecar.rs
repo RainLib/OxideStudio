@@ -23,10 +23,13 @@ use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 const MAX_DRIVER_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
+type PendingDriverRequest = oneshot::Sender<Result<DriverResult, String>>;
+type PendingDriverRequests = Arc<Mutex<HashMap<u64, PendingDriverRequest>>>;
+
 pub struct DatabaseDriverSidecar {
     child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<FramedWrite<ChildStdin, LinesCodec>>>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<DriverResult, String>>>>>,
+    pending: PendingDriverRequests,
     next_request_id: AtomicU64,
     capabilities: DriverRuntimeCapabilities,
 }
@@ -243,7 +246,7 @@ impl Drop for DatabaseDriverSidecar {
 
 fn spawn_response_dispatcher(
     mut stdout: FramedRead<tokio::process::ChildStdout, LinesCodec>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<DriverResult, String>>>>>,
+    pending: PendingDriverRequests,
 ) {
     tokio::spawn(async move {
         let terminal_error = loop {
@@ -300,9 +303,7 @@ fn copy_safe_environment(command: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::driver_package::{
-        DatabaseDriverPackageRegistry, DriverPackageManifest, DRIVER_PACKAGE_SCHEMA_VERSION,
-    };
+    use crate::core::driver_package::{DriverPackageManifest, DRIVER_PACKAGE_SCHEMA_VERSION};
     use sha2::{Digest, Sha256};
     use std::fs;
 

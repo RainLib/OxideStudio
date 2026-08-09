@@ -2301,7 +2301,7 @@ impl AgentHostInner {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToString::to_string)
-            .or_else(|| {
+            .or({
                 if matches!(
                     capabilities.connection_mode,
                     crate::core::dialect::DatabaseConnectionMode::Network
@@ -2330,7 +2330,7 @@ impl AgentHostInner {
                     .filter(|value| !value.is_empty())
             })
             .or(database.as_deref())
-            .or_else(|| {
+            .or({
                 if matches!(
                     capabilities.connection_mode,
                     crate::core::dialect::DatabaseConnectionMode::Network
@@ -2412,7 +2412,7 @@ impl AgentHostInner {
                 Some(version) => registry.resolve_version(canonical, version),
                 None => registry.resolve_active(canonical),
             }
-            .map_err(|error| SidecarRequestError::tool(error))?;
+            .map_err(SidecarRequestError::tool)?;
             return package
                 .manifest
                 .capabilities

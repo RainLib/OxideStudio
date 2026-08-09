@@ -40,6 +40,7 @@ import {
 } from "@/lib/projectFileOpen";
 import { useAssistantComposerStore } from "@/store/useAssistantComposerStore";
 import { useAssistantChangeStore } from "@/store/useAssistantChangeStore";
+import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
 import {
   agentHostService,
   type AgentProfile,
@@ -80,6 +81,9 @@ export function AssistantSidebar() {
 }
 
 function AgentHostAssistantSidebar() {
+  const setToolWindowVisible = useWorkbenchLayoutStore(
+    (state) => state.setToolWindowVisible,
+  );
   const aiEnabled = useAiSettingsStore((state) => state.enabled);
   const aiBaseUrl = useAiSettingsStore((state) => state.baseUrl);
   const aiModel = useAiSettingsStore((state) => state.model);
@@ -594,6 +598,7 @@ function AgentHostAssistantSidebar() {
     <div className="wb-assistant-shell flex h-full flex-col wb-panel">
       <AssistantHeader
         isRunning={session.isBusy}
+        onHide={() => setToolWindowVisible("assistant", false)}
         onNewChat={() => {
           autoFollowConversationRef.current = true;
           setMessage("");

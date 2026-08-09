@@ -192,7 +192,7 @@ try {
   if (
     result?.protocolVersion !== 1 ||
     result?.runtime !== "deepagents-typescript" ||
-    result?.runtimeVersion !== "1.10.8" ||
+    result?.runtimeVersion !== "1.10.9" ||
     !String(result?.nodeVersion ?? "").startsWith("v22.")
   ) {
     throw new Error(`unexpected agent host handshake: ${JSON.stringify(result)}`);

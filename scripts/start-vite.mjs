@@ -1,4 +1,5 @@
 import { createServer } from "vite";
+import { fileURLToPath } from "node:url";
 
 const args = process.argv.slice(2);
 
@@ -17,7 +18,7 @@ const port =
     : undefined;
 
 const inlineConfig = {
-  configFile: new URL("../vite.config.ts", import.meta.url).pathname,
+  configFile: fileURLToPath(new URL("../vite.config.ts", import.meta.url)),
   server: {
     ...(host !== undefined ? { host } : {}),
     ...(port !== undefined ? { port } : {}),

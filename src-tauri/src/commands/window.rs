@@ -84,7 +84,7 @@ pub async fn create_new_window(app: AppHandle) -> Result<String, String> {
     }
 
     println!("[create_new_window] Building window...");
-    let window = builder.build().map_err(|e| {
+    let _window = builder.build().map_err(|e| {
         println!("[create_new_window] Failed to build window: {}", e);
         e.to_string()
     })?;
@@ -92,7 +92,7 @@ pub async fn create_new_window(app: AppHandle) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
         use tauri::TitleBarStyle;
-        let _ = window.set_title_bar_style(TitleBarStyle::Overlay);
+        let _ = _window.set_title_bar_style(TitleBarStyle::Overlay);
     }
 
     Ok(window_label)

@@ -393,7 +393,7 @@ impl DatabaseDriver for SqliteDriver {
 
     async fn get_tables(&self, schema: &str) -> Result<Vec<TableInfo>> {
         let schema_name = normalized_sqlite_schema(schema);
-        let schema = sqlite_schema_identifier(&schema_name)?;
+        let schema = sqlite_schema_identifier(schema_name)?;
         let statement = format!(
             "SELECT name, type FROM {schema}.sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name"
         );
@@ -413,12 +413,12 @@ impl DatabaseDriver for SqliteDriver {
 
     async fn get_columns(&self, schema: &str, table: &str) -> Result<Vec<ColumnInfo>> {
         let schema_name = normalized_sqlite_schema(schema);
-        let schema = sqlite_schema_identifier(&schema_name)?;
+        let schema = sqlite_schema_identifier(schema_name)?;
         let statement = format!("PRAGMA {schema}.table_info({})", sqlite_identifier(table)?);
         let rows = sqlx::query(&statement)
             .fetch_all(&self.pool().await?)
             .await?;
-        let indexes = self.get_indexes(&schema_name, table).await?;
+        let indexes = self.get_indexes(schema_name, table).await?;
         Ok(rows
             .iter()
             .map(|row| {
@@ -483,7 +483,7 @@ impl DatabaseDriver for SqliteDriver {
 
     async fn get_constraints(&self, schema: &str, table: &str) -> Result<Vec<ConstraintInfo>> {
         let schema_name = normalized_sqlite_schema(schema);
-        let schema = sqlite_schema_identifier(&schema_name)?;
+        let schema = sqlite_schema_identifier(schema_name)?;
         let statement = format!(
             "PRAGMA {schema}.foreign_key_list({})",
             sqlite_identifier(table)?

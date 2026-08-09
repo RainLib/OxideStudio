@@ -75,9 +75,14 @@ async function requireExecutable(path) {
 }
 
 function runNpm(args) {
-  const executable = process.platform === "win32" ? "npm.cmd" : "npm";
+  // Node 24 rejects a direct spawn of a .cmd shim on Windows. Delegate to the
+  // command processor so the workspace packaging script works with both the
+  // supported Node 22 runtime and newer local developer runtimes.
+  const windows = process.platform === "win32";
+  const executable = windows ? process.env.ComSpec || "cmd.exe" : "npm";
+  const commandArgs = windows ? ["/d", "/s", "/c", "npm.cmd", ...args] : args;
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(executable, args, {
+    const child = spawn(executable, commandArgs, {
       cwd: root,
       env: process.env,
       stdio: "inherit",

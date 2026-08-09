@@ -374,7 +374,10 @@ mod tests {
         assert_eq!(encoded["params"]["request"]["name"], "analytics");
         assert_eq!(encoded["params"]["request"]["namespaceKind"], "database");
         assert!(encoded.to_string().contains("analytics"));
-        assert!(!encoded.to_string().to_ascii_lowercase().contains("create schema"));
+        assert!(!encoded
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("create schema"));
         assert_eq!(
             serde_json::from_value::<DriverRequestEnvelope>(encoded).unwrap(),
             envelope

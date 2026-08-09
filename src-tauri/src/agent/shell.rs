@@ -985,7 +985,7 @@ fn parsed_command(text: &str) -> ParsedCommand {
 
 fn split_shell_statements(value: &str) -> Vec<&str> {
     value
-        .split(|character| matches!(character, ';' | '\n' | '|'))
+        .split([';', '\n', '|'])
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
         .collect()

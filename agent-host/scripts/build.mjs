@@ -1,12 +1,15 @@
 import { chmod, mkdir, readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 await mkdir(new URL("../dist/", import.meta.url), { recursive: true });
-const outfile = new URL("../dist/oxide-agent-host.cjs", import.meta.url);
+const outfile = fileURLToPath(
+  new URL("../dist/oxide-agent-host.cjs", import.meta.url),
+);
 
 await build({
-  entryPoints: [new URL("../src/main.ts", import.meta.url).pathname],
-  outfile: outfile.pathname,
+  entryPoints: [fileURLToPath(new URL("../src/main.ts", import.meta.url))],
+  outfile,
   bundle: true,
   platform: "node",
   format: "cjs",
@@ -30,4 +33,4 @@ if (!bundle.startsWith("#!/usr/bin/env node\n") || bundle.startsWith("#!", 20)) 
   throw new Error("Agent host bundle must contain exactly one leading Node shebang");
 }
 await chmod(outfile, 0o755);
-process.stderr.write(`[agent-host] bundled ${outfile.pathname}\n`);
+process.stderr.write(`[agent-host] bundled ${outfile}\n`);

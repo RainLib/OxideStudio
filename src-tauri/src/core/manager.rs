@@ -19,9 +19,8 @@ pub struct ConnectionManager {
     /// Process-lifetime, package-level sidecar telemetry. It intentionally
     /// keeps neither connection configuration nor driver output; connection
     /// ids are only transient deduplication keys for observed exits.
-    external_runtime_telemetry: Arc<
-        Mutex<BTreeMap<(String, String), ExternalDriverRuntimeTelemetry>>,
-    >,
+    external_runtime_telemetry:
+        Arc<Mutex<BTreeMap<(String, String), ExternalDriverRuntimeTelemetry>>>,
 }
 
 struct ManagedConnection {
@@ -364,13 +363,17 @@ impl ConnectionManager {
             grouped
                 .keys()
                 .map(|identity| {
-                    let entry = telemetry.get(identity).expect("runtime telemetry entry exists");
+                    let entry = telemetry
+                        .get(identity)
+                        .expect("runtime telemetry entry exists");
                     (
                         identity.clone(),
-                        entry.launch_count,
-                        entry.observed_exit_count,
-                        entry.last_started_at_millis,
-                        entry.last_exit_observed_at_millis,
+                        (
+                            entry.launch_count,
+                            entry.observed_exit_count,
+                            entry.last_started_at_millis,
+                            entry.last_exit_observed_at_millis,
+                        ),
                     )
                 })
                 .collect::<BTreeMap<_, _>>()

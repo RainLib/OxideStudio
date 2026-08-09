@@ -751,19 +751,38 @@ pub async fn list_database_admin_table_privileges(
     let result: Result<Vec<DatabaseAdminTablePrivilege>, String> = async {
         ensure_host_database_admin_allowed(&manager, &connection_id).await?;
         let result = primary_result(
-            manager.query(&connection_id, table_privileges_sql(admin_kind(&driver)?), None, None, None)
-                .await.map_err(|error| error.to_string())?,
+            manager
+                .query(
+                    &connection_id,
+                    table_privileges_sql(admin_kind(&driver)?),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .map_err(|error| error.to_string())?,
         )?;
-        Ok(result.rows.iter().take(ADMIN_RESULT_LIMIT).filter_map(|row| Some(DatabaseAdminTablePrivilege {
-            grantee: value_string(result_row(&result, row, "grantee"))?,
-            schema: value_string(result_row(&result, row, "schema_name"))?,
-            table: value_string(result_row(&result, row, "table_name"))?,
-            privilege: value_string(result_row(&result, row, "privilege_type"))?,
-        })).collect())
-    }.await;
+        Ok(result
+            .rows
+            .iter()
+            .take(ADMIN_RESULT_LIMIT)
+            .filter_map(|row| {
+                Some(DatabaseAdminTablePrivilege {
+                    grantee: value_string(result_row(&result, row, "grantee"))?,
+                    schema: value_string(result_row(&result, row, "schema_name"))?,
+                    table: value_string(result_row(&result, row, "table_name"))?,
+                    privilege: value_string(result_row(&result, row, "privilege_type"))?,
+                })
+            })
+            .collect())
+    }
+    .await;
     match result {
         Ok(privileges) => Ok(Response::ok(privileges)),
-        Err(error) => Ok(Response::err("DATABASE_ADMIN_TABLE_PRIVILEGES_ERROR", &error)),
+        Err(error) => Ok(Response::err(
+            "DATABASE_ADMIN_TABLE_PRIVILEGES_ERROR",
+            &error,
+        )),
     }
 }
 

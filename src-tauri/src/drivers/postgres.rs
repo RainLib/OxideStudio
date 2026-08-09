@@ -1738,15 +1738,18 @@ impl DatabaseDriver for PostgresDriver {
             .await?;
         drop(metadata_pool);
 
-        timeout(METADATA_QUERY_TIMEOUT, Self::schema_objects_on_pool(&pool, schema))
-            .await
-            .map_err(|_| {
-                anyhow!(
-                    "Timed out loading schema objects from PostgreSQL database '{}', schema '{}'",
-                    database,
-                    schema
-                )
-            })?
+        timeout(
+            METADATA_QUERY_TIMEOUT,
+            Self::schema_objects_on_pool(&pool, schema),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Timed out loading schema objects from PostgreSQL database '{}', schema '{}'",
+                database,
+                schema
+            )
+        })?
     }
 
     async fn get_schema_objects(&self, schema: &str) -> Result<Vec<SchemaObjectInfo>> {

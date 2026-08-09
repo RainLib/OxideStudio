@@ -1150,10 +1150,8 @@ impl ExportTemporaryFile {
             .file_name()
             .and_then(|value| value.to_str())
             .ok_or_else(|| "Unable to derive export file name".to_string())?;
-        let path = final_path.with_file_name(format!(
-            ".{file_name}.{}.partial",
-            uuid::Uuid::new_v4()
-        ));
+        let path =
+            final_path.with_file_name(format!(".{file_name}.{}.partial", uuid::Uuid::new_v4()));
         Ok(Self {
             path,
             finalized: false,
@@ -3494,15 +3492,18 @@ fn postgres_identity_reseed_columns(
         return Ok(Vec::new());
     }
     if target_kind != DatabaseKind::Postgres {
-        return Err("Identity reseed is currently available only for a PostgreSQL target.".to_string());
+        return Err(
+            "Identity reseed is currently available only for a PostgreSQL target.".to_string(),
+        );
     }
     Ok(target_columns
         .iter()
         .filter(|column| {
             column.is_auto_increment
-                || column.default_value.as_deref().is_some_and(|value| {
-                    value.to_ascii_lowercase().contains("nextval(")
-                })
+                || column
+                    .default_value
+                    .as_deref()
+                    .is_some_and(|value| value.to_ascii_lowercase().contains("nextval("))
         })
         .map(|column| column.name.clone())
         .collect())
@@ -3512,10 +3513,8 @@ fn postgres_identity_reseed_statements(
     endpoint: &TableDataTransferEndpoint,
     columns: &[String],
 ) -> Vec<ParameterizedStatement> {
-    let relation = DatabaseKind::Postgres.qualified_table(
-        schema_option(&endpoint.schema),
-        &endpoint.table,
-    );
+    let relation =
+        DatabaseKind::Postgres.qualified_table(schema_option(&endpoint.schema), &endpoint.table);
     columns
         .iter()
         .map(|column| {
@@ -3589,10 +3588,10 @@ fn build_data_transfer_column_mapping(
         .filter(|column| {
             !column.is_nullable
                 && !column.is_auto_increment
-                && !column
+                && column
                     .default_value
                     .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
+                    .is_none_or(|value| value.trim().is_empty())
                 && !mapped_targets.contains(column.name.as_str())
         })
         .map(|column| column.name.clone())
@@ -4207,11 +4206,8 @@ async fn resolve_table_data_transfer_plan(
         &target_columns,
         &mapped_columns,
     )?;
-    let identity_reseed_columns = postgres_identity_reseed_columns(
-        target_kind,
-        &target_columns,
-        request.reseed_identity,
-    )?;
+    let identity_reseed_columns =
+        postgres_identity_reseed_columns(target_kind, &target_columns, request.reseed_identity)?;
     let max_rows = normalized_transfer_limit(request.max_rows);
     let batch_size = normalized_transfer_batch_size(request.batch_size);
     let target_rows_to_delete = if request.mode == TableDataTransferMode::Overwrite {
@@ -4381,7 +4377,10 @@ fn table_data_transfer_batch_preflight_id(
     let encoded = serde_json::to_vec(&(request, table))
         .map_err(|error| format!("Could not encode batch table preflight: {error}"))?;
     let digest = Sha256::digest(encoded);
-    Ok(format!("batch-plan-{:X}", u64::from_be_bytes(digest[..8].try_into().expect("sha256 prefix"))))
+    Ok(format!(
+        "batch-plan-{:X}",
+        u64::from_be_bytes(digest[..8].try_into().expect("sha256 prefix"))
+    ))
 }
 
 fn finalize_table_data_transfer_batch_confirmation(
@@ -4548,125 +4547,129 @@ async fn resolve_table_data_transfer_batch_plan(
     manager: &ConnectionManager,
     request: TableDataTransferBatchPlanRequest,
 ) -> Result<TableDataTransferBatchPlan, String> {
-        let tables = normalized_table_data_transfer_batch_tables(&request.tables)?;
-        if request.source_connection_id.trim().is_empty()
-            || request.target_connection_id.trim().is_empty()
-            || request.source_schema.trim().is_empty()
-            || request.target_schema.trim().is_empty()
-        {
-            return Err(
-                "Source and target connection/schema are required for a batch transfer plan."
-                    .to_string(),
-            );
-        }
-        let sample_table = tables.first().expect("validated non-empty tables").clone();
-        let source = TableDataTransferEndpoint {
-            connection_id: request.source_connection_id.clone(),
-            driver: request.source_driver.clone(),
-            database: request.source_database.clone(),
-            schema: request.source_schema.clone(),
-            table: sample_table.clone(),
-        };
-        let target = TableDataTransferEndpoint {
-            connection_id: request.target_connection_id.clone(),
-            driver: request.target_driver.clone(),
-            database: request.target_database.clone(),
-            schema: request.target_schema.clone(),
-            table: sample_table,
-        };
-        ensure_transfer_endpoint_driver_matches_connection(&manager, &source).await?;
-        ensure_transfer_endpoint_driver_matches_connection(&manager, &target).await?;
-        table_data_transfer_dialect(&manager, &source).await?;
-        table_data_transfer_dialect(&manager, &target).await?;
+    let tables = normalized_table_data_transfer_batch_tables(&request.tables)?;
+    if request.source_connection_id.trim().is_empty()
+        || request.target_connection_id.trim().is_empty()
+        || request.source_schema.trim().is_empty()
+        || request.target_schema.trim().is_empty()
+    {
+        return Err(
+            "Source and target connection/schema are required for a batch transfer plan."
+                .to_string(),
+        );
+    }
+    let sample_table = tables.first().expect("validated non-empty tables").clone();
+    let source = TableDataTransferEndpoint {
+        connection_id: request.source_connection_id.clone(),
+        driver: request.source_driver.clone(),
+        database: request.source_database.clone(),
+        schema: request.source_schema.clone(),
+        table: sample_table.clone(),
+    };
+    let target = TableDataTransferEndpoint {
+        connection_id: request.target_connection_id.clone(),
+        driver: request.target_driver.clone(),
+        database: request.target_database.clone(),
+        schema: request.target_schema.clone(),
+        table: sample_table,
+    };
+    ensure_transfer_endpoint_driver_matches_connection(manager, &source).await?;
+    ensure_transfer_endpoint_driver_matches_connection(manager, &target).await?;
+    table_data_transfer_dialect(manager, &source).await?;
+    table_data_transfer_dialect(manager, &target).await?;
 
-        let mut constraints_by_table = Vec::with_capacity(tables.len());
-        for table in &tables {
-            let constraints = match source.database.as_deref() {
-                Some(database) => {
-                    manager
-                        .get_database_constraints(
-                            &source.connection_id,
-                            database,
-                            &source.schema,
-                            table,
-                        )
-                        .await
-                }
-                None => {
-                    manager
-                        .get_constraints(&source.connection_id, &source.schema, table)
-                        .await
-                }
+    let mut constraints_by_table = Vec::with_capacity(tables.len());
+    for table in &tables {
+        let constraints = match source.database.as_deref() {
+            Some(database) => {
+                manager
+                    .get_database_constraints(
+                        &source.connection_id,
+                        database,
+                        &source.schema,
+                        table,
+                    )
+                    .await
             }
-            .map_err(|error| {
-                format!(
-                    "Could not inspect foreign-key dependencies for {}: {error}",
-                    table
-                )
-            })?;
-            constraints_by_table.push((table.clone(), constraints));
+            None => {
+                manager
+                    .get_constraints(&source.connection_id, &source.schema, table)
+                    .await
+            }
         }
-        let mut plan = table_data_transfer_batch_plan(&request, &tables, &constraints_by_table)?;
-        if plan.cyclic_tables.is_empty() {
-            for table in &plan.ordered_tables {
-                let preflight_request = TableDataTransferRequest {
-                    project_id: None,
-                    // Deterministic validation-only identity: the aggregate
-                    // confirmation token must be stable across preview and
-                    // execution while still satisfying transfer-id rules.
-                    transfer_id: table_data_transfer_batch_preflight_id(&request, table)?,
-                    source: TableDataTransferEndpoint {
-                        connection_id: request.source_connection_id.clone(),
-                        driver: request.source_driver.clone(),
-                        database: request.source_database.clone(),
-                        schema: request.source_schema.clone(),
-                        table: table.clone(),
-                    },
-                    target: TableDataTransferEndpoint {
-                        connection_id: request.target_connection_id.clone(),
-                        driver: request.target_driver.clone(),
-                        database: request.target_database.clone(),
-                        schema: request.target_schema.clone(),
-                        table: table.clone(),
-                    },
-                    mode: request.mode,
-                    max_rows: request.max_rows,
-                    batch_size: request.batch_size,
-                    reseed_identity: request.reseed_identity,
-                };
-                match resolve_table_data_transfer_plan(&manager, &preflight_request).await {
-                    Ok(table_plan) => {
-                        let can_execute = transfer_plan_can_execute(&table_plan.mapped_columns);
-                        plan.table_preflights.push(TableDataTransferBatchTablePreflight {
+        .map_err(|error| {
+            format!(
+                "Could not inspect foreign-key dependencies for {}: {error}",
+                table
+            )
+        })?;
+        constraints_by_table.push((table.clone(), constraints));
+    }
+    let mut plan = table_data_transfer_batch_plan(&request, &tables, &constraints_by_table)?;
+    if plan.cyclic_tables.is_empty() {
+        for table in &plan.ordered_tables {
+            let preflight_request = TableDataTransferRequest {
+                project_id: None,
+                // Deterministic validation-only identity: the aggregate
+                // confirmation token must be stable across preview and
+                // execution while still satisfying transfer-id rules.
+                transfer_id: table_data_transfer_batch_preflight_id(&request, table)?,
+                source: TableDataTransferEndpoint {
+                    connection_id: request.source_connection_id.clone(),
+                    driver: request.source_driver.clone(),
+                    database: request.source_database.clone(),
+                    schema: request.source_schema.clone(),
+                    table: table.clone(),
+                },
+                target: TableDataTransferEndpoint {
+                    connection_id: request.target_connection_id.clone(),
+                    driver: request.target_driver.clone(),
+                    database: request.target_database.clone(),
+                    schema: request.target_schema.clone(),
+                    table: table.clone(),
+                },
+                mode: request.mode,
+                max_rows: request.max_rows,
+                batch_size: request.batch_size,
+                reseed_identity: request.reseed_identity,
+            };
+            match resolve_table_data_transfer_plan(manager, &preflight_request).await {
+                Ok(table_plan) => {
+                    let can_execute = transfer_plan_can_execute(&table_plan.mapped_columns);
+                    plan.table_preflights
+                        .push(TableDataTransferBatchTablePreflight {
                             table: table.clone(),
                             can_execute,
                             mapped_columns: table_plan.mapped_columns.len() as u32,
-                            plan_digest: Some(table_data_transfer_plan_digest(&table_plan.confirmation_token)),
+                            plan_digest: Some(table_data_transfer_plan_digest(
+                                &table_plan.confirmation_token,
+                            )),
                             warnings: table_plan.warnings,
                         });
-                        plan.can_execute &= can_execute;
-                    }
-                    Err(error) => {
-                        plan.table_preflights.push(TableDataTransferBatchTablePreflight {
+                    plan.can_execute &= can_execute;
+                }
+                Err(error) => {
+                    plan.table_preflights
+                        .push(TableDataTransferBatchTablePreflight {
                             table: table.clone(),
                             can_execute: false,
                             mapped_columns: 0,
                             plan_digest: None,
                             warnings: vec![bounded_table_data_transfer_message(&error)],
                         });
-                        plan.can_execute = false;
-                    }
+                    plan.can_execute = false;
                 }
             }
-            if !plan.can_execute {
-                plan.warnings.push(
+        }
+        if !plan.can_execute {
+            plan.warnings.push(
                     "At least one selected table failed a fresh source/target mapping preflight. Review every table before attempting a batch transfer."
                         .to_string(),
                 );
-            }
         }
-        finalize_table_data_transfer_batch_confirmation(&request, &mut plan)?;
-        Ok(plan)
+    }
+    finalize_table_data_transfer_batch_confirmation(&request, &mut plan)?;
+    Ok(plan)
 }
 
 #[tauri::command]
@@ -4891,7 +4894,11 @@ async fn execute_resolved_table_data_transfer_in_transaction(
             })
             .collect::<Result<Vec<_>, _>>()?;
         manager
-            .execute_parameterized_transaction(&request.target.connection_id, transaction_id, &statements)
+            .execute_parameterized_transaction(
+                &request.target.connection_id,
+                transaction_id,
+                &statements,
+            )
             .await
             .map_err(|error| error.to_string())?;
         if *cancel_rx.borrow() {
@@ -4912,14 +4919,18 @@ async fn execute_resolved_table_data_transfer_in_transaction(
         }
     }
     if !plan.identity_reseed_columns.is_empty() {
-        let statements = postgres_identity_reseed_statements(
-            &request.target,
-            &plan.identity_reseed_columns,
-        );
+        let statements =
+            postgres_identity_reseed_statements(&request.target, &plan.identity_reseed_columns);
         manager
-            .execute_parameterized_transaction(&request.target.connection_id, transaction_id, &statements)
+            .execute_parameterized_transaction(
+                &request.target.connection_id,
+                transaction_id,
+                &statements,
+            )
             .await
-            .map_err(|error| format!("Could not synchronize PostgreSQL identity generators: {error}"))?;
+            .map_err(|error| {
+                format!("Could not synchronize PostgreSQL identity generators: {error}")
+            })?;
     }
     Ok((rows_transferred, batches, limit_reached))
 }
@@ -5269,7 +5280,12 @@ pub async fn execute_table_data_transfer_batch(
         .await
     {
         Ok(receiver) => receiver,
-        Err(error) => return Ok(Response::err("REGISTER_TABLE_DATA_TRANSFER_BATCH_ERROR", &error)),
+        Err(error) => {
+            return Ok(Response::err(
+                "REGISTER_TABLE_DATA_TRANSFER_BATCH_ERROR",
+                &error,
+            ))
+        }
     };
     let mut last_progress_rows = 0_u64;
     let mut last_progress_batches = 0_u64;
@@ -5405,51 +5421,100 @@ pub async fn execute_table_data_transfer_batch(
     let total_max_rows = normalized_transfer_limit(request.plan.max_rows)
         .saturating_mul(expected_tables.len().max(request.plan.tables.len()) as u32);
     match &result {
-        Ok(summary) => emit_table_data_transfer_progress(&app, TableDataTransferProgress {
-            transfer_id: transfer_id.clone(), rows_transferred: summary.rows_transferred, max_rows: total_max_rows,
-            batches: summary.batches, status: TableDataTransferProgressStatus::Done, terminal: true, message: None,
-        }),
-        Err(error) => emit_table_data_transfer_progress(&app, TableDataTransferProgress {
-            transfer_id: transfer_id.clone(), rows_transferred: last_progress_rows, max_rows: total_max_rows,
-            batches: last_progress_batches,
-            status: if error.contains(TABLE_DATA_TRANSFER_CANCELLED) { TableDataTransferProgressStatus::Cancelled } else { TableDataTransferProgressStatus::Error },
-            terminal: true, message: Some(bounded_table_data_transfer_message(error)),
-        }),
+        Ok(summary) => emit_table_data_transfer_progress(
+            &app,
+            TableDataTransferProgress {
+                transfer_id: transfer_id.clone(),
+                rows_transferred: summary.rows_transferred,
+                max_rows: total_max_rows,
+                batches: summary.batches,
+                status: TableDataTransferProgressStatus::Done,
+                terminal: true,
+                message: None,
+            },
+        ),
+        Err(error) => emit_table_data_transfer_progress(
+            &app,
+            TableDataTransferProgress {
+                transfer_id: transfer_id.clone(),
+                rows_transferred: last_progress_rows,
+                max_rows: total_max_rows,
+                batches: last_progress_batches,
+                status: if error.contains(TABLE_DATA_TRANSFER_CANCELLED) {
+                    TableDataTransferProgressStatus::Cancelled
+                } else {
+                    TableDataTransferProgressStatus::Error
+                },
+                terminal: true,
+                message: Some(bounded_table_data_transfer_message(error)),
+            },
+        ),
     }
 
     let mut result = result;
-    if let Some(project_id) = normalized_table_data_transfer_project_id(request.project_id.as_deref()) {
+    if let Some(project_id) =
+        normalized_table_data_transfer_project_id(request.project_id.as_deref())
+    {
         let (status, error) = match &result {
             Ok(_) => (TableDataTransferProgressStatus::Done, None),
             Err(error) if error.contains(TABLE_DATA_TRANSFER_CANCELLED) => (TableDataTransferProgressStatus::Cancelled, Some("Batch transfer cancelled and target changes were rolled back.".to_string())),
             Err(_) => (TableDataTransferProgressStatus::Error, Some("Batch transfer failed. The target transaction was rolled back when supported; capture a fresh batch preview before retrying.".to_string())),
         };
         for (index, table_request) in expected_tables.iter().enumerate() {
-            let (rows_transferred, batches, limit_reached) = result.as_ref().ok()
+            let (rows_transferred, batches, limit_reached) = result
+                .as_ref()
+                .ok()
                 .and_then(|summary| summary.tables.get(index))
                 .map(|table| (table.rows_transferred, table.batches, table.limit_reached))
                 .unwrap_or((0, 0, false));
             let table_digest = Sha256::digest(table_request.target.table.as_bytes());
-            let report_id = format!("table-transfer-report-{}-{:X}", transfer_id, u64::from_be_bytes(table_digest[..8].try_into().expect("sha256 prefix")));
+            let report_id = format!(
+                "table-transfer-report-{}-{:X}",
+                transfer_id,
+                u64::from_be_bytes(table_digest[..8].try_into().expect("sha256 prefix"))
+            );
             let report = TableDataTransferReport {
-                id: report_id.clone(), project_id: project_id.clone(), transfer_id: format!("{transfer_id}-{index}"),
-                source: table_request.source.clone(), target: table_request.target.clone(), mode: table_request.mode,
-                plan_digest: table_data_transfer_plan_digest(&confirmation_token), max_rows: normalized_transfer_limit(request.plan.max_rows),
-                rows_transferred, batches, limit_reached, status, started_at, finished_at: current_table_timestamp_millis(),
-                error: error.clone(), verification: None,
+                id: report_id.clone(),
+                project_id: project_id.clone(),
+                transfer_id: format!("{transfer_id}-{index}"),
+                source: table_request.source.clone(),
+                target: table_request.target.clone(),
+                mode: table_request.mode,
+                plan_digest: table_data_transfer_plan_digest(&confirmation_token),
+                max_rows: normalized_transfer_limit(request.plan.max_rows),
+                rows_transferred,
+                batches,
+                limit_reached,
+                status,
+                started_at,
+                finished_at: current_table_timestamp_millis(),
+                error: error.clone(),
+                verification: None,
             };
             match persist_table_data_transfer_report(meta_store.inner(), &report).await {
-                Ok(()) => if let Ok(summary) = result.as_mut() {
-                    if let Some(table) = summary.tables.get_mut(index) { table.report_id = Some(report_id); }
-                },
-                Err(error) => tracing::warn!(error = %error, "batch table data transfer report was not persisted"),
+                Ok(()) => {
+                    if let Ok(summary) = result.as_mut() {
+                        if let Some(table) = summary.tables.get_mut(index) {
+                            table.report_id = Some(report_id);
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "batch table data transfer report was not persisted")
+                }
             }
         }
     }
     match result {
         Ok(summary) => Ok(Response::ok(summary)),
-        Err(error) if error.contains(TABLE_DATA_TRANSFER_CANCELLED) => Ok(Response::err("TABLE_DATA_TRANSFER_CANCELLED", "Batch transfer cancelled and target changes were rolled back.")),
-        Err(error) => Ok(Response::err("EXECUTE_TABLE_DATA_TRANSFER_BATCH_ERROR", &error)),
+        Err(error) if error.contains(TABLE_DATA_TRANSFER_CANCELLED) => Ok(Response::err(
+            "TABLE_DATA_TRANSFER_CANCELLED",
+            "Batch transfer cancelled and target changes were rolled back.",
+        )),
+        Err(error) => Ok(Response::err(
+            "EXECUTE_TABLE_DATA_TRANSFER_BATCH_ERROR",
+            &error,
+        )),
     }
 }
 
@@ -5697,8 +5762,7 @@ pub async fn export_table_data(
     let mut cancel_rx = cancellation.register(&export_id, &connection_id).await?;
     let started_at = current_table_timestamp_millis();
     let encoding = encoding.unwrap_or(TableExportEncoding::Utf8);
-    if matches!(encoding, TableExportEncoding::Utf8Bom)
-        && !matches!(format, TableExportFormat::Csv)
+    if matches!(encoding, TableExportEncoding::Utf8Bom) && !matches!(format, TableExportFormat::Csv)
     {
         cancellation.take(&export_id).await;
         return Err("UTF-8 BOM output is supported only for CSV exports".to_string());
@@ -6056,8 +6120,9 @@ pub async fn list_table_export_reports(
     connection_id: String,
     limit: Option<usize>,
 ) -> Result<Response<Vec<TableExportReport>>, String> {
-    let project_id = normalized_table_export_project_id(Some(&project_id))
-        .ok_or_else(|| "A valid project id is required to read table export reports.".to_string())?;
+    let project_id = normalized_table_export_project_id(Some(&project_id)).ok_or_else(|| {
+        "A valid project id is required to read table export reports.".to_string()
+    })?;
     let mut reports = meta_store
         .get_children(
             &project_id,
@@ -6365,9 +6430,9 @@ fn verify_import_file_digest(path: &Path, expected: Option<&str>) -> Result<(), 
     Ok(())
 }
 
-fn xlsx_import_rows(
-    path: &Path,
-) -> Result<(String, Vec<String>, Vec<BTreeMap<String, Value>>), String> {
+type XlsxImportRows = (String, Vec<String>, Vec<BTreeMap<String, Value>>);
+
+fn xlsx_import_rows(path: &Path) -> Result<XlsxImportRows, String> {
     let mut workbook = open_workbook_auto(path)
         .map_err(|error| format!("Unable to read XLSX workbook: {error}"))?;
     let sheet_name = workbook
@@ -6873,13 +6938,20 @@ pub async fn preflight_table_csv_import(
         .from_path(&path)
         .map_err(|error| error.to_string())?;
     let source_columns = if has_headers {
-        reader.headers().map_err(|error| error.to_string())?.iter()
-            .map(|value| value.trim().to_string()).collect::<Vec<_>>()
+        reader
+            .headers()
+            .map_err(|error| error.to_string())?
+            .iter()
+            .map(|value| value.trim().to_string())
+            .collect::<Vec<_>>()
     } else {
         columns.keys().cloned().collect::<Vec<_>>()
     };
     let headers = resolve_csv_import_columns(&source_columns, &columns, csv_options.as_ref())?;
-    let empty_fields_as_null = csv_options.as_ref().and_then(|options| options.empty_fields_as_null).unwrap_or(false);
+    let empty_fields_as_null = csv_options
+        .as_ref()
+        .and_then(|options| options.empty_fields_as_null)
+        .unwrap_or(false);
     let mut total_rows = 0_u64;
     let mut accepted_rows = 0_u64;
     let mut rejected_rows = 0_u64;
@@ -6889,17 +6961,36 @@ pub async fn preflight_table_csv_import(
         let row_number = index as u64 + if has_headers { 2 } else { 1 };
         let valid = record
             .map_err(|_| ())
-            .and_then(|record| csv_record_values(&headers, &record, empty_fields_as_null).map_err(|_| ()))
-            .and_then(|row| build_insert_mutation(kind, &schema, &table, &columns, &row).map(|_| ()).map_err(|_| ()))
+            .and_then(|record| {
+                csv_record_values(&headers, &record, empty_fields_as_null).map_err(|_| ())
+            })
+            .and_then(|row| {
+                build_insert_mutation(kind, &schema, &table, &columns, &row)
+                    .map(|_| ())
+                    .map_err(|_| ())
+            })
             .is_ok();
-        if valid { accepted_rows += 1; } else {
+        if valid {
+            accepted_rows += 1;
+        } else {
             rejected_rows += 1;
-            if issues.len() < 100 { issues.push(TableImportRowIssue { row_number, code: "ROW_INVALID".to_string() }); }
+            if issues.len() < 100 {
+                issues.push(TableImportRowIssue {
+                    row_number,
+                    code: "ROW_INVALID".to_string(),
+                });
+            }
         }
     }
     Ok(Response::ok(TableCsvImportPreflight {
-        mapping_digest: table_import_mapping_digest(TableImportFormat::Csv, first_row_header, csv_options.as_ref())?,
-        total_rows, accepted_rows, rejected_rows,
+        mapping_digest: table_import_mapping_digest(
+            TableImportFormat::Csv,
+            first_row_header,
+            csv_options.as_ref(),
+        )?,
+        total_rows,
+        accepted_rows,
+        rejected_rows,
         issues_truncated: rejected_rows > issues.len() as u64,
         issues,
     }))
@@ -7073,11 +7164,8 @@ pub async fn import_table_data(
 ) -> Result<Response<TableImportResult>, String> {
     let import_id = validate_table_import_id(&import_id)?;
     let started_at = current_table_timestamp_millis();
-    let mapping_digest = table_import_mapping_digest(
-        format,
-        first_row_header,
-        csv_options.as_ref(),
-    )?;
+    let mapping_digest =
+        table_import_mapping_digest(format, first_row_header, csv_options.as_ref())?;
     let result: Result<TableImportResult, String> = async {
         // Import uses the same bounded parameterized row-mutation path as
         // grid edits and exports. SQLite/DuckDB are deliberately supported by
@@ -7216,7 +7304,9 @@ pub async fn import_table_data(
                 TableImportReportStatus::Error,
                 0,
                 0,
-                Some("Import failed and the transaction was rolled back when supported.".to_string()),
+                Some(
+                    "Import failed and the transaction was rolled back when supported.".to_string(),
+                ),
             ),
         };
         let report_id = table_import_report_id(&import_id);
@@ -7262,8 +7352,9 @@ pub async fn list_table_import_reports(
     connection_id: String,
     limit: Option<usize>,
 ) -> Result<Response<Vec<TableImportReport>>, String> {
-    let project_id = normalized_table_export_project_id(Some(&project_id))
-        .ok_or_else(|| "A valid project id is required to read table import reports.".to_string())?;
+    let project_id = normalized_table_export_project_id(Some(&project_id)).ok_or_else(|| {
+        "A valid project id is required to read table import reports.".to_string()
+    })?;
     let mut reports = meta_store
         .get_children(
             &project_id,
@@ -8427,7 +8518,7 @@ pub async fn get_postgres_routine_definitions(
             )
             .await
             .map_err(|error| error.to_string())?;
-        let definitions = results
+        let definitions: Vec<String> = results
             .first()
             .map(|result| result.rows.iter().filter_map(|row| row.first().and_then(value_to_string)).collect())
             .unwrap_or_default();
@@ -8438,7 +8529,10 @@ pub async fn get_postgres_routine_definitions(
     }.await;
     match result {
         Ok(definitions) => Ok(Response::ok(definitions)),
-        Err(error) => Ok(Response::err("GET_POSTGRES_ROUTINE_DEFINITION_ERROR", &error)),
+        Err(error) => Ok(Response::err(
+            "GET_POSTGRES_ROUTINE_DEFINITION_ERROR",
+            &error,
+        )),
     }
 }
 

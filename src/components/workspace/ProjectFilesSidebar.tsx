@@ -17,6 +17,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/store/useProjectStore";
+import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
 import {
   selectProjectFileTree,
   useProjectFilesStore,
@@ -243,6 +244,9 @@ function ProjectFileNode({
 }
 
 export function ProjectFilesSidebar() {
+  const setToolWindowVisible = useWorkbenchLayoutStore(
+    (state) => state.setToolWindowVisible,
+  );
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const activeProjectName = useProjectStore((state) => state.activeProjectName);
   const activeProjectRoot = useProjectStore(
@@ -571,6 +575,15 @@ export function ProjectFilesSidebar() {
             title={rootPath ? "Change Project Directory" : "Choose Project Directory"}
           >
             <FolderOpen size={12} />
+          </button>
+          <button
+            type="button"
+            className="wb-icon-button h-6 w-6"
+            onClick={() => setToolWindowVisible("projectFiles", false)}
+            title="Hide Project Files"
+            aria-label="Hide Project Files"
+          >
+            <X size={12} />
           </button>
         </div>
       </header>

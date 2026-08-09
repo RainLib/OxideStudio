@@ -1,7 +1,8 @@
 use crate::core::{
     dialect::{database_spec_for_driver, DatabaseKind},
     protocol::{
-        ColumnInfo, ConstraintInfo, FunctionInfo, FunctionParameterInfo, IndexInfo, SchemaObjectInfo,
+        ColumnInfo, ConstraintInfo, FunctionInfo, FunctionParameterInfo, IndexInfo,
+        SchemaObjectInfo,
     },
 };
 use anyhow::{anyhow, Result};
@@ -636,7 +637,8 @@ fn compare_sqlite_schema_snapshots(
             target_relations.get(&relation_name),
         ) {
             (Some(source_relation), None) => {
-                let (sql, relation_warnings) = sqlite_create_relation_sql(source_relation, &relation_name);
+                let (sql, relation_warnings) =
+                    sqlite_create_relation_sql(source_relation, &relation_name);
                 warnings.extend(relation_warnings);
                 let mut create = change(
                     SchemaChangeKind::RelationCreate,
@@ -689,12 +691,8 @@ fn compare_sqlite_schema_snapshots(
                     target_relation,
                     &mut changes,
                 );
-                let (sql, relation_warnings) = sqlite_rebuild_relation_sql(
-                    source,
-                    target,
-                    source_relation,
-                    target_relation,
-                );
+                let (sql, relation_warnings) =
+                    sqlite_rebuild_relation_sql(source, target, source_relation, target_relation);
                 warnings.extend(relation_warnings);
                 let mut rebuild = change(
                     SchemaChangeKind::RelationModify,
@@ -715,7 +713,9 @@ fn compare_sqlite_schema_snapshots(
                 );
                 changes.push(rebuild);
             }
-            (Some(source_relation), Some(target_relation)) if source_relation != target_relation => {
+            (Some(source_relation), Some(target_relation))
+                if source_relation != target_relation =>
+            {
                 // SQLite does not persist column comments. Keep descriptor
                 // drift visible without manufacturing a destructive rebuild
                 // for metadata that cannot change the physical table.
@@ -924,9 +924,7 @@ fn sqlite_constraint_clause(
             .definition
             .as_deref()
             .map(str::trim)
-            .filter(|definition| {
-                !definition.is_empty() && sqlite_sql_fragment_is_safe(definition)
-            })
+            .filter(|definition| !definition.is_empty() && sqlite_sql_fragment_is_safe(definition))
             .ok_or_else(|| {
                 format!(
                     "CHECK constraint {}.{} needs its exact source definition.",
@@ -961,8 +959,8 @@ fn sqlite_create_index_sql(
         .map(|column| column.name.as_str())
         .collect::<BTreeSet<_>>();
     let index_type = index.index_type.as_deref().map(str::trim);
-    let supported_index_type = index_type
-        .is_none_or(|value| value.is_empty() || value.eq_ignore_ascii_case("BTREE"));
+    let supported_index_type =
+        index_type.is_none_or(|value| value.is_empty() || value.eq_ignore_ascii_case("BTREE"));
     if index.columns.is_empty()
         || index
             .columns
@@ -1098,7 +1096,10 @@ fn sqlite_rebuild_relation_sql(
         )
         .as_bytes(),
     )[..12];
-    let temporary_table = format!("__oxide_rebuild_{}_{}", source_relation.name, rebuild_suffix);
+    let temporary_table = format!(
+        "__oxide_rebuild_{}_{}",
+        source_relation.name, rebuild_suffix
+    );
     let (create_sql, mut warnings) = sqlite_create_relation_sql(source_relation, &temporary_table);
     if create_sql.is_empty() {
         return (Vec::new(), warnings);
@@ -1162,7 +1163,10 @@ fn sqlite_rebuild_relation_sql(
         sqlite_quote_identifier(&temporary_table),
         sqlite_quote_identifier(&target_relation.name)
     ));
-    sql.push(format!("DROP TABLE {};", sqlite_quote_identifier(&target_relation.name)));
+    sql.push(format!(
+        "DROP TABLE {};",
+        sqlite_quote_identifier(&target_relation.name)
+    ));
     sql.push(format!(
         "ALTER TABLE {} RENAME TO {};",
         sqlite_quote_identifier(&temporary_table),
@@ -1220,7 +1224,9 @@ fn render_sqlite_rebuild_migration_sql(
             lines.push(format!("-- BLOCKED: {reason}"));
         }
         if change.sql.is_empty() {
-            lines.push("-- MANUAL REVIEW REQUIRED: no complete rebuild SQL was generated.".to_string());
+            lines.push(
+                "-- MANUAL REVIEW REQUIRED: no complete rebuild SQL was generated.".to_string(),
+            );
         } else {
             lines.extend(change.sql.iter().cloned());
         }
@@ -1366,9 +1372,7 @@ fn compare_routines(
     }
 }
 
-fn schema_object_map(
-    objects: &[SchemaObjectSnapshot],
-) -> BTreeMap<String, &SchemaObjectSnapshot> {
+fn schema_object_map(objects: &[SchemaObjectSnapshot]) -> BTreeMap<String, &SchemaObjectSnapshot> {
     objects
         .iter()
         .map(|object| (schema_object_identity(object), object))
@@ -1376,7 +1380,11 @@ fn schema_object_map(
 }
 
 fn schema_object_identity(object: &SchemaObjectSnapshot) -> String {
-    format!("{}:{}", object.object_type.to_ascii_uppercase(), object.name)
+    format!(
+        "{}:{}",
+        object.object_type.to_ascii_uppercase(),
+        object.name
+    )
 }
 
 fn schema_object_label(object: &SchemaObjectSnapshot) -> String {

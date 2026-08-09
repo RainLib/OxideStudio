@@ -783,7 +783,7 @@ impl DatabaseDriverPackageRegistry {
         let old_current = read_active_version(&driver_root);
         let state = DriverActivationState {
             current: package.manifest.package_version,
-            previous: old_current.filter(|version| version != &package_version),
+            previous: old_current.filter(|version| version != package_version),
         };
         write_activation_state(&driver_root, &state)?;
         Ok(state)

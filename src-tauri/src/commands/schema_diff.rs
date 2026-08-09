@@ -4,8 +4,8 @@ use crate::core::{
     protocol::{ParameterizedStatement, QueryResult, Response},
     schema_diff::{
         compare_schema_snapshots as build_schema_diff, finalize_schema_snapshot, SchemaChangeRisk,
-        SchemaDiffPlan, SchemaDiffSummary, SchemaPreflightAssertion, SchemaPreflightCheck,
-        SchemaObjectSnapshot, SchemaRelationSnapshot, SchemaRoutineSnapshot, SchemaSnapshot,
+        SchemaDiffPlan, SchemaDiffSummary, SchemaObjectSnapshot, SchemaPreflightAssertion,
+        SchemaPreflightCheck, SchemaRelationSnapshot, SchemaRoutineSnapshot, SchemaSnapshot,
         SCHEMA_SNAPSHOT_VERSION,
     },
     store::{MetaStore, Resource},

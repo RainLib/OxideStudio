@@ -4,31 +4,16 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: "Release tag matching package.json, for example v0.1.1"
-        required: true
-        type: string
-      release_notes:
-        description: "Optional notes shown by the desktop updater"
-        required: false
-        type: string
-      allow_unsigned_release:
-        description: "TEST ONLY: allow publishing unsigned macOS/Windows artifacts"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  RELEASE_TAG: ${{ github.ref_name }}
   OXIDE_RELEASE_BASE_URL: ${{ secrets.ALIYUN_OSS_PUBLIC_BASE_URL }}
   ALIYUN_OSS_PREFIX: ${{ secrets.ALIYUN_OSS_PREFIX }}
   WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
@@ -46,7 +31,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+          ref: ${{ github.ref }}
           fetch-depth: 0
 
       - name: Setup Node.js
@@ -110,7 +95,7 @@ jobs:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
-          ALLOW_UNSIGNED_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_unsigned_release && 'true' || 'false' }}
+          ALLOW_UNSIGNED_RELEASE: "false"
         run: |
           node - <<'NODE'
           const required = [
@@ -156,7 +141,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+          ref: ${{ github.ref }}
           submodules: recursive
 
       - name: Install native build dependencies
@@ -233,7 +218,7 @@ jobs:
       - name: Checkout repository and SQL LSP
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+          ref: ${{ github.ref }}
           fetch-depth: 0
           submodules: recursive
 
@@ -543,7 +528,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+          ref: ${{ github.ref }}
           fetch-depth: 0
 
       - name: Setup Node.js
@@ -559,7 +544,7 @@ jobs:
 
       - name: Build static updater manifest and checksums
         env:
-          RELEASE_NOTES: ${{ github.event_name == 'workflow_dispatch' && inputs.release_notes || '' }}
+          RELEASE_NOTES: ""
         run: |
           node scripts/package-oss-release.mjs \
             --input release-input \
@@ -669,6 +654,14 @@ jobs:
 
       - name: Verify public update downloads use Aliyun OSS
         run: node scripts/verify-oss-release.mjs
+
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OxideStudio ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          files: release-output/${{ env.RELEASE_TAG }}/**/*
+          fail_on_unmatched_files: true
 
       - name: Preserve release index
         uses: actions/upload-artifact@v7

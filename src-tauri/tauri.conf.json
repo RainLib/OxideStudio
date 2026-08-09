@@ -1,7 +1,7 @@
 {
     "$schema": "https://schema.tauri.app/config/2",
     "productName": "OxideStudio",
-    "version": "0.1.2",
+    "version": "0.1.6",
     "identifier": "com.houshuai.oxide-studio",
     "build": {
         "beforeDevCommand": "npm run agent-host:build && node scripts/prepare-sql-lsp.mjs && npm run dev",
