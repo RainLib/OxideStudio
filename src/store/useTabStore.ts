@@ -48,6 +48,7 @@ import type { Diagnostic } from "@/services/lsp/types";
 import type { SchemaDiagramAreaHistory } from "@/lib/schemaDiagramAreas";
 import {
   createSchemaDiagramCanvasHistory,
+  rebaseSchemaDiagramCanvasDraft,
   type SchemaDiagramCanvasHistory,
   type SchemaDiagramCanvasState,
 } from "@/lib/schemaDiagramCanvasHistory";
@@ -940,6 +941,7 @@ function normalizeDiagramCanvasHistory(
       relationNames: area.relationNames.filter((name) => relationNames.has(name)),
     })),
     notes: state.notes,
+    draft: state.draft,
   });
   if (!history) {
     return createSchemaDiagramCanvasHistory(
@@ -947,11 +949,11 @@ function normalizeDiagramCanvasHistory(
       legacyNotes || [],
     );
   }
-  return {
+  return rebaseSchemaDiagramCanvasDraft({
     past: history.past.map(normalize),
     present: normalize(history.present),
     future: history.future.map(normalize),
-  };
+  }, snapshot.fingerprint);
 }
 
 export const useTabStore = create<TabState>((set, get) => ({

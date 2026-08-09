@@ -59,6 +59,12 @@ database target until its relevant queue entries pass.
   labels, stable overload ranking, dialect fallback, server-version catalog
   gates, ClickHouse parameter groups, expression-only function suggestions,
   live-metadata precedence and editable snippet insertion.
+- The unified diagram transaction-history suite passed without database access:
+  19 focused tests cover Area/Note/draft operation ordering, the 100-step bound,
+  persisted-draft hydration, stale fingerprint rebasing without no-op undo
+  entries, draft structural sharing and scoped canvas/draft persistence. Strict
+  TypeScript, the production bundle and startup-cycle verification passed after
+  the integration.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an
@@ -564,7 +570,12 @@ explicit deferred validation task rather than an implicit release check.
   columns, views and foreign tables do nothing. Keyboard-only FK creation must
   remain available through the same form and neither path may execute DDL.
 - Create, edit, recolor, move, resize and delete diagram notes at several zoom
-  levels, interleaved with Area operations. Pointer movement/resize must remain
+  levels, interleaved with Area and Structured Draft operations. Undo/redo from
+  the toolbar and draft dialog must follow one operation-ordered 100-step
+  timeline; closing/reopening the draft must hydrate its persisted baseline
+  without adding an undo step, and snapshot refresh must remove only stale
+  fingerprint draft states without erasing valid Area/Note history. Pointer
+  movement/resize must remain
   local until release, one undo must reverse one completed gesture, keyboard
   repeats must commit on key-up, and native text undo inside dialogs must not be
   intercepted. Confirmed deletion must be required, tab switching/closing must

@@ -59,7 +59,7 @@
 | --- | --- | --- | --- | --- |
 | U01 | 主路径已对齐 | 图中直接创建/编辑 table、field、index、constraint、relationship、note | `src/context/chartdb-context/chartdb-provider.tsx` 各 mutation + history action；节点 UI 在 `src/pages/editor-page/canvas/` | Diagram 的 Structured Draft 可增删/重命名 relation，增删改 column/comment/default，增删 index/FK/CHECK，并传播 relation/column rename 引用。草稿按 project + connection + database + schema 自动保存；同 fingerprint 恢复、旧 snapshot 防串用、串行 flush 和二次确认丢弃已具备。字段可从源列拖到目标列，经 1 KiB 载荷和 snapshot 对象复核后预填唯一 FK，view/foreign table 被拒绝，仍须用户确认且只生成 review-only diff。独立 Note 节点支持 4,000 字内容、五种颜色、缩放感知拖动、编辑和二次确认删除，明确不进入 DDL。 |
 | U02 | 已对齐（最新更新） | 多选表移动到 Area、Area 内自动排列 | 最新提交修改 `src/pages/editor-page/canvas/table-node/table-node-context-menu.tsx:188`、`area-node-context-menu.tsx:39`、`src/lib/utils/area-utils.ts` | `schemaDiagramAreas.ts` 与 Diagram 工具条已支持 Ctrl/Cmd/Shift 多选、独占 move-to-area、父表优先的组内 auto-arrange、删除 Area 后表回到非分组画布；关系节点右键菜单可批量移动到现有/新 Area 或 `No area`，Area 标题右键可重命名、自动排列/删除，全部复用同一 100 步历史。重命名阻止空名和大小写等价的重复名。Area 与 Note 现按 project/connection/database/schema 共用有界资源持久化；snapshot 刷新会过滤已不存在的 Area relation，但保留 Note。 |
-| U03 | 本阶段增强 | 全量 undo/redo action stack | `src/context/history-context/history-provider.tsx:384` / `:399`，action schema 在 `redo-undo-action.ts` | Area 与 Note 已合并到同一 100 步画布事务历史，状态使用不可变引用和结构共享；创建/重命名/分组/自动排列、Note 创建/编辑/颜色/删除/移动/缩放均可按实际操作顺序 undo/redo。指针移动与缩放只在 release 提交一次，键盘连续调整在 key-up 提交；工具栏和 Ctrl/Cmd+Z、Ctrl/Cmd+Shift+Z/Ctrl+Y 共用同一路径，输入框及草稿对话框保留原生文本撤销。切换/关闭 tab 会串行 flush 最新画布，重载后从保存版本开启新历史。Structured Draft 仍是独立、review-only 的 schema artifact，因此保留自己的结构化历史，尚未成为可直接改变画布 schema 的统一事务。 |
+| U03 | 已对齐（逻辑） | 全量 undo/redo action stack | `src/context/history-context/history-provider.tsx:384` / `:399`，action schema 在 `redo-undo-action.ts` | Area、Note 与 Structured Draft 已合并到同一 100 步画布事务历史，按实际操作顺序 undo/redo，并使用不可变引用和结构共享。指针移动与缩放只在 release 提交一次，键盘连续调整在 key-up 提交；工具栏、草稿对话框与 Ctrl/Cmd+Z、Ctrl/Cmd+Shift+Z/Ctrl+Y 共用同一路径，输入框保留原生文本撤销。持久化仍按职责隔离：Area/Note 保存为画布资源，draft 作为 snapshot-fingerprint 绑定的 review-only schema artifact 单独保存；恢复草稿不会制造伪历史，snapshot 更新会清理旧 fingerprint 草稿及无效 undo step，会话重挂载不会被画布加载覆盖。 |
 | U04 | 本阶段增强 | SVG/PNG/JPG 图像导出 | `src/pages/editor-page/top-navbar/menu/menu.tsx:83` 起，`src/context/export-image-context/export-image-provider.tsx` | Diagram 可导出 SVG/PNG/JPG，选择过滤结果或完整画布、深色/浅色/透明背景；Note 会以 XML 安全文本和固定调色板进入矢量/栅格产物并扩展画布边界。栅格导出限制 2400 万像素并按比例缩小，右侧 inspector 可收起。 |
 | U05 | 本阶段增强 | 图过滤、选择聚焦、依赖高亮、lost-in-canvas 提示 | `src/pages/editor-page/canvas/canvas-filter/`、`canvas/hooks/use-is-lost-in-canvas.tsx` | Diagram 已有关系/列搜索、keys-only、选择/reveal、visible-count，并新增“选中表 + 一阶依赖”/当前 Area 范围过滤；选中表被搜索或范围隐藏时显示 `Show hidden selection`，清理过滤并居中找回 |
 | P01 | 已对齐并增强 | 大结果表格虚拟化 | ChartDB 重点是 React Flow 画布 | Oxide 使用 `@glideapps/glide-data-grid`，长表不创建每个单元格 DOM；大表 export 继续走 Rust streaming |
@@ -127,7 +127,7 @@
 - [x] 为 Structured Draft 增加项目级自动保存、snapshot fingerprint 防串用、串行 flush 与安全丢弃。
 - [x] 增加画布字段拖拽建 FK：有界载荷、对象复核、唯一名称预填和 review-only 确认。
 - [x] 增加项目 Note 的创建/编辑/颜色/拖动/安全删除，以及包含 Note 的 SVG/PNG/JPG 导出。
-- [ ] 把 Area/Note/draft 合并为统一事务历史，并增加 Note resize 的撤销能力。
+- [x] 把 Area/Note/draft 合并为统一 100 步事务历史，并增加 Note resize 的撤销能力、持久化基线 hydration 与 snapshot rebase。
 - [x] 增加 SVG export、inspector 收起与 rAF viewport culling。
 - [x] 将 viewport culling 改为布局级空间桶和关系邻接索引，移除滚动热路径的全量节点/边扫描。
 - [x] 增加 PNG/JPG、过滤/完整画布范围和背景选项。

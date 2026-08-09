@@ -34,18 +34,21 @@ import {
   addSchemaDraftForeignKey,
   addSchemaDraftIndex,
   addSchemaDraftRelation,
-  commitSchemaDiagramDraft,
-  createSchemaDiagramDraftHistory,
   createSchemaDiagramDraftSnapshot,
-  redoSchemaDiagramDraft,
   removeSchemaDraftColumn,
   removeSchemaDraftConstraint,
   removeSchemaDraftIndex,
   removeSchemaDraftRelation,
   renameSchemaDraftRelation,
-  undoSchemaDiagramDraft,
   updateSchemaDraftColumn,
 } from "@/features/schema-diff/model/schemaDiagramDraft";
+import {
+  commitSchemaDiagramDraftToCanvas,
+  hydrateSchemaDiagramCanvasDraft,
+  redoSchemaDiagramCanvas,
+  undoSchemaDiagramCanvas,
+  type SchemaDiagramCanvasHistory,
+} from "@/lib/schemaDiagramCanvasHistory";
 import { schemaService } from "@/services/tauri/schema.service";
 import {
   deleteSchemaDiagramDraft,
@@ -62,6 +65,8 @@ type SchemaStructuredDraftDialogProps = {
   snapshot: SchemaSnapshot;
   initialRelationName?: string | null;
   initialForeignKey?: SchemaStructuredDraftForeignKeySeed | null;
+  canvasHistory: SchemaDiagramCanvasHistory;
+  onCanvasHistoryChange: (history: SchemaDiagramCanvasHistory) => void;
   onClose: () => void;
 };
 
@@ -90,12 +95,15 @@ export function SchemaStructuredDraftDialog({
   snapshot,
   initialRelationName,
   initialForeignKey,
+  canvasHistory,
+  onCanvasHistoryChange,
   onClose,
 }: SchemaStructuredDraftDialogProps) {
   const openSchemaDiffTab = useTabStore((state) => state.openSchemaDiffTab);
-  const [history, setHistory] = useState(() =>
-    createSchemaDiagramDraftHistory(snapshot),
-  );
+  const sessionDraft = canvasHistory.present.draft?.baseFingerprint === snapshot.fingerprint
+    ? canvasHistory.present.draft
+    : undefined;
+  const draftRelations = sessionDraft?.relations || snapshot.relations;
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [relationFilter, setRelationFilter] = useState("");
   const [newRelationName, setNewRelationName] = useState("");
@@ -135,13 +143,12 @@ export function SchemaStructuredDraftDialog({
     if (!open) return;
     const generation = ++persistenceGenerationRef.current;
     let disposed = false;
-    setHistory(createSchemaDiagramDraftHistory(snapshot));
     setSelectedName(
-      initialRelationName && snapshot.relations.some(
+      initialRelationName && draftRelations.some(
         (relation) => relation.name === initialRelationName,
       )
         ? initialRelationName
-        : snapshot.relations[0]?.name || null,
+        : draftRelations[0]?.name || null,
     );
     setRelationFilter("");
     setNewRelationName("");
@@ -163,6 +170,13 @@ export function SchemaStructuredDraftDialog({
         ) {
           return;
         }
+        if (sessionDraft) {
+          setPersistenceState("pending");
+          setPersistenceNotice(
+            "Using the current session draft and unified canvas history.",
+          );
+          return;
+        }
         if (!draft) {
           setPersistenceState("idle");
           return;
@@ -175,7 +189,10 @@ export function SchemaStructuredDraftDialog({
           );
           return;
         }
-        setHistory({ past: [], present: draft.relations, future: [] });
+        onCanvasHistoryChange(hydrateSchemaDiagramCanvasDraft(canvasHistory, {
+          baseFingerprint: draft.baseFingerprint,
+          relations: draft.relations,
+        }));
         lastPersistedRelationsRef.current = draft.relations;
         setSelectedName(
           initialRelationName && draft.relations.some(
@@ -214,19 +231,19 @@ export function SchemaStructuredDraftDialog({
   }, [initialRelationName, open, snapshot]);
 
   const selectedRelation = useMemo(
-    () => history.present.find((relation) => relation.name === selectedName) || null,
-    [history.present, selectedName],
+    () => draftRelations.find((relation) => relation.name === selectedName) || null,
+    [draftRelations, selectedName],
   );
   const relationSearch = useMemo(() => {
     const needle = relationFilter.trim().toLowerCase();
-    const matches = history.present.filter(
+    const matches = draftRelations.filter(
       (relation) => !needle || relation.name.toLowerCase().includes(needle),
     );
     return {
       visible: matches.slice(0, MAX_VISIBLE_RELATIONS),
       hiddenCount: Math.max(0, matches.length - MAX_VISIBLE_RELATIONS),
     };
-  }, [history.present, relationFilter]);
+  }, [draftRelations, relationFilter]);
   const visibleRelations = relationSearch.visible;
   const hiddenRelationCount = relationSearch.hiddenCount;
 
@@ -245,13 +262,47 @@ export function SchemaStructuredDraftDialog({
   }, [selectedRelation?.name]);
 
   useEffect(() => {
+    if (selectedName && !selectedRelation) {
+      setSelectedName(draftRelations[0]?.name || null);
+    }
+  }, [draftRelations, selectedName, selectedRelation]);
+
+  useEffect(() => {
+    if (!open || !persistenceReady || isReviewing) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+      const wantsRedo = key === "y" || (key === "z" && event.shiftKey);
+      if (key !== "z" && key !== "y") return;
+      event.preventDefault();
+      onCanvasHistoryChange(
+        wantsRedo
+          ? redoSchemaDiagramCanvas(canvasHistory)
+          : undoSchemaDiagramCanvas(canvasHistory),
+      );
+      setError(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [canvasHistory, isReviewing, onCanvasHistoryChange, open, persistenceReady]);
+
+  useEffect(() => {
     if (!open || !persistenceReady || !initialForeignKey) return;
     const seedKey = JSON.stringify(initialForeignKey);
     if (appliedForeignKeySeedRef.current === seedKey) return;
-    const source = history.present.find(
+    const source = draftRelations.find(
       (relation) => relation.name === initialForeignKey.sourceRelation,
     );
-    const target = history.present.find(
+    const target = draftRelations.find(
       (relation) => relation.name === initialForeignKey.targetRelation,
     );
     if (
@@ -284,7 +335,7 @@ export function SchemaStructuredDraftDialog({
     setForeignKeyTargetColumns(initialForeignKey.targetColumn);
     setError(null);
     appliedForeignKeySeedRef.current = seedKey;
-  }, [history.present, initialForeignKey, open, persistenceReady, selectedName]);
+  }, [draftRelations, initialForeignKey, open, persistenceReady, selectedName]);
 
   const enqueuePersist = useCallback((relations: SchemaRelationSnapshot[]) => {
     const generation = ++persistenceGenerationRef.current;
@@ -324,8 +375,8 @@ export function SchemaStructuredDraftDialog({
     if (
       !open ||
       !persistenceReady ||
-      history.present === lastPersistedRelationsRef.current ||
-      (history.present === snapshot.relations &&
+      draftRelations === lastPersistedRelationsRef.current ||
+      (draftRelations === snapshot.relations &&
         lastPersistedRelationsRef.current === null)
     ) {
       return;
@@ -333,13 +384,18 @@ export function SchemaStructuredDraftDialog({
     setPersistenceState("pending");
     setPersistenceNotice("Project autosave queued.");
     const timer = window.setTimeout(() => {
-      void enqueuePersist(history.present).catch(() => undefined);
+      void enqueuePersist(draftRelations).catch(() => undefined);
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [enqueuePersist, history.present, open, persistenceReady, snapshot.relations]);
+  }, [draftRelations, enqueuePersist, open, persistenceReady, snapshot.relations]);
 
   const commit = (next: SchemaRelationSnapshot[]) => {
-    setHistory((current) => commitSchemaDiagramDraft(current, next));
+    onCanvasHistoryChange(commitSchemaDiagramDraftToCanvas(
+      canvasHistory,
+      snapshot.fingerprint,
+      next,
+      snapshot.relations,
+    ));
     setError(null);
   };
 
@@ -356,7 +412,7 @@ export function SchemaStructuredDraftDialog({
   const createRelation = () => {
     let created = "";
     if (!mutate(() => {
-      const next = addSchemaDraftRelation(history.present, newRelationName);
+      const next = addSchemaDraftRelation(draftRelations, newRelationName);
       created = newRelationName.trim();
       return next;
     })) return;
@@ -368,7 +424,7 @@ export function SchemaStructuredDraftDialog({
     if (!selectedRelation) return;
     const nextName = relationName.trim();
     if (!mutate(() =>
-      renameSchemaDraftRelation(history.present, selectedRelation.name, nextName),
+      renameSchemaDraftRelation(draftRelations, selectedRelation.name, nextName),
     )) return;
     setSelectedName(nextName);
   };
@@ -379,7 +435,7 @@ export function SchemaStructuredDraftDialog({
       setPendingRelationDelete(true);
       return;
     }
-    const next = removeSchemaDraftRelation(history.present, selectedRelation.name);
+    const next = removeSchemaDraftRelation(draftRelations, selectedRelation.name);
     commit(next);
     setSelectedName(next[0]?.name || null);
   };
@@ -388,7 +444,7 @@ export function SchemaStructuredDraftDialog({
     if (!selectedRelation) return;
     const saved = editingColumnName
       ? mutate(() => updateSchemaDraftColumn(
-          history.present,
+          draftRelations,
           selectedRelation.name,
           editingColumnName,
           {
@@ -399,7 +455,7 @@ export function SchemaStructuredDraftDialog({
             comment: columnComment,
           },
         ))
-      : mutate(() => addSchemaDraftColumn(history.present, selectedRelation.name, {
+      : mutate(() => addSchemaDraftColumn(draftRelations, selectedRelation.name, {
           name: columnName,
           dataType: columnType,
           nullable: columnNullable,
@@ -414,8 +470,8 @@ export function SchemaStructuredDraftDialog({
   const closeWithPersist = async () => {
     if (!persistenceReady || isReviewing) return;
     try {
-      if (history.present !== lastPersistedRelationsRef.current) {
-        await enqueuePersist(history.present);
+      if (draftRelations !== lastPersistedRelationsRef.current) {
+        await enqueuePersist(draftRelations);
       }
       onClose();
     } catch (closeError) {
@@ -433,6 +489,12 @@ export function SchemaStructuredDraftDialog({
     setPersistenceReady(false);
     try {
       await enqueuePersist(snapshot.relations);
+      onCanvasHistoryChange(commitSchemaDiagramDraftToCanvas(
+        canvasHistory,
+        snapshot.fingerprint,
+        snapshot.relations,
+        snapshot.relations,
+      ));
       onClose();
     } catch (discardError) {
       setPersistenceReady(true);
@@ -441,14 +503,14 @@ export function SchemaStructuredDraftDialog({
   };
 
   const reviewDiff = async () => {
-    if (history.present === snapshot.relations || isReviewing) return;
+    if (draftRelations === snapshot.relations || isReviewing) return;
     setIsReviewing(true);
     setError(null);
     try {
-      if (history.present !== lastPersistedRelationsRef.current) {
-        await enqueuePersist(history.present);
+      if (draftRelations !== lastPersistedRelationsRef.current) {
+        await enqueuePersist(draftRelations);
       }
-      const draft = createSchemaDiagramDraftSnapshot(snapshot, history.present);
+      const draft = createSchemaDiagramDraftSnapshot(snapshot, draftRelations);
       const plan = await schemaService.compareSchemaSnapshots(draft, snapshot);
       openSchemaDiffTab(plan, draft, snapshot);
       onClose();
@@ -470,7 +532,7 @@ export function SchemaStructuredDraftDialog({
     setColumnComment("");
   }
 
-  const dirty = history.present !== snapshot.relations;
+  const dirty = draftRelations !== snapshot.relations;
   return (
     <Dialog
       open={open}
@@ -489,35 +551,30 @@ export function SchemaStructuredDraftDialog({
                 Structured schema draft · {snapshot.schemaName}
               </DialogTitle>
               <DialogDescription className="text-[9px] text-[hsl(var(--wb-text-muted))]">
-                Project autosave · local undo/redo · review-only migration diff
+                Project autosave · unified canvas undo/redo · review-only migration diff
               </DialogDescription>
             </div>
             <button
               type="button"
               className="wb-icon-button h-7 w-7"
-              disabled={!persistenceReady || history.past.length === 0 || isReviewing}
+              disabled={!persistenceReady || canvasHistory.past.length === 0 || isReviewing}
               onClick={() => {
-                const next = undoSchemaDiagramDraft(history);
-                setHistory(next);
-                if (selectedName && !next.present.some((item) => item.name === selectedName)) {
-                  setSelectedName(next.present[0]?.name || null);
-                }
+                onCanvasHistoryChange(undoSchemaDiagramCanvas(canvasHistory));
                 setError(null);
               }}
-              title="Undo draft edit"
+              title="Undo canvas or draft action (Ctrl/Cmd+Z)"
             >
               <Undo2 size={12} />
             </button>
             <button
               type="button"
               className="wb-icon-button h-7 w-7"
-              disabled={!persistenceReady || history.future.length === 0 || isReviewing}
+              disabled={!persistenceReady || canvasHistory.future.length === 0 || isReviewing}
               onClick={() => {
-                const next = redoSchemaDiagramDraft(history);
-                setHistory(next);
+                onCanvasHistoryChange(redoSchemaDiagramCanvas(canvasHistory));
                 setError(null);
               }}
-              title="Redo draft edit"
+              title="Redo canvas or draft action (Ctrl/Cmd+Shift+Z / Ctrl+Y)"
             >
               <Redo2 size={12} />
             </button>
@@ -657,7 +714,7 @@ export function SchemaStructuredDraftDialog({
                           type="button"
                           className="wb-icon-button h-6 w-6 hover:text-red-300"
                           onClick={() => mutate(() =>
-                            removeSchemaDraftColumn(history.present, selectedRelation.name, column.name),
+                            removeSchemaDraftColumn(draftRelations, selectedRelation.name, column.name),
                           )}
                           title={`Remove ${column.name} and dependent draft metadata`}
                         >
@@ -691,14 +748,14 @@ export function SchemaStructuredDraftDialog({
                         label: index.name,
                         detail: `${index.columns.join(", ")}${index.is_unique ? " · UNIQUE" : ""}`,
                       }))}
-                      onRemove={(name) => mutate(() => removeSchemaDraftIndex(history.present, selectedRelation.name, name))}
+                      onRemove={(name) => mutate(() => removeSchemaDraftIndex(draftRelations, selectedRelation.name, name))}
                     />
                     <div className="grid grid-cols-2 gap-2 p-2">
                       <input className={inputClass} value={indexName} onChange={(event) => setIndexName(event.target.value)} placeholder="index_name" aria-label="Draft index name" />
                       <input className={inputClass} value={indexColumns} onChange={(event) => setIndexColumns(event.target.value)} placeholder="col_a, col_b" aria-label="Draft index columns" />
                       <label className="flex h-7 items-center gap-1.5 text-[8px] wb-muted"><input type="checkbox" checked={indexUnique} onChange={(event) => setIndexUnique(event.target.checked)} /> Unique</label>
                       <button type="button" className="wb-text-button h-7 gap-1.5 px-2 text-[9px]" disabled={!indexName.trim() || !indexColumns.trim()} onClick={() => {
-                        if (mutate(() => addSchemaDraftIndex(history.present, selectedRelation.name, {
+                        if (mutate(() => addSchemaDraftIndex(draftRelations, selectedRelation.name, {
                           name: indexName,
                           columns: commaList(indexColumns),
                           is_unique: indexUnique,
@@ -718,18 +775,18 @@ export function SchemaStructuredDraftDialog({
                           label: constraint.name,
                           detail: `${constraint.columns.join(", ")} → ${constraint.referenced_table}.${constraint.referenced_columns.join(", ")}`,
                         }))}
-                      onRemove={(name) => mutate(() => removeSchemaDraftConstraint(history.present, selectedRelation.name, name))}
+                      onRemove={(name) => mutate(() => removeSchemaDraftConstraint(draftRelations, selectedRelation.name, name))}
                     />
                     <div className="grid grid-cols-2 gap-2 p-2">
                       <input className={inputClass} value={foreignKeyName} onChange={(event) => setForeignKeyName(event.target.value)} placeholder="foreign_key_name" aria-label="Draft foreign key name" />
                       <input className={inputClass} value={foreignKeyColumns} onChange={(event) => setForeignKeyColumns(event.target.value)} placeholder="source columns" aria-label="Draft foreign key source columns" />
                       <select className={inputClass} value={foreignKeyTarget} onChange={(event) => setForeignKeyTarget(event.target.value)} aria-label="Draft foreign key target relation">
                         <option value="">Target relation</option>
-                        {history.present.map((relation) => <option key={relation.name} value={relation.name}>{relation.name}</option>)}
+                        {draftRelations.map((relation) => <option key={relation.name} value={relation.name}>{relation.name}</option>)}
                       </select>
                       <input className={inputClass} value={foreignKeyTargetColumns} onChange={(event) => setForeignKeyTargetColumns(event.target.value)} placeholder="target columns" aria-label="Draft foreign key target columns" />
                       <button type="button" className="wb-text-button col-span-2 h-7 gap-1.5 px-2 text-[9px]" disabled={!foreignKeyName.trim() || !foreignKeyColumns.trim() || !foreignKeyTarget || !foreignKeyTargetColumns.trim()} onClick={() => {
-                        if (mutate(() => addSchemaDraftForeignKey(history.present, selectedRelation.name, {
+                        if (mutate(() => addSchemaDraftForeignKey(draftRelations, selectedRelation.name, {
                           name: foreignKeyName,
                           columns: commaList(foreignKeyColumns),
                           referencedSchema: snapshot.schemaName,
@@ -748,13 +805,13 @@ export function SchemaStructuredDraftDialog({
                     values={selectedRelation.constraints
                       .filter((constraint) => constraint.constraint_type === "CHECK")
                       .map((constraint) => ({ key: constraint.name, label: constraint.name, detail: constraint.definition || "CHECK" }))}
-                    onRemove={(name) => mutate(() => removeSchemaDraftConstraint(history.present, selectedRelation.name, name))}
+                    onRemove={(name) => mutate(() => removeSchemaDraftConstraint(draftRelations, selectedRelation.name, name))}
                   />
                   <div className="grid grid-cols-[minmax(120px,0.35fr)_minmax(0,1fr)_auto] gap-2 p-2">
                     <input className={inputClass} value={checkName} onChange={(event) => setCheckName(event.target.value)} placeholder="constraint_name" aria-label="Draft check constraint name" />
                     <input className={inputClass} value={checkDefinition} onChange={(event) => setCheckDefinition(event.target.value)} placeholder="CHECK (amount >= 0)" aria-label="Draft check definition" />
                     <button type="button" className="wb-text-button h-7 gap-1.5 px-2 text-[9px]" disabled={!checkName.trim() || !checkDefinition.trim()} onClick={() => {
-                      if (mutate(() => addSchemaDraftCheckConstraint(history.present, selectedRelation.name, checkName, checkDefinition))) {
+                      if (mutate(() => addSchemaDraftCheckConstraint(draftRelations, selectedRelation.name, checkName, checkDefinition))) {
                         setCheckName(""); setCheckDefinition("");
                       }
                     }}><Plus size={10} /> Add check</button>
@@ -780,7 +837,7 @@ export function SchemaStructuredDraftDialog({
                 </span>
                 <span className="truncate" title={persistenceNotice || undefined}>
                   {persistenceNotice || (dirty
-                    ? `${history.past.length} reversible edit${history.past.length === 1 ? "" : "s"}; no SQL will run.`
+                    ? `${canvasHistory.past.length} reversible canvas/draft action${canvasHistory.past.length === 1 ? "" : "s"}; no SQL will run.`
                     : "No draft changes yet.")}
                 </span>
               </div>

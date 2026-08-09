@@ -60,6 +60,7 @@ import {
   createSchemaDiagramCanvasHistory,
   redoSchemaDiagramCanvas,
   undoSchemaDiagramCanvas,
+  type SchemaDiagramCanvasHistory,
 } from "@/lib/schemaDiagramCanvasHistory";
 import {
   buildSchemaDiagramEdgeIndex,
@@ -184,6 +185,11 @@ export function SchemaDiagramView() {
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
   const snapshot = activeTab?.schemaDiagramSnapshot;
   const canvasHistory = activeTab?.schemaDiagramCanvasHistory || EMPTY_CANVAS_HISTORY;
+  const updateCanvasHistory = useCallback((history: SchemaDiagramCanvasHistory) => {
+    if (activeTab?.id) {
+      setSchemaDiagramCanvasHistory(activeTab.id, history);
+    }
+  }, [activeTab?.id, setSchemaDiagramCanvasHistory]);
   const areas = canvasHistory.present.areas;
   const diagramNotes = canvasHistory.present.notes;
   const selectedAreaId = activeTab?.selectedDiagramAreaId || "";
@@ -300,7 +306,9 @@ export function SchemaDiagramView() {
     const tabId = activeTab.id;
     const initialHistory = activeTab.schemaDiagramCanvasHistory;
     const hasSessionHistory = Boolean(
-      initialHistory?.past.length || initialHistory?.future.length,
+      initialHistory?.past.length ||
+      initialHistory?.future.length ||
+      initialHistory?.present.draft,
     );
     let disposed = false;
     setCanvasPersistenceReady(false);
@@ -1541,6 +1549,8 @@ export function SchemaDiagramView() {
             snapshot={snapshot}
             initialRelationName={foreignKeySeed?.sourceRelation || selectedName}
             initialForeignKey={foreignKeySeed}
+            canvasHistory={canvasHistory}
+            onCanvasHistoryChange={updateCanvasHistory}
             onClose={() => {
               setStructuredDraftOpen(false);
               setForeignKeySeed(null);

@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  commitSchemaDiagramDraftToCanvas,
   commitSchemaDiagramCanvas,
   createSchemaDiagramCanvasHistory,
+  hydrateSchemaDiagramCanvasDraft,
+  rebaseSchemaDiagramCanvasDraft,
   redoSchemaDiagramCanvas,
   undoSchemaDiagramCanvas,
 } from "./schemaDiagramCanvasHistory";
@@ -16,6 +19,13 @@ const note = {
   height: 120,
   color: "amber" as const,
 };
+const baseRelations = [{
+  name: "users",
+  objectType: "BASE TABLE",
+  columns: [],
+  indexes: [],
+  constraints: [],
+}];
 
 describe("schema diagram canvas history", () => {
   it("undoes and redoes area and note changes in one timeline", () => {
@@ -67,5 +77,60 @@ describe("schema diagram canvas history", () => {
     }
     expect(history.past).toHaveLength(100);
     expect(history.past[0]!.notes[0]!.x).toBe(20);
+  });
+
+  it("orders structured draft edits with area and note transactions", () => {
+    const initial = createSchemaDiagramCanvasHistory();
+    const withArea = commitSchemaDiagramCanvas(initial, { areas: [area] });
+    const draftRelations = [...baseRelations, {
+      name: "orders",
+      objectType: "BASE TABLE",
+      columns: [],
+      indexes: [],
+      constraints: [],
+    }];
+    const withDraft = commitSchemaDiagramDraftToCanvas(
+      withArea,
+      "fingerprint-1",
+      draftRelations,
+      baseRelations,
+    );
+    const withNote = commitSchemaDiagramCanvas(withDraft, { notes: [note] });
+
+    const undoNote = undoSchemaDiagramCanvas(withNote);
+    expect(undoNote.present.draft?.relations).toBe(draftRelations);
+    const undoDraft = undoSchemaDiagramCanvas(undoNote);
+    expect(undoDraft.present.draft).toBeUndefined();
+    expect(undoDraft.present.areas).toEqual([area]);
+    expect(redoSchemaDiagramCanvas(undoDraft).present.draft?.relations)
+      .toBe(draftRelations);
+  });
+
+  it("hydrates a persisted draft across existing canvas history", () => {
+    const withArea = commitSchemaDiagramCanvas(
+      createSchemaDiagramCanvasHistory(),
+      { areas: [area] },
+    );
+    const draft = { baseFingerprint: "fingerprint-1", relations: baseRelations };
+    const hydrated = hydrateSchemaDiagramCanvasDraft(withArea, draft);
+
+    expect(hydrated.present.draft).toBe(draft);
+    expect(undoSchemaDiagramCanvas(hydrated).present.draft).toBe(draft);
+  });
+
+  it("drops stale draft states without leaving no-op undo steps", () => {
+    const initial = createSchemaDiagramCanvasHistory();
+    const withDraft = commitSchemaDiagramDraftToCanvas(
+      initial,
+      "old-fingerprint",
+      [...baseRelations],
+      baseRelations,
+    );
+    const withNote = commitSchemaDiagramCanvas(withDraft, { notes: [note] });
+    const rebased = rebaseSchemaDiagramCanvasDraft(withNote, "new-fingerprint");
+
+    expect(rebased.present.draft).toBeUndefined();
+    expect(rebased.past).toHaveLength(1);
+    expect(undoSchemaDiagramCanvas(rebased).present.notes).toEqual([]);
   });
 });
