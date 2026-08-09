@@ -313,6 +313,11 @@ explicit deferred validation task rather than an implicit release check.
   parenthesis must not receive a second argument list.
 - Verify same-name function overloads with distinct signatures remain separate
   Monaco rows after semantic, JOIN and syntax fallback merges.
+- Verify a visible table alias is offered as its own completion in SELECT,
+  WHERE, JOIN predicates and nested query scopes. Quoted aliases such as
+  `"User Alias"` must retain their original SQL spelling, accepting the alias
+  must not append a space before `.`, and aliases must stay suppressed inside
+  FROM/JOIN targets, comments and string literals.
 - Observe the content-free 256-event telemetry window on real LSPs: latency,
   P95, fallback, empty, discarded and error reasons must update without storing
   SQL, identifiers, labels or completion payloads.

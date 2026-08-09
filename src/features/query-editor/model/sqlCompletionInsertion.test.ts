@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { CompletionItemKind, type CompletionItem } from "@/services/lsp/types";
-import { sqlFunctionCompletionInsertion } from "./sqlCompletionInsertion";
+import {
+  appendSqlCompletionSpace,
+  sqlCompletionItemType,
+  sqlFunctionCompletionInsertion,
+} from "./sqlCompletionInsertion";
 
 describe("sqlFunctionCompletionInsertion", () => {
   it("creates linked Monaco fields from an LSP function signature", () => {
@@ -46,5 +50,25 @@ describe("sqlFunctionCompletionInsertion", () => {
       .toEqual({ insertText: "COUNT()", insertAsSnippet: false });
     expect(sqlFunctionCompletionInsertion({ ...item, textEdit: undefined }, "count", "("))
       .toEqual({ insertText: "count", insertAsSnippet: false });
+  });
+});
+
+describe("relation alias completion insertion", () => {
+  it("keeps LSP variable items compact for member access", () => {
+    const item: CompletionItem = {
+      label: "u",
+      kind: CompletionItemKind.Variable,
+      insertText: "u",
+    };
+
+    const itemType = sqlCompletionItemType(item);
+    expect(itemType).toBe("variable");
+    expect(
+      appendSqlCompletionSpace(item.insertText!, {
+        enabled: true,
+        itemType,
+        nextCharacter: ".",
+      }),
+    ).toBe("u");
   });
 });

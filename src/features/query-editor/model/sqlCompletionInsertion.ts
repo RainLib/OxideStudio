@@ -7,6 +7,7 @@ export type SqlCompletionItemType =
   | "snippet"
   | "function"
   | "schema"
+  | "variable"
   | "property"
   | "text";
 
@@ -40,6 +41,8 @@ export function sqlCompletionItemType(item: CompletionItem): SqlCompletionItemTy
       return "function";
     case CompletionItemKind.Module:
       return "schema";
+    case CompletionItemKind.Variable:
+      return "variable";
     case CompletionItemKind.Property:
       return "property";
     default:
@@ -60,6 +63,7 @@ export function appendSqlCompletionSpace(
     options.itemType === "property" ||
     options.itemType === "text" ||
     options.itemType === "schema" ||
+    options.itemType === "variable" ||
     options.itemType === "snippet" ||
     options.itemType === "function"
   ) {

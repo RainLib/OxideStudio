@@ -89,6 +89,7 @@ OxideStudio integrates with the [lsp_sqls](https://github.com/RainLib/lsp_sqls) 
 - Phase 79: A shared large-catalog regression test measures cold relation completion across PostgreSQL, MySQL, Hive, and ClickHouse with 2,500 tables and enforces a five-second debug-build ceiling. The current local run completed each dialect in under 7 ms after construction.
 - Phase 80: A signed driver contract may explicitly select `lspLanguageId: "sql"` for a SQL-shaped non-relational engine. Manticore Search and QuestDB therefore use the SQL editor and the generic metadata-completion path without changing their `dataModel`; their table workspace remains unavailable because relational Grid behavior is never inferred from editor language alone.
 - Phase 81: Saved project SQL virtual documents are bound to the active connection's schema configuration and are proactively closed when that context disappears (connection/LSP disabled, final query tab closed, or project root removed). A failed or delayed metadata sync therefore cannot leave a project file attached to an old database session.
+- Phase 82: Visible relation aliases are first-class LSP `Variable` completions. The parser keeps both the normalized alias and its original SQL spelling, so quoted aliases are inserted byte-for-byte, aliases stay out of relation targets/comments/strings, and the completion hot path does not run a second tree-sitter parse.
 
 The shipped editor/LSP path has no known unimplemented protocol handler that it advertises. The renderer may synchronize a bounded, allowlisted set of saved project SQL files (`.sql`, `.psql`, `.pgsql`, `.mysql`; at most 128 files, 128 KiB each and 5 MiB total) through credential-free `oxide://project` URIs. It never exposes absolute paths, non-SQL files, ignored dependency folders, or secret-like dotfiles. Project-wide usages beyond this bounded set remain an application indexing concern rather than hidden filesystem access by the language server.
 
@@ -105,7 +106,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked commit is `5c0a51adcebc3a161886dbc83820ca01ee018640`. A locally rebuilt binary may report the same revision with `sourceDirty: true` while the reviewed submodule changes are still uncommitted; the adjacent manifest is the authoritative build evidence.
+Current tracked commit is `bff5f263bb8017b393d1c4b5816e3f4c9440558e`. A locally rebuilt binary may report the same revision with `sourceDirty: true` while the reviewed submodule changes are still uncommitted; the adjacent manifest is the authoritative build evidence.
 
 ### 2. Prepare the Binary
 
