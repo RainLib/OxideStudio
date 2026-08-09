@@ -83,14 +83,19 @@ export function lspCompletionItemsToMonacoSuggestions({
   nextCharacter,
 }: LspCompletionPresentationOptions) {
   return items.map((item) => {
-    const spacedInsertText = appendSqlCompletionSpace(
-      completionInsertText(item, completedContextKeyword),
-      {
-        enabled: appendSpace,
-        itemType: sqlCompletionItemType(item),
-        nextCharacter,
-      },
+    const serverInsertText = completionInsertText(
+      item,
+      completedContextKeyword,
     );
+    // A server textEdit is an authoritative edit contract. Client whitespace
+    // preferences only apply to plain insertText/label proposals.
+    const spacedInsertText = item.textEdit
+      ? serverInsertText
+      : appendSqlCompletionSpace(serverInsertText, {
+          enabled: appendSpace,
+          itemType: sqlCompletionItemType(item),
+          nextCharacter,
+        });
     const functionInsertion = sqlFunctionCompletionInsertion(
       item,
       spacedInsertText,

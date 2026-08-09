@@ -396,8 +396,9 @@ explicit deferred validation task rather than an implicit release check.
 - Verify PostgreSQL, MySQL, SQL Server, Oracle and ClickHouse completion items
   that use plain `TextEdit`, LSP `InsertReplaceEdit`, `additionalTextEdits`,
   commit characters, Markdown documentation and deprecated tags. Server edits
-  must remain authoritative and an older request must never overwrite a newer
-  model revision.
+  must remain authoritative even when “append space after completion” is
+  enabled; only plain insertText/label proposals may receive client whitespace.
+  An older request must never overwrite a newer model revision.
 - Verify a server `CompletionList` with `isIncomplete: true` is returned to
   Monaco so the next typing event uses trigger kind 3, and becomes complete
   when the server returns `false`.

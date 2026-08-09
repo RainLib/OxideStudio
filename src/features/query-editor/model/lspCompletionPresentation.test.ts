@@ -21,6 +21,7 @@ const monaco = {
     },
     CompletionItemKind: {
       Field: 4,
+      Keyword: 17,
       Module: 9,
       Text: 18,
     },
@@ -105,5 +106,41 @@ describe("lspCompletionItemsToMonacoSuggestions", () => {
       title: "Continue SQL completion",
       arguments: ["postgres-scope", "public", true, "owner-1"],
     });
+  });
+
+  it("never appends client whitespace to authoritative server text edits", () => {
+    const suggestions = lspCompletionItemsToMonacoSuggestions({
+      monaco,
+      ownerKey: "owner-1",
+      items: [
+        {
+          label: "SELECT",
+          kind: CompletionItemKind.Keyword,
+          textEdit: {
+            newText: "SELECT",
+            range: {
+              start: { line: 0, character: 0 },
+              end: { line: 0, character: 3 },
+            },
+          },
+        },
+        {
+          label: "FROM",
+          kind: CompletionItemKind.Keyword,
+          insertText: "FROM",
+        },
+      ],
+      typedWord: "",
+      completedContextKeyword: false,
+      defaultRange: new MockRange(1, 1, 1, 1),
+      rankByUsage: false,
+      usageScope: "postgres-scope",
+      recordUsageCommand: "record",
+      appendSpace: true,
+      driver: "postgres",
+    });
+
+    expect(suggestions[0]?.insertText).toBe("SELECT");
+    expect(suggestions[1]?.insertText).toBe("FROM ");
   });
 });
