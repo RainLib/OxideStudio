@@ -141,4 +141,104 @@ describe("schema DBML import", () => {
     expect(parsed.relations).toHaveLength(0);
     expect(parsed.warnings.join(" ")).toContain("can only contain public");
   });
+
+  it("parses inline references and bare single-column indexes", () => {
+    const parsed = parseSchemaDbml(
+      `
+        Table public.users {
+          id uuid [pk]
+          email varchar(320) [not null]
+
+          indexes {
+            email [unique, name: 'users_email_uq']
+          }
+        }
+
+        Table public.orders {
+          id bigint [pk]
+          user_id uuid [not null, ref: > public.users.id, delete: cascade, update: no action]
+
+          indexes {
+            user_id [name: 'orders_user_idx', type: btree]
+          }
+        }
+      `,
+      "public",
+    );
+
+    const users = parsed.relations.find((relation) => relation.name === "users");
+    const orders = parsed.relations.find((relation) => relation.name === "orders");
+    expect(users?.indexes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "users_email_uq",
+          columns: ["email"],
+          is_unique: true,
+        }),
+      ]),
+    );
+    expect(orders?.indexes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "orders_user_idx",
+          columns: ["user_id"],
+          index_type: "btree",
+        }),
+      ]),
+    );
+    expect(orders?.constraints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          constraint_type: "FOREIGN KEY",
+          columns: ["user_id"],
+          referenced_schema: "public",
+          referenced_table: "users",
+          referenced_columns: ["id"],
+          definition: "ON DELETE cascade ON UPDATE no action",
+        }),
+      ]),
+    );
+  });
+
+  it("keeps dangling inline references out of the snapshot", () => {
+    const parsed = parseSchemaDbml(
+      `
+        Table public.orders {
+          id bigint [pk]
+          user_id uuid [ref: > public.users.id]
+        }
+      `,
+      "public",
+    );
+
+    expect(parsed.relations[0]?.constraints).toHaveLength(1);
+    expect(parsed.relations[0]?.constraints[0]?.constraint_type).toBe("PRIMARY KEY");
+    expect(parsed.warnings.join(" ")).toContain(
+      "referenced table users was not found",
+    );
+  });
+
+  it("preserves table-level reference actions as review metadata", () => {
+    const parsed = parseSchemaDbml(
+      `
+        Table public.users {
+          id uuid [pk]
+        }
+        Table public.orders {
+          id bigint [pk]
+          user_id uuid [not null]
+        }
+        Ref orders_user_fk: public.orders.user_id > public.users.id [delete: cascade, update: restrict]
+      `,
+      "public",
+    );
+
+    const foreignKey = parsed.relations
+      .find((relation) => relation.name === "orders")
+      ?.constraints.find((constraint) => constraint.constraint_type === "FOREIGN KEY");
+    expect(foreignKey).toMatchObject({
+      name: "orders_user_fk",
+      definition: "ON DELETE cascade ON UPDATE restrict",
+    });
+  });
 });

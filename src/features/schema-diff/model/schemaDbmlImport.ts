@@ -26,6 +26,7 @@ export function parseSchemaDbml(
   const warnings = new Set<string>();
   const source = stripComments(dbml, warnings);
   const relations = new Map<string, SchemaRelationSnapshot>();
+  const pendingReferences: ParsedRef[] = [];
   const tableBlocks = extractBlocks(source, "Table", warnings);
 
   for (const block of tableBlocks) {
@@ -46,33 +47,23 @@ export function parseSchemaDbml(
       warnings.add(`Duplicate Table ${tableName}; the later definition was ignored.`);
       continue;
     }
-    relations.set(tableName, parseTableBlock(tableName, block.body, warnings));
+    const parsed = parseTableBlock(
+      tableName,
+      schemaName || targetSchema,
+      block.body,
+      warnings,
+    );
+    relations.set(tableName, parsed.relation);
+    pendingReferences.push(...parsed.inlineReferences);
   }
 
   for (const line of source.split(/\r?\n/u)) {
     const parsed = parseRef(line, targetSchema, warnings);
-    if (!parsed) continue;
-    if (parsed.sourceSchema && parsed.sourceSchema !== targetSchema) {
-      warnings.add(
-        `${parsed.name}: skipped because its source belongs to schema ${parsed.sourceSchema}.`,
-      );
-      continue;
-    }
-    const relation = relations.get(parsed.sourceTable);
-    if (!relation) {
-      warnings.add(
-        `${parsed.name}: source table ${parsed.sourceTable} was not found in the imported DBML.`,
-      );
-      continue;
-    }
-    relation.constraints.push({
-      name: uniqueConstraintName(relation.constraints, parsed.name),
-      constraint_type: "FOREIGN KEY",
-      columns: parsed.sourceColumns,
-      referenced_schema: parsed.targetSchema || targetSchema,
-      referenced_table: parsed.targetTable,
-      referenced_columns: parsed.targetColumns,
-    });
+    if (parsed) pendingReferences.push(parsed);
+  }
+
+  for (const reference of pendingReferences) {
+    attachReference(reference, targetSchema, relations, warnings);
   }
 
   if (relations.size === 0) {
@@ -120,12 +111,17 @@ export function isSchemaDbmlSnapshot(snapshot: SchemaSnapshot) {
 
 function parseTableBlock(
   tableName: string,
+  schemaName: string,
   body: string,
   warnings: Set<string>,
-): SchemaRelationSnapshot {
+): {
+  relation: SchemaRelationSnapshot;
+  inlineReferences: ParsedRef[];
+} {
   const columns: ColumnInfo[] = [];
   const constraints: ConstraintInfo[] = [];
   const indexes: IndexInfo[] = [];
+  const inlineReferences: ParsedRef[] = [];
   const indexBlocks = extractBlocks(body, "indexes", warnings);
   const bodyWithoutIndexes = replaceRangesWithWhitespace(
     body,
@@ -135,13 +131,24 @@ function parseTableBlock(
   for (const line of bodyWithoutIndexes.split(/\r?\n/u)) {
     const value = line.trim();
     if (!value || /^(?:Note|HeaderColor)\s*:/iu.test(value)) continue;
-    const column = parseColumn(value, warnings, tableName);
-    if (!column) continue;
+    const parsedColumn = parseColumn(value, warnings, tableName);
+    if (!parsedColumn) continue;
+    const { column } = parsedColumn;
     if (columns.some((candidate) => candidate.name === column.name)) {
       warnings.add(`${tableName}.${column.name}: duplicate column was ignored.`);
       continue;
     }
     columns.push(column);
+    const inlineReference = parseInlineReferenceSetting(
+      schemaName,
+      tableName,
+      column.name,
+      parsedColumn.reference,
+      parsedColumn.referenceDelete,
+      parsedColumn.referenceUpdate,
+      warnings,
+    );
+    if (inlineReference) inlineReferences.push(inlineReference);
     if (column.is_primary_key) {
       constraints.push({
         name: `${tableName}_pkey`,
@@ -192,14 +199,28 @@ function parseTableBlock(
     column.is_indexed ||= indexedColumns.has(column.name) || column.is_primary_key;
   }
 
-  return { name: tableName, objectType: "BASE TABLE", columns, indexes, constraints };
+  return {
+    relation: {
+      name: tableName,
+      objectType: "BASE TABLE",
+      columns,
+      indexes,
+      constraints,
+    },
+    inlineReferences,
+  };
 }
 
 function parseColumn(
   line: string,
   warnings: Set<string>,
   tableName: string,
-): ColumnInfo | null {
+): {
+  column: ColumnInfo;
+  reference?: string;
+  referenceDelete?: string;
+  referenceUpdate?: string;
+} | null {
   const token = readIdentifier(line, 0);
   if (!token) {
     warnings.add(`${tableName}: an unsupported column definition was ignored.`);
@@ -216,15 +237,20 @@ function parseColumn(
     ? parseSettings(rest.slice(settingsStart), warnings)
     : new Map<string, string | true>();
   return {
-    name: token.value,
-    data_type: dataType,
-    is_nullable: !settings.has("not null") && !settings.has("pk"),
-    is_primary_key: settings.has("pk"),
-    is_unique: settings.has("unique") || settings.has("pk"),
-    is_indexed: settings.has("pk") || settings.has("unique"),
-    is_auto_increment: settings.has("increment"),
-    default_value: settingText(settings.get("default")),
-    comment: settingText(settings.get("note")),
+    column: {
+      name: token.value,
+      data_type: dataType,
+      is_nullable: !settings.has("not null") && !settings.has("pk"),
+      is_primary_key: settings.has("pk"),
+      is_unique: settings.has("unique") || settings.has("pk"),
+      is_indexed: settings.has("pk") || settings.has("unique"),
+      is_auto_increment: settings.has("increment"),
+      default_value: settingText(settings.get("default")),
+      comment: settingText(settings.get("note")),
+    },
+    reference: settingText(settings.get("ref")),
+    referenceDelete: settingText(settings.get("delete")),
+    referenceUpdate: settingText(settings.get("update")),
   };
 }
 
@@ -235,14 +261,25 @@ function parseIndex(
 ): IndexInfo | null {
   if (!line || /^(?:Note)\s*:/iu.test(line)) return null;
   const opening = line.indexOf("(");
+  const settingsStart = findSettingsStart(line);
   const closing = opening >= 0 ? matchingPair(line, opening, "(", ")") : -1;
-  if (opening < 0 || closing < 0) {
-    warnings.add(`${tableName}: unsupported DBML index definition was ignored.`);
+  if (opening >= 0 && closing < 0) {
+    warnings.add(`${tableName}: unbalanced DBML index definition was ignored.`);
     return null;
   }
-  const columns = splitTopLevel(line.slice(opening + 1, closing), ",")
+  const columnSource = opening >= 0
+    ? line.slice(opening + 1, closing)
+    : (settingsStart >= 0 ? line.slice(0, settingsStart) : line);
+  const columns = splitTopLevel(columnSource, ",")
     .map((value) => {
-      const path = parseIdentifierPath(value.trim());
+      const candidate = value.trim();
+      if (candidate.includes("(") || candidate.includes(")")) {
+        warnings.add(
+          `${tableName}: expression index ${candidate} requires manual review and was ignored.`,
+        );
+        return "";
+      }
+      const path = parseIdentifierPath(candidate);
       return path[path.length - 1] || "";
     })
     .filter(Boolean);
@@ -250,7 +287,14 @@ function parseIndex(
     warnings.add(`${tableName}: an index without columns was ignored.`);
     return null;
   }
-  const settings = parseSettings(line.slice(closing + 1), warnings);
+  const settings = parseSettings(
+    opening >= 0
+      ? line.slice(closing + 1)
+      : settingsStart >= 0
+        ? line.slice(settingsStart)
+        : "",
+    warnings,
+  );
   const explicitName = settingText(settings.get("name"));
   return {
     name: explicitName || `${tableName}_${columns.join("_")}_idx`,
@@ -269,14 +313,129 @@ type ParsedRef = {
   targetSchema: string;
   targetTable: string;
   targetColumns: string[];
+  definition?: string;
 };
+
+function parseInlineReferenceSetting(
+  schemaName: string,
+  tableName: string,
+  columnName: string,
+  setting: string | undefined,
+  deleteAction: string | undefined,
+  updateAction: string | undefined,
+  warnings: Set<string>,
+): ParsedRef | null {
+  if (!setting) return null;
+  const match = setting.match(/^\s*([><-])\s*(.+?)\s*$/u);
+  const target = match ? parseRefSide(match[2] || "", schemaName) : null;
+  if (!match || !target) {
+    warnings.add(
+      `${tableName}.${columnName}: unsupported inline DBML ref was ignored: ${setting}`,
+    );
+    return null;
+  }
+  const current = {
+    schema: schemaName,
+    table: tableName,
+    columns: [columnName],
+  };
+  const source = match[1] === "<" ? target : current;
+  const referenced = match[1] === "<" ? current : target;
+  return {
+    name: `${source.table}_${source.columns.join("_")}_${referenced.table}_fk`,
+    sourceSchema: source.schema,
+    sourceTable: source.table,
+    sourceColumns: source.columns,
+    targetSchema: referenced.schema,
+    targetTable: referenced.table,
+    targetColumns: referenced.columns,
+    definition: referenceActionDefinition(deleteAction, updateAction),
+  };
+}
+
+function attachReference(
+  parsed: ParsedRef,
+  targetSchema: string,
+  relations: Map<string, SchemaRelationSnapshot>,
+  warnings: Set<string>,
+) {
+  if (parsed.sourceSchema && parsed.sourceSchema !== targetSchema) {
+    warnings.add(
+      `${parsed.name}: skipped because its source belongs to schema ${parsed.sourceSchema}.`,
+    );
+    return;
+  }
+  const relation = relations.get(parsed.sourceTable);
+  if (!relation) {
+    warnings.add(
+      `${parsed.name}: source table ${parsed.sourceTable} was not found in the imported DBML.`,
+    );
+    return;
+  }
+  const sourceColumns = new Set(relation.columns.map((column) => column.name));
+  const missingSourceColumns = parsed.sourceColumns.filter(
+    (column) => !sourceColumns.has(column),
+  );
+  if (missingSourceColumns.length > 0) {
+    warnings.add(
+      `${parsed.name}: source column(s) ${missingSourceColumns.join(", ")} were not found on ${parsed.sourceTable}.`,
+    );
+    return;
+  }
+  const referencedSchema = parsed.targetSchema || targetSchema;
+  if (!referencedSchema || referencedSchema === targetSchema) {
+    const referenced = relations.get(parsed.targetTable);
+    if (!referenced) {
+      warnings.add(
+        `${parsed.name}: referenced table ${parsed.targetTable} was not found in the imported DBML.`,
+      );
+      return;
+    }
+    const referencedColumns = new Set(
+      referenced.columns.map((column) => column.name),
+    );
+    const missingReferencedColumns = parsed.targetColumns.filter(
+      (column) => !referencedColumns.has(column),
+    );
+    if (missingReferencedColumns.length > 0) {
+      warnings.add(
+        `${parsed.name}: referenced column(s) ${missingReferencedColumns.join(", ")} were not found on ${parsed.targetTable}.`,
+      );
+      return;
+    }
+  }
+  const existingReference = relation.constraints.find((constraint) =>
+    constraint.constraint_type === "FOREIGN KEY"
+      && constraint.columns.join("\u0000") === parsed.sourceColumns.join("\u0000")
+      && constraint.referenced_schema === referencedSchema
+      && constraint.referenced_table === parsed.targetTable
+      && constraint.referenced_columns.join("\u0000") === parsed.targetColumns.join("\u0000")
+  );
+  if (existingReference) {
+    warnings.add(
+      existingReference.definition === parsed.definition
+        ? `${parsed.name}: duplicate foreign key definition was ignored.`
+        : `${parsed.name}: conflicting foreign key actions were ignored; the first definition was preserved.`,
+    );
+    return;
+  }
+  relation.constraints.push({
+    name: uniqueConstraintName(relation.constraints, parsed.name),
+    constraint_type: "FOREIGN KEY",
+    columns: parsed.sourceColumns,
+    referenced_schema: referencedSchema,
+    referenced_table: parsed.targetTable,
+    referenced_columns: parsed.targetColumns,
+    definition: parsed.definition,
+  });
+}
 
 function parseRef(
   line: string,
   fallbackSchema: string,
   warnings: Set<string>,
 ): ParsedRef | null {
-  const match = line.match(/^\s*Ref(?:\s+(.+?))?\s*:\s*(.+?)\s*([><-])\s*(.+?)(?:\s+\[[^\]]*\])?\s*$/iu);
+  const match = line.match(/^\s*Ref(?:\s+(.+?))?\s*:\s*(.+?)\s*([><-])\s*(.+?)(\s+\[[^\]]*\])?\s*$/iu);
   if (!match) return null;
   const left = parseRefSide(match[2] || "", fallbackSchema);
   const right = parseRefSide(match[4] || "", fallbackSchema);
@@ -287,6 +446,7 @@ function parseRef(
   const source = match[3] === "<" ? right : left;
   const target = match[3] === "<" ? left : right;
   const namePath = parseIdentifierPath((match[1] || "").trim());
+  const settings = parseSettings(match[5] || "", warnings);
   return {
     name:
       namePath[namePath.length - 1] ||
@@ -297,7 +457,22 @@ function parseRef(
     targetSchema: target.schema,
     targetTable: target.table,
     targetColumns: target.columns,
+    definition: referenceActionDefinition(
+      settingText(settings.get("delete")),
+      settingText(settings.get("update")),
+    ),
   };
+}
+
+function referenceActionDefinition(
+  deleteAction: string | undefined,
+  updateAction: string | undefined,
+) {
+  const actions = [
+    deleteAction ? `ON DELETE ${deleteAction}` : "",
+    updateAction ? `ON UPDATE ${updateAction}` : "",
+  ].filter(Boolean);
+  return actions.length > 0 ? actions.join(" ") : undefined;
 }
 
 function parseRefSide(value: string, fallbackSchema: string) {
