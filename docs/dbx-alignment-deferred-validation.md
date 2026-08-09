@@ -79,6 +79,11 @@ database target until its relevant queue entries pass.
   tests cover backend-authoritative range reuse, exact-end invalidation,
   model-version invalidation and decoration reuse; strict TypeScript passed.
   Live parser IPC/decorations counts remain deferred below.
+- Elasticsearch and MongoDB Console auto-suggest now share an isolated
+  lifecycle. A focused fake-timer test covers the 45 ms debounce and rejects a
+  completion trigger after the Monaco model version changes; strict TypeScript
+  passed. Live WebView focus, model replacement and real provider composition
+  remain deferred below.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an

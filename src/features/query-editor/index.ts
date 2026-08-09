@@ -154,6 +154,12 @@ export {
   type UseCurrentStatementDecorationOptions,
 } from "./hooks/useCurrentStatementDecoration";
 export {
+  attachConsoleAutoSuggest,
+  useConsoleAutoSuggest,
+  type ConsoleAutoSuggestOptions,
+  type UseConsoleAutoSuggestOptions,
+} from "./hooks/useConsoleAutoSuggest";
+export {
   resolveQueryExecutionTarget,
   type QueryExecutionKind,
   type QueryExecutionMode,

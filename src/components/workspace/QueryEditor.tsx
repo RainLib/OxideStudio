@@ -137,17 +137,11 @@ import {
   ELASTICSEARCH_CONSOLE_LANGUAGE_ID,
   formatElasticsearchConsole,
   registerElasticsearchConsoleLanguage,
-  shouldOfferElasticsearchCompletions,
-  shouldTriggerElasticsearchCompletions,
   validateElasticsearchConsole,
 } from "@/lib/elasticsearchConsole";
 import type { ElasticsearchAnalysisResponse } from "@/workers/elasticsearchAnalysis.worker";
 import type { ElasticsearchServerVersion } from "@/lib/elasticsearchConsole";
 import { useSqlScriptImportController } from "@/features/sql-script-import";
-import {
-  shouldOfferMongoDbCompletions,
-  shouldTriggerMongoDbCompletions,
-} from "@/lib/mongodbCompletion";
 import {
   buildQueryEditorOptions,
   appendSqlCompletionSpace,
@@ -171,6 +165,7 @@ import {
   useConsoleFileController,
   useLspCompletionProviderCoordinator,
   useCachedSqlCompletionSource,
+  useConsoleAutoSuggest,
   useCurrentStatementDecoration,
   useMonacoEditorViewState,
   useLspCoreProviderCoordinator,
@@ -342,10 +337,6 @@ export function QueryEditor({
   const [mountedEditor, setMountedEditor] = useState<any>(null);
   const effectiveTabId = tabId === undefined ? activeTabId : tabId;
   const activeTabIdRef = useRef<string | null>(effectiveTabId);
-  const elasticsearchSuggestDisposableRef = useRef<{
-    dispose: () => void;
-  } | null>(null);
-  const elasticsearchSuggestTimerRef = useRef<number | null>(null);
   const vimControllerRef = useRef<VimModeController | null>(null);
   const vimModeRef = useRef("NORMAL");
   const inlineKeysContextRef = useRef<{ set: (value: boolean) => void } | null>(
@@ -806,22 +797,19 @@ export function QueryEditor({
     },
   });
 
+  useConsoleAutoSuggest({
+    editor: mountedEditor,
+    ownerKey: effectiveTabId ? `${effectiveTabId}\u0000${documentUri}` : "",
+  });
+
   useEffect(() => {
     if (!isProjectFilePreview) return;
-    elasticsearchSuggestDisposableRef.current?.dispose();
-    elasticsearchSuggestDisposableRef.current = null;
     editorRef.current = null;
     setMountedEditor(null);
   }, [isProjectFilePreview]);
 
   useEffect(() => {
     return () => {
-      elasticsearchSuggestDisposableRef.current?.dispose();
-      elasticsearchSuggestDisposableRef.current = null;
-      if (elasticsearchSuggestTimerRef.current !== null) {
-        window.clearTimeout(elasticsearchSuggestTimerRef.current);
-        elasticsearchSuggestTimerRef.current = null;
-      }
       inlineKeysContextRef.current = null;
     };
   }, []);
@@ -2768,76 +2756,6 @@ export function QueryEditor({
         "oxideInlineCompletionKeysEnabled",
         editorSettings.keybindingMode !== "vim",
       );
-      elasticsearchSuggestDisposableRef.current?.dispose();
-      const scheduleElasticsearchSuggestions = (
-        model: any,
-        insertedText: string,
-        allowDeletion: boolean,
-      ) => {
-        if (!editor.hasTextFocus()) return;
-        const identity = extractLspDocumentIdentity(model.uri.toString());
-        const isElasticsearchModel =
-          model.getLanguageId() === ELASTICSEARCH_CONSOLE_LANGUAGE_ID;
-        const isMongoDbModel =
-          model.getLanguageId() === "json" && identity?.driver === "mongodb";
-        if (!isElasticsearchModel && !isMongoDbModel) return;
-        const position = editor.getPosition();
-        if (!position) return;
-        const offset = model.getOffsetAt(position);
-        const source = model.getValue();
-        const shouldTrigger = isElasticsearchModel
-          ? shouldTriggerElasticsearchCompletions(
-              source,
-              offset,
-              insertedText,
-            )
-          : shouldTriggerMongoDbCompletions(source, offset, insertedText);
-        const shouldOfferAfterDeletion = isElasticsearchModel
-          ? shouldOfferElasticsearchCompletions(source, offset)
-          : shouldOfferMongoDbCompletions(source, offset);
-        if (!shouldTrigger && !(allowDeletion && shouldOfferAfterDeletion)) {
-          return;
-        }
-
-        if (elasticsearchSuggestTimerRef.current !== null) {
-          window.clearTimeout(elasticsearchSuggestTimerRef.current);
-        }
-        const version = model.getVersionId();
-        elasticsearchSuggestTimerRef.current = window.setTimeout(() => {
-          elasticsearchSuggestTimerRef.current = null;
-          if (
-            editor.getModel() !== model ||
-            model.getVersionId() !== version ||
-            !editor.hasTextFocus()
-          ) {
-            return;
-          }
-          editor.trigger(
-            isElasticsearchModel
-              ? "oxide.elasticsearch.autoSuggest"
-              : "oxide.mongodb.autoSuggest",
-            "editor.action.triggerSuggest",
-            {},
-          );
-        }, 45);
-      };
-      elasticsearchSuggestDisposableRef.current =
-        editor.onDidChangeModelContent((event: any) => {
-          const model = editor.getModel();
-          if (!model) return;
-          const insertedText = event.changes
-            .map((change: { text?: string }) => change.text || "")
-            .join("");
-          const deletedText = event.changes.some(
-            (change: { rangeLength?: number }) =>
-              (change.rangeLength || 0) > 0,
-          );
-          scheduleElasticsearchSuggestions(
-            model,
-            insertedText,
-            deletedText && !insertedText,
-          );
-        });
       monacoInstance.editor.setTheme(
         mode === "light" ? "vs" : "oxide-dark",
       );
