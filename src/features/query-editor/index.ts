@@ -132,6 +132,15 @@ export {
   type MonacoCompletionProvider,
 } from "./hooks/useLspCompletionProviderCoordinator";
 export {
+  boundedSqlCompletionTextBeforeCursor,
+  cachedRelationCompletionSuggestions,
+  createCachedSqlCompletionRequest,
+  useCachedSqlCompletionSource,
+  type CachedSqlCompletionRequest,
+  type CachedSqlCompletionRequestOptions,
+  type CachedSqlCompletionSourceOptions,
+} from "./hooks/useCachedSqlCompletionSource";
+export {
   resolveQueryExecutionTarget,
   type QueryExecutionKind,
   type QueryExecutionMode,

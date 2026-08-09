@@ -24,7 +24,6 @@ import {
   databaseService,
   queryService,
   type DatabaseCapabilities,
-  type TableInfo,
 } from "@/services/tauri";
 import { useLspClient } from "@/hooks/useLspClient";
 import {
@@ -48,7 +47,6 @@ import {
   extractSqlDocumentTabId,
   LSP_NOTIFICATION_EVENT,
 } from "@/services/lsp";
-import { lspForeignKeyRelationships } from "@/services/lsp/relationshipIndex";
 import type { LspServerNotification } from "@/services/lsp";
 import {
   APP_EVENT_RUN_QUERY,
@@ -97,11 +95,6 @@ import { SqlScriptImportDialog } from "./SqlScriptImportDialog";
 import { aiService } from "@/services/tauri/ai.service";
 import { projectFilesService } from "@/services/tauri/project-files.service";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
-import {
-  cachedSqlJoinTargetContext,
-  cachedSqlRelationForFieldCompletion,
-  cachedSqlRelationTargetPrefix,
-} from "@/lib/queryEditorCachedCompletion";
 import { ProjectFileImagePreview } from "./ProjectFileImagePreview";
 import { openProjectFileInEditor } from "@/lib/projectFileOpen";
 import {
@@ -150,7 +143,6 @@ import {
 } from "@/lib/elasticsearchConsole";
 import type { ElasticsearchAnalysisResponse } from "@/workers/elasticsearchAnalysis.worker";
 import type { ElasticsearchServerVersion } from "@/lib/elasticsearchConsole";
-import type { ConstraintInfo } from "@/services/tauri/types";
 import { useSqlScriptImportController } from "@/features/sql-script-import";
 import {
   shouldOfferMongoDbCompletions,
@@ -159,15 +151,11 @@ import {
 import {
   buildQueryEditorOptions,
   appendSqlCompletionSpace,
-  completionFilterTextForQuery,
-  completionMatchScore,
-  completionMatches,
-  containsHan,
+  boundedSqlCompletionTextBeforeCursor,
   cachedCurrentStatementRangeAtOffset,
   currentStatementLineFrames,
   elasticsearchJsonStringCompletionRange,
   editorDocumentIdentity,
-  ensurePinyinCompletionSupport,
   isPublishDiagnosticsParams,
   lspDiagnosticToMonacoMarker,
   lspCompletionItemsToMonacoSuggestions,
@@ -178,11 +166,8 @@ import {
   quoteSqlIdentifierSelection,
   recordSqlCompletionTelemetry,
   sqlInListFromClipboard,
-  sqlForeignKeyJoinCompletions,
-  sqlJoinConstraintsFromRelationshipIndex,
   sqlSyntaxFallbackCompletions,
   sqlCompletionItemType,
-  sqlCompletionIdentifierPrefix,
   sqlCompletionTriggerDecision,
   syncLspModelBeforeCompletion,
   type CurrentStatementRange,
@@ -190,6 +175,7 @@ import {
   unquoteSqlIdentifierSelection,
   useConsoleFileController,
   useLspCompletionProviderCoordinator,
+  useCachedSqlCompletionSource,
   useLspCoreProviderCoordinator,
   useLspHoverProviderCoordinator,
   useLspDocumentLifecycle,
@@ -198,92 +184,6 @@ import {
 } from "@/features/query-editor";
 
 const RECORD_COMPLETION_USAGE_COMMAND = "oxide.sqlCompletion.recordUsage";
-const SQL_COMPLETION_CONTEXT_MAX_CHARACTERS = 128 * 1024;
-const RELATION_COMPLETION_CONTEXTS = new Set([
-  "from",
-  "join",
-  "into",
-  "update",
-  "table",
-  "truncate",
-  "describe",
-  "desc",
-]);
-
-export function boundedSqlCompletionTextBeforeCursor(
-  monaco: any,
-  model: any,
-  position: any,
-) {
-  if (
-    typeof model.getOffsetAt !== "function" ||
-    typeof model.getPositionAt !== "function"
-  ) {
-    return model.getValueInRange(
-      new monaco.Range(1, 1, position.lineNumber, position.column),
-    );
-  }
-  const cursorOffset = model.getOffsetAt(position);
-  const requestedStart = Math.max(
-    0,
-    cursorOffset - SQL_COMPLETION_CONTEXT_MAX_CHARACTERS,
-  );
-  const requestedPosition = model.getPositionAt(requestedStart);
-  // Start at the beginning of the containing line so an identifier or SQL
-  // keyword is never split merely because the bounded window starts there.
-  return model.getValueInRange(
-    new monaco.Range(
-      requestedPosition.lineNumber,
-      1,
-      position.lineNumber,
-      position.column,
-    ),
-  );
-}
-
-export function cachedRelationCompletionSuggestions(
-  monaco: any,
-  model: any,
-  position: any,
-  tables: TableInfo[],
-  textBeforeCursor = boundedSqlCompletionTextBeforeCursor(
-    monaco,
-    model,
-    position,
-  ),
-) {
-  const relationPrefix = cachedSqlRelationTargetPrefix(textBeforeCursor);
-  if (
-    relationPrefix === null &&
-    !RELATION_COMPLETION_CONTEXTS.has(
-      sqlContextKeywordBeforeCursor(textBeforeCursor) || "",
-    )
-  ) {
-    return [];
-  }
-  const word = model.getWordUntilPosition(position);
-  const range = new monaco.Range(
-    position.lineNumber,
-    word.startColumn,
-    position.lineNumber,
-    word.endColumn,
-  );
-  const query = relationPrefix ?? "";
-  return tables
-    .filter((table) => completionMatches(table.name, query))
-    .map((table) => ({
-    label: table.name,
-    kind: monaco.languages.CompletionItemKind.Struct,
-    detail: "Cached database object",
-    documentation: table.comment
-      ? { value: table.comment }
-      : { value: "Available from cached database metadata." },
-    insertText: table.name,
-    filterText: completionFilterTextForQuery(table.name, query),
-    sortText: `0:${String(9_999 - Math.max(0, completionMatchScore(table.name, query))).padStart(4, "0")}:${table.name.toLocaleLowerCase()}`,
-    range,
-  }));
-}
 
 function createInlineCompletionRequestId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -480,15 +380,6 @@ export function QueryEditor({
   const elasticsearchFieldCacheRef = useRef<
     Map<string, Array<{ name: string; dataType: string }>>
   >(new Map());
-  const sqlFieldCacheRef = useRef<
-    Map<
-      string,
-      Array<{ name: string; dataType: string; comment?: string | null }>
-    >
-  >(new Map());
-  const sqlJoinConstraintCacheRef = useRef<Map<string, ConstraintInfo[]>>(
-    new Map(),
-  );
   const pendingElasticsearchSqlRef = useRef<{
     tabId: string;
     value: string;
@@ -1155,8 +1046,6 @@ export function QueryEditor({
 
   useEffect(() => {
     elasticsearchFieldCacheRef.current.clear();
-    sqlFieldCacheRef.current.clear();
-    sqlJoinConstraintCacheRef.current.clear();
   }, [effectiveConnectionId, metadataVersion]);
 
   // Mapping fields must remain available even while the full LSP catalog is
@@ -1351,6 +1240,17 @@ export function QueryEditor({
   // starting or recovering. It is deliberately limited to existing Explorer
   // metadata and relation-only SQL contexts; the full LSP still owns fields,
   // keywords, diagnostics, and every vendor-specific proposal once ready.
+  const createCachedSqlCompletionRequest = useCachedSqlCompletionSource({
+    activeProjectId,
+    connectionId: effectiveConnectionId,
+    currentSchema,
+    databaseName: activeTab?.databaseName,
+    driver,
+    metadataRevision: metadataVersion,
+    schemaTables,
+    sqlCompletion: editorSettings.sqlCompletion,
+    targetSchema: activeTab?.targetSchema,
+  });
   const usageScope = completionUsageScope([
     activeProjectId,
     effectiveConnectionId,
@@ -1443,282 +1343,17 @@ export function QueryEditor({
               return { suggestions: [] };
             }
           }
-          const cachedRelationSuggestions = async () => {
-            if (["elasticsearch", "elastic", "mongodb"].includes(completionDriver)) {
-              return [];
-            }
-            const relationPrefix = cachedSqlRelationTargetPrefix(textBeforeCursor);
-            if (
-              relationPrefix &&
-              /^[a-z0-9]+$/iu.test(relationPrefix) &&
-              schemaTables.some((table) => containsHan(table.name))
-            ) {
-              await ensurePinyinCompletionSupport();
-            }
-            return cachedRelationCompletionSuggestions(
-              monaco,
-              model,
-              position,
-              schemaTables,
-              textBeforeCursor,
-            );
-          };
-          const cachedJoinSuggestions = async () => {
-            if (
-              !effectiveConnectionId ||
-              ["elasticsearch", "elastic", "mongodb"].includes(
-                completionDriver,
-              )
-            ) {
-              return [];
-            }
-            const joinContext = cachedSqlJoinTargetContext(textBeforeCursor);
-            const sourceRelation = joinContext?.sourceRelations
-              .slice()
-              .reverse()
-              .find((relation) => !relation.isCte);
-            if (!joinContext || !sourceRelation) return [];
-
-            const schema =
-              sourceRelation.schema ||
-              activeTab?.targetSchema ||
-              currentSchema ||
-              activeTab?.databaseName ||
-              undefined;
-            if (!schema) return [];
-            const databaseName =
-              sourceRelation.database || activeTab?.databaseName || undefined;
-            const cacheKey = [
-              activeProjectId || "local",
-              effectiveConnectionId,
-              driver,
-              databaseName || "",
-              schema,
-              sourceRelation.table,
-              "foreign-keys",
-            ].join("\u0000");
-            const modelVersion = model.getVersionId();
-            let constraints = sqlJoinConstraintCacheRef.current.get(cacheKey);
-            if (!constraints) {
-              const indexedConstraints =
-                sqlJoinConstraintsFromRelationshipIndex(
-                  sourceRelation,
-                  schema,
-                  lspForeignKeyRelationships({
-                    connectionId: effectiveConnectionId,
-                    driver,
-                    databaseName,
-                    schema,
-                  }),
-                );
-              try {
-                const metadata = await loadTableMetadata({
-                  projectId: activeProjectId || undefined,
-                  connectionId: effectiveConnectionId,
-                  driver,
-                  databaseName,
-                  schema,
-                  table: sourceRelation.table,
-                  includeIndexes: false,
-                  includeConstraints: true,
-                });
-                constraints = [...indexedConstraints, ...metadata.constraints];
-              } catch (error) {
-                console.debug(
-                  `[QueryEditor] Foreign-key metadata unavailable for ${sourceRelation.table}`,
-                  error,
-                );
-                constraints = indexedConstraints;
-              }
-              sqlJoinConstraintCacheRef.current.set(cacheKey, constraints);
-            }
-            if (
-              token?.isCancellationRequested ||
-              model.getVersionId() !== modelVersion
-            ) {
-              return [];
-            }
-            const joinPrefix = joinContext.targetFragment
-              .split(".")
-              .pop()
-              ?.trim() || "";
-            if (
-              /^[a-z0-9]+$/iu.test(joinPrefix) &&
-              constraints.some((constraint) =>
-                containsHan(constraint.referenced_table || ""),
-              )
-            ) {
-              await ensurePinyinCompletionSupport();
-            }
-
-            const word = model.getWordUntilPosition(position);
-            const range = new monaco.Range(
-              position.lineNumber,
-              word.startColumn,
-              position.lineNumber,
-              word.endColumn,
-            );
-            return sqlForeignKeyJoinCompletions(
-              joinContext,
-              sourceRelation,
-              constraints,
-              {
-                driver,
-                defaultSchema: schema,
-                keywordCase:
-                  editorSettings.sqlCompletion.keywordCase === "preserve"
-                    ? undefined
-                    : editorSettings.sqlCompletion.keywordCase,
-              },
-            ).map((completion) => ({
-              ...completion,
-              kind: monaco.languages.CompletionItemKind.Reference,
-              documentation: { value: completion.documentation },
-              range,
-            }));
-          };
-          const cachedFieldSuggestions = async () => {
-            if (
-              !effectiveConnectionId ||
-              ["elasticsearch", "elastic", "mongodb"].includes(
-                completionDriver,
-              )
-            ) {
-              return [];
-            }
-            if (
-              RELATION_COMPLETION_CONTEXTS.has(
-                sqlContextKeywordBeforeCursor(textBeforeCursor) || "",
-              )
-            ) {
-              return [];
-            }
-            const relation = cachedSqlRelationForFieldCompletion(textBeforeCursor);
-            if (!relation) return [];
-            const fieldQuery = sqlCompletionIdentifierPrefix(textBeforeCursor);
-
-            const word = model.getWordUntilPosition(position);
-            const range = new monaco.Range(
-              position.lineNumber,
-              word.startColumn,
-              position.lineNumber,
-              word.endColumn,
-            );
-            // A CTE shadows physical objects with the same name. Only an
-            // explicit CTE column list is losslessly available to this
-            // fallback; otherwise wait for the language service instead of
-            // querying unrelated table metadata.
-            if (relation.isCte || relation.isDerived) {
-              const relationKind = relation.isDerived
-                ? "Derived table"
-                : "CTE";
-              const declaredColumns = relation.cteColumns || [];
-              if (
-                /^[a-z0-9]+$/iu.test(fieldQuery) &&
-                declaredColumns.some(containsHan)
-              ) {
-                await ensurePinyinCompletionSupport();
-              }
-              return declaredColumns
-                .filter((column) => completionMatches(column, fieldQuery))
-                .map((column) => ({
-                label: column,
-                kind: monaco.languages.CompletionItemKind.Field,
-                detail: `${relationKind} column`,
-                documentation: {
-                  value: `Column declared by ${relationKind.toLocaleLowerCase()} ${relation.table}.`,
-                },
-                insertText: column,
-                filterText: completionFilterTextForQuery(column, fieldQuery),
-                sortText: `0:${String(9_999 - Math.max(0, completionMatchScore(column, fieldQuery))).padStart(4, "0")}:${column.toLocaleLowerCase()}`,
-                range,
-              }));
-            }
-
-            const schema =
-              relation.schema ||
-              activeTab?.targetSchema ||
-              currentSchema ||
-              activeTab?.databaseName ||
-              undefined;
-            // Table metadata is namespace-scoped. Do not turn an ambiguous
-            // unqualified relation into a request with a fabricated schema:
-            // the normal relation/keyword fallback remains available until
-            // the editor has a concrete namespace context.
-            if (!schema) return [];
-            const databaseName =
-              relation.database || activeTab?.databaseName || undefined;
-            const cacheKey = [
-              activeProjectId || "local",
-              effectiveConnectionId,
-              driver,
-              databaseName || "",
-              schema,
-              relation.table,
-            ].join("\u0000");
-            let columns = sqlFieldCacheRef.current.get(cacheKey);
-            if (!columns) {
-              try {
-                const metadata = await loadTableMetadata({
-                  projectId: activeProjectId || undefined,
-                  connectionId: effectiveConnectionId,
-                  driver,
-                  databaseName,
-                  schema,
-                  table: relation.table,
-                  includeIndexes: false,
-                  includeConstraints: false,
-                });
-                columns = metadata.columns.map((column) => ({
-                  name: column.name,
-                  dataType: column.data_type || "column",
-                  comment: column.comment,
-                }));
-                sqlFieldCacheRef.current.set(cacheKey, columns);
-              } catch (error) {
-                console.debug(
-                  `[QueryEditor] Cached field metadata unavailable for ${relation.table}`,
-                  error,
-                );
-                return [];
-              }
-            }
-            if (token?.isCancellationRequested) return [];
-            if (
-              /^[a-z0-9]+$/iu.test(fieldQuery) &&
-              columns.some((column) => containsHan(column.name))
-            ) {
-              await ensurePinyinCompletionSupport();
-            }
-            return columns
-              .filter((column) => completionMatches(column.name, fieldQuery))
-              .map((column) => ({
-              label: column.name,
-              kind: monaco.languages.CompletionItemKind.Field,
-              detail: `Cached ${column.dataType}`,
-              documentation: column.comment
-                ? { value: column.comment }
-                : { value: `Column from cached metadata for ${relation.table}.` },
-              insertText: column.name,
-              filterText: completionFilterTextForQuery(
-                column.name,
-                fieldQuery,
-              ),
-              sortText: `0:${String(9_999 - Math.max(0, completionMatchScore(column.name, fieldQuery))).padStart(4, "0")}:${column.name.toLocaleLowerCase()}`,
-              range,
-            }));
-          };
-          const cachedMetadataSuggestions = async () => {
-            const fields = await cachedFieldSuggestions();
-            return fields.length > 0 ? fields : cachedRelationSuggestions();
-          };
-          const cachedSuggestions = async () => {
-            const joins = await cachedJoinSuggestions();
-            return mergeCompletionFallbackSuggestions(
-              joins,
-              await cachedMetadataSuggestions(),
-            );
-          };
+          const cachedCompletion = createCachedSqlCompletionRequest({
+            completionDriver,
+            model,
+            monaco,
+            position,
+            textBeforeCursor,
+            token,
+          });
+          const cachedJoinSuggestions = cachedCompletion.joinSuggestions;
+          const cachedMetadataSuggestions = cachedCompletion.metadataSuggestions;
+          const cachedSuggestions = cachedCompletion.suggestions;
           const fallbackSuggestions = async () => {
             const cached = await cachedSuggestions();
             const word = model.getWordUntilPosition(position);

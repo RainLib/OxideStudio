@@ -65,6 +65,11 @@ database target until its relevant queue entries pass.
   entries, draft structural sharing and scoped canvas/draft persistence. Strict
   TypeScript, the production bundle and startup-cycle verification passed after
   the integration.
+- Cached SQL metadata completion is now isolated behind a stable request
+  factory. Nine focused tests cover bounded context, relation-position gating,
+  declared CTE/derived fields and the existing SQL source parser; strict
+  TypeScript passed without loading Monaco or a database. Live metadata cache,
+  FK JOIN and provider combinations remain deferred below.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an
