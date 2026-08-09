@@ -32,6 +32,7 @@ H2 的内存 JDBC fixture 已进入同一 runner；它在 managed Java 21 和经
 | Explorer | 数据库/namespace/relation/column/index/constraint 的实际支持与 manifest 一致；若声明外键，侧车还必须明确支持按被引用关系查询反向 FK，不能让 Host 扫描完整 catalog。 |
 | Editor/LSP | 正确语言、identifier quote、对象名称和版本方言；无元数据时明确降级。签名的关系型驱动若暂未有内置厂商方言，可显式使用通用 `sql` document + 受审查的厂商 compatibility identity；LSP registry 将 identity 映射到明示 parser baseline，但 UI 不宣称厂商语法诊断。连接固定到某个 driver package 版本时，Editor 与 metadata sync 必须使用该版本的契约；UI 要独立展示 LSP process 与 schema metadata 的同步/缓存/降级状态。 |
 | Grid | 只有声明 primary-key mutation、transaction 与参数绑定后，才能开放编辑；改列、改索引名、改约束必须分别声明对应的细粒度能力，不能由通用 DDL 推断。 |
+| Semantic migration | 外置包必须在签名 manifest 声明 `schemaMigration: { snapshotVersion: 1, mode }`，runtime handshake 同时声明 `semanticSchemaMigration`。Host 只发送无 SQL/DDL/source/row value 的 descriptor snapshot；sidecar 依次返回 plan token、preflight token、apply token 和 verify 结果，Host 不回传或执行 sidecar 的展示文本。catalog 的 `conformance.migration` 只能引用精确包/entrypoint/target/server-version 的 runner evidence，不能从通用 query、Table Editor DDL 或相似方言推导。没有该双重契约和证据时始终 review-only。 |
 | Table data transfer | 跨连接复制必须单独声明 `supportsTableDataTransfer`，并同时满足 relation browsing、事务与已审核的 PostgreSQL/MySQL/SQLite/DuckDB 方言；它有意独立于 Grid mutation，便于 DuckDB 等只开放受控批量复制的连接。runtime handshake 还必须提供事务。catalog 的 `conformance.dataTransfer` 只记录该**精确包版本**通过的 server 版本，不能由 `query`、`mutations` 或 JDBC 可连接状态推导。当前开放受限 append/overwrite；preview 必须输出结构化类型兼容性与转换、运行真实转换路径并生成绑定稳定 transfer id 的 exact confirmation token。执行使用有界分页和批次，但所有目标批次共享一个显式事务，任何读取/转换/写入或用户取消都回滚，全部成功后才提交；overwrite 只能使用可回滚 DELETE，并绑定/复检有硬上限的目标行数，不能使用可能隐式提交的 TRUNCATE。进度事件不得携带行值，取消必须声明 driver backend cancel 与有界协作式 fallback。 |
 | Test | 包协议、离线安装、版本、metadata、query、cancel 和安全回归 fixture。 |
 
@@ -58,6 +59,9 @@ H2 的内存 JDBC fixture 已进入同一 runner；它在 managed Java 21 和经
   manifest 与 handshake 不一致时禁止启用高风险能力。
 - `referencingForeignKeys` 是 runtime handshake 的独立开关。旧包缺省为 `false`，即使其
   manifest 声明了外键，关系图和引用导航也安全降级为空，直到包实际实现有界的反向查询。
+- `semanticSchemaMigration` 同样是 runtime handshake 的独立开关，旧包缺省为 `false`。
+  只有它与签名 `schemaMigration` contract、精确 server-version migration evidence 同时
+  存在时才具备进入执行编排的前提；否则 snapshot/diff 只能审阅。
 - 产品层只显示 `ready + active` 包，未受信任、协议不兼容或 schema 不匹配的包仅在
   Driver 管理中显示故障与恢复入口。
 - `supportsColumnAlteration`、`supportsIndexRename`、`supportsConstraintAlteration` 默认均为

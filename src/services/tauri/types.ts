@@ -204,6 +204,13 @@ export interface DatabaseDriverProbeResult {
   /** Required before Agent queries can be delegated to an external sidecar. */
   supportsAgentReadOnlyEnforcement: boolean;
   supportsReferencingForeignKeys: boolean;
+  /** Effective only after signed manifest + runtime handshake verification. */
+  supportsSemanticSchemaMigration: boolean;
+}
+
+export interface DriverPackageSchemaMigrationContract {
+  snapshotVersion: 1;
+  mode: "transactional" | "nonTransactional";
 }
 
 export interface DatabaseDriverCatalogEntry {
@@ -219,6 +226,8 @@ export interface DatabaseDriverCatalogEntry {
   releaseNotesUrl?: string | null;
   /** Signed discovery metadata; package import remains required to execute. */
   capabilities?: DatabaseCapabilities | null;
+  /** Discovery copy; the package manifest must match before installation. */
+  schemaMigration?: DriverPackageSchemaMigrationContract | null;
   /** Signed release coverage only; it does not grant execution permission. */
   conformance?: DatabaseDriverConformance | null;
 }

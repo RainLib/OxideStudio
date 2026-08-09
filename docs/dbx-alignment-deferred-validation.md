@@ -84,6 +84,12 @@ database target until its relevant queue entries pass.
   completion trigger after the Monaco model version changes; strict TypeScript
   passed. Live WebView focus, model replacement and real provider composition
   remain deferred below.
+- External drivers now have a descriptor-only semantic schema-migration wire
+  contract for plan, preflight, token-bound apply and verify. Protocol tests
+  prove apply requests contain no Host SQL/statements; package tests enforce
+  the signed manifest + runtime handshake gate; the privacy-bounded
+  conformance runner records migration evidence only after the complete state
+  machine succeeds. No migration fixture was executed against a real database.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an
@@ -195,6 +201,11 @@ explicit deferred validation task rather than an implicit release check.
   including connect, metadata, query, parameter binding, cancellation, and
   normalized error mapping. The catalog must remain candidate-only without
   evidence.
+- For each external driver that claims migration, run a descriptor-only
+  migration fixture and publish hash-bound `migration` evidence. Verify stale
+  target fingerprints, plan/preflight/apply token swaps, blocked preflight,
+  missing review/destructive/non-transactional approval, partial-apply reports
+  and post-apply drift. Until then the product remains review-only.
 - With a live external sidecar, verify the Driver Manager refreshes its
   process-health summary after an unexpected sidecar exit without exposing
   connection names, URLs, stderr, SQL, or credentials.

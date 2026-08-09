@@ -2477,6 +2477,9 @@ function DriverManagementSettings() {
                           {probeState.result.supportsTableDataTransfer
                             ? " + table transfer"
                             : ""}
+                          {probeState.result.supportsSemanticSchemaMigration
+                            ? " + semantic migration"
+                            : ""}
                           {probeState.result.supportsAgentReadOnlyEnforcement
                             ? " + Agent read-only"
                             : ""}

@@ -67,6 +67,9 @@ pub struct DatabaseDriverProbeResult {
     /// true, because the sidecar independently enforces read-only mode.
     pub supports_agent_read_only_enforcement: bool,
     pub supports_referencing_foreign_keys: bool,
+    /// Effective only when the signed package contract and the launched
+    /// sidecar handshake both expose the semantic migration protocol.
+    pub supports_semantic_schema_migration: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -952,6 +955,8 @@ pub async fn probe_external_database_driver(
             && capabilities.transactions,
         supports_agent_read_only_enforcement: capabilities.read_only_enforcement,
         supports_referencing_foreign_keys: capabilities.referencing_foreign_keys,
+        supports_semantic_schema_migration: package.manifest.schema_migration.is_some()
+            && capabilities.semantic_schema_migration,
     }))
 }
 

@@ -94,6 +94,7 @@ fn handle_request(
                 // Agent connections set `context.read_only`; this sidecar
                 // validates it before handing the statement to DuckDB.
                 read_only_enforcement: true,
+                semantic_schema_migration: false,
             },
         })),
         DriverRequest::Connect {
@@ -125,6 +126,13 @@ fn handle_request(
         DriverRequest::CreateDatabase { .. } => Err(protocol_error(
             "DATABASE_CREATION_UNSUPPORTED",
             "DuckDB does not create catalogs through the connected session",
+        )),
+        DriverRequest::PlanSchemaMigration { .. }
+        | DriverRequest::PreflightSchemaMigration { .. }
+        | DriverRequest::ApplySchemaMigration { .. }
+        | DriverRequest::VerifySchemaMigration { .. } => Err(protocol_error(
+            "SCHEMA_MIGRATION_UNSUPPORTED",
+            "DuckDB semantic schema migration is not enabled by this package",
         )),
         DriverRequest::Query {
             connection_id,

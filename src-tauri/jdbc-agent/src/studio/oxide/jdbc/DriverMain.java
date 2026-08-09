@@ -115,6 +115,7 @@ public final class DriverMain {
     // DatabaseMetaData contract. Package capabilities still decide whether
     // Explorer exposes these nodes for a particular server family.
     capabilities.put("referencingForeignKeys", true); capabilities.put("readOnlyEnforcement", false);
+    capabilities.put("semanticSchemaMigration", false);
     Map<String, Object> value = new LinkedHashMap<>();
     value.put("protocolVersion", "1.0"); value.put("packageId", requiredEnv("OXIDE_DRIVER_PACKAGE_ID"));
     value.put("packageVersion", requiredEnv("OXIDE_DRIVER_PACKAGE_VERSION")); value.put("driverId", requiredEnv("OXIDE_DRIVER_ID"));

@@ -35,9 +35,17 @@ so error mapping never degrades into a timeout.
 When the package declares transactions, row mutation, or table transfer, the
 runner also refuses a handshake that does not declare runtime transactions. A
 fixture may additionally prove a begin/mutate/rollback/post-rollback sequence.
-Host-level schema migration and multi-connection data-transfer fixtures remain
-separate semantic conformance suites; they must not be inferred from one
-sidecar query test.
+
+An optional `migration` fixture exercises the sidecar-owned semantic
+`plan → preflight → token-bound apply → verify` protocol. It is accepted only
+when the signed manifest contains `schemaMigration` and the runtime handshake
+contains `semanticSchemaMigration: true`. Snapshots are descriptor-only: the
+runner recursively rejects `sql`, `ddl`, `statement` and `statements` keys, and
+the apply request carries only opaque plan/preflight tokens, fingerprints and
+explicit approvals. A passing migration operation can therefore become
+`conformance.migration` evidence, but it is never inferred from query, generic
+DDL, mutation or transaction coverage. Multi-connection data transfer remains
+a separate semantic conformance suite.
 
 ## Run a fixture
 
@@ -72,4 +80,6 @@ or password.
 A passing report is release evidence, not an execution permission. Production
 still requires the catalog signature, archive digest (for direct install),
 package manifest signature, target compatibility, package handshake, and the
-runtime capability contract.
+runtime capability contract. Transactional migration additionally requires a
+signed transaction capability; non-transactional migration must be declared as
+such and explicitly acknowledged by the caller.

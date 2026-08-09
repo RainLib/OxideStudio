@@ -200,7 +200,7 @@ WHERE 与 SORT 输入不是普通文本框。应复用同一个 dialect/metadata
 - [x] `get_connection_database_capability_context` 已把 live connection、精确 package version、
   server version、签名 capability 与 schema migration mode 统一为单次只读快照；LSP sync
   与 Query Editor 优先读取该快照，重连时不复用旧 server/package 组合。
-- [ ] 将 `QueryEditor.tsx` 拆为 model lifecycle、LSP adapter、execution controller 和 view（LSP→Monaco、completion presentation、virtual-document lifecycle、稳定协议 provider coordinator、事务、query/explain/parameter execution、SQL/Console 文件 workflow 已完成；metadata-sensitive completion/hover coordinator 与剩余 view lifecycle 仍待拆分）。
+- [x] 将 `QueryEditor.tsx` 的已识别 model lifecycle、LSP adapter、execution controller 和 view lifecycle 拆入独立模块；Console auto-suggest 已完成 focus/model-version 门禁和清理，真实 Monaco/provider 组合验证延期。
 - [ ] 为 Grid filter/sort 建立语法位置、typed literal 和 multi-predicate 测试矩阵。
 
 ### 7.2 P1：以产品族推进，而不是堆菜单项
@@ -219,7 +219,7 @@ WHERE 与 SORT 输入不是普通文本框。应复用同一个 dialect/metadata
 - [x] Transfer overwrite 已使用事务内 DELETE、目标行数硬上限、确认摘要绑定与执行时 affected-row 复检，避免 TRUNCATE 隐式提交。
 - [x] bundled PostgreSQL/MySQL/SQLite 的单表 transfer 已支持以目标完整主键为冲突身份的
   upsert；确认摘要绑定 key columns，外置包在 semantic conflict-write protocol 完成前拒绝。
-- [ ] 继续补齐 transfer 的 owned-sequence/ownership preview、循环 FK policy、schema object transfer、外置驱动 semantic DDL conformance 和真实数据库验证；多表依赖顺序、同事务执行、PostgreSQL identity/serial reseed 与持久化逐对象报告已落地。
+- [ ] 继续补齐 transfer 的 owned-sequence/ownership preview、循环 FK policy、schema object transfer、外置驱动逐产品 semantic migration 实现/evidence 和真实数据库验证；descriptor-only plan/preflight/token-bound apply/verify 协议、签名/runtime 双门禁和 evidence runner 已落地，多表依赖顺序、同事务执行、PostgreSQL identity/serial reseed 与持久化逐对象报告已落地。
 - [ ] 按 capability 扩展 snapshot/diff/migration，禁止未实现的方言生成可执行 DDL。
 
 ### 7.4 P3：工作台体验

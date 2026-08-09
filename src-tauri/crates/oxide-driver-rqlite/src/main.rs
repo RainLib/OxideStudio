@@ -98,6 +98,7 @@ fn handle_request(
                 // Agent read-only requests are routed to RQLite's dedicated
                 // `/db/query` endpoint, which uses a SQLite read-only connection.
                 read_only_enforcement: true,
+                semantic_schema_migration: false,
             },
         })),
         DriverRequest::Connect {
@@ -130,6 +131,13 @@ fn handle_request(
         DriverRequest::CreateDatabase { .. } => Err(protocol_error(
             "DATABASE_CREATION_UNSUPPORTED",
             "RQLite exposes one database per cluster; create a connection or cluster instead",
+        )),
+        DriverRequest::PlanSchemaMigration { .. }
+        | DriverRequest::PreflightSchemaMigration { .. }
+        | DriverRequest::ApplySchemaMigration { .. }
+        | DriverRequest::VerifySchemaMigration { .. } => Err(protocol_error(
+            "SCHEMA_MIGRATION_UNSUPPORTED",
+            "RQLite semantic schema migration is not enabled by this package",
         )),
         DriverRequest::Query {
             connection_id,

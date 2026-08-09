@@ -172,6 +172,16 @@
         }
       ],
       "additionalProperties": true
+    },
+    "schemaMigration": {
+      "description": "Optional signed semantic migration contract. The sidecar must also advertise semanticSchemaMigration at runtime; Host-generated SQL is never sent through this protocol.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["snapshotVersion", "mode"],
+      "properties": {
+        "snapshotVersion": { "const": 1 },
+        "mode": { "enum": ["transactional", "nonTransactional"] }
+      }
     }
   }
 }

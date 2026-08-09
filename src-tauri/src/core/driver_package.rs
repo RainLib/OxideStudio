@@ -2,8 +2,8 @@ use crate::core::dialect::DatabaseCapabilities;
 use flate2::read::GzDecoder;
 use futures::StreamExt;
 use minisign_verify::{PublicKey, Signature};
-use oxide_driver_protocol::HandshakeResponse;
 pub use oxide_driver_protocol::DRIVER_PROTOCOL_VERSION;
+use oxide_driver_protocol::{HandshakeResponse, SchemaMigrationMode};
 use regex::Regex;
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
@@ -66,6 +66,18 @@ pub struct DriverPackageManifest {
     /// unknown packages from being rendered as generic relational SQL drivers.
     #[serde(default)]
     pub capabilities: Option<DatabaseCapabilities>,
+    /// Signed semantic migration contract. The runtime handshake must also
+    /// advertise `semanticSchemaMigration`; neither signal is sufficient by
+    /// itself, and Host-generated SQL is never part of this protocol.
+    #[serde(default)]
+    pub schema_migration: Option<DriverPackageSchemaMigrationContract>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DriverPackageSchemaMigrationContract {
+    pub snapshot_version: u32,
+    pub mode: SchemaMigrationMode,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -163,6 +175,10 @@ pub struct DriverPackageCatalogEntry {
     /// manifest and sidecar handshake.
     #[serde(default)]
     pub capabilities: Option<DatabaseCapabilities>,
+    /// Discovery copy of the package-owned semantic migration contract. The
+    /// independently signed package manifest must match it exactly.
+    #[serde(default)]
+    pub schema_migration: Option<DriverPackageSchemaMigrationContract>,
     /// Signed release evidence displayed before installation. This is not a
     /// trust bypass: package installation and sidecar handshake remain the
     /// executable authority.
@@ -984,6 +1000,12 @@ fn validate_catalog_manifest_binding(
                 .to_string(),
         );
     }
+    if manifest.schema_migration != entry.schema_migration {
+        return Err(
+            "Downloaded driver package schema-migration contract does not match the signed catalog entry"
+                .to_string(),
+        );
+    }
 
     let mut catalog_targets = entry.supported_targets.clone();
     let mut manifest_targets = manifest.supported_targets.clone();
@@ -1277,6 +1299,12 @@ pub fn validate_handshake(
     if !response.capabilities.query {
         return Err("Driver runtime does not provide query capability".to_string());
     }
+    if manifest.schema_migration.is_some() && !response.capabilities.semantic_schema_migration {
+        return Err(
+            "Driver manifest declares semantic schema migration that its runtime does not provide"
+                .to_string(),
+        );
+    }
     if let Some(capabilities) = &manifest.capabilities {
         let declares_metadata = capabilities.supports_table_browsing
             || capabilities.supports_collection_browsing
@@ -1417,6 +1445,10 @@ fn validate_manifest(manifest: &DriverPackageManifest, package_root: &Path) -> R
     if let Some(capabilities) = &manifest.capabilities {
         validate_capability_contract(&manifest.driver_id, capabilities)?;
     }
+    validate_schema_migration_contract(
+        manifest.capabilities.as_ref(),
+        manifest.schema_migration.as_ref(),
+    )?;
     validate_connection_url_template(manifest.connection_url_template.as_deref())?;
     validate_server_version_range(manifest.server_version_range.as_deref())?;
     for (field, value) in [
@@ -1789,6 +1821,40 @@ fn validate_capability_contract(
         return Err(
             "Table data transfer requires a reviewed postgres, mysql, sqlite, or duckdb dialect profile"
                 .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_schema_migration_contract(
+    capabilities: Option<&DatabaseCapabilities>,
+    contract: Option<&DriverPackageSchemaMigrationContract>,
+) -> Result<(), String> {
+    let Some(contract) = contract else {
+        return Ok(());
+    };
+    if contract.snapshot_version != 1 {
+        return Err("Semantic schema migration requires snapshotVersion 1".to_string());
+    }
+    let Some(capabilities) = capabilities else {
+        return Err(
+            "Semantic schema migration requires a signed database capability contract".to_string(),
+        );
+    };
+    if !matches!(
+        capabilities.data_model,
+        crate::core::dialect::DatabaseDataModel::Relational
+    ) || !capabilities.supports_table_browsing
+        || !capabilities.supports_table_ddl
+    {
+        return Err(
+            "Semantic schema migration requires relational metadata browsing and table DDL capabilities"
+                .to_string(),
+        );
+    }
+    if contract.mode == SchemaMigrationMode::Transactional && !capabilities.supports_transactions {
+        return Err(
+            "Transactional semantic schema migration requires transaction capability".to_string(),
         );
     }
     Ok(())
@@ -2364,9 +2430,17 @@ fn validate_driver_catalog(catalog: &DriverPackageCatalog) -> Result<(), String>
         if let Some(capabilities) = &entry.capabilities {
             validate_capability_contract(&entry.driver_id, capabilities)?;
         }
+        validate_schema_migration_contract(
+            entry.capabilities.as_ref(),
+            entry.schema_migration.as_ref(),
+        )?;
         if let Some(conformance) = &entry.conformance {
             validate_driver_conformance(entry, conformance)?;
-            validate_conformance_capability_contract(entry.capabilities.as_ref(), conformance)?;
+            validate_conformance_capability_contract(
+                entry.capabilities.as_ref(),
+                entry.schema_migration.as_ref(),
+                conformance,
+            )?;
         }
         if entry.supported_targets.len() > 16
             || entry
@@ -2538,6 +2612,7 @@ fn conformance_operation_is_valid(operation: &str) -> bool {
 /// not declare the corresponding user-facing capability.
 fn validate_conformance_capability_contract(
     capabilities: Option<&DatabaseCapabilities>,
+    schema_migration: Option<&DriverPackageSchemaMigrationContract>,
     conformance: &DriverPackageConformance,
 ) -> Result<(), String> {
     let needs_declared_capabilities = !conformance.metadata.is_empty()
@@ -2588,9 +2663,11 @@ fn validate_conformance_capability_contract(
                 .to_string(),
         );
     }
-    if !conformance.migration.is_empty() && !capabilities.supports_table_ddl {
+    if !conformance.migration.is_empty()
+        && (!capabilities.supports_table_ddl || schema_migration.is_none())
+    {
         return Err(
-            "Driver catalog declares migration conformance without table DDL capability"
+            "Driver catalog declares migration conformance without a semantic schema-migration contract"
                 .to_string(),
         );
     }
@@ -2681,6 +2758,7 @@ mod tests {
                     capabilities.display_name = "ClickHouse".to_string();
                     capabilities
                 }),
+                schema_migration: None,
                 conformance: Some(DriverPackageConformance {
                     connect: vec!["24.3".to_string()],
                     metadata: vec!["24.3".to_string()],
@@ -2891,6 +2969,7 @@ mod tests {
             release_notes_url: None,
             connection_url_template: Some("jdbc:warehouse://{host}:{port}/{database}".to_string()),
             capabilities: Some(capabilities.clone()),
+            schema_migration: None,
             conformance: Some(DriverPackageConformance {
                 evidence: vec![DriverPackageConformanceEvidence {
                     schema_version: 1,
@@ -2926,6 +3005,7 @@ mod tests {
             server_version_range: Some(">= 1 < 3".to_string()),
             connection_url_template: Some("jdbc:warehouse://{host}:{port}/{database}".to_string()),
             capabilities: Some(capabilities),
+            schema_migration: None,
         };
         assert!(validate_catalog_manifest_binding(&entry, &manifest).is_ok());
 
@@ -3235,6 +3315,7 @@ mod tests {
             server_version_range: None,
             connection_url_template: None,
             capabilities: None,
+            schema_migration: None,
         };
         assert!(validate_manifest(&manifest, Path::new("/tmp/package")).is_err());
     }
@@ -3270,6 +3351,7 @@ mod tests {
             server_version_range: None,
             connection_url_template: None,
             capabilities: None,
+            schema_migration: None,
         };
         assert!(validate_manifest(&manifest, &package).is_ok());
         assert!(verify_runtime_dependencies(&package, &runtime).is_ok());
@@ -3441,6 +3523,7 @@ mod tests {
             server_version_range: None,
             connection_url_template: None,
             capabilities: Some(capabilities),
+            schema_migration: None,
         };
         let response = HandshakeResponse {
             protocol_version: DRIVER_PROTOCOL_VERSION.to_string(),
@@ -3456,6 +3539,74 @@ mod tests {
         assert!(validate_handshake(&manifest, &response)
             .unwrap_err()
             .contains("table row mutation"));
+    }
+
+    #[test]
+    fn semantic_migration_requires_signed_runtime_and_evidence_contracts() {
+        let mut capabilities = crate::core::dialect::database_capabilities_for_driver("postgres")
+            .expect("postgres capability fixture should exist");
+        capabilities.driver = "warehouse".to_string();
+        let contract = DriverPackageSchemaMigrationContract {
+            snapshot_version: 1,
+            mode: SchemaMigrationMode::Transactional,
+        };
+        assert!(validate_schema_migration_contract(Some(&capabilities), Some(&contract)).is_ok());
+
+        let conformance = DriverPackageConformance {
+            connect: vec!["1.0".to_string()],
+            migration: vec!["1.0".to_string()],
+            ..DriverPackageConformance::default()
+        };
+        assert!(
+            validate_conformance_capability_contract(Some(&capabilities), None, &conformance,)
+                .unwrap_err()
+                .contains("semantic schema-migration contract")
+        );
+        assert!(validate_conformance_capability_contract(
+            Some(&capabilities),
+            Some(&contract),
+            &conformance,
+        )
+        .is_ok());
+
+        let manifest = DriverPackageManifest {
+            schema_version: DRIVER_PACKAGE_SCHEMA_VERSION,
+            package_id: "oxide.warehouse".to_string(),
+            package_version: "1.0.0".to_string(),
+            protocol_version: DRIVER_PROTOCOL_VERSION.to_string(),
+            driver_id: "warehouse".to_string(),
+            display_name: "Warehouse".to_string(),
+            client_library: "warehouse-client".to_string(),
+            client_version: "1.0".to_string(),
+            entrypoint: "driver".to_string(),
+            sha256: "a".repeat(64),
+            runtime: DriverPackageRuntime::Native,
+            supported_targets: Vec::new(),
+            server_version_range: None,
+            connection_url_template: None,
+            capabilities: Some(capabilities),
+            schema_migration: Some(contract),
+        };
+        let mut response = HandshakeResponse {
+            protocol_version: DRIVER_PROTOCOL_VERSION.to_string(),
+            package_id: manifest.package_id.clone(),
+            package_version: manifest.package_version.clone(),
+            driver_id: manifest.driver_id.clone(),
+            capabilities: DriverRuntimeCapabilities {
+                query: true,
+                metadata: true,
+                cancellation: true,
+                transactions: true,
+                database_creation: true,
+                referencing_foreign_keys: true,
+                ..DriverRuntimeCapabilities::default()
+            },
+        };
+        assert!(validate_handshake(&manifest, &response)
+            .unwrap_err()
+            .contains("semantic schema migration"));
+        response.capabilities.semantic_schema_migration = true;
+        assert!(validate_handshake(&manifest, &response).is_ok());
     }
 
     #[test]
@@ -3733,6 +3884,7 @@ mod tests {
                 server_version_range: None,
                 connection_url_template: None,
                 capabilities: None,
+                schema_migration: None,
             },
             entrypoint: package_root.join("agent.jar"),
             package_root,

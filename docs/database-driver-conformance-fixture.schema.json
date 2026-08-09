@@ -74,6 +74,19 @@
         "verify": { "$ref": "#/$defs/queryExpectation" }
       }
     },
+    "migration": {
+      "description": "Optional semantic plan/preflight/apply/verify fixture. Snapshots are descriptor-only and must not contain SQL, DDL, statements, credentials, row values or local paths.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "target"],
+      "properties": {
+        "source": { "$ref": "#/$defs/semanticSnapshot" },
+        "target": { "$ref": "#/$defs/semanticSnapshot" },
+        "allowReview": { "type": "boolean", "default": false },
+        "allowDestructive": { "type": "boolean", "default": false },
+        "allowNonTransactional": { "type": "boolean", "default": false }
+      }
+    },
     "cleanup": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/query" } }
   },
   "$defs": {
@@ -120,6 +133,18 @@
         "minRows": { "type": "integer", "minimum": 0 },
         "columns": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
         "firstRow": { "type": "array" }
+      }
+    },
+    "semanticSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshotVersion", "fingerprint", "namespace", "descriptor"],
+      "properties": {
+        "snapshotVersion": { "const": 1 },
+        "fingerprint": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "database": { "type": ["string", "null"], "maxLength": 256 },
+        "namespace": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "descriptor": { "type": "object" }
       }
     },
     "valueExpectation": {

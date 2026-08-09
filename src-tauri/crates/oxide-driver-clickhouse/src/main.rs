@@ -104,6 +104,7 @@ fn handle_request(
                 // Read-only calls use a GET request; ClickHouse documents GET HTTP
                 // query requests as read-only, independently of host SQL parsing.
                 read_only_enforcement: true,
+                semantic_schema_migration: false,
             },
         })),
         DriverRequest::Connect {
@@ -150,6 +151,13 @@ fn handle_request(
         DriverRequest::CreateDatabase { .. } => Err(protocol_error(
             "DATABASE_CREATION_UNSUPPORTED",
             "ClickHouse database creation is not enabled by this read-focused driver package",
+        )),
+        DriverRequest::PlanSchemaMigration { .. }
+        | DriverRequest::PreflightSchemaMigration { .. }
+        | DriverRequest::ApplySchemaMigration { .. }
+        | DriverRequest::VerifySchemaMigration { .. } => Err(protocol_error(
+            "SCHEMA_MIGRATION_UNSUPPORTED",
+            "ClickHouse semantic schema migration is not enabled by this package",
         )),
         DriverRequest::Query {
             connection_id,

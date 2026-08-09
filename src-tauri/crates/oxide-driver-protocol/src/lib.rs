@@ -61,6 +61,10 @@ pub struct DriverRuntimeCapabilities {
     /// `DriverQueryContext.read_only` is set. Agent-owned external drivers
     /// require this capability instead of trusting a host-side SQL parser.
     pub read_only_enforcement: bool,
+    /// The sidecar owns the complete schema-migration state machine. A Host
+    /// must also require the signed package contract before sending semantic
+    /// snapshots; this runtime bit alone never enables execution.
+    pub semantic_schema_migration: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -109,6 +113,24 @@ pub enum DriverRequest {
     Metadata {
         connection_id: String,
         request: MetadataRequest,
+    },
+    /// Build a target-owned plan from bounded semantic snapshots. No Host SQL
+    /// is present in this request or in any later mutation request.
+    PlanSchemaMigration {
+        connection_id: String,
+        request: SchemaMigrationPlanRequest,
+    },
+    PreflightSchemaMigration {
+        connection_id: String,
+        request: SchemaMigrationPreflightRequest,
+    },
+    ApplySchemaMigration {
+        connection_id: String,
+        request: SchemaMigrationApplyRequest,
+    },
+    VerifySchemaMigration {
+        connection_id: String,
+        request: SchemaMigrationVerifyRequest,
     },
     BeginTransaction {
         connection_id: String,
@@ -165,6 +187,138 @@ pub struct DatabaseCreateRequest {
     /// Optional semantic namespace kind. Existing v1 sidecars may omit it.
     #[serde(default)]
     pub namespace_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SchemaMigrationMode {
+    Transactional,
+    NonTransactional,
+}
+
+/// A normalized, descriptor-only schema snapshot. `descriptor` may contain
+/// relation, column, index and constraint metadata, but never credentials,
+/// SQL source, row values or local paths.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticSchemaSnapshot {
+    pub snapshot_version: u32,
+    pub fingerprint: String,
+    #[serde(default)]
+    pub database: Option<String>,
+    pub namespace: String,
+    pub descriptor: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaMigrationPlanRequest {
+    pub source: SemanticSchemaSnapshot,
+    pub target: SemanticSchemaSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaMigrationPreviewChange {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub risk: String,
+    pub reversible: bool,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaMigrationPlanResult {
+    pub plan_id: String,
+    /// Opaque sidecar-owned token. The Host persists neither this token nor a
+    /// resumable migration after process exit.
+    pub plan_token: String,
+    pub target_fingerprint: String,
+    pub mode: SchemaMigrationMode,
+    pub change_count: u32,
+    pub blocked_change_count: u32,
+    pub requires_review: bool,
+    pub requires_destructive: bool,
+    pub preview: Vec<SchemaMigrationPreviewChange>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaMigrationPreflightRequest {
+    pub plan_token: String,
+    pub target_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaMigrationPreflightCheckResult {
+    pub id: String,
+    pub label: String,
+    pub status: String,
+    pub blocks_execution: bool,
+    pub observed: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaMigrationPreflightResult {
+    pub plan_id: String,
+    pub preflight_token: String,
+    pub target_fingerprint: String,
+    pub ready: bool,
+    pub checks: Vec<SchemaMigrationPreflightCheckResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaMigrationApplyRequest {
+    pub plan_token: String,
+    pub preflight_token: String,
+    pub target_fingerprint: String,
+    pub allow_review: bool,
+    pub allow_destructive: bool,
+    pub allow_non_transactional: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SchemaMigrationApplyStatus {
+    Applied,
+    PartiallyApplied,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaMigrationApplyResult {
+    pub plan_id: String,
+    pub apply_token: String,
+    pub status: SchemaMigrationApplyStatus,
+    pub committed_change_count: u32,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaMigrationVerifyRequest {
+    pub plan_token: String,
+    pub apply_token: String,
+    pub expected_source_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaMigrationVerifyResult {
+    pub plan_id: String,
+    pub matches_source: bool,
+    pub target_fingerprint_after: String,
+    pub remaining_change_count: u32,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -246,6 +400,10 @@ pub enum DriverResult {
     ServerVersion(Option<String>),
     Query(Vec<DriverQueryResult>),
     Metadata(Value),
+    SchemaMigrationPlan(SchemaMigrationPlanResult),
+    SchemaMigrationPreflight(SchemaMigrationPreflightResult),
+    SchemaMigrationApply(SchemaMigrationApplyResult),
+    SchemaMigrationVerify(SchemaMigrationVerifyResult),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -385,6 +543,34 @@ mod tests {
     }
 
     #[test]
+    fn migration_requests_are_token_bound_and_never_carry_host_sql() {
+        let envelope = DriverRequestEnvelope {
+            id: 12,
+            request: DriverRequest::ApplySchemaMigration {
+                connection_id: "connection-1".to_string(),
+                request: SchemaMigrationApplyRequest {
+                    plan_token: "plan-token".to_string(),
+                    preflight_token: "preflight-token".to_string(),
+                    target_fingerprint: "target-fingerprint".to_string(),
+                    allow_review: true,
+                    allow_destructive: false,
+                    allow_non_transactional: false,
+                },
+            },
+        };
+        let encoded = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(encoded["method"], "applySchemaMigration");
+        assert_eq!(encoded["params"]["connection_id"], "connection-1");
+        assert_eq!(encoded["params"]["request"]["planToken"], "plan-token");
+        assert!(encoded["params"]["request"].get("sql").is_none());
+        assert!(encoded["params"]["request"].get("statements").is_none());
+        assert_eq!(
+            serde_json::from_value::<DriverRequestEnvelope>(encoded).unwrap(),
+            envelope
+        );
+    }
+
+    #[test]
     fn only_matching_protocol_majors_are_compatible() {
         assert!(protocol_is_compatible("1.9"));
         assert!(!protocol_is_compatible("2.0"));
@@ -401,5 +587,6 @@ mod tests {
         .unwrap();
         assert!(capabilities.metadata);
         assert!(!capabilities.referencing_foreign_keys);
+        assert!(!capabilities.semantic_schema_migration);
     }
 }

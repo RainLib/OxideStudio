@@ -4,7 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { delimiter, dirname, isAbsolute, relative, resolve } from "node:path";
 
-export const DRIVER_CONFORMANCE_RUNNER_VERSION = "1.0.0";
+export const DRIVER_CONFORMANCE_RUNNER_VERSION = "1.1.0";
 export const CATALOG_CONFORMANCE_OPERATIONS = Object.freeze([
   "connect",
   "metadata",
@@ -19,6 +19,13 @@ const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const SAFE_TOKEN = /^[A-Za-z0-9._-]{1,96}$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const FORBIDDEN_MIGRATION_DESCRIPTOR_KEYS = new Set([
+  "ddl",
+  "sql",
+  "sourcesql",
+  "statement",
+  "statements",
+]);
 
 export class DriverProtocolResponseError extends Error {
   constructor(code) {
@@ -298,6 +305,35 @@ function assertQueryResult(value, expectation = {}) {
   }
 }
 
+function validateMigrationDescriptor(value, path = "descriptor") {
+  if (Array.isArray(value)) {
+    assert(value.length <= 20_000, `${path} contains too many items`);
+    value.forEach((item, index) => validateMigrationDescriptor(item, `${path}[${index}]`));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, item] of Object.entries(value)) {
+    assert(
+      !FORBIDDEN_MIGRATION_DESCRIPTOR_KEYS.has(key.replaceAll("_", "").toLowerCase()),
+      `${path} must not contain Host SQL or DDL`,
+    );
+    validateMigrationDescriptor(item, `${path}.${key}`);
+  }
+}
+
+function validateSemanticSnapshot(snapshot, label) {
+  assert(snapshot?.snapshotVersion === 1, `${label} snapshotVersion must be 1`);
+  assert(typeof snapshot.fingerprint === "string" && snapshot.fingerprint.length <= 256, `${label} fingerprint is invalid`);
+  assert(typeof snapshot.namespace === "string" && snapshot.namespace.length > 0 && snapshot.namespace.length <= 256, `${label} namespace is invalid`);
+  assert(snapshot.descriptor && typeof snapshot.descriptor === "object" && !Array.isArray(snapshot.descriptor), `${label} descriptor must be an object`);
+  assert(JSON.stringify(snapshot).length <= 2 * 1024 * 1024, `${label} snapshot exceeds the conformance limit`);
+  validateMigrationDescriptor(snapshot.descriptor, `${label}.descriptor`);
+}
+
+function assertOpaqueToken(value, label) {
+  assert(typeof value === "string" && value.length > 0 && value.length <= 4096, `${label} is invalid`);
+}
+
 function operationRecorder() {
   const operations = [];
   return {
@@ -332,6 +368,16 @@ function validateManifestFixture(manifest, fixture) {
   assert((fixture.query.parameters || []).length > 0, "Query conformance requires at least one bound parameter");
   assert(fixture.errorMapping?.statement, "Conformance fixture must include an error-mapping check");
   assert((fixture.errorMapping.expectedCodes || []).length > 0, "Error-mapping check requires expectedCodes");
+  if (fixture.migration) {
+    assert(manifest.schemaMigration?.snapshotVersion === 1, "Migration fixture requires a signed schemaMigration contract");
+    assert(["transactional", "nonTransactional"].includes(manifest.schemaMigration.mode), "Migration contract mode is invalid");
+    assert(manifest.capabilities?.supportsTableDdl === true, "Migration fixture requires table DDL capability");
+    if (manifest.schemaMigration.mode === "transactional") {
+      assert(manifest.capabilities?.supportsTransactions === true, "Transactional migration requires transaction capability");
+    }
+    validateSemanticSnapshot(fixture.migration.source, "migration source");
+    validateSemanticSnapshot(fixture.migration.target, "migration target");
+  }
 }
 
 export async function runDriverConformance({
@@ -387,6 +433,9 @@ export async function runDriverConformance({
       if (declared.supportsQueryCancellation) assert(runtime.cancellation === true, "Runtime did not prove cancellation capability");
       if (declared.supportsTransactions || declared.supportsTableRowMutation || declared.supportsTableDataTransfer) {
         assert(runtime.transactions === true, "Runtime did not prove transaction capability");
+      }
+      if (manifest.schemaMigration) {
+        assert(runtime.semanticSchemaMigration === true, "Runtime did not prove semantic schema migration capability");
       }
       assertResultKind(await client.request("connect", { connection_id: connectionId, config: connection }), "empty");
       const ping = await client.request("ping", { connection_id: connectionId });
@@ -450,6 +499,66 @@ export async function runDriverConformance({
           fixture.transactionRollback.verify,
         )), "query");
         assertQueryResult(verification, fixture.transactionRollback.verify.expect);
+      });
+    }
+
+    if (fixture.migration) {
+      await recorder.run("migration", ["semanticPlan", "preflight", "tokenBoundApply", "postApplyVerify"], async () => {
+        const planned = assertResultKind(await client.request("planSchemaMigration", {
+          connection_id: connectionId,
+          request: {
+            source: fixture.migration.source,
+            target: fixture.migration.target,
+          },
+        }), "schemaMigrationPlan");
+        assertOpaqueToken(planned.planId, "Migration plan id");
+        assertOpaqueToken(planned.planToken, "Migration plan token");
+        assert(planned.targetFingerprint === fixture.migration.target.fingerprint, "Migration plan target fingerprint mismatch");
+        assert(planned.mode === manifest.schemaMigration.mode, "Migration plan mode does not match the signed contract");
+        assert(Number.isInteger(planned.changeCount) && planned.changeCount > 0, "Migration plan must contain a change");
+        assert(planned.blockedChangeCount === 0, "Migration conformance plan contains blocked changes");
+        assert(Array.isArray(planned.preview) && planned.preview.length <= 10_000, "Migration preview is invalid");
+
+        const preflight = assertResultKind(await client.request("preflightSchemaMigration", {
+          connection_id: connectionId,
+          request: {
+            planToken: planned.planToken,
+            targetFingerprint: planned.targetFingerprint,
+          },
+        }), "schemaMigrationPreflight");
+        assert(preflight.planId === planned.planId, "Migration preflight plan mismatch");
+        assert(preflight.targetFingerprint === planned.targetFingerprint, "Migration preflight target mismatch");
+        assertOpaqueToken(preflight.preflightToken, "Migration preflight token");
+        assert(preflight.ready === true, "Migration preflight did not pass");
+        assert(Array.isArray(preflight.checks) && preflight.checks.every((check) => !check.blocksExecution), "Migration preflight contains a blocking check");
+
+        const applied = assertResultKind(await client.request("applySchemaMigration", {
+          connection_id: connectionId,
+          request: {
+            planToken: planned.planToken,
+            preflightToken: preflight.preflightToken,
+            targetFingerprint: planned.targetFingerprint,
+            allowReview: fixture.migration.allowReview === true,
+            allowDestructive: fixture.migration.allowDestructive === true,
+            allowNonTransactional: fixture.migration.allowNonTransactional === true,
+          },
+        }), "schemaMigrationApply");
+        assert(applied.planId === planned.planId, "Migration apply plan mismatch");
+        assert(applied.status === "applied", "Migration was only partially applied");
+        assert(applied.committedChangeCount === planned.changeCount, "Migration apply count mismatch");
+        assertOpaqueToken(applied.applyToken, "Migration apply token");
+
+        const verified = assertResultKind(await client.request("verifySchemaMigration", {
+          connection_id: connectionId,
+          request: {
+            planToken: planned.planToken,
+            applyToken: applied.applyToken,
+            expectedSourceFingerprint: fixture.migration.source.fingerprint,
+          },
+        }), "schemaMigrationVerify");
+        assert(verified.planId === planned.planId, "Migration verification plan mismatch");
+        assert(verified.matchesSource === true, "Migration verification did not match the source snapshot");
+        assert(verified.remainingChangeCount === 0, "Migration verification found remaining changes");
       });
     }
 

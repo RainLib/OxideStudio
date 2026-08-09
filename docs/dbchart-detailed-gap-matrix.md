@@ -41,7 +41,7 @@
 | M05 | 本阶段增强 | 确定性跨方言 DDL 转换 | `src/lib/data/sql-export/cross-dialect/index.ts:33` 目前仅 PostgreSQL → MySQL/MariaDB/SQL Server；完整类型表在 `postgresql/type-mappings.ts` | `src-tauri/src/core/schema_diff.rs` 已把 ChartDB 有损映射面迁为 PostgreSQL → MySQL/SQL Server 的结构化 review plan，覆盖 array、JSON/JSONB、UUID/binary/boolean、money、time/timestamp zone、network、interval、bit string、serial、geometry、full-text、range、XML 与 target index/default 表示；跨库产物仍不生成/执行 DDL。下一步是签名 capability 驱动的 target-owned 完整映射协议 |
 | M06 | 已对齐并增强 | 转换前枚举不支持特性并把告警写入产物 | `src/lib/data/sql-export/cross-dialect/unsupported-features.ts:36` 检测 array/custom type/default/index 等 | `SchemaConversionIssue` 现显式区分 `type/array/default/index/customType/schema`，记录 relation/object、source/target representation、safe/review/unsupported、原因、remediation 和 `blocksAutomaticConversion`；迁移视图按类别展示并明确标识 `blocks DDL`。默认值包含 sequence/UUID/array/cast/session state，索引包含 partial/expression 与 GIN/GiST/SP-GiST/BRIN/HASH；未知族仍给出 schema 级阻断项而不猜测 |
 | M07 | Oxide 增强项 | 可执行迁移预检、确认、事务/非事务边界和 journal | ChartDB `src/lib/data/sql-export/export-sql-script.ts:154` 主要生成 SQL，不负责安全执行 | Oxide `src-tauri/src/commands/schema_diff.rs:493` 执行，`src-tauri/src/core/schema_diff.rs` 规划；PostgreSQL 事务、MySQL 显式非事务、SQLite rebuild、rollback artifact/journal 已存在 |
-| M08 | 未完成 | 70+ 产品的 migration capability 仍缺逐产品语义实现 | ChartDB 不覆盖此规模 | 外置 driver 只有声明 `semantic DDL/migration` 协议并通过真实 conformance 后才可执行；否则保持 review-only，不借用相似方言猜测 |
+| M08 | 协议主路径已对齐，产品实现与证据延期 | 70+ 产品的 migration capability 仍需逐产品语义实现 | ChartDB 不覆盖此规模 | 外置 driver 已有 descriptor-only `plan/preflight/token-bound apply/verify` 协议、签名 `schemaMigration` contract、runtime 双重握手门禁和 migration evidence runner；旧包缺省禁用。没有精确包/server-version evidence 的产品继续保持 review-only，不借用相似方言猜测。 |
 
 ## 3. 表数据与结果网格导入导出
 
@@ -111,7 +111,7 @@
 - [x] 增加 ChartDB metadata-query JSON 有界导入、聚合和 review-only snapshot diff。
 - [x] 增加 ChartDB 8 类数据库及兼容驱动的 target-scoped metadata query 一键复制。
 - [x] 增加 PostgreSQL/MySQL/SQL Server/SQLite/Oracle DDL 自动识别、独立文件导入和有界 relation/index/constraint baseline 解析。
-- [ ] 扩展外置 driver semantic DDL/migration 协议和 conformance evidence。
+- [x] 扩展外置 driver descriptor-only semantic migration 协议、签名/runtime 双门禁和 conformance evidence runner；逐产品实现与真实版本证据延期。
 
 ### 阶段 C：表格导出
 

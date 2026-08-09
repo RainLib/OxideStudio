@@ -53,6 +53,16 @@
             },
             "additionalProperties": true
           },
+          "schemaMigration": {
+            "description": "Discovery copy of the independently signed package semantic migration contract.",
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["snapshotVersion", "mode"],
+            "properties": {
+              "snapshotVersion": { "const": 1 },
+              "mode": { "enum": ["transactional", "nonTransactional"] }
+            }
+          },
           "conformance": {
             "description": "Signed release evidence for UI transparency only; it is not execution authority.",
             "type": ["object", "null"],
@@ -73,7 +83,31 @@
             },
             "additionalProperties": false
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "conformance": {
+                  "properties": { "migration": { "minItems": 1 } },
+                  "required": ["migration"]
+                }
+              },
+              "required": ["conformance"]
+            },
+            "then": {
+              "required": ["schemaMigration", "capabilities"],
+              "properties": {
+                "schemaMigration": { "type": "object" },
+                "capabilities": {
+                  "type": "object",
+                  "properties": { "supportsTableDdl": { "const": true } },
+                  "required": ["supportsTableDdl"]
+                }
+              }
+            }
+          }
+        ]
       }
     }
   },

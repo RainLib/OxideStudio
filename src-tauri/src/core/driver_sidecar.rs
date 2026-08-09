@@ -338,6 +338,7 @@ mod tests {
             server_version_range: None,
             connection_url_template: None,
             capabilities: None,
+            schema_migration: None,
         };
         fs::write(
             package_root.join("manifest.json"),
@@ -379,6 +380,7 @@ mod tests {
                 server_version_range: None,
                 connection_url_template: None,
                 capabilities: None,
+                schema_migration: None,
             },
             entrypoint: package_root.join("agent.jar"),
             package_root,
