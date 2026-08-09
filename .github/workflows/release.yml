@@ -206,7 +206,7 @@ jobs:
 
       - name: Test Rust workspaces
         run: |
-          cargo test --manifest-path src-tauri/Cargo.toml
+          cargo test --manifest-path src-tauri/Cargo.toml --lib
           cargo test --manifest-path enterprise/Cargo.toml --workspace
 
   build:

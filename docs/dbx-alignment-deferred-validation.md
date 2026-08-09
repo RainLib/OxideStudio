@@ -13,6 +13,10 @@ database target until its relevant queue entries pass.
 - Keep this database-surface suite outside tag-release gating until the mock
   contract is reconciled; tag releases still run deterministic release,
   agent-contract, agent-host, frontend-build, and Rust quality checks.
+- Keep Rust database integration targets (including `live_database`) outside
+  tag-release gating until runnable database fixtures are supplied. Tag builds
+  run Rust unit tests only; integration tests remain an explicit deferred
+  validation task rather than an implicit linker-dependent release check.
 
 ## Multi-table data transfer
 

@@ -211,6 +211,32 @@ Secrets**:
 | `ALIYUN_OSS_PREFIX` | `oxide-studio/releases` | Object prefix controlled by the RAM user |
 | `ALIYUN_OSS_PUBLIC_BASE_URL` | `https://download.example.com` | Public HTTPS bucket/CDN base URL compiled into the app and written into manifests |
 
+### Independent driver package release secrets
+
+The **Publish signed driver packages** workflow builds ClickHouse, DuckDB, and
+RQLite sidecars for Linux x64, Windows x64, and macOS arm64. Run it manually,
+select one driver or `all`, and provide a new immutable package version. Each
+target payload is manifest-bound, signed, locally verified, archived, SHA-256
+hashed, and uploaded to:
+
+`oss://<ALIYUN_OSS_BUCKET>/<ALIYUN_OSS_PREFIX>/drivers/<driver>/<version>/<target>/package.tar.gz`
+
+The workflow refuses to replace an existing version/target object. In addition
+to the OSS secrets above, configure these base64-encoded Minisign key files:
+
+| Secret | Purpose |
+| --- | --- |
+| `DRIVER_MINISIGN_SECRET_KEY_B64` | Unencrypted, dedicated driver-release Minisign secret key file. Scope it only to this workflow. |
+| `DRIVER_MINISIGN_PUBLIC_KEY_B64` | Matching public key file, used to verify every generated detached manifest signature before upload. |
+
+JDBC packages remain a separate controlled release flow: vendor JAR licensing
+and provenance are product-specific, so this native-driver workflow never
+downloads or redistributes third-party JARs implicitly.
+
+The matching public key must also be compiled into official desktop builds as
+`OXIDE_DRIVER_SIGNING_PUBLIC_KEY`; signing a package with an unrelated key does
+not make it executable by production clients.
+
 `ALIYUN_OSS_PUBLIC_BASE_URL` may use an OSS public domain or an Aliyun CDN
 custom domain. It may point to the public bucket/CDN root, in which case the
 workflow appends `ALIYUN_OSS_PREFIX`, or it may already include that exact
