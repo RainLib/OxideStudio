@@ -25,6 +25,7 @@ import {
   Network,
   PanelRightClose,
   PanelRightOpen,
+  Pencil,
   Plus,
   Redo2,
   Search,
@@ -51,10 +52,12 @@ import {
   createSchemaDiagramAreaHistory,
   moveSchemaDiagramRelationsToArea,
   removeSchemaDiagramRelationsFromAreas,
+  renameSchemaDiagramArea,
   redoSchemaDiagramAreas,
   undoSchemaDiagramAreas,
 } from "@/lib/schemaDiagramAreas";
 import {
+  buildSchemaDiagramEdgeIndex,
   buildSchemaDiagramViewportIndex,
   querySchemaDiagramViewport,
 } from "@/lib/schemaDiagramViewport";
@@ -77,6 +80,16 @@ import {
   ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 1.6;
@@ -122,6 +135,8 @@ export function SchemaDiagramView() {
   const [isRasterizing, setIsRasterizing] = useState(false);
   const [dbmlDraftOpen, setDbmlDraftOpen] = useState(false);
   const [structuredDraftOpen, setStructuredDraftOpen] = useState(false);
+  const [renamingAreaId, setRenamingAreaId] = useState<string | null>(null);
+  const [areaNameDraft, setAreaNameDraft] = useState("");
   const viewportRef = useRef<HTMLDivElement>(null);
   const viewportFrameRef = useRef<number | null>(null);
   const [viewportWindow, setViewportWindow] =
@@ -199,9 +214,22 @@ export function SchemaDiagramView() {
   const layout = areaLayout?.layout || null;
   const fullLayout = fullAreaLayout?.layout || null;
   const areaBounds = areaLayout?.areaBounds || [];
+  const snapshotRelationsByName = useMemo(
+    () =>
+      new Map(
+        (snapshot?.relations || []).map((relation) => [relation.name, relation]),
+      ),
+    [snapshot],
+  );
+  const fullEdgeIndexesByRelation = useMemo(
+    () => buildSchemaDiagramEdgeIndex(fullLayout?.edges || []),
+    [fullLayout?.edges],
+  );
 
   useEffect(() => {
     setRelationScope("all");
+    setRenamingAreaId(null);
+    setAreaNameDraft("");
   }, [snapshot?.id]);
 
   const exportSvg = useCallback(() => {
@@ -374,21 +402,20 @@ export function SchemaDiagramView() {
     return null;
   }
 
-  const selectedRelation = snapshot.relations.find(
-    (relation) => relation.name === activeTab.selectedDiagramRelationName,
-  ) || null;
+  const selectedRelation = activeTab.selectedDiagramRelationName
+    ? snapshotRelationsByName.get(activeTab.selectedDiagramRelationName) || null
+    : null;
   const selectedName = selectedRelation?.name || null;
   const selectedIsHidden = Boolean(
-    selectedName && !layout.nodes.some((node) => node.relationName === selectedName),
+    selectedName && !viewportIndex.nodesByName.has(selectedName),
   );
   const selectedArea = areaHistory.present.find(
     (area) => area.id === selectedAreaId,
   ) || null;
   const relatedEdges = selectedName
-    ? fullLayout.edges.filter(
-        (edge) =>
-          edge.sourceRelation === selectedName || edge.targetRelation === selectedName,
-      )
+    ? [...(fullEdgeIndexesByRelation.get(selectedName) || [])]
+        .map((edgeIndex) => fullLayout.edges[edgeIndex])
+        .filter((edge): edge is SchemaDiagramEdge => Boolean(edge))
     : [];
 
   const selectRelation = (relationName: string, additive = false) => {
@@ -483,6 +510,45 @@ export function SchemaDiagramView() {
         ),
       ),
     );
+  };
+
+  const beginRenameArea = (areaId: string) => {
+    const area = areaHistory.present.find((candidate) => candidate.id === areaId);
+    if (!area) return;
+    setAreaNameDraft(area.name);
+    setRenamingAreaId(area.id);
+  };
+
+  const areaName = areaNameDraft.trim();
+  const areaNameConflict = Boolean(
+    renamingAreaId &&
+      areaHistory.present.some(
+        (area) =>
+          area.id !== renamingAreaId &&
+          area.name.localeCompare(areaName, undefined, {
+            sensitivity: "accent",
+          }) === 0,
+      ),
+  );
+  const areaNameError = !areaName
+    ? "Area name is required."
+    : areaNameConflict
+      ? "Another area already uses this name."
+      : null;
+  const commitAreaRename = () => {
+    if (!renamingAreaId || areaNameError) return;
+    setSchemaDiagramAreaHistory(
+      activeTab.id,
+      commitSchemaDiagramAreas(
+        areaHistory,
+        renameSchemaDiagramArea(
+          areaHistory.present,
+          renamingAreaId,
+          areaName,
+        ),
+      ),
+    );
+    setRenamingAreaId(null);
   };
 
   const removeSelectedArea = () => removeArea(selectedAreaId);
@@ -797,6 +863,16 @@ export function SchemaDiagramView() {
           type="button"
           className="wb-icon-button h-6 w-6"
           disabled={!selectedArea}
+          onClick={() => selectedArea && beginRenameArea(selectedArea.id)}
+          aria-label="Rename selected area"
+          title="Rename selected area"
+        >
+          <Pencil size={10} />
+        </button>
+        <button
+          type="button"
+          className="wb-icon-button h-6 w-6"
+          disabled={!selectedArea}
           onClick={removeSelectedArea}
           aria-label="Remove selected area"
           title="Remove area; contained relations remain on the diagram"
@@ -897,6 +973,12 @@ export function SchemaDiagramView() {
                         </button>
                       </ContextMenuTrigger>
                       <ContextMenuContent className="w-48 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                        <ContextMenuItem
+                          className="gap-2 text-[10px]"
+                          onClick={() => beginRenameArea(area.id)}
+                        >
+                          <Pencil size={11} /> Rename area
+                        </ContextMenuItem>
                         <ContextMenuItem
                           className="gap-2 text-[10px]"
                           disabled={area.relationNames.length < 2}
@@ -1020,6 +1102,75 @@ export function SchemaDiagramView() {
         </aside>
         )}
       </div>
+      <Dialog
+        open={Boolean(renamingAreaId)}
+        onOpenChange={(open) => {
+          if (!open) setRenamingAreaId(null);
+        }}
+      >
+        <DialogContent className="w-[420px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.35)]">
+          <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3">
+            <DialogTitle className="text-[13px] font-semibold">
+              Rename area
+            </DialogTitle>
+            <DialogDescription className="text-[10px] text-[hsl(var(--wb-text-muted))]">
+              Area names identify visual groups in this diagram.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              commitAreaRename();
+            }}
+          >
+            <div className="space-y-1.5 p-4">
+              <label
+                htmlFor="schema-diagram-area-name"
+                className="text-[10px] font-medium text-[hsl(var(--wb-text-muted))]"
+              >
+                Area name
+              </label>
+              <Input
+                id="schema-diagram-area-name"
+                autoFocus
+                value={areaNameDraft}
+                onChange={(event) => setAreaNameDraft(event.target.value)}
+                aria-invalid={Boolean(areaNameError)}
+                aria-describedby={
+                  areaNameError ? "schema-diagram-area-name-error" : undefined
+                }
+                className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] text-[11px]"
+              />
+              {areaNameError && (
+                <p
+                  id="schema-diagram-area-name-error"
+                  className="text-[10px] text-red-300"
+                  role="alert"
+                >
+                  {areaNameError}
+                </p>
+              )}
+            </div>
+            <DialogFooter className="flex-row justify-end gap-2 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.56)] px-4 py-2.5 sm:space-x-0">
+              <Button
+                type="button"
+                variant="ghost"
+                className="h-7 text-[11px]"
+                onClick={() => setRenamingAreaId(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                className="h-7 text-[11px]"
+                disabled={Boolean(areaNameError)}
+              >
+                Rename
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
       <SchemaDbmlDraftDialog
         open={dbmlDraftOpen}
         snapshot={snapshot}

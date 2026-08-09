@@ -53,13 +53,7 @@ export function buildSchemaDiagramViewportIndex(
     });
   });
 
-  const edgeIndexesByRelation = new Map<string, number[]>();
-  edges.forEach((edge, edgeIndex) => {
-    addRelationEdge(edgeIndexesByRelation, edge.sourceRelation, edgeIndex);
-    if (edge.targetRelation !== edge.sourceRelation) {
-      addRelationEdge(edgeIndexesByRelation, edge.targetRelation, edgeIndex);
-    }
-  });
+  const edgeIndexesByRelation = buildSchemaDiagramEdgeIndex(edges);
 
   return {
     cellSize: normalizedCellSize,
@@ -69,6 +63,19 @@ export function buildSchemaDiagramViewportIndex(
     nodeIndexesByCell,
     edgeIndexesByRelation,
   };
+}
+
+export function buildSchemaDiagramEdgeIndex(
+  edges: readonly SchemaDiagramEdge[],
+): ReadonlyMap<string, readonly number[]> {
+  const edgeIndexesByRelation = new Map<string, number[]>();
+  edges.forEach((edge, edgeIndex) => {
+    addRelationEdge(edgeIndexesByRelation, edge.sourceRelation, edgeIndex);
+    if (edge.targetRelation !== edge.sourceRelation) {
+      addRelationEdge(edgeIndexesByRelation, edge.targetRelation, edgeIndex);
+    }
+  });
+  return edgeIndexesByRelation;
 }
 
 export function querySchemaDiagramViewport(

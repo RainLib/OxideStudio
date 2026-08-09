@@ -97,6 +97,20 @@ export function removeSchemaDiagramRelationsFromAreas(
   }));
 }
 
+export function renameSchemaDiagramArea(
+  areas: SchemaDiagramArea[],
+  targetAreaId: string,
+  name: string,
+) {
+  const nextName = name.trim();
+  if (!nextName) return areas;
+  return areas.map((area) =>
+    area.id === targetAreaId && area.name !== nextName
+      ? { ...area, name: nextName }
+      : area,
+  );
+}
+
 export function autoArrangeSchemaDiagramArea(
   areas: SchemaDiagramArea[],
   targetAreaId: string,

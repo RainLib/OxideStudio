@@ -7,6 +7,7 @@ import {
   createSchemaDiagramAreaHistory,
   moveSchemaDiagramRelationsToArea,
   removeSchemaDiagramRelationsFromAreas,
+  renameSchemaDiagramArea,
   redoSchemaDiagramAreas,
   undoSchemaDiagramAreas,
 } from "./schemaDiagramAreas";
@@ -93,5 +94,17 @@ describe("schema diagram areas", () => {
       { id: "a", name: "Core", relationNames: ["items"] },
       { id: "b", name: "Sales", relationNames: [] },
     ]);
+  });
+
+  it("renames one area with a trimmed non-empty name", () => {
+    const areas = [
+      { id: "a", name: "Core", relationNames: ["users"] },
+      { id: "b", name: "Sales", relationNames: ["orders"] },
+    ];
+    expect(renameSchemaDiagramArea(areas, "b", "  Fulfillment  ")).toEqual([
+      areas[0],
+      { id: "b", name: "Fulfillment", relationNames: ["orders"] },
+    ]);
+    expect(renameSchemaDiagramArea(areas, "b", "   ")).toBe(areas);
   });
 });

@@ -5,6 +5,7 @@ import type {
 } from "./schemaDiagram";
 import {
   buildSchemaDiagramViewportIndex,
+  buildSchemaDiagramEdgeIndex,
   querySchemaDiagramViewport,
 } from "./schemaDiagramViewport";
 
@@ -70,6 +71,10 @@ describe("schema diagram viewport index", () => {
         height: 100,
       }),
     ).toEqual({ nodes: [], edges: [] });
+  });
+
+  it("indexes a self relationship only once", () => {
+    expect(buildSchemaDiagramEdgeIndex(edges).get("audit")).toEqual([2]);
   });
 });
 
