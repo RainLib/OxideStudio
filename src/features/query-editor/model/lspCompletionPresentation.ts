@@ -16,12 +16,14 @@ import {
 } from "./lspMonacoAdapter";
 import {
   appendSqlCompletionSpace,
+  shouldChainSqlCompletionAfterAccept,
   sqlFunctionCompletionInsertion,
   sqlCompletionItemType,
 } from "./sqlCompletionInsertion";
 
 export interface LspCompletionPresentationOptions {
   monaco: any;
+  ownerKey: string;
   items: CompletionItem[];
   typedWord: string;
   completedContextKeyword: boolean;
@@ -30,6 +32,7 @@ export interface LspCompletionPresentationOptions {
   usageScope: string;
   recordUsageCommand: string;
   appendSpace: boolean;
+  driver?: string;
   nextCharacter?: string;
 }
 
@@ -67,6 +70,7 @@ function completionInsertTextRules(
  */
 export function lspCompletionItemsToMonacoSuggestions({
   monaco,
+  ownerKey,
   items,
   typedWord,
   completedContextKeyword,
@@ -75,6 +79,7 @@ export function lspCompletionItemsToMonacoSuggestions({
   usageScope,
   recordUsageCommand,
   appendSpace,
+  driver,
   nextCharacter,
 }: LspCompletionPresentationOptions) {
   return items.map((item) => {
@@ -90,6 +95,11 @@ export function lspCompletionItemsToMonacoSuggestions({
       item,
       spacedInsertText,
       nextCharacter,
+    );
+    const chainCompletion = shouldChainSqlCompletionAfterAccept(
+      item,
+      functionInsertion.insertText,
+      driver,
     );
     return {
       label: completionLabelForMonaco(item),
@@ -117,11 +127,13 @@ export function lspCompletionItemsToMonacoSuggestions({
         range: toMonacoRange(monaco, edit.range),
         text: edit.newText,
       })),
-      command: rankByUsage
+      command: rankByUsage || chainCompletion
         ? {
             id: recordUsageCommand,
-            title: "Record SQL completion usage",
-            arguments: [usageScope, item.label],
+            title: chainCompletion
+              ? "Continue SQL completion"
+              : "Record SQL completion usage",
+            arguments: [usageScope, item.label, chainCompletion, ownerKey],
           }
         : undefined,
       insertTextRules: completionInsertTextRules(

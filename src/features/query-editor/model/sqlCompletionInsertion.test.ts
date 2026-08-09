@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CompletionItemKind, type CompletionItem } from "@/services/lsp/types";
 import {
   appendSqlCompletionSpace,
+  shouldChainSqlCompletionAfterAccept,
   sqlCompletionItemType,
   sqlFunctionCompletionInsertion,
 } from "./sqlCompletionInsertion";
@@ -70,5 +71,37 @@ describe("relation alias completion insertion", () => {
         nextCharacter: ".",
       }),
     ).toBe("u");
+  });
+});
+
+describe("chained SQL completion", () => {
+  it("continues after an accepted schema qualifier", () => {
+    expect(
+      shouldChainSqlCompletionAfterAccept(
+        {
+          label: "public",
+          kind: CompletionItemKind.Module,
+        },
+        "public.",
+        "postgres",
+      ),
+    ).toBe(true);
+  });
+
+  it("continues after SQL Server USE but not ordinary keywords", () => {
+    expect(
+      shouldChainSqlCompletionAfterAccept(
+        { label: "USE", kind: CompletionItemKind.Keyword },
+        "USE ",
+        "sqlserver",
+      ),
+    ).toBe(true);
+    expect(
+      shouldChainSqlCompletionAfterAccept(
+        { label: "SELECT", kind: CompletionItemKind.Keyword },
+        "SELECT ",
+        "sqlserver",
+      ),
+    ).toBe(false);
   });
 });

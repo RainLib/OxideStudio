@@ -157,6 +157,7 @@ import {
   parseElasticsearchConsoleServerVersion,
   quoteSqlIdentifierSelection,
   recordSqlCompletionTelemetry,
+  shouldChainSqlCompletionAfterAccept,
   sqlInListFromClipboard,
   sqlSyntaxFallbackCompletions,
   sqlCompletionItemType,
@@ -344,7 +345,9 @@ export function QueryEditor({
     null,
   );
   const vimStatusNodeRef = useRef<HTMLSpanElement | null>(null);
-  const completionTriggerOriginRef = useRef<"explicit" | null>(null);
+  const completionTriggerOriginRef = useRef<"explicit" | "chained" | null>(
+    null,
+  );
   const inlineCompletionCacheRef = useRef(new InlineCompletionCache());
   const inlineCompletionAbortRef = useRef<AbortController | null>(null);
   const inlineCompletionListenersRef = useRef(new Set<() => void>());
@@ -1316,8 +1319,7 @@ export function QueryEditor({
             "elastic",
             "mongodb",
           ].includes(completionDriver);
-          const explicitCompletion =
-            completionTriggerOriginRef.current === "explicit";
+          const explicitCompletion = completionTriggerOriginRef.current !== null;
           completionTriggerOriginRef.current = null;
           if (isSqlCompletionDocument) {
             const trigger = sqlCompletionTriggerDecision(
@@ -1375,49 +1377,65 @@ export function QueryEditor({
               supportsSqlQuery: capabilities.supportsSqlQuery,
               keywordCase: editorSettings.sqlCompletion.keywordCase,
               snippets: editorSettings.sqlCompletion.snippets,
-            }).map((item) => ({
-              label: completionLabelForMonaco(item),
-              kind: toMonacoCompletionKind(monaco, item.kind),
-              detail: item.detail || "SQL syntax",
-              documentation: item.documentation
-                ? { value: item.documentation }
-                : { value: "Available SQL syntax for the current clause." },
+            }).map((item) => {
               // Use the same completed-keyword replacement semantics as a
               // live LSP response. In particular, an offline/restarting LSP
               // must append ` DISTINCT` after a typed `SELECT`, not replace
               // the statement keyword with the fallback proposal.
-              insertText: appendSqlCompletionSpace(
+              const insertText = appendSqlCompletionSpace(
                 completionInsertText(item, completedContextKeyword),
                 {
                   enabled: editorSettings.sqlCompletion.appendSpace,
                   itemType: sqlCompletionItemType(item),
                   nextCharacter,
                 },
-              ),
-              filterText: completionFilterText(
+              );
+              const chainCompletion = shouldChainSqlCompletionAfterAccept(
                 item,
-                typedWord,
-                completedContextKeyword,
-              ),
-              sortText: rankByUsage
-                ? usageRankedCompletionSortText(
-                    item.sortText || `9:${item.label}`,
-                    completionUsageScore(usageScope, item.label),
-                  )
-                : item.sortText || `9:${item.label}`,
-              command: rankByUsage
-                ? {
-                    id: RECORD_COMPLETION_USAGE_COMMAND,
-                    title: "Record SQL completion usage",
-                    arguments: [usageScope, item.label],
-                  }
-                : undefined,
-              insertTextRules:
-                item.insertTextFormat === 2
-                  ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
-                  : undefined,
-              range: insertRange,
-            }));
+                insertText,
+                completionDriver,
+              );
+              return {
+                label: completionLabelForMonaco(item),
+                kind: toMonacoCompletionKind(monaco, item.kind),
+                detail: item.detail || "SQL syntax",
+                documentation: item.documentation
+                  ? { value: item.documentation }
+                  : { value: "Available SQL syntax for the current clause." },
+                insertText,
+                filterText: completionFilterText(
+                  item,
+                  typedWord,
+                  completedContextKeyword,
+                ),
+                sortText: rankByUsage
+                  ? usageRankedCompletionSortText(
+                      item.sortText || `9:${item.label}`,
+                      completionUsageScore(usageScope, item.label),
+                    )
+                  : item.sortText || `9:${item.label}`,
+                command:
+                  rankByUsage || chainCompletion
+                    ? {
+                        id: RECORD_COMPLETION_USAGE_COMMAND,
+                        title: chainCompletion
+                          ? "Continue SQL completion"
+                          : "Record SQL completion usage",
+                        arguments: [
+                          usageScope,
+                          item.label,
+                          chainCompletion,
+                          completionOwnerKey,
+                        ],
+                      }
+                    : undefined,
+                insertTextRules:
+                  item.insertTextFormat === 2
+                    ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+                    : undefined,
+                range: insertRange,
+              };
+            });
             return mergeCompletionFallbackSuggestions(cached, syntax);
           };
           const result = (
@@ -1597,6 +1615,7 @@ export function QueryEditor({
 
             const suggestions = lspCompletionItemsToMonacoSuggestions({
               monaco,
+              ownerKey: completionOwnerKey,
               items: completionItems,
               typedWord,
               completedContextKeyword,
@@ -1609,6 +1628,7 @@ export function QueryEditor({
               usageScope,
               recordUsageCommand: RECORD_COMPLETION_USAGE_COMMAND,
               appendSpace: editorSettings.sqlCompletion.appendSpace,
+              driver: completionDriver,
               nextCharacter,
             });
             const suggestionsWithMetadata = mergeCompletionFallbackSuggestions(
@@ -1659,6 +1679,25 @@ export function QueryEditor({
     provideCompletionItems,
     rankByUsage,
     recordUsage: recordCompletionUsage,
+    triggerChainedCompletion: () => {
+      const editor = mountedEditor;
+      const model = editor?.getModel();
+      if (!editor || !model) return;
+      window.setTimeout(() => {
+        if (editor.getModel() !== model || !editor.hasTextFocus()) return;
+        completionTriggerOriginRef.current = "chained";
+        editor.trigger(
+          "oxide.sql.chainedCompletion",
+          "editor.action.triggerSuggest",
+          {},
+        );
+        window.setTimeout(() => {
+          if (completionTriggerOriginRef.current === "chained") {
+            completionTriggerOriginRef.current = null;
+          }
+        }, 0);
+      }, 0);
+    },
     triggerCharacters:
       editorLanguageId === ELASTICSEARCH_CONSOLE_LANGUAGE_ID
         ? ELASTICSEARCH_COMPLETION_TRIGGER_CHARACTERS

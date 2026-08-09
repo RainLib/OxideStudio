@@ -21,6 +21,7 @@ const monaco = {
     },
     CompletionItemKind: {
       Field: 4,
+      Module: 9,
       Text: 18,
     },
     CompletionItemTag: {
@@ -33,6 +34,7 @@ describe("lspCompletionItemsToMonacoSuggestions", () => {
   it("preserves label details, insert/replace boundaries, and whitespace mode", () => {
     const [suggestion] = lspCompletionItemsToMonacoSuggestions({
       monaco,
+      ownerKey: "owner-1",
       items: [
         {
           label: "customer_id",
@@ -74,6 +76,34 @@ describe("lspCompletionItemsToMonacoSuggestions", () => {
     expect(suggestion?.range).toEqual({
       insert: new MockRange(3, 5, 3, 8),
       replace: new MockRange(3, 5, 3, 12),
+    });
+  });
+
+  it("requests the next completion level after inserting a schema qualifier", () => {
+    const [suggestion] = lspCompletionItemsToMonacoSuggestions({
+      monaco,
+      ownerKey: "owner-1",
+      items: [
+        {
+          label: "public",
+          kind: CompletionItemKind.Module,
+          insertText: "public.",
+        },
+      ],
+      typedWord: "pub",
+      completedContextKeyword: false,
+      defaultRange: new MockRange(1, 1, 1, 4),
+      rankByUsage: false,
+      usageScope: "postgres-scope",
+      recordUsageCommand: "record",
+      appendSpace: true,
+      driver: "postgres",
+    });
+
+    expect(suggestion?.command).toEqual({
+      id: "record",
+      title: "Continue SQL completion",
+      arguments: ["postgres-scope", "public", true, "owner-1"],
     });
   });
 });

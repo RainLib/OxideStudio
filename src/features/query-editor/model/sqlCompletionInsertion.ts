@@ -83,6 +83,29 @@ export function appendSqlCompletionSpace(
   return `${insertText} `;
 }
 
+/**
+ * Some accepted completions deliberately end at the boundary of another
+ * completion scope. Reopen suggestions after the edit instead of relying on
+ * Monaco to treat programmatically inserted trigger characters as typing.
+ */
+export function shouldChainSqlCompletionAfterAccept(
+  item: CompletionItem,
+  insertText: string,
+  driver?: string,
+) {
+  if (
+    sqlCompletionItemType(item) === "schema" &&
+    insertText.trimEnd().endsWith(".")
+  ) {
+    return true;
+  }
+  return (
+    driver?.trim().toLocaleLowerCase() === "sqlserver" &&
+    sqlCompletionItemType(item) === "keyword" &&
+    item.label.trim().toLocaleUpperCase() === "USE"
+  );
+}
+
 function signatureParameters(signature: string) {
   const open = signature.indexOf("(");
   if (open < 0) return null;

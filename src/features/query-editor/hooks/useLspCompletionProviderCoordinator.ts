@@ -17,6 +17,7 @@ export type LspCompletionProviderCoordinatorOptions = {
   provideCompletionItems: MonacoCompletionProvider;
   rankByUsage: boolean;
   recordUsage: (scope: string, label: string) => void;
+  triggerChainedCompletion: () => void;
   usageCommandId: string;
   usageScope: string;
   triggerCharacters: string[];
@@ -28,6 +29,7 @@ type CompletionRuntime = Pick<
   | "provideCompletionItems"
   | "rankByUsage"
   | "recordUsage"
+  | "triggerChainedCompletion"
   | "usageScope"
 >;
 
@@ -47,11 +49,24 @@ export function registerLspCompletionProvider(options: {
   } = options;
   const command = monaco.editor.registerCommand(
     usageCommandId,
-    (_accessor: unknown, scope: string, label: string) => {
+    (
+      _accessor: unknown,
+      scope: string,
+      label: string,
+      chainCompletion = false,
+      commandOwnerKey?: string,
+    ) => {
       const runtime = getRuntime();
-      if (runtime.rankByUsage && scope === runtime.usageScope) {
+      if (
+        scope !== runtime.usageScope ||
+        (commandOwnerKey !== undefined && commandOwnerKey !== runtime.ownerKey)
+      ) {
+        return;
+      }
+      if (runtime.rankByUsage) {
         runtime.recordUsage(scope, label);
       }
+      if (chainCompletion) runtime.triggerChainedCompletion();
     },
   );
   const provider = monaco.languages.registerCompletionItemProvider(

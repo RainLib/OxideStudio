@@ -34,6 +34,7 @@ function fixture() {
     },
   };
   const usage = vi.fn();
+  const triggerChainedCompletion = vi.fn();
   let runtime = {
     ownerKey: "owner-1",
     provideCompletionItems: vi.fn(async () => ({
@@ -41,6 +42,7 @@ function fixture() {
     })) as MonacoCompletionProvider,
     rankByUsage: true,
     recordUsage: usage,
+    triggerChainedCompletion,
     usageScope: "scope-1",
   };
   const coordinator = registerLspCompletionProvider({
@@ -61,6 +63,7 @@ function fixture() {
     setRuntime: (next: typeof runtime) => {
       runtime = next;
     },
+    triggerChainedCompletion,
     usage,
   };
 }
@@ -78,6 +81,19 @@ describe("LSP completion provider coordinator", () => {
     state.coordinator.dispose();
     expect(state.commandDispose).toHaveBeenCalledTimes(1);
     expect(state.providerDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("reopens suggestions after a chained completion is accepted", () => {
+    const state = fixture();
+
+    state.command()({}, "scope-1", "public", true);
+    expect(state.triggerChainedCompletion).toHaveBeenCalledTimes(1);
+
+    state.command()({}, "stale-scope", "archive", true);
+    expect(state.triggerChainedCompletion).toHaveBeenCalledTimes(1);
+
+    state.command()({}, "scope-1", "private", true, "stale-owner");
+    expect(state.triggerChainedCompletion).toHaveBeenCalledTimes(1);
   });
 
   it("uses current usage settings without provider re-registration", () => {

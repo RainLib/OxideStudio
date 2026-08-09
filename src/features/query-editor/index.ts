@@ -54,6 +54,7 @@ export {
 } from "./model/lspCompletionPresentation";
 export {
   appendSqlCompletionSpace,
+  shouldChainSqlCompletionAfterAccept,
   sqlFunctionCompletionInsertion,
   sqlCompletionItemType,
   type SqlCompletionItemType,
