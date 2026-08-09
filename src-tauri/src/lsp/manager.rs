@@ -19,6 +19,32 @@ enum LspOutgoingMessage {
     CancelRequest(u64),
 }
 
+fn completion_client_capabilities() -> Value {
+    serde_json::json!({
+        "completionItem": {
+            "snippetSupport": true,
+            "commitCharactersSupport": true,
+            "documentationFormat": ["markdown", "plaintext"],
+            "deprecatedSupport": true,
+            "preselectSupport": true,
+            "tagSupport": { "valueSet": [1] },
+            "insertReplaceSupport": true,
+            "insertTextModeSupport": { "valueSet": [1, 2] },
+            "labelDetailsSupport": true
+        },
+        "contextSupport": true,
+        "insertTextMode": 2,
+        "completionList": {
+            "itemDefaults": [
+                "commitCharacters",
+                "editRange",
+                "insertTextFormat",
+                "insertTextMode"
+            ]
+        }
+    })
+}
+
 /// LSP Server Manager with bidirectional communication
 pub struct LspServerManager {
     process: Arc<Mutex<Option<Child>>>,
@@ -311,11 +337,7 @@ impl LspServerManager {
             "rootUri": Value::Null,
             "capabilities": {
                 "textDocument": {
-                    "completion": {
-                        "completionItem": {
-                            "snippetSupport": true
-                        }
-                    },
+                    "completion": completion_client_capabilities(),
                     "hover": {
                         "contentFormat": ["markdown", "plaintext"]
                     },
@@ -498,12 +520,39 @@ fn cancel_request_notification(id: u64) -> LspNotification {
 
 #[cfg(test)]
 mod tests {
-    use super::cancel_request_notification;
+    use super::{cancel_request_notification, completion_client_capabilities};
 
     #[test]
     fn timeout_cancellation_uses_the_standard_lsp_notification() {
         let notification = cancel_request_notification(42);
         assert_eq!(notification.method, "$/cancelRequest");
         assert_eq!(notification.params["id"], 42);
+    }
+
+    #[test]
+    fn completion_capabilities_match_the_values_preserved_by_the_bridge() {
+        let capabilities = completion_client_capabilities();
+
+        assert_eq!(
+            capabilities.pointer("/completionItem/insertReplaceSupport"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            capabilities.pointer("/completionItem/labelDetailsSupport"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            capabilities.pointer("/completionItem/insertTextModeSupport/valueSet"),
+            Some(&serde_json::json!([1, 2]))
+        );
+        assert_eq!(
+            capabilities.pointer("/completionList/itemDefaults"),
+            Some(&serde_json::json!([
+                "commitCharacters",
+                "editRange",
+                "insertTextFormat",
+                "insertTextMode"
+            ]))
+        );
     }
 }

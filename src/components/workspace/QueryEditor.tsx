@@ -148,6 +148,7 @@ import {
   boundedSqlCompletionTextBeforeCursor,
   elasticsearchJsonStringCompletionRange,
   editorDocumentIdentity,
+  completionLabelForMonaco,
   isPublishDiagnosticsParams,
   lspDiagnosticToMonacoMarker,
   lspCompletionItemsToMonacoSuggestions,
@@ -1375,7 +1376,7 @@ export function QueryEditor({
               keywordCase: editorSettings.sqlCompletion.keywordCase,
               snippets: editorSettings.sqlCompletion.snippets,
             }).map((item) => ({
-              label: item.label,
+              label: completionLabelForMonaco(item),
               kind: toMonacoCompletionKind(monaco, item.kind),
               detail: item.detail || "SQL syntax",
               documentation: item.documentation
@@ -1423,6 +1424,7 @@ export function QueryEditor({
             suggestions: any[],
             outcome: "lsp" | "fallback" | "empty" | "discarded" | "error",
             reason?: string,
+            incomplete = false,
           ) => {
             recordSqlCompletionTelemetry({
               scope: usageScope,
@@ -1431,7 +1433,7 @@ export function QueryEditor({
               suggestionCount: suggestions.length,
               reason,
             });
-            return { suggestions };
+            return { suggestions, incomplete };
           };
           try {
             const uri = model.uri.toString();
@@ -1494,12 +1496,13 @@ export function QueryEditor({
             });
 
             // Now request completions with synchronized state
-            const items = await lspClient.getCompletions(
+            const completionList = await lspClient.getCompletionList(
               uri,
               position.lineNumber - 1, // LSP uses 0-indexed lines
               position.column - 1, // LSP uses 0-indexed columns
               toLspCompletionContext(context),
             );
+            const items = completionList.items;
 
             if (
               token?.isCancellationRequested ||
@@ -1627,13 +1630,19 @@ export function QueryEditor({
             // objects, so an empty LSP response never turns into cross-schema
             // guessing.
             if (suggestionsWithSmartJoins.length > 0) {
-              return result(suggestionsWithSmartJoins, "lsp");
+              return result(
+                suggestionsWithSmartJoins,
+                "lsp",
+                undefined,
+                completionList.isIncomplete,
+              );
             }
             const fallback = await fallbackSuggestions();
             return result(
               fallback,
               fallback.length > 0 ? "fallback" : "empty",
               fallback.length > 0 ? "emptyLsp" : "emptyLspNoFallback",
+              completionList.isIncomplete,
             );
           } catch (error) {
             console.error("[LSP] Completion failed:", error);

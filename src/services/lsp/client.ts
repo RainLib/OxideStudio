@@ -219,9 +219,18 @@ class LspClient {
     character: number,
     context?: CompletionContext
   ): Promise<CompletionItem[]> {
+    return (await this.getCompletionList(uri, line, character, context)).items;
+  }
+
+  async getCompletionList(
+    uri: string,
+    line: number,
+    character: number,
+    context?: CompletionContext
+  ): Promise<CompletionResponse> {
     if (!this.initialized) {
       console.warn("[LSP] Not initialized, returning empty completions");
-      return [];
+      return { items: [], isIncomplete: false };
     }
 
     try {
@@ -241,15 +250,19 @@ class LspClient {
         },
       });
 
-      console.log(`[LSP] ← Response: Got ${response.items.length} items`);
-      if (response.items.length > 0) {
-        console.log(`[LSP] First 3 items:`, response.items.slice(0, 3));
+      const completionList = {
+        items: Array.isArray(response.items) ? response.items : [],
+        isIncomplete: response.isIncomplete === true,
+      };
+      console.log(`[LSP] ← Response: Got ${completionList.items.length} items`);
+      if (completionList.items.length > 0) {
+        console.log(`[LSP] First 3 items:`, completionList.items.slice(0, 3));
       }
 
-      return response.items;
+      return completionList;
     } catch (error) {
       console.error("[LSP] ✗ Get completions failed:", error);
-      return [];
+      return { items: [], isIncomplete: false };
     }
   }
 

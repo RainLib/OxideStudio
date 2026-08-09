@@ -13,6 +13,12 @@ export async function completionSuggestionsOrCached<TLive, TCached>(
     : cachedSuggestions();
 }
 
+type CompletionSuggestionLabel = string | { label: string };
+
+function completionSuggestionLabel(label: CompletionSuggestionLabel) {
+  return typeof label === "string" ? label : label.label;
+}
+
 /**
  * Cached metadata and grammar fallbacks answer different questions: the
  * former supplies only scoped relation fields, while the latter supplies SQL
@@ -20,8 +26,8 @@ export async function completionSuggestionsOrCached<TLive, TCached>(
  * never duplicate a label when a provider already supplied it.
  */
 export function mergeCompletionFallbackSuggestions<
-  TPrimary extends { label: string; detail?: unknown },
-  TSecondary extends { label: string; detail?: unknown },
+  TPrimary extends { label: CompletionSuggestionLabel; detail?: unknown },
+  TSecondary extends { label: CompletionSuggestionLabel; detail?: unknown },
 >(
   primary: readonly TPrimary[],
   secondary: readonly TSecondary[],
@@ -30,7 +36,9 @@ export function mergeCompletionFallbackSuggestions<
   const primaryLabels = new Set<string>();
   const result: Array<TPrimary | TSecondary> = [];
   const append = (suggestion: TPrimary | TSecondary, isPrimary: boolean) => {
-    const label = suggestion.label.trim().toLocaleLowerCase();
+    const label = completionSuggestionLabel(suggestion.label)
+      .trim()
+      .toLocaleLowerCase();
     if (!label || (!isPrimary && primaryLabels.has(label))) return;
     const detail =
       typeof suggestion.detail === "string"

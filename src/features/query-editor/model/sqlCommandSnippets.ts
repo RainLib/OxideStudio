@@ -2,6 +2,10 @@ import {
   CompletionItemKind,
   type CompletionItem,
 } from "@/services/lsp/types";
+import {
+  completionFilterTextForQuery,
+  completionMatchScore,
+} from "./completionMatch";
 
 const DEFAULT_ROW_LIMIT = 100;
 
@@ -376,26 +380,39 @@ export function sqlCommandSnippetCompletions(
           ),
         ]
       : configuredSnippets;
-  return snippets.filter(
-    (snippet) =>
-      snippet.enabled &&
-      (!prefix ||
-        snippet.prefix.toLowerCase().startsWith(prefix) ||
-        snippet.label.toLowerCase().startsWith(prefix)),
-  ).map((snippet, index) => ({
-    label: snippet.label,
-    kind: CompletionItemKind.Snippet,
-    detail: snippet.detail,
-    documentation:
-      "Common SQL command template adapted to the current database product.",
-    filterText: `${snippet.prefix} ${snippet.label}`,
-    insertText: isUnmodifiedBuiltinSnippet(snippet)
-      ? applySnippetKeywordCase(
-          resolvedSnippetBody(snippet, driver),
-          options.keywordCase,
-        )
-      : snippet.body,
-    insertTextFormat: 2,
-    sortText: `${prefix === snippet.prefix.toLowerCase() ? "0" : "4"}:${String(index).padStart(2, "0")}:${snippet.prefix}`,
-  }));
+  return snippets
+    .map((snippet, index) => ({
+      snippet,
+      index,
+      score: Math.max(
+        completionMatchScore(snippet.prefix, prefix),
+        completionMatchScore(snippet.label, prefix),
+      ),
+    }))
+    .filter(({ snippet, score }) => snippet.enabled && score >= 0)
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .map(({ snippet, index, score }) => ({
+      label: snippet.label,
+      labelDetails: {
+        detail: `  ${snippet.prefix}`,
+        description: "SQL snippet",
+      },
+      kind: CompletionItemKind.Snippet,
+      detail: snippet.detail,
+      documentation:
+        "Common SQL command template adapted to the current database product.",
+      filterText:
+        completionFilterTextForQuery(
+          `${snippet.prefix} ${snippet.label}`,
+          prefix,
+        ) || `${snippet.prefix} ${snippet.label}`,
+      insertText: isUnmodifiedBuiltinSnippet(snippet)
+        ? applySnippetKeywordCase(
+            resolvedSnippetBody(snippet, driver),
+            options.keywordCase,
+          )
+        : snippet.body,
+      insertTextFormat: 2,
+      sortText: `${prefix === snippet.prefix.toLowerCase() ? "0" : "4"}:${String(9_999 - Math.max(0, score)).padStart(4, "0")}:${String(index).padStart(2, "0")}:${snippet.prefix}`,
+    }));
 }

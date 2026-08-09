@@ -7,9 +7,22 @@ describe("sqlCommandSnippetCompletions", () => {
 
     expect(item).toMatchObject({
       label: "select rows",
+      labelDetails: {
+        detail: "  sel",
+        description: "SQL snippet",
+      },
       insertTextFormat: 2,
     });
     expect(item?.sortText).toMatch(/^0:/);
+  });
+
+  it("finds common commands from their descriptive initials", () => {
+    const [item] = sqlCommandSnippetCompletions("sr", {
+      driver: "postgres",
+    });
+
+    expect(item?.label).toBe("select rows");
+    expect(item?.filterText).toBe("sr");
   });
 
   it("keeps matching by descriptive label after typing past a short trigger", () => {

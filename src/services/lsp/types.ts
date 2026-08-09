@@ -29,6 +29,12 @@ export interface TextEdit {
   newText: string;
 }
 
+export interface InsertReplaceEdit {
+  insert: Range;
+  replace: Range;
+  newText: string;
+}
+
 export interface MarkupContent {
   kind?: "plaintext" | "markdown" | string;
   value: string;
@@ -110,12 +116,17 @@ export interface LspWorkspaceSymbol {
 
 export interface CompletionItem {
   label: string;
+  labelDetails?: {
+    detail?: string;
+    description?: string;
+  };
   kind?: number;
   detail?: string;
   documentation?: string | MarkupContent;
   insertText?: string;
   insertTextFormat?: number;
-  textEdit?: TextEdit;
+  insertTextMode?: 1 | 2;
+  textEdit?: TextEdit | InsertReplaceEdit;
   additionalTextEdits?: TextEdit[];
   sortText?: string;
   filterText?: string;
@@ -126,6 +137,7 @@ export interface CompletionItem {
 
 export interface CompletionResponse {
   items: CompletionItem[];
+  isIncomplete: boolean;
 }
 
 export interface CompletionContext {

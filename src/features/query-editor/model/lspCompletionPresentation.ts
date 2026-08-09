@@ -11,6 +11,7 @@ import {
 import type { CompletionItem } from "@/services/lsp/types";
 import {
   lspDocumentationForMonaco,
+  toMonacoCompletionRange,
   toMonacoRange,
 } from "./lspMonacoAdapter";
 import {
@@ -30,6 +31,33 @@ export interface LspCompletionPresentationOptions {
   recordUsageCommand: string;
   appendSpace: boolean;
   nextCharacter?: string;
+}
+
+export function completionLabelForMonaco(item: CompletionItem) {
+  return item.labelDetails?.detail || item.labelDetails?.description
+    ? {
+        label: item.label,
+        detail: item.labelDetails.detail,
+        description: item.labelDetails.description,
+      }
+    : item.label;
+}
+
+function completionInsertTextRules(
+  monaco: any,
+  item: CompletionItem,
+  insertAsSnippet: boolean,
+) {
+  let rules = monaco.languages.CompletionItemInsertTextRule.None;
+  if (insertAsSnippet) {
+    rules |= monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
+  }
+  if (item.insertTextMode === 1) {
+    rules |= monaco.languages.CompletionItemInsertTextRule.KeepWhitespace;
+  }
+  return rules === monaco.languages.CompletionItemInsertTextRule.None
+    ? undefined
+    : rules;
 }
 
 /**
@@ -64,7 +92,7 @@ export function lspCompletionItemsToMonacoSuggestions({
       nextCharacter,
     );
     return {
-      label: item.label,
+      label: completionLabelForMonaco(item),
       kind: toMonacoCompletionKind(monaco, item.kind),
       detail: item.detail,
       documentation: lspDocumentationForMonaco(item.documentation),
@@ -96,11 +124,13 @@ export function lspCompletionItemsToMonacoSuggestions({
             arguments: [usageScope, item.label],
           }
         : undefined,
-      insertTextRules: functionInsertion.insertAsSnippet
-        ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
-        : undefined,
+      insertTextRules: completionInsertTextRules(
+        monaco,
+        item,
+        functionInsertion.insertAsSnippet,
+      ),
       range: item.textEdit
-        ? toMonacoRange(monaco, item.textEdit.range)
+        ? toMonacoCompletionRange(monaco, item.textEdit)
         : defaultRange,
     };
   });

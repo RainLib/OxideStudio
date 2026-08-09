@@ -1,8 +1,10 @@
 import type {
   Diagnostic,
+  InsertReplaceEdit,
   LspSelectionRange,
   PublishDiagnosticsParams,
   Range as LspRange,
+  TextEdit,
   WorkspaceEdit,
 } from "@/services/lsp/types";
 
@@ -28,6 +30,18 @@ export function toMonacoRange(monaco: any, range: LspRange) {
     range.end.line + 1,
     range.end.character + 1,
   );
+}
+
+/** Preserves the different insert and replace boundaries supported by LSP 3.17. */
+export function toMonacoCompletionRange(
+  monaco: any,
+  edit: TextEdit | InsertReplaceEdit,
+) {
+  if ("range" in edit) return toMonacoRange(monaco, edit.range);
+  return {
+    insert: toMonacoRange(monaco, edit.insert),
+    replace: toMonacoRange(monaco, edit.replace),
+  };
 }
 
 export function toMonacoWorkspaceEdit(monaco: any, edit: WorkspaceEdit) {

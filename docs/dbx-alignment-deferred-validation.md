@@ -398,9 +398,25 @@ explicit deferred validation task rather than an implicit release check.
   commit characters, Markdown documentation and deprecated tags. Server edits
   must remain authoritative and an older request must never overwrite a newer
   model revision.
+- Verify a server `CompletionList` with `isIncomplete: true` is returned to
+  Monaco so the next typing event uses trigger kind 3, and becomes complete
+  when the server returns `false`.
+- Verify shared `itemDefaults` for commit characters, edit range, insert text
+  format and insert text mode apply only when an item has no overriding value.
+  Exercise both range and insert/replace default edit shapes plus
+  `textEditText`.
+- Accept the same proposal while typing inside and at the end of an identifier.
+  Monaco must use the LSP insert boundary for insertion and the wider replace
+  boundary for overwrite without deleting adjacent SQL.
+- Verify `insertTextMode` 1 preserves server whitespace in multiline code
+  blocks while mode 2 adjusts indentation, and that `labelDetails` displays
+  signature/trigger context without replacing the searchable label.
 - Verify built-in `sel`, `upd`, `at` and transaction snippets use the active
   product syntax; custom edits to a built-in must remain byte-for-byte custom
   and must not be silently dialect-rewritten.
+- Verify common snippets show their trigger and “SQL snippet” in Monaco's
+  native suggestion row, and that descriptive initials/fuzzy input does not
+  hide an otherwise matched proposal during Monaco's second-stage filtering.
 - Verify custom snippet add/edit/enable/disable/delete/default restoration,
   duplicate trigger rejection, persistence across restart, and Monaco
   placeholder navigation with Tab/Shift+Tab.

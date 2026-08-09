@@ -43,10 +43,12 @@ export {
   isPublishDiagnosticsParams,
   lspDiagnosticToMonacoMarker,
   lspDocumentationForMonaco,
+  toMonacoCompletionRange,
   toMonacoRange,
   toMonacoWorkspaceEdit,
 } from "./model/lspMonacoAdapter";
 export {
+  completionLabelForMonaco,
   lspCompletionItemsToMonacoSuggestions,
   type LspCompletionPresentationOptions,
 } from "./model/lspCompletionPresentation";

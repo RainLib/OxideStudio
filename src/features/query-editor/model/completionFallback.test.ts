@@ -23,6 +23,23 @@ describe("mergeCompletionFallbackSuggestions", () => {
     ).toEqual([{ label: "SELECT", detail: "Language server keyword" }]);
   });
 
+  it("deduplicates Monaco labels that include protocol label details", () => {
+    expect(
+      mergeCompletionFallbackSuggestions(
+        [
+          {
+            label: {
+              label: "select rows",
+              detail: "  sel",
+              description: "SQL snippet",
+            },
+          },
+        ],
+        [{ label: "select rows", detail: "Fallback snippet" }],
+      ),
+    ).toHaveLength(1);
+  });
+
   it("preserves overloads when they arrive in the secondary merge input", () => {
     expect(
       mergeCompletionFallbackSuggestions(

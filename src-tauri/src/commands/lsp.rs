@@ -76,6 +76,8 @@ pub struct GenericLspRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CompletionResponse {
     pub items: Vec<CompletionItem>,
+    #[serde(rename = "isIncomplete")]
+    pub is_incomplete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -97,10 +99,40 @@ pub struct TextEdit {
     pub new_text: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InsertReplaceEdit {
+    pub new_text: String,
+    pub insert: Range,
+    pub replace: Range,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum CompletionTextEdit {
+    Edit(TextEdit),
+    InsertAndReplace(InsertReplaceEdit),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionItemLabelDetails {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// Completion item
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionItem {
     pub label: String,
+    #[serde(
+        default,
+        rename = "labelDetails",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub label_details: Option<CompletionItemLabelDetails>,
     pub kind: Option<u32>,
     pub detail: Option<String>,
     pub documentation: Option<String>,
@@ -116,6 +148,12 @@ pub struct CompletionItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub insert_text_format: Option<u32>,
+    #[serde(
+        default,
+        rename = "insertTextMode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub insert_text_mode: Option<u32>,
     #[serde(default, rename = "sortText", skip_serializing_if = "Option::is_none")]
     pub sort_text: Option<String>,
     #[serde(
@@ -125,7 +163,7 @@ pub struct CompletionItem {
     )]
     pub filter_text: Option<String>,
     #[serde(default, rename = "textEdit", skip_serializing_if = "Option::is_none")]
-    pub text_edit: Option<TextEdit>,
+    pub text_edit: Option<CompletionTextEdit>,
     #[serde(
         default,
         rename = "additionalTextEdits",
@@ -183,17 +221,67 @@ fn parse_range(value: &Value) -> Option<Range> {
 
 fn parse_text_edit(value: &Value) -> Option<TextEdit> {
     Some(TextEdit {
-        // LSP 3.16+ also permits InsertReplaceEdit. Monaco accepts a single
-        // replacement range, so prefer the replace range when the server
-        // supplies separate insert/replace boundaries.
-        range: parse_range(value.get("range").or_else(|| value.get("replace"))?)?,
+        range: parse_range(value.get("range")?)?,
         new_text: value.get("newText")?.as_str()?.to_string(),
     })
 }
 
-fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
+fn parse_completion_text_edit(value: &Value) -> Option<CompletionTextEdit> {
+    if let Some(edit) = parse_text_edit(value) {
+        return Some(CompletionTextEdit::Edit(edit));
+    }
+    Some(CompletionTextEdit::InsertAndReplace(InsertReplaceEdit {
+        new_text: value.get("newText")?.as_str()?.to_string(),
+        insert: parse_range(value.get("insert")?)?,
+        replace: parse_range(value.get("replace")?)?,
+    }))
+}
+
+fn parse_default_completion_text_edit(
+    item: &Value,
+    edit_range: &Value,
+) -> Option<CompletionTextEdit> {
+    let new_text = item
+        .get("textEditText")
+        .or_else(|| item.get("insertText"))
+        .or_else(|| item.get("label"))?
+        .as_str()?
+        .to_string();
+    if let Some(range) = parse_range(edit_range) {
+        return Some(CompletionTextEdit::Edit(TextEdit { range, new_text }));
+    }
+    Some(CompletionTextEdit::InsertAndReplace(InsertReplaceEdit {
+        new_text,
+        insert: parse_range(edit_range.get("insert")?)?,
+        replace: parse_range(edit_range.get("replace")?)?,
+    }))
+}
+
+fn completion_value<'a>(
+    item: &'a Value,
+    defaults: Option<&'a Value>,
+    key: &str,
+) -> Option<&'a Value> {
+    item.get(key)
+        .or_else(|| defaults.and_then(|value| value.get(key)))
+}
+
+fn parse_completion_item(item: &Value, defaults: Option<&Value>) -> Option<CompletionItem> {
     Some(CompletionItem {
         label: item.get("label")?.as_str()?.to_string(),
+        label_details: item.get("labelDetails").and_then(|value| {
+            let details = CompletionItemLabelDetails {
+                detail: value
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                description: value
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            };
+            (details.detail.is_some() || details.description.is_some()).then_some(details)
+        }),
         kind: item.get("kind").and_then(|v| v.as_i64()).map(|v| v as u32),
         detail: item
             .get("detail")
@@ -206,10 +294,12 @@ fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
             .get("insertText")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-        insert_text_format: item
-            .get("insertTextFormat")
+        insert_text_format: completion_value(item, defaults, "insertTextFormat")
             .and_then(|v| v.as_u64())
             .map(|v| v as u32),
+        insert_text_mode: completion_value(item, defaults, "insertTextMode")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
         sort_text: item
             .get("sortText")
             .and_then(|v| v.as_str())
@@ -218,7 +308,14 @@ fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
             .get("filterText")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-        text_edit: item.get("textEdit").and_then(parse_text_edit),
+        text_edit: item
+            .get("textEdit")
+            .and_then(parse_completion_text_edit)
+            .or_else(|| {
+                defaults
+                    .and_then(|value| value.get("editRange"))
+                    .and_then(|range| parse_default_completion_text_edit(item, range))
+            }),
         additional_text_edits: item.get("additionalTextEdits").and_then(|value| {
             let edits = value
                 .as_array()?
@@ -228,7 +325,7 @@ fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
             Some(edits)
         }),
         preselect: item.get("preselect").and_then(|v| v.as_bool()),
-        commit_characters: item.get("commitCharacters").and_then(|value| {
+        commit_characters: completion_value(item, defaults, "commitCharacters").and_then(|value| {
             Some(
                 value
                     .as_array()?
@@ -426,6 +523,11 @@ pub async fn lsp_get_completions(
             // 1. CompletionList: {"items": [...], "isIncomplete": false}
             // 2. CompletionItem[]: [{...}, {...}] (direct array)
 
+            let defaults = result.get("itemDefaults");
+            let is_incomplete = result
+                .get("isIncomplete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let items_array = if let Some(items) = result.get("items").and_then(|v| v.as_array()) {
                 tracing::debug!("Found LSP CompletionList with {} items", items.len());
                 items.clone()
@@ -442,11 +544,14 @@ pub async fn lsp_get_completions(
 
             let items: Vec<CompletionItem> = items_array
                 .iter()
-                .filter_map(parse_completion_item)
+                .filter_map(|item| parse_completion_item(item, defaults))
                 .collect();
 
             tracing::debug!("Parsed {} LSP completion items", items.len());
-            Ok(CompletionResponse { items })
+            Ok(CompletionResponse {
+                items,
+                is_incomplete,
+            })
         }
         Err(e) => {
             tracing::error!("LSP completion request failed: {}", e);
@@ -787,16 +892,21 @@ mod tests {
     fn parses_completion_insert_text() {
         let item = serde_json::json!({
             "label": "calculate_score",
+            "labelDetails": {
+                "detail": "(value numeric)",
+                "description": "public"
+            },
             "kind": 3,
             "detail": "Function",
             "insertText": "calculate_score()",
             "insertTextFormat": 1,
+            "insertTextMode": 2,
             "sortText": "1:calculate_score",
             "filterText": "calculate_score",
             "textEdit": {
                 "insert": {
                     "start": { "line": 0, "character": 7 },
-                    "end": { "line": 0, "character": 16 }
+                    "end": { "line": 0, "character": 12 }
                 },
                 "replace": {
                     "start": { "line": 0, "character": 7 },
@@ -816,17 +926,35 @@ mod tests {
             "preselect": true
         });
 
-        let parsed = parse_completion_item(&item).expect("completion should parse");
+        let parsed = parse_completion_item(&item, None).expect("completion should parse");
 
         assert_eq!(parsed.label, "calculate_score");
+        assert_eq!(
+            parsed.label_details,
+            Some(CompletionItemLabelDetails {
+                detail: Some("(value numeric)".to_string()),
+                description: Some("public".to_string()),
+            })
+        );
         assert_eq!(parsed.insert_text.as_deref(), Some("calculate_score()"));
         assert_eq!(parsed.insert_text_format, Some(1));
+        assert_eq!(parsed.insert_text_mode, Some(2));
         assert_eq!(parsed.sort_text.as_deref(), Some("1:calculate_score"));
         assert_eq!(parsed.filter_text.as_deref(), Some("calculate_score"));
         assert_eq!(
             parsed.text_edit,
-            Some(TextEdit {
-                range: Range {
+            Some(CompletionTextEdit::InsertAndReplace(InsertReplaceEdit {
+                insert: Range {
+                    start: Position {
+                        line: 0,
+                        character: 7
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 12
+                    },
+                },
+                replace: Range {
                     start: Position {
                         line: 0,
                         character: 7
@@ -837,7 +965,7 @@ mod tests {
                     },
                 },
                 new_text: "public.calculate_score()".to_string(),
-            })
+            }))
         );
         assert_eq!(
             parsed.additional_text_edits,
@@ -861,6 +989,61 @@ mod tests {
         );
         assert_eq!(parsed.deprecated, Some(true));
         assert_eq!(parsed.preselect, Some(true));
+    }
+
+    #[test]
+    fn applies_supported_completion_list_item_defaults() {
+        let item = serde_json::json!({
+            "label": "customer_id",
+            "textEditText": "customer_id"
+        });
+        let defaults = serde_json::json!({
+            "commitCharacters": ["."],
+            "editRange": {
+                "insert": {
+                    "start": { "line": 2, "character": 4 },
+                    "end": { "line": 2, "character": 7 }
+                },
+                "replace": {
+                    "start": { "line": 2, "character": 4 },
+                    "end": { "line": 2, "character": 11 }
+                }
+            },
+            "insertTextFormat": 2,
+            "insertTextMode": 1
+        });
+
+        let parsed = parse_completion_item(&item, Some(&defaults)).unwrap();
+
+        assert_eq!(parsed.commit_characters, Some(vec![".".to_string()]));
+        assert_eq!(parsed.insert_text_format, Some(2));
+        assert_eq!(parsed.insert_text_mode, Some(1));
+        assert_eq!(
+            parsed.text_edit,
+            Some(CompletionTextEdit::InsertAndReplace(InsertReplaceEdit {
+                new_text: "customer_id".to_string(),
+                insert: Range {
+                    start: Position {
+                        line: 2,
+                        character: 4,
+                    },
+                    end: Position {
+                        line: 2,
+                        character: 7,
+                    },
+                },
+                replace: Range {
+                    start: Position {
+                        line: 2,
+                        character: 4,
+                    },
+                    end: Position {
+                        line: 2,
+                        character: 11,
+                    },
+                },
+            }))
+        );
     }
 
     #[test]
