@@ -26,7 +26,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::{watch, Mutex as AsyncMutex};
+use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 const DEFAULT_PAGE_SIZE: u32 = 500;
@@ -70,6 +70,11 @@ const TABLE_DATA_TRANSFER_CANCELLED: &str = "TABLE_DATA_TRANSFER_CANCELLED";
 const TABLE_DATA_TRANSFER_REPORT_PARENT_ID: &str = "table-data-transfer-reports-v1";
 const TABLE_DATA_TRANSFER_REPORT_KIND: &str = "TABLE_DATA_TRANSFER_REPORT";
 const TABLE_EXPORT_CANCELLED: &str = "TABLE_EXPORT_CANCELLED";
+const TABLE_EXPORT_WRITER_CLOSED: &str = "TABLE_EXPORT_WRITER_CLOSED";
+/// At most two database pages may wait for the blocking encoder/writer. This
+/// keeps memory bounded while allowing one page to be fetched as the previous
+/// page is encoded and flushed to the operating-system cache.
+const TABLE_EXPORT_BUFFERED_PAGES: usize = 2;
 const TABLE_EXPORT_REPORT_PARENT_ID: &str = "table-export-reports-v1";
 const TABLE_EXPORT_REPORT_KIND: &str = "TABLE_EXPORT_REPORT";
 const TABLE_IMPORT_REPORT_PARENT_ID: &str = "table-import-reports-v1";
@@ -1400,6 +1405,274 @@ impl StreamingXlsxWriter {
             .write_all(contents)
             .map_err(|error| error.to_string())
     }
+}
+
+struct TableExportWriterContext {
+    app: Option<AppHandle>,
+    export_id: String,
+    final_path: PathBuf,
+    kind: DatabaseKind,
+    schema: String,
+    table: String,
+    format: TableExportFormat,
+    encoding: TableExportEncoding,
+    progress_rows: Arc<AtomicU64>,
+    progress_batches: Arc<AtomicU64>,
+}
+
+enum TableExportWriterMessage {
+    Batch {
+        columns: Vec<String>,
+        rows: Vec<Vec<Value>>,
+    },
+    /// A file is published only after this explicit terminal message. A closed
+    /// channel means the producer failed or was cancelled and leaves the
+    /// temporary-file guard responsible for cleanup.
+    Finish,
+}
+
+/// Blocking file and compression work is deliberately isolated from Tokio's
+/// async workers. The bounded receiver is the export backpressure boundary:
+/// when two pages are queued, the database producer waits instead of growing
+/// memory without limit.
+fn write_table_export_stream(
+    context: TableExportWriterContext,
+    mut receiver: mpsc::Receiver<TableExportWriterMessage>,
+    cancel_rx: watch::Receiver<bool>,
+) -> Result<TableExportResult, String> {
+    let TableExportWriterContext {
+        app,
+        export_id,
+        final_path,
+        kind,
+        schema,
+        table,
+        format,
+        encoding,
+        progress_rows,
+        progress_batches,
+    } = context;
+    let mut temporary_file = ExportTemporaryFile::create(&final_path)?;
+    let file = File::create(&temporary_file.path).map_err(|error| error.to_string())?;
+    let (mut text_writer, mut xlsx_writer) = match format {
+        TableExportFormat::Xlsx => (None, Some(StreamingXlsxWriter::new(file))),
+        _ => (Some(BufWriter::new(file)), None),
+    };
+    if matches!(encoding, TableExportEncoding::Utf8Bom) {
+        text_writer
+            .as_mut()
+            .ok_or_else(|| "XLSX exports do not use a text encoding".to_string())?
+            .write_all(b"\xEF\xBB\xBF")
+            .map_err(|error| error.to_string())?;
+    }
+
+    let mut columns = Vec::<String>::new();
+    let mut columns_initialized = false;
+    let mut wrote_json_row = false;
+    let mut wrote_delimited_header = false;
+    let mut wrote_xlsx_header = false;
+    let mut rows_exported = 0_u64;
+    let mut batches = 0_u64;
+
+    if matches!(format, TableExportFormat::Json) {
+        text_writer
+            .as_mut()
+            .expect("text writer exists for JSON exports")
+            .write_all(b"[")
+            .map_err(|error| error.to_string())?;
+    } else if matches!(format, TableExportFormat::Sql) {
+        writeln!(
+            text_writer
+                .as_mut()
+                .expect("text writer exists for SQL exports"),
+            "-- OxideStudio data export for {}",
+            kind.qualified_table(schema_option(&schema), &table)
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    loop {
+        if *cancel_rx.borrow() {
+            return Err(format!(
+                "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
+            ));
+        }
+        let Some(message) = receiver.blocking_recv() else {
+            return Err(
+                "Export source stopped before completion; partial file removed".to_string(),
+            );
+        };
+        match message {
+            TableExportWriterMessage::Finish => break,
+            TableExportWriterMessage::Batch {
+                columns: batch_columns,
+                rows,
+            } => {
+                if columns_initialized {
+                    if columns != batch_columns {
+                        return Err(
+                            "Export column metadata changed between database pages".to_string()
+                        );
+                    }
+                } else {
+                    columns = batch_columns;
+                    columns_initialized = true;
+                }
+
+                if matches!(format, TableExportFormat::Xlsx) && !wrote_xlsx_header {
+                    xlsx_writer
+                        .as_mut()
+                        .expect("XLSX writer exists for XLSX exports")
+                        .write_header(&columns)?;
+                    wrote_xlsx_header = true;
+                }
+                if matches!(format, TableExportFormat::Csv | TableExportFormat::Tsv)
+                    && !wrote_delimited_header
+                {
+                    let delimiter = if matches!(format, TableExportFormat::Tsv) {
+                        "\t"
+                    } else {
+                        ","
+                    };
+                    let header = columns
+                        .iter()
+                        .map(|column| {
+                            let value = Value::String(column.clone());
+                            if matches!(format, TableExportFormat::Tsv) {
+                                tsv_escape(&value)
+                            } else {
+                                csv_escape(&value)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(delimiter);
+                    writeln!(
+                        text_writer
+                            .as_mut()
+                            .expect("text writer exists for delimited exports"),
+                        "{header}"
+                    )
+                    .map_err(|error| error.to_string())?;
+                    wrote_delimited_header = true;
+                }
+
+                for row in &rows {
+                    if *cancel_rx.borrow() {
+                        return Err(format!(
+                            "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
+                        ));
+                    }
+                    match format {
+                        TableExportFormat::Csv => {
+                            let line = row.iter().map(csv_escape).collect::<Vec<_>>().join(",");
+                            writeln!(
+                                text_writer
+                                    .as_mut()
+                                    .expect("text writer exists for CSV exports"),
+                                "{line}"
+                            )
+                            .map_err(|error| error.to_string())?;
+                        }
+                        TableExportFormat::Json => {
+                            let writer = text_writer
+                                .as_mut()
+                                .expect("text writer exists for JSON exports");
+                            if wrote_json_row {
+                                writer.write_all(b",").map_err(|error| error.to_string())?;
+                            }
+                            let object = row_to_object(&columns, row);
+                            serde_json::to_writer(&mut *writer, &object)
+                                .map_err(|error| error.to_string())?;
+                            wrote_json_row = true;
+                        }
+                        TableExportFormat::Jsonl => {
+                            let writer = text_writer
+                                .as_mut()
+                                .expect("text writer exists for JSON Lines exports");
+                            let object = row_to_object(&columns, row);
+                            serde_json::to_writer(&mut *writer, &object)
+                                .map_err(|error| error.to_string())?;
+                            writer.write_all(b"\n").map_err(|error| error.to_string())?;
+                        }
+                        TableExportFormat::Sql => {
+                            writeln!(
+                                text_writer
+                                    .as_mut()
+                                    .expect("text writer exists for SQL exports"),
+                                "{}",
+                                sql_insert_statement(kind, &schema, &table, &columns, row)
+                            )
+                            .map_err(|error| error.to_string())?;
+                        }
+                        TableExportFormat::Tsv => {
+                            let line = row.iter().map(tsv_escape).collect::<Vec<_>>().join("\t");
+                            writeln!(
+                                text_writer
+                                    .as_mut()
+                                    .expect("text writer exists for TSV exports"),
+                                "{line}"
+                            )
+                            .map_err(|error| error.to_string())?;
+                        }
+                        TableExportFormat::Xlsx => {
+                            xlsx_writer
+                                .as_mut()
+                                .expect("XLSX writer exists for XLSX exports")
+                                .write_row(row)?;
+                        }
+                    }
+                }
+
+                if !rows.is_empty() {
+                    rows_exported += rows.len() as u64;
+                    batches += 1;
+                    progress_rows.store(rows_exported, Ordering::Release);
+                    progress_batches.store(batches, Ordering::Release);
+                    if let Some(app) = app.as_ref() {
+                        let _ = app.emit(
+                            TABLE_EXPORT_PROGRESS_EVENT,
+                            TableExportProgress {
+                                export_id: export_id.clone(),
+                                rows_exported,
+                                batches,
+                                terminal: false,
+                                status: "running".to_string(),
+                                message: None,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if matches!(format, TableExportFormat::Json) {
+        text_writer
+            .as_mut()
+            .expect("text writer exists for JSON exports")
+            .write_all(b"]")
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(mut writer) = text_writer {
+        writer.flush().map_err(|error| error.to_string())?;
+        writer
+            .get_ref()
+            .sync_all()
+            .map_err(|error| error.to_string())?;
+        drop(writer);
+    }
+    if let Some(writer) = xlsx_writer.take() {
+        writer.finish()?;
+    }
+    temporary_file.finalize(&final_path)?;
+
+    Ok(TableExportResult {
+        export_id,
+        file_path: final_path.display().to_string(),
+        rows_exported,
+        batches,
+        report_id: None,
+    })
 }
 
 fn xlsx_column_name(index: usize) -> Result<String, String> {
@@ -6055,8 +6328,8 @@ pub async fn export_table_data(
     } else {
         requested_encoding
     };
-    let progress_rows = AtomicU64::new(0);
-    let progress_batches = AtomicU64::new(0);
+    let progress_rows = Arc::new(AtomicU64::new(0));
+    let progress_batches = Arc::new(AtomicU64::new(0));
     let result: Result<TableExportResult, String> = async {
         let kind =
             table_data_dialect_for_connection(&manager, &connection_id, &driver, false).await?;
@@ -6108,263 +6381,156 @@ pub async fn export_table_data(
         };
         let filter = filter_clause.as_deref();
         let file_path = export_file_path(&app, &schema, &table, format)?;
-        let mut temporary_file = ExportTemporaryFile::create(&file_path)?;
-        let file = File::create(&temporary_file.path).map_err(|e| e.to_string())?;
-        let (mut text_writer, mut xlsx_writer) = match format {
-            TableExportFormat::Xlsx => (None, Some(StreamingXlsxWriter::new(file))),
-            _ => (Some(BufWriter::new(file)), None),
-        };
-        if matches!(encoding, TableExportEncoding::Utf8Bom) {
-            text_writer
-                .as_mut()
-                .ok_or_else(|| "XLSX exports do not use a text encoding".to_string())?
-                .write_all(b"\xEF\xBB\xBF")
-                .map_err(|e| e.to_string())?;
-        }
-
-        let mut offset = 0_u64;
-        let mut rows_exported = 0_u64;
-        let mut columns: Vec<String> = Vec::new();
-        let mut wrote_json_row = false;
-        let mut wrote_csv_header = false;
-        let mut wrote_xlsx_header = false;
-        let mut batches = 0_u64;
-
-        if matches!(format, TableExportFormat::Json) {
-            text_writer
-                .as_mut()
-                .expect("text writer exists for JSON exports")
-                .write_all(b"[")
-                .map_err(|e| e.to_string())?;
-        } else if matches!(format, TableExportFormat::Sql) {
-            writeln!(
-                text_writer
-                    .as_mut()
-                    .expect("text writer exists for SQL exports"),
-                "-- OxideStudio data export for {}",
-                kind.qualified_table(schema_option(&schema), &table)
-            )
-            .map_err(|e| e.to_string())?;
-        }
-
-        loop {
-            if *cancel_rx.borrow() {
-                return Err(format!(
-                    "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
-                ));
-            }
-            let limit = match max_rows {
-                Some(max_rows) => {
-                    let remaining = max_rows.saturating_sub(rows_exported);
-                    if remaining == 0 {
-                        break;
-                    }
-                    (page_size as u64).min(remaining) as u32
-                }
-                None => page_size,
-            };
-
-            let page_sql = kind.paged_table_query_with_order(
-                schema_option(&schema),
-                &table,
-                filter,
-                order,
-                limit,
-                offset,
-            );
-            let query_result = if use_parameterized_query {
-                tokio::select! {
-                    result = manager.query_parameterized(&connection_id, &page_sql, &params) => result,
-                    changed = cancel_rx.changed() => {
-                        let _ = changed;
-                        return Err(format!(
-                            "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
-                        ));
-                    }
-                }
-            } else {
-                tokio::select! {
-                    result = manager.query(
-                        &connection_id,
-                        &page_sql,
-                        None,
-                        None,
-                        Some(export_id.clone()),
-                    ) => result,
-                    changed = cancel_rx.changed() => {
-                        let _ = changed;
-                        return Err(format!(
-                            "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
-                        ));
-                    }
-                }
-            };
-            if *cancel_rx.borrow() {
-                return Err(format!(
-                    "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
-                ));
-            }
-            let mut results = query_result.map_err(|error| error.to_string())?;
-            let result = results
-                .drain(..)
-                .next()
-                .unwrap_or_else(|| QueryResult::rows(Vec::new(), Vec::new()));
-
-            if columns.is_empty() {
-                columns = result
-                    .columns
-                    .iter()
-                    .map(|column| column.name.clone())
-                    .collect();
-            }
-            if matches!(format, TableExportFormat::Xlsx) && !wrote_xlsx_header {
-                xlsx_writer
-                    .as_mut()
-                    .expect("XLSX writer exists for XLSX exports")
-                    .write_header(&columns)?;
-                wrote_xlsx_header = true;
-            }
-
-            if matches!(format, TableExportFormat::Csv | TableExportFormat::Tsv)
-                && !wrote_csv_header
-            {
-                let delimiter = if matches!(format, TableExportFormat::Tsv) {
-                    "\t"
-                } else {
-                    ","
-                };
-                let header = columns
-                    .iter()
-                    .map(|column| {
-                        let value = Value::String(column.clone());
-                        if matches!(format, TableExportFormat::Tsv) {
-                            tsv_escape(&value)
-                        } else {
-                            csv_escape(&value)
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(delimiter);
-                writeln!(
-                    text_writer
-                        .as_mut()
-                        .expect("text writer exists for delimited exports"),
-                    "{header}"
+        let (batch_tx, batch_rx) = mpsc::channel(TABLE_EXPORT_BUFFERED_PAGES);
+        let writer_handle = tokio::task::spawn_blocking({
+            let writer_app = app.clone();
+            let writer_export_id = export_id.clone();
+            let writer_schema = schema.clone();
+            let writer_table = table.clone();
+            let writer_progress_rows = Arc::clone(&progress_rows);
+            let writer_progress_batches = Arc::clone(&progress_batches);
+            let writer_cancel_rx = cancel_rx.clone();
+            move || {
+                write_table_export_stream(
+                    TableExportWriterContext {
+                        app: Some(writer_app),
+                        export_id: writer_export_id,
+                        final_path: file_path,
+                        kind,
+                        schema: writer_schema,
+                        table: writer_table,
+                        format,
+                        encoding,
+                        progress_rows: writer_progress_rows,
+                        progress_batches: writer_progress_batches,
+                    },
+                    batch_rx,
+                    writer_cancel_rx,
                 )
-                .map_err(|e| e.to_string())?;
-                wrote_csv_header = true;
             }
-
-            if result.rows.is_empty() {
-                break;
-            }
-
-            for row in &result.rows {
-                match format {
-                    TableExportFormat::Csv => {
-                        let line = row.iter().map(csv_escape).collect::<Vec<_>>().join(",");
-                        writeln!(
-                            text_writer
-                                .as_mut()
-                                .expect("text writer exists for CSV exports"),
-                            "{line}"
-                        )
-                        .map_err(|e| e.to_string())?;
-                    }
-                    TableExportFormat::Json => {
-                        let writer = text_writer
-                            .as_mut()
-                            .expect("text writer exists for JSON exports");
-                        if wrote_json_row {
-                            writer.write_all(b",").map_err(|e| e.to_string())?;
+        });
+        let mut offset = 0_u64;
+        let producer_result: Result<(), String> = async {
+            loop {
+                if *cancel_rx.borrow() {
+                    return Err(format!(
+                        "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
+                    ));
+                }
+                let limit = match max_rows {
+                    Some(max_rows) => {
+                        let remaining = max_rows.saturating_sub(offset);
+                        if remaining == 0 {
+                            break;
                         }
-                        let object = row_to_object(&columns, row);
-                        serde_json::to_writer(&mut *writer, &object).map_err(|e| e.to_string())?;
-                        wrote_json_row = true;
+                        (page_size as u64).min(remaining) as u32
                     }
-                    TableExportFormat::Jsonl => {
-                        let writer = text_writer
-                            .as_mut()
-                            .expect("text writer exists for JSON Lines exports");
-                        let object = row_to_object(&columns, row);
-                        serde_json::to_writer(&mut *writer, &object).map_err(|e| e.to_string())?;
-                        writer.write_all(b"\n").map_err(|e| e.to_string())?;
+                    None => page_size,
+                };
+                let page_sql = kind.paged_table_query_with_order(
+                    schema_option(&schema),
+                    &table,
+                    filter,
+                    order,
+                    limit,
+                    offset,
+                );
+                let query_result = if use_parameterized_query {
+                    tokio::select! {
+                        result = manager.query_parameterized(&connection_id, &page_sql, &params) => result,
+                        changed = cancel_rx.changed() => {
+                            let _ = changed;
+                            return Err(format!(
+                                "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
+                            ));
+                        }
                     }
-                    TableExportFormat::Sql => {
-                        writeln!(
-                            text_writer
-                                .as_mut()
-                                .expect("text writer exists for SQL exports"),
-                            "{}",
-                            sql_insert_statement(kind, &schema, &table, &columns, row)
-                        )
-                        .map_err(|e| e.to_string())?;
+                } else {
+                    tokio::select! {
+                        result = manager.query(
+                            &connection_id,
+                            &page_sql,
+                            None,
+                            None,
+                            Some(export_id.clone()),
+                        ) => result,
+                        changed = cancel_rx.changed() => {
+                            let _ = changed;
+                            return Err(format!(
+                                "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
+                            ));
+                        }
                     }
-                    TableExportFormat::Tsv => {
-                        let line = row.iter().map(tsv_escape).collect::<Vec<_>>().join("\t");
-                        writeln!(
-                            text_writer
-                                .as_mut()
-                                .expect("text writer exists for TSV exports"),
-                            "{line}"
-                        )
-                        .map_err(|e| e.to_string())?;
+                };
+                if *cancel_rx.borrow() {
+                    return Err(format!(
+                        "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
+                    ));
+                }
+                let mut results = query_result.map_err(|error| error.to_string())?;
+                let result = results
+                    .drain(..)
+                    .next()
+                    .unwrap_or_else(|| QueryResult::rows(Vec::new(), Vec::new()));
+                let page_rows = result.rows.len() as u64;
+                let message = TableExportWriterMessage::Batch {
+                    columns: result
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect(),
+                    rows: result.rows,
+                };
+                tokio::select! {
+                    sent = batch_tx.send(message) => {
+                        if sent.is_err() {
+                            return Err(TABLE_EXPORT_WRITER_CLOSED.to_string());
+                        }
                     }
-                    TableExportFormat::Xlsx => {
-                        xlsx_writer
-                            .as_mut()
-                            .expect("XLSX writer exists for XLSX exports")
-                            .write_row(row)?;
+                    changed = cancel_rx.changed() => {
+                        let _ = changed;
+                        return Err(format!(
+                            "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
+                        ));
                     }
                 }
+                if page_rows == 0 {
+                    break;
+                }
+                offset += page_rows;
+                if page_rows < limit as u64 {
+                    break;
+                }
             }
-
-            let page_rows = result.rows.len() as u64;
-            rows_exported += page_rows;
-            offset += page_rows;
-            batches += 1;
-            progress_rows.store(rows_exported, Ordering::Relaxed);
-            progress_batches.store(batches, Ordering::Relaxed);
-            let _ = app.emit(
-                TABLE_EXPORT_PROGRESS_EVENT,
-                TableExportProgress {
-                    export_id: export_id.clone(),
-                    rows_exported,
-                    batches,
-                    terminal: false,
-                    status: "running".to_string(),
-                    message: None,
-                },
-            );
-
-            if page_rows < limit as u64 {
-                break;
+            tokio::select! {
+                sent = batch_tx.send(TableExportWriterMessage::Finish) => {
+                    if sent.is_err() {
+                        return Err(TABLE_EXPORT_WRITER_CLOSED.to_string());
+                    }
+                }
+                changed = cancel_rx.changed() => {
+                    let _ = changed;
+                    return Err(format!(
+                        "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
+                    ));
+                }
             }
+            Ok(())
         }
-
-        if matches!(format, TableExportFormat::Json) {
-            text_writer
-                .as_mut()
-                .expect("text writer exists for JSON exports")
-                .write_all(b"]")
-                .map_err(|e| e.to_string())?;
+        .await;
+        drop(batch_tx);
+        let writer_result = writer_handle
+            .await
+            .map_err(|error| format!("Export writer task failed: {error}"))?;
+        match (producer_result, writer_result) {
+            (Ok(()), writer_result) => writer_result,
+            (Err(producer_error), Err(writer_error))
+                if producer_error == TABLE_EXPORT_WRITER_CLOSED =>
+            {
+                Err(writer_error)
+            }
+            (Err(producer_error), _) => Err(producer_error),
         }
-        if let Some(mut writer) = text_writer {
-            writer.flush().map_err(|e| e.to_string())?;
-            drop(writer);
-        }
-        if let Some(writer) = xlsx_writer.take() {
-            writer.finish()?;
-        }
-        temporary_file.finalize(&file_path)?;
-
-        Ok(TableExportResult {
-            export_id: export_id.clone(),
-            file_path: file_path.display().to_string(),
-            rows_exported,
-            batches,
-            report_id: None,
-        })
     }
     .await;
 
@@ -9184,15 +9350,17 @@ mod tests {
         transfer_target_confirmation_token, transfer_type_mapping_assessment,
         transfer_type_mapping_warnings, tsv_escape, validate_table_data_transfer_id,
         validate_table_data_transfer_overwrite_rows, validate_xlsx_headers,
-        validated_raw_filter_sql, value_to_u64, view_definition_query, xlsx_cell_value,
-        xlsx_column_name, xlsx_escape_text, AlterColumnValueMode, AlterTableColumn,
-        CreateTableColumn, RelationOperation, StreamingXlsxWriter, TableCsvColumnMapping,
-        TableCsvImportOptions, TableDataTransferBatchPlanRequest,
+        validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
+        xlsx_cell_value, xlsx_column_name, xlsx_escape_text, AlterColumnValueMode,
+        AlterTableColumn, CreateTableColumn, RelationOperation, StreamingXlsxWriter,
+        TableCsvColumnMapping, TableCsvImportOptions, TableDataTransferBatchPlanRequest,
         TableDataTransferCancellationState, TableDataTransferColumnMapping,
         TableDataTransferCompatibility, TableDataTransferConversion, TableDataTransferEndpoint,
         TableDataTransferMode, TableDataTransferRequest, TableDataTransferTargetColumn,
-        TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus, TableFilter,
-        TableRowUpdate, TableSort, MAX_JSON_IMPORT_PREVIEW_ROWS, MAX_TRANSFER_OVERWRITE_ROWS,
+        TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
+        TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
+        TableFilter, TableRowUpdate, TableSort, MAX_JSON_IMPORT_PREVIEW_ROWS,
+        MAX_TRANSFER_OVERWRITE_ROWS,
     };
     use crate::core::{
         dialect::DatabaseKind,
@@ -9210,9 +9378,10 @@ mod tests {
     use std::{
         collections::BTreeMap,
         fs,
-        path::Path,
-        sync::{Arc, Mutex},
+        path::{Path, PathBuf},
+        sync::{atomic::AtomicU64, Arc, Mutex},
     };
+    use tokio::sync::{mpsc, watch};
 
     struct PreviewTargetDriver;
 
@@ -11949,5 +12118,104 @@ WITH DATA;"#
         assert!(
             build_sqlite_create_table_statements("main", "bad", &[invalid_autoincrement]).is_err()
         );
+    }
+
+    fn test_export_writer_context(final_path: PathBuf) -> TableExportWriterContext {
+        TableExportWriterContext {
+            app: None,
+            export_id: "export-test".to_string(),
+            final_path,
+            kind: DatabaseKind::Postgres,
+            schema: "public".to_string(),
+            table: "users".to_string(),
+            format: TableExportFormat::Jsonl,
+            encoding: TableExportEncoding::Utf8,
+            progress_rows: Arc::new(AtomicU64::new(0)),
+            progress_batches: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn unique_export_test_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "oxide-table-export-{label}-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    fn matching_export_partials(final_path: &Path) -> Vec<PathBuf> {
+        let file_name = final_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .expect("test path has a file name");
+        final_path
+            .parent()
+            .and_then(|parent| fs::read_dir(parent).ok())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let name = name.to_str()?;
+                (name.starts_with(&format!(".{file_name}.")) && name.ends_with(".partial"))
+                    .then(|| entry.path())
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_writer_publishes_only_after_explicit_finish() {
+        let final_path = unique_export_test_path("finish");
+        let context = test_export_writer_context(final_path.clone());
+        let (sender, receiver) = mpsc::channel(2);
+        let (_cancel_sender, cancel_rx) = watch::channel(false);
+        let writer = tokio::task::spawn_blocking(move || {
+            write_table_export_stream(context, receiver, cancel_rx)
+        });
+
+        sender
+            .send(TableExportWriterMessage::Batch {
+                columns: vec!["id".to_string(), "name".to_string()],
+                rows: vec![vec![json!(1), json!("Ada")]],
+            })
+            .await
+            .unwrap();
+        assert!(!final_path.exists());
+        sender.send(TableExportWriterMessage::Finish).await.unwrap();
+        drop(sender);
+
+        let result = writer.await.unwrap().unwrap();
+        assert_eq!(result.rows_exported, 1);
+        assert_eq!(result.batches, 1);
+        assert_eq!(
+            fs::read_to_string(&final_path).unwrap(),
+            "{\"id\":1,\"name\":\"Ada\"}\n"
+        );
+        assert!(matching_export_partials(&final_path).is_empty());
+        fs::remove_file(final_path).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_writer_removes_partial_when_producer_stops_without_finish() {
+        let final_path = unique_export_test_path("interrupted");
+        let context = test_export_writer_context(final_path.clone());
+        let (sender, receiver) = mpsc::channel(2);
+        let (_cancel_sender, cancel_rx) = watch::channel(false);
+        let writer = tokio::task::spawn_blocking(move || {
+            write_table_export_stream(context, receiver, cancel_rx)
+        });
+
+        sender
+            .send(TableExportWriterMessage::Batch {
+                columns: vec!["id".to_string()],
+                rows: vec![vec![json!(1)]],
+            })
+            .await
+            .unwrap();
+        drop(sender);
+
+        let error = writer.await.unwrap().unwrap_err();
+        assert!(error.contains("before completion"));
+        assert!(!final_path.exists());
+        assert!(matching_export_partials(&final_path).is_empty());
     }
 }

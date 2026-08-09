@@ -175,8 +175,11 @@ explicit deferred validation task rather than an implicit release check.
   leading three bytes and must not appear in JSON or SQL exports. Verify
   cancellation from both the table-data toolbar and the Explorer table
   context menu reaches the same export ID and produces one cancelled terminal
-  report. Backpressure and resume semantics remain implementation gaps and
-  therefore cannot yet be validated as supported behavior.
+  report. The bounded two-page producer/writer channel and blocking writer are
+  implemented; verify with an injected slow writer that no third page can be
+  buffered and that progress counts only pages fully written. Resume remains
+  deliberately unsupported until a driver supplies a stable cursor/keyset and
+  snapshot contract.
 
 ## Reviewed table-import file binding
 
@@ -476,8 +479,11 @@ explicit deferred validation task rather than an implicit release check.
   Large tables must not be materialized in the webview.
 - XLSX logic is implemented but still needs its large-file, cancellation,
   NULL/date/binary/nested-JSON, 1,048,576-row boundary, Excel/LibreOffice and
-  atomic-finalization validation matrix. Parquet/Arrow and
-  resumable/backpressured exports remain implementation gaps.
+  atomic-finalization validation matrix. The bounded backpressure pipeline has
+  compile-time coverage and local writer lifecycle tests, but the Windows test
+  binary currently exits with `STATUS_ENTRYPOINT_NOT_FOUND` before the Rust
+  harness starts; rerun those tests in CI. Parquet/Arrow and stable-snapshot
+  resumable exports remain implementation gaps.
 
 ## FK-aware JOIN completion and completion hot path
 

@@ -118,7 +118,8 @@
 - [x] 查询结果导出补 CSV BOM/JSONL/TSV/SQL 并优化入口。
 - [x] 表模式 CSV/CSV BOM/JSON/JSONL/TSV/SQL 统一到一个 Export 菜单，继续使用后端流式任务。
 - [x] 后端流式 XLSX export，复用 progress/cancel/audit/atomic finalize，并保护大整数精度。
-- [ ] 按 capability 增加 Parquet/Arrow 与 resume/backpressure。
+- [x] 表数据导出增加容量为 2 的有界页通道，将编码/压缩/写盘移出异步 worker，并以显式 `Finish` 约束原子发布。
+- [ ] 按 capability 增加 Parquet/Arrow；resume 仅在 driver 提供稳定 cursor/keyset + snapshot contract 时开放。
 
 ### 阶段 D：Diagram UX 与性能
 
