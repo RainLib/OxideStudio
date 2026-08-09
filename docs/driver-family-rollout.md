@@ -25,6 +25,11 @@ transactions，并要求包明确采用 Host 已审核的 `postgres`、`mysql`�
 已经验证。generic JDBC、只读 warehouse 和仅支持 Grid 编辑的 sidecar 均不会因此获得
 跨连接写入入口。
 
+`tableExportFormats` 是独立的签名导出契约。可声明值仅限
+`csv/json/jsonl/sql/tsv/xlsx/parquet/arrow`，且要求 relational table browse 与受审
+PostgreSQL/MySQL/SQLite/DuckDB 分页方言。应用只返回“驱动声明 ∩ 当前构建编码器”的有效
+集合；因此提前声明 Parquet/Arrow 不会让未实现的格式出现在菜单或绕过后端命令门禁。
+
 ## 产品目录与实际执行目录分离
 
 `src/features/database-drivers/model/referenceDriverCatalog.ts` 保存一个可测试的产品

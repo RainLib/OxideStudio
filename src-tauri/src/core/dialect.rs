@@ -53,6 +53,11 @@ pub struct DatabaseCapabilities {
     pub default_port: u16,
     pub supports_sql_query: bool,
     pub supports_table_browsing: bool,
+    /// Host-owned table export encodings enabled for this driver. The list is
+    /// explicit because binary analytical formats require a reviewed type
+    /// mapping; table browsing alone must not make Parquet or Arrow appear.
+    #[serde(default)]
+    pub table_export_formats: Vec<String>,
     /// Whether table rows can be inserted, updated, and deleted through the
     /// bounded Data Editor command surface.
     #[serde(default)]
@@ -195,6 +200,11 @@ impl DatabaseSpec {
             default_port: self.default_port,
             supports_sql_query: self.supports_sql_query,
             supports_table_browsing: self.supports_table_browsing,
+            table_export_formats: if self.supports_table_browsing {
+                host_table_export_formats()
+            } else {
+                Vec::new()
+            },
             supports_table_row_mutation: self.supports_table_row_mutation,
             // The bundled table engines share the reviewed bounded transfer
             // implementation. External packages must opt in explicitly in
@@ -241,6 +251,24 @@ impl DatabaseSpec {
 
 fn default_true() -> bool {
     true
+}
+
+pub const HOST_TABLE_EXPORT_FORMATS: &[&str] = &["csv", "json", "jsonl", "sql", "tsv", "xlsx"];
+pub const DECLARED_TABLE_EXPORT_FORMATS: &[&str] = &[
+    "csv", "json", "jsonl", "sql", "tsv", "xlsx", "parquet", "arrow",
+];
+
+pub fn host_table_export_formats() -> Vec<String> {
+    HOST_TABLE_EXPORT_FORMATS
+        .iter()
+        .map(|format| (*format).to_string())
+        .collect()
+}
+
+pub fn retain_host_table_export_formats(capabilities: &mut DatabaseCapabilities) {
+    capabilities
+        .table_export_formats
+        .retain(|format| HOST_TABLE_EXPORT_FORMATS.contains(&format.as_str()));
 }
 
 const POSTGRES_COMMON_DATA_TYPES: &[&str] = &[
@@ -1894,6 +1922,7 @@ WITH NO DATA;"#
         assert!(postgres.supports_transactions);
         assert!(postgres.supports_query_cancellation);
         assert!(postgres.supports_explain_plan);
+        assert_eq!(postgres.table_export_formats, host_table_export_formats());
         assert_eq!(postgres.connection_mode, DatabaseConnectionMode::Network);
         assert_eq!(postgres.default_primary_key_type, "SERIAL");
 
@@ -1959,6 +1988,27 @@ WITH NO DATA;"#
             .remove("supportsConnectionDatabase");
         let restored: DatabaseCapabilities = serde_json::from_value(legacy).unwrap();
         assert!(restored.supports_connection_database);
+    }
+
+    #[test]
+    fn legacy_capability_contracts_do_not_invent_export_formats() {
+        let capabilities = database_capabilities_for_driver("postgres").unwrap();
+        let mut legacy = serde_json::to_value(capabilities).unwrap();
+        legacy.as_object_mut().unwrap().remove("tableExportFormats");
+        let restored: DatabaseCapabilities = serde_json::from_value(legacy).unwrap();
+        assert!(restored.table_export_formats.is_empty());
+    }
+
+    #[test]
+    fn effective_export_formats_are_intersected_with_host_encoders() {
+        let mut capabilities = database_capabilities_for_driver("postgres").unwrap();
+        capabilities.table_export_formats = vec![
+            "csv".to_string(),
+            "parquet".to_string(),
+            "arrow".to_string(),
+        ];
+        retain_host_table_export_formats(&mut capabilities);
+        assert_eq!(capabilities.table_export_formats, vec!["csv"]);
     }
 
     #[test]

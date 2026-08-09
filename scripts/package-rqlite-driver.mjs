@@ -32,6 +32,7 @@ const CAPABILITIES = {
   defaultPort: 4001,
   supportsSqlQuery: true,
   supportsTableBrowsing: true,
+  tableExportFormats: ["csv", "json", "jsonl", "sql", "tsv", "xlsx"],
   supportsTableRowMutation: false,
   supportsTableDdl: false,
   supportsColumnAlteration: false,

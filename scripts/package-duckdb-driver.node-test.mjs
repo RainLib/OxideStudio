@@ -36,6 +36,10 @@ test("DuckDB package preparation produces a manifest-bound sidecar payload", asy
   assert.equal(manifest.capabilities.supportsDatabaseCatalogs, true);
   assert.equal(manifest.capabilities.supportsTableRowMutation, false);
   assert.equal(manifest.capabilities.supportsTableDataTransfer, true);
+  assert.deepEqual(
+    manifest.capabilities.tableExportFormats,
+    ["csv", "json", "jsonl", "sql", "tsv", "xlsx"],
+  );
   assert.equal(manifest.capabilities.supportsColumnAlteration, false);
   assert.equal(manifest.capabilities.supportsIndexRename, false);
   assert.equal(

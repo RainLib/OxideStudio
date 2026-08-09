@@ -2477,6 +2477,11 @@ function DriverManagementSettings() {
                           {probeState.result.supportsTableDataTransfer
                             ? " + table transfer"
                             : ""}
+                          {probeState.result.tableExportFormats.length > 0
+                            ? ` + exports ${probeState.result.tableExportFormats
+                                .map((format) => format.toUpperCase())
+                                .join("/")}`
+                            : ""}
                           {probeState.result.supportsSemanticSchemaMigration
                             ? " + semantic migration"
                             : ""}

@@ -2,7 +2,8 @@ use crate::core::{
     config::ConfigManager,
     dialect::{
         all_database_capabilities, canonical_driver_name, database_capabilities_for_driver,
-        DatabaseCapabilities, DatabaseConnectionMode, DatabaseDataModel, DatabaseKind,
+        retain_host_table_export_formats, DatabaseCapabilities, DatabaseConnectionMode,
+        DatabaseDataModel, DatabaseKind, HOST_TABLE_EXPORT_FORMATS,
     },
     driver_package::{
         DatabaseDriverPackageRegistry, DriverActivationState, DriverPackageCatalog,
@@ -63,6 +64,9 @@ pub struct DatabaseDriverProbeResult {
     /// separate signal so package verification never conflates Grid editing
     /// with source paging and partial-commit transfer semantics.
     pub supports_table_data_transfer: bool,
+    /// Effective Host-owned formats after intersecting the signed declaration
+    /// with encoders compiled into this application build.
+    pub table_export_formats: Vec<String>,
     /// External Agent connections may receive credentials only when this is
     /// true, because the sidecar independently enforces read-only mode.
     pub supports_agent_read_only_enforcement: bool,
@@ -232,6 +236,7 @@ fn conservative_external_database_capabilities(
         default_port: 0,
         supports_sql_query: true,
         supports_table_browsing: false,
+        table_export_formats: Vec::new(),
         supports_table_row_mutation: false,
         supports_table_data_transfer: false,
         supports_table_ddl: false,
@@ -270,12 +275,17 @@ fn conservative_external_database_capabilities(
 fn fallback_external_database_capabilities(
     package: &InstalledDriverPackage,
 ) -> DatabaseCapabilities {
-    package.manifest.capabilities.clone().unwrap_or_else(|| {
+    let mut capabilities = package.manifest.capabilities.clone().unwrap_or_else(|| {
         conservative_external_database_capabilities(
             &package.manifest.driver_id,
             &package.manifest.display_name,
         )
-    })
+    });
+    // A package may declare a future Parquet/Arrow mapping, but this build
+    // exposes only encoders it can execute locally. The signed declaration is
+    // preserved in the manifest; effective editor capabilities are narrowed.
+    retain_host_table_export_formats(&mut capabilities);
+    capabilities
 }
 
 fn schema_migration_capability_mode(
@@ -307,7 +317,7 @@ fn connection_database_capability_context(
         .ok_or_else(|| {
             "The live connection does not expose a trusted driver identity".to_string()
         })?;
-    let capabilities = match snapshot.package_capabilities {
+    let mut capabilities = match snapshot.package_capabilities {
         Some(capabilities) => capabilities,
         None if external_package => conservative_external_database_capabilities(
             &driver,
@@ -319,6 +329,7 @@ fn connection_database_capability_context(
                 database_capabilities_for_driver(&driver).map_err(|error| error.to_string())
             })?,
     };
+    retain_host_table_export_formats(&mut capabilities);
 
     Ok(ConnectionDatabaseCapabilityContext {
         connection_id,
@@ -792,7 +803,10 @@ fn external_driver_installation(
         .to_string(),
         status_message: package.status_message,
         connection_url_template: manifest.connection_url_template,
-        capabilities: manifest.capabilities,
+        capabilities: manifest.capabilities.map(|mut capabilities| {
+            retain_host_table_export_formats(&mut capabilities);
+            capabilities
+        }),
     }
 }
 
@@ -931,6 +945,19 @@ pub async fn probe_external_database_driver(
         DatabaseDriverSidecar::spawn(&package, &registry, env!("CARGO_PKG_VERSION")).await?;
     let capabilities = sidecar.capabilities().clone();
     sidecar.terminate().await;
+    let table_export_formats = package
+        .manifest
+        .capabilities
+        .as_ref()
+        .map(|declared| {
+            declared
+                .table_export_formats
+                .iter()
+                .filter(|format| HOST_TABLE_EXPORT_FORMATS.contains(&format.as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(Response::ok(DatabaseDriverProbeResult {
         driver: package.manifest.driver_id,
         package_version: package.manifest.package_version,
@@ -953,6 +980,7 @@ pub async fn probe_external_database_driver(
             .as_ref()
             .is_some_and(|declared| declared.supports_table_data_transfer)
             && capabilities.transactions,
+        table_export_formats,
         supports_agent_read_only_enforcement: capabilities.read_only_enforcement,
         supports_referencing_foreign_keys: capabilities.referencing_foreign_keys,
         supports_semantic_schema_migration: package.manifest.schema_migration.is_some()

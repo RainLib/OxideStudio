@@ -50,7 +50,7 @@
 | E01 | Oxide 增强项 | 大表导出任务、进度、取消、原子产物和审计 | ChartDB 的 export 主要面向 schema/diagram，不提供 live table streaming | `src-tauri/src/commands/table.rs:5754` 已流式导出 CSV/JSON/JSONL/TSV/SQL，支持 progress/cancel/report；前端表工具栏统一为一个 Export 菜单，WebView 不物化整表 |
 | E02 | 本阶段增强 | 查询结果导出格式和入口不完整 | ChartDB diagram JSON 在 `src/hooks/use-export-diagram.tsx`，SQL 在 `src/dialogs/export-sql-dialog/export-sql-dialog.tsx` | `src/lib/exportUtils.ts` 与 `DataGrid.tsx` 已增加 CSV、CSV BOM、JSON、JSONL、TSV、SQL INSERT template，统一下载并释放 Blob URL |
 | E03 | 已对齐并增强 | XLSX 导出 | ChartDB 不提供表数据 XLSX | `src-tauri/src/commands/table.rs` 逐页读取并直接流式写 XLSX ZIP/XML，冻结表头、启用筛选、保留 boolean/number/text，超过 15 位整数按文本保护精度；复用 progress/cancel/audit/atomic finalize，WebView 不物化整表 |
-| E04 | 未对齐 | Parquet/Arrow 等分析格式 | ChartDB 不提供 | DuckDB/分析型驱动可优先支持 Parquet；通用表导出需 capability gate，避免所有 driver 强制实现同一二进制格式 |
+| E04 | capability 门禁已对齐，编码器延期 | Parquet/Arrow 等分析格式 | ChartDB 不提供 | 签名驱动能力新增 `tableExportFormats`，只接受 CSV/JSON/JSONL/SQL/TSV/XLSX/Parquet/Arrow 的有界唯一集合；有效连接能力会再与当前 Host 编码器求交集，菜单和后端命令双重校验，因此声明 Parquet/Arrow 但当前构建无编码器时不会显示或执行。DuckDB/分析型驱动的类型映射与实际编码器仍待实现 |
 | E05 | 部分对齐 | SQL INSERT 导出应方言感知并可配置 batch/upsert | ChartDB schema SQL exporters 位于 `src/lib/data/sql-export/export-per-type/` | 表导出后端已有精确表名；仍需按 driver 处理 binary/date/JSON/identity、batch size、insert/upsert/copy strategy。查询结果使用明确的 `target_table` 占位符，避免猜错来源表 |
 
 ## 4. Diagram、整体体验与性能
@@ -119,7 +119,8 @@
 - [x] 表模式 CSV/CSV BOM/JSON/JSONL/TSV/SQL 统一到一个 Export 菜单，继续使用后端流式任务。
 - [x] 后端流式 XLSX export，复用 progress/cancel/audit/atomic finalize，并保护大整数精度。
 - [x] 表数据导出增加容量为 2 的有界页通道，将编码/压缩/写盘移出异步 worker，并以显式 `Finish` 约束原子发布。
-- [ ] 按 capability 增加 Parquet/Arrow；resume 仅在 driver 提供稳定 cursor/keyset + snapshot contract 时开放。
+- [x] 增加签名 `tableExportFormats`、当前构建编码器交集、菜单过滤和后端格式门禁；Parquet/Arrow 已进入受控 vocabulary，但在编码器完成前保持不可用。
+- [ ] 实现 Parquet/Arrow 类型映射与流式编码器；resume 仅在 driver 提供稳定 cursor/keyset + snapshot contract 时开放。
 
 ### 阶段 D：Diagram UX 与性能
 

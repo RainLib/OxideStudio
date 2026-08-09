@@ -20,7 +20,7 @@ const CAPABILITIES = {
   // them in its standard parser mode, so use that portable form instead of
   // leaking a MySQL-specific backtick preference into shared UI quoting.
   lspLanguageId: "clickhouse", namespaceLabel: "database", identifierQuote: '"', defaultPort: 8123,
-  supportsSqlQuery: true, supportsTableBrowsing: true, supportsTableRowMutation: false, supportsTableDdl: false,
+  supportsSqlQuery: true, supportsTableBrowsing: true, tableExportFormats: [], supportsTableRowMutation: false, supportsTableDdl: false,
   supportsColumnAlteration: false, supportsIndexRename: false, supportsConstraintAlteration: false,
   supportsCollectionBrowsing: false, supportsKeyValueBrowsing: false, supportsSchemas: true, supportsDatabaseCatalogs: true,
   supportsConnectionDatabase: true, supportsCreateDatabase: false, supportsCreateDatabaseOwner: false,

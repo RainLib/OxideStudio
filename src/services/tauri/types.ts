@@ -42,6 +42,15 @@ export type DatabaseDataModel =
   | "coordination"
   | "queue";
 export type DatabaseConnectionMode = "network" | "file";
+export type DatabaseTableExportFormat =
+  | "csv"
+  | "json"
+  | "jsonl"
+  | "sql"
+  | "tsv"
+  | "xlsx"
+  | "parquet"
+  | "arrow";
 
 export interface DatabaseCapabilities {
   driver: DatabaseDriver;
@@ -59,6 +68,8 @@ export interface DatabaseCapabilities {
   defaultPort: number;
   supportsSqlQuery: boolean;
   supportsTableBrowsing: boolean;
+  /** Effective Host encoders enabled for this driver and application build. */
+  tableExportFormats?: DatabaseTableExportFormat[];
   supportsTableRowMutation: boolean;
   /** Cross-connection table transfer is separately verified from Grid editing. */
   supportsTableDataTransfer?: boolean;
@@ -201,6 +212,8 @@ export interface DatabaseDriverProbeResult {
   supportsTableRowMutation: boolean;
   /** Effective cross-connection table transfer after package/runtime verification. */
   supportsTableDataTransfer: boolean;
+  /** Effective formats after the signed declaration is intersected with this build. */
+  tableExportFormats: TableExportFormat[];
   /** Required before Agent queries can be delegated to an external sidecar. */
   supportsAgentReadOnlyEnforcement: boolean;
   supportsReferencingForeignKeys: boolean;
@@ -434,7 +447,10 @@ export interface TableSort {
   direction: "asc" | "desc";
 }
 
-export type TableExportFormat = "csv" | "json" | "jsonl" | "sql" | "tsv" | "xlsx";
+export type TableExportFormat = Exclude<
+  DatabaseTableExportFormat,
+  "parquet" | "arrow"
+>;
 export type TableExportEncoding = "utf8" | "utf8Bom" | "binary";
 
 export interface TableExportResult {

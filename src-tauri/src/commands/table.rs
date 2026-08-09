@@ -102,6 +102,19 @@ pub enum TableExportFormat {
     Xlsx,
 }
 
+impl TableExportFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Csv => "csv",
+            Self::Json => "json",
+            Self::Jsonl => "jsonl",
+            Self::Sql => "sql",
+            Self::Tsv => "tsv",
+            Self::Xlsx => "xlsx",
+        }
+    }
+}
+
 /// Output encoding is intentionally narrow until each additional encoding has
 /// a complete escaping and conformance contract. UTF-8 BOM is offered for
 /// spreadsheet-oriented CSV consumers that otherwise mis-detect UTF-8.
@@ -888,6 +901,46 @@ async fn table_data_dialect_for_connection(
         Some(capabilities) => reviewed_table_data_dialect(&capabilities, requires_mutation),
         None => table_data_dialect(driver),
     }
+}
+
+fn ensure_table_export_format(
+    capabilities: &crate::core::dialect::DatabaseCapabilities,
+    format: TableExportFormat,
+) -> Result<(), String> {
+    if capabilities
+        .table_export_formats
+        .iter()
+        .any(|candidate| candidate == format.as_str())
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "{} does not declare {} table export support",
+        capabilities.display_name,
+        format.as_str().to_ascii_uppercase()
+    ))
+}
+
+async fn table_export_dialect_for_connection(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    driver: &str,
+    format: TableExportFormat,
+) -> Result<DatabaseKind, String> {
+    let package_capabilities = manager
+        .package_capabilities(connection_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Some(capabilities) = package_capabilities {
+        ensure_table_export_format(&capabilities, format)?;
+        return reviewed_table_data_dialect(&capabilities, false);
+    }
+
+    let capabilities = database_spec_for_driver(driver)
+        .map(|spec| spec.capabilities())
+        .ok_or_else(|| format!("Unsupported database driver: {}", driver.trim()))?;
+    ensure_table_export_format(&capabilities, format)?;
+    table_data_dialect(driver)
 }
 
 /// Resolve the dialect used by the bounded table-to-table transfer path.
@@ -6332,7 +6385,7 @@ pub async fn export_table_data(
     let progress_batches = Arc::new(AtomicU64::new(0));
     let result: Result<TableExportResult, String> = async {
         let kind =
-            table_data_dialect_for_connection(&manager, &connection_id, &driver, false).await?;
+            table_export_dialect_for_connection(&manager, &connection_id, &driver, format).await?;
         let page_size = page_size
             .unwrap_or(DEFAULT_PAGE_SIZE)
             .clamp(1, MAX_PAGE_SIZE);
@@ -9333,11 +9386,11 @@ mod tests {
         build_structured_filter_where, build_table_order_by, build_update_mutation,
         build_upsert_mutation, canonical_import_columns, column_lookup, csv_delimiter, csv_escape,
         csv_record_values, delete_table_data_transfer_target_for_overwrite,
-        ensure_host_table_ddl_capability, ensure_transfer_endpoint_driver_matches_connection,
-        execute_target_parameterized_batch, finish_table_data_transfer_transaction,
-        generate_postgres_materialized_view_ddl, generate_postgres_table_ddl,
-        generate_postgres_view_ddl, get_target_columns, is_json_lines_path,
-        normalized_table_data_transfer_project_id, object_label_from_type,
+        ensure_host_table_ddl_capability, ensure_table_export_format,
+        ensure_transfer_endpoint_driver_matches_connection, execute_target_parameterized_batch,
+        finish_table_data_transfer_transaction, generate_postgres_materialized_view_ddl,
+        generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
+        is_json_lines_path, normalized_table_data_transfer_project_id, object_label_from_type,
         object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
         overwrite_transfer_verification, postgres_view_definition_query, preview_metadata_required,
         query_target, query_target_parameterized, read_csv_import_preview,
@@ -12217,5 +12270,18 @@ WITH DATA;"#
         assert!(error.contains("before completion"));
         assert!(!final_path.exists());
         assert!(matching_export_partials(&final_path).is_empty());
+    }
+
+    #[test]
+    fn table_export_format_requires_an_explicit_driver_capability() {
+        let mut capabilities = DatabaseKind::Postgres.capabilities();
+        assert!(ensure_table_export_format(&capabilities, TableExportFormat::Xlsx).is_ok());
+        capabilities.table_export_formats = vec!["csv".to_string()];
+        assert!(ensure_table_export_format(&capabilities, TableExportFormat::Csv).is_ok());
+        assert!(
+            ensure_table_export_format(&capabilities, TableExportFormat::Xlsx)
+                .unwrap_err()
+                .contains("does not declare XLSX")
+        );
     }
 }

@@ -19,6 +19,6 @@ test("ClickHouse package preparation produces a manifest-bound OLAP sidecar", as
   const manifest = JSON.parse(await readFile(join(output, "manifest.json"), "utf8"));
   assert.equal(manifest.packageId, "oxide.clickhouse"); assert.equal(manifest.capabilities.lspLanguageId, "clickhouse");
   assert.equal(manifest.capabilities.defaultPort, 8123); assert.equal(manifest.capabilities.identifierQuote, '"'); assert.equal(manifest.capabilities.supportsDatabaseCatalogs, true);
-  assert.equal(manifest.capabilities.supportsTableRowMutation, false); assert.equal(manifest.capabilities.supportsTransactions, false);
+  assert.equal(manifest.capabilities.supportsTableRowMutation, false); assert.equal(manifest.capabilities.supportsTransactions, false); assert.deepEqual(manifest.capabilities.tableExportFormats, []);
   assert.equal(manifest.sha256, createHash("sha256").update(await readFile(join(output, manifest.entrypoint))).digest("hex"));
 });

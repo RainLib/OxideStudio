@@ -1,4 +1,4 @@
-use crate::core::dialect::DatabaseCapabilities;
+use crate::core::dialect::{DatabaseCapabilities, DECLARED_TABLE_EXPORT_FORMATS};
 use flate2::read::GzDecoder;
 use futures::StreamExt;
 use minisign_verify::{PublicKey, Signature};
@@ -1725,6 +1725,37 @@ fn validate_capability_contract(
         "" | "\"" | "`" | "["
     ) {
         return Err("Driver identifier quote is not supported by this build".to_string());
+    }
+    let export_formats = capabilities
+        .table_export_formats
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    if capabilities.table_export_formats.len() > DECLARED_TABLE_EXPORT_FORMATS.len()
+        || export_formats.len() != capabilities.table_export_formats.len()
+        || capabilities.table_export_formats.iter().any(|format| {
+            format.trim() != format || !DECLARED_TABLE_EXPORT_FORMATS.contains(&format.as_str())
+        })
+    {
+        return Err(
+            "Driver table export formats contain an unsupported or duplicate value".to_string(),
+        );
+    }
+    if !capabilities.table_export_formats.is_empty()
+        && (!capabilities.supports_table_browsing
+            || !matches!(
+                capabilities.data_model,
+                crate::core::dialect::DatabaseDataModel::Relational
+            )
+            || !matches!(
+                capabilities.lsp_language_id.trim(),
+                "postgres" | "mysql" | "sqlite" | "duckdb"
+            ))
+    {
+        return Err(
+            "Table export formats require relational browsing and a reviewed postgres, mysql, sqlite, or duckdb paging dialect"
+                .to_string(),
+        );
     }
     if let Some(server_dialect) = capabilities.lsp_server_dialect.as_deref() {
         let server_dialect = server_dialect.trim();
@@ -3615,6 +3646,7 @@ mod tests {
             .expect("postgres capability fixture should exist");
         capabilities.driver = "warehouse".to_string();
         capabilities.supports_table_data_transfer = true;
+        capabilities.table_export_formats.clear();
         capabilities.supports_table_browsing = false;
         assert!(validate_capability_contract("warehouse", &capabilities)
             .unwrap_err()
@@ -3623,6 +3655,7 @@ mod tests {
         capabilities.supports_table_browsing = true;
         capabilities.supports_transactions = true;
         capabilities.lsp_language_id = "sql".to_string();
+        capabilities.table_export_formats.clear();
         assert!(validate_capability_contract("warehouse", &capabilities)
             .unwrap_err()
             .contains("reviewed postgres, mysql, sqlite, or duckdb dialect"));
@@ -3641,6 +3674,7 @@ mod tests {
         // This test exercises LSP routing only. Cross-connection transfer is
         // intentionally stricter and requires a dedicated document dialect.
         capabilities.supports_table_data_transfer = false;
+        capabilities.table_export_formats.clear();
         assert!(validate_capability_contract("doris", &capabilities).is_ok());
 
         capabilities.lsp_server_dialect = Some("doris".to_string());
@@ -3683,6 +3717,7 @@ mod tests {
             .expect("postgres capability fixture should exist");
         capabilities.driver = "neo4j".to_string();
         capabilities.data_model = crate::core::dialect::DatabaseDataModel::Graph;
+        capabilities.table_export_formats.clear();
 
         assert!(validate_capability_contract("neo4j", &capabilities)
             .unwrap_err()
@@ -3695,7 +3730,33 @@ mod tests {
         capabilities.supports_column_alteration = false;
         capabilities.supports_index_rename = false;
         capabilities.supports_constraint_alteration = false;
+        capabilities.table_export_formats.clear();
         assert!(validate_capability_contract("neo4j", &capabilities).is_ok());
+    }
+
+    #[test]
+    fn table_export_formats_require_a_reviewed_unique_contract() {
+        let mut capabilities = crate::core::dialect::database_capabilities_for_driver("postgres")
+            .expect("postgres capability fixture should exist");
+        capabilities.driver = "warehouse".to_string();
+        capabilities.table_export_formats = vec!["parquet".to_string(), "arrow".to_string()];
+        assert!(validate_capability_contract("warehouse", &capabilities).is_ok());
+
+        capabilities.table_export_formats = vec!["csv".to_string(), "csv".to_string()];
+        assert!(validate_capability_contract("warehouse", &capabilities)
+            .unwrap_err()
+            .contains("duplicate"));
+
+        capabilities.table_export_formats = vec!["vendor-binary".to_string()];
+        assert!(validate_capability_contract("warehouse", &capabilities)
+            .unwrap_err()
+            .contains("unsupported"));
+
+        capabilities.table_export_formats = vec!["csv".to_string()];
+        capabilities.lsp_language_id = "sql".to_string();
+        assert!(validate_capability_contract("warehouse", &capabilities)
+            .unwrap_err()
+            .contains("reviewed postgres, mysql, sqlite, or duckdb paging dialect"));
     }
 
     #[test]

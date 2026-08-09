@@ -60,6 +60,22 @@ describe("database dialect capabilities", () => {
     ).toBe(false);
   });
 
+  it("keeps table export formats explicit and isolated per driver", () => {
+    expect(defaultDatabaseCapabilities("postgres").tableExportFormats).toEqual([
+      "csv",
+      "json",
+      "jsonl",
+      "sql",
+      "tsv",
+      "xlsx",
+    ]);
+    expect(defaultDatabaseCapabilities("redis").tableExportFormats).toEqual([]);
+    expect(
+      defaultDatabaseCapabilities("uninstalled-enterprise-db")
+        .tableExportFormats,
+    ).toEqual([]);
+  });
+
   it("keeps namespace creation options capability-driven", () => {
     expect(defaultDatabaseCapabilities("postgres")).toMatchObject({
       supportsCreateDatabase: true,

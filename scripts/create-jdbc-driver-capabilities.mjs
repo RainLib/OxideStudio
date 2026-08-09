@@ -17,6 +17,7 @@ import {
 
 const SQL_LSP_LANGUAGES = new Set(["sql", "postgres", "mysql", "sqlite", "duckdb", "hive"]);
 const NAMESPACE_LABELS = new Set(["schema", "database", "catalog"]);
+const HOST_TABLE_EXPORT_FORMATS = ["csv", "json", "jsonl", "sql", "tsv", "xlsx"];
 
 function option(name, required = false) {
   const index = process.argv.indexOf(name);
@@ -98,6 +99,9 @@ async function main() {
     defaultPort,
     supportsSqlQuery: true,
     supportsTableBrowsing: true,
+    tableExportFormats: ["postgres", "mysql", "sqlite", "duckdb"].includes(lspLanguageId)
+      ? HOST_TABLE_EXPORT_FORMATS
+      : [],
     supportsTableRowMutation: false,
     supportsTableDataTransfer: false,
     supportsTableDdl: false,

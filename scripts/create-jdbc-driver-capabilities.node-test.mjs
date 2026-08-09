@@ -75,6 +75,7 @@ test("writes a conservative JDBC capability contract", async () => {
   assert.equal(capabilities.identifierQuote, "`");
   assert.equal(capabilities.supportsTableRowMutation, false);
   assert.equal(capabilities.supportsTableDataTransfer, false);
+  assert.deepEqual(capabilities.tableExportFormats, []);
   assert.equal(capabilities.supportsTableConstraints, false);
   assert.equal(capabilities.supportsTransactions, false);
 
@@ -149,4 +150,19 @@ test("writes a conservative JDBC capability contract", async () => {
   const h2Capabilities = JSON.parse(await readFile(h2Output, "utf8"));
   assert.equal(h2Capabilities.supportsTableConstraints, true);
   assert.equal(h2Capabilities.supportsCreateDatabase, true);
+
+  const postgresOutput = join(directory, "postgres.json");
+  const postgresResult = spawnSync(process.execPath, [
+    "scripts/create-jdbc-driver-capabilities.mjs",
+    "--driver", "postgres",
+    "--display-name", "PostgreSQL",
+    "--out", postgresOutput,
+    "--dialect-profile", "postgres",
+  ], { encoding: "utf8" });
+  assert.equal(postgresResult.status, 0, postgresResult.stderr);
+  const postgresCapabilities = JSON.parse(await readFile(postgresOutput, "utf8"));
+  assert.deepEqual(
+    postgresCapabilities.tableExportFormats,
+    ["csv", "json", "jsonl", "sql", "tsv", "xlsx"],
+  );
 });

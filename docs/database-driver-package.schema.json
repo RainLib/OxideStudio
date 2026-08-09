@@ -126,6 +126,13 @@
           "type": "boolean",
           "description": "Optional for v1 package compatibility. An omitted value defaults to false and never enables Grid mutations."
         },
+        "tableExportFormats": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "enum": ["csv", "json", "jsonl", "sql", "tsv", "xlsx", "parquet", "arrow"] },
+          "description": "Signed table export declaration. The application intersects this list with encoders available in the running build; Parquet/Arrow therefore remain hidden until their reviewed Host encoder is present."
+        },
         "supportsTableDataTransfer": {
           "type": "boolean",
           "description": "Optional for v1 package compatibility. An omitted value defaults to false and never enables cross-connection table transfer. It is intentionally separate from interactive Grid mutation."
@@ -145,6 +152,20 @@
         }
       },
       "allOf": [
+        {
+          "if": {
+            "properties": { "tableExportFormats": { "minItems": 1 } },
+            "required": ["tableExportFormats"]
+          },
+          "then": {
+            "properties": {
+              "dataModel": { "const": "relational" },
+              "supportsTableBrowsing": { "const": true },
+              "lspLanguageId": { "enum": ["postgres", "mysql", "sqlite", "duckdb"] }
+            },
+            "required": ["dataModel", "supportsTableBrowsing", "lspLanguageId"]
+          }
+        },
         {
           "if": {
             "properties": { "supportsTableRowMutation": { "const": true } },

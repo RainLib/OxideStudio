@@ -117,6 +117,7 @@ const DATABASE_DRIVER_PROFILES: Record<
       defaultPort: 5432,
       supportsSqlQuery: true,
       supportsTableBrowsing: true,
+      tableExportFormats: ["csv", "json", "jsonl", "sql", "tsv", "xlsx"],
       supportsTableRowMutation: true,
       supportsTableDataTransfer: true,
       supportsTableDdl: true,
@@ -187,6 +188,7 @@ const DATABASE_DRIVER_PROFILES: Record<
       defaultPort: 3306,
       supportsSqlQuery: true,
       supportsTableBrowsing: true,
+      tableExportFormats: ["csv", "json", "jsonl", "sql", "tsv", "xlsx"],
       supportsTableRowMutation: true,
       supportsTableDataTransfer: true,
       supportsTableDdl: true,
@@ -256,6 +258,7 @@ const DATABASE_DRIVER_PROFILES: Record<
       defaultPort: 0,
       supportsSqlQuery: true,
       supportsTableBrowsing: true,
+      tableExportFormats: ["csv", "json", "jsonl", "sql", "tsv", "xlsx"],
       supportsTableRowMutation: true,
       supportsTableDataTransfer: true,
       supportsTableDdl: true,
@@ -494,6 +497,7 @@ function cloneCapabilities(
         : "network"),
     supportsSqlQuery: capabilities.supportsSqlQuery ?? true,
     supportsTableBrowsing: capabilities.supportsTableBrowsing ?? true,
+    tableExportFormats: [...(capabilities.tableExportFormats ?? [])],
     supportsTableRowMutation: capabilities.supportsTableRowMutation ?? false,
     supportsTableDataTransfer: capabilities.supportsTableDataTransfer ?? false,
     supportsTableDdl: capabilities.supportsTableDdl ?? false,
@@ -528,6 +532,7 @@ function cloneDriverProfile(
           : "network"),
       supportsSqlQuery: profile.capabilities.supportsSqlQuery ?? true,
       supportsTableBrowsing: profile.capabilities.supportsTableBrowsing ?? true,
+      tableExportFormats: [...(profile.capabilities.tableExportFormats ?? [])],
       supportsTableRowMutation:
         profile.capabilities.supportsTableRowMutation ?? false,
       supportsTableDataTransfer:
@@ -846,6 +851,7 @@ export function defaultDatabaseCapabilities(
     supportsDatabaseCatalogs: capabilities.supportsDatabaseCatalogs ?? false,
     supportsConnectionDatabase:
       capabilities.supportsConnectionDatabase ?? true,
+    tableExportFormats: [...(capabilities.tableExportFormats ?? [])],
     commonDataTypes: [...capabilities.commonDataTypes],
   };
 }

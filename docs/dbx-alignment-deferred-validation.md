@@ -482,8 +482,11 @@ explicit deferred validation task rather than an implicit release check.
   atomic-finalization validation matrix. The bounded backpressure pipeline has
   compile-time coverage and local writer lifecycle tests, but the Windows test
   binary currently exits with `STATUS_ENTRYPOINT_NOT_FOUND` before the Rust
-  harness starts; rerun those tests in CI. Parquet/Arrow and stable-snapshot
-  resumable exports remain implementation gaps.
+  harness starts; rerun those tests in CI. Verify each signed
+  `tableExportFormats` combination is intersected with the encoders compiled
+  into the application and that an IPC caller cannot bypass the backend gate.
+  Parquet/Arrow encoders and stable-snapshot resumable exports remain
+  implementation gaps.
 
 ## FK-aware JOIN completion and completion hot path
 

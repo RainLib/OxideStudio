@@ -71,6 +71,15 @@ import {
 } from "@/lib/actionEvents";
 import { transposeQueryResult } from "@/features/data-grid";
 
+const HOST_TABLE_EXPORT_FORMATS: readonly TableExportFormat[] = [
+  "csv",
+  "json",
+  "jsonl",
+  "sql",
+  "tsv",
+  "xlsx",
+];
+
 export function TableDataView() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const dataGridRef = useRef<DataGridHandle>(null);
@@ -128,6 +137,9 @@ export function TableDataView() {
     resolvedCapabilities?.driver === driver
       ? resolvedCapabilities
       : defaultDatabaseCapabilities(driver);
+  const tableExportFormats = HOST_TABLE_EXPORT_FORMATS.filter((format) =>
+    activeCapabilities.tableExportFormats?.includes(format),
+  );
   // New package data models (graph, time-series, queue, etc.) must never
   // accidentally enter the mutable relational grid while their dedicated
   // workspace is still unavailable.
@@ -832,7 +844,8 @@ export function TableDataView() {
       activeTab.isExecuting ||
       activeTableExportRef.current ||
       isCrossDatabasePreview ||
-      isNativeObjectPreview
+      isNativeObjectPreview ||
+      !tableExportFormats.includes(format)
     ) {
       return;
     }
@@ -1567,6 +1580,7 @@ export function TableDataView() {
         readOnly={isTableReadOnly}
         viewOnly={isTransposed}
         exportDisabled={isCrossDatabasePreview || isNativeObjectPreview}
+        exportFormats={tableExportFormats}
         isExporting={Boolean(activeTableExport)}
         transferDisabled={
           isCrossDatabasePreview ||

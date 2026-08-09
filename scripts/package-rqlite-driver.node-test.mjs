@@ -31,6 +31,7 @@ test("RQLite package preparation produces a manifest-bound network sidecar", asy
   assert.equal(manifest.capabilities.defaultPort, 4001);
   assert.equal(manifest.capabilities.supportsConnectionDatabase, false);
   assert.equal(manifest.capabilities.supportsTableRowMutation, false);
+  assert.deepEqual(manifest.capabilities.tableExportFormats, ["csv", "json", "jsonl", "sql", "tsv", "xlsx"]);
   assert.equal(manifest.capabilities.supportsForeignKeys, true);
   assert.equal(
     manifest.sha256,
