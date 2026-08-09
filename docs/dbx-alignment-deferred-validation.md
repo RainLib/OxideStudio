@@ -52,11 +52,13 @@ database target until its relevant queue entries pass.
   ref. Focused tests cover disposal, live usage-ranking changes and stale owner
   rejection; a strict production build confirms metadata or snippet refreshes
   no longer require global Monaco provider re-registration.
-- The signature-help alignment suite passed without database access: 127 LSP
+- The signature-help and built-in function completion alignment suite passed
+  without database access: 131 LSP
   library tests, 12 process-protocol tests and 9 schema contract tests. It
   covers SQL-noise-safe nested calls, qualified Unicode routines, optional
   labels, stable overload ranking, dialect fallback, server-version catalog
-  gates and ClickHouse parameter groups.
+  gates, ClickHouse parameter groups, expression-only function suggestions,
+  live-metadata precedence and editable snippet insertion.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an
@@ -185,6 +187,13 @@ explicit deferred validation task rather than an implicit release check.
   select the correct parameter group. Profile the 64 KiB scan and 50-overload
   limits on large consoles; crossing either bound must fail quietly without
   blocking completion.
+- In Monaco, accept zero-, fixed-, optional-, variadic- and ClickHouse
+  multi-group built-in function candidates with each keyword/function casing
+  preference. Confirm tab stops, closing parentheses, retriggered signature
+  help and undo form one coherent edit, and that FROM/JOIN targets, comments,
+  literals and `alias.` completion never display the built-in catalog. Repeat
+  with more than 100 available routines to confirm the bounded fallback does
+  not displace live metadata or block the typing thread.
 - On large real SQL consoles, verify CTE/derived projection completion stops
   local-relation discovery beyond the documented 512 KiB budget without
   blocking ordinary metadata completion. Comments, string/dollar literals and
