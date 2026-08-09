@@ -30,6 +30,7 @@ import {
   Plus,
   Redo2,
   Search,
+  StickyNote,
   Table2,
   Undo2,
   X,
@@ -43,6 +44,7 @@ import {
 } from "@/lib/schemaDiagram";
 import {
   rasterizeSchemaDiagramSvg,
+  schemaDiagramSvgSize,
   serializeSchemaDiagramToSvg,
   type SchemaDiagramRasterFormat,
 } from "@/lib/schemaDiagramSvg";
@@ -97,12 +99,22 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import type { SchemaStructuredDraftForeignKeySeed } from "./SchemaStructuredDraftDialog";
+import { SchemaDiagramNoteDialog } from "./SchemaDiagramNoteDialog";
+import { SchemaDiagramNoteNode } from "./SchemaDiagramNoteNode";
+import {
+  loadSchemaDiagramCanvas,
+  saveSchemaDiagramCanvas,
+  type SchemaDiagramNote,
+  type SchemaDiagramNoteColor,
+} from "@/services/schemaDiagramCanvasStore";
 
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 1.6;
 const VIEWPORT_OVERSCAN = 320;
 const VIEWPORT_BUCKET = 160;
+const NEW_NOTE_ID = "__new_diagram_note__";
 const EMPTY_AREA_HISTORY = createSchemaDiagramAreaHistory();
+const EMPTY_DIAGRAM_NOTES: SchemaDiagramNote[] = [];
 const loadSchemaStructuredDraftDialog = () =>
   import("./SchemaStructuredDraftDialog");
 const SchemaStructuredDraftDialog = lazy(() =>
@@ -124,6 +136,7 @@ export function SchemaDiagramView() {
     activeTabId,
     selectSchemaDiagramRelation,
     setSchemaDiagramAreaHistory,
+    setSchemaDiagramNotes,
     selectSchemaDiagramArea,
     selectSchemaDiagramRelations,
   } = useTabStore();
@@ -144,6 +157,17 @@ export function SchemaDiagramView() {
   const [structuredDraftOpen, setStructuredDraftOpen] = useState(false);
   const [foreignKeySeed, setForeignKeySeed] =
     useState<SchemaStructuredDraftForeignKeySeed | null>(null);
+  const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
+  const [noteContentDraft, setNoteContentDraft] = useState("");
+  const [noteColorDraft, setNoteColorDraft] =
+    useState<SchemaDiagramNoteColor>("amber");
+  const [notePositionDraft, setNotePositionDraft] = useState({ x: 24, y: 24 });
+  const [pendingNoteDelete, setPendingNoteDelete] = useState(false);
+  const [canvasPersistenceReady, setCanvasPersistenceReady] = useState(false);
+  const [canvasPersistenceState, setCanvasPersistenceState] =
+    useState<"loading" | "ready" | "saving" | "error">("loading");
+  const canvasLoadGenerationRef = useRef(0);
+  const canvasSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [renamingAreaId, setRenamingAreaId] = useState<string | null>(null);
   const [areaNameDraft, setAreaNameDraft] = useState("");
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -153,6 +177,7 @@ export function SchemaDiagramView() {
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
   const snapshot = activeTab?.schemaDiagramSnapshot;
   const areaHistory = activeTab?.schemaDiagramAreaHistory || EMPTY_AREA_HISTORY;
+  const diagramNotes = activeTab?.schemaDiagramNotes || EMPTY_DIAGRAM_NOTES;
   const selectedAreaId = activeTab?.selectedDiagramAreaId || "";
   const activeSelectedRelationName = activeTab?.selectedDiagramRelationName || null;
   const selectedRelationNames = useMemo(
@@ -223,6 +248,16 @@ export function SchemaDiagramView() {
   const layout = areaLayout?.layout || null;
   const fullLayout = fullAreaLayout?.layout || null;
   const areaBounds = areaLayout?.areaBounds || [];
+  const canvasExtent = useMemo(() => ({
+    width: Math.max(
+      layout?.width || 0,
+      ...diagramNotes.map((note) => note.x + note.width + 48),
+    ),
+    height: Math.max(
+      layout?.height || 0,
+      ...diagramNotes.map((note) => note.y + note.height + 48),
+    ),
+  }), [diagramNotes, layout?.height, layout?.width]);
   const snapshotRelationsByName = useMemo(
     () =>
       new Map(
@@ -241,6 +276,97 @@ export function SchemaDiagramView() {
     setAreaNameDraft("");
   }, [snapshot?.id]);
 
+  useEffect(() => {
+    if (!snapshot || !activeTab) return;
+    const generation = ++canvasLoadGenerationRef.current;
+    const tabId = activeTab.id;
+    const initialAreas = activeTab.schemaDiagramAreaHistory?.present;
+    const initialNotes = activeTab.schemaDiagramNotes;
+    let disposed = false;
+    setCanvasPersistenceReady(false);
+    setCanvasPersistenceState("loading");
+    void loadSchemaDiagramCanvas(snapshot)
+      .then((canvas) => {
+        if (
+          disposed ||
+          generation !== canvasLoadGenerationRef.current ||
+          !canvas
+        ) {
+          return;
+        }
+        const currentTab = useTabStore
+          .getState()
+          .tabs.find((tab) => tab.id === tabId);
+        if (
+          currentTab?.schemaDiagramAreaHistory?.present !== initialAreas ||
+          currentTab?.schemaDiagramNotes !== initialNotes
+        ) {
+          return;
+        }
+        setSchemaDiagramAreaHistory(tabId, {
+          past: [],
+          present: canvas.areas,
+          future: [],
+        });
+        setSchemaDiagramNotes(tabId, canvas.notes);
+      })
+      .catch((loadError) => {
+        if (!disposed && generation === canvasLoadGenerationRef.current) {
+          console.warn("Failed to restore the project diagram canvas", loadError);
+          setCanvasPersistenceState("error");
+        }
+      })
+      .finally(() => {
+        if (!disposed && generation === canvasLoadGenerationRef.current) {
+          setCanvasPersistenceReady(true);
+          setCanvasPersistenceState((current) =>
+            current === "error" ? current : "ready",
+          );
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [activeTab?.id, setSchemaDiagramAreaHistory, setSchemaDiagramNotes, snapshot]);
+
+  useEffect(() => {
+    if (!snapshot || !activeTab || !canvasPersistenceReady) return;
+    const generation = canvasLoadGenerationRef.current;
+    const timer = window.setTimeout(() => {
+      setCanvasPersistenceState("saving");
+      const operation = canvasSaveQueueRef.current
+        .catch(() => undefined)
+        .then(() =>
+          saveSchemaDiagramCanvas(
+            snapshot,
+            areaHistory.present,
+            diagramNotes,
+          ).then(() => undefined),
+        );
+      canvasSaveQueueRef.current = operation.catch(() => undefined);
+      void operation.then(
+        () => {
+          if (generation === canvasLoadGenerationRef.current) {
+            setCanvasPersistenceState("ready");
+          }
+        },
+        (saveError) => {
+          if (generation === canvasLoadGenerationRef.current) {
+            console.warn("Failed to save the project diagram canvas", saveError);
+            setCanvasPersistenceState("error");
+          }
+        },
+      );
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeTab?.id,
+    areaHistory.present,
+    canvasPersistenceReady,
+    diagramNotes,
+    snapshot,
+  ]);
+
   const exportSvg = useCallback(() => {
     const exportLayout = exportScope === "full" ? fullLayout : layout;
     if (!snapshot || !exportLayout) return;
@@ -257,11 +383,12 @@ export function SchemaDiagramView() {
             : exportBackground === "light"
               ? "#ffffff"
               : "transparent",
+        annotations: diagramNotes,
       }),
       `${basename}.svg`,
       "image/svg+xml;charset=utf-8",
     );
-  }, [exportBackground, exportScope, fullLayout, layout, snapshot]);
+  }, [diagramNotes, exportBackground, exportScope, fullLayout, layout, snapshot]);
 
   const exportRaster = useCallback(async (format: SchemaDiagramRasterFormat) => {
     const exportLayout = exportScope === "full" ? fullLayout : layout;
@@ -282,18 +409,20 @@ export function SchemaDiagramView() {
       const svg = serializeSchemaDiagramToSvg(exportLayout, {
         title: `${snapshot.connectionName} / ${snapshot.schemaName}`,
         background,
+        annotations: diagramNotes,
       });
+      const exportSize = schemaDiagramSvgSize(exportLayout, diagramNotes);
       const blob = await rasterizeSchemaDiagramSvg(
         svg,
-        exportLayout.width,
-        exportLayout.height,
+        exportSize.width,
+        exportSize.height,
         format,
       );
       downloadBlob(blob, `${basename}.${format === "jpeg" ? "jpg" : "png"}`);
     } finally {
       setIsRasterizing(false);
     }
-  }, [exportBackground, exportScope, fullLayout, isRasterizing, layout, snapshot]);
+  }, [diagramNotes, exportBackground, exportScope, fullLayout, isRasterizing, layout, snapshot]);
 
   const exportDbml = useCallback(() => {
     if (!snapshot) return;
@@ -388,12 +517,12 @@ export function SchemaDiagramView() {
   const fitDiagram = useCallback(() => {
     const viewport = viewportRef.current;
     if (!viewport || !layout) return;
-    const horizontal = Math.max(0, viewport.clientWidth - 32) / layout.width;
-    const vertical = Math.max(0, viewport.clientHeight - 32) / layout.height;
+    const horizontal = Math.max(0, viewport.clientWidth - 32) / canvasExtent.width;
+    const vertical = Math.max(0, viewport.clientHeight - 32) / canvasExtent.height;
     const nextZoom = Math.max(MIN_ZOOM, Math.min(1, horizontal, vertical));
     setZoom(nextZoom);
     viewport.scrollTo({ left: 0, top: 0 });
-  }, [layout]);
+  }, [canvasExtent.height, canvasExtent.width, layout]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(fitDiagram);
@@ -526,6 +655,84 @@ export function SchemaDiagramView() {
     if (!area) return;
     setAreaNameDraft(area.name);
     setRenamingAreaId(area.id);
+  };
+
+  const beginCreateNote = () => {
+    const viewport = viewportRef.current;
+    const x = viewport
+      ? Math.max(0, (viewport.scrollLeft + viewport.clientWidth / 2) / zoom - 110)
+      : 24;
+    const y = viewport
+      ? Math.max(0, (viewport.scrollTop + viewport.clientHeight / 2) / zoom - 60)
+      : 24;
+    setNoteContentDraft("");
+    setNoteColorDraft("amber");
+    setNotePositionDraft({ x, y });
+    setPendingNoteDelete(false);
+    setEditingNoteId(NEW_NOTE_ID);
+  };
+
+  const beginEditNote = (note: SchemaDiagramNote) => {
+    setNoteContentDraft(note.content);
+    setNoteColorDraft(note.color);
+    setNotePositionDraft({ x: note.x, y: note.y });
+    setPendingNoteDelete(false);
+    setEditingNoteId(note.id);
+  };
+
+  const saveNote = () => {
+    const content = noteContentDraft.trim();
+    if (!editingNoteId || !content) return;
+    if (editingNoteId === NEW_NOTE_ID) {
+      setSchemaDiagramNotes(activeTab.id, [
+        ...diagramNotes,
+        {
+          id: createDiagramNoteId(),
+          content,
+          x: notePositionDraft.x,
+          y: notePositionDraft.y,
+          width: 220,
+          height: 120,
+          color: noteColorDraft,
+        },
+      ]);
+    } else {
+      setSchemaDiagramNotes(
+        activeTab.id,
+        diagramNotes.map((note) =>
+          note.id === editingNoteId
+            ? { ...note, content, color: noteColorDraft }
+            : note,
+        ),
+      );
+    }
+    setEditingNoteId(null);
+    setPendingNoteDelete(false);
+  };
+
+  const removeEditingNote = () => {
+    if (!editingNoteId || editingNoteId === NEW_NOTE_ID) return;
+    if (!pendingNoteDelete) {
+      setPendingNoteDelete(true);
+      return;
+    }
+    setSchemaDiagramNotes(
+      activeTab.id,
+      diagramNotes.filter((note) => note.id !== editingNoteId),
+    );
+    setEditingNoteId(null);
+    setPendingNoteDelete(false);
+  };
+
+  const moveNote = (noteId: string, x: number, y: number) => {
+    setSchemaDiagramNotes(
+      activeTab.id,
+      diagramNotes.map((note) =>
+        note.id === noteId
+          ? { ...note, x: Math.max(0, x), y: Math.max(0, y) }
+          : note,
+      ),
+    );
   };
 
   const areaName = areaNameDraft.trim();
@@ -743,7 +950,7 @@ export function SchemaDiagramView() {
           type="button"
           className="wb-text-button h-6 gap-1.5 px-2 text-[9px]"
           onClick={exportSvg}
-          disabled={layout.nodes.length === 0}
+          disabled={layout.nodes.length === 0 && diagramNotes.length === 0}
           title="Export the current filtered diagram as SVG"
         >
           <Download size={10} /> SVG
@@ -752,7 +959,7 @@ export function SchemaDiagramView() {
           type="button"
           className="wb-text-button h-6 px-2 text-[9px]"
           onClick={() => void exportRaster("png")}
-          disabled={layout.nodes.length === 0 || isRasterizing}
+          disabled={(layout.nodes.length === 0 && diagramNotes.length === 0) || isRasterizing}
         >
           PNG
         </button>
@@ -760,7 +967,7 @@ export function SchemaDiagramView() {
           type="button"
           className="wb-text-button h-6 px-2 text-[9px]"
           onClick={() => void exportRaster("jpeg")}
-          disabled={layout.nodes.length === 0 || isRasterizing}
+          disabled={(layout.nodes.length === 0 && diagramNotes.length === 0) || isRasterizing}
           title={exportBackground === "transparent" ? "JPEG uses a white background" : undefined}
         >
           JPG
@@ -785,6 +992,15 @@ export function SchemaDiagramView() {
           title="Edit tables, columns, indexes and constraints in a local review-only draft"
         >
           <Table2 size={10} /> Structure
+        </button>
+        <button
+          type="button"
+          className="wb-text-button h-6 gap-1.5 px-2 text-[9px]"
+          disabled={!canvasPersistenceReady}
+          onClick={beginCreateNote}
+          title="Add a project-persisted annotation to the diagram canvas"
+        >
+          <StickyNote size={10} /> Note
         </button>
         <button
           type="button"
@@ -921,7 +1137,7 @@ export function SchemaDiagramView() {
           <Redo2 size={10} />
         </button>
         <span className="ml-auto text-[8px] wb-muted">
-          {areaHistory.present.length} area{areaHistory.present.length === 1 ? "" : "s"} · {selectedRelationNames.size} selected
+          {areaHistory.present.length} area{areaHistory.present.length === 1 ? "" : "s"} · {diagramNotes.length} note{diagramNotes.length === 1 ? "" : "s"} · {selectedRelationNames.size} selected · {canvasPersistenceLabel(canvasPersistenceState)}
         </span>
       </div>
 
@@ -938,19 +1154,22 @@ export function SchemaDiagramView() {
           onScroll={scheduleViewportWindowUpdate}
           className="min-h-0 overflow-auto bg-[radial-gradient(circle_at_center,hsl(var(--wb-border-subtle)/0.42)_0.75px,transparent_0.75px)] bg-[length:18px_18px]"
         >
-          {layout.nodes.length === 0 ? (
+          {layout.nodes.length === 0 && diagramNotes.length === 0 ? (
             <div className="flex h-full items-center justify-center text-[10px] wb-muted">
               No relation or column matches “{query}”.
             </div>
           ) : (
             <div
-              style={{ width: layout.width * zoom, height: layout.height * zoom }}
+              style={{
+                width: canvasExtent.width * zoom,
+                height: canvasExtent.height * zoom,
+              }}
             >
               <div
                 className="relative"
                 style={{
-                  width: layout.width,
-                  height: layout.height,
+                  width: canvasExtent.width,
+                  height: canvasExtent.height,
                   transform: `scale(${zoom})`,
                   transformOrigin: "top left",
                 }}
@@ -1070,6 +1289,15 @@ export function SchemaDiagramView() {
                       });
                       setStructuredDraftOpen(true);
                     }}
+                  />
+                ))}
+                {diagramNotes.map((note) => (
+                  <SchemaDiagramNoteNode
+                    key={note.id}
+                    note={note}
+                    zoom={zoom}
+                    onEdit={() => beginEditNote(note)}
+                    onMove={(x, y) => moveNote(note.id, x, y)}
                   />
                 ))}
               </div>
@@ -1212,6 +1440,21 @@ export function SchemaDiagramView() {
           </form>
         </DialogContent>
       </Dialog>
+      <SchemaDiagramNoteDialog
+        open={Boolean(editingNoteId)}
+        mode={editingNoteId === NEW_NOTE_ID ? "create" : "edit"}
+        content={noteContentDraft}
+        color={noteColorDraft}
+        pendingDelete={pendingNoteDelete}
+        onContentChange={setNoteContentDraft}
+        onColorChange={setNoteColorDraft}
+        onDelete={removeEditingNote}
+        onCancel={() => {
+          setEditingNoteId(null);
+          setPendingNoteDelete(false);
+        }}
+        onSave={saveNote}
+      />
       <SchemaDbmlDraftDialog
         open={dbmlDraftOpen}
         snapshot={snapshot}
@@ -1522,6 +1765,22 @@ function isDiagramRelationshipTable(value?: string | null) {
   return normalized.includes("TABLE") &&
     !normalized.includes("VIEW") &&
     !normalized.includes("FOREIGN");
+}
+
+function canvasPersistenceLabel(
+  state: "loading" | "ready" | "saving" | "error",
+) {
+  if (state === "loading") return "loading canvas";
+  if (state === "saving") return "saving canvas";
+  if (state === "error") return "canvas save failed";
+  return "canvas saved";
+}
+
+function createDiagramNoteId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `note-${crypto.randomUUID()}`;
+  }
+  return `note-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function formatTimestamp(value: number) {

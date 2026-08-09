@@ -7,9 +7,35 @@ import {
 export type SchemaDiagramSvgOptions = {
   title?: string;
   background?: string;
+  annotations?: SchemaDiagramSvgAnnotation[];
+};
+
+export type SchemaDiagramSvgAnnotation = {
+  content: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: "amber" | "violet" | "blue" | "green" | "slate";
 };
 
 export type SchemaDiagramRasterFormat = "png" | "jpeg";
+
+export function schemaDiagramSvgSize(
+  layout: SchemaDiagramLayout,
+  annotations: readonly SchemaDiagramSvgAnnotation[] = [],
+) {
+  return {
+    width: Math.max(
+      layout.width,
+      ...annotations.map((note) => note.x + note.width + 48),
+    ),
+    height: Math.max(
+      layout.height,
+      ...annotations.map((note) => note.y + note.height + 48),
+    ),
+  };
+}
 
 export function schemaDiagramRasterSize(
   width: number,
@@ -88,6 +114,8 @@ export function serializeSchemaDiagramToSvg(
 ) {
   const title = options.title || "Database schema diagram";
   const background = options.background || "#11151c";
+  const annotations = options.annotations || [];
+  const size = schemaDiagramSvgSize(layout, annotations);
   const light = /^(?:#fff(?:fff)?|white)$/iu.test(background.trim());
   const palette = light
     ? {
@@ -171,15 +199,67 @@ export function serializeSchemaDiagramToSvg(
       `</g>`,
     ].join("");
   });
+  const notes = annotations.map((note) => {
+    const colors = annotationColors(note.color);
+    const lines = wrappedAnnotationLines(note.content, Math.max(12, Math.floor(
+      (note.width - 20) / 6,
+    ))).slice(0, Math.max(1, Math.floor((note.height - 42) / 14)));
+    return [
+      `<g><title>${xml(note.content)}</title>`,
+      `<rect x="${note.x}" y="${note.y}" width="${note.width}" height="${note.height}" rx="6" fill="${colors.body}" stroke="${colors.border}"/>`,
+      `<path d="M ${note.x + 6} ${note.y} H ${note.x + note.width - 6} Q ${note.x + note.width} ${note.y} ${note.x + note.width} ${note.y + 6} V ${note.y + 28} H ${note.x} V ${note.y + 6} Q ${note.x} ${note.y} ${note.x + 6} ${note.y}" fill="${colors.header}"/>`,
+      `<text x="${note.x + 10}" y="${note.y + 18}" fill="${colors.text}" font-size="8" font-weight="600">PROJECT NOTE</text>`,
+      lines.map((line, index) =>
+        `<text x="${note.x + 10}" y="${note.y + 44 + index * 14}" fill="${colors.text}" font-size="9">${xml(line)}</text>`,
+      ).join(""),
+      `</g>`,
+    ].join("");
+  });
 
   return [
     `<?xml version="1.0" encoding="UTF-8"?>`,
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}" role="img" aria-labelledby="diagram-title">`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${size.width}" height="${size.height}" viewBox="0 0 ${size.width} ${size.height}" role="img" aria-labelledby="diagram-title">`,
     `<title id="diagram-title">${xml(title)}</title>`,
     `<rect width="100%" height="100%" fill="${xml(background)}"/>`,
     `<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">`,
     edges.join(""),
     nodes.join(""),
+    notes.join(""),
     `</g></svg>`,
   ].join("");
+}
+
+function annotationColors(color: SchemaDiagramSvgAnnotation["color"]) {
+  if (color === "violet") {
+    return { body: "#ddd6fe", header: "#c4b5fd", border: "#8b5cf6", text: "#2e1065" };
+  }
+  if (color === "blue") {
+    return { body: "#bae6fd", header: "#7dd3fc", border: "#0ea5e9", text: "#082f49" };
+  }
+  if (color === "green") {
+    return { body: "#a7f3d0", header: "#6ee7b7", border: "#10b981", text: "#022c22" };
+  }
+  if (color === "slate") {
+    return { body: "#e2e8f0", header: "#cbd5e1", border: "#64748b", text: "#0f172a" };
+  }
+  return { body: "#fde68a", header: "#fcd34d", border: "#f59e0b", text: "#451a03" };
+}
+
+function wrappedAnnotationLines(content: string, maxCharacters: number) {
+  const lines: string[] = [];
+  for (const sourceLine of content.split(/\r?\n/u)) {
+    let remaining = sourceLine.trim();
+    if (!remaining) {
+      lines.push("");
+      continue;
+    }
+    while (remaining.length > maxCharacters) {
+      const candidate = remaining.slice(0, maxCharacters + 1);
+      const boundary = Math.max(candidate.lastIndexOf(" "), maxCharacters);
+      lines.push(remaining.slice(0, boundary).trimEnd());
+      remaining = remaining.slice(boundary).trimStart();
+    }
+    lines.push(remaining);
+  }
+  return lines;
 }

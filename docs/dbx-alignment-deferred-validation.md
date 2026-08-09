@@ -27,6 +27,9 @@ database target until its relevant queue entries pass.
   undo/redo and the offline snapshot marker. A Rust unit test confirms every
   Project DDL, DBML, metadata JSON and diagram-draft sentinel is rejected by
   the migration execution boundary.
+- Diagram canvas persistence tests passed for project/schema scoping, stale Area
+  member cleanup, Note retention, duplicate/corrupt payload rejection and
+  bounded content. SVG tests cover XML-safe Note export and expanded bounds.
 - The complete bundled LSP Rust suite passed after adding DBX semantic row
   source and catalog coverage: 105 library tests plus all integration/doc targets. The
   end-to-end process test now covers table functions, `WITH ORDINALITY`,
@@ -516,6 +519,12 @@ explicit deferred validation task rather than an implicit release check.
   name and exact endpoints, while malformed/oversized drag payloads, missing
   columns, views and foreign tables do nothing. Keyboard-only FK creation must
   remain available through the same form and neither path may execute DDL.
+- Create, edit, recolor, move and delete diagram notes at several zoom levels.
+  Pointer movement must remain local until release, confirmed deletion must be
+  required, and a project/schema switch must restore only its own bounded canvas
+  resource. Snapshot refresh must remove stale Area members while preserving
+  notes. Export SVG/PNG/JPG with XML-sensitive and multiline note content; note
+  bounds must expand the artifact without bypassing the 24 MP raster limit.
 
 ## ChartDB metadata JSON import
 

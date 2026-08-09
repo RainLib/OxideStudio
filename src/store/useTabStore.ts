@@ -46,6 +46,7 @@ import {
 } from "@/lib/querySafety";
 import type { Diagnostic } from "@/services/lsp/types";
 import type { SchemaDiagramAreaHistory } from "@/lib/schemaDiagramAreas";
+import type { SchemaDiagramNote } from "@/services/schemaDiagramCanvasStore";
 import {
   extractQueryExecutionError,
   isMissingConnectionSession,
@@ -295,6 +296,7 @@ export interface TabData {
   schemaDiagramSnapshot?: SchemaSnapshot;
   selectedDiagramRelationName?: string | null;
   schemaDiagramAreaHistory?: SchemaDiagramAreaHistory;
+  schemaDiagramNotes?: SchemaDiagramNote[];
   selectedDiagramAreaId?: string | null;
   selectedDiagramRelationNames?: string[];
   dataCompareLeft?: DataCompareSource;
@@ -748,6 +750,7 @@ interface TabState {
     tabId: string,
     history: SchemaDiagramAreaHistory,
   ) => void;
+  setSchemaDiagramNotes: (tabId: string, notes: SchemaDiagramNote[]) => void;
   selectSchemaDiagramArea: (tabId: string, areaId: string | null) => void;
   selectSchemaDiagramRelations: (tabId: string, relationNames: string[]) => void;
   openDataCompareTab: (leftTabId: string, rightTabId: string) => string | null;
@@ -1200,6 +1203,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                   tab.schemaDiagramAreaHistory,
                   snapshot,
                 ),
+                schemaDiagramNotes: tab.schemaDiagramNotes || [],
                 selectedDiagramRelationNames: (
                   tab.selectedDiagramRelationNames || []
                 ).filter((name) =>
@@ -1227,6 +1231,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       schemaDiagramSnapshot: snapshot,
       selectedDiagramRelationName: snapshot.relations[0]?.name || null,
       schemaDiagramAreaHistory: { past: [], present: [], future: [] },
+      schemaDiagramNotes: [],
       selectedDiagramAreaId: null,
       selectedDiagramRelationNames: snapshot.relations[0]?.name
         ? [snapshot.relations[0].name]
@@ -1253,6 +1258,14 @@ export const useTabStore = create<TabState>((set, get) => ({
     set((state) => ({
       tabs: state.tabs.map((tab) =>
         tab.id === tabId ? { ...tab, schemaDiagramAreaHistory: history } : tab,
+      ),
+    }));
+  },
+
+  setSchemaDiagramNotes: (tabId, notes) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId ? { ...tab, schemaDiagramNotes: notes } : tab,
       ),
     }));
   },

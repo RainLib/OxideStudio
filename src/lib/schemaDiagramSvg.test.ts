@@ -60,12 +60,23 @@ describe("schema diagram SVG export", () => {
           targetColumns: ["id"],
         },
       ],
+    }, {
+      annotations: [{
+        content: "Owner <Platform> & Security",
+        x: 720,
+        y: 400,
+        width: 220,
+        height: 120,
+        color: "amber",
+      }],
     });
 
     expect(svg).toContain("<svg");
     expect(svg).toContain("orders &amp; invoices");
     expect(svg).toContain("orders_customer_fk");
     expect(svg).toContain("<path");
+    expect(svg).toContain("Owner &lt;Platform&gt; &amp; Security");
+    expect(svg).toContain('width="988"');
     expect(svg).not.toContain("orders & invoices");
   });
 });
