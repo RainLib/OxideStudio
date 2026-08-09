@@ -1,4 +1,4 @@
-name: Release to Aliyun OSS
+name: Release desktop packages
 
 on:
   push:
@@ -25,8 +25,9 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
-      apple_signing_enabled: ${{ steps.signing.outputs.apple_signing_enabled }}
-      windows_signing_enabled: ${{ steps.signing.outputs.windows_signing_enabled }}
+      oss_enabled: ${{ steps.distribution.outputs.oss_enabled }}
+      apple_signing_enabled: ${{ steps.distribution.outputs.apple_signing_enabled }}
+      windows_signing_enabled: ${{ steps.distribution.outputs.windows_signing_enabled }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -73,8 +74,8 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Validate signing and Aliyun configuration
-        id: signing
+      - name: Validate signing and optional Aliyun configuration
+        id: distribution
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -95,10 +96,10 @@ jobs:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
-          ALLOW_UNSIGNED_RELEASE: "false"
+          ALLOW_UNSIGNED_RELEASE: "true"
         run: |
           node - <<'NODE'
-          const required = [
+          const ossRequired = [
             "TAURI_SIGNING_PRIVATE_KEY",
             "OXIDE_UPDATER_PUBLIC_KEY",
             "OXIDE_RELEASE_BASE_URL",
@@ -110,15 +111,38 @@ jobs:
             "ALIYUN_OSS_ENDPOINT",
             "ALIYUN_OSS_PREFIX",
           ];
-          const missing = required.filter((name) => !process.env[name]?.trim());
-          if (missing.length) throw new Error(`Missing GitHub configuration: ${missing.join(", ")}`);
-          if (!/^(1|true|yes|on)$/i.test(process.env.ALIYUN_OSS_ENABLED.trim())) {
-            throw new Error("ALIYUN_OSS_ENABLED must be true to publish a release.");
+          const configured = ossRequired.filter((name) => process.env[name]?.trim());
+          const missing = ossRequired.filter((name) => !process.env[name]?.trim());
+          const ossEnabled = configured.length === ossRequired.length && /^(1|true|yes|on)$/i.test(process.env.ALIYUN_OSS_ENABLED.trim());
+          if (!ossEnabled) {
+            const detail = configured.length > 0
+              ? `Aliyun updater configuration is incomplete; missing: ${missing.join(", ")}.`
+              : "Aliyun updater configuration is absent.";
+            console.warn(`::warning title=GitHub Release fallback::${detail} Publishing unsigned bundles to GitHub Release without OTA metadata.`);
           }
-
+          const signingGroups = [
+            ["apple_signing_enabled", ["APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID", "KEYCHAIN_PASSWORD"]],
+            ["windows_signing_enabled", ["WINDOWS_CERTIFICATE", "WINDOWS_CERTIFICATE_PASSWORD", "WINDOWS_CERTIFICATE_THUMBPRINT"]],
+          ];
+          const outputs = [`oss_enabled=${ossEnabled}`];
+          for (const [output, names] of signingGroups) {
+            const present = names.filter((name) => process.env[name]?.trim());
+            const enabled = present.length === names.length;
+            if (present.length > 0 && !enabled) {
+              const groupMissing = names.filter((name) => !process.env[name]?.trim());
+              console.warn(`::warning title=Unsigned platform bundle::${output} is partial; skipping signing because ${groupMissing.join(", ")} is missing.`);
+            }
+            outputs.push(`${output}=${enabled}`);
+          }
+          require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `${outputs.join("\n")}\n`);
           NODE
-          node scripts/resolve-platform-signing.mjs
-          node scripts/write-tauri-release-config.mjs
+
+      - name: Configure Aliyun updater endpoint
+        if: steps.distribution.outputs.oss_enabled == 'true'
+        env:
+          OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+        run: node scripts/write-tauri-release-config.mjs
 
       - name: Test release manifest generator
         run: npm run test:release
@@ -296,6 +320,7 @@ jobs:
             | node -e 'let s=""; process.stdin.on("data", c => s += c); process.stdin.on("end", () => { const tools=JSON.parse(s); if (tools.length !== 5 || tools.some(tool => !tool.readOnly || tool.destructive)) process.exit(1); });'
 
       - name: Configure Aliyun updater endpoint
+        if: needs.validate.outputs.oss_enabled == 'true'
         env:
           OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ matrix.family == 'windows' && secrets.WINDOWS_CERTIFICATE_THUMBPRINT || '' }}
@@ -457,7 +482,7 @@ jobs:
           APPLE_PASSWORD: ${{ matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true' && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true' && secrets.APPLE_TEAM_ID || '' }}
         with:
-          args: ${{ matrix.args }} --config src-tauri/tauri.release.conf.json
+          args: ${{ matrix.args }} ${{ needs.validate.outputs.oss_enabled == 'true' && '--config src-tauri/tauri.release.conf.json' || '' }}
 
       - name: Verify macOS Developer ID signature and notarization ticket
         if: matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true'
@@ -515,7 +540,7 @@ jobs:
             src-tauri/target/**/release/bundle/rpm/*.rpm
 
   publish:
-    name: Publish and verify Aliyun OSS release
+    name: Publish GitHub Release and optional Aliyun updater
     needs: [validate, build]
     runs-on: ubuntu-22.04
     env:
@@ -543,6 +568,7 @@ jobs:
           path: release-input
 
       - name: Build static updater manifest and checksums
+        if: needs.validate.outputs.oss_enabled == 'true'
         env:
           RELEASE_NOTES: ""
         run: |
@@ -554,6 +580,7 @@ jobs:
             --base-url "$OXIDE_RELEASE_BASE_URL"
 
       - name: Install pinned minisign
+        if: needs.validate.outputs.oss_enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -569,6 +596,7 @@ jobs:
             /usr/local/bin/minisign
 
       - name: Verify Tauri updater signatures locally
+        if: needs.validate.outputs.oss_enabled == 'true'
         env:
           OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
         shell: bash
@@ -589,6 +617,7 @@ jobs:
           test "$SIGNATURE_COUNT" -gt 0
 
       - name: Install pinned ossutil
+        if: needs.validate.outputs.oss_enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -605,6 +634,7 @@ jobs:
           ossutil version
 
       - name: Upload immutable version assets
+        if: needs.validate.outputs.oss_enabled == 'true'
         env:
           OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
@@ -629,12 +659,14 @@ jobs:
           ossutil stat "$DESTINATION/$RELEASE_TAG/release.json"
 
       - name: Verify immutable version assets from the public endpoint
+        if: needs.validate.outputs.oss_enabled == 'true'
         env:
           OXIDE_VERIFY_VERSIONED_ASSETS: "1"
           OXIDE_EXPECTED_RELEASE_INDEX: release-output/${{ needs.validate.outputs.tag }}/release.json
         run: node scripts/verify-oss-release.mjs
 
       - name: Publish latest manifest after immutable assets pass verification
+        if: needs.validate.outputs.oss_enabled == 'true'
         env:
           OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
@@ -653,6 +685,7 @@ jobs:
           ossutil stat "$DESTINATION/latest.json"
 
       - name: Verify public update downloads use Aliyun OSS
+        if: needs.validate.outputs.oss_enabled == 'true'
         run: node scripts/verify-oss-release.mjs
 
       - name: Publish GitHub Release assets
@@ -660,10 +693,11 @@ jobs:
         with:
           name: OxideStudio ${{ env.RELEASE_TAG }}
           generate_release_notes: true
-          files: release-output/${{ env.RELEASE_TAG }}/**/*
+          files: release-input/**/*
           fail_on_unmatched_files: true
 
       - name: Preserve release index
+        if: needs.validate.outputs.oss_enabled == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: oxide-studio-${{ needs.validate.outputs.tag }}-release-index
