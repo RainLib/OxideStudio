@@ -28,11 +28,12 @@ database target until its relevant queue entries pass.
   Project DDL, DBML, metadata JSON and diagram-draft sentinel is rejected by
   the migration execution boundary.
 - The complete bundled LSP Rust suite passed after adding DBX semantic row
-  source coverage: 102 library tests plus all integration/doc targets. The
+  source and catalog coverage: 105 library tests plus all integration/doc targets. The
   end-to-end process test now covers table functions, `WITH ORDINALITY`,
   positional correlation-column merging, comma-separated sources after JOIN,
-  SQL Server table hints, LATERAL/APPLY row sources and qualified outer aliases
-  inside correlated subqueries. No live metadata source was used.
+  SQL Server table hints, LATERAL/APPLY row sources, qualified outer aliases
+  inside correlated subqueries, four-part SQL Server names, `database..table`
+  and cross-catalog isolation. No live metadata source was used.
 - The extracted stable Monaco/LSP provider coordinator passed registration,
   disposal and stale-document isolation tests together with the existing
   document/execution/transaction/file controllers (20 focused tests total),
@@ -153,8 +154,7 @@ explicit deferred validation task rather than an implicit release check.
   process-health summary after an unexpected sidecar exit without exposing
   connection names, URLs, stderr, SQL, or credentials.
 - Run the remaining SQL semantic corpus across the bundled LSP and Monaco
-  fallback for three/four-part catalog qualification, SQL Server
-  `database..table`, alias/name collisions, dialect quoting, and INSERT value
+  fallback for alias/name collisions, dialect quoting, and INSERT value
   hints. The bundled process contract already covers CTE/derived shadowing,
   table functions, `WITH ORDINALITY`, positional correlation columns, JOIN
   followed by comma sources, and SQL Server `(NOLOCK)`; repeat those cases
