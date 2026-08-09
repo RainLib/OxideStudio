@@ -22,6 +22,7 @@ import { cn } from "@/lib/utils";
 import { isProjectDdlSnapshot } from "@/features/schema-diff/model/projectDdlSnapshot";
 import { isSchemaDbmlSnapshot } from "@/features/schema-diff/model/schemaDbmlImport";
 import { isChartDbMetadataSnapshot } from "@/features/schema-diff/model/chartDbMetadataImport";
+import { isSchemaDiagramDraftSnapshot } from "@/features/schema-diff/model/schemaDiagramDraft";
 import { schemaService } from "@/services/tauri/schema.service";
 import type {
   SchemaChange,
@@ -146,9 +147,15 @@ export function SchemaDiffView() {
   const isOfflineProjectDdlSource = isProjectDdlSnapshot(source);
   const isOfflineDbmlSource = isSchemaDbmlSnapshot(source);
   const isOfflineMetadataSource = isChartDbMetadataSnapshot(source);
+  const isOfflineDiagramDraftSource = isSchemaDiagramDraftSnapshot(source);
   const isOfflineSource =
-    isOfflineProjectDdlSource || isOfflineDbmlSource || isOfflineMetadataSource;
-  const offlineSourceLabel = isOfflineDbmlSource
+    isOfflineProjectDdlSource ||
+    isOfflineDbmlSource ||
+    isOfflineMetadataSource ||
+    isOfflineDiagramDraftSource;
+  const offlineSourceLabel = isOfflineDiagramDraftSource
+    ? "Diagram draft"
+    : isOfflineDbmlSource
     ? "DBML"
     : isOfflineMetadataSource
       ? "Metadata JSON"

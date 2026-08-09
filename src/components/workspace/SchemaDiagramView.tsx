@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -66,6 +68,13 @@ const MAX_ZOOM = 1.6;
 const VIEWPORT_OVERSCAN = 320;
 const VIEWPORT_BUCKET = 160;
 const EMPTY_AREA_HISTORY = createSchemaDiagramAreaHistory();
+const loadSchemaStructuredDraftDialog = () =>
+  import("./SchemaStructuredDraftDialog");
+const SchemaStructuredDraftDialog = lazy(() =>
+  loadSchemaStructuredDraftDialog().then((module) => ({
+    default: module.SchemaStructuredDraftDialog,
+  })),
+);
 
 type DiagramViewportWindow = {
   x: number;
@@ -97,6 +106,7 @@ export function SchemaDiagramView() {
   const [exportBackground, setExportBackground] = useState<"dark" | "light" | "transparent">("dark");
   const [isRasterizing, setIsRasterizing] = useState(false);
   const [dbmlDraftOpen, setDbmlDraftOpen] = useState(false);
+  const [structuredDraftOpen, setStructuredDraftOpen] = useState(false);
   const viewportRef = useRef<HTMLDivElement>(null);
   const viewportFrameRef = useRef<number | null>(null);
   const [viewportWindow, setViewportWindow] =
@@ -655,10 +665,20 @@ export function SchemaDiagramView() {
         <button
           type="button"
           className="wb-text-button h-6 gap-1.5 px-2 text-[9px]"
+          onClick={() => setStructuredDraftOpen(true)}
+          onPointerEnter={() => void loadSchemaStructuredDraftDialog()}
+          onFocus={() => void loadSchemaStructuredDraftDialog()}
+          title="Edit tables, columns, indexes and constraints in a local review-only draft"
+        >
+          <Table2 size={10} /> Structure
+        </button>
+        <button
+          type="button"
+          className="wb-text-button h-6 gap-1.5 px-2 text-[9px]"
           onClick={() => setDbmlDraftOpen(true)}
           title="Edit a local DBML draft and open a review-only schema diff"
         >
-          <GitCompareArrows size={10} /> Draft
+          <GitCompareArrows size={10} /> DBML Draft
         </button>
         <button
           type="button"
@@ -927,6 +947,16 @@ export function SchemaDiagramView() {
         snapshot={snapshot}
         onClose={() => setDbmlDraftOpen(false)}
       />
+      {structuredDraftOpen && (
+        <Suspense fallback={null}>
+          <SchemaStructuredDraftDialog
+            open
+            snapshot={snapshot}
+            initialRelationName={selectedName}
+            onClose={() => setStructuredDraftOpen(false)}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

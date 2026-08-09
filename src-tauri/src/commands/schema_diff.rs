@@ -24,6 +24,15 @@ const SNAPSHOT_METADATA_CONCURRENCY: usize = 6;
 const MIGRATION_JOURNAL_PARENT_ID: &str = "schema-migration-journal-v1";
 const MIGRATION_JOURNAL_KIND: &str = "SCHEMA_MIGRATION_JOURNAL";
 const OFFLINE_PROJECT_DDL_REVIEW_WARNING: &str = "OFFLINE_PROJECT_DDL_REVIEW_ONLY";
+const OFFLINE_DBML_REVIEW_WARNING: &str = "OFFLINE_DBML_REVIEW_ONLY";
+const OFFLINE_METADATA_REVIEW_WARNING: &str = "OFFLINE_METADATA_JSON_REVIEW_ONLY";
+const OFFLINE_DIAGRAM_DRAFT_REVIEW_WARNING: &str = "OFFLINE_DIAGRAM_DRAFT_REVIEW_ONLY";
+const OFFLINE_REVIEW_WARNINGS: [&str; 4] = [
+    OFFLINE_PROJECT_DDL_REVIEW_WARNING,
+    OFFLINE_DBML_REVIEW_WARNING,
+    OFFLINE_METADATA_REVIEW_WARNING,
+    OFFLINE_DIAGRAM_DRAFT_REVIEW_WARNING,
+];
 static ACTIVE_MIGRATION_JOURNALS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize)]
@@ -945,20 +954,19 @@ fn verify_snapshot_integrity(snapshot: SchemaSnapshot) -> Result<SchemaSnapshot,
     Ok(finalized)
 }
 
-/// Project DDL baselines are intentionally partial, review-only descriptions.
-/// Check the marker before fingerprint verification so a future source format
-/// cannot accidentally make this execution path available without an explicit
-/// backend contract change.
+/// Offline baselines are intentionally review-only descriptions. Check every
+/// registered marker before fingerprint verification so a frontend guard or a
+/// future source format cannot accidentally expose migration execution.
 fn ensure_snapshot_is_executable_source(
     snapshot: SchemaSnapshot,
 ) -> Result<SchemaSnapshot, String> {
     if snapshot
         .warnings
         .iter()
-        .any(|warning| warning == OFFLINE_PROJECT_DDL_REVIEW_WARNING)
+        .any(|warning| OFFLINE_REVIEW_WARNINGS.contains(&warning.as_str()))
     {
         return Err(
-            "Project DDL baselines are review-only. Capture a live schema snapshot before applying a migration."
+            "Offline schema baselines are review-only. Capture a live schema snapshot before applying a migration."
                 .to_string(),
         );
     }
@@ -1456,5 +1464,31 @@ mod tests {
         let error = ensure_snapshot_is_executable_source(snapshot).unwrap_err();
 
         assert!(error.contains("review-only"));
+    }
+
+    #[test]
+    fn every_offline_baseline_marker_is_rejected_by_the_backend() {
+        for warning in OFFLINE_REVIEW_WARNINGS {
+            let snapshot = SchemaSnapshot {
+                version: SCHEMA_SNAPSHOT_VERSION,
+                id: format!("offline-{warning}"),
+                fingerprint: "offline-1234".to_string(),
+                project_id: "project-1".to_string(),
+                connection_id: "connection-1".to_string(),
+                connection_name: "Production".to_string(),
+                driver: "postgres".to_string(),
+                database_name: Some("app".to_string()),
+                schema_name: "public".to_string(),
+                captured_at: 1,
+                relations: Vec::new(),
+                routines: Vec::new(),
+                schema_objects: Vec::new(),
+                warnings: vec![warning.to_string()],
+            };
+
+            assert!(ensure_snapshot_is_executable_source(snapshot)
+                .unwrap_err()
+                .contains("review-only"));
+        }
     }
 }

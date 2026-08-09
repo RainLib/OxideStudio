@@ -22,6 +22,11 @@ database target until its relevant queue entries pass.
 - The streaming XLSX writer unit suite passed, including a generated workbook
   reopened through `calamine`, XML escaping, boolean cells, Excel column limits
   and precision-safe integers above 15 digits.
+- Structured diagram draft model tests passed for relation/column/index/FK
+  editing, reference-safe renames, dependent cleanup, structural-sharing
+  undo/redo and the offline snapshot marker. A Rust unit test confirms every
+  Project DDL, DBML, metadata JSON and diagram-draft sentinel is rejected by
+  the migration execution boundary.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an
@@ -360,6 +365,22 @@ explicit deferred validation task rather than an implicit release check.
   undo/redo, warning bounds and desired-draft → captured-snapshot diff direction.
   Offline plans must disable both Apply and Open in console while retaining a
   readable/copyable review artifact.
+
+## Structured diagram draft
+
+- Exercise relation create/rename/drop, column create/edit/drop, index, FK and
+  CHECK editing with quoted/non-ASCII identifiers, composite relationships,
+  self references, name collisions and more than 100 undo/redo operations.
+- Confirm relation and column renames update every source/index/constraint and
+  inbound reference, while removals never leave dangling metadata in the
+  review snapshot.
+- Compare a structured draft against its captured snapshot and verify the
+  source is visibly review-only. Apply and Open in console must stay disabled,
+  and a direct backend execution request carrying any registered offline
+  sentinel must fail before fingerprint, preflight or database access.
+- Profile opening/searching the lazily loaded editor with 1k/5k/10k relations.
+  The relation list is capped at 500 visible rows and edit history must retain
+  structural sharing rather than deep-copying the entire schema.
 
 ## ChartDB metadata JSON import
 
