@@ -39,6 +39,11 @@ database target until its relevant queue entries pass.
   document/execution/transaction/file controllers (20 focused tests total),
   followed by a strict frontend production build. Live provider/metadata
   combinations remain deferred below.
+- The extracted metadata + LSP hover coordinator passed registration,
+  disposal, active response and stale connection-owner tests. It now reads
+  refreshed schema metadata without provider re-registration and rejects late
+  results after metadata revision, owner or model-version changes. A strict
+  frontend production build and bundle-cycle verification passed afterward.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an

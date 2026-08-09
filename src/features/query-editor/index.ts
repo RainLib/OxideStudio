@@ -117,6 +117,12 @@ export {
   type LspCoreProviderCoordinatorOptions,
 } from "./hooks/useLspCoreProviderCoordinator";
 export {
+  registerLspHoverProvider,
+  useLspHoverProviderCoordinator,
+  type LspHoverProviderCoordinatorOptions,
+  type LspHoverProviderRuntime,
+} from "./hooks/useLspHoverProviderCoordinator";
+export {
   resolveQueryExecutionTarget,
   type QueryExecutionKind,
   type QueryExecutionMode,

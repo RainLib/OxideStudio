@@ -13,7 +13,7 @@
 
 - OxideStudio 的数据库产品目录、真实连接、SQL LSP、表数据流式导出和迁移执行安全边界已超过 ChartDB。
 - ChartDB 的优势集中在可编辑 ER 图、DBML 即时编译/差异预览、结构导入导出、跨方言转换告警、画布历史和区域组织。
-- SQL 智能提示的协议、snippet、函数参数、JOIN/外键推导和主要作用域 fallback 已补齐；事务、query/explain execution、文件 workflow、LSP document lifecycle 与稳定协议 provider coordinator 已从 `QueryEditor.tsx` 移出，剩余重点是扩大多方言语义 corpus 并迁出 metadata-sensitive completion/hover 与 view lifecycle。
+- SQL 智能提示的协议、snippet、函数参数、JOIN/外键推导和主要作用域 fallback 已补齐；事务、query/explain execution、文件 workflow、LSP document lifecycle、稳定协议 provider 与 metadata hover coordinator 已从 `QueryEditor.tsx` 移出，剩余重点是迁出 completion 与 view lifecycle。
 - 迁移侧最大的可迁移逻辑是“确定性类型映射 + 不支持特性清单”，而不是 ChartDB 的 AI 生成兜底。Oxide 的可执行迁移必须继续受 capability、预检、确认摘要和 journal 约束。
 
 ## 1. SQL Editor、LSP 与智能提示
@@ -28,7 +28,7 @@
 | L06 | 本阶段增强 | 基于 FK、别名、CTE 和子查询作用域生成 JOIN/字段候选 | DBX `apps/desktop/src/lib/sql/semantic/completion.ts`、`apps/desktop/src/lib/sql/semantic/model.ts:308-427`、`apps/desktop/src/lib/sql/sqlCompletion.ts:2909` | `sqlJoinCompletion.ts` 已按外键生成完整 `JOIN … ON …`；缓存 fallback 识别 correlated outer alias、derived subquery、LATERAL/APPLY 与显式 table-function output columns。Bundled LSP 的 local relation overlay 现原生覆盖 CTE/derived/table-function/correlation scope、`WITH ORDINALITY`、partial positional rename、JOIN 后逗号 source、LATERAL/APPLY 派生表与函数；相关子查询只按需解析被限定的外层 alias，未限定列不泄漏。前端传入的 `catalog` 现由 Rust Schema 保留，三/四段限定、SQL Server `database..table` 和跨 catalog 同名表按 catalog + schema + table 消歧；table hint 和真实 `lateral` 表名不会误判。单一 SQL-noise 缓冲区和 512 KiB 上限约束按键路径 |
 | L07 | 本阶段增强 | 补全触发与排序应避免“空列表、重复候选、过期响应覆盖新输入” | ChartDB trigger 字符位于 `src/components/code-snippet/dbml/dbml-completion-provider.ts:19`；DBX `lib/sql/sqlCompletionTriggerPolicy.ts`、`lib/common/pinyin.ts`、`lib/common/completionMatch.ts` | Oxide 已有请求 generation、model version、cancellation 检查和 overload-aware 去重；现在提供智能位置/名称前缀/仅手动三种触发模式，LSP 请求前门控；live LSP 与缓存候选合并，Unicode、拼音首字母、camel/fuzzy 排序覆盖对象/列/FK JOIN；`sqlCompletionTelemetry.ts` 只记录无内容的触发/延迟/结果原因 |
 | L08 | 本阶段增强 | SQL/DBML 编辑差异预览的细粒度防抖与可撤销应用 | ChartDB `src/pages/editor-page/side-panel/dbml-section/table-dbml/table-dbml.tsx:265` 使用 debounce，`:284` 应用，`:306` 撤销 | Diagram 的 DBML Draft 对当前 snapshot 生成文本，250ms 防抖解析 relation/warning，确认后只调用 snapshot compare 打开只读 diff；offline plan 同时禁用 Apply 和 Open in console。textarea 原生 undo 可用；仍缺逐项接受和结构化 schema CRUD history |
-| L09 | 本阶段增强 | `QueryEditor.tsx` 仍承载过多 provider 和视图生命周期 | DBX 将 semantic、presentation、insertion、execution target、keymap 分文件；ChartDB 将 completion manager 单独封装 | completion 已分层，事务、执行和文件 workflow 已有独立 controller；LSP virtual-document lifecycle 独立管理 owner/version/text/FIFO/session。稳定的 definition/reference/format/signature/rename/code-action/symbol/folding/selection/semantic-token/inlay providers 现由 `useLspCoreProviderCoordinator` 一次注册和统一销毁，metadata/schema/snippet 刷新不再重建它们；rename prepare/apply 均校验当前 document owner。本阶段主组件再减少 459 行，累计约 1,049 行。仍需迁出 metadata-sensitive completion/hover 与剩余 view lifecycle |
+| L09 | 本阶段增强 | `QueryEditor.tsx` 仍承载过多 provider 和视图生命周期 | DBX 将 semantic、presentation、insertion、execution target、keymap 分文件；ChartDB 将 completion manager 单独封装 | completion 已分层，事务、执行和文件 workflow 已有独立 controller；LSP virtual-document lifecycle 独立管理 owner/version/text/FIFO/session。稳定协议 providers 由 `useLspCoreProviderCoordinator` 统一拥有；metadata + LSP hover 现由 `useLspHoverProviderCoordinator` 注册一次并通过 runtime ref 读取最新连接/schema，metadata revision、连接 owner 或 model version 变化后丢弃迟到结果。rename prepare/apply 均校验当前 document owner。六阶段累计从 `QueryEditor.tsx` 移出约 1,126 行。仍需迁出 completion 与剩余 view lifecycle |
 
 ## 2. 数据库结构、导入与迁移
 
@@ -93,7 +93,7 @@
 - [x] 迁出稳定协议 provider coordinator，并为统一注册/销毁、跨文档调用隔离与 rename 二次 gate 增加测试。
 - [x] 扩大 outer correlation、LATERAL/APPLY 多方言语义 corpus，并保持内外 scope 隔离。
 - [x] 扩大三/四段 catalog、SQL Server `database..table` 多方言语义 corpus，并阻止跨 catalog 同名 metadata 泄漏。
-- [ ] 继续迁出 metadata-sensitive completion/hover 与 QueryEditor view lifecycle。
+- [ ] 继续迁出 metadata-sensitive completion 与 QueryEditor view lifecycle。
 
 ### 阶段 B：迁移与结构格式
 

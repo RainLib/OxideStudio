@@ -102,12 +102,6 @@ import {
   cachedSqlRelationForFieldCompletion,
   cachedSqlRelationTargetPrefix,
 } from "@/lib/queryEditorCachedCompletion";
-import {
-  buildQueryEditorTableHoverMarkdown,
-  findQueryEditorHoverTable,
-  isSqlRelationIdentifierContext,
-  sqlIdentifierAtColumn,
-} from "@/lib/queryEditorTableHover";
 import { ProjectFileImagePreview } from "./ProjectFileImagePreview";
 import { openProjectFileInEditor } from "@/lib/projectFileOpen";
 import {
@@ -190,10 +184,10 @@ import {
   sqlCompletionIdentifierPrefix,
   sqlCompletionTriggerDecision,
   syncLspModelBeforeCompletion,
-  toMonacoRange,
   unquoteSqlIdentifierSelection,
   useConsoleFileController,
   useLspCoreProviderCoordinator,
+  useLspHoverProviderCoordinator,
   useLspDocumentLifecycle,
   useQueryExecutionController,
   useQueryTransactionController,
@@ -2003,105 +1997,11 @@ export function QueryEditor({
       }),
     );
 
-    const hoverDisposables = providerLanguages.map((language) =>
-      monaco.languages.registerHoverProvider(language, {
-        provideHover: async (model: any, position: any) => {
-          const uri = model.uri.toString();
-          if (!isCurrentLspModelUri(uri)) return null;
-          const hoverModelVersion = model.getVersionId();
-          try {
-            const identity = extractLspDocumentIdentity(uri);
-            await syncLspModelBeforeCompletion({
-              uri,
-              model,
-              languageId:
-                identity?.driver?.toLowerCase() === driver.toLowerCase()
-                  ? documentLanguageId
-                  : identity?.driver
-                    ? lspLanguageId(identity.driver)
-                    : "sql",
-              client: lspClient,
-              openedDocuments: openedDocumentsRef.current,
-              documentVersions: documentVersionsRef.current,
-              documentTexts: documentTextsRef.current,
-            });
-          } catch {
-            // Keep the cached server hover available during a transient sync
-            // failure; metadata hover below remains independent and cached.
-          }
-          if (model.getVersionId() !== hoverModelVersion) return null;
-          const line = model.getLineContent(position.lineNumber);
-          const identifier = sqlIdentifierAtColumn(line, position.column);
-          const relation =
-            effectiveConnectionId &&
-            capabilities.supportsTableBrowsing &&
-            isSqlRelationIdentifierContext(line, position.column)
-              ? findQueryEditorHoverTable(schemaTables, identifier)
-              : null;
-          const hoverSchema = activeTab?.targetSchema || currentSchema;
-          const hoverConnectionId = effectiveConnectionId;
-          const modelVersion = model.getVersionId();
-          const [lspHover, metadata] = await Promise.all([
-            lspClient
-              .getHover(uri, position.lineNumber - 1, position.column - 1)
-              .catch(() => null),
-            relation && hoverSchema && hoverConnectionId
-              ? loadTableMetadata({
-                  projectId: activeProjectId || undefined,
-                  connectionId: hoverConnectionId,
-                  driver,
-                  databaseName: activeTab?.databaseName || undefined,
-                  schema: hoverSchema,
-                  table: relation.name,
-                  includeIndexes: true,
-                  includeConstraints: false,
-                }).catch(() => null)
-              : Promise.resolve(null),
-          ]);
-          if (model.getVersionId() !== modelVersion) return null;
-
-          const contents = [
-            ...(metadata
-              ? [
-                  {
-                    value: buildQueryEditorTableHoverMarkdown({
-                      schema: hoverSchema,
-                      table: { name: relation!.name, tableType: relation!.type },
-                      columns: metadata.columns,
-                      indexes: metadata.indexes,
-                    }),
-                  },
-                ]
-              : []),
-            ...(lspHover ? [{ value: lspHover.contents }] : []),
-          ];
-          if (contents.length === 0) return null;
-          const word = model.getWordAtPosition(position);
-          const fallbackRange = word
-            ? new monaco.Range(
-                position.lineNumber,
-                word.startColumn,
-                position.lineNumber,
-                word.endColumn,
-              )
-            : undefined;
-          return {
-            contents,
-            range: lspHover?.range
-              ? toMonacoRange(monaco, lspHover.range)
-              : fallbackRange,
-          };
-        },
-      }),
-    );
-
     return () => {
-      console.log("[QueryEditor] Disposing completion and hover providers");
-      [
-        usageCommandDisposable,
-        ...completionDisposables,
-        ...hoverDisposables,
-      ].forEach((disposable) => disposable.dispose());
+      console.log("[QueryEditor] Disposing completion providers");
+      [usageCommandDisposable, ...completionDisposables].forEach(
+        (disposable) => disposable.dispose(),
+      );
     };
   }, [
     isActivePane,
@@ -2137,6 +2037,28 @@ export function QueryEditor({
     isActivePane,
     lspClient,
     monaco,
+  });
+
+  useLspHoverProviderCoordinator({
+    activeProjectId,
+    canUseLsp,
+    currentSchema,
+    databaseName: activeTab?.databaseName,
+    documentLanguageId,
+    documentUri,
+    documentTextsRef,
+    documentVersionsRef,
+    driver,
+    editorLanguageId,
+    effectiveConnectionId,
+    isActivePane,
+    lspClient,
+    metadataRevision: metadataVersion,
+    monaco,
+    openedDocumentsRef,
+    schemaTables,
+    supportsTableBrowsing: capabilities.supportsTableBrowsing,
+    targetSchema: activeTab?.targetSchema,
   });
 
   useEffect(() => {
