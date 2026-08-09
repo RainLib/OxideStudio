@@ -27,6 +27,7 @@ import { schemaService } from "@/services/tauri/schema.service";
 import type {
   SchemaChange,
   SchemaChangeRisk,
+  SchemaConversionFeatureKind,
   SchemaMigrationJournalEntry,
   SchemaMigrationStatus,
 } from "@/services/tauri/types";
@@ -51,6 +52,15 @@ const riskStyle: Record<SchemaChangeRisk, { rail: string; text: string; label: s
     text: "text-red-300",
     label: "Destructive",
   },
+};
+
+const conversionFeatureLabels: Record<SchemaConversionFeatureKind, string> = {
+  type: "Type",
+  array: "Array",
+  default: "Default",
+  index: "Index",
+  customType: "Custom type",
+  schema: "Schema",
 };
 
 export function SchemaDiffView() {
@@ -575,11 +585,11 @@ export function SchemaDiffView() {
               <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-sky-200 marker:hidden">
                 <GitCompareArrows size={11} />
                 <span className="font-medium">
-                  {conversionIssues.length} structured type conversion review
+                  {conversionIssues.length} structured conversion issue
                   {conversionIssues.length === 1 ? "" : "s"}
                 </span>
                 <span className="ml-auto text-sky-200/65 group-open:hidden">
-                  Expand mappings
+                  Expand details
                 </span>
                 <span className="ml-auto hidden text-sky-200/65 group-open:inline">
                   Collapse mappings
@@ -591,10 +601,15 @@ export function SchemaDiffView() {
                     key={`${issue.relationName}:${issue.columnName}:${index}`}
                     className="grid grid-cols-[minmax(120px,0.65fr)_minmax(160px,0.8fr)_minmax(260px,1.5fr)] gap-3 border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2 last:border-b-0"
                   >
-                    <span className="truncate font-mono text-sky-100">
-                      {issue.relationName === "*"
-                        ? "All captured columns"
-                        : `${issue.relationName}.${issue.columnName}`}
+                    <span className="min-w-0">
+                      <span className="mb-1 inline-flex rounded-[3px] border border-sky-300/20 px-1 py-0.5 text-[7px] text-sky-200/75">
+                        {conversionFeatureLabels[issue.featureKind || "type"]}
+                      </span>
+                      <span className="block truncate font-mono text-sky-100">
+                        {issue.relationName === "*"
+                          ? "All captured columns"
+                          : `${issue.relationName}.${issue.columnName}`}
+                      </span>
                     </span>
                     <span className="truncate font-mono text-sky-200/75">
                       {issue.sourceDataType} → {issue.targetDataType || "unmapped"}

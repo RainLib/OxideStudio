@@ -1150,7 +1150,17 @@ export type SchemaConversionCompatibility =
   | "review"
   | "unsupported";
 
+export type SchemaConversionFeatureKind =
+  | "type"
+  | "array"
+  | "default"
+  | "index"
+  | "customType"
+  | "schema";
+
 export interface SchemaConversionIssue {
+  /** Missing on persisted plans created before conversion issues were categorized. */
+  featureKind?: SchemaConversionFeatureKind;
   relationName: string;
   columnName: string;
   sourceDataType: string;

@@ -204,9 +204,23 @@ pub enum SchemaConversionCompatibility {
     Unsupported,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SchemaConversionFeatureKind {
+    #[default]
+    Type,
+    Array,
+    Default,
+    Index,
+    CustomType,
+    Schema,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaConversionIssue {
+    #[serde(default)]
+    pub feature_kind: SchemaConversionFeatureKind,
     pub relation_name: String,
     pub column_name: String,
     pub source_data_type: String,
@@ -532,17 +546,12 @@ fn postgres_conversion_note(data_type: &str, target_driver: &str) -> Option<(Str
     let is_array = normalized.ends_with("[]") || normalized.starts_with("array<");
     let base = normalized_type_base(&normalized);
     if is_array {
-        let target_type = if target_driver == "mysql" {
-            "JSON"
+        let mapping = if target_driver == "mysql" {
+            "JSON; array operators and indexes require manual redesign"
         } else {
-            "NVARCHAR(MAX) JSON"
+            "NVARCHAR(MAX); store as a JSON array and redesign array operators and indexes"
         };
-        return Some((
-            format!(
-                "{data_type} -> {target_type}; array operators and indexes require manual redesign"
-            ),
-            true,
-        ));
+        return Some((format!("{data_type} -> {mapping}"), true));
     }
     let mapping = match target_driver {
         "mysql" => match base.as_str() {
@@ -550,6 +559,11 @@ fn postgres_conversion_note(data_type: &str, target_driver: &str) -> Option<(Str
             "jsonb" => ("JSON; GIN/operator semantics are not preserved", true),
             "bytea" => ("LONGBLOB", false),
             "boolean" | "bool" => ("BOOLEAN/TINYINT(1)", false),
+            "money" => (
+                "DECIMAL(19,4); verify currency, locale, range, and rounding semantics",
+                true,
+            ),
+            "time with time zone" | "timetz" => ("TIME; timezone offset is not preserved", true),
             "timestamp with time zone" | "timestamptz" => (
                 "DATETIME(6); normalize timezone values before transfer",
                 true,
@@ -559,6 +573,25 @@ fn postgres_conversion_note(data_type: &str, target_driver: &str) -> Option<(Str
                 true,
             ),
             "interval" => ("VARCHAR; interval arithmetic is not preserved", true),
+            "varbit" | "bit varying" => (
+                "BIT(64); verify maximum length and bit-string behavior",
+                true,
+            ),
+            "line" => (
+                "LINESTRING; PostgreSQL infinite-line semantics are not preserved",
+                true,
+            ),
+            "circle" => ("POLYGON; circle geometry is approximated", true),
+            "tsvector" | "tsquery" => ("TEXT; redesign with MySQL full-text search", true),
+            "int4range" | "int8range" | "numrange" | "tsrange" | "tstzrange" | "daterange" => (
+                "JSON; range operators, bounds, and indexes are not preserved",
+                true,
+            ),
+            "xml" => (
+                "TEXT; XML validation and query semantics are not preserved",
+                true,
+            ),
+            "smallserial" => ("SMALLINT AUTO_INCREMENT; review sequence ownership", true),
             "serial" => ("INTEGER AUTO_INCREMENT; review sequence ownership", true),
             "bigserial" => ("BIGINT AUTO_INCREMENT; review sequence ownership", true),
             _ => return None,
@@ -571,6 +604,7 @@ fn postgres_conversion_note(data_type: &str, target_driver: &str) -> Option<(Str
             ),
             "bytea" => ("VARBINARY(MAX)", false),
             "boolean" | "bool" => ("BIT", false),
+            "time with time zone" | "timetz" => ("TIME; timezone offset is not preserved", true),
             "timestamp with time zone" | "timestamptz" => ("DATETIMEOFFSET", false),
             "timestamp without time zone" | "timestamp" => ("DATETIME2", false),
             "inet" | "cidr" | "macaddr" | "macaddr8" => (
@@ -578,6 +612,23 @@ fn postgres_conversion_note(data_type: &str, target_driver: &str) -> Option<(Str
                 true,
             ),
             "interval" => ("NVARCHAR; interval arithmetic is not preserved", true),
+            "varbit" | "bit varying" => (
+                "VARBINARY(64); verify bit length and ordering semantics",
+                true,
+            ),
+            "circle" => (
+                "GEOMETRY; represent and validate the radius explicitly",
+                true,
+            ),
+            "tsvector" | "tsquery" => (
+                "NVARCHAR(MAX); redesign with SQL Server Full-Text Search",
+                true,
+            ),
+            "int4range" | "int8range" | "numrange" | "tsrange" | "tstzrange" | "daterange" => (
+                "NVARCHAR(MAX); prefer explicit lower/upper bound columns",
+                true,
+            ),
+            "smallserial" => ("SMALLINT IDENTITY; review sequence ownership", true),
             "serial" => ("INT IDENTITY; review sequence ownership", true),
             "bigserial" => ("BIGINT IDENTITY; review sequence ownership", true),
             _ => return None,
@@ -587,18 +638,72 @@ fn postgres_conversion_note(data_type: &str, target_driver: &str) -> Option<(Str
     Some((format!("{data_type} -> {}", mapping.0), mapping.1))
 }
 
-fn postgres_default_requires_cross_driver_review(default_value: &str) -> bool {
+fn postgres_default_conversion_note(
+    default_value: &str,
+    target_driver: &str,
+) -> Option<(Option<String>, String, bool)> {
     let normalized = default_value.trim().to_ascii_lowercase();
-    normalized.contains("::")
-        || normalized.contains("nextval(")
-        || normalized.contains("currval(")
+    if normalized.contains("nextval(") {
+        return Some((
+            Some(if target_driver == "mysql" {
+                "AUTO_INCREMENT".to_string()
+            } else {
+                "IDENTITY(1,1)".to_string()
+            }),
+            "Sequence ownership, start value, increment, and current value require explicit target review."
+                .to_string(),
+            true,
+        ));
+    }
+    if normalized.contains("gen_random_uuid(") || normalized.contains("uuid_generate_") {
+        return Some((
+            Some(if target_driver == "mysql" {
+                "UUID()".to_string()
+            } else {
+                "NEWID()".to_string()
+            }),
+            "Use the target-native UUID generator and verify ordering/index expectations."
+                .to_string(),
+            false,
+        ));
+    }
+    if normalized.contains("array[") || normalized == "'{}'" || normalized == "'{}'::text[]" {
+        return Some((
+            Some(if target_driver == "mysql" {
+                "JSON_ARRAY()".to_string()
+            } else {
+                "N'[]'".to_string()
+            }),
+            "Array defaults require a target JSON representation and value-shape validation."
+                .to_string(),
+            true,
+        ));
+    }
+    if normalized.contains("currval(")
         || normalized.contains("setval(")
-        || normalized.contains("gen_random_uuid(")
-        || normalized.contains("uuid_generate_")
         || normalized.contains("current_setting(")
+    {
+        return Some((
+            None,
+            "PostgreSQL session or sequence state has no context-free target default.".to_string(),
+            true,
+        ));
+    }
+    if normalized.contains("::") {
+        return Some((
+            None,
+            "PostgreSQL cast syntax must be removed or replaced with a target-owned expression."
+                .to_string(),
+            true,
+        ));
+    }
+    None
 }
 
-fn postgres_index_requires_cross_driver_review(index: &IndexInfo) -> bool {
+fn postgres_index_conversion_note(
+    index: &IndexInfo,
+    target_driver: &str,
+) -> Option<(Option<String>, String, bool)> {
     let index_type = index
         .index_type
         .as_deref()
@@ -618,7 +723,54 @@ fn postgres_index_requires_cross_driver_review(index: &IndexInfo) -> bool {
             || column.contains("::")
             || column.contains(' ')
     });
-    special_method || partial || expression
+    if partial || expression {
+        return Some((
+            None,
+            "Partial or expression index predicates require a target-owned equivalent.".to_string(),
+            true,
+        ));
+    }
+    if !special_method {
+        return None;
+    }
+    let (target_type, reason, blocks): (Option<&str>, String, bool) = match (
+        target_driver,
+        index_type.as_str(),
+    ) {
+        ("mysql", "hash") => (
+            Some("HASH"),
+            "HASH availability depends on the target storage engine.".to_string(),
+            true,
+        ),
+        ("mysql", "gin" | "gist" | "spgist" | "sp-gist" | "brin") => (
+            Some("BTREE"),
+            "PostgreSQL operator-class and access-method semantics are not preserved."
+                .to_string(),
+            true,
+        ),
+        ("sqlserver", "gist") => (
+            None,
+            "Choose SPATIAL for geometry-compatible data or NONCLUSTERED for scalar data."
+                .to_string(),
+            true,
+        ),
+        ("sqlserver", "hash" | "gin" | "spgist" | "sp-gist" | "brin") => (
+            Some("NONCLUSTERED"),
+            "PostgreSQL access-method semantics are not preserved; full-text or specialized indexes may be required."
+                .to_string(),
+            true,
+        ),
+        (_, unknown) => (
+            None,
+            if unknown.is_empty() {
+                "The source index access method is missing.".to_string()
+            } else {
+                format!("No deterministic target mapping exists for {unknown} indexes.")
+            },
+            true,
+        ),
+    };
+    Some((target_type.map(str::to_string), reason, blocks))
 }
 
 fn postgres_type_looks_custom(data_type: &str) -> bool {
@@ -639,6 +791,7 @@ fn cross_driver_conversion_issues(
     let target_driver = normalized_driver_family(&target.driver);
     if source_driver != "postgres" || !matches!(target_driver.as_str(), "mysql" | "sqlserver") {
         return vec![SchemaConversionIssue {
+            feature_kind: SchemaConversionFeatureKind::Schema,
             relation_name: "*".to_string(),
             column_name: "*".to_string(),
             source_data_type: "*".to_string(),
@@ -674,6 +827,13 @@ fn cross_driver_conversion_issues(
                     (false, false) => mapping_reason.to_string(),
                 };
                 issues.push(SchemaConversionIssue {
+                    feature_kind: if column.data_type.trim().ends_with("[]")
+                        || column.data_type.trim().to_ascii_lowercase().starts_with("array<")
+                    {
+                        SchemaConversionFeatureKind::Array
+                    } else {
+                        SchemaConversionFeatureKind::Type
+                    },
                     relation_name: relation.name.clone(),
                     column_name: column.name.clone(),
                     source_data_type: column.data_type.clone(),
@@ -699,6 +859,7 @@ fn cross_driver_conversion_issues(
                 });
             } else if postgres_type_looks_custom(&column.data_type) {
                 issues.push(SchemaConversionIssue {
+                    feature_kind: SchemaConversionFeatureKind::CustomType,
                     relation_name: relation.name.clone(),
                     column_name: column.name.clone(),
                     source_data_type: column.data_type.clone(),
@@ -716,44 +877,45 @@ fn cross_driver_conversion_issues(
                 });
             }
             if let Some(default_value) = column.default_value.as_deref() {
-                if postgres_default_requires_cross_driver_review(default_value) {
+                if let Some((target_default, reason, blocks_automatic_conversion)) =
+                    postgres_default_conversion_note(default_value, &target_driver)
+                {
                     issues.push(SchemaConversionIssue {
+                        feature_kind: SchemaConversionFeatureKind::Default,
                         relation_name: relation.name.clone(),
                         column_name: column.name.clone(),
                         source_data_type: format!("DEFAULT {default_value}"),
-                        target_data_type: None,
+                        target_data_type: target_default.map(|value| format!("DEFAULT {value}")),
                         compatibility: SchemaConversionCompatibility::Review,
-                        reason: format!(
-                            "PostgreSQL default expression requires a target-owned {} rewrite.",
-                            target.driver
-                        ),
+                        reason,
                         remediation: format!(
-                            "Replace the default with a semantically equivalent {} expression and verify generated values.",
+                            "Confirm the target-owned {} default and verify generated values before enabling DDL.",
                             target.driver
                         ),
-                        blocks_automatic_conversion: true,
+                        blocks_automatic_conversion,
                     });
                 }
             }
         }
         for index in &relation.indexes {
-            if postgres_index_requires_cross_driver_review(index) {
+            if let Some((target_index_type, reason, blocks_automatic_conversion)) =
+                postgres_index_conversion_note(index, &target_driver)
+            {
                 let index_type = index.index_type.as_deref().unwrap_or("btree");
                 issues.push(SchemaConversionIssue {
+                    feature_kind: SchemaConversionFeatureKind::Index,
                     relation_name: relation.name.clone(),
                     column_name: format!("index:{}", index.name),
                     source_data_type: format!("{} INDEX", index_type.to_ascii_uppercase()),
-                    target_data_type: None,
+                    target_data_type: target_index_type
+                        .map(|value| format!("{} INDEX", value.to_ascii_uppercase())),
                     compatibility: SchemaConversionCompatibility::Review,
-                    reason: format!(
-                        "PostgreSQL partial, expression, or specialized index semantics require a target-owned {} design.",
-                        target.driver
-                    ),
+                    reason,
                     remediation: format!(
                         "Choose an equivalent {} index strategy, or explicitly accept the indexing behavior loss.",
                         target.driver
                     ),
-                    blocks_automatic_conversion: true,
+                    blocks_automatic_conversion,
                 });
             }
         }
@@ -778,13 +940,14 @@ fn cross_driver_conversion_note(issue: &SchemaConversionIssue) -> String {
     if issue.relation_name == "*" && issue.column_name == "*" {
         return issue.reason.clone();
     }
+    let prefix = match issue.compatibility {
+        SchemaConversionCompatibility::Safe => "",
+        SchemaConversionCompatibility::Review => "LOSSY ",
+        SchemaConversionCompatibility::Unsupported => "UNSUPPORTED ",
+    };
     format!(
         "{}{}.{}: {} -> {}{}",
-        if issue.compatibility == SchemaConversionCompatibility::Review {
-            "LOSSY "
-        } else {
-            ""
-        },
+        prefix,
         issue.relation_name,
         issue.column_name,
         issue.source_data_type,
@@ -4021,24 +4184,79 @@ mod tests {
         assert!(plan.migration_sql.contains("uuid -> CHAR(36)"));
         assert!(plan.migration_sql.contains("LOSSY users.tags"));
         assert!(plan.migration_sql.contains("DATETIME(6)"));
-        assert!(plan
-            .conversion_issues
-            .iter()
-            .any(|issue| issue.source_data_type.starts_with("DEFAULT ")));
-        assert!(plan
-            .conversion_issues
-            .iter()
-            .any(|issue| issue.column_name == "index:users_tags_gin"));
+        assert!(plan.conversion_issues.iter().any(|issue| issue.feature_kind
+            == SchemaConversionFeatureKind::Default
+            && issue.source_data_type.starts_with("DEFAULT ")));
+        assert!(plan.conversion_issues.iter().any(|issue| issue.feature_kind
+            == SchemaConversionFeatureKind::Index
+            && issue.column_name == "index:users_tags_gin"
+            && issue.target_data_type.as_deref() == Some("BTREE INDEX")));
         assert!(plan
             .conversion_issues
             .iter()
             .any(|issue| issue.column_name == "status"
+                && issue.feature_kind == SchemaConversionFeatureKind::CustomType
                 && issue.compatibility == SchemaConversionCompatibility::Unsupported));
         assert!(plan.changes.iter().all(|change| change.sql.is_empty()));
         assert!(plan
             .warnings
             .iter()
             .any(|warning| warning.contains("target-side validation is required")));
+    }
+
+    #[test]
+    fn postgres_conversion_review_categorizes_extended_chartdb_mappings() {
+        let mut source = snapshot(
+            "desired",
+            vec![
+                column("event_id", "uuid", false),
+                column("active_window", "int4range", true),
+                column("search_vector", "tsvector", true),
+                column("meeting_time", "timetz", true),
+                column("sequence_id", "smallserial", false),
+                column("flags", "varbit", true),
+            ],
+        );
+        source.relations[0].columns[0].default_value = Some("gen_random_uuid()".to_string());
+        source.relations[0].indexes.push(IndexInfo {
+            name: "users_search_gist".to_string(),
+            columns: vec!["search_vector".to_string()],
+            is_unique: false,
+            is_primary: false,
+            index_type: Some("gist".to_string()),
+            definition: Some(
+                "CREATE INDEX users_search_gist ON users USING gist (search_vector)".to_string(),
+            ),
+        });
+        source = finalize_schema_snapshot(source).unwrap();
+        let mut target = snapshot(
+            "actual",
+            vec![column("event_id", "uniqueidentifier", false)],
+        );
+        target.driver = "sqlserver".to_string();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+
+        assert!(plan.conversion_issues.iter().any(|issue| {
+            issue.column_name == "active_window"
+                && issue.feature_kind == SchemaConversionFeatureKind::Type
+                && issue.target_data_type.as_deref() == Some("NVARCHAR(MAX)")
+                && issue.blocks_automatic_conversion
+        }));
+        assert!(plan.conversion_issues.iter().any(|issue| {
+            issue.column_name == "meeting_time" && issue.target_data_type.as_deref() == Some("TIME")
+        }));
+        assert!(plan.conversion_issues.iter().any(|issue| {
+            issue.column_name == "event_id"
+                && issue.feature_kind == SchemaConversionFeatureKind::Default
+                && issue.target_data_type.as_deref() == Some("DEFAULT NEWID()")
+                && !issue.blocks_automatic_conversion
+        }));
+        assert!(plan.conversion_issues.iter().any(|issue| {
+            issue.column_name == "index:users_search_gist"
+                && issue.feature_kind == SchemaConversionFeatureKind::Index
+                && issue.target_data_type.is_none()
+        }));
     }
 
     #[test]
