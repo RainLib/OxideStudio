@@ -108,6 +108,10 @@ export {
   type ConsoleFileOperation,
 } from "./hooks/useConsoleFileController";
 export {
+  useLspDocumentLifecycle,
+  type LspDocumentLifecycleClient,
+} from "./hooks/useLspDocumentLifecycle";
+export {
   resolveQueryExecutionTarget,
   type QueryExecutionKind,
   type QueryExecutionMode,

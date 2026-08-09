@@ -285,6 +285,10 @@ explicit deferred validation task rather than an implicit release check.
 - Observe the content-free 256-event telemetry window on real LSPs: latency,
   P95, fallback, empty, discarded and error reasons must update without storing
   SQL, identifiers, labels or completion payloads.
+- Delay a real LSP `didOpen`, then switch tab, connection, dialect package and
+  session before it returns. The late document must receive `didClose`, must
+  not reappear in the local version/text shadow, and a later document in the
+  new session must remain open. Closing a tab must also clear its diagnostics.
 
 ## Query transaction controller
 

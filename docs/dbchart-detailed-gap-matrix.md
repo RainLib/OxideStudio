@@ -13,14 +13,14 @@
 
 - OxideStudio 的数据库产品目录、真实连接、SQL LSP、表数据流式导出和迁移执行安全边界已超过 ChartDB。
 - ChartDB 的优势集中在可编辑 ER 图、DBML 即时编译/差异预览、结构导入导出、跨方言转换告警、画布历史和区域组织。
-- SQL 智能提示的协议、snippet、函数参数、JOIN/外键推导和主要作用域 fallback 已补齐；事务、query/explain execution、SQL 脚本审阅导入与 Console 文件 controller 已从 `QueryEditor.tsx` 移出，剩余重点是扩大多方言语义 corpus 并迁出 model/provider lifecycle。
+- SQL 智能提示的协议、snippet、函数参数、JOIN/外键推导和主要作用域 fallback 已补齐；事务、query/explain execution、文件 workflow 与 LSP document lifecycle 已从 `QueryEditor.tsx` 移出，剩余重点是扩大多方言语义 corpus 并迁出 provider coordinator。
 - 迁移侧最大的可迁移逻辑是“确定性类型映射 + 不支持特性清单”，而不是 ChartDB 的 AI 生成兜底。Oxide 的可执行迁移必须继续受 capability、预检、确认摘要和 journal 约束。
 
 ## 1. SQL Editor、LSP 与智能提示
 
 | ID | 状态 | 差距/能力 | ChartDB / DBX 实现位置 | OxideStudio 当前落点与下一步 |
 | --- | --- | --- | --- | --- |
-| L01 | 已对齐并增强 | 编辑器内容与语义引擎持续同步 | ChartDB `src/components/code-snippet/dbml/dbml-completion-provider.ts:34` 创建长生命周期 `Compiler`；`src/pages/editor-page/side-panel/dbml-section/table-dbml/table-dbml.tsx:101` 持续更新 source | `src/features/query-editor/model/lspDocumentSync.ts` 与 `src/components/workspace/QueryEditor.tsx:1714` 在补全前强制同步版本；保留 didOpen/didChange 链与过期结果丢弃 |
+| L01 | 已对齐并增强 | 编辑器内容与语义引擎持续同步 | ChartDB `src/components/code-snippet/dbml/dbml-completion-provider.ts:34` 创建长生命周期 `Compiler`；`src/pages/editor-page/side-panel/dbml-section/table-dbml/table-dbml.tsx:101` 持续更新 source | `useLspDocumentLifecycle.ts` 与 `lspDocumentSync.ts` 维护 didOpen/didChange FIFO、已确认 text/version shadow、session owner 与关闭清理；tab/连接/session 改变后迟到的 didOpen 会被丢弃并主动 didClose，补全前仍强制同步当前版本 |
 | L02 | 本阶段增强 | LSP CompletionItem 协议字段曾被裁剪，可能导致导入文本、提交字符和弃用状态丢失 | ChartDB DBML provider 直接复用 Monaco completion contract；DBX `apps/desktop/src/lib/editor/sqlCompletionPresentation.ts` | `src-tauri/src/commands/lsp.rs` 与 `src/features/query-editor/model/lspCompletionPresentation.ts` 已补 `InsertReplaceEdit`、`additionalTextEdits`、`commitCharacters`、deprecated tag 和 Markdown 文档适配 |
 | L03 | 本阶段增强 | 常用 SQL 代码块数量不足，触发词展示和精确匹配排序不够稳定 | DBX `apps/desktop/src/lib/sql/sqlSnippetTemplates.ts:11`、`apps/desktop/src/lib/sql/sqlCompletion.ts:4041` | `src/features/query-editor/model/sqlCommandSnippets.ts` 已补 `join/case/exists/not exists/transaction/explain`，精确 trigger 优先，支持方言分页/ALTER/事务、keyword case 与 Manticore `MATCH/FACET/SHOW/CALL PQ` 专属模板；设置页可自定义/启停/恢复默认 |
 | L04 | 本阶段增强 | 用户可新增、修改、禁用并同步 SQL snippet | DBX `apps/desktop/src/stores/settingsStore.ts:832`、`apps/desktop/src/components/config/EditorSettingsDialog.vue`、`docs/content/docs/sql-snippets.cn.mdx` | `src/lib/appSettings.ts` 与 `SettingsDialog.tsx` 已增加 snippet schema、设置 UI、唯一 id/prefix 校验、启停/删除/恢复默认、本地持久化及版本化 JSON 导入导出；仍缺可选云同步 |
@@ -28,7 +28,7 @@
 | L06 | 本阶段增强 | 基于 FK、别名、CTE 和子查询作用域生成 JOIN/字段候选 | DBX `apps/desktop/src/lib/sql/semantic/completion.ts`、`apps/desktop/src/lib/sql/sqlCompletion.ts:2909` | `sqlJoinCompletion.ts` 已按外键生成完整 `JOIN … ON …`，覆盖复合键、跨 schema、别名冲突、父→子反向关系和 keyword case；关系索引复用 LSP metadata。缓存 fallback 也识别 correlated outer alias、derived subquery、LATERAL/APPLY 与显式 table-function output columns；仍需扩大多方言语义 corpus |
 | L07 | 本阶段增强 | 补全触发与排序应避免“空列表、重复候选、过期响应覆盖新输入” | ChartDB trigger 字符位于 `src/components/code-snippet/dbml/dbml-completion-provider.ts:19`；DBX `lib/sql/sqlCompletionTriggerPolicy.ts`、`lib/common/pinyin.ts`、`lib/common/completionMatch.ts` | Oxide 已有请求 generation、model version、cancellation 检查和 overload-aware 去重；现在提供智能位置/名称前缀/仅手动三种触发模式，LSP 请求前门控；live LSP 与缓存候选合并，Unicode、拼音首字母、camel/fuzzy 排序覆盖对象/列/FK JOIN；`sqlCompletionTelemetry.ts` 只记录无内容的触发/延迟/结果原因 |
 | L08 | 本阶段增强 | SQL/DBML 编辑差异预览的细粒度防抖与可撤销应用 | ChartDB `src/pages/editor-page/side-panel/dbml-section/table-dbml/table-dbml.tsx:265` 使用 debounce，`:284` 应用，`:306` 撤销 | Diagram 的 DBML Draft 对当前 snapshot 生成文本，250ms 防抖解析 relation/warning，确认后只调用 snapshot compare 打开只读 diff；offline plan 同时禁用 Apply 和 Open in console。textarea 原生 undo 可用；仍缺逐项接受和结构化 schema CRUD history |
-| L09 | 本阶段增强 | `QueryEditor.tsx` 仍承载过多 provider 和视图生命周期 | DBX 将 semantic、presentation、insertion、execution target、keymap 分文件；ChartDB 将 completion manager 单独封装 | completion/provider 已分层，拼音词典改为条件动态块；命名事务、query/explain/parameter execution 已有独立 controller。SQL 脚本审阅导入由 `features/sql-script-import/` 在 Editor/Explorer 共享，绑定 target/digest、拒绝重复提交并将“导入成功但刷新失败”拆成独立任务；ES Console 文件操作也拒绝 stale tab 与重复操作。`QueryEditor.tsx` 本阶段再减少 87 行；仍需迁出 model/provider lifecycle |
+| L09 | 本阶段增强 | `QueryEditor.tsx` 仍承载过多 provider 和视图生命周期 | DBX 将 semantic、presentation、insertion、execution target、keymap 分文件；ChartDB 将 completion manager 单独封装 | completion 已分层，事务、执行和文件 workflow 已有独立 controller；LSP virtual-document owner/version/text/FIFO/session 清理现由 `useLspDocumentLifecycle` 管理并修复迟到 didOpen 泄漏，本阶段主组件再减少 161 行。仍需迁出 provider coordinator 与剩余 view lifecycle |
 
 ## 2. 数据库结构、导入与迁移
 
@@ -87,7 +87,8 @@
 - [x] 把命名事务 session/lifecycle 从 QueryEditor 移入独立 controller，并为 Begin/Commit/Rollback 增加防重复操作和进行中反馈。
 - [x] 迁出 query/explain/parameter execution controller，统一 SQL/Elasticsearch/MongoDB 目标范围、过期异步结果丢弃与重复执行门控。
 - [x] 统一 Editor/Explorer 的 SQL 脚本审阅导入，并迁出 Elasticsearch Console 文件操作；覆盖 target/digest 绑定、stale context、重复操作与导入后刷新失败语义。
-- [ ] 扩大多方言语义 corpus，并继续迁出 QueryEditor model/provider lifecycle。
+- [x] 迁出 LSP virtual-document lifecycle，统一 session/URI/tab 清理并拒绝迟到 didOpen 回写。
+- [ ] 扩大多方言语义 corpus，并继续迁出 QueryEditor provider coordinator。
 
 ### 阶段 B：迁移与结构格式
 

@@ -177,7 +177,6 @@ import {
   currentStatementLineFrames,
   elasticsearchJsonStringCompletionRange,
   editorDocumentIdentity,
-  enqueueLspDocumentSync,
   ensurePinyinCompletionSupport,
   flattenLspSelectionRanges,
   isPublishDiagnosticsParams,
@@ -202,6 +201,7 @@ import {
   toMonacoWorkspaceEdit,
   unquoteSqlIdentifierSelection,
   useConsoleFileController,
+  useLspDocumentLifecycle,
   useQueryExecutionController,
   useQueryTransactionController,
 } from "@/features/query-editor";
@@ -464,22 +464,6 @@ export function QueryEditor({
     null,
   );
   const vimStatusNodeRef = useRef<HTMLSpanElement | null>(null);
-  const openedDocumentsRef = useRef<Set<string>>(new Set());
-  const documentSessionsRef = useRef<
-    Map<
-      string,
-      {
-        sessionKey: string;
-        client: { didClose: (uri: string) => Promise<void> };
-      }
-    >
-  >(new Map());
-  const documentVersionsRef = useRef<Map<string, number>>(new Map());
-  const documentTextsRef = useRef<Map<string, string>>(new Map());
-  const documentSyncChainsRef = useRef<Map<string, Promise<void>>>(new Map());
-  const activeLspDocumentUriRef = useRef<string | null>(null);
-  const lastLspSessionKeyRef = useRef<string | null>(null);
-  const completionRequestGenerationRef = useRef<Map<string, number>>(new Map());
   const completionTriggerOriginRef = useRef<"explicit" | null>(null);
   const inlineCompletionCacheRef = useRef(new InlineCompletionCache());
   const inlineCompletionAbortRef = useRef<AbortController | null>(null);
@@ -892,6 +876,24 @@ export function QueryEditor({
     capabilities,
     enabled: Boolean(activeTab && effectiveConnectionId && canUseLsp),
   });
+  const {
+    openedDocumentsRef,
+    documentVersionsRef,
+    documentTextsRef,
+    completionRequestGenerationRef,
+  } = useLspDocumentLifecycle({
+    activeTabId: activeTab?.id,
+    activeDocumentText: activeDocumentSql,
+    canUseLsp,
+    documentLanguageId,
+    documentUri,
+    lifecycleKey: driverCatalogStatus,
+    lspClient,
+    lspReady,
+    lspSessionKey,
+    monaco,
+    tabs,
+  });
   const lspSemanticStatus = useLspSemanticStatusStore((state) =>
     effectiveConnectionId ? state.byConnectionId[effectiveConnectionId] : undefined,
   );
@@ -1155,169 +1157,6 @@ export function QueryEditor({
     const disposable = monaco.editor.addKeybindingRules(rules);
     return () => disposable.dispose();
   }, [keymap, monaco]);
-
-  useEffect(() => {
-    if (!lspReady || !activeTab || !documentUri || !canUseLsp) {
-      activeLspDocumentUriRef.current = null;
-      return;
-    }
-    activeLspDocumentUriRef.current = documentUri;
-
-    // A connection can be pinned to a driver package whose LSP dialect differs
-    // from the current catalog default. Close that tab's former virtual model
-    // before opening the new URI so the server never keeps two dialects for
-    // one editor tab alive at once.
-    for (const staleUri of Array.from(openedDocumentsRef.current)) {
-      const staleIdentity = extractLspDocumentIdentity(staleUri);
-      if (staleUri === documentUri || staleIdentity?.tabId !== activeTab.id) {
-        continue;
-      }
-      openedDocumentsRef.current.delete(staleUri);
-      documentVersionsRef.current.delete(staleUri);
-      documentTextsRef.current.delete(staleUri);
-      documentSyncChainsRef.current.delete(staleUri);
-      completionRequestGenerationRef.current.delete(staleUri);
-      const staleOwner = documentSessionsRef.current.get(staleUri);
-      documentSessionsRef.current.delete(staleUri);
-      if (staleOwner) void staleOwner.client.didClose(staleUri);
-    }
-
-    // Serialize writes to a URI. A fast typing burst becomes didOpen(text 1)
-    // followed by didChange(text 2), rather than racing didOpen calls that
-    // share a version. The helper commits local shadow state only after the
-    // LSP accepts the write, so a restart remains retryable.
-    void enqueueLspDocumentSync(
-      documentSyncChainsRef.current,
-      documentUri,
-      async () => {
-        if (activeLspDocumentUriRef.current !== documentUri) return;
-        const owner = documentSessionsRef.current.get(documentUri);
-        if (owner?.sessionKey !== lspSessionKey) {
-          documentSessionsRef.current.delete(documentUri);
-          if (owner) {
-            await owner.client.didClose(documentUri).catch(() => undefined);
-          }
-        }
-
-        await syncLspModelBeforeCompletion({
-          uri: documentUri,
-          model: { getValue: () => activeDocumentSql },
-          languageId: documentLanguageId,
-          client: lspClient,
-          openedDocuments: openedDocumentsRef.current,
-          documentVersions: documentVersionsRef.current,
-          documentTexts: documentTextsRef.current,
-        });
-
-        if (
-          activeLspDocumentUriRef.current === documentUri &&
-          openedDocumentsRef.current.has(documentUri)
-        ) {
-          documentSessionsRef.current.set(documentUri, {
-            sessionKey: lspSessionKey,
-            client: lspClient,
-          });
-        }
-      },
-    )
-      .catch((error) => {
-        // Completion retries the exact failed revision through the same
-        // coordinator; a transient LSP restart must not tear down Monaco.
-        console.debug("[LSP] Deferred document synchronization failed:", error);
-      });
-  }, [
-    activeTab?.id,
-    activeDocumentSql,
-    canUseLsp,
-    documentLanguageId,
-    documentUri,
-    editorLanguageId,
-    lspClient,
-    lspReady,
-    lspSessionKey,
-    driverCatalogStatus,
-  ]);
-
-  useEffect(() => {
-    if (lspReady) return;
-    activeLspDocumentUriRef.current = null;
-    for (const [uri, owner] of documentSessionsRef.current) {
-      documentSessionsRef.current.delete(uri);
-      openedDocumentsRef.current.delete(uri);
-      documentVersionsRef.current.delete(uri);
-      documentTextsRef.current.delete(uri);
-      documentSyncChainsRef.current.delete(uri);
-      completionRequestGenerationRef.current.delete(uri);
-      void owner.client.didClose(uri).catch(() => undefined);
-    }
-  }, [lspReady, lspSessionKey]);
-
-  useEffect(() => {
-    if (!lspReady) return;
-
-    const currentDocumentTabIds = new Set(
-      tabs
-        .filter((tab) => tab.type === "query")
-        .map((tab) => tab.id),
-    );
-
-    for (const uri of Array.from(openedDocumentsRef.current)) {
-      const identity = extractLspDocumentIdentity(uri);
-      if (identity && currentDocumentTabIds.has(identity.tabId)) continue;
-
-      openedDocumentsRef.current.delete(uri);
-      documentVersionsRef.current.delete(uri);
-      documentTextsRef.current.delete(uri);
-      documentSyncChainsRef.current.delete(uri);
-      completionRequestGenerationRef.current.delete(uri);
-      const owner = documentSessionsRef.current.get(uri);
-      documentSessionsRef.current.delete(uri);
-      if (owner) void owner.client.didClose(uri);
-
-      if (monaco) {
-        const model = monaco.editor.getModel(monaco.Uri.parse(uri));
-        if (model) {
-          monaco.editor.setModelMarkers(model, "sql-lsp", []);
-        }
-      }
-    }
-  }, [lspReady, monaco, tabs]);
-
-  useEffect(() => {
-    return () => {
-      for (const [uri, owner] of documentSessionsRef.current) {
-        void owner.client.didClose(uri);
-        if (monaco) {
-          const model = monaco.editor.getModel(monaco.Uri.parse(uri));
-          if (model) {
-            monaco.editor.setModelMarkers(model, "sql-lsp", []);
-          }
-        }
-      }
-      openedDocumentsRef.current.clear();
-      documentSessionsRef.current.clear();
-      documentVersionsRef.current.clear();
-      documentTextsRef.current.clear();
-      documentSyncChainsRef.current.clear();
-      completionRequestGenerationRef.current.clear();
-    };
-  }, [monaco]);
-
-  useEffect(() => {
-    const previousSessionKey = lastLspSessionKeyRef.current;
-    lastLspSessionKeyRef.current = lspSessionKey;
-    if (!previousSessionKey || previousSessionKey === lspSessionKey) return;
-    for (const [uri, owner] of documentSessionsRef.current) {
-      if (owner.sessionKey === lspSessionKey) continue;
-      documentSessionsRef.current.delete(uri);
-      void owner.client.didClose(uri).catch(() => undefined);
-    }
-    openedDocumentsRef.current.clear();
-    documentVersionsRef.current.clear();
-    documentTextsRef.current.clear();
-    documentSyncChainsRef.current.clear();
-    completionRequestGenerationRef.current.clear();
-  }, [lspSessionKey]);
 
   useEffect(() => {
     elasticsearchFieldCacheRef.current.clear();
