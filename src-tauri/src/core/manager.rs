@@ -5,7 +5,7 @@ use super::protocol::{
 use super::ssh::SshTunnel;
 use super::{dialect::DatabaseCapabilities, driver::DatabaseDriver};
 use anyhow::{anyhow, Result};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -109,6 +109,18 @@ impl ConnectionManager {
             .get(id)
             .map(|connection| connection.driver.clone())
             .ok_or_else(|| anyhow!("Connection not found: {}", id))
+    }
+
+    /// Exact package versions owned by live connections. Cache maintenance
+    /// uses this snapshot only as a retention set; it exposes neither
+    /// connection ids nor connection configuration.
+    pub async fn active_external_driver_package_identities(&self) -> BTreeSet<(String, String)> {
+        let connections = self.connections.lock().await;
+        connections
+            .values()
+            .filter_map(|connection| connection.driver.external_package_identity())
+            .map(|(driver, version)| (driver.to_string(), version.to_string()))
+            .collect()
     }
 
     async fn record_external_runtime_replacement(

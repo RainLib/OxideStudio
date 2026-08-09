@@ -5,9 +5,14 @@ use minisign_verify::{PublicKey, Signature};
 pub use oxide_driver_protocol::DRIVER_PROTOCOL_VERSION;
 use oxide_driver_protocol::{HandshakeResponse, SchemaMigrationMode};
 use regex::Regex;
+use reqwest::{
+    header::{CONTENT_RANGE, RANGE},
+    StatusCode,
+};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -15,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tar::Archive;
 use tempfile::{NamedTempFile, TempDir};
+use tokio::sync::Mutex as AsyncMutex;
 use url::Url;
 use uuid::Uuid;
 
@@ -263,11 +269,25 @@ pub enum DriverPackageStatus {
     Invalid,
 }
 
+/// Summary of a bounded cleanup of downloaded catalog archives. Installed
+/// packages are never part of this cache and are therefore never removed.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DriverPackageCachePruneResult {
+    pub files_removed: u64,
+    pub partial_files_removed: u64,
+    pub bytes_removed: u64,
+    pub versions_removed: u64,
+    pub retained_versions: u64,
+    pub skipped_entries: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct DatabaseDriverPackageRegistry {
     root: PathBuf,
     trust: DriverPackageTrust,
     mutation_lock: Arc<Mutex<()>>,
+    download_lock: Arc<AsyncMutex<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -295,11 +315,37 @@ impl DatabaseDriverPackageRegistry {
             root,
             trust,
             mutation_lock: Arc::new(Mutex::new(())),
+            download_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Remove disposable catalog archives while retaining every version that
+    /// could still be needed by activation, rollback, a pinned connection, or
+    /// a currently running sidecar. Cleanup is serialized with downloads and
+    /// package mutations so a partial archive cannot disappear mid-write.
+    pub async fn prune_catalog_cache(
+        &self,
+        additional_retained: &BTreeSet<(String, String)>,
+    ) -> Result<DriverPackageCachePruneResult, String> {
+        let _download_guard = self.download_lock.lock().await;
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .map_err(|_| "Database driver package registry is unavailable".to_string())?;
+        let mut retained = activation_retained_driver_packages(&self.root);
+        retained.extend(
+            additional_retained
+                .iter()
+                .filter(|(driver, version)| {
+                    is_safe_token(driver.as_str()) && is_safe_token(version.as_str())
+                })
+                .cloned(),
+        );
+        prune_catalog_cache_files(&self.root.join(DRIVER_PACKAGE_CACHE_DIRECTORY), &retained)
     }
 
     /// Copy the complete driver store into a fresh sibling staging directory
@@ -359,6 +405,7 @@ impl DatabaseDriverPackageRegistry {
             root,
             trust: DriverPackageTrust::AllowUnsigned,
             mutation_lock: Arc::new(Mutex::new(())),
+            download_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -368,6 +415,7 @@ impl DatabaseDriverPackageRegistry {
             root,
             trust: DriverPackageTrust::Unavailable,
             mutation_lock: Arc::new(Mutex::new(())),
+            download_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -657,19 +705,20 @@ impl DatabaseDriverPackageRegistry {
             &entry.package_version,
             archive_sha256,
         )?;
+        let _download_guard = self.download_lock.lock().await;
         if !copy_cached_driver_package_archive(&cache_path, &archive_path, archive_sha256)? {
             download_driver_package_archive(
                 &client,
                 download_url.as_str(),
-                &archive_path,
+                &cache_path,
                 archive_sha256,
             )
             .await?;
-            // The cache is only a verified copy of the release archive. A
-            // failure to populate it must not make an otherwise verified
-            // explicit installation fail (for example after a store-location
-            // migration left the old directory read-only).
-            let _ = cache_driver_package_archive(&archive_path, &cache_path, archive_sha256);
+            if !copy_cached_driver_package_archive(&cache_path, &archive_path, archive_sha256)? {
+                return Err(
+                    "Downloaded driver package was not published to its verified cache".to_string(),
+                );
+            }
         }
         let unpacked = temporary.path().join("package");
         unpack_driver_package_archive(&archive_path, &unpacked)?;
@@ -2076,53 +2125,417 @@ async fn download_driver_package_archive(
     destination: &Path,
     expected_sha256: &str,
 ) -> Result<(), String> {
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|error| format!("Cannot download driver package: {error}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Cannot download driver package: server returned {}",
-            response.status()
-        ));
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_DRIVER_PACKAGE_ARCHIVE_BYTES)
-    {
-        return Err("Driver package archive exceeds the 512 MiB limit".to_string());
-    }
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)
-        .map_err(|error| format!("Cannot create driver package archive staging file: {error}"))?;
-    let mut digest = Sha256::new();
-    let mut downloaded = 0u64;
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk =
-            chunk.map_err(|error| format!("Cannot read driver package download: {error}"))?;
-        downloaded = downloaded
-            .checked_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX))
-            .ok_or_else(|| "Driver package archive size overflow".to_string())?;
-        if downloaded > MAX_DRIVER_PACKAGE_ARCHIVE_BYTES {
+    validate_sha256(expected_sha256, "Driver package archive SHA-256")?;
+    ensure_catalog_cache_parent(destination)?;
+    let partial_path = catalog_cache_partial_path(destination)?;
+    let mut retry_without_range = false;
+
+    for attempt in 0..2 {
+        if retry_without_range && partial_path.exists() {
+            fs::remove_file(&partial_path).map_err(|error| {
+                format!("Cannot reset incomplete driver package download: {error}")
+            })?;
+        }
+        let existing = resumable_partial_length(&partial_path)?;
+        let mut request = client.get(url);
+        if existing > 0 {
+            request = request.header(RANGE, format!("bytes={existing}-"));
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("Cannot download driver package: {error}"))?;
+
+        if existing > 0 && response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+            if archive_file_matches_digest(&partial_path, expected_sha256)? {
+                publish_resumed_driver_archive(&partial_path, destination, expected_sha256)?;
+                return Ok(());
+            }
+            retry_without_range = true;
+            continue;
+        }
+
+        let append = if existing > 0 && response.status() == StatusCode::PARTIAL_CONTENT {
+            if let Err(error) =
+                validate_content_range(response.headers().get(CONTENT_RANGE), existing)
+            {
+                fs::remove_file(&partial_path).map_err(|remove_error| {
+                    format!("Cannot reset unsafe driver package resume: {remove_error}")
+                })?;
+                if attempt == 0 {
+                    retry_without_range = true;
+                    continue;
+                }
+                return Err(error);
+            }
+            true
+        } else if response.status() == StatusCode::OK {
+            false
+        } else {
+            return Err(format!(
+                "Cannot download driver package: server returned {}",
+                response.status()
+            ));
+        };
+        let retained = if append { existing } else { 0 };
+        if response.content_length().is_some_and(|length| {
+            retained
+                .checked_add(length)
+                .is_none_or(|total| total > MAX_DRIVER_PACKAGE_ARCHIVE_BYTES)
+        }) {
             return Err("Driver package archive exceeds the 512 MiB limit".to_string());
         }
+
+        let mut digest = Sha256::new();
+        if append {
+            update_digest_from_file(&partial_path, &mut digest)?;
+        }
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(append)
+            .truncate(!append)
+            .open(&partial_path)
+            .map_err(|error| format!("Cannot open incomplete driver package download: {error}"))?;
+        let mut downloaded = retained;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    let _ = output.sync_data();
+                    return Err(format!("Cannot read driver package download: {error}"));
+                }
+            };
+            downloaded = downloaded
+                .checked_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX))
+                .ok_or_else(|| "Driver package archive size overflow".to_string())?;
+            if downloaded > MAX_DRIVER_PACKAGE_ARCHIVE_BYTES {
+                let _ = output.sync_data();
+                return Err("Driver package archive exceeds the 512 MiB limit".to_string());
+            }
+            output
+                .write_all(&chunk)
+                .map_err(|error| format!("Cannot stage driver package archive: {error}"))?;
+            digest.update(&chunk);
+        }
         output
-            .write_all(&chunk)
-            .map_err(|error| format!("Cannot stage driver package archive: {error}"))?;
-        digest.update(&chunk);
+            .sync_all()
+            .map_err(|error| format!("Cannot finalize driver package archive: {error}"))?;
+        drop(output);
+        let actual = format!("{:x}", digest.finalize());
+        if !actual.eq_ignore_ascii_case(expected_sha256) {
+            fs::remove_file(&partial_path).map_err(|error| {
+                format!("Cannot remove invalid driver package download: {error}")
+            })?;
+            return Err(
+                "Driver package archive digest does not match the signed catalog".to_string(),
+            );
+        }
+        publish_resumed_driver_archive(&partial_path, destination, expected_sha256)?;
+        return Ok(());
     }
-    output
-        .sync_all()
-        .map_err(|error| format!("Cannot finalize driver package archive: {error}"))?;
-    let actual = format!("{:x}", digest.finalize());
-    if !actual.eq_ignore_ascii_case(expected_sha256) {
-        return Err("Driver package archive digest does not match the signed catalog".to_string());
+
+    Err("Driver package server rejected the cached resume offset".to_string())
+}
+
+fn catalog_cache_partial_path(cache_path: &Path) -> Result<PathBuf, String> {
+    let file_name = cache_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Driver package cache path has no valid file name".to_string())?;
+    Ok(cache_path.with_file_name(format!(".{file_name}.partial")))
+}
+
+fn ensure_catalog_cache_parent(cache_path: &Path) -> Result<(), String> {
+    let version_directory = cache_path
+        .parent()
+        .ok_or_else(|| "Driver package cache path has no parent directory".to_string())?;
+    let driver_directory = version_directory
+        .parent()
+        .ok_or_else(|| "Driver package cache path has no driver directory".to_string())?;
+    let cache_directory = driver_directory
+        .parent()
+        .ok_or_else(|| "Driver package cache path has no cache directory".to_string())?;
+
+    fs::create_dir_all(cache_directory)
+        .map_err(|error| format!("Cannot create driver package cache directory: {error}"))?;
+    for directory in [cache_directory, driver_directory, version_directory] {
+        if !directory.exists() {
+            fs::create_dir(directory).map_err(|error| {
+                format!("Cannot create driver package cache directory: {error}")
+            })?;
+        }
+        let metadata = fs::symlink_metadata(directory)
+            .map_err(|error| format!("Cannot inspect driver package cache directory: {error}"))?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err("Driver package cache directory is invalid".to_string());
+        }
     }
     Ok(())
+}
+
+fn activation_retained_driver_packages(root: &Path) -> BTreeSet<(String, String)> {
+    let mut retained = BTreeSet::new();
+    let Ok(drivers) = fs::read_dir(root) else {
+        return retained;
+    };
+    for driver in drivers.flatten() {
+        let Ok(file_type) = driver.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        let Some(driver_id) = driver.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !is_safe_token(&driver_id) {
+            continue;
+        }
+        let Some(state) = read_activation_state(&driver.path()) else {
+            continue;
+        };
+        retained.insert((driver_id.clone(), state.current));
+        if let Some(previous) = state.previous {
+            retained.insert((driver_id, previous));
+        }
+    }
+    retained
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogCacheFileKind {
+    Complete,
+    Partial,
+}
+
+fn catalog_cache_file_kind(file_name: &str) -> Option<CatalogCacheFileKind> {
+    let (digest, kind) = if let Some(digest) = file_name
+        .strip_prefix('.')
+        .and_then(|value| value.strip_suffix(".tar.gz.partial"))
+    {
+        (digest, CatalogCacheFileKind::Partial)
+    } else if let Some(digest) = file_name.strip_suffix(".tar.gz") {
+        (digest, CatalogCacheFileKind::Complete)
+    } else {
+        return None;
+    };
+    (digest.len() == 64 && digest.bytes().all(|value| value.is_ascii_hexdigit())).then_some(kind)
+}
+
+fn prune_catalog_cache_files(
+    cache_root: &Path,
+    retained: &BTreeSet<(String, String)>,
+) -> Result<DriverPackageCachePruneResult, String> {
+    let cache_metadata = match fs::symlink_metadata(cache_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DriverPackageCachePruneResult::default())
+        }
+        Err(error) => return Err(format!("Cannot inspect driver package cache: {error}")),
+    };
+    if !cache_metadata.file_type().is_dir() || cache_metadata.file_type().is_symlink() {
+        return Err("Driver package cache root is invalid".to_string());
+    }
+
+    let mut result = DriverPackageCachePruneResult::default();
+    let drivers = fs::read_dir(cache_root)
+        .map_err(|error| format!("Cannot read driver package cache: {error}"))?;
+    for driver in drivers {
+        let driver =
+            driver.map_err(|error| format!("Cannot read driver package cache: {error}"))?;
+        let file_type = driver
+            .file_type()
+            .map_err(|error| format!("Cannot inspect driver package cache entry: {error}"))?;
+        let Some(driver_id) = driver.file_name().to_str().map(str::to_string) else {
+            result.skipped_entries = result.skipped_entries.saturating_add(1);
+            continue;
+        };
+        if !file_type.is_dir() || file_type.is_symlink() || !is_safe_token(&driver_id) {
+            result.skipped_entries = result.skipped_entries.saturating_add(1);
+            continue;
+        }
+
+        let versions = fs::read_dir(driver.path())
+            .map_err(|error| format!("Cannot read driver package cache directory: {error}"))?;
+        for version in versions {
+            let version = version
+                .map_err(|error| format!("Cannot read driver package cache directory: {error}"))?;
+            let file_type = version.file_type().map_err(|error| {
+                format!("Cannot inspect driver package cache directory: {error}")
+            })?;
+            let Some(package_version) = version.file_name().to_str().map(str::to_string) else {
+                result.skipped_entries = result.skipped_entries.saturating_add(1);
+                continue;
+            };
+            if !file_type.is_dir() || file_type.is_symlink() || !is_safe_token(&package_version) {
+                result.skipped_entries = result.skipped_entries.saturating_add(1);
+                continue;
+            }
+            if retained.contains(&(driver_id.clone(), package_version)) {
+                result.retained_versions = result.retained_versions.saturating_add(1);
+                continue;
+            }
+
+            let files = fs::read_dir(version.path()).map_err(|error| {
+                format!("Cannot read driver package cache version directory: {error}")
+            })?;
+            for file in files {
+                let file = file.map_err(|error| {
+                    format!("Cannot read driver package cache version directory: {error}")
+                })?;
+                let file_type = file.file_type().map_err(|error| {
+                    format!("Cannot inspect driver package cache file: {error}")
+                })?;
+                let Some(file_name) = file.file_name().to_str().map(str::to_string) else {
+                    result.skipped_entries = result.skipped_entries.saturating_add(1);
+                    continue;
+                };
+                let Some(kind) = catalog_cache_file_kind(&file_name) else {
+                    result.skipped_entries = result.skipped_entries.saturating_add(1);
+                    continue;
+                };
+                if !file_type.is_file() || file_type.is_symlink() {
+                    result.skipped_entries = result.skipped_entries.saturating_add(1);
+                    continue;
+                }
+                let bytes = file
+                    .metadata()
+                    .map_err(|error| format!("Cannot inspect driver package cache file: {error}"))?
+                    .len();
+                fs::remove_file(file.path())
+                    .map_err(|error| format!("Cannot remove driver package cache file: {error}"))?;
+                result.files_removed = result.files_removed.saturating_add(1);
+                result.bytes_removed = result.bytes_removed.saturating_add(bytes);
+                if kind == CatalogCacheFileKind::Partial {
+                    result.partial_files_removed = result.partial_files_removed.saturating_add(1);
+                }
+            }
+
+            if fs::read_dir(version.path())
+                .map_err(|error| {
+                    format!("Cannot inspect driver package cache version directory: {error}")
+                })?
+                .next()
+                .is_none()
+            {
+                fs::remove_dir(version.path()).map_err(|error| {
+                    format!("Cannot remove empty driver package cache directory: {error}")
+                })?;
+                result.versions_removed = result.versions_removed.saturating_add(1);
+            }
+        }
+
+        if fs::read_dir(driver.path())
+            .map_err(|error| format!("Cannot inspect driver package cache directory: {error}"))?
+            .next()
+            .is_none()
+        {
+            fs::remove_dir(driver.path()).map_err(|error| {
+                format!("Cannot remove empty driver package cache directory: {error}")
+            })?;
+        }
+    }
+    Ok(result)
+}
+
+fn resumable_partial_length(path: &Path) -> Result<u64, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(format!(
+                "Cannot inspect incomplete driver package download: {error}"
+            ))
+        }
+    };
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_DRIVER_PACKAGE_ARCHIVE_BYTES
+    {
+        fs::remove_file(path).map_err(|error| {
+            format!("Cannot remove invalid incomplete driver package download: {error}")
+        })?;
+        return Ok(0);
+    }
+    Ok(metadata.len())
+}
+
+fn validate_content_range(
+    value: Option<&reqwest::header::HeaderValue>,
+    expected_start: u64,
+) -> Result<(), String> {
+    let value = value
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| "Driver package resume response has no valid Content-Range".to_string())?;
+    let value = value
+        .strip_prefix("bytes ")
+        .ok_or_else(|| "Driver package resume response has an invalid Content-Range".to_string())?;
+    let (range, total) = value
+        .split_once('/')
+        .ok_or_else(|| "Driver package resume response has an invalid Content-Range".to_string())?;
+    let (start, end) = range
+        .split_once('-')
+        .ok_or_else(|| "Driver package resume response has an invalid Content-Range".to_string())?;
+    let start = start
+        .parse::<u64>()
+        .map_err(|_| "Driver package resume response has an invalid Content-Range".to_string())?;
+    let end = end
+        .parse::<u64>()
+        .map_err(|_| "Driver package resume response has an invalid Content-Range".to_string())?;
+    let total = total
+        .parse::<u64>()
+        .map_err(|_| "Driver package resume response has an invalid Content-Range".to_string())?;
+    if start != expected_start
+        || end < start
+        || end >= total
+        || total > MAX_DRIVER_PACKAGE_ARCHIVE_BYTES
+    {
+        return Err("Driver package resume response has an unsafe Content-Range".to_string());
+    }
+    Ok(())
+}
+
+fn update_digest_from_file(path: &Path, digest: &mut Sha256) -> Result<(), String> {
+    let mut input = fs::File::open(path)
+        .map_err(|error| format!("Cannot read incomplete driver package download: {error}"))?;
+    let mut read_total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| format!("Cannot read incomplete driver package download: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        read_total = read_total
+            .checked_add(u64::try_from(read).unwrap_or(u64::MAX))
+            .ok_or_else(|| "Driver package archive size overflow".to_string())?;
+        if read_total > MAX_DRIVER_PACKAGE_ARCHIVE_BYTES {
+            return Err("Driver package archive exceeds the 512 MiB limit".to_string());
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(())
+}
+
+fn publish_resumed_driver_archive(
+    partial_path: &Path,
+    destination: &Path,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    if destination.exists() {
+        if archive_file_matches_digest(destination, expected_sha256)? {
+            fs::remove_file(partial_path).map_err(|error| {
+                format!("Cannot remove redundant driver package download: {error}")
+            })?;
+            return Ok(());
+        }
+        return Err("Driver package cache destination already exists and is invalid".to_string());
+    }
+    fs::rename(partial_path, destination)
+        .map_err(|error| format!("Cannot publish verified driver package archive: {error}"))
 }
 
 /// Return the only permitted cache location for a catalog archive. The digest
@@ -2177,6 +2590,7 @@ fn copy_cached_driver_package_archive(
 /// Persist a second verified copy only after the temporary download has passed
 /// the catalog digest check. This is intentionally best-effort; cache storage
 /// is never an authority for package execution.
+#[cfg(test)]
 fn cache_driver_package_archive(
     source: &Path,
     cache_path: &Path,
@@ -2185,13 +2599,7 @@ fn cache_driver_package_archive(
     let parent = cache_path
         .parent()
         .ok_or_else(|| "Driver package cache path has no parent directory".to_string())?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("Cannot create driver package cache directory: {error}"))?;
-    let metadata = fs::symlink_metadata(parent)
-        .map_err(|error| format!("Cannot inspect driver package cache directory: {error}"))?;
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-        return Err("Driver package cache directory is invalid".to_string());
-    }
+    ensure_catalog_cache_parent(cache_path)?;
     if cache_path.exists() {
         return Ok(());
     }
@@ -2765,6 +3173,10 @@ fn verify_package_signature(
 mod tests {
     use super::*;
     use oxide_driver_protocol::DriverRuntimeCapabilities;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     #[test]
     fn catalog_validation_requires_https_safe_identities_and_unique_versions() {
@@ -2971,6 +3383,138 @@ mod tests {
         let retry = directory.path().join("retry.tar.gz");
         assert!(!copy_cached_driver_package_archive(&cache_path, &retry, &digest).unwrap());
         assert!(!cache_path.exists());
+    }
+
+    #[test]
+    fn driver_archive_content_range_must_continue_the_exact_partial() {
+        let valid = reqwest::header::HeaderValue::from_static("bytes 7-15/16");
+        assert!(validate_content_range(Some(&valid), 7).is_ok());
+
+        let wrong_start = reqwest::header::HeaderValue::from_static("bytes 8-15/16");
+        assert!(validate_content_range(Some(&wrong_start), 7).is_err());
+        let oversized = reqwest::header::HeaderValue::from_str(&format!(
+            "bytes 7-15/{}",
+            MAX_DRIVER_PACKAGE_ARCHIVE_BYTES + 1
+        ))
+        .unwrap();
+        assert!(validate_content_range(Some(&oversized), 7).is_err());
+        assert!(validate_content_range(None, 7).is_err());
+    }
+
+    #[tokio::test]
+    async fn driver_archive_download_resumes_into_digest_bound_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let payload = b"verified resumable driver archive";
+        let retained = 9usize;
+        let digest = format!("{:x}", Sha256::digest(payload));
+        let cache_path =
+            catalog_cache_archive_path(directory.path(), "duckdb", "1.2.3", &digest).unwrap();
+        ensure_catalog_cache_parent(&cache_path).unwrap();
+        let partial_path = catalog_cache_partial_path(&cache_path).unwrap();
+        fs::write(&partial_path, &payload[..retained]).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let suffix = payload[retained..].to_vec();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+            assert!(request.contains(&format!("range: bytes={retained}-")));
+            let end = retained + suffix.len() - 1;
+            let response = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {retained}-{end}/{}\r\nConnection: close\r\n\r\n",
+                suffix.len(),
+                retained + suffix.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(&suffix).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        download_driver_package_archive(
+            &client,
+            &format!("http://{address}/driver.tar.gz"),
+            &cache_path,
+            &digest,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(fs::read(&cache_path).unwrap(), payload);
+        assert!(!partial_path.exists());
+    }
+
+    #[tokio::test]
+    async fn catalog_cache_cleanup_retains_activation_rollback_pins_and_live_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry =
+            DatabaseDriverPackageRegistry::allow_unsigned_for_tests(directory.path().to_path_buf());
+        let driver_root = directory.path().join("duckdb");
+        fs::create_dir_all(&driver_root).unwrap();
+        write_activation_state(
+            &driver_root,
+            &DriverActivationState {
+                current: "2.0.0".to_string(),
+                previous: Some("1.0.0".to_string()),
+            },
+        )
+        .unwrap();
+
+        let cache_root = directory.path().join(DRIVER_PACKAGE_CACHE_DIRECTORY);
+        let digest = "a".repeat(64);
+        let create_cache = |driver: &str, version: &str, name: &str, payload: &[u8]| {
+            let path = cache_root.join(driver).join(version).join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, payload).unwrap();
+            path
+        };
+        let active = create_cache("duckdb", "2.0.0", &format!("{digest}.tar.gz"), b"active");
+        let rollback = create_cache("duckdb", "1.0.0", &format!("{digest}.tar.gz"), b"rollback");
+        let pinned = create_cache(
+            "clickhouse",
+            "3.0.0",
+            &format!("{digest}.tar.gz"),
+            b"pinned",
+        );
+        let live = create_cache("oracle", "4.0.0", &format!("{digest}.tar.gz"), b"live");
+        let removable = create_cache("warehouse", "5.0.0", &format!("{digest}.tar.gz"), b"remove");
+        let partial = create_cache(
+            "warehouse",
+            "5.0.0",
+            &format!(".{digest}.tar.gz.partial"),
+            b"partial",
+        );
+        let unknown = create_cache("warehouse", "6.0.0", "notes.txt", b"keep unknown");
+        let mut retained = BTreeSet::new();
+        retained.insert(("clickhouse".to_string(), "3.0.0".to_string()));
+        retained.insert(("oracle".to_string(), "4.0.0".to_string()));
+
+        let result = registry.prune_catalog_cache(&retained).await.unwrap();
+
+        assert_eq!(result.files_removed, 2);
+        assert_eq!(result.partial_files_removed, 1);
+        assert_eq!(result.versions_removed, 1);
+        assert_eq!(result.retained_versions, 4);
+        assert_eq!(result.skipped_entries, 1);
+        assert!(active.exists());
+        assert!(rollback.exists());
+        assert!(pinned.exists());
+        assert!(live.exists());
+        assert!(!removable.exists());
+        assert!(!partial.exists());
+        assert!(unknown.exists());
     }
 
     #[test]

@@ -1930,6 +1930,12 @@ function DatabaseExplorerSettings({
   );
 }
 
+function formatDriverCacheBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
 function DriverManagementSettings() {
   const catalogUrl = useSettingsStore((state) => state.settings.drivers.catalogUrl);
   const driverStorePath = useSettingsStore((state) => state.settings.drivers.storePath);
@@ -2216,6 +2222,26 @@ function DriverManagementSettings() {
     }
   };
 
+  const cleanDriverCache = async () => {
+    try {
+      setPackageAction({ status: "loading", key: "prune-cache" });
+      const result = await databaseService.pruneDatabaseDriverCache();
+      const skipped = result.skippedEntries
+        ? ` ${result.skippedEntries} unknown or unsafe cache ${result.skippedEntries === 1 ? "entry was" : "entries were"} left unchanged.`
+        : "";
+      setPackageAction({
+        status: "success",
+        message: `Freed ${formatDriverCacheBytes(result.bytesRemoved)} from ${result.filesRemoved} cached file${result.filesRemoved === 1 ? "" : "s"}; ${result.retainedVersions} protected version${result.retainedVersions === 1 ? " was" : "s were"} retained.${skipped}`,
+      });
+    } catch (error) {
+      setPackageAction({
+        status: "error",
+        message:
+          error instanceof Error ? error.message : "Unable to clean Driver Store cache.",
+      });
+    }
+  };
+
   const activatePackage = async (installation: DatabaseDriverInstallation) => {
     const packageVersion = installation.packageVersion;
     if (!packageVersion) return;
@@ -2302,16 +2328,29 @@ function DriverManagementSettings() {
               {driverStore.activePath}
             </div>
           </div>
-          <button
-            type="button"
-            className="h-6 shrink-0 rounded-[3px] border border-[hsl(var(--wb-border))] px-2 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:opacity-50"
-            disabled={packageAction.status === "loading"}
-            onClick={() => void migrateDriverStore()}
-          >
-            {packageAction.status === "loading" && packageAction.key === "migrate-store"
-              ? "Migrating…"
-              : "Move…"}
-          </button>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <button
+              type="button"
+              className="h-6 rounded-[3px] border border-[hsl(var(--wb-border))] px-2 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:opacity-50"
+              disabled={packageAction.status === "loading"}
+              onClick={() => void cleanDriverCache()}
+              title="Remove disposable catalog downloads while keeping active, rollback, connection-pinned, and running package versions"
+            >
+              {packageAction.status === "loading" && packageAction.key === "prune-cache"
+                ? "Cleaning..."
+                : "Clean cache"}
+            </button>
+            <button
+              type="button"
+              className="h-6 rounded-[3px] border border-[hsl(var(--wb-border))] px-2 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:opacity-50"
+              disabled={packageAction.status === "loading"}
+              onClick={() => void migrateDriverStore()}
+            >
+              {packageAction.status === "loading" && packageAction.key === "migrate-store"
+                ? "Migrating…"
+                : "Move…"}
+            </button>
+          </div>
         </div>
       )}
       <div className="mb-2 flex items-center justify-between gap-3">

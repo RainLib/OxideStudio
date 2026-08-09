@@ -762,6 +762,32 @@ impl MetaStore {
         Ok(())
     }
 
+    /// Read only the package pin needed by driver-cache retention. This query
+    /// deliberately does not join or decrypt the credential table.
+    pub async fn pinned_driver_packages(&self) -> Result<Vec<(String, String)>> {
+        let records = sqlx::query("SELECT driver, config FROM connections")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut packages = Vec::new();
+        for record in records {
+            let driver: String = record.get("driver");
+            let config: serde_json::Value = record.get("config");
+            let Some(version) = config
+                .get("driverPackageVersion")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let driver = driver.trim();
+            if !driver.is_empty() {
+                packages.push((driver.to_string(), version.to_string()));
+            }
+        }
+        Ok(packages)
+    }
+
     pub async fn get_connections(&self, project_id: &str) -> Result<Vec<SavedConnection>> {
         let recs = sqlx::query(
             "SELECT c.*, s.ciphertext AS secret_ciphertext, s.nonce AS secret_nonce

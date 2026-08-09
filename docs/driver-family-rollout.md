@@ -76,6 +76,17 @@ Driver Manager 的候选行会在用户检查过签名 HTTPS catalog 后显示�
 直接复用同一条 digest-bound 安装链路；它不会自行访问网络、选择版本或绕过 catalog
 签名。没有 `archiveSha256` 的 release 仍只显示为 review/import，保持离线审阅路径。
 
+catalog 下载使用 `<sha256>.tar.gz` 与同目录 `.<sha256>.tar.gz.partial` 作为唯一缓存身份。
+网络中断会保留 partial，重试发送严格的 HTTP Range；206 必须从已保存字节精确继续，服务端
+忽略 Range 返回 200 时会截断后重新全量下载，416 只有在 partial 已通过 catalog SHA-256
+时才允许发布。任何路径最终都必须完成摘要复验，随后原子改名为完整缓存，不能直接从
+partial 解压或执行。Registry 级异步锁避免并发安装覆盖同一缓存。
+
+Settings 的 **Clean cache** 只清理 catalog 归档，不删除已安装 package/runtime。清理与下载、
+安装/激活串行，并自动保留 active、previous rollback、所有保存连接固定的 packageVersion
+和当前 live sidecar 使用的版本。扫描只接受安全 driver/version 目录和 64-hex 摘要命名的
+普通归档/partial 文件；未知文件、目录与符号链接会保留并报告，而不是递归删除。
+
 运行时观察同样按最小披露原则处理。Driver Manager 只汇总 package identity、连接数、
 可观察 PID、PID 不可观察数以及已退出 sidecar 数；不会显示连接名、URL、账号、请求内容
 或 sidecar stderr。后两种状态必须提示用户重新连接，而不能尝试从设置页面向

@@ -27,7 +27,7 @@ dbx 仅用于观察交互、能力覆盖和测试组合，不是 OxideStudio 的
 | 领域 | OxideStudio 当前成熟度 | dbx 可参考点 | 结论 |
 | --- | --- | --- | --- |
 | SQL 编辑器 | 中高 | 更成熟的语句边界恢复、编辑辅助与测试矩阵 | 优先修复多语句上下文并拆分 `QueryEditor` |
-| 数据驱动 | 中高 | 驱动商店、离线包、JRE/JAR、更新/回滚流程 | Oxide 已有签名离线包、隔离运行时、连接 pin 和回滚；带 archive SHA-256 的签名 HTTPS catalog 条目可由用户显式下载、摘要核验并复验安装，已提供摘要命名的本地归档复用缓存；仍缺断点续传与更多驱动族 |
+| 数据驱动 | 中高 | 驱动商店、离线包、JRE/JAR、更新/回滚流程 | Oxide 已有签名离线包、隔离运行时、连接 pin 和回滚；签名 HTTPS catalog 下载已支持摘要绑定断点续传、严格 Range 回退和安全缓存回收；仍缺更多正式签名驱动族及真实 CDN/版本 conformance 证据 |
 | LSP/补全 | 中高 | 软语句边界、组合场景覆盖 | 基线发现第二条无分号 SQL 会串上下文；本轮已修复高置信度场景 |
 | Agent | 高 | 数据库语境和写 SQL 确认 | Oxide 的安全、恢复、工具协议和文件审核领先 |
 | 版本管理 | 中高 | dbx 没有同等完整的独立 Git 工作台 | Oxide 领先，后续补 stash/blame/merge/rebase |
@@ -47,7 +47,7 @@ dbx 仅用于观察交互、能力覆盖和测试组合，不是 OxideStudio 的
   1. 多条 SQL 未使用分号时的上下文泄漏已修复：LSP completion、子句建议、当前语句
      高亮与执行均使用相同的高置信度软边界规则。后续仍需抽取跨进程共享 scope contract。
   2. 外置驱动包的签名导入、原子激活/回滚、长驻连接 sidecar、并发 RPC 和连接级 pin
-     已完成；带摘要的签名远程 catalog 已能受控下载、复验安装并复用已校验归档，仍缺断点续传、崩溃遥测与正式 conformance 包。
+     已完成；带摘要的签名远程 catalog 已能受控下载、断点续传、复验安装并复用已校验归档，缓存回收会保留 active/previous/pinned/live 版本；仍缺正式 conformance 包与真实 CDN 故障注入证据。
   3. `QueryEditor.tsx`、`SchemaSidebar.tsx`、`DataGrid.tsx`、`useTabStore.ts`、
      `commands/table.rs`、`agent/host.rs` 过大，修改会扩大回归范围。
   4. 缺少 Process/Session、User/Role/Privilege、Job、运行参数等数据库管理入口。
@@ -185,8 +185,9 @@ ADR-0017 的 registry/manifest、签名离线导入、原子激活与回滚、�
 sidecar 连接路径已经接入。当前 PostgreSQL/MySQL 的 SQLx、MongoDB、Redis 和 HTTP
 adapter 仍是 bundled recovery channel，升级它们仍需发布整个应用。当前仍缺：
 
-- 断点续传与可观测的缓存回收（当前缓存按 driver/version/archive SHA-256 隔离，
-  每次复用前重新摘要校验，损坏条目会丢弃并重新下载）；
+- 真实 CDN/代理下的断点续传故障注入证据；逻辑已按
+  driver/version/archive SHA-256 隔离 partial，严格校验 Range 并提供可观测缓存回收，
+  复用前仍重新摘要校验；
 - 长期健康/崩溃预算、可诊断但脱敏的运行日志；
 - Maven 依赖解析与经审计的受控下载/断点缓存（现有 Java 21 runtime 与本地签名 JAR
   package 已可用，但不自动下载或解析任意 Maven 坐标）。

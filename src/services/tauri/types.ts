@@ -168,6 +168,15 @@ export interface DatabaseDriverStoreInfo {
   restartRequired: boolean;
 }
 
+export interface DatabaseDriverCachePruneResult {
+  filesRemoved: number;
+  partialFilesRemoved: number;
+  bytesRemoved: number;
+  versionsRemoved: number;
+  retainedVersions: number;
+  skippedEntries: number;
+}
+
 /**
  * Aggregated, connection-owned external driver processes. Intentionally does
  * not include connection names, URLs, credentials, query text, or stderr.

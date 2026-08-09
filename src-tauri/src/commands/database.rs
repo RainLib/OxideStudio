@@ -6,15 +6,17 @@ use crate::core::{
         DatabaseDataModel, DatabaseKind, HOST_TABLE_EXPORT_FORMATS,
     },
     driver_package::{
-        DatabaseDriverPackageRegistry, DriverActivationState, DriverPackageCatalog,
-        DriverPackageRuntime, DriverPackageStatus, InstalledDriverPackage,
+        DatabaseDriverPackageRegistry, DriverActivationState, DriverPackageCachePruneResult,
+        DriverPackageCatalog, DriverPackageRuntime, DriverPackageStatus, InstalledDriverPackage,
         ManagedJavaRuntimeInstallation,
     },
     driver_sidecar::DatabaseDriverSidecar,
     manager::{ConnectionManager, ExternalDriverRuntimeSummary, LiveConnectionCapabilitySnapshot},
     protocol::{DatabaseCreateRequest, Response},
+    store::MetaStore,
 };
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::str::FromStr;
 use tauri::State;
@@ -669,6 +671,34 @@ pub async fn get_database_driver_store_info(
         active_path: registry.root().to_string_lossy().into_owned(),
         restart_required: false,
     }))
+}
+
+/// Remove only disposable signed-catalog archives. Activation and rollback
+/// state are retained by the registry itself; connection pins and live
+/// sidecars are added here without exposing credentials or connection ids.
+#[tauri::command]
+pub async fn prune_database_driver_cache(
+    manager: State<'_, ConnectionManager>,
+    registry: State<'_, DatabaseDriverPackageRegistry>,
+    meta_store: State<'_, MetaStore>,
+) -> Result<Response<DriverPackageCachePruneResult>, String> {
+    let result: Result<DriverPackageCachePruneResult, String> = async {
+        let mut retained: BTreeSet<(String, String)> =
+            manager.active_external_driver_package_identities().await;
+        retained.extend(
+            meta_store
+                .pinned_driver_packages()
+                .await
+                .map_err(|error| format!("Cannot inspect pinned driver packages: {error}"))?,
+        );
+        registry.prune_catalog_cache(&retained).await
+    }
+    .await;
+
+    Ok(match result {
+        Ok(summary) => Response::ok(summary),
+        Err(error) => Response::err("DRIVER_CACHE_CLEANUP_ERROR", &error),
+    })
 }
 
 /// Stage a complete external-driver store at a new location and persist the

@@ -14,6 +14,7 @@ import type {
   DatabaseDriver,
   DatabaseDriverInstallation,
   DatabaseDriverRuntimeSummary,
+  DatabaseDriverCachePruneResult,
   DatabaseDriverStoreInfo,
   DatabaseDriverCatalog,
   DatabaseDriverProbeResult,
@@ -144,6 +145,12 @@ export async function listExternalDatabaseDriverRuntimes(): Promise<
 export async function getDatabaseDriverStoreInfo(): Promise<DatabaseDriverStoreInfo> {
   return invokeWithInterceptors<DatabaseDriverStoreInfo>(
     "get_database_driver_store_info",
+  );
+}
+
+export async function pruneDatabaseDriverCache(): Promise<DatabaseDriverCachePruneResult> {
+  return invokeWithInterceptors<DatabaseDriverCachePruneResult>(
+    "prune_database_driver_cache",
   );
 }
 
@@ -420,6 +427,7 @@ export const databaseService = {
   listDatabaseDriverInstallations,
   listExternalDatabaseDriverRuntimes,
   getDatabaseDriverStoreInfo,
+  pruneDatabaseDriverCache,
   migrateDatabaseDriverStore,
   listManagedJavaRuntimes,
   getExternalDatabaseDriverCatalog,

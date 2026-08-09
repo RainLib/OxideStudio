@@ -126,6 +126,7 @@ pub fn run() {
             commands::connection::save_connections,
             commands::connection::load_connections,
             commands::database::get_database_driver_store_info,
+            commands::database::prune_database_driver_cache,
             commands::database::migrate_database_driver_store,
             // AI commands
             commands::ai::ai_chat_completion,

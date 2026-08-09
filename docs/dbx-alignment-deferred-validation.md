@@ -200,6 +200,18 @@ explicit deferred validation task rather than an implicit release check.
 
 ## Driver, LSP, and SQL-editor alignment
 
+- Exercise driver archive download through a real CDN and an intercepting
+  proxy: exact 206 continuation, ignored Range with 200 full fallback, valid
+  and invalid 416, missing/mismatched Content-Range, mid-stream disconnect,
+  digest mismatch, and retry after process restart. Only a complete
+  catalog-bound SHA-256 may be atomically published; interrupted bytes must
+  remain in the digest-bound `.partial` file and must never be extracted.
+- Populate the catalog cache with active, previous rollback, saved-connection
+  pinned, live-sidecar, unused, malformed and symlink entries. Cleanup must
+  retain the first four sets, remove only regular 64-hex digest archives and
+  partials from unused versions, report unknown entries, and never recurse
+  through or delete a symlink. Repeat while an install is queued and with a
+  Windows file handle open to verify serialization and visible failure.
 - Run driver conformance for every signed package/server-version pair,
   including connect, metadata, query, parameter binding, cancellation, and
   normalized error mapping. The catalog must remain candidate-only without
