@@ -1,4 +1,9 @@
 import { quoteIdentifier } from "@/lib/databaseDialect";
+import {
+  completionFilterTextForQuery,
+  completionMatchScore,
+  completionMatches,
+} from "./completionMatch";
 import type {
   CachedSqlJoinTargetContext,
   CachedSqlRelationReference,
@@ -152,6 +157,12 @@ export function sqlForeignKeyJoinCompletions(
   const completions: SqlForeignKeyJoinCompletion[] = [];
   const seen = new Set<string>();
   const targetCounts = new Map<string, number>();
+  const targetQuery =
+    context.targetFragment
+      .split(".")
+      .pop()
+      ?.trim()
+      .replace(/^["`\[]|["`\]]$/gu, "") || "";
 
   for (const constraint of constraints) {
     const targetTable = constraint.referenced_table?.trim();
@@ -165,6 +176,7 @@ export function sqlForeignKeyJoinCompletions(
     ) {
       continue;
     }
+    if (!completionMatches(targetTable, targetQuery)) continue;
 
     const targetSchema = constraint.referenced_schema?.trim() || undefined;
     const key = [
@@ -212,9 +224,11 @@ export function sqlForeignKeyJoinCompletions(
       documentation: `${constraintLabel}: ${sourceRelation.table}(${sourceColumns.join(
         ", ",
       )}) → ${displayTarget}(${targetColumns.join(", ")})`,
-      filterText: targetTable,
+      filterText:
+        completionFilterTextForQuery(targetTable, targetQuery, targetTable) ||
+        targetTable,
       insertText: `${target} ${quotedAlias} ${on} ${predicates.join(and)}`,
-      sortText: `-1:${displayTarget.toLocaleLowerCase()}:${occurrence}`,
+      sortText: `-1:${String(9_999 - Math.max(0, completionMatchScore(targetTable, targetQuery))).padStart(4, "0")}:${displayTarget.toLocaleLowerCase()}:${occurrence}`,
     });
   }
 

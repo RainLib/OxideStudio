@@ -66,15 +66,15 @@ const ORDER_CONTINUATIONS = ["ASC", "DESC", "NULLS FIRST", "NULLS LAST"] as cons
 // names; this only recognizes a completed field so the next predicate/sort
 // token is still offered while LSP is cold or rebuilding its schema cache.
 const SQL_IDENTIFIER_SEGMENT =
-  '(?:[A-Za-z_][A-Za-z0-9_$]*|"(?:[^"]|"")+"|`[^`]+`|\\[[^\\]]+\\])';
+  '(?:[_\\p{ID_Start}][$@#_\\u200c\\u200d\\p{ID_Continue}]*|"(?:[^"]|"")+"|`[^`]+`|\\[[^\\]]+\\])';
 const SQL_IDENTIFIER_REFERENCE = `${SQL_IDENTIFIER_SEGMENT}(?:\\s*\\.\\s*${SQL_IDENTIFIER_SEGMENT})*`;
 const CONDITION_FIELD_AT_CURSOR = new RegExp(
   `\\b(?:WHERE|HAVING|ON)\\s+${SQL_IDENTIFIER_REFERENCE}\\s*$`,
-  "i",
+  "iu",
 );
 const ORDER_FIELD_AT_CURSOR = new RegExp(
   `\\bORDER\\s+BY\\s+${SQL_IDENTIFIER_REFERENCE}\\s*$`,
-  "i",
+  "iu",
 );
 
 function currentStatementFragment(textBeforeCursor: string) {

@@ -113,6 +113,7 @@ import { loadTableMetadata } from "@/services/tableMetadataCache";
 import {
   cachedSqlJoinTargetContext,
   cachedSqlRelationForFieldCompletion,
+  cachedSqlRelationTargetPrefix,
 } from "@/lib/queryEditorCachedCompletion";
 import {
   buildQueryEditorTableHoverMarkdown,
@@ -180,10 +181,15 @@ import {
 import {
   buildQueryEditorOptions,
   appendSqlCompletionSpace,
+  completionFilterTextForQuery,
+  completionMatchScore,
+  completionMatches,
+  containsHan,
   currentStatementLineFrames,
   elasticsearchJsonStringCompletionRange,
   editorDocumentIdentity,
   enqueueLspDocumentSync,
+  ensurePinyinCompletionSupport,
   flattenLspSelectionRanges,
   isPublishDiagnosticsParams,
   lspDiagnosticToMonacoMarker,
@@ -202,6 +208,8 @@ import {
   sqlJoinConstraintsFromRelationshipIndex,
   sqlSyntaxFallbackCompletions,
   sqlCompletionItemType,
+  sqlCompletionIdentifierPrefix,
+  sqlCompletionTriggerDecision,
   syncLspModelBeforeCompletion,
   toMonacoRange,
   toMonacoWorkspaceEdit,
@@ -280,7 +288,13 @@ export function cachedRelationCompletionSuggestions(
     position,
   ),
 ) {
-  if (!RELATION_COMPLETION_CONTEXTS.has(sqlContextKeywordBeforeCursor(textBeforeCursor) || "")) {
+  const relationPrefix = cachedSqlRelationTargetPrefix(textBeforeCursor);
+  if (
+    relationPrefix === null &&
+    !RELATION_COMPLETION_CONTEXTS.has(
+      sqlContextKeywordBeforeCursor(textBeforeCursor) || "",
+    )
+  ) {
     return [];
   }
   const word = model.getWordUntilPosition(position);
@@ -290,7 +304,10 @@ export function cachedRelationCompletionSuggestions(
     position.lineNumber,
     word.endColumn,
   );
-  return tables.map((table) => ({
+  const query = relationPrefix ?? "";
+  return tables
+    .filter((table) => completionMatches(table.name, query))
+    .map((table) => ({
     label: table.name,
     kind: monaco.languages.CompletionItemKind.Struct,
     detail: "Cached database object",
@@ -298,7 +315,8 @@ export function cachedRelationCompletionSuggestions(
       ? { value: table.comment }
       : { value: "Available from cached database metadata." },
     insertText: table.name,
-    sortText: `0:${table.name.toLocaleLowerCase()}`,
+    filterText: completionFilterTextForQuery(table.name, query),
+    sortText: `0:${String(9_999 - Math.max(0, completionMatchScore(table.name, query))).padStart(4, "0")}:${table.name.toLocaleLowerCase()}`,
     range,
   }));
 }
@@ -499,6 +517,7 @@ export function QueryEditor({
   const activeLspDocumentUriRef = useRef<string | null>(null);
   const lastLspSessionKeyRef = useRef<string | null>(null);
   const completionRequestGenerationRef = useRef<Map<string, number>>(new Map());
+  const completionTriggerOriginRef = useRef<"explicit" | null>(null);
   const inlineCompletionCacheRef = useRef(new InlineCompletionCache());
   const inlineCompletionAbortRef = useRef<AbortController | null>(null);
   const inlineCompletionListenersRef = useRef(new Set<() => void>());
@@ -1518,10 +1537,47 @@ export function QueryEditor({
             model,
             position,
           );
-          const cachedRelationSuggestions = () => {
-            const identity = extractLspDocumentIdentity(model.uri.toString());
-            if (identity?.driver === "elasticsearch" || identity?.driver === "elastic" || identity?.driver === "mongodb") {
+          const completionIdentity = extractLspDocumentIdentity(
+            model.uri.toString(),
+          );
+          const completionDriver =
+            completionIdentity?.driver.toLocaleLowerCase() || "";
+          const isSqlCompletionDocument = ![
+            "elasticsearch",
+            "elastic",
+            "mongodb",
+          ].includes(completionDriver);
+          const explicitCompletion =
+            completionTriggerOriginRef.current === "explicit";
+          completionTriggerOriginRef.current = null;
+          if (isSqlCompletionDocument) {
+            const trigger = sqlCompletionTriggerDecision(
+              editorSettings.sqlCompletion.triggerMode,
+              textBeforeCursor,
+              explicitCompletion,
+            );
+            if (!trigger.allowed) {
+              recordSqlCompletionTelemetry({
+                scope: usageScope,
+                outcome: "empty",
+                durationMs: performance.now() - completionStartedAt,
+                suggestionCount: 0,
+                reason: `trigger:${trigger.reason}`,
+              });
+              return { suggestions: [] };
+            }
+          }
+          const cachedRelationSuggestions = async () => {
+            if (["elasticsearch", "elastic", "mongodb"].includes(completionDriver)) {
               return [];
+            }
+            const relationPrefix = cachedSqlRelationTargetPrefix(textBeforeCursor);
+            if (
+              relationPrefix &&
+              /^[a-z0-9]+$/iu.test(relationPrefix) &&
+              schemaTables.some((table) => containsHan(table.name))
+            ) {
+              await ensurePinyinCompletionSupport();
             }
             return cachedRelationCompletionSuggestions(
               monaco,
@@ -1532,12 +1588,11 @@ export function QueryEditor({
             );
           };
           const cachedJoinSuggestions = async () => {
-            const identity = extractLspDocumentIdentity(model.uri.toString());
             if (
               !effectiveConnectionId ||
-              identity?.driver === "elasticsearch" ||
-              identity?.driver === "elastic" ||
-              identity?.driver === "mongodb"
+              ["elasticsearch", "elastic", "mongodb"].includes(
+                completionDriver,
+              )
             ) {
               return [];
             }
@@ -1607,6 +1662,18 @@ export function QueryEditor({
             ) {
               return [];
             }
+            const joinPrefix = joinContext.targetFragment
+              .split(".")
+              .pop()
+              ?.trim() || "";
+            if (
+              /^[a-z0-9]+$/iu.test(joinPrefix) &&
+              constraints.some((constraint) =>
+                containsHan(constraint.referenced_table || ""),
+              )
+            ) {
+              await ensurePinyinCompletionSupport();
+            }
 
             const word = model.getWordUntilPosition(position);
             const range = new monaco.Range(
@@ -1635,12 +1702,11 @@ export function QueryEditor({
             }));
           };
           const cachedFieldSuggestions = async () => {
-            const identity = extractLspDocumentIdentity(model.uri.toString());
             if (
               !effectiveConnectionId ||
-              identity?.driver === "elasticsearch" ||
-              identity?.driver === "elastic" ||
-              identity?.driver === "mongodb"
+              ["elasticsearch", "elastic", "mongodb"].includes(
+                completionDriver,
+              )
             ) {
               return [];
             }
@@ -1653,6 +1719,7 @@ export function QueryEditor({
             }
             const relation = cachedSqlRelationForFieldCompletion(textBeforeCursor);
             if (!relation) return [];
+            const fieldQuery = sqlCompletionIdentifierPrefix(textBeforeCursor);
 
             const word = model.getWordUntilPosition(position);
             const range = new monaco.Range(
@@ -1669,7 +1736,16 @@ export function QueryEditor({
               const relationKind = relation.isDerived
                 ? "Derived table"
                 : "CTE";
-              return (relation.cteColumns || []).map((column) => ({
+              const declaredColumns = relation.cteColumns || [];
+              if (
+                /^[a-z0-9]+$/iu.test(fieldQuery) &&
+                declaredColumns.some(containsHan)
+              ) {
+                await ensurePinyinCompletionSupport();
+              }
+              return declaredColumns
+                .filter((column) => completionMatches(column, fieldQuery))
+                .map((column) => ({
                 label: column,
                 kind: monaco.languages.CompletionItemKind.Field,
                 detail: `${relationKind} column`,
@@ -1677,7 +1753,8 @@ export function QueryEditor({
                   value: `Column declared by ${relationKind.toLocaleLowerCase()} ${relation.table}.`,
                 },
                 insertText: column,
-                sortText: `0:${column.toLocaleLowerCase()}`,
+                filterText: completionFilterTextForQuery(column, fieldQuery),
+                sortText: `0:${String(9_999 - Math.max(0, completionMatchScore(column, fieldQuery))).padStart(4, "0")}:${column.toLocaleLowerCase()}`,
                 range,
               }));
             }
@@ -1731,7 +1808,15 @@ export function QueryEditor({
               }
             }
             if (token?.isCancellationRequested) return [];
-            return columns.map((column) => ({
+            if (
+              /^[a-z0-9]+$/iu.test(fieldQuery) &&
+              columns.some((column) => containsHan(column.name))
+            ) {
+              await ensurePinyinCompletionSupport();
+            }
+            return columns
+              .filter((column) => completionMatches(column.name, fieldQuery))
+              .map((column) => ({
               label: column.name,
               kind: monaco.languages.CompletionItemKind.Field,
               detail: `Cached ${column.dataType}`,
@@ -1739,16 +1824,24 @@ export function QueryEditor({
                 ? { value: column.comment }
                 : { value: `Column from cached metadata for ${relation.table}.` },
               insertText: column.name,
-              sortText: `0:${column.name.toLocaleLowerCase()}`,
+              filterText: completionFilterTextForQuery(
+                column.name,
+                fieldQuery,
+              ),
+              sortText: `0:${String(9_999 - Math.max(0, completionMatchScore(column.name, fieldQuery))).padStart(4, "0")}:${column.name.toLocaleLowerCase()}`,
               range,
             }));
           };
+          const cachedMetadataSuggestions = async () => {
+            const fields = await cachedFieldSuggestions();
+            return fields.length > 0 ? fields : cachedRelationSuggestions();
+          };
           const cachedSuggestions = async () => {
             const joins = await cachedJoinSuggestions();
-            const fields = await cachedFieldSuggestions();
-            const cached =
-              fields.length > 0 ? fields : cachedRelationSuggestions();
-            return mergeCompletionFallbackSuggestions(joins, cached);
+            return mergeCompletionFallbackSuggestions(
+              joins,
+              await cachedMetadataSuggestions(),
+            );
           };
           const fallbackSuggestions = async () => {
             const cached = await cachedSuggestions();
@@ -2012,10 +2105,15 @@ export function QueryEditor({
               appendSpace: editorSettings.sqlCompletion.appendSpace,
               nextCharacter,
             });
-            const suggestionsWithSmartJoins = mergeCompletionFallbackSuggestions(
-              await cachedJoinSuggestions(),
+            const suggestionsWithMetadata = mergeCompletionFallbackSuggestions(
               suggestions,
+              await cachedMetadataSuggestions(),
             );
+            const suggestionsWithSmartJoins =
+              mergeCompletionFallbackSuggestions(
+                await cachedJoinSuggestions(),
+                suggestionsWithMetadata,
+              );
 
             // A healthy language server can still return no proposals while
             // metadata is being refreshed, a newly opened document has not
@@ -2166,6 +2264,7 @@ export function QueryEditor({
     editorSettings.sqlCompletion.keywordCase,
     editorSettings.sqlCompletion.rankByUsage,
     editorSettings.sqlCompletion.snippets,
+    editorSettings.sqlCompletion.triggerMode,
   ]);
 
   // Stable protocol providers do not depend on schema metadata or completion
@@ -3995,7 +4094,14 @@ export function QueryEditor({
   ]);
 
   useEffect(() => {
-    if (!monaco || !mountedEditor || isElasticsearchConsole) return;
+    if (
+      !monaco ||
+      !mountedEditor ||
+      isElasticsearchConsole ||
+      !capabilities.supportsSqlQuery
+    ) {
+      return;
+    }
     const replaceSelections = (transform: (selected: string) => string | null) => {
       const model = mountedEditor.getModel();
       const selections = mountedEditor
@@ -4018,6 +4124,24 @@ export function QueryEditor({
       mountedEditor.executeEdits("oxide.sql-intention", edits);
     };
     const actions = [
+      mountedEditor.addAction({
+        id: "oxide.sql.triggerCompletion",
+        label: "Show SQL completion suggestions",
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Space],
+        run: () => {
+          completionTriggerOriginRef.current = "explicit";
+          mountedEditor.trigger(
+            "oxide.sql.explicitCompletion",
+            "editor.action.triggerSuggest",
+            {},
+          );
+          window.setTimeout(() => {
+            if (completionTriggerOriginRef.current === "explicit") {
+              completionTriggerOriginRef.current = null;
+            }
+          }, 0);
+        },
+      }),
       mountedEditor.addAction({
         id: "oxide.sql.quoteIdentifier",
         label: "Quote selected SQL identifier",
@@ -4050,7 +4174,13 @@ export function QueryEditor({
       }),
     ];
     return () => actions.forEach((action) => action.dispose());
-  }, [driver, isElasticsearchConsole, monaco, mountedEditor]);
+  }, [
+    capabilities.supportsSqlQuery,
+    driver,
+    isElasticsearchConsole,
+    monaco,
+    mountedEditor,
+  ]);
 
   const handleTransactionModeChange = (mode: TransactionMode) => {
     if (!supportsTransactions) return;
@@ -4143,6 +4273,7 @@ export function QueryEditor({
       editorSettings.keybindingMode,
       editorSettings.inlineCompletion.enabled,
       editorSettings.minimap,
+      editorSettings.sqlCompletion.triggerMode,
       editorSettings.tabSize,
       editorSettings.vim.relativeLineNumbers,
       editorSettings.wordWrap,

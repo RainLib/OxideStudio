@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   cachedSqlRelationForFieldCompletion,
+  cachedSqlRelationTargetPrefix,
   cachedSqlRelationsBeforeCursor,
 } from "./queryEditorCachedCompletion";
 
@@ -70,5 +71,17 @@ describe("cached SQL relation completion", () => {
       isDerived: true,
       cteColumns: ["key", "value"],
     });
+  });
+
+  it("recognizes unquoted Unicode SQL Server relation references", () => {
+    expect(cachedSqlRelationsBeforeCursor("SELECT * FROM 销售.订单 o WHERE o.")).toContainEqual(
+      expect.objectContaining({ schema: "销售", table: "订单", alias: "o" }),
+    );
+  });
+
+  it("keeps the typed Unicode relation fragment available for matching", () => {
+    expect(cachedSqlRelationTargetPrefix("SELECT * FROM 订")).toBe("订");
+    expect(cachedSqlRelationTargetPrefix("SELECT * FROM 销售.zz")).toBe("zz");
+    expect(cachedSqlRelationTargetPrefix("SELECT * FROM orders ")).toBeNull();
   });
 });

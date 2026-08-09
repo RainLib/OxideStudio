@@ -252,6 +252,20 @@ explicit deferred validation task rather than an implicit release check.
 
 ## LSP completion protocol and SQL snippets
 
+- Verify all three SQL completion modes against PostgreSQL, MySQL, SQLite/DuckDB,
+  SQL Server and Oracle connections: semantic-position mode must avoid comments,
+  strings and non-SQL positions; prefix mode must wait for a name or qualifier;
+  manual mode must issue no automatic LSP request while Ctrl/Cmd+Space still works.
+- Use real schemas containing Chinese table/column names and ASCII names on each
+  supported driver family. Verify pinyin initials, camel and fuzzy matching,
+  deterministic ordering, live-LSP/cache deduplication, and no pinyin dictionary
+  download or parse on editor startup and ordinary ASCII-only completion.
+- Verify `INSERT INTO table (` all-column completion with quoted/non-ASCII names,
+  identity/generated/default columns and placeholder navigation. Validate the
+  intended include/exclude policy per database before declaring this aligned.
+- Verify `SELECT *` and `alias.*` expansion for one and multiple sources, duplicate
+  column names, quoted aliases, joins, views and schema-qualified objects. Multi-source
+  output must remain unambiguous and preserve the typed alias where applicable.
 - Verify PostgreSQL, MySQL, SQL Server, Oracle and ClickHouse completion items
   that use plain `TextEdit`, LSP `InsertReplaceEdit`, `additionalTextEdits`,
   commit characters, Markdown documentation and deprecated tags. Server edits

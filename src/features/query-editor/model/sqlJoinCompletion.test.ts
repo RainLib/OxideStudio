@@ -4,6 +4,7 @@ import {
   sqlForeignKeyJoinCompletions,
   sqlJoinConstraintsFromRelationshipIndex,
 } from "./sqlJoinCompletion";
+import { ensurePinyinCompletionSupport } from "./completionMatch";
 
 describe("foreign-key JOIN completion", () => {
   it("keeps the incomplete target out of the metadata source relation", () => {
@@ -70,6 +71,32 @@ describe("foreign-key JOIN completion", () => {
     expect(completion?.insertText).toBe(
       '"crm"."customers" "c2" on "c2"."id" = "c"."parent_id"',
     );
+  });
+
+  it("finds a Unicode foreign-key target by pinyin initials", async () => {
+    await ensurePinyinCompletionSupport();
+    const context = cachedSqlJoinTargetContext(
+      "SELECT * FROM 销售订单 so JOIN dd",
+    );
+    const [completion] = sqlForeignKeyJoinCompletions(
+      context!,
+      context!.sourceRelations[0]!,
+      [
+        {
+          name: "fk_order_detail",
+          constraint_type: "FOREIGN KEY",
+          columns: ["详情_id"],
+          referenced_table: "订单详情",
+          referenced_columns: ["id"],
+        },
+      ],
+      { driver: "sqlserver" },
+    );
+
+    expect(completion).toMatchObject({
+      label: "订单详情",
+      filterText: "dd",
+    });
   });
 
   it("ignores incomplete and non-foreign constraints", () => {

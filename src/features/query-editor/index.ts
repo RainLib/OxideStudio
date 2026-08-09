@@ -25,6 +25,20 @@ export {
 } from "./model/editorDocumentIdentity";
 export { buildQueryEditorOptions } from "./model/editorOptions";
 export {
+  completionFilterTextForQuery,
+  completionMatchScore,
+  completionMatches,
+  containsHan,
+  ensurePinyinCompletionSupport,
+  pinyinInitials,
+} from "./model/completionMatch";
+export {
+  sqlCompletionIdentifierPrefix,
+  sqlCompletionTriggerDecision,
+  type SqlCompletionTriggerDecision,
+  type SqlCompletionTriggerMode,
+} from "./model/sqlCompletionTriggerPolicy";
+export {
   flattenLspSelectionRanges,
   isPublishDiagnosticsParams,
   lspDiagnosticToMonacoMarker,

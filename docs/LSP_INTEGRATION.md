@@ -105,7 +105,7 @@ git submodule update --init --recursive
 git -C vendor/sql-lsp describe --tags --always
 ```
 
-Current tracked commit is `8ebc2cb17ce1853a83e492b9652db9a47d1cca57`. A locally rebuilt binary may report the same revision with `sourceDirty: true` while the reviewed submodule changes are still uncommitted; the adjacent manifest is the authoritative build evidence.
+Current tracked commit is `5c0a51adcebc3a161886dbc83820ca01ee018640`. A locally rebuilt binary may report the same revision with `sourceDirty: true` while the reviewed submodule changes are still uncommitted; the adjacent manifest is the authoritative build evidence.
 
 ### 2. Prepare the Binary
 
@@ -202,6 +202,28 @@ function QueryEditor() {
 
 The bundled LSP accepts both pure Elasticsearch JSON DSL and HTTP-style Elasticsearch requests such as `GET /index/_search` followed by a JSON body; diagnostics are applied to the body instead of treating request lines as JSON syntax errors. Console field completion is restricted to the request's current index and includes quoted field-list/value positions. REST operation snippets follow the connected server's ES 6 typed or ES 7/8 typeless API. MongoDB completions include collection CRUD commands plus administrative command names such as `create`, `drop`, `dropDatabase`, `dropIndexes`, `renameCollection`, and `collMod`; field suggestions are restricted to the collection named by `collection`, `find`, `aggregate`, or another collection-valued command property.
 
+## Smart SQL completion
+
+SQL completion has three user-selectable trigger policies: semantic SQL positions,
+identifier-prefix only, and manual Ctrl/Cmd+Space. Automatic requests are rejected
+before IPC when the cursor is in a comment/string or outside the selected policy;
+explicit requests remain available in valid SQL text. The rejection reason is stored
+in the existing content-free completion telemetry without SQL or identifier text.
+
+Live LSP results remain authoritative, while connection-scoped cached metadata fills
+missing objects and columns. Cached relation, column, and FK JOIN candidates support
+Unicode identifiers plus camel/fuzzy and Chinese pinyin matching. The pinyin dictionary
+is loaded as a separate lazy chunk only when an ASCII prefix is compared with Chinese
+metadata, so ordinary editor startup and ASCII completion do not pay its parse cost.
+
+The bundled LSP also provides metadata-backed `INSERT INTO table (` all-column snippets
+with `VALUES` tab stops and expands single-source, multi-source, and qualified `SELECT
+*` selections. Multi-source expansion qualifies columns with the existing table aliases.
+Generated column lists quote reserved, case-sensitive, and non-ASCII identifiers with
+the active base dialect, and LSP UTF-16 cursor positions are converted before UTF-8 slicing.
+These SQL behaviors cover PostgreSQL, MySQL, SQLite/DuckDB, Hive, ClickHouse, and the
+registered compatibility product aliases.
+
 ```typescript
 await lspClient.updateConfiguration({
   defaultDialect: "postgres",
@@ -228,7 +250,11 @@ Run the dialect scope and document-database unit matrices directly against the s
 cargo test --manifest-path vendor/sql-lsp/Cargo.toml --test completion_scope_matrix_tests --test dialect_tests
 ```
 
-Frontend tests cover MongoDB automatic-trigger classification, Elasticsearch quoted-field and ES 6/7/8 REST completion, WHERE virtual documents/fuzzy ranking/keyboard acceptance, table-tab schema mappings, stale completion rejection, and didChange deduplication.
+Frontend tests cover SQL trigger policies, pinyin/camel/fuzzy completion ranking,
+Unicode cached metadata, MongoDB automatic-trigger classification, Elasticsearch
+quoted-field and ES 6/7/8 REST completion, WHERE virtual documents/fuzzy
+ranking/keyboard acceptance, table-tab schema mappings, stale completion rejection,
+and didChange deduplication.
 
 Run the protocol-level bundled LSP test after rebuilding `src-tauri/binaries/sql-lsp`:
 

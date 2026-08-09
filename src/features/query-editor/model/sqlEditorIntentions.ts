@@ -10,7 +10,10 @@ export function quoteSqlIdentifierSelection(
   const parts = selection.trim().split(".");
   if (
     parts.length === 0 ||
-    parts.some((part) => !/^[A-Za-z_][A-Za-z0-9_$]*$/.test(part))
+    parts.some(
+      (part) =>
+        !/^[_\p{ID_Start}][$@#_\u200c\u200d\p{ID_Continue}]*$/u.test(part),
+    )
   ) {
     return null;
   }

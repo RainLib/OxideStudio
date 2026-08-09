@@ -1341,6 +1341,25 @@ function EditorSettings({
         }
       />
       <SettingsDivider title="SQL completion" />
+      <SettingRow label="Automatic suggestions:">
+        <select
+          className={selectClass}
+          value={editor.sqlCompletion.triggerMode}
+          onChange={(event) =>
+            updateEditor({
+              sqlCompletion: {
+                ...editor.sqlCompletion,
+                triggerMode: event.target.value as AppSettings["editor"]["sqlCompletion"]["triggerMode"],
+              },
+            })
+          }
+          title="Manual keeps Ctrl+Space available; Prefix waits for an identifier; Smart positions also opens after SQL clauses"
+        >
+          <option value="positional">Smart SQL positions</option>
+          <option value="require-prefix">After typing a name</option>
+          <option value="manual">Manual (Ctrl+Space)</option>
+        </select>
+      </SettingRow>
       <SettingRow label="Keyword case:">
         <select
           className={selectClass}

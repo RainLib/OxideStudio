@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
-> 审计基线：2026-08-02
-> DBX 参考提交：`8efe83aaa`
+> 审计基线：2026-08-10
+> DBX 参考提交：`c20ad57f9`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -48,13 +48,13 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 | L02 | 部分对齐：完整 semantic model | `lib/sql/semantic/model.ts`、`references.ts`、`diagnostics.ts` | bundled LSP + `src/lib/sqlAnalysis.ts` + cached completion | 补 CTE shadow、correlated subquery、table function、lateral/apply、projection alias、三段 catalog 限定组合测试。 |
 | L03 | 部分对齐：方言关键词与类型 | `lib/sql/sqlCompletion.ts` 中 `DATABASE_SQL_KEYWORDS`、函数签名和 dialect sets | bundled LSP dialect registry、`databaseDialect.ts`、常用 snippet fallback | Oracle/SQL Server/ClickHouse/DB2/Dameng 由 package product identity 选择，generic JDBC 不伪造诊断。 |
 | L04 | 部分对齐：函数签名帮助 | `sqlCompletion.ts:getSqlFunctionSignatureHelp` 与 per-dialect signature maps；对应 `sqlCompletion.signature.spec.ts` | LSP signature help 基础路径 | 覆盖 overload、可选参数、嵌套调用、routine metadata、server-version gating。 |
-| L05 | 部分对齐：对象/列补全 | `sqlCompletion.ts:buildSqlCompletionItems*`；`metadata/completionTreeIndex.ts` | LSP schema sync、metadata cache fallback、WHERE completion | alias、同名表、跨 schema/catalog、CTE、临时表和多表歧义均有确定行为。 |
-| L06 | 部分对齐：INSERT values inlay hints | `lib/sql/insertValueHints.ts`；`codemirrorInsertValueHints.ts` | Monaco inlay provider 现合并 LSP hints 与 `sqlInsertValueHints`：对显式 `INSERT INTO t (a, b) VALUES ...` 的每个值标注列名，支持多行 VALUES、嵌套表达式、注释/字符串隔离；不因输入触发 metadata 读取 | 无列清单时按需、受限地取 metadata；增加用户开关与更广方言语法 corpus。 |
+| L05 | 部分对齐：对象/列补全 | `lib/sql/sqlCompletion.ts:buildSqlCompletionItems*`、`lib/metadata/completionTreeIndex.ts`、`lib/common/pinyin.ts`、`lib/common/completionMatch.ts` | LSP schema sync 与 metadata cache 现在合并而非互斥；对象、列和 FK JOIN 支持 Unicode identifier、拼音首字母、camel/fuzzy 排序，拼音词典仅在中文候选与 ASCII 前缀同时出现时异步加载 | 仍需 alias 同名表、跨 catalog、CTE shadow、临时表和多表歧义的完整 contract corpus；真实中文 metadata 验证延期。 |
+| L06 | 部分对齐：INSERT values hints/snippet | `lib/sql/insertValueHints.ts`、`codemirrorInsertValueHints.ts`、`lib/sql/sqlCompletion.ts` | 显式列清单继续提供 Monaco inlay；空列清单 `INSERT INTO t (` 现在由 bundled LSP 基于 metadata 推荐全列并生成 `VALUES` snippet/tab stops，保留字、大小写和非 ASCII 列名按基础方言引用；覆盖 PostgreSQL/MySQL/SQLite/DuckDB/Hive/ClickHouse 及其 compatibility aliases | 验证 identity/generated/default 列策略和更广方言语法；按产品决定是否默认排除 server-generated 列。 |
 | L07 | 未对齐：跨 console symbol/reference index | `lib/sql/semantic/references.ts` 和本地 semantic fixtures | 项目 SQL 虚拟文档同步已存在，但没有项目级 symbol graph | 支持 table/view/routine/CTE 引用查找和安全 rename preview；migration/view definition 可成为只读来源。 |
 | L08 | 未对齐：真实值采样补全 | `sqlCompletion.ts:buildComparisonValueItems` | Oxide 只提供类型安全的值模板 | 新 capability 必须显式 opt-in，限定列/行数/字节数，不把样例值无条件送到 LSP 或 Agent。 |
 | L09 | 已对齐：常用命令 snippet | `lib/sql/sqlSnippetTemplates.ts`；`sqlCompletion.snippet.spec.ts` | `features/query-editor/model/sqlCommandSnippets.ts` | 按产品选择 LIMIT/TOP/ROWNUM/FETCH/ROWS、DDL 与 mutation 语法；接受历史按连接排序。 |
-| L10 | 部分对齐：补全展示和插入 | `lib/editor/sqlCompletionPresentation.ts`、`sqlCompletionInsertion.ts` | LSP→Monaco adapter、usage ranking、snippet insertion | textEdit/additionalTextEdit、quote policy、自动 alias、触发后链式补全形成 provider 集成测试。 |
-| L11 | 部分对齐：结构化编辑 intentions | `lib/editor/queryEditorTextEdits.ts`、`sqlInListPaste.ts`、`sqlQuoteCaret.ts` | 已有格式化、星号展开和危险语句 guard；`sqlEditorIntentions` 提供 quote/unquote identifier 和 clipboard→IN-list，Monaco 对所有非空选区原子应用，任一选区无法安全转换即不修改 | 仍缺 metadata 驱动的列清单展开、JOIN/WHERE 重写 preview、以及更复杂的结构化多光标编辑。 |
+| L10 | 部分对齐：补全触发、展示和插入 | `lib/sql/sqlCompletionTriggerPolicy.ts`、`components/editor/QueryEditor.vue`、`components/editor/EditorSettingsDialog.vue`、`lib/editor/sqlCompletionPresentation.ts`、`sqlCompletionInsertion.ts` | 设置中提供“智能 SQL 位置 / 输入名称后 / 仅 Ctrl+Space”三种触发模式；provider 在调用 LSP 前按语义位置门控，显式 Ctrl/Cmd+Space 始终可用并记录无内容原因；LSP→Monaco adapter、usage ranking、snippet insertion 保持原链路 | 补 textEdit/additionalTextEdit、quote policy、自动 alias、触发后链式补全的 provider 集成测试，并在超大文档验证有界触发扫描。 |
+| L11 | 部分对齐：结构化编辑 intentions | `lib/editor/queryEditorTextEdits.ts`、`sqlInListPaste.ts`、`sqlQuoteCaret.ts`、`lib/sql/semantic/completion.ts` | 已有格式化、危险语句 guard、Unicode quote/unquote identifier 和 clipboard→IN-list；星号 action 已可将单表、多表及 `alias.*` 按 metadata 展开，多表使用 alias 限定以避免同名列歧义 | 仍缺 JOIN/WHERE 重写 preview、generated/hidden 列策略以及更复杂的结构化多光标编辑。 |
 | L12 | 部分对齐：编辑器模块边界 | DBX 已拆出 `lib/editor/*`、`lib/sql/*`，但主组件仍大 | `QueryEditor.tsx` 仍承担 model/LSP/execution/view 多重职责 | 提取 model lifecycle、execution controller 和 provider coordinator；组件测试不加载完整 Monaco。 |
 | L13 | 已对齐：进程恢复遥测 | DBX 本地 semantic model不依赖独立进程 | `useLspSemanticStatusStore` 按连接记录 LSP restart/恢复耗时、schema sync failure 与 stale response drop 的无内容计数；session registry 和同步器在对应路径写入，状态栏 schema 语义提示的 title 展示最新趋势，不记录 SQL/对象内容 | 保持计数有界、仅会话内；如需跨会话分析另建脱敏诊断导出。 |
 

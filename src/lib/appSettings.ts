@@ -23,6 +23,7 @@ export type InlineCompletionSettings = {
 };
 
 export type SqlCompletionSettings = {
+  triggerMode: "manual" | "require-prefix" | "positional";
   keywordCase: "upper" | "lower" | "preserve";
   tableAlias: "none" | "initials";
   rankByUsage: boolean;
@@ -258,6 +259,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     minimap: false,
     confirmDestructiveSql: true,
     sqlCompletion: {
+      triggerMode: "positional",
       keywordCase: "upper",
       tableAlias: "none",
       rankByUsage: true,
@@ -514,6 +516,12 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         defaults.editor.confirmDestructiveSql,
       ),
       sqlCompletion: {
+        triggerMode: enumAt(
+          raw,
+          ["editor", "sqlCompletion", "triggerMode"],
+          ["manual", "require-prefix", "positional"],
+          defaults.editor.sqlCompletion.triggerMode,
+        ),
         keywordCase: enumAt(
           raw,
           ["editor", "sqlCompletion", "keywordCase"],

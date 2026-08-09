@@ -360,25 +360,31 @@ function splitQualifiedIdentifier(value: string) {
   return database ? { ...relation, database } : relation;
 }
 
+const UNQUOTED_SQL_IDENTIFIER =
+  '[_\\p{ID_Start}][$@#_\\u200c\\u200d\\p{ID_Continue}]*';
 const SQL_IDENTIFIER =
-  '(?:"(?:""|[^"])+"|`(?:``|[^`])+`|\\[(?:\\]\\]|[^\\]])+\\]|[A-Za-z_][\\w$]*)';
+  `(?:"(?:""|[^"])+"|\`(?:\`\`|[^\`])+\`|\\[(?:\\]\\]|[^\\]])+\\]|${UNQUOTED_SQL_IDENTIFIER})`;
 const TRAILING_IDENTIFIER_FRAGMENT =
-  '(?:"[^"]*|`[^`]*|\\[[^\\]]*|[A-Za-z_][\\w$]*)';
+  `(?:"[^"]*|\`[^\`]*|\\[[^\\]]*|${UNQUOTED_SQL_IDENTIFIER})`;
 const RELATION_MATCHER = new RegExp(
   `\\b(from|join|update|into|apply)\\s+(?:lateral\\s+)?(${SQL_IDENTIFIER}(?:\\.${SQL_IDENTIFIER})*)\\s*(?:as\\s+)?(${SQL_IDENTIFIER})?`,
-  "gi",
+  "giu",
 );
 const TRAILING_QUALIFIER = new RegExp(
   `(${SQL_IDENTIFIER})\\s*\\.\\s*${TRAILING_IDENTIFIER_FRAGMENT}?$`,
-  "i",
+  "iu",
 );
 const CTE_DECLARATION_MATCHER = new RegExp(
   `(?:\\bwith\\b|,)\\s*(?:recursive\\s+)?(${SQL_IDENTIFIER})(?:\\s*\\(([^)]*)\\))?\\s+as\\s*\\(`,
-  "gi",
+  "giu",
 );
 const JOIN_TARGET_CONTEXT_MATCHER = new RegExp(
   `\\b(?:(?:left|right|full|inner|outer|cross|natural)\\s+)*(?:join)\\s+((?:${SQL_IDENTIFIER}\\s*\\.\\s*)*(?:${TRAILING_IDENTIFIER_FRAGMENT})?)$`,
-  "i",
+  "iu",
+);
+const RELATION_TARGET_CONTEXT_MATCHER = new RegExp(
+  `\\b(?:from|join|into|update|truncate\\s+table|alter\\s+table|drop\\s+(?:table|view)|describe|desc)\\s+((?:${SQL_IDENTIFIER}\\s*\\.\\s*)*(?:${TRAILING_IDENTIFIER_FRAGMENT})?)$`,
+  "iu",
 );
 const SUBQUERY_RELATION_MATCHER = /\b(?:from|join|apply)\s+(?:lateral\s+)?\(/giu;
 const TABLE_FUNCTION_RELATION_MATCHER = new RegExp(
@@ -650,6 +656,23 @@ export function cachedSqlJoinTargetContext(
   if (sourceRelations.length === 0) return null;
 
   return { sourceRelations, targetFragment };
+}
+
+/**
+ * Returns the relation-name fragment currently being typed. Unlike a trailing
+ * keyword check, this remains true after `FROM cus` and supports Unicode and
+ * qualified SQL Server names, which is required for pinyin-backed matching.
+ */
+export function cachedSqlRelationTargetPrefix(textBeforeCursor: string) {
+  const statement = currentTopLevelStatementBeforeCursor(textBeforeCursor);
+  const match = statement.masked.match(RELATION_TARGET_CONTEXT_MATCHER);
+  if (!match) return null;
+  const fragment = statement.source
+    .slice(statement.masked.length - (match[1]?.length || 0))
+    .trim();
+  if (!fragment) return "";
+  const lastPart = fragment.split(".").pop()?.trim() || "";
+  return lastPart.replace(/^["`\[]/u, "").replace(/["`\]]$/u, "");
 }
 
 /**

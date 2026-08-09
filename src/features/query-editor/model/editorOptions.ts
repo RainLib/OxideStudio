@@ -7,6 +7,7 @@ type EditorPreferences = Pick<
   | "tabSize"
   | "wordWrap"
   | "minimap"
+  | "sqlCompletion"
   | "inlineCompletion"
   | "keybindingMode"
   | "vim"
@@ -20,6 +21,7 @@ export function buildQueryEditorOptions(
   preferences: EditorPreferences,
   isElasticsearchConsole: boolean,
 ) {
+  const automaticCompletion = preferences.sqlCompletion.triggerMode !== "manual";
   return {
     ...QUERY_EDITOR_OPTIONS,
     fontSize: preferences.fontSize,
@@ -28,6 +30,10 @@ export function buildQueryEditorOptions(
     minimap: { enabled: preferences.minimap },
     glyphMargin: isElasticsearchConsole,
     inlineSuggest: { enabled: preferences.inlineCompletion.enabled },
+    quickSuggestions: automaticCompletion
+      ? { other: true, comments: false, strings: false }
+      : false,
+    suggestOnTriggerCharacters: automaticCompletion,
     lineNumbers:
       preferences.keybindingMode === "vim" &&
       preferences.vim.relativeLineNumbers

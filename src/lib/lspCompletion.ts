@@ -3,6 +3,7 @@ import {
   type CompletionContext,
   type CompletionItem,
 } from "@/services/lsp/types";
+import { completionFilterTextForQuery } from "@/features/query-editor/model/completionMatch";
 
 const SQL_CONTEXT_KEYWORDS = new Set([
   "select",
@@ -104,6 +105,11 @@ export function completionFilterText(
   typedWord: string,
   completedContextKeyword: boolean
 ) {
+  const existing =
+    item.filterText || (completedContextKeyword ? typedWord : undefined);
+  if (typedWord) {
+    return completionFilterTextForQuery(item.label, typedWord, existing);
+  }
   if (item.filterText) return item.filterText;
   return completedContextKeyword ? typedWord : undefined;
 }
