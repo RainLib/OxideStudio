@@ -17,8 +17,23 @@ export type ProjectDdlSnapshotIdentity = {
 };
 
 export type ProjectDdlParseResult = {
+  dialect: ProjectDdlDialect;
   relations: SchemaRelationSnapshot[];
   warnings: string[];
+};
+
+export type ProjectDdlDialect =
+  | "generic"
+  | "postgres"
+  | "mysql"
+  | "sqlserver"
+  | "sqlite"
+  | "oracle";
+
+export type ProjectDdlDialectDetection = {
+  dialect: ProjectDdlDialect;
+  confidence: "high" | "medium" | "low";
+  evidence: string[];
 };
 
 const OFFLINE_DDL_WARNING = "OFFLINE_PROJECT_DDL_REVIEW_ONLY";
@@ -39,13 +54,31 @@ const CONSTRAINT_WORDS = new Set([
  * snapshot is review-only until a dialect-owned parser can establish a fully
  * verified source fingerprint.
  */
-export function parseProjectDdl(sql: string, fallbackSchema: string): ProjectDdlParseResult {
+export function parseProjectDdl(
+  sql: string,
+  fallbackSchema: string,
+  preferredDialect: ProjectDdlDialect = "generic",
+): ProjectDdlParseResult {
   const warnings = new Set<string>();
+  const detectedDialect = detectProjectDdlDialect(sql);
+  const dialect = detectedDialect.dialect === "generic"
+    ? preferredDialect
+    : detectedDialect.dialect;
+  if (
+    preferredDialect !== "generic" &&
+    detectedDialect.confidence === "high" &&
+    detectedDialect.dialect !== "generic" &&
+    detectedDialect.dialect !== preferredDialect
+  ) {
+    warnings.add(
+      `DDL markers indicate ${detectedDialect.dialect}, but the current connection uses ${preferredDialect}; parsed as detected source syntax for review.`,
+    );
+  }
   const relations = new Map<string, SchemaRelationSnapshot>();
   const pendingIndexes: Array<{ table: string; index: IndexInfo }> = [];
   const pendingConstraints: Array<{ table: string; constraint: ConstraintInfo }> = [];
 
-  for (const statement of splitStatements(stripSqlComments(sql))) {
+  for (const statement of splitStatements(stripSqlComments(sql), dialect)) {
     const trimmed = statement.trim();
     if (!trimmed) continue;
     const table = parseCreateTable(trimmed, fallbackSchema, warnings);
@@ -99,8 +132,85 @@ export function parseProjectDdl(sql: string, fallbackSchema: string): ProjectDdl
     warnings.add("No supported CREATE TABLE statement was found in this project SQL file.");
   }
   return {
+    dialect,
     relations: [...relations.values()].sort((left, right) => left.name.localeCompare(right.name)),
     warnings: [...warnings].sort(),
+  };
+}
+
+export function detectProjectDdlDialect(sql: string): ProjectDdlDialectDetection {
+  const source = sql.toUpperCase();
+  const candidates: Array<{
+    dialect: Exclude<ProjectDdlDialect, "generic">;
+    markers: Array<[RegExp, string, number]>;
+  }> = [
+    {
+      dialect: "sqlserver",
+      markers: [
+        [/^\s*GO\s*$/gim, "GO batch separator", 3],
+        [/\[[^\]]+\]\.\[[^\]]+\]/g, "bracket-qualified identifier", 2],
+        [/\bIDENTITY\s*\(/g, "IDENTITY column", 3],
+        [/\b(?:NVARCHAR|UNIQUEIDENTIFIER|DATETIME2)\b/g, "SQL Server type", 2],
+      ],
+    },
+    {
+      dialect: "mysql",
+      markers: [
+        [/\bAUTO_INCREMENT\b/g, "AUTO_INCREMENT column", 3],
+        [/\bENGINE\s*=\s*(?:INNODB|MYISAM)\b/g, "table ENGINE option", 3],
+        [/`[^`]+`/g, "backtick identifier", 1],
+        [/\bUNSIGNED\b/g, "UNSIGNED type", 1],
+      ],
+    },
+    {
+      dialect: "sqlite",
+      markers: [
+        [/\bPRAGMA\b/g, "PRAGMA statement", 3],
+        [/\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b/g, "SQLite autoincrement key", 3],
+        [/\bWITHOUT\s+ROWID\b/g, "WITHOUT ROWID table", 3],
+      ],
+    },
+    {
+      dialect: "oracle",
+      markers: [
+        [/\bVARCHAR2\s*\(/g, "VARCHAR2 type", 3],
+        [/\bNUMBER\s*\([^)]*\)/g, "NUMBER precision", 2],
+        [/^\s*\/\s*$/gm, "slash statement terminator", 2],
+        [/\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:PACKAGE|SEQUENCE)\b/g, "Oracle schema object", 2],
+      ],
+    },
+    {
+      dialect: "postgres",
+      markers: [
+        [/\b(?:BIGSERIAL|SMALLSERIAL|SERIAL|JSONB)\b/g, "PostgreSQL type", 2],
+        [/\bCREATE\s+EXTENSION\b/g, "CREATE EXTENSION", 3],
+        [/::[A-Z_][A-Z0-9_.]*/g, "PostgreSQL cast", 2],
+        [/\bGENERATED\s+(?:ALWAYS|BY\s+DEFAULT)\s+AS\s+IDENTITY\b/g, "identity clause", 2],
+      ],
+    },
+  ];
+  const scored = candidates
+    .map(({ dialect, markers }) => {
+      let score = 0;
+      const evidence: string[] = [];
+      for (const [pattern, label, weight] of markers) {
+        pattern.lastIndex = 0;
+        if (!pattern.test(source)) continue;
+        score += weight;
+        evidence.push(label);
+      }
+      return { dialect, evidence, score };
+    })
+    .sort((left, right) => right.score - left.score || left.dialect.localeCompare(right.dialect));
+  const best = scored[0];
+  const runnerUp = scored[1];
+  if (!best || best.score === 0 || best.score === runnerUp?.score) {
+    return { dialect: "generic", confidence: "low", evidence: [] };
+  }
+  return {
+    dialect: best.dialect,
+    confidence: best.score >= 3 ? "high" : "medium",
+    evidence: best.evidence,
   };
 }
 
@@ -117,7 +227,11 @@ export function createProjectDdlSnapshot(
         .filter(Boolean),
     ),
   ).sort((left, right) => left.localeCompare(right));
-  const parsed = parseProjectDdl(sql, identity.schemaName);
+  const parsed = parseProjectDdl(
+    sql,
+    identity.schemaName,
+    projectDdlDialectForDriver(identity.driver),
+  );
   const fingerprint = stableSnapshotFingerprint(identity, sourcePaths, parsed.relations);
   return {
     version: 1,
@@ -134,6 +248,7 @@ export function createProjectDdlSnapshot(
     warnings: [
       OFFLINE_DDL_WARNING,
       ...sourcePaths.map((path) => `Source: ${path}`),
+      `DDL dialect: ${parsed.dialect}`,
       ...parsed.warnings,
     ],
   };
@@ -179,6 +294,19 @@ function parseCreateTable(
   for (const item of splitTopLevel(rest.slice(opening + 1, close), ",")) {
     const entry = item.trim();
     if (!entry) continue;
+    const tableIndex = parseCreateTableIndex(entry, tableName);
+    if (tableIndex) {
+      indexes.push(tableIndex);
+      if (tableIndex.is_unique) {
+        constraints.push({
+          name: tableIndex.name,
+          constraint_type: "UNIQUE",
+          columns: tableIndex.columns,
+          referenced_columns: [],
+        });
+      }
+      continue;
+    }
     const constraint = parseConstraint(entry, tableName, warnings);
     if (constraint) {
       constraints.push(constraint);
@@ -190,6 +318,8 @@ function parseCreateTable(
     const column = parseColumn(entry, warnings);
     if (!column) continue;
     columns.push(column);
+    const inlineReference = parseInlineReference(entry, tableName, column.name);
+    if (inlineReference) constraints.push(inlineReference);
     if (column.is_primary_key) {
       const name = `${tableName.replace(/\./g, "_")}_pkey`;
       constraints.push({ name, constraint_type: "PRIMARY KEY", columns: [column.name], referenced_columns: [] });
@@ -200,22 +330,47 @@ function parseCreateTable(
   }
   const primaryColumns = new Set(constraints.filter((item) => item.constraint_type === "PRIMARY KEY").flatMap((item) => item.columns));
   const uniqueColumns = new Set(constraints.filter((item) => item.constraint_type === "UNIQUE").flatMap((item) => item.columns));
+  const indexedColumns = new Set(indexes.flatMap((item) => item.columns));
   for (const column of columns) {
     column.is_primary_key ||= primaryColumns.has(column.name);
     column.is_unique ||= uniqueColumns.has(column.name);
-    column.is_indexed ||= column.is_primary_key || column.is_unique;
+    column.is_indexed ||= column.is_primary_key || column.is_unique || indexedColumns.has(column.name);
   }
   return { name: tableName, objectType: "BASE TABLE", columns, indexes, constraints };
 }
 
 function parseCreateIndex(statement: string, fallbackSchema: string) {
-  const match = statement.match(/^CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(.+?)\s+ON\s+(.+?)\s*\(([^)]*)\)/i);
+  const match = statement.match(
+    /^CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(.+?)\s+ON\s+([^\s(]+)\s*/i,
+  );
   if (!match) return null;
   const table = normalizeRelationName(match[3] || "", fallbackSchema);
   const name = normalizeIdentifier(match[2] || "");
-  const columns = splitTopLevel(match[4] || "", ",").map((value) => normalizeIdentifier(value.replace(/\s+(ASC|DESC)\b.*$/i, ""))).filter(Boolean);
+  const columnGroup = parenthesizedContent(statement.slice(match[0].length));
+  const columns = indexColumnList(columnGroup?.content || "");
   if (!table || !name || columns.length === 0) return null;
   return { table, index: { name, columns, is_unique: Boolean(match[1]), is_primary: false } };
+}
+
+function parseCreateTableIndex(entry: string, table: string): IndexInfo | null {
+  const header = entry.match(
+    /^(UNIQUE\s+)?(?:(FULLTEXT|SPATIAL)\s+)?(?:KEY|INDEX)\s+([^\s(]+)\s*(?:USING\s+([A-Za-z0-9_]+)\s*)?/i,
+  );
+  if (!header) return null;
+  const columnGroup = parenthesizedContent(entry.slice(header[0].length));
+  const name = normalizeIdentifier(header[3] || "");
+  const columns = indexColumnList(columnGroup?.content || "");
+  if (!name || columns.length === 0) return null;
+  const trailingType = columnGroup?.trailing.match(/^\s*USING\s+([A-Za-z0-9_]+)/i)?.[1];
+  const indexType = header[2] || header[4] || trailingType;
+  return {
+    name,
+    columns,
+    is_unique: Boolean(header[1]),
+    is_primary: false,
+    index_type: indexType?.toUpperCase(),
+    definition: `${table}: ${entry.trim()}`,
+  };
 }
 
 function parseAlterTableConstraint(
@@ -293,6 +448,32 @@ function parseConstraint(entry: string, table: string, warnings: Set<string>): C
   return null;
 }
 
+function parseInlineReference(
+  entry: string,
+  table: string,
+  column: string,
+): ConstraintInfo | null {
+  const foreign = entry.match(
+    /(?:CONSTRAINT\s+([^\s]+)\s+)?REFERENCES\s+([^\s(]+)\s*\(([^)]*)\)/i,
+  );
+  if (!foreign) return null;
+  const reference = normalizeReferencedRelation(foreign[2] || "");
+  if (!reference) return null;
+  const [referencedSchema, referencedTable] = reference.includes(".")
+    ? reference.split(/\.(?=[^.]+$)/)
+    : [undefined, reference];
+  const explicitName = normalizeIdentifier(foreign[1] || "");
+  return {
+    name: explicitName || `${table.replace(/\./g, "_")}_${column}_fkey`,
+    constraint_type: "FOREIGN KEY",
+    columns: [column],
+    referenced_schema: referencedSchema,
+    referenced_table: referencedTable || undefined,
+    referenced_columns: columnList(foreign[3] || ""),
+    definition: entry.trim(),
+  };
+}
+
 function parseColumn(entry: string, warnings: Set<string>): ColumnInfo | null {
   const parts = entry.match(/^([^\s]+)\s+(.+)$/s);
   if (!parts) {
@@ -302,12 +483,16 @@ function parseColumn(entry: string, warnings: Set<string>): ColumnInfo | null {
   const name = normalizeIdentifier(parts[1] || "");
   if (!name || CONSTRAINT_WORDS.has(name.toUpperCase())) return null;
   const definition = parts[2] || "";
-  const type = definition.match(/^([A-Za-z][A-Za-z0-9_]*(?:\s+[A-Za-z][A-Za-z0-9_]*)?(?:\s*\([^)]*\))?)/)?.[1]?.trim();
+  const type = definition.match(
+    /^(.+?)(?=\s+(?:DEFAULT|NOT\s+NULL|NULL|PRIMARY\s+KEY|UNIQUE|REFERENCES|CHECK|COLLATE|GENERATED|IDENTITY|AUTO_INCREMENT|AUTOINCREMENT|CONSTRAINT)\b|$)/is,
+  )?.[1]?.trim();
   if (!type) {
     warnings.add(`Column ${name} has no supported type and was ignored.`);
     return null;
   }
-  const defaultValue = definition.match(/\bDEFAULT\s+(.+?)(?=\s+(?:NOT\s+NULL|NULL|PRIMARY\s+KEY|UNIQUE|REFERENCES|CHECK)\b|$)/i)?.[1]?.trim();
+  const defaultValue = definition.match(
+    /\bDEFAULT\s+(.+?)(?=\s+(?:NOT\s+NULL|NULL|PRIMARY\s+KEY|UNIQUE|REFERENCES|CHECK|COLLATE|GENERATED|IDENTITY|AUTO_INCREMENT|AUTOINCREMENT|CONSTRAINT)\b|$)/i,
+  )?.[1]?.trim();
   return {
     name,
     data_type: type,
@@ -331,6 +516,15 @@ function normalizeRelationName(value: string, fallbackSchema: string) {
   return null;
 }
 
+function projectDdlDialectForDriver(driver: DatabaseDriver): ProjectDdlDialect {
+  if (driver === "postgres" || driver === "cockroachdb") return "postgres";
+  if (driver === "mysql" || driver === "mariadb") return "mysql";
+  if (driver === "sqlserver") return "sqlserver";
+  if (driver === "sqlite") return "sqlite";
+  if (driver === "oracle") return "oracle";
+  return "generic";
+}
+
 function normalizeReferencedRelation(value: string) {
   const segments = value.trim().split(".").map(normalizeIdentifier).filter(Boolean);
   if (segments.length === 1 || segments.length === 2) return segments.join(".");
@@ -348,8 +542,32 @@ function columnList(value: string) {
   return splitTopLevel(value, ",").map(normalizeIdentifier).filter(Boolean);
 }
 
-function splitStatements(sql: string) {
-  return splitTopLevel(sql, ";");
+function indexColumnList(value: string) {
+  return splitTopLevel(value, ",")
+    .map((column) => column.trim().replace(/\s+(?:ASC|DESC)\b.*$/i, ""))
+    .map((column) => column.replace(/\(\s*\d+\s*\)$/, ""))
+    .map(normalizeIdentifier)
+    .filter(Boolean);
+}
+
+function parenthesizedContent(value: string) {
+  const opening = value.indexOf("(");
+  if (opening < 0) return null;
+  const close = matchingParen(value, opening);
+  if (close < 0) return null;
+  return {
+    content: value.slice(opening + 1, close),
+    trailing: value.slice(close + 1),
+  };
+}
+
+function splitStatements(sql: string, dialect: ProjectDdlDialect) {
+  const normalized = dialect === "sqlserver"
+    ? sql.replace(/^\s*GO\s*$/gim, ";")
+    : dialect === "oracle"
+      ? sql.replace(/^\s*\/\s*$/gm, ";")
+      : sql;
+  return splitTopLevel(normalized, ";");
 }
 
 function splitTopLevel(value: string, delimiter: string) {

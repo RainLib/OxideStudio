@@ -7,16 +7,20 @@ Accepted.
 ## Context
 
 Projects often keep schema definitions in SQL files before a live database is
-available. Those files are useful for reviewing expected structure, but a
-generic parser cannot safely prove a complete dialect, include graph, template
-expansion, version contract, or the source fingerprint needed for executable
-migrations.
+available, and users may also import a standalone database dump. Those files
+are useful for reviewing expected structure, but a bounded parser cannot safely
+prove a complete dialect, include graph, template expansion, version contract,
+or the source fingerprint needed for executable migrations.
 
 ## Decision
 
-- Parse one selected bounded project SQL document or the deterministic bounded
-  eligible project SQL set, using a portable `CREATE TABLE` / `CREATE INDEX`
-  subset, including columns and supported key constraints.
+- Parse one selected bounded project SQL document, the deterministic bounded
+  eligible project SQL set, or one standalone SQL file capped at 8 MiB.
+- Detect PostgreSQL, MySQL, SQL Server, SQLite and Oracle markers. When a source
+  is portable, use the target connection driver only as a parsing preference.
+- Parse a bounded `CREATE TABLE` / `CREATE INDEX` subset, including common
+  multiword and precision types, standalone and inline indexes, columns,
+  primary/unique keys and supported table-level or inline foreign keys.
 - Preserve unsupported syntax as explicit warnings instead of guessing.
 - Store every relative source path and the `OFFLINE_PROJECT_DDL_REVIEW_ONLY`
   marker on the snapshot.
@@ -26,7 +30,8 @@ migrations.
 
 ## Consequences
 
-This adds useful offline drift review without treating a convenience parser as
-a migration engine. Full executable DDL support requires a dialect-owned
-parser, source dependency and fingerprint contract, preflight generation, and
-post-apply verification for that database family.
+This adds useful offline drift review and editable structured drafts without
+treating a convenience parser as a migration engine. Full executable DDL
+support requires a dialect-owned parser, source dependency and fingerprint
+contract, preflight generation, and post-apply verification for that database
+family. Advanced objects and expressions remain explicit review gaps.

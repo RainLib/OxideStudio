@@ -36,7 +36,7 @@
 | --- | --- | --- | --- | --- |
 | M01 | Oxide 增强项 | ChartDB 只定义 Generic + 8 个数据库产品 | `src/lib/domain/database-type.ts:1`，capability 在 `src/lib/domain/database-capabilities.ts:11` | Oxide `src/features/database-drivers/model/referenceDriverCatalog.ts` 有 70+ 候选并区分安装/运行/能力；真实可用性仍以签名包和 conformance 证据为准 |
 | M02 | 已对齐并增强 | 一条可复制的 metadata query 将数据库结构转成统一 JSON | `src/lib/data/import-metadata/scripts/scripts.ts:22` 到 `:30` 覆盖 PostgreSQL/MySQL/SQLite/SQL Server/MariaDB/ClickHouse/CockroachDB/Oracle；schema 位于 `metadata-types/database-metadata.ts` | `chartDbMetadataQueries.ts` 为同一 8 类数据库及兼容驱动生成 target-scoped、read-only、单 JSON cell 查询；Snapshot 对话框可一键复制。`chartDbMetadataImport.ts` 严格导入 wrapper，限制 16 MiB，并保持 review-only/Apply 禁用 |
-| M03 | 部分对齐 | SQL DDL 离线导入和方言自动识别 | `src/lib/data/sql-import/index.ts:121` 检测方言，`:178` 导入，dialect importers 位于同目录 | Oxide 有 SQL 文件审阅/执行和 project DDL snapshot；缺少完整 DDL → editable schema snapshot 的多方言解析面 |
+| M03 | 本阶段增强 | SQL DDL 离线导入和方言自动识别 | `src/lib/data/sql-import/index.ts:121` 检测 PostgreSQL dump、SQL Server、MySQL、SQLite、Oracle，`:178` 路由到同目录 dialect importers | `projectDdlSnapshot.ts` 现以有权重的语法证据识别同 5 类方言，并结合连接 driver 处理 portable SQL；支持项目 SQL 集合或独立 `.sql` 文件（8 MiB）导入，解析 `CREATE TABLE`、独立/表内 index、主键/唯一键/表级与列内外键、常用自增和多词/精度类型，保存来源与方言后进入 diagram/structured draft/live diff。产物继续强制 review-only；完整方言 grammar、view/type/sequence/partition/generated expression 和依赖图仍未对齐 |
 | M04 | 本阶段增强 | DBML 导入、导出、校验和 apply diff | `src/lib/dbml/dbml-import/`、`src/lib/dbml/dbml-export/`、`src/lib/dbml/apply-dbml/` | `schemaDbml.ts` 导出 review-only DBML；`schemaDbmlImport.ts` 有界解析 table/column/default/index/复合 FK、校验 schema/重复/缺失引用、保留 source warning，并从 Snapshot 对话框保存为离线 baseline 后进入 live diff。DBML 和项目 DDL 均强制禁用 Apply；仍缺 ChartDB 全语法编译器与编辑器内即时 diff |
 | M05 | 本阶段增强 | 确定性跨方言 DDL 转换 | `src/lib/data/sql-export/cross-dialect/index.ts:33` 目前仅 PostgreSQL → MySQL/MariaDB/SQL Server；类型表在 `postgresql/type-mappings.ts` | `src-tauri/src/core/schema_diff.rs` 已为 PostgreSQL → MySQL/SQL Server 的特殊类型生成确定性 review notes，同时坚持不生成/执行跨库 DDL；下一步把覆盖扩展为 capability 驱动的完整映射计划 |
 | M06 | 本阶段增强 | 转换前枚举不支持特性并把告警写入产物 | `src/lib/data/sql-export/cross-dialect/unsupported-features.ts:36` 检测 array/custom type/default/index 等 | `SchemaConversionIssue` 已结构化记录 relation/column、source/target type、safe/review/unsupported、原因、remediation 和 `blocksAutomaticConversion`，迁移视图明确显示 `blocks DDL`；覆盖 array、JSONB、timezone、network、interval、serial、PostgreSQL cast/sequence default、partial/expression/specialized index 与显式 custom type |
@@ -106,6 +106,7 @@
 - [x] 增加有界 DBML import/validation，并接入 review-only snapshot diff，不直接执行。
 - [x] 增加 ChartDB metadata-query JSON 有界导入、聚合和 review-only snapshot diff。
 - [x] 增加 ChartDB 8 类数据库及兼容驱动的 target-scoped metadata query 一键复制。
+- [x] 增加 PostgreSQL/MySQL/SQL Server/SQLite/Oracle DDL 自动识别、独立文件导入和有界 relation/index/constraint baseline 解析。
 - [ ] 扩展外置 driver semantic DDL/migration 协议和 conformance evidence。
 
 ### 阶段 C：表格导出
@@ -135,4 +136,5 @@
 - 70+ 产品的 driver 安装、连接、metadata、query、cancel、error mapping 和 migration capability 证据。
 - CSV/JSON/SQL/XLSX/Parquet 的大文件、编码、NULL/binary/date/JSON、大整数、取消和原子落盘。
 - PostgreSQL/MySQL/SQLite 的 migration preflight、rollback/journal 与 crash recovery。
+- PostgreSQL/MySQL/SQL Server/SQLite/Oracle 的真实 dump DDL corpus、方言误判率、复杂对象 lossiness 与 8 MiB 导入交互。
 - 1k/5k/10k relation diagram 和 100k+ row table 的渲染、内存和交互延迟。
