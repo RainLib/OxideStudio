@@ -30,6 +30,7 @@ import {
   FileCode2,
   History,
   LineChart,
+  LoaderCircle,
   Play,
   Save,
   ScanSearch,
@@ -48,6 +49,12 @@ import { QueryHistoryPanel } from "./QueryHistoryPanel";
 type TransactionMode = "auto" | "manual";
 type TransactionState = "idle" | "active";
 type TransactionOperation = "begin" | "commit" | "rollback" | null;
+type EditorFileOperation =
+  | "sql-review"
+  | "sql-import"
+  | "console-import"
+  | "console-export"
+  | null;
 
 interface EditorActionBarProps {
   connectionId?: string | null;
@@ -73,6 +80,7 @@ interface EditorActionBarProps {
   onImportSqlScript?: () => void;
   onImportConsoleRequests?: () => void;
   onExportConsoleRequests?: () => void;
+  fileOperation: EditorFileOperation;
   isExecuting: boolean;
   isConnected: boolean;
   supportsExplainPlan: boolean;
@@ -128,6 +136,7 @@ export function EditorActionBar({
   onImportSqlScript,
   onImportConsoleRequests,
   onExportConsoleRequests,
+  fileOperation,
   isExecuting,
   isConnected,
   supportsExplainPlan,
@@ -234,27 +243,51 @@ export function EditorActionBar({
                   <DropdownMenuItem
                     className={menuItemClass}
                     onClick={onImportSqlScript}
+                    disabled={fileOperation !== null}
                   >
-                    <Upload size={13} className="mr-2" />
-                    Import SQL Script...
+                    {fileOperation === "sql-review" ||
+                    fileOperation === "sql-import" ? (
+                      <LoaderCircle size={13} className="mr-2 animate-spin" />
+                    ) : (
+                      <Upload size={13} className="mr-2" />
+                    )}
+                    {fileOperation === "sql-review"
+                      ? "Reviewing SQL Script..."
+                      : fileOperation === "sql-import"
+                        ? "Importing SQL Script..."
+                        : "Import SQL Script..."}
                   </DropdownMenuItem>
                 )}
                 {onImportConsoleRequests && (
                   <DropdownMenuItem
                     className={menuItemClass}
                     onClick={onImportConsoleRequests}
+                    disabled={fileOperation !== null}
                   >
-                    <Upload size={13} className="mr-2" />
-                    Import Console Requests...
+                    {fileOperation === "console-import" ? (
+                      <LoaderCircle size={13} className="mr-2 animate-spin" />
+                    ) : (
+                      <Upload size={13} className="mr-2" />
+                    )}
+                    {fileOperation === "console-import"
+                      ? "Importing Console Requests..."
+                      : "Import Console Requests..."}
                   </DropdownMenuItem>
                 )}
                 {onExportConsoleRequests && (
                   <DropdownMenuItem
                     className={menuItemClass}
                     onClick={onExportConsoleRequests}
+                    disabled={fileOperation !== null}
                   >
-                    <Download size={13} className="mr-2" />
-                    Export Console Requests...
+                    {fileOperation === "console-export" ? (
+                      <LoaderCircle size={13} className="mr-2 animate-spin" />
+                    ) : (
+                      <Download size={13} className="mr-2" />
+                    )}
+                    {fileOperation === "console-export"
+                      ? "Exporting Console Requests..."
+                      : "Export Console Requests..."}
                   </DropdownMenuItem>
                 )}
               </>

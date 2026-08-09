@@ -93,7 +93,6 @@ import {
   revealLspProjectDefinition,
 } from "@/lib/lspNavigation";
 import { lspSemanticStatusPresentation } from "@/lib/lspSemanticStatus";
-import { useTaskStore } from "@/store/useTaskStore";
 import { usePostgresDatabaseDiscovery } from "@/hooks/usePostgresDatabaseDiscovery";
 import { connectionCatalogDatabaseName } from "./PostgresDatabaseTree";
 import { useAiSettingsStore } from "@/store/useAiSettingsStore";
@@ -162,10 +161,8 @@ import {
 } from "@/lib/elasticsearchConsole";
 import type { ElasticsearchAnalysisResponse } from "@/workers/elasticsearchAnalysis.worker";
 import type { ElasticsearchServerVersion } from "@/lib/elasticsearchConsole";
-import type {
-  ConstraintInfo,
-  SqlScriptImportPreview,
-} from "@/services/tauri/types";
+import type { ConstraintInfo } from "@/services/tauri/types";
+import { useSqlScriptImportController } from "@/features/sql-script-import";
 import {
   shouldOfferMongoDbCompletions,
   shouldTriggerMongoDbCompletions,
@@ -204,19 +201,11 @@ import {
   toMonacoRange,
   toMonacoWorkspaceEdit,
   unquoteSqlIdentifierSelection,
+  useConsoleFileController,
   useQueryExecutionController,
   useQueryTransactionController,
 } from "@/features/query-editor";
 
-type PendingSqlScriptImport = {
-  connectionId: string;
-  filePath: string;
-  schema?: string;
-  database?: string;
-  target: string;
-  preview: SqlScriptImportPreview;
-  taskId: string;
-};
 const RECORD_COMPLETION_USAGE_COMMAND = "oxide.sqlCompletion.recordUsage";
 const SQL_COMPLETION_CONTEXT_MAX_CHARACTERS = 128 * 1024;
 const RELATION_COMPLETION_CONTEXTS = new Set([
@@ -455,9 +444,6 @@ export function QueryEditor({
   // const [isSaveOpen, setIsSaveOpen] = useState(false);
   // const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false);
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
-  const [pendingSqlScriptImport, setPendingSqlScriptImport] =
-    useState<PendingSqlScriptImport | null>(null);
-  const [isSqlScriptImporting, setIsSqlScriptImporting] = useState(false);
   const [inlineCompletionStatus, setInlineCompletionStatus] =
     useState<InlineCompletionStatus>("off");
   const [elasticsearchServerVersion, setElasticsearchServerVersion] =
@@ -533,6 +519,10 @@ export function QueryEditor({
   const effectiveConnectionId = activeTab?.connectionId || activeConnectionId;
   const activeConnection = connections.find(
     (c) => c.id === effectiveConnectionId,
+  );
+  const connectionAvailabilityKey = useMemo(
+    () => connections.map((connection) => connection.id).join("|"),
+    [connections],
   );
   // External driver profiles are registered asynchronously. Keep capability
   // dependent editor controls (catalog selector and LSP language) reactive
@@ -821,6 +811,74 @@ export function QueryEditor({
     runExplainPlan,
     cancelTabQuery,
   });
+  const sqlScriptImportContextKey =
+    activeTab?.id && effectiveConnectionId
+      ? `${activeTab.id}:${effectiveConnectionId}`
+      : null;
+  const {
+    pendingImport: pendingSqlScriptImport,
+    isReviewing: isSqlScriptReviewing,
+    isImporting: isSqlScriptImporting,
+    requestImport: requestSqlScriptImport,
+    confirmImport: handleConfirmSqlScriptImport,
+    closeImport: closeSqlScriptImport,
+  } = useSqlScriptImportController({
+    activeContextKey: sqlScriptImportContextKey,
+    availabilityKey: connectionAvailabilityKey,
+    isTargetAvailable: (target) =>
+      connections.some((connection) => connection.id === target.connectionId),
+    refreshMetadata: async (target) => {
+      await loadSchemas(target.connectionId, true);
+      if (target.schema) {
+        await loadTables(target.connectionId, target.schema, true);
+      }
+      bumpMetadataVersion();
+    },
+  });
+  const handleImportSqlScript = useCallback(() => {
+    if (
+      !effectiveConnectionId ||
+      !activeTab ||
+      !capabilities.supportsSqlQuery ||
+      !sqlScriptImportContextKey
+    ) {
+      return;
+    }
+    void requestSqlScriptImport({
+      connectionId: effectiveConnectionId,
+      schema: activeTab.targetSchema ?? currentSchema ?? undefined,
+      database: activeTab.databaseName,
+      label: activeConnection?.name || effectiveConnectionId,
+      driver,
+      contextKey: sqlScriptImportContextKey,
+    });
+  }, [
+    activeConnection?.name,
+    activeTab,
+    capabilities.supportsSqlQuery,
+    currentSchema,
+    driver,
+    effectiveConnectionId,
+    requestSqlScriptImport,
+    sqlScriptImportContextKey,
+  ]);
+  const {
+    operation: consoleFileOperation,
+    handleImportConsoleRequests,
+    handleExportConsoleRequests,
+  } = useConsoleFileController({
+    activeTab,
+    enabled: isElasticsearchConsole,
+    editorRef,
+    updateTabSql,
+  });
+  const editorFileOperation = isSqlScriptReviewing
+    ? "sql-review"
+    : isSqlScriptImporting
+      ? "sql-import"
+      : consoleFileOperation
+        ? `console-${consoleFileOperation}` as const
+        : null;
   const monaco = useMonaco();
   const {
     isReady: lspReady,
@@ -3238,150 +3296,6 @@ export function QueryEditor({
   // Close dropdown on click outside - COMMENTED OUT UNUSED
   // useEffect(() => { ... }, []);
 
-  const handleImportSqlScript = async () => {
-    if (
-      !effectiveConnectionId ||
-      !activeTab ||
-      !capabilities.supportsSqlQuery
-    ) {
-      return;
-    }
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const selected = await open({
-      multiple: false,
-      directory: false,
-      filters: [{ name: "SQL scripts", extensions: ["sql"] }],
-    });
-    if (typeof selected !== "string") return;
-    const selectedFileName = selected.split(/[\\/]/).pop() || "SQL script";
-    const taskStore = useTaskStore.getState();
-    const taskId = taskStore.startTask({
-      kind: "import",
-      title: `Review ${selectedFileName}`,
-      detail: activeConnection?.name || effectiveConnectionId,
-    });
-    let preview;
-    try {
-      preview = await queryService.previewSqlScriptImport(
-        effectiveConnectionId,
-        selected,
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      taskStore.failTask(taskId, message, "SQL script review failed");
-      return;
-    }
-    taskStore.setTaskWaiting(taskId, "Awaiting SQL script review");
-    setPendingSqlScriptImport({
-      connectionId: effectiveConnectionId,
-      filePath: selected,
-      schema: activeTab.targetSchema ?? currentSchema ?? undefined,
-      database: activeTab.databaseName,
-      target: activeConnection?.name || effectiveConnectionId,
-      preview,
-      taskId,
-    });
-  };
-
-  const handleConfirmSqlScriptImport = async () => {
-    const pending = pendingSqlScriptImport;
-    if (!pending) return;
-    const taskStore = useTaskStore.getState();
-    setIsSqlScriptImporting(true);
-    taskStore.setTaskRunning(pending.taskId, pending.target);
-    taskStore.updateTask(pending.taskId, { title: `Import ${pending.preview.fileName}` });
-    try {
-      const imported = await queryService.importSqlScript(
-        pending.connectionId,
-        pending.filePath,
-        pending.preview.reviewDigest,
-        pending.schema,
-        pending.database,
-      );
-      taskStore.finishTask(
-        pending.taskId,
-        `${imported.statementsExecuted.toLocaleString()} statements · ${imported.rowsAffected.toLocaleString()} rows affected`,
-      );
-      await loadSchemas(pending.connectionId, true);
-      const schemaToRefresh = pending.schema;
-      if (schemaToRefresh) {
-        await loadTables(pending.connectionId, schemaToRefresh, true);
-      }
-      bumpMetadataVersion();
-      setPendingSqlScriptImport(null);
-    } catch (error: any) {
-      taskStore.failTask(pending.taskId, error?.message || String(error));
-    } finally {
-      setIsSqlScriptImporting(false);
-    }
-  };
-
-  const handleImportConsoleRequests = async () => {
-    if (!activeTab || !isElasticsearchConsole) return;
-    if (
-      activeTab.sql.trim() &&
-      !window.confirm(
-        "Importing Console requests replaces the current editor content. Continue?",
-      )
-    ) {
-      return;
-    }
-
-    const tasks = useTaskStore.getState();
-    const taskId = tasks.startTask({
-      kind: "import",
-      title: "Import Elasticsearch Console requests",
-    });
-    try {
-      const imported = await queryService.importElasticsearchConsoleFile();
-      if (!imported) {
-        tasks.cancelTask(taskId, "Import cancelled");
-        return;
-      }
-      updateTabSql(activeTab.id, imported.content);
-      tasks.finishTask(
-        taskId,
-        `${imported.fileName} · ${imported.content.length.toLocaleString()} characters`,
-      );
-      window.requestAnimationFrame(() => {
-        editorRef.current?.setPosition({ lineNumber: 1, column: 1 });
-        editorRef.current?.focus();
-      });
-    } catch (error) {
-      tasks.failTask(
-        taskId,
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-  };
-
-  const handleExportConsoleRequests = async () => {
-    if (!activeTab || !isElasticsearchConsole) return;
-    const source = editorRef.current?.getModel()?.getValue() ?? activeTab.sql;
-    const tasks = useTaskStore.getState();
-    const taskId = tasks.startTask({
-      kind: "export",
-      title: "Export Elasticsearch Console requests",
-    });
-    try {
-      const exported =
-        await queryService.exportElasticsearchConsoleFile(source);
-      if (!exported.exported) {
-        tasks.cancelTask(taskId, "Export cancelled");
-        return;
-      }
-      tasks.finishTask(
-        taskId,
-        `${exported.byteCount.toLocaleString()} bytes`,
-      );
-    } catch (error) {
-      tasks.failTask(
-        taskId,
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-  };
-
   const openHistoryInEditor = (item: QueryHistoryItem) => {
     const savedConnection = item.connectionId
       ? connections.find((connection) => connection.id === item.connectionId)
@@ -4212,16 +4126,9 @@ export function QueryEditor({
       <SqlScriptImportDialog
         open={Boolean(pendingSqlScriptImport)}
         preview={pendingSqlScriptImport?.preview || null}
-        target={pendingSqlScriptImport?.target || "selected data source"}
+        target={pendingSqlScriptImport?.target.label || "selected data source"}
         isSubmitting={isSqlScriptImporting}
-        onClose={() => {
-          if (pendingSqlScriptImport) {
-            useTaskStore
-              .getState()
-              .cancelTask(pendingSqlScriptImport.taskId, "SQL script review cancelled");
-          }
-          setPendingSqlScriptImport(null);
-        }}
+        onClose={closeSqlScriptImport}
         onImport={handleConfirmSqlScriptImport}
       />
       {activeTab.agentFileDiffPreview ? (
@@ -4312,6 +4219,7 @@ export function QueryEditor({
           onExportConsoleRequests={
             isElasticsearchConsole ? handleExportConsoleRequests : undefined
           }
+          fileOperation={editorFileOperation}
           isExecuting={activeTab.isExecuting}
           isConnected={Boolean(effectiveConnectionId && canExecuteDocument)}
           supportsExplainPlan={

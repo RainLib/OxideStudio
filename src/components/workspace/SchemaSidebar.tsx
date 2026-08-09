@@ -66,9 +66,9 @@ import type {
   DatabaseDriver,
   FunctionInfo,
   SchemaObjectInfo,
-  SqlScriptImportPreview,
   TableInfo,
 } from "@/services/tauri/types";
+import { useSqlScriptImportController } from "@/features/sql-script-import";
 import {
   DEFAULT_DATABASE_DRIVER,
   databaseDriverProfile,
@@ -201,17 +201,6 @@ interface PostgresRemoteDatabaseState {
   connectionId: string | null;
   schemas: Record<string, string[]>;
   tables: Record<string, Record<string, TableInfo[]>>;
-}
-
-interface PendingSqlScriptImport {
-  connectionId: string;
-  filePath: string;
-  schema?: string;
-  database?: string;
-  connectionName: string;
-  driver: DatabaseDriver;
-  preview: SqlScriptImportPreview;
-  taskId: string;
 }
 
 function routineMatchesFilter(routine: FunctionInfo, filter: string) {
@@ -451,6 +440,10 @@ export function SchemaSidebar() {
     metadataNodeStates,
   } = useSchemaStore();
 
+  const connectionAvailabilityKey = useMemo(
+    () => connections.map((connection) => connection.id).join("|"),
+    [connections],
+  );
   const [filterText, setFilterText] = useState("");
   const [schemaObjectDescriptors, setSchemaObjectDescriptors] = useState<
     SchemaObjectInfo[]
@@ -464,9 +457,6 @@ export function SchemaSidebar() {
   const [isCreateDbDialogOpen, setIsCreateDbDialogOpen] = useState(false);
   const [isCreateViewDialogOpen, setIsCreateViewDialogOpen] = useState(false);
   const [isCreateRedisKeyOpen, setIsCreateRedisKeyOpen] = useState(false);
-  const [pendingSqlScriptImport, setPendingSqlScriptImport] =
-    useState<PendingSqlScriptImport | null>(null);
-  const [isSqlScriptImporting, setIsSqlScriptImporting] = useState(false);
   const [databaseAdministrationConnectionId, setDatabaseAdministrationConnectionId] =
     useState<string | null>(null);
   const [connectingConnectionIds, setConnectingConnectionIds] = useState<
@@ -538,6 +528,48 @@ export function SchemaSidebar() {
   const [activeTableType, setActiveTableType] = useState<string | null>(null);
   const [ddlContent, setDdlContent] = useState("");
   const [namespaceError, setNamespaceError] = useState<string | null>(null);
+  const {
+    pendingImport: pendingSqlScriptImport,
+    isImporting: isSqlScriptImporting,
+    requestImport: requestSqlScriptImport,
+    confirmImport: handleConfirmSqlScriptImport,
+    closeImport: closeSqlScriptImport,
+  } = useSqlScriptImportController({
+    availabilityKey: connectionAvailabilityKey,
+    isTargetAvailable: (target) =>
+      connections.some((connection) => connection.id === target.connectionId),
+    ensureTargetReady: async (target) => {
+      const connectionError = await setActiveConnection(target.connectionId);
+      if (connectionError) throw new Error(connectionError);
+    },
+    refreshMetadata: async (target) => {
+      bumpMetadataVersion();
+      const connection = connections.find(
+        (candidate) => candidate.id === target.connectionId,
+      );
+      const configuredDatabase =
+        connection && supportsDatabaseCatalogTree(target.driver)
+          ? connectionCatalogDatabaseName(connection)
+          : undefined;
+      if (target.database && target.database !== configuredDatabase) {
+        setPostgresDatabaseRefreshVersion((version) => version + 1);
+        return;
+      }
+      await loadSchemas(target.connectionId, true);
+      if (target.schema) {
+        await loadTables(target.connectionId, target.schema, true);
+      }
+    },
+    onError: (message, phase) => {
+      setNamespaceError(
+        phase === "preview"
+          ? message
+          : phase === "refresh"
+            ? `SQL import completed; metadata refresh failed: ${message}`
+            : `SQL import failed: ${message}`,
+      );
+    },
+  });
   const [pendingDataSourceRemoval, setPendingDataSourceRemoval] = useState<{
     id: string;
     name: string;
@@ -2080,7 +2112,7 @@ export function SchemaSidebar() {
     await action();
   };
 
-  const handleImportSqlScript = async ({
+  const handleImportSqlScript = ({
     connectionId,
     schema,
     database,
@@ -2101,87 +2133,15 @@ export function SchemaSidebar() {
       return;
     }
 
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const selected = await open({
-      multiple: false,
-      directory: false,
-      filters: [{ name: "SQL scripts", extensions: ["sql"] }],
-    });
-    if (typeof selected !== "string") return;
-
-    const tasks = useTaskStore.getState();
-    const taskId = tasks.startTask({
-      kind: "import",
-      title: `Review ${selected.split(/[\\/]/).pop() || "SQL script"}`,
-      detail: [database, schema].filter(Boolean).join(".") || connection.name,
-    });
-    let preview;
-    try {
-      preview = await queryService.previewSqlScriptImport(connectionId, selected);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      tasks.failTask(taskId, message, "SQL script review failed");
-      setNamespaceError(message);
-      return;
-    }
     const target = [database, schema].filter(Boolean).join(".");
-    tasks.setTaskWaiting(taskId, "Awaiting SQL script review");
     setNamespaceError(null);
-    setPendingSqlScriptImport({
+    void requestSqlScriptImport({
       connectionId,
-      filePath: selected,
       schema,
       database,
-      connectionName: target || connection.name,
+      label: target || connection.name,
       driver: connection.driver,
-      preview,
-      taskId,
     });
-  };
-
-  const handleConfirmSqlScriptImport = async () => {
-    const pending = pendingSqlScriptImport;
-    if (!pending) return;
-    const tasks = useTaskStore.getState();
-    setIsSqlScriptImporting(true);
-    tasks.setTaskRunning(pending.taskId, pending.connectionName);
-    tasks.updateTask(pending.taskId, { title: `Import ${pending.preview.fileName}` });
-    try {
-      const connectionError = await setActiveConnection(pending.connectionId);
-      if (connectionError) throw new Error(connectionError);
-      const imported = await queryService.importSqlScript(
-        pending.connectionId,
-        pending.filePath,
-        pending.preview.reviewDigest,
-        pending.schema,
-        pending.database,
-      );
-      tasks.finishTask(
-        pending.taskId,
-        `${imported.statementsExecuted.toLocaleString()} statements · ${imported.rowsAffected.toLocaleString()} rows affected`,
-      );
-      bumpMetadataVersion();
-
-      const connection = connections.find(
-        (candidate) => candidate.id === pending.connectionId,
-      );
-      const configuredDatabase = connection && supportsDatabaseCatalogTree(pending.driver)
-        ? connectionCatalogDatabaseName(connection)
-        : undefined;
-      if (pending.database && pending.database !== configuredDatabase) {
-        setPostgresDatabaseRefreshVersion((version) => version + 1);
-      } else {
-        await loadSchemas(pending.connectionId, true);
-        if (pending.schema) await loadTables(pending.connectionId, pending.schema, true);
-      }
-      setPendingSqlScriptImport(null);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      tasks.failTask(pending.taskId, message);
-      setNamespaceError(`SQL import failed: ${message}`);
-    } finally {
-      setIsSqlScriptImporting(false);
-    }
   };
 
   const handleConnectionRowClick = async (connectionId: string) => {
@@ -5002,16 +4962,9 @@ export function SchemaSidebar() {
       <SqlScriptImportDialog
         open={Boolean(pendingSqlScriptImport)}
         preview={pendingSqlScriptImport?.preview || null}
-        target={pendingSqlScriptImport?.connectionName || "selected data source"}
+        target={pendingSqlScriptImport?.target.label || "selected data source"}
         isSubmitting={isSqlScriptImporting}
-        onClose={() => {
-          if (pendingSqlScriptImport) {
-            useTaskStore
-              .getState()
-              .cancelTask(pendingSqlScriptImport.taskId, "SQL script review cancelled");
-          }
-          setPendingSqlScriptImport(null);
-        }}
+        onClose={closeSqlScriptImport}
         onImport={handleConfirmSqlScriptImport}
       />
 

@@ -104,6 +104,10 @@ export {
   type QueryExecutionEditor,
 } from "./hooks/useQueryExecutionController";
 export {
+  useConsoleFileController,
+  type ConsoleFileOperation,
+} from "./hooks/useConsoleFileController";
+export {
   resolveQueryExecutionTarget,
   type QueryExecutionKind,
   type QueryExecutionMode,

@@ -314,6 +314,21 @@ explicit deferred validation task rather than an implicit release check.
   compiled SQL must retain the reviewed transaction ID and destructive-query
   confirmation policy.
 
+## SQL script and Console file controllers
+
+- On two live connections with different current database/schema targets, open
+  a SQL script review, change the selected target before approval, and confirm
+  the stale review is cancelled. Repeated clicks during native file selection,
+  preview and import must not create duplicate tasks or backend calls.
+- Replace the SQL file after review and confirm the digest check rejects it.
+  Force only the post-import metadata refresh to fail and confirm the original
+  import task remains successful while a separate introspection task reports
+  the refresh failure; retry must not execute the script a second time.
+- In an Elasticsearch Console tab, import a request file and switch tabs before
+  the native read finishes. The stale result must not overwrite either tab.
+  Verify export uses the content snapshot taken at dispatch and duplicate
+  import/export actions remain disabled until the active operation settles.
+
 ## Cross-driver migration review notes
 
 - Compare PostgreSQL snapshots against MySQL/MariaDB and SQL Server targets
