@@ -1607,6 +1607,7 @@ export function TableDataView() {
         onExportJsonl={() => void handleExport("jsonl")}
         onExportSql={() => void handleExport("sql")}
         onExportTsv={() => void handleExport("tsv")}
+        onExportXlsx={() => void handleExport("xlsx")}
         onCancelExport={() => void handleCancelExport()}
       />
 
@@ -1615,7 +1616,7 @@ export function TableDataView() {
           className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 py-1 text-[10px] wb-muted"
           title={recentExportReport.error || "Latest export audit record"}
         >
-          Latest export: {recentExportReport.status} · {recentExportReport.format.toUpperCase()} · {recentExportReport.encoding === "utf8Bom" ? "UTF-8 BOM" : "UTF-8"} · {recentExportReport.rowsExported.toLocaleString()} rows · {recentExportReport.batches.toLocaleString()} batches
+          Latest export: {recentExportReport.status} · {recentExportReport.format.toUpperCase()} · {recentExportReport.encoding === "utf8Bom" ? "UTF-8 BOM" : recentExportReport.encoding === "binary" ? "Binary workbook" : "UTF-8"} · {recentExportReport.rowsExported.toLocaleString()} rows · {recentExportReport.batches.toLocaleString()} batches
         </div>
       )}
 

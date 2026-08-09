@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   Camera,
+  Check,
+  ClipboardCopy,
   Database,
   FileCode2,
   GitCompareArrows,
@@ -45,6 +47,7 @@ import {
   createChartDbMetadataSnapshot,
   isChartDbMetadataSnapshot,
 } from "@/features/schema-diff/model/chartDbMetadataImport";
+import { chartDbMetadataQueryForDriver } from "@/features/schema-diff/model/chartDbMetadataQueries";
 
 interface SchemaSnapshotDialogProps {
   open: boolean;
@@ -72,6 +75,7 @@ export function SchemaSnapshotDialog({
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [copiedMetadataQuery, setCopiedMetadataQuery] = useState(false);
   const dbmlInputRef = useRef<HTMLInputElement>(null);
   const metadataInputRef = useRef<HTMLInputElement>(null);
   const openSchemaDiffTab = useTabStore((state) => state.openSchemaDiffTab);
@@ -105,6 +109,16 @@ export function SchemaSnapshotDialog({
       : []),
     [selected],
   );
+  const metadataQuery = useMemo(
+    () => identity
+      ? chartDbMetadataQueryForDriver(
+          identity.driver,
+          identity.schemaName,
+          identity.databaseName,
+        )
+      : null,
+    [identity],
+  );
   const selectedSupportsRestorePlan = supportsSchemaReviewPlan && !selectedIsOffline;
 
   useEffect(() => {
@@ -130,6 +144,10 @@ export function SchemaSnapshotDialog({
     return () => {
       cancelled = true;
     };
+  }, [identity, open]);
+
+  useEffect(() => {
+    setCopiedMetadataQuery(false);
   }, [identity, open]);
 
   useEffect(() => {
@@ -324,6 +342,21 @@ export function SchemaSnapshotDialog({
     } finally {
       setOperation(null);
       if (metadataInputRef.current) metadataInputRef.current.value = "";
+    }
+  };
+
+  const copyMetadataQuery = async () => {
+    if (!metadataQuery) return;
+    setError(null);
+    try {
+      await navigator.clipboard.writeText(metadataQuery.query);
+      setCopiedMetadataQuery(true);
+    } catch (nextError) {
+      setError(
+        nextError instanceof Error
+          ? nextError.message
+          : "Unable to copy the metadata query.",
+      );
     }
   };
 
@@ -575,7 +608,7 @@ export function SchemaSnapshotDialog({
                   }
                 />
                 <p className="min-w-0 flex-1 text-[9px] leading-4 wb-muted">
-                  Import bounded DBML as a review-only baseline; unsupported semantics remain warnings.
+                  Import DBML or ChartDB-compatible metadata JSON. Copy the target-scoped read-only query when capturing outside OxideStudio.
                 </p>
                 <button
                   type="button"
@@ -585,6 +618,20 @@ export function SchemaSnapshotDialog({
                 >
                   {operation === "import" ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />}
                   Import DBML
+                </button>
+                <button
+                  type="button"
+                  className="wb-text-button h-7 shrink-0 gap-1.5 px-2.5 text-[10px]"
+                  disabled={busy || !metadataQuery}
+                  onClick={() => void copyMetadataQuery()}
+                  title={
+                    metadataQuery
+                      ? `${metadataQuery.dialectLabel}: ${metadataQuery.note}`
+                      : `No ChartDB-compatible metadata query is registered for ${identity.driver}`
+                  }
+                >
+                  {copiedMetadataQuery ? <Check size={11} /> : <ClipboardCopy size={11} />}
+                  {copiedMetadataQuery ? "Query copied" : "Copy query"}
                 </button>
                 <button
                   type="button"

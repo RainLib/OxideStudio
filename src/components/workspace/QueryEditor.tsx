@@ -2135,6 +2135,51 @@ export function QueryEditor({
       }),
     );
 
+    return () => {
+      console.log("[QueryEditor] Disposing completion and hover providers");
+      [
+        usageCommandDisposable,
+        ...completionDisposables,
+        ...hoverDisposables,
+      ].forEach((disposable) => disposable.dispose());
+    };
+  }, [
+    isActivePane,
+    activeProjectId,
+    monaco,
+    lspReady,
+    lspClient,
+    preferredElasticsearchIndex,
+    activeTab?.databaseName,
+    activeTab?.targetSchema,
+    currentSchema,
+    schemaTables,
+    capabilities,
+    driver,
+    driverCatalogStatus,
+    canUseLsp,
+    documentLanguageId,
+    documentUri,
+    editorLanguageId,
+    effectiveConnectionId,
+    editorSettings.sqlCompletion.appendSpace,
+    editorSettings.sqlCompletion.keywordCase,
+    editorSettings.sqlCompletion.rankByUsage,
+    editorSettings.sqlCompletion.snippets,
+  ]);
+
+  // Stable protocol providers do not depend on schema metadata or completion
+  // preferences. Keeping them in their own lifecycle avoids tearing down
+  // navigation, formatting, rename and semantic providers every time Explorer
+  // metadata or a snippet setting changes.
+  useEffect(() => {
+    if (!isActivePane || !monaco) return;
+
+    console.log("[QueryEditor] Registering core LSP providers");
+    const providerLanguages = [editorLanguageId];
+    const isCurrentLspModelUri = (uri: string) =>
+      uri === documentUri && canUseLsp;
+
     const definitionDisposables = providerLanguages.map((language) =>
       monaco.languages.registerDefinitionProvider(language, {
         provideDefinition: async (model: any, position: any) => {
@@ -2579,11 +2624,8 @@ export function QueryEditor({
     );
 
     return () => {
-      console.log("[QueryEditor] Disposing LSP providers");
+      console.log("[QueryEditor] Disposing core LSP providers");
       [
-        usageCommandDisposable,
-        ...completionDisposables,
-        ...hoverDisposables,
         ...definitionDisposables,
         ...referencesDisposables,
         ...formattingDisposables,
@@ -2602,25 +2644,10 @@ export function QueryEditor({
     isActivePane,
     activeProjectId,
     monaco,
-    lspReady,
     lspClient,
-    preferredElasticsearchIndex,
-    activeTab?.databaseName,
-    activeTab?.targetSchema,
-    currentSchema,
-    schemaTables,
-    capabilities,
-    driver,
-    driverCatalogStatus,
     canUseLsp,
-    documentLanguageId,
     documentUri,
     editorLanguageId,
-    effectiveConnectionId,
-    editorSettings.sqlCompletion.appendSpace,
-    editorSettings.sqlCompletion.keywordCase,
-    editorSettings.sqlCompletion.rankByUsage,
-    editorSettings.sqlCompletion.snippets,
   ]);
 
   useEffect(() => {

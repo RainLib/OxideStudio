@@ -13,7 +13,7 @@
 
 - OxideStudio 的数据库产品目录、真实连接、SQL LSP、表数据流式导出和迁移执行安全边界已超过 ChartDB。
 - ChartDB 的优势集中在可编辑 ER 图、DBML 即时编译/差异预览、结构导入导出、跨方言转换告警、画布历史和区域组织。
-- 当前最高优先级差距仍是 SQL 智能提示质量：可配置代码片段、函数参数片段、JOIN/外键推导、作用域语义覆盖和 `QueryEditor.tsx` 生命周期拆分。
+- SQL 智能提示的协议、snippet、函数参数、JOIN/外键推导和主要作用域 fallback 已补齐；剩余重点是扩大多方言语义 corpus，并继续把执行/事务 controller 从 `QueryEditor.tsx` 移出。
 - 迁移侧最大的可迁移逻辑是“确定性类型映射 + 不支持特性清单”，而不是 ChartDB 的 AI 生成兜底。Oxide 的可执行迁移必须继续受 capability、预检、确认摘要和 journal 约束。
 
 ## 1. SQL Editor、LSP 与智能提示
@@ -28,14 +28,14 @@
 | L06 | 本阶段增强 | 基于 FK、别名、CTE 和子查询作用域生成 JOIN/字段候选 | DBX `apps/desktop/src/lib/sql/semantic/completion.ts`、`apps/desktop/src/lib/sql/sqlCompletion.ts:2909` | `sqlJoinCompletion.ts` 已按外键生成完整 `JOIN … ON …`，覆盖复合键、跨 schema、别名冲突、父→子反向关系和 keyword case；关系索引复用 LSP metadata。缓存 fallback 也识别 correlated outer alias、derived subquery、LATERAL/APPLY 与显式 table-function output columns；仍需扩大多方言语义 corpus |
 | L07 | 本阶段增强 | 补全触发与排序应避免“空列表、重复候选、过期响应覆盖新输入” | ChartDB trigger 字符位于 `src/components/code-snippet/dbml/dbml-completion-provider.ts:19`；DBX exact prefix boost 位于 `sqlCompletion.ts:4043` | Oxide 已有请求 generation、model version、cancellation 检查和 overload-aware 去重；本阶段补 exact snippet sort、128 KiB 有界语句上下文、一次按键只读取一次前缀，并把每个编辑器的 Monaco provider 从四种语言缩减为当前模型语言；`sqlCompletionTelemetry.ts` 以无 SQL 内容的 256 条滚动窗口记录 LSP/fallback/empty/discard/error、平均/P95 延迟及原因 |
 | L08 | 本阶段增强 | SQL/DBML 编辑差异预览的细粒度防抖与可撤销应用 | ChartDB `src/pages/editor-page/side-panel/dbml-section/table-dbml/table-dbml.tsx:265` 使用 debounce，`:284` 应用，`:306` 撤销 | Diagram 的 DBML Draft 对当前 snapshot 生成文本，250ms 防抖解析 relation/warning，确认后只调用 snapshot compare 打开只读 diff；offline plan 同时禁用 Apply 和 Open in console。textarea 原生 undo 可用；仍缺逐项接受和结构化 schema CRUD history |
-| L09 | 未完成 | `QueryEditor.tsx` 仍承载过多 provider、执行、事务和视图生命周期 | DBX 将 semantic、presentation、insertion、keymap 分文件；ChartDB 将 completion manager 单独封装 | 已拆出多个 model adapter，但 `src/components/workspace/QueryEditor.tsx` 仍是性能和维护热点；继续拆 provider registry、metadata completion controller 和 execution controller |
+| L09 | 本阶段增强 | `QueryEditor.tsx` 仍承载过多 provider、执行、事务和视图生命周期 | DBX 将 semantic、presentation、insertion、keymap 分文件；ChartDB 将 completion manager 单独封装 | completion/hover 已与 definition/reference/format/signature/rename/code-action/symbol/folding/selection/semantic/inlay provider 分离；Explorer metadata 或 snippet 设置变化不再重建整套稳定 provider。仍需迁出 execution/transaction controller |
 
 ## 2. 数据库结构、导入与迁移
 
 | ID | 状态 | 差距/能力 | ChartDB 实现位置 | OxideStudio 当前落点与下一步 |
 | --- | --- | --- | --- | --- |
 | M01 | Oxide 增强项 | ChartDB 只定义 Generic + 8 个数据库产品 | `src/lib/domain/database-type.ts:1`，capability 在 `src/lib/domain/database-capabilities.ts:11` | Oxide `src/features/database-drivers/model/referenceDriverCatalog.ts` 有 70+ 候选并区分安装/运行/能力；真实可用性仍以签名包和 conformance 证据为准 |
-| M02 | 本阶段增强 | 一条可复制的 metadata query 将数据库结构转成统一 JSON | `src/lib/data/import-metadata/scripts/scripts.ts:22` 到 `:30` 覆盖 PostgreSQL/MySQL/SQLite/SQL Server/MariaDB/ClickHouse/CockroachDB/Oracle；schema 位于 `metadata-types/database-metadata.ts` | `chartDbMetadataImport.ts` 严格读取 ChartDB metadata JSON 及有效 `metadata_json_to_import` wrapper，聚合 columns/PK/FK/index/view/check/custom type 为 review-only snapshot；Snapshot 对话框限制 16 MiB，可保存、画图和 live diff，Apply 强制禁用。仍缺在 Oxide UI 内生成/复制各数据库 metadata query |
+| M02 | 已对齐并增强 | 一条可复制的 metadata query 将数据库结构转成统一 JSON | `src/lib/data/import-metadata/scripts/scripts.ts:22` 到 `:30` 覆盖 PostgreSQL/MySQL/SQLite/SQL Server/MariaDB/ClickHouse/CockroachDB/Oracle；schema 位于 `metadata-types/database-metadata.ts` | `chartDbMetadataQueries.ts` 为同一 8 类数据库及兼容驱动生成 target-scoped、read-only、单 JSON cell 查询；Snapshot 对话框可一键复制。`chartDbMetadataImport.ts` 严格导入 wrapper，限制 16 MiB，并保持 review-only/Apply 禁用 |
 | M03 | 部分对齐 | SQL DDL 离线导入和方言自动识别 | `src/lib/data/sql-import/index.ts:121` 检测方言，`:178` 导入，dialect importers 位于同目录 | Oxide 有 SQL 文件审阅/执行和 project DDL snapshot；缺少完整 DDL → editable schema snapshot 的多方言解析面 |
 | M04 | 本阶段增强 | DBML 导入、导出、校验和 apply diff | `src/lib/dbml/dbml-import/`、`src/lib/dbml/dbml-export/`、`src/lib/dbml/apply-dbml/` | `schemaDbml.ts` 导出 review-only DBML；`schemaDbmlImport.ts` 有界解析 table/column/default/index/复合 FK、校验 schema/重复/缺失引用、保留 source warning，并从 Snapshot 对话框保存为离线 baseline 后进入 live diff。DBML 和项目 DDL 均强制禁用 Apply；仍缺 ChartDB 全语法编译器与编辑器内即时 diff |
 | M05 | 本阶段增强 | 确定性跨方言 DDL 转换 | `src/lib/data/sql-export/cross-dialect/index.ts:33` 目前仅 PostgreSQL → MySQL/MariaDB/SQL Server；类型表在 `postgresql/type-mappings.ts` | `src-tauri/src/core/schema_diff.rs` 已为 PostgreSQL → MySQL/SQL Server 的特殊类型生成确定性 review notes，同时坚持不生成/执行跨库 DDL；下一步把覆盖扩展为 capability 驱动的完整映射计划 |
@@ -49,7 +49,7 @@
 | --- | --- | --- | --- | --- |
 | E01 | Oxide 增强项 | 大表导出任务、进度、取消、原子产物和审计 | ChartDB 的 export 主要面向 schema/diagram，不提供 live table streaming | `src-tauri/src/commands/table.rs:5754` 已流式导出 CSV/JSON/JSONL/TSV/SQL，支持 progress/cancel/report；前端表工具栏统一为一个 Export 菜单，WebView 不物化整表 |
 | E02 | 本阶段增强 | 查询结果导出格式和入口不完整 | ChartDB diagram JSON 在 `src/hooks/use-export-diagram.tsx`，SQL 在 `src/dialogs/export-sql-dialog/export-sql-dialog.tsx` | `src/lib/exportUtils.ts` 与 `DataGrid.tsx` 已增加 CSV、CSV BOM、JSON、JSONL、TSV、SQL INSERT template，统一下载并释放 Blob URL |
-| E03 | 未对齐 | XLSX 导出 | ChartDB 不提供表数据 XLSX | Oxide 已支持 XLSX import，尚缺 export；下一步后端流式写 workbook，保持类型、日期、布尔和大整数，不在主线程拼装整个文件 |
+| E03 | 已对齐并增强 | XLSX 导出 | ChartDB 不提供表数据 XLSX | `src-tauri/src/commands/table.rs` 逐页读取并直接流式写 XLSX ZIP/XML，冻结表头、启用筛选、保留 boolean/number/text，超过 15 位整数按文本保护精度；复用 progress/cancel/audit/atomic finalize，WebView 不物化整表 |
 | E04 | 未对齐 | Parquet/Arrow 等分析格式 | ChartDB 不提供 | DuckDB/分析型驱动可优先支持 Parquet；通用表导出需 capability gate，避免所有 driver 强制实现同一二进制格式 |
 | E05 | 部分对齐 | SQL INSERT 导出应方言感知并可配置 batch/upsert | ChartDB schema SQL exporters 位于 `src/lib/data/sql-export/export-per-type/` | 表导出后端已有精确表名；仍需按 driver 处理 binary/date/JSON/identity、batch size、insert/upsert/copy strategy。查询结果使用明确的 `target_table` 占位符，避免猜错来源表 |
 
@@ -64,7 +64,7 @@
 | U05 | 本阶段增强 | 图过滤、选择聚焦、依赖高亮、lost-in-canvas 提示 | `src/pages/editor-page/canvas/canvas-filter/`、`canvas/hooks/use-is-lost-in-canvas.tsx` | Diagram 已有关系/列搜索、keys-only、选择/reveal、visible-count，并新增“选中表 + 一阶依赖”/当前 Area 范围过滤；选中表被搜索或范围隐藏时显示 `Show hidden selection`，清理过滤并居中找回 |
 | P01 | 已对齐并增强 | 大结果表格虚拟化 | ChartDB 重点是 React Flow 画布 | Oxide 使用 `@glideapps/glide-data-grid`，长表不创建每个单元格 DOM；大表 export 继续走 Rust streaming |
 | P02 | 本阶段增强 | 高频画布事件批处理 | ChartDB `canvas.tsx:397/:718/:967` debounce，`:1530` 用 `requestAnimationFrame` throttle；节点测量也使用 rAF | `SchemaDiagramView.tsx` 已用 rAF + 分桶 overscan 做 viewport culling，只渲染视口附近节点/关联边，并修复关联定位与实际布局列数不一致；仍需 1k/5k/10k relation 基准与极端缩放策略 |
-| P03 | 本阶段增强 | 派生状态 memo 与细粒度 context | ChartDB 大量 `useMemo/useCallback`，但单一 chartdb provider 也很大 | Oxide QueryEditor/DataGrid 已缓存 metadata、虚拟化行并拆纯函数；本阶段降低 provider 注册数和补全前缀分配，后续用 profiler 继续定位 schemaTables 变化和 edge path 计算热点 |
+| P03 | 本阶段增强 | 派生状态 memo 与细粒度 context | ChartDB 大量 `useMemo/useCallback`，但单一 chartdb provider 也很大 | Oxide QueryEditor/DataGrid 已缓存 metadata、虚拟化行并拆纯函数；本阶段降低 provider 注册数和补全前缀分配，并隔离 metadata-sensitive completion provider 与稳定协议 provider；后续用 profiler 定位 execution state 与 edge path 计算热点 |
 
 ## 5. 分阶段执行顺序
 
@@ -80,7 +80,8 @@
 - [x] 增加 correlated subquery、derived table、LATERAL/APPLY 与显式 table-function column fixtures。
 - [x] 同名不同 signature 的 overload 作为独立候选展示。
 - [x] 记录 completion latency、discarded response、empty fallback 原因，且不保存 SQL/标识符/候选文本。
-- [ ] 扩大多方言语义 corpus，并继续拆分 QueryEditor provider lifecycle。
+- [x] 隔离 metadata-sensitive completion/hover 与稳定 LSP provider lifecycle。
+- [ ] 扩大多方言语义 corpus，并继续迁出 QueryEditor execution/transaction controller。
 
 ### 阶段 B：迁移与结构格式
 
@@ -92,13 +93,15 @@
 - [x] 增加 snapshot → review-only DBML export 与文件内 lossiness warnings。
 - [x] 增加有界 DBML import/validation，并接入 review-only snapshot diff，不直接执行。
 - [x] 增加 ChartDB metadata-query JSON 有界导入、聚合和 review-only snapshot diff。
+- [x] 增加 ChartDB 8 类数据库及兼容驱动的 target-scoped metadata query 一键复制。
 - [ ] 扩展外置 driver semantic DDL/migration 协议和 conformance evidence。
 
 ### 阶段 C：表格导出
 
 - [x] 查询结果导出补 CSV BOM/JSONL/TSV/SQL 并优化入口。
 - [x] 表模式 CSV/CSV BOM/JSON/JSONL/TSV/SQL 统一到一个 Export 菜单，继续使用后端流式任务。
-- [ ] 后端 XLSX export；随后按 capability 增加 Parquet/Arrow 与 resume/backpressure。
+- [x] 后端流式 XLSX export，复用 progress/cancel/audit/atomic finalize，并保护大整数精度。
+- [ ] 按 capability 增加 Parquet/Arrow 与 resume/backpressure。
 
 ### 阶段 D：Diagram UX 与性能
 

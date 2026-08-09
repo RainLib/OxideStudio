@@ -27,6 +27,7 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{watch, Mutex as AsyncMutex};
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 const DEFAULT_PAGE_SIZE: u32 = 500;
 const MAX_PAGE_SIZE: u32 = 5_000;
@@ -53,6 +54,9 @@ const MAX_JSON_IMPORT_PREVIEW_ARRAY_ITEMS: usize = 32;
 const MAX_JSON_IMPORT_PREVIEW_OBJECT_FIELDS: usize = 32;
 const MAX_IMPORT_ROWS: usize = 100_000;
 const IMPORT_BATCH_SIZE: usize = 500;
+const XLSX_MAX_ROWS: u64 = 1_048_576;
+const XLSX_MAX_COLUMNS: usize = 16_384;
+const XLSX_MAX_CELL_CHARS: usize = 32_767;
 /// A database-to-database copy is intentionally bounded.  It is a reviewed
 /// table-data transfer, not an unbounded background replication feature.
 const DEFAULT_TRANSFER_ROWS: u32 = 1_000;
@@ -90,6 +94,7 @@ pub enum TableExportFormat {
     Jsonl,
     Sql,
     Tsv,
+    Xlsx,
 }
 
 /// Output encoding is intentionally narrow until each additional encoding has
@@ -100,6 +105,7 @@ pub enum TableExportFormat {
 pub enum TableExportEncoding {
     Utf8,
     Utf8Bom,
+    Binary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1146,6 +1152,7 @@ fn export_file_path(
         TableExportFormat::Jsonl => "jsonl",
         TableExportFormat::Sql => "sql",
         TableExportFormat::Tsv => "tsv",
+        TableExportFormat::Xlsx => "xlsx",
     };
     let schema = sanitize_file_part(schema);
     let table = sanitize_file_part(table);
@@ -1188,6 +1195,258 @@ impl Drop for ExportTemporaryFile {
             let _ = remove_file(&self.path);
         }
     }
+}
+
+/// Writes a standards-compatible XLSX archive one row at a time. Values are
+/// encoded as inline strings or scalar cells so memory use stays bounded by a
+/// single database page and the archive never needs a shared-string table.
+struct StreamingXlsxWriter {
+    archive: ZipWriter<File>,
+    columns: usize,
+    sheet_row: u64,
+    sheet_started: bool,
+}
+
+impl StreamingXlsxWriter {
+    fn new(file: File) -> Self {
+        Self {
+            archive: ZipWriter::new(file),
+            columns: 0,
+            sheet_row: 0,
+            sheet_started: false,
+        }
+    }
+
+    fn options() -> SimpleFileOptions {
+        SimpleFileOptions::default().compression_method(CompressionMethod::Deflated)
+    }
+
+    fn write_header(&mut self, columns: &[String]) -> Result<(), String> {
+        if self.sheet_started {
+            return Err("XLSX worksheet header was already written".to_string());
+        }
+        if columns.len() > XLSX_MAX_COLUMNS {
+            return Err(format!(
+                "XLSX supports at most {XLSX_MAX_COLUMNS} columns; export has {}",
+                columns.len()
+            ));
+        }
+
+        self.columns = columns.len();
+        self.archive
+            .start_file("xl/worksheets/sheet1.xml", Self::options())
+            .map_err(|error| error.to_string())?;
+        self.archive
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>"#,
+            )
+            .map_err(|error| error.to_string())?;
+        if !columns.is_empty() {
+            self.archive
+                .write_all(b"<cols><col min=\"1\" max=\"")
+                .map_err(|error| error.to_string())?;
+            write!(self.archive, "{}", columns.len()).map_err(|error| error.to_string())?;
+            self.archive
+                .write_all(b"\" width=\"16\" customWidth=\"1\"/></cols>")
+                .map_err(|error| error.to_string())?;
+        }
+        self.archive
+            .write_all(b"<sheetData>")
+            .map_err(|error| error.to_string())?;
+        self.sheet_started = true;
+
+        if !columns.is_empty() {
+            self.sheet_row = 1;
+            write!(self.archive, "<row r=\"{}\">", self.sheet_row)
+                .map_err(|error| error.to_string())?;
+            for (index, column) in columns.iter().enumerate() {
+                let reference = xlsx_cell_reference(index, self.sheet_row)?;
+                self.write_inline_string_cell(&reference, column, Some(1))?;
+            }
+            self.archive
+                .write_all(b"</row>")
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn write_row(&mut self, row: &[Value]) -> Result<(), String> {
+        if !self.sheet_started {
+            return Err("XLSX worksheet header must be written before rows".to_string());
+        }
+        if self.sheet_row >= XLSX_MAX_ROWS {
+            return Err(format!(
+                "XLSX supports at most {XLSX_MAX_ROWS} rows including the header"
+            ));
+        }
+        self.sheet_row += 1;
+        write!(self.archive, "<row r=\"{}\">", self.sheet_row)
+            .map_err(|error| error.to_string())?;
+        for index in 0..self.columns {
+            let reference = xlsx_cell_reference(index, self.sheet_row)?;
+            self.write_value_cell(&reference, row.get(index).unwrap_or(&Value::Null))?;
+        }
+        self.archive
+            .write_all(b"</row>")
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn write_value_cell(&mut self, reference: &str, value: &Value) -> Result<(), String> {
+        match value {
+            Value::Null => {
+                write!(self.archive, "<c r=\"{reference}\"/>").map_err(|error| error.to_string())
+            }
+            Value::Bool(value) => write!(
+                self.archive,
+                "<c r=\"{reference}\" t=\"b\"><v>{}</v></c>",
+                if *value { 1 } else { 0 }
+            )
+            .map_err(|error| error.to_string()),
+            Value::Number(value) => {
+                let raw = value.to_string();
+                let digits = raw.trim_start_matches('-');
+                let loses_integer_precision = !digits.contains(['.', 'e', 'E'])
+                    && digits
+                        .chars()
+                        .filter(|character| character.is_ascii_digit())
+                        .count()
+                        > 15;
+                if loses_integer_precision {
+                    self.write_inline_string_cell(reference, &raw, None)
+                } else {
+                    write!(self.archive, "<c r=\"{reference}\"><v>{raw}</v></c>")
+                        .map_err(|error| error.to_string())
+                }
+            }
+            Value::String(value) => self.write_inline_string_cell(reference, value, None),
+            Value::Array(_) | Value::Object(_) => {
+                self.write_inline_string_cell(reference, &value.to_string(), None)
+            }
+        }
+    }
+
+    fn write_inline_string_cell(
+        &mut self,
+        reference: &str,
+        value: &str,
+        style: Option<u8>,
+    ) -> Result<(), String> {
+        let escaped = xlsx_escape_text(value)?;
+        match style {
+            Some(style) => write!(
+                self.archive,
+                "<c r=\"{reference}\" s=\"{style}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{escaped}</t></is></c>"
+            ),
+            None => write!(
+                self.archive,
+                "<c r=\"{reference}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{escaped}</t></is></c>"
+            ),
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    fn finish(mut self) -> Result<(), String> {
+        if !self.sheet_started {
+            self.write_header(&[])?;
+        }
+        self.archive
+            .write_all(b"</sheetData>")
+            .map_err(|error| error.to_string())?;
+        if self.columns > 0 && self.sheet_row > 0 {
+            let last_column = xlsx_column_name(self.columns - 1)?;
+            write!(
+                self.archive,
+                "<autoFilter ref=\"A1:{last_column}{}\"/>",
+                self.sheet_row
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        self.archive
+            .write_all(b"</worksheet>")
+            .map_err(|error| error.to_string())?;
+
+        self.write_package_part(
+            "[Content_Types].xml",
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>"#,
+        )?;
+        self.write_package_part(
+            "_rels/.rels",
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+        )?;
+        self.write_package_part(
+            "xl/workbook.xml",
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+        )?;
+        self.write_package_part(
+            "xl/_rels/workbook.xml.rels",
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#,
+        )?;
+        self.write_package_part(
+            "xl/styles.xml",
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#,
+        )?;
+
+        let file = self.archive.finish().map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())
+    }
+
+    fn write_package_part(&mut self, name: &str, contents: &[u8]) -> Result<(), String> {
+        self.archive
+            .start_file(name, Self::options())
+            .map_err(|error| error.to_string())?;
+        self.archive
+            .write_all(contents)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn xlsx_column_name(index: usize) -> Result<String, String> {
+    if index >= XLSX_MAX_COLUMNS {
+        return Err(format!(
+            "XLSX column index {index} exceeds the format limit"
+        ));
+    }
+    let mut value = index + 1;
+    let mut name = String::new();
+    while value > 0 {
+        let remainder = (value - 1) % 26;
+        name.insert(0, (b'A' + remainder as u8) as char);
+        value = (value - 1) / 26;
+    }
+    Ok(name)
+}
+
+fn xlsx_cell_reference(column: usize, row: u64) -> Result<String, String> {
+    Ok(format!("{}{row}", xlsx_column_name(column)?))
+}
+
+fn xlsx_escape_text(value: &str) -> Result<String, String> {
+    if value.chars().count() > XLSX_MAX_CELL_CHARS {
+        return Err(format!(
+            "XLSX cell text exceeds the {XLSX_MAX_CELL_CHARS} character limit"
+        ));
+    }
+    if value.chars().any(|character| {
+        let code = character as u32;
+        code < 0x20 && !matches!(character, '\t' | '\n' | '\r')
+    }) {
+        return Err("XLSX cell text contains an unsupported XML control character".to_string());
+    }
+
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '\"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(character),
+        }
+    }
+    Ok(escaped)
 }
 
 fn row_to_object(columns: &[String], row: &[Value]) -> Value {
@@ -5778,12 +6037,24 @@ pub async fn export_table_data(
 ) -> Result<Response<TableExportResult>, String> {
     let mut cancel_rx = cancellation.register(&export_id, &connection_id).await?;
     let started_at = current_table_timestamp_millis();
-    let encoding = encoding.unwrap_or(TableExportEncoding::Utf8);
-    if matches!(encoding, TableExportEncoding::Utf8Bom) && !matches!(format, TableExportFormat::Csv)
+    let requested_encoding = encoding.unwrap_or(TableExportEncoding::Utf8);
+    if matches!(requested_encoding, TableExportEncoding::Utf8Bom)
+        && !matches!(format, TableExportFormat::Csv)
     {
         cancellation.take(&export_id).await;
         return Err("UTF-8 BOM output is supported only for CSV exports".to_string());
     }
+    if matches!(requested_encoding, TableExportEncoding::Binary)
+        && !matches!(format, TableExportFormat::Xlsx)
+    {
+        cancellation.take(&export_id).await;
+        return Err("Binary output encoding is supported only for XLSX exports".to_string());
+    }
+    let encoding = if matches!(format, TableExportFormat::Xlsx) {
+        TableExportEncoding::Binary
+    } else {
+        requested_encoding
+    };
     let progress_rows = AtomicU64::new(0);
     let progress_batches = AtomicU64::new(0);
     let result: Result<TableExportResult, String> = async {
@@ -5839,9 +6110,16 @@ pub async fn export_table_data(
         let file_path = export_file_path(&app, &schema, &table, format)?;
         let mut temporary_file = ExportTemporaryFile::create(&file_path)?;
         let file = File::create(&temporary_file.path).map_err(|e| e.to_string())?;
-        let mut writer = BufWriter::new(file);
+        let (mut text_writer, mut xlsx_writer) = match format {
+            TableExportFormat::Xlsx => (None, Some(StreamingXlsxWriter::new(file))),
+            _ => (Some(BufWriter::new(file)), None),
+        };
         if matches!(encoding, TableExportEncoding::Utf8Bom) {
-            writer.write_all(b"\xEF\xBB\xBF").map_err(|e| e.to_string())?;
+            text_writer
+                .as_mut()
+                .ok_or_else(|| "XLSX exports do not use a text encoding".to_string())?
+                .write_all(b"\xEF\xBB\xBF")
+                .map_err(|e| e.to_string())?;
         }
 
         let mut offset = 0_u64;
@@ -5849,13 +6127,20 @@ pub async fn export_table_data(
         let mut columns: Vec<String> = Vec::new();
         let mut wrote_json_row = false;
         let mut wrote_csv_header = false;
+        let mut wrote_xlsx_header = false;
         let mut batches = 0_u64;
 
         if matches!(format, TableExportFormat::Json) {
-            writer.write_all(b"[").map_err(|e| e.to_string())?;
+            text_writer
+                .as_mut()
+                .expect("text writer exists for JSON exports")
+                .write_all(b"[")
+                .map_err(|e| e.to_string())?;
         } else if matches!(format, TableExportFormat::Sql) {
             writeln!(
-                writer,
+                text_writer
+                    .as_mut()
+                    .expect("text writer exists for SQL exports"),
                 "-- OxideStudio data export for {}",
                 kind.qualified_table(schema_option(&schema), &table)
             )
@@ -5932,6 +6217,13 @@ pub async fn export_table_data(
                     .map(|column| column.name.clone())
                     .collect();
             }
+            if matches!(format, TableExportFormat::Xlsx) && !wrote_xlsx_header {
+                xlsx_writer
+                    .as_mut()
+                    .expect("XLSX writer exists for XLSX exports")
+                    .write_header(&columns)?;
+                wrote_xlsx_header = true;
+            }
 
             if matches!(format, TableExportFormat::Csv | TableExportFormat::Tsv)
                 && !wrote_csv_header
@@ -5953,7 +6245,13 @@ pub async fn export_table_data(
                     })
                     .collect::<Vec<_>>()
                     .join(delimiter);
-                writeln!(writer, "{header}").map_err(|e| e.to_string())?;
+                writeln!(
+                    text_writer
+                        .as_mut()
+                        .expect("text writer exists for delimited exports"),
+                    "{header}"
+                )
+                .map_err(|e| e.to_string())?;
                 wrote_csv_header = true;
             }
 
@@ -5965,24 +6263,38 @@ pub async fn export_table_data(
                 match format {
                     TableExportFormat::Csv => {
                         let line = row.iter().map(csv_escape).collect::<Vec<_>>().join(",");
-                        writeln!(writer, "{line}").map_err(|e| e.to_string())?;
+                        writeln!(
+                            text_writer
+                                .as_mut()
+                                .expect("text writer exists for CSV exports"),
+                            "{line}"
+                        )
+                        .map_err(|e| e.to_string())?;
                     }
                     TableExportFormat::Json => {
+                        let writer = text_writer
+                            .as_mut()
+                            .expect("text writer exists for JSON exports");
                         if wrote_json_row {
                             writer.write_all(b",").map_err(|e| e.to_string())?;
                         }
                         let object = row_to_object(&columns, row);
-                        serde_json::to_writer(&mut writer, &object).map_err(|e| e.to_string())?;
+                        serde_json::to_writer(&mut *writer, &object).map_err(|e| e.to_string())?;
                         wrote_json_row = true;
                     }
                     TableExportFormat::Jsonl => {
+                        let writer = text_writer
+                            .as_mut()
+                            .expect("text writer exists for JSON Lines exports");
                         let object = row_to_object(&columns, row);
-                        serde_json::to_writer(&mut writer, &object).map_err(|e| e.to_string())?;
+                        serde_json::to_writer(&mut *writer, &object).map_err(|e| e.to_string())?;
                         writer.write_all(b"\n").map_err(|e| e.to_string())?;
                     }
                     TableExportFormat::Sql => {
                         writeln!(
-                            writer,
+                            text_writer
+                                .as_mut()
+                                .expect("text writer exists for SQL exports"),
                             "{}",
                             sql_insert_statement(kind, &schema, &table, &columns, row)
                         )
@@ -5990,7 +6302,19 @@ pub async fn export_table_data(
                     }
                     TableExportFormat::Tsv => {
                         let line = row.iter().map(tsv_escape).collect::<Vec<_>>().join("\t");
-                        writeln!(writer, "{line}").map_err(|e| e.to_string())?;
+                        writeln!(
+                            text_writer
+                                .as_mut()
+                                .expect("text writer exists for TSV exports"),
+                            "{line}"
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                    TableExportFormat::Xlsx => {
+                        xlsx_writer
+                            .as_mut()
+                            .expect("XLSX writer exists for XLSX exports")
+                            .write_row(row)?;
                     }
                 }
             }
@@ -6019,10 +6343,19 @@ pub async fn export_table_data(
         }
 
         if matches!(format, TableExportFormat::Json) {
-            writer.write_all(b"]").map_err(|e| e.to_string())?;
+            text_writer
+                .as_mut()
+                .expect("text writer exists for JSON exports")
+                .write_all(b"]")
+                .map_err(|e| e.to_string())?;
         }
-        writer.flush().map_err(|e| e.to_string())?;
-        drop(writer);
+        if let Some(mut writer) = text_writer {
+            writer.flush().map_err(|e| e.to_string())?;
+            drop(writer);
+        }
+        if let Some(writer) = xlsx_writer.take() {
+            writer.finish()?;
+        }
         temporary_file.finalize(&file_path)?;
 
         Ok(TableExportResult {
@@ -8852,8 +9185,9 @@ mod tests {
         transfer_type_mapping_warnings, tsv_escape, validate_table_data_transfer_id,
         validate_table_data_transfer_overwrite_rows, validate_xlsx_headers,
         validated_raw_filter_sql, value_to_u64, view_definition_query, xlsx_cell_value,
-        AlterColumnValueMode, AlterTableColumn, CreateTableColumn, RelationOperation,
-        TableCsvColumnMapping, TableCsvImportOptions, TableDataTransferBatchPlanRequest,
+        xlsx_column_name, xlsx_escape_text, AlterColumnValueMode, AlterTableColumn,
+        CreateTableColumn, RelationOperation, StreamingXlsxWriter, TableCsvColumnMapping,
+        TableCsvImportOptions, TableDataTransferBatchPlanRequest,
         TableDataTransferCancellationState, TableDataTransferColumnMapping,
         TableDataTransferCompatibility, TableDataTransferConversion, TableDataTransferEndpoint,
         TableDataTransferMode, TableDataTransferRequest, TableDataTransferTargetColumn,
@@ -8871,7 +9205,7 @@ mod tests {
     };
     use anyhow::Result;
     use async_trait::async_trait;
-    use calamine::Data;
+    use calamine::{open_workbook_auto, Data, Reader};
     use serde_json::{json, Value};
     use std::{
         collections::BTreeMap,
@@ -10231,6 +10565,52 @@ SELECT id FROM users WHERE active;"#
             "first second third"
         );
         assert_eq!(tsv_escape(&json!(null)), "");
+    }
+
+    #[test]
+    fn names_xlsx_columns_and_rejects_invalid_cell_text() {
+        assert_eq!(xlsx_column_name(0).unwrap(), "A");
+        assert_eq!(xlsx_column_name(25).unwrap(), "Z");
+        assert_eq!(xlsx_column_name(26).unwrap(), "AA");
+        assert_eq!(xlsx_column_name(16_383).unwrap(), "XFD");
+        assert!(xlsx_column_name(16_384).is_err());
+        assert_eq!(
+            xlsx_escape_text("A&B <value>").unwrap(),
+            "A&amp;B &lt;value&gt;"
+        );
+        assert!(xlsx_escape_text("invalid\u{0001}").is_err());
+    }
+
+    #[test]
+    fn writes_streaming_xlsx_with_precision_safe_scalar_cells() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("table-export.xlsx");
+        let file = fs::File::create(&path).unwrap();
+        let mut writer = StreamingXlsxWriter::new(file);
+        writer
+            .write_header(&["id".to_string(), "label".to_string(), "enabled".to_string()])
+            .unwrap();
+        writer
+            .write_row(&[
+                json!(9_007_199_254_740_993_i64),
+                json!("A&B <value>"),
+                json!(true),
+            ])
+            .unwrap();
+        writer.finish().unwrap();
+
+        let mut workbook = open_workbook_auto(&path).unwrap();
+        let sheet = workbook.worksheet_range("Data").unwrap();
+        assert_eq!(sheet.get((0, 0)), Some(&Data::String("id".to_string())));
+        assert_eq!(
+            sheet.get((1, 0)),
+            Some(&Data::String("9007199254740993".to_string()))
+        );
+        assert_eq!(
+            sheet.get((1, 1)),
+            Some(&Data::String("A&B <value>".to_string()))
+        );
+        assert_eq!(sheet.get((1, 2)), Some(&Data::Bool(true)));
     }
 
     #[test]

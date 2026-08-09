@@ -425,8 +425,8 @@ export interface TableSort {
   direction: "asc" | "desc";
 }
 
-export type TableExportFormat = "csv" | "json" | "jsonl" | "sql" | "tsv";
-export type TableExportEncoding = "utf8" | "utf8Bom";
+export type TableExportFormat = "csv" | "json" | "jsonl" | "sql" | "tsv" | "xlsx";
+export type TableExportEncoding = "utf8" | "utf8Bom" | "binary";
 
 export interface TableExportResult {
   exportId: string;

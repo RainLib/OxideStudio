@@ -63,6 +63,7 @@ interface TableDataToolbarProps {
   onExportJsonl: () => void;
   onExportSql: () => void;
   onExportTsv: () => void;
+  onExportXlsx: () => void;
   onCancelExport?: () => void;
 }
 
@@ -100,6 +101,7 @@ export function TableDataToolbar({
   onExportJsonl,
   onExportSql,
   onExportTsv,
+  onExportXlsx,
   onCancelExport,
 }: TableDataToolbarProps) {
   const mutationDisabled = isExecuting || readOnly || viewOnly || !editingEnabled;
@@ -275,6 +277,10 @@ export function TableDataToolbar({
             <DropdownMenuItem className="wb-menu-item" onSelect={onExportCsvBom}>
               <FileSpreadsheet className="mr-2 h-3.5 w-3.5" />
               Export CSV (UTF-8 BOM / Excel)
+            </DropdownMenuItem>
+            <DropdownMenuItem className="wb-menu-item" onSelect={onExportXlsx}>
+              <FileSpreadsheet className="mr-2 h-3.5 w-3.5" />
+              Export Excel workbook (.xlsx)
             </DropdownMenuItem>
             <DropdownMenuItem className="wb-menu-item" onSelect={onExportJson}>
               <FileJson className="mr-2 h-3.5 w-3.5" />

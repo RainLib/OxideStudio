@@ -16,6 +16,12 @@ database target until its relevant queue entries pass.
   25 schema diff and migration-planning unit tests passed.
 - Targeted Rust SQL/TSV export and type-conversion review tests passed.
 - `cargo fmt --manifest-path src-tauri/Cargo.toml` and `git diff --check` passed.
+- The ChartDB metadata-query catalog unit suite passed for PostgreSQL,
+  CockroachDB, MySQL, MariaDB, SQLite, SQL Server, ClickHouse and Oracle query
+  contracts; no query was executed against a live database.
+- The streaming XLSX writer unit suite passed, including a generated workbook
+  reopened through `calamine`, XML escaping, boolean cells, Excel column limits
+  and precision-safe integers above 15 digits.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an
@@ -282,11 +288,13 @@ explicit deferred validation task rather than an implicit release check.
 - Verify query-result CSV, UTF-8 BOM CSV, JSON, JSONL, TSV and SQL template
   downloads with duplicate column names, quotes/newlines, NULL, booleans,
   finite/non-finite numbers, nested JSON, binary values and empty results.
-- Verify table-mode CSV/CSV BOM/JSON/JSONL/TSV/SQL still use the Rust streaming task,
+- Verify table-mode CSV/CSV BOM/JSON/JSONL/TSV/SQL/XLSX still use the Rust streaming task,
   progress/cancellation/report path after the toolbar entry is consolidated.
   Large tables must not be materialized in the webview.
-- XLSX export, Parquet/Arrow export and resumable/backpressured exports remain
-  implementation gaps and require their own large-file validation matrix.
+- XLSX logic is implemented but still needs its large-file, cancellation,
+  NULL/date/binary/nested-JSON, 1,048,576-row boundary, Excel/LibreOffice and
+  atomic-finalization validation matrix. Parquet/Arrow and
+  resumable/backpressured exports remain implementation gaps.
 
 ## FK-aware JOIN completion and completion hot path
 
@@ -355,6 +363,10 @@ explicit deferred validation task rather than an implicit release check.
 
 ## ChartDB metadata JSON import
 
+- Copy each target-scoped query from the Snapshot dialog and execute it on the
+  supported server/version matrix. The query must be read-only, return exactly
+  one `metadata_json_to_import` cell, scope catalogs to the requested schema,
+  and keep literal escaping intact for quoted schema names.
 - Validate PostgreSQL/MySQL/MariaDB/SQLite/SQL Server/Oracle/ClickHouse and
   CockroachDB metadata-query output against the strict importer, including the
   valid `metadata_json_to_import` wrapper, composite PK/FK/index ordering,
