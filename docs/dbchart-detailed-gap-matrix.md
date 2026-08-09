@@ -57,9 +57,9 @@
 
 | ID | 状态 | 差距/能力 | ChartDB 实现位置 | OxideStudio 当前落点与下一步 |
 | --- | --- | --- | --- | --- |
-| U01 | 本阶段增强 | 图中直接创建/编辑 table、field、index、constraint、relationship、note | `src/context/chartdb-context/chartdb-provider.tsx` 各 mutation + history action；节点 UI 在 `src/pages/editor-page/canvas/` | Diagram 新增按需加载的 Structured Draft，可增删/重命名 relation，增删改 column/comment/default，增删 index/FK/CHECK，并传播 relation/column rename 引用。它不修改 captured snapshot，只生成 review-only diff；仍缺 note、drag-to-create relationship 与 draft 项目持久化 |
+| U01 | 本阶段增强 | 图中直接创建/编辑 table、field、index、constraint、relationship、note | `src/context/chartdb-context/chartdb-provider.tsx` 各 mutation + history action；节点 UI 在 `src/pages/editor-page/canvas/` | Diagram 新增按需加载的 Structured Draft，可增删/重命名 relation，增删改 column/comment/default，增删 index/FK/CHECK，并传播 relation/column rename 引用。草稿按 project + connection + database + schema 自动保存到资源库；重新打开会恢复同一 snapshot fingerprint 的版本，旧 snapshot 草稿只提示而不会误套，保存串行化且关闭/进入 diff 前强制 flush，丢弃需二次确认。它不修改 captured snapshot，只生成 review-only diff；仍缺 note 与 drag-to-create relationship |
 | U02 | 已对齐（最新更新） | 多选表移动到 Area、Area 内自动排列 | 最新提交修改 `src/pages/editor-page/canvas/table-node/table-node-context-menu.tsx:188`、`area-node-context-menu.tsx:39`、`src/lib/utils/area-utils.ts` | `schemaDiagramAreas.ts` 与 Diagram 工具条已支持 Ctrl/Cmd/Shift 多选、独占 move-to-area、父表优先的组内 auto-arrange、删除 Area 后表回到非分组画布；关系节点右键菜单可批量移动到现有/新 Area 或 `No area`，Area 标题右键可重命名、自动排列/删除，全部复用同一 100 步历史。重命名阻止空名和大小写等价的重复名。Area 当前仍是图表会话状态，项目持久化/拖放列入后续独立能力 |
-| U03 | 本阶段增强 | 全量 undo/redo action stack | `src/context/history-context/history-provider.tsx:384` / `:399`，action schema 在 `redo-undo-action.ts` | Area 与 Structured Draft 均有 100 步 undo/redo；draft history 使用 relation-array structural sharing，单次编辑只替换受影响 relation。仍需把 Area 与 schema draft 合并为可持久化的统一画布事务历史 |
+| U03 | 本阶段增强 | 全量 undo/redo action stack | `src/context/history-context/history-provider.tsx:384` / `:399`，action schema 在 `redo-undo-action.ts` | Area 与 Structured Draft 均有 100 步 undo/redo；draft history 使用 relation-array structural sharing，单次编辑只替换受影响 relation，当前 draft present 已项目持久化，重载后从该版本开启新历史。仍需把 Area 与 schema draft 合并为可持久化的统一画布事务历史 |
 | U04 | 本阶段增强 | SVG/PNG/JPG 图像导出 | `src/pages/editor-page/top-navbar/menu/menu.tsx:83` 起，`src/context/export-image-context/export-image-provider.tsx` | Diagram 可导出 SVG/PNG/JPG，选择过滤结果或完整画布、深色/浅色/透明背景；栅格导出限制 2400 万像素并按比例缩小，右侧 inspector 可收起 |
 | U05 | 本阶段增强 | 图过滤、选择聚焦、依赖高亮、lost-in-canvas 提示 | `src/pages/editor-page/canvas/canvas-filter/`、`canvas/hooks/use-is-lost-in-canvas.tsx` | Diagram 已有关系/列搜索、keys-only、选择/reveal、visible-count，并新增“选中表 + 一阶依赖”/当前 Area 范围过滤；选中表被搜索或范围隐藏时显示 `Show hidden selection`，清理过滤并居中找回 |
 | P01 | 已对齐并增强 | 大结果表格虚拟化 | ChartDB 重点是 React Flow 画布 | Oxide 使用 `@glideapps/glide-data-grid`，长表不创建每个单元格 DOM；大表 export 继续走 Rust streaming |
@@ -124,7 +124,8 @@
 - [x] 增加 Area 重命名、空值/重复名门控，并索引化节点选择与 inspector 关联边查询。
 - [x] 建立按需加载的 Structured Draft，把 table/field/index/FK/CHECK 与 column comment/default CRUD 接入 100 步结构共享历史。
 - [x] 通过 snapshot diff 把结构化图编辑转为 reviewed migration plan，并由前端与 Rust 执行入口双重拒绝 offline draft Apply。
-- [ ] 增加 note、drag-to-create relationship、draft 项目持久化，并把 Area/draft 合并为统一事务历史。
+- [x] 为 Structured Draft 增加项目级自动保存、snapshot fingerprint 防串用、串行 flush 与安全丢弃。
+- [ ] 增加 note、drag-to-create relationship，并把 Area/draft 合并为统一事务历史。
 - [x] 增加 SVG export、inspector 收起与 rAF viewport culling。
 - [x] 将 viewport culling 改为布局级空间桶和关系邻接索引，移除滚动热路径的全量节点/边扫描。
 - [x] 增加 PNG/JPG、过滤/完整画布范围和背景选项。

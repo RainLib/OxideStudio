@@ -506,6 +506,11 @@ explicit deferred validation task rather than an implicit release check.
 - Profile opening/searching the lazily loaded editor with 1k/5k/10k relations.
   The relation list is capped at 500 visible rows and edit history must retain
   structural sharing rather than deep-copying the entire schema.
+- Close and reopen a dirty draft, restart the application, and switch projects,
+  connections, databases and schemas. Only the exact project scope with the
+  same base snapshot fingerprint may restore. A stale fingerprint must remain
+  visible but unapplied; rapid edits must persist in order, closing/reviewing
+  must flush the newest version, and confirmed discard must remove the resource.
 
 ## ChartDB metadata JSON import
 

@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   AlertCircle,
   Check,
@@ -40,6 +47,11 @@ import {
   updateSchemaDraftColumn,
 } from "@/features/schema-diff/model/schemaDiagramDraft";
 import { schemaService } from "@/services/tauri/schema.service";
+import {
+  deleteSchemaDiagramDraft,
+  loadSchemaDiagramDraft,
+  saveSchemaDiagramDraft,
+} from "@/services/schemaDiagramDraftStore";
 import type { SchemaRelationSnapshot, SchemaSnapshot } from "@/services/tauri/types";
 import { cn } from "@/lib/utils";
 import { useTabStore } from "@/store/useTabStore";
@@ -54,6 +66,15 @@ type SchemaStructuredDraftDialogProps = {
 const MAX_VISIBLE_RELATIONS = 500;
 const inputClass =
   "h-7 min-w-0 rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 font-mono text-[9px] text-[hsl(var(--wb-text))] outline-none focus:border-[hsl(var(--wb-accent)/0.65)] disabled:opacity-50";
+
+type DraftPersistenceState =
+  | "loading"
+  | "idle"
+  | "pending"
+  | "saving"
+  | "saved"
+  | "stale"
+  | "error";
 
 export function SchemaStructuredDraftDialog({
   open,
@@ -89,9 +110,20 @@ export function SchemaStructuredDraftDialog({
   const [checkDefinition, setCheckDefinition] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isReviewing, setIsReviewing] = useState(false);
+  const [persistenceReady, setPersistenceReady] = useState(false);
+  const [persistenceState, setPersistenceState] =
+    useState<DraftPersistenceState>("idle");
+  const [persistenceNotice, setPersistenceNotice] = useState<string | null>(null);
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  const [pendingDiscard, setPendingDiscard] = useState(false);
+  const persistenceGenerationRef = useRef(0);
+  const persistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const lastPersistedRelationsRef = useRef<SchemaRelationSnapshot[] | null>(null);
 
   useEffect(() => {
     if (!open) return;
+    const generation = ++persistenceGenerationRef.current;
+    let disposed = false;
     setHistory(createSchemaDiagramDraftHistory(snapshot));
     setSelectedName(
       initialRelationName && snapshot.relations.some(
@@ -104,6 +136,69 @@ export function SchemaStructuredDraftDialog({
     setNewRelationName("");
     setError(null);
     setPendingRelationDelete(false);
+    setPendingDiscard(false);
+    setPersistenceReady(false);
+    setPersistenceState("loading");
+    setPersistenceNotice(null);
+    setLastSavedAt(null);
+    lastPersistedRelationsRef.current = null;
+
+    void loadSchemaDiagramDraft(snapshot)
+      .then((draft) => {
+        if (
+          disposed ||
+          generation !== persistenceGenerationRef.current
+        ) {
+          return;
+        }
+        if (!draft) {
+          setPersistenceState("idle");
+          return;
+        }
+        if (draft.baseFingerprint !== snapshot.fingerprint) {
+          setPersistenceState("stale");
+          setLastSavedAt(draft.updatedAt);
+          setPersistenceNotice(
+            "A saved draft belongs to an older snapshot and was not restored. The first new edit will replace it.",
+          );
+          return;
+        }
+        setHistory({ past: [], present: draft.relations, future: [] });
+        lastPersistedRelationsRef.current = draft.relations;
+        setSelectedName(
+          initialRelationName && draft.relations.some(
+            (relation) => relation.name === initialRelationName,
+          )
+            ? initialRelationName
+            : draft.relations[0]?.name || null,
+        );
+        setLastSavedAt(draft.updatedAt);
+        setPersistenceState("saved");
+        setPersistenceNotice("Restored the project draft for this schema.");
+      })
+      .catch((loadError) => {
+        if (
+          disposed ||
+          generation !== persistenceGenerationRef.current
+        ) {
+          return;
+        }
+        setPersistenceState("error");
+        setPersistenceNotice(
+          `The project draft could not be loaded: ${errorMessage(loadError)}`,
+        );
+      })
+      .finally(() => {
+        if (
+          !disposed &&
+          generation === persistenceGenerationRef.current
+        ) {
+          setPersistenceReady(true);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
   }, [initialRelationName, open, snapshot]);
 
   const selectedRelation = useMemo(
@@ -136,6 +231,58 @@ export function SchemaStructuredDraftDialog({
     setCheckName("");
     setCheckDefinition("");
   }, [selectedRelation?.name]);
+
+  const enqueuePersist = useCallback((relations: SchemaRelationSnapshot[]) => {
+    const generation = ++persistenceGenerationRef.current;
+    setPersistenceState("saving");
+    setPersistenceNotice(null);
+    const operation = persistenceQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (relations === snapshot.relations) {
+          await deleteSchemaDiagramDraft(snapshot);
+          return null;
+        }
+        return saveSchemaDiagramDraft(snapshot, relations);
+      });
+    persistenceQueueRef.current = operation.then(() => undefined, () => undefined);
+    return operation.then(
+      (saved) => {
+        if (generation !== persistenceGenerationRef.current) return;
+        lastPersistedRelationsRef.current = saved ? relations : null;
+        setLastSavedAt(saved?.updatedAt || null);
+        setPersistenceState(saved ? "saved" : "idle");
+        setPersistenceNotice(
+          saved ? "Draft saved to this project." : "Saved draft removed.",
+        );
+      },
+      (saveError) => {
+        if (generation === persistenceGenerationRef.current) {
+          setPersistenceState("error");
+          setPersistenceNotice(`Project draft save failed: ${errorMessage(saveError)}`);
+        }
+        throw saveError;
+      },
+    );
+  }, [snapshot]);
+
+  useEffect(() => {
+    if (
+      !open ||
+      !persistenceReady ||
+      history.present === lastPersistedRelationsRef.current ||
+      (history.present === snapshot.relations &&
+        lastPersistedRelationsRef.current === null)
+    ) {
+      return;
+    }
+    setPersistenceState("pending");
+    setPersistenceNotice("Project autosave queued.");
+    const timer = window.setTimeout(() => {
+      void enqueuePersist(history.present).catch(() => undefined);
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [enqueuePersist, history.present, open, persistenceReady, snapshot.relations]);
 
   const commit = (next: SchemaRelationSnapshot[]) => {
     setHistory((current) => commitSchemaDiagramDraft(current, next));
@@ -210,11 +357,43 @@ export function SchemaStructuredDraftDialog({
     if (saved) resetColumnForm();
   };
 
+  const closeWithPersist = async () => {
+    if (!persistenceReady || isReviewing) return;
+    try {
+      if (history.present !== lastPersistedRelationsRef.current) {
+        await enqueuePersist(history.present);
+      }
+      onClose();
+    } catch (closeError) {
+      setError(
+        `The draft remains open because it could not be saved: ${errorMessage(closeError)}`,
+      );
+    }
+  };
+
+  const discardDraft = async () => {
+    if (!pendingDiscard) {
+      setPendingDiscard(true);
+      return;
+    }
+    setPersistenceReady(false);
+    try {
+      await enqueuePersist(snapshot.relations);
+      onClose();
+    } catch (discardError) {
+      setPersistenceReady(true);
+      setError(`The saved draft could not be removed: ${errorMessage(discardError)}`);
+    }
+  };
+
   const reviewDiff = async () => {
     if (history.present === snapshot.relations || isReviewing) return;
     setIsReviewing(true);
     setError(null);
     try {
+      if (history.present !== lastPersistedRelationsRef.current) {
+        await enqueuePersist(history.present);
+      }
       const draft = createSchemaDiagramDraftSnapshot(snapshot, history.present);
       const plan = await schemaService.compareSchemaSnapshots(draft, snapshot);
       openSchemaDiffTab(plan, draft, snapshot);
@@ -239,7 +418,12 @@ export function SchemaStructuredDraftDialog({
 
   const dirty = history.present !== snapshot.relations;
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && !isReviewing && onClose()}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) void closeWithPersist();
+      }}
+    >
       <DialogContent className="grid h-[min(800px,calc(100vh-24px))] w-[min(1120px,calc(100vw-24px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3">
           <div className="flex items-center gap-2">
@@ -251,13 +435,13 @@ export function SchemaStructuredDraftDialog({
                 Structured schema draft · {snapshot.schemaName}
               </DialogTitle>
               <DialogDescription className="text-[9px] text-[hsl(var(--wb-text-muted))]">
-                Local undo/redo · structural sharing · review-only migration diff
+                Project autosave · local undo/redo · review-only migration diff
               </DialogDescription>
             </div>
             <button
               type="button"
               className="wb-icon-button h-7 w-7"
-              disabled={history.past.length === 0 || isReviewing}
+              disabled={!persistenceReady || history.past.length === 0 || isReviewing}
               onClick={() => {
                 const next = undoSchemaDiagramDraft(history);
                 setHistory(next);
@@ -273,7 +457,7 @@ export function SchemaStructuredDraftDialog({
             <button
               type="button"
               className="wb-icon-button h-7 w-7"
-              disabled={history.future.length === 0 || isReviewing}
+              disabled={!persistenceReady || history.future.length === 0 || isReviewing}
               onClick={() => {
                 const next = redoSchemaDiagramDraft(history);
                 setHistory(next);
@@ -286,7 +470,12 @@ export function SchemaStructuredDraftDialog({
           </div>
         </DialogHeader>
 
-        <div className="grid min-h-0 grid-cols-[230px_minmax(0,1fr)]">
+        <div
+          className={cn(
+            "grid min-h-0 grid-cols-[230px_minmax(0,1fr)] transition-opacity",
+            !persistenceReady && "pointer-events-none opacity-60",
+          )}
+        >
           <aside className="flex min-h-0 flex-col border-r border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))]">
             <div className="border-b border-[hsl(var(--wb-border-subtle))] p-2">
               <div className="relative">
@@ -531,14 +720,39 @@ export function SchemaStructuredDraftDialog({
             {error ? (
               <span className="flex items-center gap-1.5 truncate text-[9px] text-red-300" role="alert"><AlertCircle size={11} /> {error}</span>
             ) : (
-              <span className="text-[9px] wb-muted">
-                {dirty ? `${history.past.length} reversible edit${history.past.length === 1 ? "" : "s"}; no SQL will run.` : "No draft changes yet."}
-              </span>
+              <div className="flex min-w-0 items-center gap-2 text-[9px] wb-muted">
+                <span className="shrink-0">
+                  {draftPersistenceLabel(persistenceState, lastSavedAt)}
+                </span>
+                <span className="truncate" title={persistenceNotice || undefined}>
+                  {persistenceNotice || (dirty
+                    ? `${history.past.length} reversible edit${history.past.length === 1 ? "" : "s"}; no SQL will run.`
+                    : "No draft changes yet.")}
+                </span>
+              </div>
             )}
           </div>
           <div className="flex gap-2">
-            <button type="button" className="wb-text-button h-7 px-3 text-[10px]" disabled={isReviewing} onClick={onClose}>Discard</button>
-            <button type="button" className="wb-primary-button h-7 min-w-32 justify-center gap-1.5 px-3 text-[10px]" disabled={!dirty || isReviewing} onClick={() => void reviewDiff()}>
+            <button
+              type="button"
+              className={cn(
+                "wb-text-button h-7 px-3 text-[10px]",
+                pendingDiscard && "text-red-300",
+              )}
+              disabled={!persistenceReady || isReviewing || persistenceState === "saving"}
+              onClick={() => void discardDraft()}
+            >
+              {pendingDiscard ? "Confirm discard" : "Discard draft"}
+            </button>
+            <button
+              type="button"
+              className="wb-text-button h-7 px-3 text-[10px]"
+              disabled={!persistenceReady || isReviewing || persistenceState === "saving"}
+              onClick={() => void closeWithPersist()}
+            >
+              Save & close
+            </button>
+            <button type="button" className="wb-primary-button h-7 min-w-32 justify-center gap-1.5 px-3 text-[10px]" disabled={!persistenceReady || !dirty || isReviewing || persistenceState === "saving"} onClick={() => void reviewDiff()}>
               {isReviewing ? <Loader2 size={11} className="animate-spin" /> : <GitCompareArrows size={11} />}
               Review migration diff
             </button>
@@ -592,4 +806,26 @@ function MetadataRows({
 
 function commaList(value: string) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function draftPersistenceLabel(
+  state: DraftPersistenceState,
+  lastSavedAt: number | null,
+) {
+  if (state === "loading") return "Loading project draft…";
+  if (state === "pending") return "Autosave queued";
+  if (state === "saving") return "Saving project draft…";
+  if (state === "stale") return "Older draft available";
+  if (state === "error") return "Project draft unavailable";
+  if (state === "saved" && lastSavedAt) {
+    return `Saved ${new Date(lastSavedAt).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    })}`;
+  }
+  return "Project draft ready";
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
