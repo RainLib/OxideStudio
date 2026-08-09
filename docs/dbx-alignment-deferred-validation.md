@@ -32,6 +32,11 @@ database target until its relevant queue entries pass.
   end-to-end process test now covers table functions, `WITH ORDINALITY`,
   positional correlation-column merging, comma-separated sources after JOIN,
   and SQL Server table hints. No live metadata source was used.
+- The extracted stable Monaco/LSP provider coordinator passed registration,
+  disposal and stale-document isolation tests together with the existing
+  document/execution/transaction/file controllers (20 focused tests total),
+  followed by a strict frontend production build. Live provider/metadata
+  combinations remain deferred below.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an

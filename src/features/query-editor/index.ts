@@ -112,6 +112,11 @@ export {
   type LspDocumentLifecycleClient,
 } from "./hooks/useLspDocumentLifecycle";
 export {
+  registerLspCoreProviders,
+  useLspCoreProviderCoordinator,
+  type LspCoreProviderCoordinatorOptions,
+} from "./hooks/useLspCoreProviderCoordinator";
+export {
   resolveQueryExecutionTarget,
   type QueryExecutionKind,
   type QueryExecutionMode,
