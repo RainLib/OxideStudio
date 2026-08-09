@@ -148,6 +148,12 @@ export {
   type UseMonacoEditorViewStateOptions,
 } from "./hooks/useMonacoEditorViewState";
 export {
+  attachCurrentStatementDecoration,
+  useCurrentStatementDecoration,
+  type CurrentStatementDecorationOptions,
+  type UseCurrentStatementDecorationOptions,
+} from "./hooks/useCurrentStatementDecoration";
+export {
   resolveQueryExecutionTarget,
   type QueryExecutionKind,
   type QueryExecutionMode,

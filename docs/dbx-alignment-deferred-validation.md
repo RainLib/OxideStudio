@@ -75,6 +75,10 @@ database target until its relevant queue entries pass.
   offsets and rAF-batched viewport updates; strict TypeScript passed. Manual
   WebView checks for focus, split panes and delayed layout restoration remain
   deferred below.
+- Current-statement decoration now has an isolated lifecycle. Five focused
+  tests cover backend-authoritative range reuse, exact-end invalidation,
+  model-version invalidation and decoration reuse; strict TypeScript passed.
+  Live parser IPC/decorations counts remain deferred below.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an
