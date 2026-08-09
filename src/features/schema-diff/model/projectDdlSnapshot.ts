@@ -139,7 +139,7 @@ export function parseProjectDdl(
 }
 
 export function detectProjectDdlDialect(sql: string): ProjectDdlDialectDetection {
-  const source = sql.toUpperCase();
+  const source = stripSqlComments(sql).toUpperCase();
   const candidates: Array<{
     dialect: Exclude<ProjectDdlDialect, "generic">;
     markers: Array<[RegExp, string, number]>;
@@ -575,15 +575,46 @@ function splitTopLevel(value: string, delimiter: string) {
   let start = 0;
   let depth = 0;
   let quote = "";
+  let dollarQuote = "";
+  let bracketQuote = false;
 
   for (let index = 0; index < value.length; index += 1) {
     const char = value[index] || "";
+    if (dollarQuote) {
+      if (value.startsWith(dollarQuote, index)) {
+        index += dollarQuote.length - 1;
+        dollarQuote = "";
+      }
+      continue;
+    }
+    if (bracketQuote) {
+      if (char === "]" && value[index + 1] === "]") {
+        index += 1;
+      } else if (char === "]") {
+        bracketQuote = false;
+      }
+      continue;
+    }
     if (quote) {
-      if (char === quote && value[index - 1] !== "\\") quote = "";
+      if (char === quote && value[index + 1] === quote) {
+        index += 1;
+      } else if (char === quote && value[index - 1] !== "\\") {
+        quote = "";
+      }
       continue;
     }
     if (["'", '"', "`"].includes(char)) {
       quote = char;
+      continue;
+    }
+    if (char === "[") {
+      bracketQuote = true;
+      continue;
+    }
+    const tag = char === "$" ? readDollarQuoteTag(value, index) : "";
+    if (tag) {
+      dollarQuote = tag;
+      index += tag.length - 1;
       continue;
     }
     if (char === "(") {
@@ -602,14 +633,45 @@ function splitTopLevel(value: string, delimiter: string) {
 function matchingParen(value: string, opening: number) {
   let depth = 0;
   let quote = "";
+  let dollarQuote = "";
+  let bracketQuote = false;
   for (let index = opening; index < value.length; index += 1) {
     const char = value[index] || "";
+    if (dollarQuote) {
+      if (value.startsWith(dollarQuote, index)) {
+        index += dollarQuote.length - 1;
+        dollarQuote = "";
+      }
+      continue;
+    }
+    if (bracketQuote) {
+      if (char === "]" && value[index + 1] === "]") {
+        index += 1;
+      } else if (char === "]") {
+        bracketQuote = false;
+      }
+      continue;
+    }
     if (quote) {
-      if (char === quote && value[index - 1] !== "\\") quote = "";
+      if (char === quote && value[index + 1] === quote) {
+        index += 1;
+      } else if (char === quote && value[index - 1] !== "\\") {
+        quote = "";
+      }
       continue;
     }
     if (["'", '"', "`"].includes(char)) {
       quote = char;
+      continue;
+    }
+    if (char === "[") {
+      bracketQuote = true;
+      continue;
+    }
+    const tag = char === "$" ? readDollarQuoteTag(value, index) : "";
+    if (tag) {
+      dollarQuote = tag;
+      index += tag.length - 1;
       continue;
     }
     if (char === "(") depth += 1;
@@ -622,9 +684,103 @@ function matchingParen(value: string, opening: number) {
 }
 
 function stripSqlComments(value: string) {
-  return value
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/--[^\r\n]*/g, " ");
+  let result = "";
+  let quote = "";
+  let dollarQuote = "";
+  let bracketQuote = false;
+  let lineComment = false;
+  let blockCommentDepth = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index] || "";
+    const next = value[index + 1] || "";
+    if (lineComment) {
+      if (char === "\n" || char === "\r") {
+        lineComment = false;
+        result += char;
+      } else {
+        result += " ";
+      }
+      continue;
+    }
+    if (blockCommentDepth > 0) {
+      if (char === "/" && next === "*") {
+        blockCommentDepth += 1;
+        result += "  ";
+        index += 1;
+      } else if (char === "*" && next === "/") {
+        blockCommentDepth -= 1;
+        result += "  ";
+        index += 1;
+      } else {
+        result += char === "\n" || char === "\r" ? char : " ";
+      }
+      continue;
+    }
+    if (dollarQuote) {
+      result += char;
+      if (value.startsWith(dollarQuote, index)) {
+        result += value.slice(index + 1, index + dollarQuote.length);
+        index += dollarQuote.length - 1;
+        dollarQuote = "";
+      }
+      continue;
+    }
+    if (bracketQuote) {
+      result += char;
+      if (char === "]" && next === "]") {
+        result += next;
+        index += 1;
+      } else if (char === "]") {
+        bracketQuote = false;
+      }
+      continue;
+    }
+    if (quote) {
+      result += char;
+      if (char === quote && next === quote) {
+        result += next;
+        index += 1;
+      } else if (char === quote && value[index - 1] !== "\\") {
+        quote = "";
+      }
+      continue;
+    }
+    if (char === "-" && next === "-") {
+      lineComment = true;
+      result += "  ";
+      index += 1;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      blockCommentDepth = 1;
+      result += "  ";
+      index += 1;
+      continue;
+    }
+    if (["'", '"', "`"].includes(char)) {
+      quote = char;
+      result += char;
+      continue;
+    }
+    if (char === "[") {
+      bracketQuote = true;
+      result += char;
+      continue;
+    }
+    const tag = char === "$" ? readDollarQuoteTag(value, index) : "";
+    if (tag) {
+      dollarQuote = tag;
+      result += tag;
+      index += tag.length - 1;
+      continue;
+    }
+    result += char;
+  }
+  return result;
+}
+
+function readDollarQuoteTag(value: string, start: number) {
+  return value.slice(start).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/)?.[0] || "";
 }
 
 function leadingWords(value: string) {

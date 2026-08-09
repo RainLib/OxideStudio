@@ -210,4 +210,67 @@ describe("project DDL snapshot", () => {
     );
     expect(snapshot.warnings).toContain("DDL dialect: oracle");
   });
+
+  it("ignores dialect markers inside comments", () => {
+    const detection = detectProjectDdlDialect(`
+      -- AUTO_INCREMENT ENGINE=InnoDB
+      /* CREATE TABLE [dbo].[fake] (id bigint IDENTITY(1,1)); */
+      CREATE TABLE users (id bigint);
+    `);
+    expect(detection).toEqual({
+      dialect: "generic",
+      confidence: "low",
+      evidence: [],
+    });
+  });
+
+  it("preserves comment-like text and delimiters inside quoted defaults", () => {
+    const parsed = parseProjectDdl(
+      `
+        CREATE TABLE messages (
+          id bigint PRIMARY KEY,
+          subject varchar(200) DEFAULT 'keep -- text',
+          body text DEFAULT 'keep /* text */ and ; commas, too'
+        );
+      `,
+      "public",
+    );
+    expect(parsed.relations[0]?.columns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "subject",
+          default_value: "'keep -- text'",
+        }),
+        expect.objectContaining({
+          name: "body",
+          default_value: "'keep /* text */ and ; commas, too'",
+        }),
+      ]),
+    );
+  });
+
+  it("keeps PostgreSQL dollar-quoted bodies within one ignored statement", () => {
+    const parsed = parseProjectDdl(
+      `
+        CREATE FUNCTION public.touch_updated_at() RETURNS trigger AS $body$
+        BEGIN
+          NEW.updated_at := now();
+          RETURN NEW;
+        END;
+        $body$ LANGUAGE plpgsql;
+
+        CREATE TABLE public.items (
+          id bigint PRIMARY KEY,
+          marker text DEFAULT $$semi;colon -- still text$$
+        );
+      `,
+      "public",
+      "postgres",
+    );
+    expect(parsed.relations).toHaveLength(1);
+    expect(parsed.relations[0]?.columns.find((column) => column.name === "marker"))
+      .toMatchObject({ default_value: "$$semi;colon -- still text$$" });
+    expect(parsed.warnings.filter((warning) => warning.includes("Unsupported CREATE")))
+      .toHaveLength(1);
+  });
 });
