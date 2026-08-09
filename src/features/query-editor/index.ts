@@ -98,3 +98,15 @@ export {
   type QueryTransactionOperation,
   type QueryTransactionState,
 } from "./hooks/useQueryTransactionController";
+export {
+  useQueryExecutionController,
+  type ParameterExecutionRequest,
+  type QueryExecutionEditor,
+} from "./hooks/useQueryExecutionController";
+export {
+  resolveQueryExecutionTarget,
+  type QueryExecutionKind,
+  type QueryExecutionMode,
+  type QueryExecutionSnapshot,
+  type QueryExecutionTarget,
+} from "./model/queryExecutionTarget";

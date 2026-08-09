@@ -55,7 +55,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 | L09 | 已对齐：常用命令 snippet | `lib/sql/sqlSnippetTemplates.ts`；`sqlCompletion.snippet.spec.ts` | `features/query-editor/model/sqlCommandSnippets.ts` | 按产品选择 LIMIT/TOP/ROWNUM/FETCH/ROWS、DDL 与 mutation 语法；接受历史按连接排序。 |
 | L10 | 部分对齐：补全触发、展示和插入 | `lib/sql/sqlCompletionTriggerPolicy.ts`、`components/editor/QueryEditor.vue`、`components/editor/EditorSettingsDialog.vue`、`lib/editor/sqlCompletionPresentation.ts`、`sqlCompletionInsertion.ts` | 设置中提供“智能 SQL 位置 / 输入名称后 / 仅 Ctrl+Space”三种触发模式；provider 在调用 LSP 前按语义位置门控，显式 Ctrl/Cmd+Space 始终可用并记录无内容原因；LSP→Monaco adapter、usage ranking、snippet insertion 保持原链路 | 补 textEdit/additionalTextEdit、quote policy、自动 alias、触发后链式补全的 provider 集成测试，并在超大文档验证有界触发扫描。 |
 | L11 | 部分对齐：结构化编辑 intentions | `lib/editor/queryEditorTextEdits.ts`、`sqlInListPaste.ts`、`sqlQuoteCaret.ts`、`lib/sql/semantic/completion.ts` | 已有格式化、危险语句 guard、Unicode quote/unquote identifier 和 clipboard→IN-list；星号 action 已可将单表、多表及 `alias.*` 按 metadata 展开，多表使用 alias 限定以避免同名列歧义 | 仍缺 JOIN/WHERE 重写 preview、generated/hidden 列策略以及更复杂的结构化多光标编辑。 |
-| L12 | 部分对齐：编辑器模块边界 | DBX 已拆出 `lib/editor/*`、`lib/sql/*`，但主组件仍大 | 命名事务 lifecycle 已移入 `features/query-editor/hooks/useQueryTransactionController.ts`，覆盖 tab/connection stale rollback、卸载清理、提交后 metadata refresh、busy 防重入和失败时保留 manual mode；`QueryEditor.tsx` 减少约 146 行 | 继续提取 query/explain/import execution controller、model lifecycle 和 provider coordinator；组件测试不加载完整 Monaco。 |
+| L12 | 部分对齐：编辑器模块边界 | DBX `components/editor/QueryEditor.vue:791-924` 将 execution request 编排建立在 `lib/sql/sqlExecutionTarget.ts` 上 | 命名事务 lifecycle 已移入 `useQueryTransactionController.ts`；query/explain/parameter execution 已移入 `useQueryExecutionController.ts`，`queryExecutionTarget.ts` 统一 selection、SQL parser statement、ES request、Mongo command，异步 range 在 tab/connection 变化后丢弃且同 tab 执行防重入；`QueryEditor.tsx` 两阶段合计减少约 342 行 | 继续提取 import workflow、model lifecycle 和 provider coordinator；组件测试不加载完整 Monaco。 |
 | L13 | 已对齐：进程恢复遥测 | DBX 本地 semantic model不依赖独立进程 | `useLspSemanticStatusStore` 按连接记录 LSP restart/恢复耗时、schema sync failure 与 stale response drop 的无内容计数；session registry 和同步器在对应路径写入，状态栏 schema 语义提示的 title 展示最新趋势，不记录 SQL/对象内容 | 保持计数有界、仅会话内；如需跨会话分析另建脱敏诊断导出。 |
 
 ## 4. Explorer、metadata 与数据库管理
@@ -125,7 +125,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 
 1. 把 DBX semantic fixtures 转换为 Oxide LSP contract corpus。
 2. 补函数签名、INSERT inlay hints、CTE/subquery/table-function/reference 场景。
-3. 继续拆 QueryEditor model lifecycle 与 query/explain/import execution controller，补真实 provider 组合测试。
+3. 继续拆 QueryEditor import workflow、model lifecycle 与 provider coordinator，补真实 provider 组合测试。
 
 ### 批次 3：数据生命周期
 

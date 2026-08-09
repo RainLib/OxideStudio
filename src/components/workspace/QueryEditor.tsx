@@ -144,7 +144,6 @@ import {
 } from "@/lib/inlineCompletion";
 import {
   elasticsearchRequestNavigationOffset,
-  elasticsearchRequestAtOffset,
   elasticsearchRequestsForSelection,
   elasticsearchConsoleCompletionContext,
   elasticsearchCompletionExpectsMappingField,
@@ -192,7 +191,6 @@ import {
   mergeCompletionFallbackSuggestions,
   mongodbCommandRangeAtCursor,
   parseElasticsearchConsoleServerVersion,
-  selectedOrFullEditorText,
   quoteSqlIdentifierSelection,
   recordSqlCompletionTelemetry,
   sqlInListFromClipboard,
@@ -206,15 +204,10 @@ import {
   toMonacoRange,
   toMonacoWorkspaceEdit,
   unquoteSqlIdentifierSelection,
+  useQueryExecutionController,
   useQueryTransactionController,
 } from "@/features/query-editor";
 
-type ParameterExecutionRequest = {
-  tabId: string;
-  connectionId: string;
-  sql: string;
-  transactionId?: string;
-};
 type PendingSqlScriptImport = {
   connectionId: string;
   filePath: string;
@@ -462,8 +455,6 @@ export function QueryEditor({
   // const [isSaveOpen, setIsSaveOpen] = useState(false);
   // const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false);
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
-  const [parameterExecution, setParameterExecution] =
-    useState<ParameterExecutionRequest | null>(null);
   const [pendingSqlScriptImport, setPendingSqlScriptImport] =
     useState<PendingSqlScriptImport | null>(null);
   const [isSqlScriptImporting, setIsSqlScriptImporting] = useState(false);
@@ -761,6 +752,17 @@ export function QueryEditor({
         : [],
     [activeDocumentSql, isElasticsearchConsole],
   );
+  const confirmEditorExecution = useCallback(
+    (sql: string, executionDriver = driver) => {
+      if (!editorSettings.confirmDestructiveSql) return true;
+      const confirmation = editorExecutionConfirmation(sql, executionDriver);
+      if (!confirmation.required) return true;
+      return window.confirm(
+        confirmation.message || "Execute this query?",
+      );
+    },
+    [driver, editorSettings.confirmDestructiveSql],
+  );
   const canExecuteDocument =
     !isProjectFilePreview &&
     !activeTab?.agentFileDiffPreview &&
@@ -789,6 +791,35 @@ export function QueryEditor({
     loadSchemas,
     loadTables,
     bumpMetadataVersion,
+  });
+  const {
+    parameterExecution,
+    handleRun,
+    handleRunCurrent,
+    handleCancelRun,
+    handleConfigureParameters,
+    handleExplain,
+    handleRunParameterizedSql,
+    closeParameterExecution,
+  } = useQueryExecutionController({
+    activeTab,
+    connectionId: effectiveConnectionId,
+    connectionLabel: activeConnection?.name,
+    canExecute: canExecuteDocument,
+    driver,
+    kind: isElasticsearchConsole
+      ? "elasticsearch"
+      : isMongoDbConsole
+        ? "mongodb"
+        : "sql",
+    supportsExplainPlan: capabilities.supportsExplainPlan,
+    confirmExecution: confirmEditorExecution,
+    editorRef,
+    transactionIdForExecution,
+    updateTabSql,
+    runTabQuery,
+    runExplainPlan,
+    cancelTabQuery,
   });
   const monaco = useMonaco();
   const {
@@ -819,10 +850,6 @@ export function QueryEditor({
 
   useEffect(() => {
     activeTabIdRef.current = effectiveTabId;
-  }, [effectiveTabId]);
-
-  useEffect(() => {
-    setParameterExecution(null);
   }, [effectiveTabId]);
 
   useEffect(() => {
@@ -3211,73 +3238,6 @@ export function QueryEditor({
   // Close dropdown on click outside - COMMENTED OUT UNUSED
   // useEffect(() => { ... }, []);
 
-  const confirmEditorExecution = (sql: string, executionDriver = driver) => {
-    if (!editorSettings.confirmDestructiveSql) return true;
-    const confirmation = editorExecutionConfirmation(sql, executionDriver);
-    if (!confirmation.required) return true;
-    return window.confirm(confirmation.message || "Execute this query?");
-  };
-
-  const requestParameterizedExecution = (
-    sql: string,
-    transactionId?: string,
-  ) => {
-    if (
-      !activeTab ||
-      !effectiveConnectionId ||
-      extractSqlParameters(sql, driver).length === 0
-    ) {
-      return false;
-    }
-
-    setParameterExecution({
-      tabId: activeTab.id,
-      connectionId: effectiveConnectionId,
-      sql,
-      transactionId,
-    });
-    return true;
-  };
-
-  const currentEditorExecutionSql = () => {
-    const editor = editorRef.current;
-    const selection = editor?.getSelection();
-    const model = editor?.getModel();
-    return selectedOrFullEditorText(model, selection, activeTab?.sql || "");
-  };
-
-  const currentElasticsearchRequest = (editor: any, model: any) => {
-    if (!isElasticsearchConsole) {
-      return null;
-    }
-
-    const position = editor.getPosition?.();
-    const cursorOffset = position ? model.getOffsetAt(position) : 0;
-    return elasticsearchRequestAtOffset(model.getValue(), cursorOffset)?.text;
-  };
-
-  const handleRun = () => {
-    if (canExecuteDocument && effectiveConnectionId && activeTab) {
-      const sql = editorRef.current?.getModel()?.getValue() ?? activeTab.sql;
-      const transactionId = transactionIdForExecution();
-      if (requestParameterizedExecution(sql, transactionId)) return;
-      if (!confirmEditorExecution(sql)) return;
-      updateTabSql(activeTab.id, sql);
-      runTabQuery(
-        activeTab.id,
-        effectiveConnectionId,
-        undefined,
-        transactionId,
-      );
-    }
-  };
-
-  const handleCancelRun = () => {
-    if (activeTab) {
-      void cancelTabQuery(activeTab.id);
-    }
-  };
-
   const handleImportSqlScript = async () => {
     if (
       !effectiveConnectionId ||
@@ -3422,158 +3382,6 @@ export function QueryEditor({
     }
   };
 
-  const handleRunCurrent = async () => {
-    if (
-      !canExecuteDocument ||
-      !effectiveConnectionId ||
-      !activeTab ||
-      !editorRef.current
-    ) {
-      return;
-    }
-
-    const selection = editorRef.current.getSelection();
-    const model = editorRef.current.getModel();
-    if (!selection || !model) return;
-
-    const selectedText = model.getValueInRange(selection);
-    const transactionId = transactionIdForExecution();
-
-    // If something is selected, run only that.
-    if (selectedText && selectedText.trim()) {
-      const selectionStart = model.getOffsetAt({
-        lineNumber: selection.startLineNumber,
-        column: selection.startColumn,
-      });
-      const selectionEnd = model.getOffsetAt({
-        lineNumber: selection.endLineNumber,
-        column: selection.endColumn,
-      });
-      const executionText = isElasticsearchConsole
-        ? elasticsearchRequestsForSelection(
-            model.getValue(),
-            selectionStart,
-            selectionEnd,
-          )
-            .map((request) => request.text)
-            .join("\n\n")
-        : selectedText;
-      if (!executionText.trim()) return;
-      if (requestParameterizedExecution(executionText, transactionId)) return;
-      if (!confirmEditorExecution(executionText)) return;
-      runTabQuery(
-        activeTab.id,
-        effectiveConnectionId,
-        executionText,
-        transactionId,
-        selectionStart,
-      );
-    } else {
-      // Kibana Console runs the request under the cursor when no text is
-      // selected.
-      const currentRequest = currentElasticsearchRequest(
-        editorRef.current,
-        model,
-      );
-      if (currentRequest) {
-        if (requestParameterizedExecution(currentRequest, transactionId))
-          return;
-        if (!confirmEditorExecution(currentRequest)) return;
-        runTabQuery(
-          activeTab.id,
-          effectiveConnectionId,
-          currentRequest,
-          transactionId,
-        );
-        return;
-      }
-
-      const position = editorRef.current.getPosition();
-      if (!position) return;
-      const fullQuery = model.getValue();
-      if (isMongoDbConsole) {
-        const command = mongodbCommandRangeAtCursor(
-          fullQuery,
-          model.getOffsetAt(position),
-        );
-        if (!command?.text.trim()) return;
-        if (requestParameterizedExecution(command.text, transactionId)) return;
-        if (!confirmEditorExecution(command.text)) return;
-        runTabQuery(
-          activeTab.id,
-          effectiveConnectionId,
-          command.text,
-          transactionId,
-          command.from,
-        );
-        return;
-      }
-      let currentStatement: string;
-      let currentStatementStartOffset: number | undefined;
-      try {
-        const resolved = await queryService.resolveSqlStatementAtCursor(
-          effectiveConnectionId,
-          fullQuery,
-          model.getOffsetAt(position),
-        );
-        currentStatement = resolved?.sql || "";
-        currentStatementStartOffset = resolved?.startOffset;
-      } catch (error) {
-        const tasks = useTaskStore.getState();
-        const taskId = tasks.startTask({
-          kind: "query",
-          title: "Resolve statement at cursor",
-          detail: activeConnection?.name || effectiveConnectionId,
-        });
-        tasks.failTask(
-          taskId,
-          error instanceof Error ? error.message : String(error),
-        );
-        return;
-      }
-
-      if (!currentStatement.trim()) return;
-      if (requestParameterizedExecution(currentStatement, transactionId)) return;
-      if (!confirmEditorExecution(currentStatement)) return;
-      runTabQuery(
-        activeTab.id,
-        effectiveConnectionId,
-        currentStatement,
-        transactionId,
-        currentStatementStartOffset,
-      );
-    }
-  };
-
-  const handleConfigureParameters = () => {
-    requestParameterizedExecution(
-      currentEditorExecutionSql(),
-      transactionIdForExecution(),
-    );
-  };
-
-  const handleExplain = (mode: "estimate" | "analyze") => {
-    if (
-      !canExecuteDocument ||
-      !capabilities.supportsExplainPlan ||
-      !effectiveConnectionId ||
-      !activeTab
-    ) {
-      return;
-    }
-    const sql = currentEditorExecutionSql();
-    if (!sql.trim() || extractSqlParameters(sql, driver).length > 0) return;
-    if (
-      mode === "analyze" &&
-      !window.confirm(
-        "Explain Analyze executes this query to collect actual timing and row counts. It runs in a backend-enforced read-only transaction, but it can still be expensive. Continue?",
-      )
-    ) {
-      return;
-    }
-    void runExplainPlan(activeTab.id, effectiveConnectionId, sql, mode);
-  };
-
   const openHistoryInEditor = (item: QueryHistoryItem) => {
     const savedConnection = item.connectionId
       ? connections.find((connection) => connection.id === item.connectionId)
@@ -3645,25 +3453,12 @@ export function QueryEditor({
     return true;
   };
 
-  const handleRunParameterizedSql = (compiledSql: string) => {
-    if (!parameterExecution) return;
-    if (!confirmEditorExecution(compiledSql)) return;
-
-    void runTabQuery(
-      parameterExecution.tabId,
-      parameterExecution.connectionId,
-      compiledSql,
-      parameterExecution.transactionId,
-    );
-    setParameterExecution(null);
-  };
-
   useEffect(() => {
     if (!isActivePane) return;
 
-    const onRun = () => handleRun();
-    const onRunCurrent = () => void handleRunCurrent();
-    const onFormat = () => handleFormat();
+    const onRun = () => runAllActionRef.current();
+    const onRunCurrent = () => void runCurrentActionRef.current();
+    const onFormat = () => formatActionRef.current();
 
     window.addEventListener(APP_EVENT_RUN_QUERY, onRun);
     window.addEventListener(APP_EVENT_RUN_CURRENT, onRunCurrent);
@@ -3674,17 +3469,7 @@ export function QueryEditor({
       window.removeEventListener(APP_EVENT_RUN_CURRENT, onRunCurrent);
       window.removeEventListener(APP_EVENT_FORMAT_SQL, onFormat);
     };
-  }, [
-    activeConnectionId,
-    activeTab,
-    activeTransactionState,
-    canExecuteDocument,
-    effectiveConnectionId,
-    isActivePane,
-    runTabQuery,
-    supportsTransactions,
-    transactionMode,
-  ]);
+  }, [isActivePane]);
 
   useEffect(() => {
     if (!isActivePane) return;
@@ -4573,7 +4358,7 @@ export function QueryEditor({
           dialect={driver}
           isConnected={Boolean(effectiveConnectionId && canExecuteDocument)}
           isExecuting={activeTab.isExecuting}
-          onClose={() => setParameterExecution(null)}
+          onClose={closeParameterExecution}
           onRun={handleRunParameterizedSql}
         />
       )}

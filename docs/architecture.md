@@ -295,7 +295,7 @@ Changes 的逐文件审阅可切换 All、Staged、Working；不可用范围明�
 
 ## 7. 当前架构债务
 
-1. `SchemaSidebar.tsx` 和 `QueryEditor.tsx` 仍是高复杂度组件；QueryEditor 的命名事务已移入 `features/query-editor/hooks/useQueryTransactionController.ts`，下一步继续迁出 query/explain/import execution 与 model lifecycle。
+1. `SchemaSidebar.tsx` 和 `QueryEditor.tsx` 仍是高复杂度组件；QueryEditor 的命名事务与 query/explain/parameter execution 已分别移入 `features/query-editor/hooks/useQueryTransactionController.ts` 和 `useQueryExecutionController.ts`，下一步继续迁出 import workflow、model lifecycle 与 provider coordinator。
 2. 核心 connection/query/schema/table/project-file 已统一为结构化错误；低频 legacy command 仍有字符串 rejection，但前端 raw-command adapter 会规范化为稳定 `ApiError`，后续应随模块修改逐步迁移后端来源码。
 3. `tauri::generate_handler!` 是手工总表，新增命令容易漏注册，应增加命令契约测试或代码生成。
 4. Search Everywhere 目前只索引内存中已知范围，还没有覆盖 MetaStore 的全项目对象索引。

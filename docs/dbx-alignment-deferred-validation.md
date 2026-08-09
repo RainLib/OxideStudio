@@ -299,6 +299,21 @@ explicit deferred validation task rather than an implicit release check.
   the editor while a manual session exists. Each stale session must receive one
   best-effort rollback without leaking its transaction ID to another tab.
 
+## Query execution controller
+
+- On SQL, Elasticsearch Console and MongoDB connections, verify that selection
+  wins over cursor scope, Run Current resolves one complete statement/request/
+  command, and Run All keeps the whole document. Database error offsets must
+  still point to the original Monaco document after range execution.
+- Double-click Run and Explain while backend target resolution is pending. Only
+  one parser request and one execution may be dispatched for a tab. Switch tab
+  or connection before statement resolution returns and confirm the stale result
+  is discarded without starting a query.
+- Open SQL parameters inside and outside a manual transaction. Changing tab,
+  connection or transaction context must close the stale parameter request;
+  compiled SQL must retain the reviewed transaction ID and destructive-query
+  confirmation policy.
+
 ## Cross-driver migration review notes
 
 - Compare PostgreSQL snapshots against MySQL/MariaDB and SQL Server targets
