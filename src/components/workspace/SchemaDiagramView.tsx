@@ -51,14 +51,16 @@ import {
 import {
   applySchemaDiagramAreas,
   autoArrangeSchemaDiagramArea,
-  commitSchemaDiagramAreas,
-  createSchemaDiagramAreaHistory,
   moveSchemaDiagramRelationsToArea,
   removeSchemaDiagramRelationsFromAreas,
   renameSchemaDiagramArea,
-  redoSchemaDiagramAreas,
-  undoSchemaDiagramAreas,
 } from "@/lib/schemaDiagramAreas";
+import {
+  commitSchemaDiagramCanvas,
+  createSchemaDiagramCanvasHistory,
+  redoSchemaDiagramCanvas,
+  undoSchemaDiagramCanvas,
+} from "@/lib/schemaDiagramCanvasHistory";
 import {
   buildSchemaDiagramEdgeIndex,
   buildSchemaDiagramViewportIndex,
@@ -107,14 +109,14 @@ import {
   type SchemaDiagramNote,
   type SchemaDiagramNoteColor,
 } from "@/services/schemaDiagramCanvasStore";
+import type { SchemaSnapshot } from "@/services/tauri/types";
 
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 1.6;
 const VIEWPORT_OVERSCAN = 320;
 const VIEWPORT_BUCKET = 160;
 const NEW_NOTE_ID = "__new_diagram_note__";
-const EMPTY_AREA_HISTORY = createSchemaDiagramAreaHistory();
-const EMPTY_DIAGRAM_NOTES: SchemaDiagramNote[] = [];
+const EMPTY_CANVAS_HISTORY = createSchemaDiagramCanvasHistory();
 const loadSchemaStructuredDraftDialog = () =>
   import("./SchemaStructuredDraftDialog");
 const SchemaStructuredDraftDialog = lazy(() =>
@@ -135,8 +137,7 @@ export function SchemaDiagramView() {
     tabs,
     activeTabId,
     selectSchemaDiagramRelation,
-    setSchemaDiagramAreaHistory,
-    setSchemaDiagramNotes,
+    setSchemaDiagramCanvasHistory,
     selectSchemaDiagramArea,
     selectSchemaDiagramRelations,
   } = useTabStore();
@@ -168,6 +169,12 @@ export function SchemaDiagramView() {
     useState<"loading" | "ready" | "saving" | "error">("loading");
   const canvasLoadGenerationRef = useRef(0);
   const canvasSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const latestCanvasByTabRef = useRef(new Map<string, {
+    snapshot: SchemaSnapshot;
+    areas: typeof EMPTY_CANVAS_HISTORY.present.areas;
+    notes: SchemaDiagramNote[];
+    ready: boolean;
+  }>());
   const [renamingAreaId, setRenamingAreaId] = useState<string | null>(null);
   const [areaNameDraft, setAreaNameDraft] = useState("");
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -176,8 +183,9 @@ export function SchemaDiagramView() {
     useState<DiagramViewportWindow | null>(null);
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
   const snapshot = activeTab?.schemaDiagramSnapshot;
-  const areaHistory = activeTab?.schemaDiagramAreaHistory || EMPTY_AREA_HISTORY;
-  const diagramNotes = activeTab?.schemaDiagramNotes || EMPTY_DIAGRAM_NOTES;
+  const canvasHistory = activeTab?.schemaDiagramCanvasHistory || EMPTY_CANVAS_HISTORY;
+  const areas = canvasHistory.present.areas;
+  const diagramNotes = canvasHistory.present.notes;
   const selectedAreaId = activeTab?.selectedDiagramAreaId || "";
   const activeSelectedRelationName = activeTab?.selectedDiagramRelationName || null;
   const selectedRelationNames = useMemo(
@@ -202,12 +210,12 @@ export function SchemaDiagramView() {
         : new Set<string>();
     }
     return new Set(
-      areaHistory.present.find((area) => area.id === selectedAreaId)
+      areas.find((area) => area.id === selectedAreaId)
         ?.relationNames || [],
     );
   }, [
     activeSelectedRelationName,
-    areaHistory.present,
+    areas,
     relationScope,
     selectedAreaId,
     snapshot,
@@ -234,16 +242,16 @@ export function SchemaDiagramView() {
   const areaLayout = useMemo(
     () =>
       baseLayout
-        ? applySchemaDiagramAreas(baseLayout, areaHistory.present)
+        ? applySchemaDiagramAreas(baseLayout, areas)
         : null,
-    [areaHistory.present, baseLayout],
+    [areas, baseLayout],
   );
   const fullAreaLayout = useMemo(
     () =>
       fullBaseLayout
-        ? applySchemaDiagramAreas(fullBaseLayout, areaHistory.present)
+        ? applySchemaDiagramAreas(fullBaseLayout, areas)
         : null,
-    [areaHistory.present, fullBaseLayout],
+    [areas, fullBaseLayout],
   );
   const layout = areaLayout?.layout || null;
   const fullLayout = fullAreaLayout?.layout || null;
@@ -277,11 +285,23 @@ export function SchemaDiagramView() {
   }, [snapshot?.id]);
 
   useEffect(() => {
+    if (!activeTab || !snapshot) return;
+    latestCanvasByTabRef.current.set(activeTab.id, {
+      snapshot,
+      areas,
+      notes: diagramNotes,
+      ready: canvasPersistenceReady,
+    });
+  }, [activeTab, areas, canvasPersistenceReady, diagramNotes, snapshot]);
+
+  useEffect(() => {
     if (!snapshot || !activeTab) return;
     const generation = ++canvasLoadGenerationRef.current;
     const tabId = activeTab.id;
-    const initialAreas = activeTab.schemaDiagramAreaHistory?.present;
-    const initialNotes = activeTab.schemaDiagramNotes;
+    const initialHistory = activeTab.schemaDiagramCanvasHistory;
+    const hasSessionHistory = Boolean(
+      initialHistory?.past.length || initialHistory?.future.length,
+    );
     let disposed = false;
     setCanvasPersistenceReady(false);
     setCanvasPersistenceState("loading");
@@ -290,7 +310,8 @@ export function SchemaDiagramView() {
         if (
           disposed ||
           generation !== canvasLoadGenerationRef.current ||
-          !canvas
+          !canvas ||
+          hasSessionHistory
         ) {
           return;
         }
@@ -298,17 +319,14 @@ export function SchemaDiagramView() {
           .getState()
           .tabs.find((tab) => tab.id === tabId);
         if (
-          currentTab?.schemaDiagramAreaHistory?.present !== initialAreas ||
-          currentTab?.schemaDiagramNotes !== initialNotes
+          currentTab?.schemaDiagramCanvasHistory !== initialHistory
         ) {
           return;
         }
-        setSchemaDiagramAreaHistory(tabId, {
-          past: [],
-          present: canvas.areas,
-          future: [],
-        });
-        setSchemaDiagramNotes(tabId, canvas.notes);
+        setSchemaDiagramCanvasHistory(
+          tabId,
+          createSchemaDiagramCanvasHistory(canvas.areas, canvas.notes),
+        );
       })
       .catch((loadError) => {
         if (!disposed && generation === canvasLoadGenerationRef.current) {
@@ -327,7 +345,7 @@ export function SchemaDiagramView() {
     return () => {
       disposed = true;
     };
-  }, [activeTab?.id, setSchemaDiagramAreaHistory, setSchemaDiagramNotes, snapshot]);
+  }, [activeTab?.id, setSchemaDiagramCanvasHistory, snapshot]);
 
   useEffect(() => {
     if (!snapshot || !activeTab || !canvasPersistenceReady) return;
@@ -339,7 +357,7 @@ export function SchemaDiagramView() {
         .then(() =>
           saveSchemaDiagramCanvas(
             snapshot,
-            areaHistory.present,
+            areas,
             diagramNotes,
           ).then(() => undefined),
         );
@@ -361,11 +379,29 @@ export function SchemaDiagramView() {
     return () => window.clearTimeout(timer);
   }, [
     activeTab?.id,
-    areaHistory.present,
+    areas,
     canvasPersistenceReady,
     diagramNotes,
     snapshot,
   ]);
+
+  useEffect(() => {
+    const tabId = activeTab?.id;
+    if (!tabId) return;
+    return () => {
+      const pending = latestCanvasByTabRef.current.get(tabId);
+      latestCanvasByTabRef.current.delete(tabId);
+      if (!pending?.ready) return;
+      const operation = canvasSaveQueueRef.current
+        .catch(() => undefined)
+        .then(() => saveSchemaDiagramCanvas(
+          pending.snapshot,
+          pending.areas,
+          pending.notes,
+        ).then(() => undefined));
+      canvasSaveQueueRef.current = operation.catch(() => undefined);
+    };
+  }, [activeTab?.id]);
 
   const exportSvg = useCallback(() => {
     const exportLayout = exportScope === "full" ? fullLayout : layout;
@@ -529,6 +565,71 @@ export function SchemaDiagramView() {
     return () => window.cancelAnimationFrame(frame);
   }, [fitDiagram]);
 
+  const undoCanvas = useCallback(() => {
+    if (!activeTab || canvasHistory.past.length === 0) return;
+    setSchemaDiagramCanvasHistory(
+      activeTab.id,
+      undoSchemaDiagramCanvas(canvasHistory),
+    );
+  }, [activeTab, canvasHistory, setSchemaDiagramCanvasHistory]);
+
+  const redoCanvas = useCallback(() => {
+    if (!activeTab || canvasHistory.future.length === 0) return;
+    setSchemaDiagramCanvasHistory(
+      activeTab.id,
+      redoSchemaDiagramCanvas(canvasHistory),
+    );
+  }, [activeTab, canvasHistory, setSchemaDiagramCanvasHistory]);
+
+  useEffect(() => {
+    if (!activeTab || activeTab.type !== "schema_diagram") return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        (!event.ctrlKey && !event.metaKey) ||
+        event.altKey ||
+        isEditableKeyboardTarget(event.target) ||
+        editingNoteId !== null ||
+        renamingAreaId !== null ||
+        dbmlDraftOpen ||
+        structuredDraftOpen
+      ) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      const wantsRedo = key === "y" || (key === "z" && event.shiftKey);
+      const wantsUndo = key === "z" && !event.shiftKey;
+      if ((!wantsUndo && !wantsRedo) ||
+        (wantsUndo && canvasHistory.past.length === 0) ||
+        (wantsRedo && canvasHistory.future.length === 0)) {
+        return;
+      }
+      event.preventDefault();
+      if (wantsRedo) redoCanvas();
+      else undoCanvas();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    activeTab,
+    canvasHistory.future.length,
+    canvasHistory.past.length,
+    dbmlDraftOpen,
+    editingNoteId,
+    redoCanvas,
+    renamingAreaId,
+    structuredDraftOpen,
+    undoCanvas,
+  ]);
+
+  useEffect(() => {
+    if (!activeTab || !selectedAreaId || areas.some((area) => area.id === selectedAreaId)) {
+      return;
+    }
+    selectSchemaDiagramArea(activeTab.id, null);
+    if (relationScope === "area") setRelationScope("all");
+  }, [activeTab, areas, relationScope, selectSchemaDiagramArea, selectedAreaId]);
+
   if (
     !activeTab ||
     activeTab.type !== "schema_diagram" ||
@@ -547,7 +648,7 @@ export function SchemaDiagramView() {
   const selectedIsHidden = Boolean(
     selectedName && !viewportIndex.nodesByName.has(selectedName),
   );
-  const selectedArea = areaHistory.present.find(
+  const selectedArea = areas.find(
     (area) => area.id === selectedAreaId,
   ) || null;
   const relatedEdges = selectedName
@@ -569,34 +670,38 @@ export function SchemaDiagramView() {
     selectSchemaDiagramRelation(activeTab.id, relationName);
   };
 
+  const commitAreas = (nextAreas: typeof areas) => {
+    setSchemaDiagramCanvasHistory(
+      activeTab.id,
+      commitSchemaDiagramCanvas(canvasHistory, { areas: nextAreas }),
+    );
+  };
+
+  const commitNotes = (nextNotes: SchemaDiagramNote[]) => {
+    setSchemaDiagramCanvasHistory(
+      activeTab.id,
+      commitSchemaDiagramCanvas(canvasHistory, { notes: nextNotes }),
+    );
+  };
+
   const createArea = (relationNames: readonly string[] = []) => {
-    const sequence = areaHistory.present.length + 1;
+    const sequence = areas.length + 1;
     const id = `area-${Date.now().toString(36)}-${sequence}`;
     const nextAreas = [
-      ...areaHistory.present,
+      ...areas,
       { id, name: `Area ${sequence}`, relationNames: [] },
     ];
-    setSchemaDiagramAreaHistory(
-      activeTab.id,
-      commitSchemaDiagramAreas(
-        areaHistory,
-        relationNames.length > 0
-          ? moveSchemaDiagramRelationsToArea(nextAreas, relationNames, id)
-          : nextAreas,
-      ),
+    commitAreas(
+      relationNames.length > 0
+        ? moveSchemaDiagramRelationsToArea(nextAreas, relationNames, id)
+        : nextAreas,
     );
     selectSchemaDiagramArea(activeTab.id, id);
   };
 
   const removeArea = (areaId: string) => {
     if (!areaId) return;
-    setSchemaDiagramAreaHistory(
-      activeTab.id,
-      commitSchemaDiagramAreas(
-        areaHistory,
-        areaHistory.present.filter((area) => area.id !== areaId),
-      ),
-    );
+    commitAreas(areas.filter((area) => area.id !== areaId));
     if (selectedAreaId === areaId) {
       selectSchemaDiagramArea(activeTab.id, null);
       if (relationScope === "area") setRelationScope("all");
@@ -608,50 +713,27 @@ export function SchemaDiagramView() {
     relationNames: readonly string[],
   ) => {
     if (!areaId || relationNames.length === 0) return;
-    setSchemaDiagramAreaHistory(
-      activeTab.id,
-      commitSchemaDiagramAreas(
-        areaHistory,
-        moveSchemaDiagramRelationsToArea(
-          areaHistory.present,
-          relationNames,
-          areaId,
-        ),
-      ),
+    commitAreas(
+      moveSchemaDiagramRelationsToArea(areas, relationNames, areaId),
     );
   };
 
   const removeRelationsFromAreas = (relationNames: readonly string[]) => {
     if (relationNames.length === 0) return;
-    setSchemaDiagramAreaHistory(
-      activeTab.id,
-      commitSchemaDiagramAreas(
-        areaHistory,
-        removeSchemaDiagramRelationsFromAreas(
-          areaHistory.present,
-          relationNames,
-        ),
-      ),
+    commitAreas(
+      removeSchemaDiagramRelationsFromAreas(areas, relationNames),
     );
   };
 
   const autoArrangeArea = (areaId: string) => {
     if (!areaId) return;
-    setSchemaDiagramAreaHistory(
-      activeTab.id,
-      commitSchemaDiagramAreas(
-        areaHistory,
-        autoArrangeSchemaDiagramArea(
-          areaHistory.present,
-          areaId,
-          fullLayout.edges,
-        ),
-      ),
+    commitAreas(
+      autoArrangeSchemaDiagramArea(areas, areaId, fullLayout.edges),
     );
   };
 
   const beginRenameArea = (areaId: string) => {
-    const area = areaHistory.present.find((candidate) => candidate.id === areaId);
+    const area = areas.find((candidate) => candidate.id === areaId);
     if (!area) return;
     setAreaNameDraft(area.name);
     setRenamingAreaId(area.id);
@@ -684,7 +766,7 @@ export function SchemaDiagramView() {
     const content = noteContentDraft.trim();
     if (!editingNoteId || !content) return;
     if (editingNoteId === NEW_NOTE_ID) {
-      setSchemaDiagramNotes(activeTab.id, [
+      commitNotes([
         ...diagramNotes,
         {
           id: createDiagramNoteId(),
@@ -697,8 +779,7 @@ export function SchemaDiagramView() {
         },
       ]);
     } else {
-      setSchemaDiagramNotes(
-        activeTab.id,
+      commitNotes(
         diagramNotes.map((note) =>
           note.id === editingNoteId
             ? { ...note, content, color: noteColorDraft }
@@ -716,8 +797,7 @@ export function SchemaDiagramView() {
       setPendingNoteDelete(true);
       return;
     }
-    setSchemaDiagramNotes(
-      activeTab.id,
+    commitNotes(
       diagramNotes.filter((note) => note.id !== editingNoteId),
     );
     setEditingNoteId(null);
@@ -725,8 +805,7 @@ export function SchemaDiagramView() {
   };
 
   const moveNote = (noteId: string, x: number, y: number) => {
-    setSchemaDiagramNotes(
-      activeTab.id,
+    commitNotes(
       diagramNotes.map((note) =>
         note.id === noteId
           ? { ...note, x: Math.max(0, x), y: Math.max(0, y) }
@@ -735,10 +814,18 @@ export function SchemaDiagramView() {
     );
   };
 
+  const resizeNote = (noteId: string, width: number, height: number) => {
+    commitNotes(
+      diagramNotes.map((note) =>
+        note.id === noteId ? { ...note, width, height } : note,
+      ),
+    );
+  };
+
   const areaName = areaNameDraft.trim();
   const areaNameConflict = Boolean(
     renamingAreaId &&
-      areaHistory.present.some(
+      areas.some(
         (area) =>
           area.id !== renamingAreaId &&
           area.name.localeCompare(areaName, undefined, {
@@ -753,16 +840,8 @@ export function SchemaDiagramView() {
       : null;
   const commitAreaRename = () => {
     if (!renamingAreaId || areaNameError) return;
-    setSchemaDiagramAreaHistory(
-      activeTab.id,
-      commitSchemaDiagramAreas(
-        areaHistory,
-        renameSchemaDiagramArea(
-          areaHistory.present,
-          renamingAreaId,
-          areaName,
-        ),
-      ),
+    commitAreas(
+      renameSchemaDiagramArea(areas, renamingAreaId, areaName),
     );
     setRenamingAreaId(null);
   };
@@ -1059,11 +1138,11 @@ export function SchemaDiagramView() {
           onChange={(event) =>
             selectSchemaDiagramArea(activeTab.id, event.target.value || null)
           }
-          disabled={areaHistory.present.length === 0}
+          disabled={areas.length === 0}
           className="h-6 min-w-32 max-w-44 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] px-1.5 text-[9px] outline-none focus:border-[hsl(var(--wb-accent)/0.55)] disabled:opacity-50"
         >
           <option value="">Select area</option>
-          {areaHistory.present.map((area) => (
+          {areas.map((area) => (
             <option key={area.id} value={area.id}>
               {area.name} ({area.relationNames.length})
             </option>
@@ -1111,33 +1190,25 @@ export function SchemaDiagramView() {
         <button
           type="button"
           className="wb-icon-button h-6 w-6"
-          disabled={areaHistory.past.length === 0}
-          onClick={() =>
-            setSchemaDiagramAreaHistory(
-              activeTab.id,
-              undoSchemaDiagramAreas(areaHistory),
-            )
-          }
-          aria-label="Undo diagram area change"
+          disabled={canvasHistory.past.length === 0}
+          onClick={undoCanvas}
+          aria-label="Undo diagram canvas change"
+          title="Undo canvas change (Ctrl/Cmd+Z)"
         >
           <Undo2 size={10} />
         </button>
         <button
           type="button"
           className="wb-icon-button h-6 w-6"
-          disabled={areaHistory.future.length === 0}
-          onClick={() =>
-            setSchemaDiagramAreaHistory(
-              activeTab.id,
-              redoSchemaDiagramAreas(areaHistory),
-            )
-          }
-          aria-label="Redo diagram area change"
+          disabled={canvasHistory.future.length === 0}
+          onClick={redoCanvas}
+          aria-label="Redo diagram canvas change"
+          title="Redo canvas change (Ctrl/Cmd+Shift+Z)"
         >
           <Redo2 size={10} />
         </button>
         <span className="ml-auto text-[8px] wb-muted">
-          {areaHistory.present.length} area{areaHistory.present.length === 1 ? "" : "s"} · {diagramNotes.length} note{diagramNotes.length === 1 ? "" : "s"} · {selectedRelationNames.size} selected · {canvasPersistenceLabel(canvasPersistenceState)}
+          {areas.length} area{areas.length === 1 ? "" : "s"} · {diagramNotes.length} note{diagramNotes.length === 1 ? "" : "s"} · {selectedRelationNames.size} selected · {canvasPersistenceLabel(canvasPersistenceState)}
         </span>
       </div>
 
@@ -1256,7 +1327,7 @@ export function SchemaDiagramView() {
                         ? [...selectedRelationNames]
                         : [node.relationName]
                     }
-                    areas={areaHistory.present}
+                    areas={areas}
                     onCreateArea={createArea}
                     onMoveToArea={moveRelationsToArea}
                     onRemoveFromAreas={removeRelationsFromAreas}
@@ -1298,6 +1369,9 @@ export function SchemaDiagramView() {
                     zoom={zoom}
                     onEdit={() => beginEditNote(note)}
                     onMove={(x, y) => moveNote(note.id, x, y)}
+                    onResize={(width, height) =>
+                      resizeNote(note.id, width, height)
+                    }
                   />
                 ))}
               </div>
@@ -1781,6 +1855,14 @@ function createDiagramNoteId() {
     return `note-${crypto.randomUUID()}`;
   }
   return `note-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function isEditableKeyboardTarget(target: EventTarget | null) {
+  return target instanceof HTMLElement && Boolean(
+    target.closest(
+      "input, textarea, select, [contenteditable]:not([contenteditable='false'])",
+    ),
+  );
 }
 
 function formatTimestamp(value: number) {

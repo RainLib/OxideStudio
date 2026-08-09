@@ -16,13 +16,16 @@ export function SchemaDiagramNoteNode({
   zoom,
   onEdit,
   onMove,
+  onResize,
 }: {
   note: SchemaDiagramNote;
   zoom: number;
   onEdit: () => void;
   onMove: (x: number, y: number) => void;
+  onResize: (width: number, height: number) => void;
 }) {
   const [position, setPosition] = useState({ x: note.x, y: note.y });
+  const [size, setSize] = useState({ width: note.width, height: note.height });
   const dragRef = useRef<{
     pointerId: number;
     clientX: number;
@@ -32,10 +35,23 @@ export function SchemaDiagramNoteNode({
     currentX: number;
     currentY: number;
   } | null>(null);
+  const resizeRef = useRef<{
+    pointerId: number;
+    clientX: number;
+    clientY: number;
+    originWidth: number;
+    originHeight: number;
+    currentWidth: number;
+    currentHeight: number;
+  } | null>(null);
 
   useEffect(() => {
     if (!dragRef.current) setPosition({ x: note.x, y: note.y });
   }, [note.x, note.y]);
+
+  useEffect(() => {
+    if (!resizeRef.current) setSize({ width: note.width, height: note.height });
+  }, [note.height, note.width]);
 
   const movePointer = (event: ReactPointerEvent<HTMLButtonElement>) => {
     const drag = dragRef.current;
@@ -59,6 +75,32 @@ export function SchemaDiagramNoteNode({
     onMove(drag.currentX, drag.currentY);
   };
 
+  const resizePointer = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const resize = resizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    const next = {
+      width: clampNoteWidth(
+        resize.originWidth + (event.clientX - resize.clientX) / zoom,
+      ),
+      height: clampNoteHeight(
+        resize.originHeight + (event.clientY - resize.clientY) / zoom,
+      ),
+    };
+    resize.currentWidth = next.width;
+    resize.currentHeight = next.height;
+    setSize(next);
+  };
+
+  const finishResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const resize = resizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    resizeRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    onResize(resize.currentWidth, resize.currentHeight);
+  };
+
   return (
     <div
       className={cn(
@@ -68,8 +110,8 @@ export function SchemaDiagramNoteNode({
       style={{
         left: position.x,
         top: position.y,
-        width: note.width,
-        height: note.height,
+        width: size.width,
+        height: size.height,
       }}
     >
       <div className="flex h-7 items-center border-b border-black/10 bg-black/10">
@@ -112,7 +154,11 @@ export function SchemaDiagramNoteNode({
               y: Math.max(0, position.y + delta.y),
             };
             setPosition(next);
-            onMove(next.x, next.y);
+          }}
+          onKeyUp={(event) => {
+            if (!event.key.startsWith("Arrow")) return;
+            event.preventDefault();
+            onMove(position.x, position.y);
           }}
         >
           <StickyNote size={10} className="shrink-0 opacity-75" />
@@ -137,8 +183,61 @@ export function SchemaDiagramNoteNode({
       >
         {note.content}
       </button>
+      <button
+        type="button"
+        className="absolute bottom-0 right-0 z-10 h-5 w-5 cursor-nwse-resize rounded-tl opacity-45 hover:bg-black/10 hover:opacity-90 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-current"
+        aria-label="Resize diagram note"
+        title="Drag to resize; use arrow keys for precise sizing"
+        onPointerDown={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          resizeRef.current = {
+            pointerId: event.pointerId,
+            clientX: event.clientX,
+            clientY: event.clientY,
+            originWidth: size.width,
+            originHeight: size.height,
+            currentWidth: size.width,
+            currentHeight: size.height,
+          };
+        }}
+        onPointerMove={resizePointer}
+        onPointerUp={finishResize}
+        onPointerCancel={finishResize}
+        onKeyDown={(event) => {
+          const step = event.shiftKey ? 20 : 5;
+          const next = event.key === "ArrowLeft"
+            ? { width: clampNoteWidth(size.width - step), height: size.height }
+            : event.key === "ArrowRight"
+              ? { width: clampNoteWidth(size.width + step), height: size.height }
+              : event.key === "ArrowUp"
+                ? { width: size.width, height: clampNoteHeight(size.height - step) }
+                : event.key === "ArrowDown"
+                  ? { width: size.width, height: clampNoteHeight(size.height + step) }
+                  : null;
+          if (!next) return;
+          event.preventDefault();
+          setSize(next);
+        }}
+        onKeyUp={(event) => {
+          if (!event.key.startsWith("Arrow")) return;
+          event.preventDefault();
+          onResize(size.width, size.height);
+        }}
+      >
+        <span className="absolute bottom-1 right-1 h-2 w-2 border-b border-r border-current" />
+      </button>
     </div>
   );
+}
+
+function clampNoteWidth(value: number) {
+  return Math.max(160, Math.min(640, Math.round(value)));
+}
+
+function clampNoteHeight(value: number) {
+  return Math.max(90, Math.min(640, Math.round(value)));
 }
 
 function diagramNoteColorClass(color: SchemaDiagramNoteColor) {

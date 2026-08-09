@@ -541,12 +541,16 @@ explicit deferred validation task rather than an implicit release check.
   name and exact endpoints, while malformed/oversized drag payloads, missing
   columns, views and foreign tables do nothing. Keyboard-only FK creation must
   remain available through the same form and neither path may execute DDL.
-- Create, edit, recolor, move and delete diagram notes at several zoom levels.
-  Pointer movement must remain local until release, confirmed deletion must be
-  required, and a project/schema switch must restore only its own bounded canvas
-  resource. Snapshot refresh must remove stale Area members while preserving
-  notes. Export SVG/PNG/JPG with XML-sensitive and multiline note content; note
-  bounds must expand the artifact without bypassing the 24 MP raster limit.
+- Create, edit, recolor, move, resize and delete diagram notes at several zoom
+  levels, interleaved with Area operations. Pointer movement/resize must remain
+  local until release, one undo must reverse one completed gesture, keyboard
+  repeats must commit on key-up, and native text undo inside dialogs must not be
+  intercepted. Confirmed deletion must be required, tab switching/closing must
+  flush the latest canvas, and a project/schema switch must restore only its own
+  bounded resource. Snapshot refresh must remove stale Area members while
+  preserving notes. Export SVG/PNG/JPG with XML-sensitive and multiline note
+  content; resized note bounds must expand the artifact without bypassing the
+  24 MP raster limit.
 
 ## ChartDB metadata JSON import
 

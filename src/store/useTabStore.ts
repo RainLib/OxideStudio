@@ -46,6 +46,11 @@ import {
 } from "@/lib/querySafety";
 import type { Diagnostic } from "@/services/lsp/types";
 import type { SchemaDiagramAreaHistory } from "@/lib/schemaDiagramAreas";
+import {
+  createSchemaDiagramCanvasHistory,
+  type SchemaDiagramCanvasHistory,
+  type SchemaDiagramCanvasState,
+} from "@/lib/schemaDiagramCanvasHistory";
 import type { SchemaDiagramNote } from "@/services/schemaDiagramCanvasStore";
 import {
   extractQueryExecutionError,
@@ -295,6 +300,8 @@ export interface TabData {
   selectedSchemaChangeId?: string | null;
   schemaDiagramSnapshot?: SchemaSnapshot;
   selectedDiagramRelationName?: string | null;
+  schemaDiagramCanvasHistory?: SchemaDiagramCanvasHistory;
+  /** Legacy session fields retained while persisted tabs migrate to canvas history. */
   schemaDiagramAreaHistory?: SchemaDiagramAreaHistory;
   schemaDiagramNotes?: SchemaDiagramNote[];
   selectedDiagramAreaId?: string | null;
@@ -746,11 +753,10 @@ interface TabState {
     tabId: string,
     relationName: string | null,
   ) => void;
-  setSchemaDiagramAreaHistory: (
+  setSchemaDiagramCanvasHistory: (
     tabId: string,
-    history: SchemaDiagramAreaHistory,
+    history: SchemaDiagramCanvasHistory,
   ) => void;
-  setSchemaDiagramNotes: (tabId: string, notes: SchemaDiagramNote[]) => void;
   selectSchemaDiagramArea: (tabId: string, areaId: string | null) => void;
   selectSchemaDiagramRelations: (tabId: string, relationNames: string[]) => void;
   openDataCompareTab: (leftTabId: string, rightTabId: string) => string | null;
@@ -919,6 +925,33 @@ function normalizeDiagramAreaHistory(
         future: history.future.map(normalize),
       }
     : { past: [], present: [], future: [] };
+}
+
+function normalizeDiagramCanvasHistory(
+  history: SchemaDiagramCanvasHistory | undefined,
+  legacyAreas: SchemaDiagramAreaHistory | undefined,
+  legacyNotes: SchemaDiagramNote[] | undefined,
+  snapshot: SchemaSnapshot,
+): SchemaDiagramCanvasHistory {
+  const relationNames = new Set(snapshot.relations.map((relation) => relation.name));
+  const normalize = (state: SchemaDiagramCanvasState): SchemaDiagramCanvasState => ({
+    areas: state.areas.map((area) => ({
+      ...area,
+      relationNames: area.relationNames.filter((name) => relationNames.has(name)),
+    })),
+    notes: state.notes,
+  });
+  if (!history) {
+    return createSchemaDiagramCanvasHistory(
+      normalizeDiagramAreaHistory(legacyAreas, snapshot).present,
+      legacyNotes || [],
+    );
+  }
+  return {
+    past: history.past.map(normalize),
+    present: normalize(history.present),
+    future: history.future.map(normalize),
+  };
 }
 
 export const useTabStore = create<TabState>((set, get) => ({
@@ -1199,6 +1232,12 @@ export const useTabStore = create<TabState>((set, get) => ({
                   )
                     ? tab.selectedDiagramRelationName
                     : snapshot.relations[0]?.name || null,
+                schemaDiagramCanvasHistory: normalizeDiagramCanvasHistory(
+                  tab.schemaDiagramCanvasHistory,
+                  tab.schemaDiagramAreaHistory,
+                  tab.schemaDiagramNotes,
+                  snapshot,
+                ),
                 schemaDiagramAreaHistory: normalizeDiagramAreaHistory(
                   tab.schemaDiagramAreaHistory,
                   snapshot,
@@ -1230,6 +1269,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       isPinned: false,
       schemaDiagramSnapshot: snapshot,
       selectedDiagramRelationName: snapshot.relations[0]?.name || null,
+      schemaDiagramCanvasHistory: createSchemaDiagramCanvasHistory(),
       schemaDiagramAreaHistory: { past: [], present: [], future: [] },
       schemaDiagramNotes: [],
       selectedDiagramAreaId: null,
@@ -1254,18 +1294,21 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
   },
 
-  setSchemaDiagramAreaHistory: (tabId, history) => {
+  setSchemaDiagramCanvasHistory: (tabId, history) => {
     set((state) => ({
       tabs: state.tabs.map((tab) =>
-        tab.id === tabId ? { ...tab, schemaDiagramAreaHistory: history } : tab,
-      ),
-    }));
-  },
-
-  setSchemaDiagramNotes: (tabId, notes) => {
-    set((state) => ({
-      tabs: state.tabs.map((tab) =>
-        tab.id === tabId ? { ...tab, schemaDiagramNotes: notes } : tab,
+        tab.id === tabId
+          ? {
+              ...tab,
+              schemaDiagramCanvasHistory: history,
+              schemaDiagramAreaHistory: {
+                past: [],
+                present: history.present.areas,
+                future: [],
+              },
+              schemaDiagramNotes: history.present.notes,
+            }
+          : tab,
       ),
     }));
   },
