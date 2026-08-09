@@ -45,10 +45,10 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 | ID | 状态 / 差距 | DBX 实现位置 | Oxide 当前落点 | 对齐验收 |
 | --- | --- | --- | --- | --- |
 | L01 | 已对齐：多语句/软边界 | `lib/sql/sqlStatementRanges.ts`；`lib/sql/semantic/tokens.ts` | Rust current-statement scanner、bundled LSP statement scope、前端 fallback | 无分号双 SQL、CTE、INSERT SELECT、EXPLAIN、过程体、引号和注释使用同一 fixture corpus。 |
-| L02 | 部分对齐：完整 semantic model | `lib/sql/semantic/model.ts`、`references.ts`、`diagnostics.ts` | bundled LSP + `src/lib/sqlAnalysis.ts` + cached completion | 补 CTE shadow、correlated subquery、table function、lateral/apply、projection alias、三段 catalog 限定组合测试。 |
+| L02 | 部分对齐：完整 semantic model | `lib/sql/semantic/model.ts`、`references.ts`、`diagnostics.ts` | bundled LSP + `src/lib/sqlAnalysis.ts` + cached completion；LSP local relation overlay 已覆盖 CTE 显式列/推导 projection、derived table projection 与本地 shadow；UTF-16 cursor 仅在入口转换一次，emoji/非 ASCII 前缀后的 alias scope 不再错位 | 补 correlated subquery、table function、lateral/apply、三段 catalog 限定组合测试。 |
 | L03 | 部分对齐：方言关键词与类型 | `lib/sql/sqlCompletion.ts` 中 `DATABASE_SQL_KEYWORDS`、函数签名和 dialect sets | bundled LSP dialect registry、`databaseDialect.ts`、常用 snippet fallback | Oracle/SQL Server/ClickHouse/DB2/Dameng 由 package product identity 选择，generic JDBC 不伪造诊断。 |
 | L04 | 部分对齐：函数签名帮助 | `sqlCompletion.ts:getSqlFunctionSignatureHelp` 与 per-dialect signature maps；对应 `sqlCompletion.signature.spec.ts` | LSP signature help 基础路径 | 覆盖 overload、可选参数、嵌套调用、routine metadata、server-version gating。 |
-| L05 | 部分对齐：对象/列补全 | `lib/sql/sqlCompletion.ts:buildSqlCompletionItems*`、`lib/metadata/completionTreeIndex.ts`、`lib/common/pinyin.ts`、`lib/common/completionMatch.ts` | LSP schema sync 与 metadata cache 现在合并而非互斥；对象、列和 FK JOIN 支持 Unicode identifier、拼音首字母、camel/fuzzy 排序，拼音词典仅在中文候选与 ASCII 前缀同时出现时异步加载 | 仍需 alias 同名表、跨 catalog、CTE shadow、临时表和多表歧义的完整 contract corpus；真实中文 metadata 验证延期。 |
+| L05 | 部分对齐：对象/列补全 | `lib/sql/sqlCompletion.ts:buildSqlCompletionItems*`、`lib/metadata/completionTreeIndex.ts`、`lib/common/pinyin.ts`、`lib/common/completionMatch.ts` | LSP schema sync 与 metadata cache 现在合并而非互斥；对象、列和 FK JOIN 支持 Unicode identifier、拼音首字母、camel/fuzzy 排序。临时表/CTE/derived relation overlay 会覆盖同名远端对象，扫描屏蔽 SQL noise 且限制 512 KiB | 仍需 alias 同名表、跨 catalog 和多表歧义的完整 contract corpus；真实中文 metadata 验证延期。 |
 | L06 | 部分对齐：INSERT values hints/snippet | `lib/sql/insertValueHints.ts`、`codemirrorInsertValueHints.ts`、`lib/sql/sqlCompletion.ts` | 显式列清单继续提供 Monaco inlay；空列清单 `INSERT INTO t (` 现在由 bundled LSP 基于 metadata 推荐全列并生成 `VALUES` snippet/tab stops，保留字、大小写和非 ASCII 列名按基础方言引用；覆盖 PostgreSQL/MySQL/SQLite/DuckDB/Hive/ClickHouse 及其 compatibility aliases | 验证 identity/generated/default 列策略和更广方言语法；按产品决定是否默认排除 server-generated 列。 |
 | L07 | 未对齐：跨 console symbol/reference index | `lib/sql/semantic/references.ts` 和本地 semantic fixtures | 项目 SQL 虚拟文档同步已存在，但没有项目级 symbol graph | 支持 table/view/routine/CTE 引用查找和安全 rename preview；migration/view definition 可成为只读来源。 |
 | L08 | 未对齐：真实值采样补全 | `sqlCompletion.ts:buildComparisonValueItems` | Oxide 只提供类型安全的值模板 | 新 capability 必须显式 opt-in，限定列/行数/字节数，不把样例值无条件送到 LSP 或 Agent。 |
@@ -123,8 +123,8 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 
 ### 批次 2：编辑器语义对齐
 
-1. 把 DBX semantic fixtures 转换为 Oxide LSP contract corpus。
-2. 补函数签名、INSERT inlay hints、CTE/subquery/table-function/reference 场景。
+1. 继续把 DBX semantic fixtures 转换为 Oxide LSP contract corpus；CTE/derived projection scope 已覆盖 native 与 compatibility dialect。
+2. 补函数签名、INSERT inlay hints、correlated subquery/table-function/reference 场景。
 3. 继续拆 QueryEditor provider coordinator 与剩余 view lifecycle，补真实 provider 组合测试。
 
 ### 批次 3：数据生命周期

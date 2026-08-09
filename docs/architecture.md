@@ -132,7 +132,7 @@ catalog 暴露给前端。这样产品路线图与可执行驱动、连接固定
 - `MetaStore`：本地 metadata SQLite；
 - `ConfigManager` 与 `CacheManager`：设置和遗留 JSON 缓存；
 - `ParserState`、查询取消状态、AI 取消状态；
-- 每个连接/语言会话的 LSP 状态；会话有引用计数、空闲回收、健康恢复和标准 JSON-RPC 取消。同步 metadata 使用不含凭据的 `oxide://database-object` URI，内置 binary 由相邻 manifest 做 SHA-256 与 source revision 校验。
+- 每个连接/语言会话的 LSP 状态；会话有引用计数、空闲回收、健康恢复和标准 JSON-RPC 取消。同步 metadata 使用不含凭据的 `oxide://database-object` URI，内置 binary 由相邻 manifest 做 SHA-256 与 source revision 校验。补全时的本地 relation overlay 可识别临时表、CTE 与 derived-table projection；扫描先屏蔽注释/字符串/quoted identifier、复用单份 searchable text，并以 512 KiB 为硬上限，避免大 Console 在每次按键上无界解析。LSP UTF-16 坐标只在 dialect 入口转换一次为 tree-sitter byte column，内部 scope helper 不再对 emoji/非 ASCII 前缀二次换算。
 - `AgentHostManager`：无副作用装配的 sidecar supervisor、模型/工具代理、批准 lease 与加密 AgentStore。
 
 ### 4.2 Command 边界

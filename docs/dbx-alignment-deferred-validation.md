@@ -144,6 +144,11 @@ explicit deferred validation task rather than an implicit release check.
 - Run the SQL semantic corpus across the bundled LSP and Monaco fallback for
   CTE shadowing, correlated subqueries, table functions, dialect quoting, and
   INSERT value hints.
+- On large real SQL consoles, verify CTE/derived projection completion stops
+  local-relation discovery beyond the documented 512 KiB budget without
+  blocking ordinary metadata completion. Comments, string/dollar literals and
+  quoted identifiers containing `WITH`, `FROM` or `JOIN` must not create local
+  relations.
 - Exercise Monaco command-palette SQL intentions for quoted identifiers,
   escaped identifiers, malformed selections, clipboard permission denial, and
   IN-list values containing quotes, NULLs, numbers, and a 1,000-value bound.
