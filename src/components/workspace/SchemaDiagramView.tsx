@@ -53,6 +53,10 @@ import {
   redoSchemaDiagramAreas,
   undoSchemaDiagramAreas,
 } from "@/lib/schemaDiagramAreas";
+import {
+  buildSchemaDiagramViewportIndex,
+  querySchemaDiagramViewport,
+} from "@/lib/schemaDiagramViewport";
 import { downloadBlob, downloadText } from "@/lib/exportUtils";
 import { serializeSchemaSnapshotToDbml } from "@/features/schema-diff/model/schemaDbml";
 import { SchemaDbmlDraftDialog } from "./SchemaDbmlDraftDialog";
@@ -313,35 +317,25 @@ export function SchemaDiagramView() {
     };
   }, [layout, scheduleViewportWindowUpdate]);
 
-  const viewportNodes = useMemo(() => {
-    if (!layout) return [];
+  const viewportIndex = useMemo(
+    () =>
+      layout
+        ? buildSchemaDiagramViewportIndex(layout.nodes, layout.edges)
+        : null,
+    [layout],
+  );
+  const viewportResult = useMemo(() => {
+    if (!viewportIndex) return { nodes: [], edges: [] };
     const windowBounds = viewportWindow || {
       x: -VIEWPORT_OVERSCAN,
       y: -VIEWPORT_OVERSCAN,
       width: 1600 + VIEWPORT_OVERSCAN * 2,
       height: 1000 + VIEWPORT_OVERSCAN * 2,
     };
-    return layout.nodes.filter(
-      (node) =>
-        node.x + node.width >= windowBounds.x &&
-        node.x <= windowBounds.x + windowBounds.width &&
-        node.y + node.height >= windowBounds.y &&
-        node.y <= windowBounds.y + windowBounds.height,
-    );
-  }, [layout, viewportWindow]);
-  const viewportRelationNames = useMemo(
-    () => new Set(viewportNodes.map((node) => node.relationName)),
-    [viewportNodes],
-  );
-  const viewportEdges = useMemo(
-    () =>
-      layout?.edges.filter(
-        (edge) =>
-          viewportRelationNames.has(edge.sourceRelation) ||
-          viewportRelationNames.has(edge.targetRelation),
-      ) || [],
-    [layout, viewportRelationNames],
-  );
+    return querySchemaDiagramViewport(viewportIndex, windowBounds);
+  }, [viewportIndex, viewportWindow]);
+  const viewportNodes = viewportResult.nodes;
+  const viewportEdges = viewportResult.edges;
 
   const fitDiagram = useCallback(() => {
     const viewport = viewportRef.current;
@@ -363,7 +357,8 @@ export function SchemaDiagramView() {
     activeTab.type !== "schema_diagram" ||
     !snapshot ||
     !layout ||
-    !fullLayout
+    !fullLayout ||
+    !viewportIndex
   ) {
     return null;
   }
@@ -853,7 +848,7 @@ export function SchemaDiagramView() {
                   </div>
                 ))}
                 <DiagramEdges
-                  nodes={layout.nodes}
+                  nodesByName={viewportIndex.nodesByName}
                   edges={viewportEdges}
                   selectedRelation={selectedName}
                 />
@@ -1034,15 +1029,14 @@ function DiagramRelationNode({
 }
 
 function DiagramEdges({
-  nodes,
+  nodesByName,
   edges,
   selectedRelation,
 }: {
-  nodes: SchemaDiagramNode[];
+  nodesByName: ReadonlyMap<string, SchemaDiagramNode>;
   edges: SchemaDiagramEdge[];
   selectedRelation: string | null;
 }) {
-  const nodesByName = new Map(nodes.map((node) => [node.relationName, node]));
   return (
     <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible">
       {edges.map((edge) => {

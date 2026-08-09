@@ -451,7 +451,9 @@ explicit deferred validation task rather than an implicit release check.
   and edge geometry, and contain no unescaped source text.
 - Benchmark scroll, zoom, search, selected-edge highlighting and inspector
   collapse with 1k/5k/10k relations. Viewport buckets and overscan must not
-  leave blank nodes after programmatic focus, resize or zoom changes.
+  leave blank nodes after programmatic focus, resize or zoom changes. Profile
+  traces should confirm scroll queries inspect intersecting spatial buckets and
+  visible-relation edge adjacency rather than scanning every node and edge.
 - Export PNG/JPG with dark, light and transparent backgrounds and both filtered
   and full scopes. Confirm JPEG converts transparent to white, light exports
   retain readable contrast, and canvases above 24 MP down-scale without changing

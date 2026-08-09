@@ -63,7 +63,7 @@
 | U04 | 本阶段增强 | SVG/PNG/JPG 图像导出 | `src/pages/editor-page/top-navbar/menu/menu.tsx:83` 起，`src/context/export-image-context/export-image-provider.tsx` | Diagram 可导出 SVG/PNG/JPG，选择过滤结果或完整画布、深色/浅色/透明背景；栅格导出限制 2400 万像素并按比例缩小，右侧 inspector 可收起 |
 | U05 | 本阶段增强 | 图过滤、选择聚焦、依赖高亮、lost-in-canvas 提示 | `src/pages/editor-page/canvas/canvas-filter/`、`canvas/hooks/use-is-lost-in-canvas.tsx` | Diagram 已有关系/列搜索、keys-only、选择/reveal、visible-count，并新增“选中表 + 一阶依赖”/当前 Area 范围过滤；选中表被搜索或范围隐藏时显示 `Show hidden selection`，清理过滤并居中找回 |
 | P01 | 已对齐并增强 | 大结果表格虚拟化 | ChartDB 重点是 React Flow 画布 | Oxide 使用 `@glideapps/glide-data-grid`，长表不创建每个单元格 DOM；大表 export 继续走 Rust streaming |
-| P02 | 本阶段增强 | 高频画布事件批处理 | ChartDB `canvas.tsx:397/:718/:967` debounce，`:1530` 用 `requestAnimationFrame` throttle；节点测量也使用 rAF | `SchemaDiagramView.tsx` 已用 rAF + 分桶 overscan 做 viewport culling，只渲染视口附近节点/关联边，并修复关联定位与实际布局列数不一致；仍需 1k/5k/10k relation 基准与极端缩放策略 |
+| P02 | 本阶段增强 | 高频画布事件批处理 | ChartDB `canvas.tsx:397/:718/:967` debounce，`:1530` 用 `requestAnimationFrame` throttle；节点测量也使用 rAF | `SchemaDiagramView.tsx` 已用 rAF + 量化 overscan 更新视口，并新增布局级二维空间桶与 relation→edge 邻接索引：滚动只检查相交桶和可见关系的相邻边，edge layer 复用全局 relation map，不再线性扫描全部节点/边或随 render 重建映射；仍需 1k/5k/10k relation 基准与极端缩放策略 |
 | P03 | 本阶段增强 | 派生状态 memo 与细粒度 context | ChartDB 大量 `useMemo/useCallback`，但单一 chartdb provider 也很大 | Oxide QueryEditor/DataGrid 已缓存 metadata、虚拟化行并拆纯函数；稳定协议、hover、completion provider 均有独立生命周期，metadata/settings 更新只替换 runtime callback，completion owner key 通过 memo 生成；后续用 profiler 定位 execution state 与 edge path 计算热点 |
 
 ## 5. 分阶段执行顺序
@@ -124,6 +124,7 @@
 - [x] 通过 snapshot diff 把结构化图编辑转为 reviewed migration plan，并由前端与 Rust 执行入口双重拒绝 offline draft Apply。
 - [ ] 增加 note、drag-to-create relationship、draft 项目持久化，并把 Area/draft 合并为统一事务历史。
 - [x] 增加 SVG export、inspector 收起与 rAF viewport culling。
+- [x] 将 viewport culling 改为布局级空间桶和关系邻接索引，移除滚动热路径的全量节点/边扫描。
 - [x] 增加 PNG/JPG、过滤/完整画布范围和背景选项。
 - [x] 增加依赖/Area 范围过滤与 lost-selection 找回入口。
 - [x] 增加 250ms DBML Draft 诊断与 snapshot-only reviewed diff；offline artifact 禁止 Apply/Open in console。
