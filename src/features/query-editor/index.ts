@@ -123,6 +123,12 @@ export {
   type LspHoverProviderRuntime,
 } from "./hooks/useLspHoverProviderCoordinator";
 export {
+  registerLspCompletionProvider,
+  useLspCompletionProviderCoordinator,
+  type LspCompletionProviderCoordinatorOptions,
+  type MonacoCompletionProvider,
+} from "./hooks/useLspCompletionProviderCoordinator";
+export {
   resolveQueryExecutionTarget,
   type QueryExecutionKind,
   type QueryExecutionMode,

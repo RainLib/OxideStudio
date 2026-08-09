@@ -186,6 +186,7 @@ import {
   syncLspModelBeforeCompletion,
   unquoteSqlIdentifierSelection,
   useConsoleFileController,
+  useLspCompletionProviderCoordinator,
   useLspCoreProviderCoordinator,
   useLspHoverProviderCoordinator,
   useLspDocumentLifecycle,
@@ -1339,54 +1340,66 @@ export function QueryEditor({
     preferredElasticsearchIndex,
   ]);
 
-  // Register LSP providers (completion, hover, navigation, formatting)
-  useEffect(() => {
-    // Keep cached relation completion available while the semantic server is
-    // starting or recovering. It is deliberately limited to existing Explorer
-    // metadata and relation-only SQL contexts; the full LSP still owns fields,
-    // keywords, diagnostics, and every vendor-specific proposal once ready.
-    if (!isActivePane || !monaco) return;
-
-    console.log("[QueryEditor] Registering LSP providers");
-    // Monaco providers are global per language. Register only the language of
-    // this model instead of multiplying every provider across SQL, JSON,
-    // plaintext and console languages on each active editor.
-    const providerLanguages = [editorLanguageId];
-
-    const usageScope = completionUsageScope([
-      activeProjectId,
-      effectiveConnectionId,
+  // Keep cached relation completion available while the semantic server is
+  // starting or recovering. It is deliberately limited to existing Explorer
+  // metadata and relation-only SQL contexts; the full LSP still owns fields,
+  // keywords, diagnostics, and every vendor-specific proposal once ready.
+  const usageScope = completionUsageScope([
+    activeProjectId,
+    effectiveConnectionId,
+    activeTab?.databaseName,
+    activeTab?.targetSchema || currentSchema,
+    driver,
+  ]);
+  const rankByUsage = editorSettings.sqlCompletion.rankByUsage;
+  const completionOwnerKey = useMemo(
+    () =>
+      [
+        documentUri,
+        effectiveConnectionId || "",
+        driver,
+        activeTab?.databaseName || "",
+        activeTab?.targetSchema || currentSchema || "",
+        metadataVersion,
+        driverCatalogStatus,
+        lspReady ? "ready" : "offline",
+        preferredElasticsearchIndex || "",
+        editorSettings.sqlCompletion.appendSpace ? "space" : "compact",
+        editorSettings.sqlCompletion.keywordCase,
+        rankByUsage ? "usage" : "alphabetic",
+        editorSettings.sqlCompletion.triggerMode,
+        JSON.stringify(editorSettings.sqlCompletion.snippets),
+      ].join("\u0000"),
+    [
       activeTab?.databaseName,
-      activeTab?.targetSchema || currentSchema,
+      activeTab?.targetSchema,
+      currentSchema,
+      documentUri,
       driver,
-    ]);
-    const rankByUsage = editorSettings.sqlCompletion.rankByUsage;
-    // Monaco providers are global per language. Scope them to the document
-    // owned by this editor instance so a background tab cannot be served by
-    // the active connection's LSP client or its pinned driver package.
-    const isCurrentLspModelUri = (uri: string) =>
-      uri === documentUri && canUseLsp;
-    const usageCommandDisposable = monaco.editor.registerCommand(
-      RECORD_COMPLETION_USAGE_COMMAND,
-      (_accessor: unknown, scope: string, label: string) => {
-        if (rankByUsage && scope === usageScope) {
-          recordCompletionUsage(scope, label);
-        }
-      },
-    );
-
-    const completionDisposables = providerLanguages.map((language) =>
-      monaco.languages.registerCompletionItemProvider(language, {
-        triggerCharacters:
-          language === ELASTICSEARCH_CONSOLE_LANGUAGE_ID
-            ? ELASTICSEARCH_COMPLETION_TRIGGER_CHARACTERS
-            : [" ", ".", "(", ",", '"', "@", "/", "{", ":"],
-        provideCompletionItems: async (
+      driverCatalogStatus,
+      editorSettings.sqlCompletion.appendSpace,
+      editorSettings.sqlCompletion.keywordCase,
+      editorSettings.sqlCompletion.snippets,
+      editorSettings.sqlCompletion.triggerMode,
+      effectiveConnectionId,
+      lspReady,
+      metadataVersion,
+      preferredElasticsearchIndex,
+      rankByUsage,
+    ],
+  );
+  // Monaco providers are global per language. Scope requests to the document
+  // owned by this editor instance so a background tab cannot use this
+  // connection's LSP client or pinned driver package.
+  const isCurrentLspModelUri = (uri: string) =>
+    uri === documentUri && canUseLsp;
+  const provideCompletionItems = async (
           model: any,
           position: any,
           context: any,
           token: { isCancellationRequested?: boolean },
         ) => {
+          if (!monaco) return { suggestions: [] };
           const completionStartedAt = performance.now();
           const textBeforeCursor = boundedSqlCompletionTextBeforeCursor(
             monaco,
@@ -1993,41 +2006,23 @@ export function QueryEditor({
             const fallback = await fallbackSuggestions();
             return result(fallback, "error", fallback.length > 0 ? "lspErrorFallback" : "lspErrorEmpty");
           }
-        },
-      }),
-    );
+        };
 
-    return () => {
-      console.log("[QueryEditor] Disposing completion providers");
-      [usageCommandDisposable, ...completionDisposables].forEach(
-        (disposable) => disposable.dispose(),
-      );
-    };
-  }, [
-    isActivePane,
-    activeProjectId,
-    monaco,
-    lspReady,
-    lspClient,
-    preferredElasticsearchIndex,
-    activeTab?.databaseName,
-    activeTab?.targetSchema,
-    currentSchema,
-    schemaTables,
-    capabilities,
-    driver,
-    driverCatalogStatus,
-    canUseLsp,
-    documentLanguageId,
-    documentUri,
+  useLspCompletionProviderCoordinator({
     editorLanguageId,
-    effectiveConnectionId,
-    editorSettings.sqlCompletion.appendSpace,
-    editorSettings.sqlCompletion.keywordCase,
-    editorSettings.sqlCompletion.rankByUsage,
-    editorSettings.sqlCompletion.snippets,
-    editorSettings.sqlCompletion.triggerMode,
-  ]);
+    isActivePane,
+    monaco,
+    ownerKey: completionOwnerKey,
+    provideCompletionItems,
+    rankByUsage,
+    recordUsage: recordCompletionUsage,
+    triggerCharacters:
+      editorLanguageId === ELASTICSEARCH_CONSOLE_LANGUAGE_ID
+        ? ELASTICSEARCH_COMPLETION_TRIGGER_CHARACTERS
+        : [" ", ".", "(", ",", '"', "@", "/", "{", ":"],
+    usageCommandId: RECORD_COMPLETION_USAGE_COMMAND,
+    usageScope,
+  });
 
   useLspCoreProviderCoordinator({
     activeProjectId,

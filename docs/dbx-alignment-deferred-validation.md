@@ -44,6 +44,11 @@ database target until its relevant queue entries pass.
   refreshed schema metadata without provider re-registration and rejects late
   results after metadata revision, owner or model-version changes. A strict
   frontend production build and bundle-cycle verification passed afterward.
+- The completion provider and usage-command lifecycle is now independently
+  registered and reads the latest metadata/settings callback through a runtime
+  ref. Focused tests cover disposal, live usage-ranking changes and stale owner
+  rejection; a strict production build confirms metadata or snippet refreshes
+  no longer require global Monaco provider re-registration.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an
