@@ -1059,6 +1059,10 @@ export interface ColumnInfo {
   is_unique?: boolean;
   is_indexed?: boolean;
   is_auto_increment?: boolean;
+  /** Absent when the driver cannot prove generated/computed-column status. */
+  is_generated?: boolean;
+  /** Absent when the driver cannot prove hidden/invisible-column status. */
+  is_hidden?: boolean;
   default_value?: string;
   comment?: string;
 }

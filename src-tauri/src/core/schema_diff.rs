@@ -1349,6 +1349,8 @@ fn sqlite_relation_requires_rebuild(
             || source_column.is_unique != target_column.is_unique
             || source_column.is_indexed != target_column.is_indexed
             || source_column.is_auto_increment != target_column.is_auto_increment
+            || source_column.is_generated != target_column.is_generated
+            || source_column.is_hidden != target_column.is_hidden
             || source_column.default_value != target_column.default_value
     })
 }
@@ -1358,6 +1360,12 @@ fn sqlite_sql_fragment_is_safe(fragment: &str) -> bool {
 }
 
 fn sqlite_column_definition(column: &ColumnInfo) -> Result<String, String> {
+    if column.is_generated != Some(false) || column.is_hidden != Some(false) {
+        return Err(format!(
+            "Column {} has generated/hidden metadata that is true or unknown, but its lossless SQLite expression or visibility clause was not captured.",
+            column.name
+        ));
+    }
     let data_type = column.data_type.trim();
     if data_type.is_empty() || !sqlite_sql_fragment_is_safe(data_type) {
         return Err(format!(
@@ -2303,11 +2311,31 @@ fn compare_columns(
             (Some(source_column), None) => {
                 let (definition, definition_warnings) = column_definition(kind, source_column);
                 warnings.extend(definition_warnings);
-                let risk = if source_column.is_nullable || source_column.default_value.is_some() {
+                let ownership_unmodeled = source_column.is_generated != Some(false)
+                    || source_column.is_hidden != Some(false);
+                if ownership_unmodeled {
+                    warnings.push(format!(
+                        "Column {}.{} cannot be generated until its generated/hidden definition is captured losslessly.",
+                        source.name, column_name
+                    ));
+                }
+                let risk = if ownership_unmodeled {
+                    SchemaChangeRisk::Review
+                } else if source_column.is_nullable || source_column.default_value.is_some() {
                     SchemaChangeRisk::Safe
                 } else {
                     SchemaChangeRisk::Review
                 };
+                let sql = (!ownership_unmodeled)
+                    .then(|| {
+                        format!(
+                            "ALTER TABLE {} ADD COLUMN {};",
+                            kind.qualified_table(Some(target_schema), &source.name),
+                            definition
+                        )
+                    })
+                    .into_iter()
+                    .collect();
                 changes.push(change(
                     SchemaChangeKind::ColumnAdd,
                     risk,
@@ -2316,12 +2344,8 @@ fn compare_columns(
                     source.object_type.clone(),
                     Some(column_name.to_string()),
                     format!("Add column {}.{}", source.name, column_name),
-                    vec![format!(
-                        "ALTER TABLE {} ADD COLUMN {};",
-                        kind.qualified_table(Some(target_schema), &source.name),
-                        definition
-                    )],
-                    true,
+                    sql,
+                    !ownership_unmodeled,
                     risk == SchemaChangeRisk::Review,
                 ));
             }
@@ -2854,6 +2878,18 @@ fn column_definition(kind: DatabaseKind, column: &ColumnInfo) -> (String, Vec<St
         column.data_type.trim()
     );
     let mut warnings = Vec::new();
+    if column.is_generated == Some(true) {
+        warnings.push(format!(
+            "{} is generated/computed; its generation expression is not synthesized as a default.",
+            column.name
+        ));
+    }
+    if column.is_hidden == Some(true) {
+        warnings.push(format!(
+            "{} is hidden/invisible; its product-specific visibility clause requires review.",
+            column.name
+        ));
+    }
     if column.is_auto_increment {
         match kind.auto_increment_clause_for_type(&column.data_type) {
             Ok(Some(clause)) => definition.push_str(clause),
@@ -2861,9 +2897,11 @@ fn column_definition(kind: DatabaseKind, column: &ColumnInfo) -> (String, Vec<St
             Err(error) => warnings.push(format!("{}: {error}", column.name)),
         }
     }
-    if let Some(default_value) = column.default_value.as_deref() {
-        definition.push_str(" DEFAULT ");
-        definition.push_str(&kind.metadata_default_sql(&column.data_type, default_value));
+    if column.is_generated != Some(true) {
+        if let Some(default_value) = column.default_value.as_deref() {
+            definition.push_str(" DEFAULT ");
+            definition.push_str(&kind.metadata_default_sql(&column.data_type, default_value));
+        }
     }
     if !column.is_nullable {
         definition.push_str(" NOT NULL");
@@ -2889,6 +2927,18 @@ fn alter_column_sql(
     let mut sql = Vec::new();
     let mut warnings = Vec::new();
     let mut manual_review = false;
+
+    if source.is_generated != Some(false)
+        || source.is_hidden != Some(false)
+        || source.is_generated != target.is_generated
+        || source.is_hidden != target.is_hidden
+    {
+        warnings.push(format!(
+            "Generated/hidden metadata change for {table}.{} requires a lossless dialect-owned expression and visibility model.",
+            source.name
+        ));
+        return (Vec::new(), true, warnings);
+    }
 
     if kind == DatabaseKind::Mysql {
         let (definition, definition_warnings) = column_definition(kind, source);
@@ -4063,6 +4113,8 @@ mod tests {
             is_auto_increment: name == "id",
             default_value: None,
             comment: None,
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }
     }
 
@@ -4232,6 +4284,59 @@ mod tests {
         let with_routine = finalize_schema_snapshot(with_routine).unwrap();
 
         assert_ne!(legacy.fingerprint, with_routine.fingerprint);
+    }
+
+    #[test]
+    fn generated_and_hidden_classification_changes_the_snapshot_fingerprint() {
+        let ordinary = snapshot("ordinary", vec![column("total", "numeric", true)]);
+        let mut generated_column = column("total", "numeric", true);
+        generated_column.is_generated = Some(true);
+        let generated = snapshot("generated", vec![generated_column]);
+        let mut hidden_column = column("total", "numeric", true);
+        hidden_column.is_hidden = Some(true);
+        let hidden = snapshot("hidden", vec![hidden_column]);
+
+        assert_ne!(ordinary.fingerprint, generated.fingerprint);
+        assert_ne!(ordinary.fingerprint, hidden.fingerprint);
+        assert_ne!(generated.fingerprint, hidden.fingerprint);
+    }
+
+    #[test]
+    fn generated_or_unknown_column_ddl_is_review_only_without_partial_sql() {
+        for classification in [Some(true), None] {
+            let mut owned = column("computed_total", "numeric", true);
+            owned.is_generated = classification;
+            let source = snapshot("desired", vec![owned]);
+            let target = snapshot("actual", Vec::new());
+
+            let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+            let change = plan
+                .changes
+                .iter()
+                .find(|change| change.kind == SchemaChangeKind::ColumnAdd)
+                .unwrap();
+            assert!(change.manual_review);
+            assert!(change.sql.is_empty());
+            assert!(change.blocked_reason.is_some());
+        }
+    }
+
+    #[test]
+    fn generated_visibility_changes_do_not_emit_incomplete_alter_sql() {
+        let mut generated_column = column("total", "numeric", true);
+        generated_column.is_generated = Some(true);
+        let source = snapshot("desired", vec![generated_column]);
+        let target = snapshot("actual", vec![column("total", "numeric", true)]);
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::ColumnModify)
+            .unwrap();
+        assert!(change.manual_review);
+        assert!(change.sql.is_empty());
+        assert!(change.blocked_reason.is_some());
     }
 
     #[test]
@@ -4902,6 +5007,21 @@ mod tests {
         assert!(rebuild.sql.iter().any(|sql| sql.contains("CREATE TABLE")));
         assert!(plan.migration_sql.contains("BEGIN IMMEDIATE"));
         assert!(plan.migration_sql.contains("PRAGMA foreign_key_check"));
+    }
+
+    #[test]
+    fn sqlite_generated_columns_never_emit_lossy_rebuild_definitions() {
+        let mut computed = column("computed_total", "INTEGER", true);
+        computed.is_generated = Some(true);
+        assert!(sqlite_column_definition(&computed)
+            .unwrap_err()
+            .contains("lossless SQLite expression"));
+
+        let mut unknown = column("legacy_package_column", "TEXT", true);
+        unknown.is_hidden = None;
+        assert!(sqlite_column_definition(&unknown)
+            .unwrap_err()
+            .contains("true or unknown"));
     }
 
     #[test]

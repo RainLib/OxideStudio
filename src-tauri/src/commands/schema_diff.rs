@@ -580,6 +580,8 @@ fn semantic_schema_snapshot(snapshot: &SchemaSnapshot) -> SemanticSchemaSnapshot
                     "unique": column.is_unique,
                     "indexed": column.is_indexed,
                     "autoIncrement": column.is_auto_increment,
+                    "generated": column.is_generated,
+                    "hidden": column.is_hidden,
                     "hasDefault": column.default_value.is_some(),
                     "defaultFingerprint": descriptor_value_fingerprint(column.default_value.as_deref()),
                 })).collect::<Vec<_>>(),
@@ -2204,6 +2206,8 @@ mod tests {
                     is_auto_increment: false,
                     default_value: Some("nextval('private_sequence')".to_string()),
                     comment: Some("private comment".to_string()),
+                    is_generated: Some(false),
+                    is_hidden: Some(false),
                 }],
                 indexes: vec![IndexInfo {
                     name: "users_idx".to_string(),

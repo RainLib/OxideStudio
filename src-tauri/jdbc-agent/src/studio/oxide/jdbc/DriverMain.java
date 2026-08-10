@@ -251,8 +251,12 @@ public final class DriverMain {
   private static List<Object> columns(DatabaseMetaData metadata, String catalog, String schema, String relation) throws SQLException {
     Map<String, ColumnFacts> facts = columnFacts(metadata, catalog, schema, relation);
     List<Object> result = new ArrayList<>(); try (ResultSet rows = metadata.getColumns(catalog, schema, relation, "%")) {
-      while (rows.next()) { String name = rows.getString("COLUMN_NAME"); ColumnFacts column = facts.getOrDefault(name, new ColumnFacts()); Map<String, Object> item = new LinkedHashMap<>(); item.put("name", name); item.put("data_type", rows.getString("TYPE_NAME")); item.put("is_nullable", rows.getInt("NULLABLE") != DatabaseMetaData.columnNoNulls); item.put("is_primary_key", column.primaryKey); item.put("is_unique", column.unique); item.put("is_indexed", column.indexed); item.put("is_auto_increment", "YES".equalsIgnoreCase(rows.getString("IS_AUTOINCREMENT"))); item.put("default_value", rows.getString("COLUMN_DEF")); item.put("comment", rows.getString("REMARKS")); result.add(item); }
+      while (rows.next()) { String name = rows.getString("COLUMN_NAME"); ColumnFacts column = facts.getOrDefault(name, new ColumnFacts()); Map<String, Object> item = new LinkedHashMap<>(); item.put("name", name); item.put("data_type", rows.getString("TYPE_NAME")); item.put("is_nullable", rows.getInt("NULLABLE") != DatabaseMetaData.columnNoNulls); item.put("is_primary_key", column.primaryKey); item.put("is_unique", column.unique); item.put("is_indexed", column.indexed); item.put("is_auto_increment", "YES".equalsIgnoreCase(optionalColumn(rows, "IS_AUTOINCREMENT"))); String generated = optionalColumn(rows, "IS_GENERATEDCOLUMN"); if (generated != null) item.put("is_generated", "YES".equalsIgnoreCase(generated)); item.put("default_value", rows.getString("COLUMN_DEF")); item.put("comment", rows.getString("REMARKS")); result.add(item); }
     } return result;
+  }
+
+  private static String optionalColumn(ResultSet rows, String name) {
+    try { return rows.getString(name); } catch (SQLException | AbstractMethodError ignored) { return null; }
   }
 
   private static Map<String, ColumnFacts> columnFacts(DatabaseMetaData metadata, String catalog, String schema, String relation) {

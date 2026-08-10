@@ -744,6 +744,8 @@ fn infer_mongodb_columns(documents: &[Document]) -> Vec<ColumnInfo> {
             is_unique: name == "_id",
             is_indexed: name == "_id",
             is_auto_increment: false,
+            is_generated: Some(false),
+            is_hidden: Some(false),
             default_value: None,
             comment: None,
             name,

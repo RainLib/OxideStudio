@@ -37,6 +37,7 @@ export type LspTableDefinition = {
     default_value?: string | null;
     auto_increment?: boolean;
     generated?: boolean;
+    hidden?: boolean;
     comment: string | null;
     source_location: LspSourceLocation;
   }>;
@@ -68,6 +69,29 @@ export type LspSchemaDefinition = {
 };
 
 export type LspSourceLocation = [uri: string, line: number] | null;
+
+export function classifyLspColumnOwnership(
+  column: ColumnInfo,
+  options: {
+    hasExactGeneratedColumnFallback: boolean;
+    generatedColumnNames: ReadonlySet<string> | null;
+  }
+) {
+  const generated =
+    typeof column.is_generated === "boolean"
+      ? column.is_generated
+      : options.hasExactGeneratedColumnFallback
+        ? options.generatedColumnNames === null ||
+          options.generatedColumnNames.has(column.name)
+        : true;
+
+  return {
+    generated,
+    // Unknown visibility remains selectable, but never becomes an affirmative
+    // hidden classification. INSERT safety is already provided by generated.
+    hidden: column.is_hidden === true,
+  };
+}
 
 export function emptyLspTableDetails(
   sourceLocation: LspSourceLocation = null
@@ -161,6 +185,7 @@ export function lspSchemaSignature(schemaDefinitions: LspSchemaDefinition[]) {
               default_value: column.default_value ?? null,
               auto_increment: column.auto_increment ?? false,
               generated: column.generated ?? false,
+              hidden: column.hidden ?? false,
               comment: column.comment ?? null,
               source_location: column.source_location ?? null,
             }))

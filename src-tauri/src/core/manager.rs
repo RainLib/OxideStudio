@@ -1147,6 +1147,8 @@ mod tests {
                 is_auto_increment: false,
                 default_value: None,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             }])
         }
 

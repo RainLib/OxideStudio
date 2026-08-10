@@ -147,6 +147,8 @@ describe("LspConnectionSyncer render integration", () => {
         is_primary_key: true,
         is_unique: true,
         is_indexed: true,
+        is_generated: false,
+        is_hidden: false,
         comment: null,
       },
     ]);
@@ -166,6 +168,8 @@ describe("LspConnectionSyncer render integration", () => {
         is_primary_key: true,
         is_unique: true,
         is_indexed: true,
+        is_generated: false,
+        is_hidden: false,
         comment: null,
       },
     ]);

@@ -965,3 +965,19 @@ explicit deferred validation task rather than an implicit release check.
   Expressions must be reported as omitted, must not leak into `default_value`,
   and must keep the offline snapshot on the review-only path until a
   dialect-owned lossless expression model is available.
+- Validate the structured generated/hidden contract against PostgreSQL 9.6/12+
+  (including stored generated and identity), MySQL 5.7/8 plus MariaDB
+  (`DEFAULT_GENERATED`, virtual/stored generated and invisible), and SQLite
+  versions that expose `PRAGMA table_xinfo`. Confirm LSP INSERT snippets and SQL
+  export omit only database-owned columns, hidden columns remain discoverable
+  but do not enter wildcard expansion, and ordinary defaults remain writable.
+- Install an older signed external driver package that omits both ownership
+  fields. Confirm SELECT completion still exposes its columns while INSERT
+  snippets, table transfer and generated target DDL fail closed with a review
+  message. Repeat with a new package that explicitly sends `false` for both
+  fields to prove that backward compatibility does not become implicit trust.
+- Run the JDBC Agent fixture with drivers that implement and omit
+  `IS_GENERATEDCOLUMN`, plus ClickHouse `DEFAULT`/`MATERIALIZED`/`ALIAS`/
+  `EPHEMERAL` and rqlite `table_xinfo` fixtures. The local Java harness was
+  skipped on 2026-08-10 because this runner had no JDK fixture; do not treat the
+  successful Rust sidecar suites as JDBC product conformance evidence.

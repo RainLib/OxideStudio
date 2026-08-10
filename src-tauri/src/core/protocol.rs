@@ -267,6 +267,15 @@ pub struct ColumnInfo {
     pub is_indexed: bool,
     #[serde(default)]
     pub is_auto_increment: bool,
+    /// Structured database-owned generation metadata. `None` means that the
+    /// driver did not prove the classification and must not be treated as a
+    /// writable `false` by INSERT-oriented consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_generated: Option<bool>,
+    /// Structured hidden/invisible-column metadata. `None` is unknown rather
+    /// than visible; old external driver packages remain wire-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_hidden: Option<bool>,
     pub default_value: Option<String>,
     pub comment: Option<String>,
 }
@@ -465,7 +474,31 @@ fn error_category(code: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandError, QueryResult, Response};
+    use super::{ColumnInfo, CommandError, QueryResult, Response};
+
+    #[test]
+    fn column_info_keeps_old_packages_compatible_without_claiming_writability() {
+        let legacy = serde_json::json!({
+            "name": "computed_total",
+            "data_type": "numeric",
+            "is_nullable": true,
+            "is_primary_key": false,
+            "is_unique": false,
+            "is_indexed": false,
+            "default_value": null,
+            "comment": null
+        });
+        let column: ColumnInfo = serde_json::from_value(legacy).unwrap();
+        assert_eq!(column.is_generated, None);
+        assert_eq!(column.is_hidden, None);
+
+        let mut classified = column;
+        classified.is_generated = Some(true);
+        classified.is_hidden = Some(false);
+        let encoded = serde_json::to_value(classified).unwrap();
+        assert_eq!(encoded["is_generated"], true);
+        assert_eq!(encoded["is_hidden"], false);
+    }
 
     #[test]
     fn execution_result_carries_affected_rows() {

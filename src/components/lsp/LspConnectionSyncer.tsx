@@ -17,6 +17,7 @@ import {
 } from "@/services/tauri";
 import {
   assignLspObjectSourceLocations,
+  classifyLspColumnOwnership,
   collectionToLspTableDefinition,
   emptyLspTableDetails,
   selectLspTablesForSchema,
@@ -537,49 +538,51 @@ export function LspConnectionSyncer() {
     ): Promise<LspTableDefinition> => {
       try {
         const capabilities = await capabilitiesPromise;
-        const generatedColumnsPromise = (EXACT_GENERATED_COLUMN_METADATA_DRIVERS.has(
-          connection.driver
-        )
-          ? catalog.databaseName
-            ? schemaService.getDatabaseGeneratedColumns(
-                activeConnectionId,
-                catalog.databaseName,
-                catalog.schemaName,
-                table.name
-              )
-            : schemaService.getGeneratedColumns(
-                activeConnectionId,
-                catalog.schemaName,
-                table.name
-              )
-          : Promise.resolve([])
-        ).catch((error) => {
-          console.warn(
-            `[LSP] Failed to classify generated columns for ${[
-              catalog.catalogName,
-              catalog.schemaName,
-              table.name,
-            ]
-              .filter(Boolean)
-              .join(".")}:`,
-            error
-          );
-          return null;
+        const hasGeneratedColumnFallback =
+          EXACT_GENERATED_COLUMN_METADATA_DRIVERS.has(connection.driver);
+        const metadata = await loadTableMetadata({
+          connectionId: activeConnectionId,
+          driver: connection.driver,
+          databaseName: catalog.databaseName || undefined,
+          schema: catalog.schemaName,
+          table: table.name,
+          includeIndexes: capabilities.supportsTableIndexes,
+          includeConstraints: capabilities.supportsTableConstraints,
+          priority: "background",
         });
-        const [metadata, generatedColumnNames] = await Promise.all([
-          loadTableMetadata({
-            connectionId: activeConnectionId,
-            driver: connection.driver,
-            databaseName: catalog.databaseName || undefined,
-            schema: catalog.schemaName,
-            table: table.name,
-            includeIndexes: capabilities.supportsTableIndexes,
-            includeConstraints: capabilities.supportsTableConstraints,
-            priority: "background",
-          }),
-          generatedColumnsPromise,
-        ]);
         const { columns, indexes, constraints } = metadata;
+        // New metadata makes the extra catalog query unnecessary. Keep the
+        // exact legacy route only while an older bundled driver omits flags.
+        const needsGeneratedColumnFallback =
+          hasGeneratedColumnFallback &&
+          columns.some((column) => typeof column.is_generated !== "boolean");
+        const generatedColumnNames = needsGeneratedColumnFallback
+          ? await (catalog.databaseName
+              ? schemaService.getDatabaseGeneratedColumns(
+                  activeConnectionId,
+                  catalog.databaseName,
+                  catalog.schemaName,
+                  table.name
+                )
+              : schemaService.getGeneratedColumns(
+                  activeConnectionId,
+                  catalog.schemaName,
+                  table.name
+                )
+            ).catch((error) => {
+              console.warn(
+                `[LSP] Failed to classify generated columns for ${[
+                  catalog.catalogName,
+                  catalog.schemaName,
+                  table.name,
+                ]
+                  .filter(Boolean)
+                  .join(".")}:`,
+                error
+              );
+              return null;
+            })
+          : [];
         const generatedColumns = new Set(generatedColumnNames ?? []);
 
         return assignSourceLocations(catalog, {
@@ -618,10 +621,16 @@ export function LspConnectionSyncer() {
             indexed: !!col.is_indexed,
             default_value: col.default_value ?? null,
             auto_increment: !!col.is_auto_increment,
-            // If exact generated-column discovery fails, suppress INSERT
-            // snippets for this table instead of recommending unsafe writes.
-            generated:
-              generatedColumnNames === null || generatedColumns.has(col.name),
+            // New native/external drivers provide structured flags directly.
+            // For the three legacy native paths, retain the exact discovery
+            // fallback. An old external package with no classification is not
+            // silently treated as writable: generated=true suppresses INSERT
+            // snippets while SELECT completion remains available.
+            ...classifyLspColumnOwnership(col, {
+              hasExactGeneratedColumnFallback: hasGeneratedColumnFallback,
+              generatedColumnNames:
+                generatedColumnNames === null ? null : generatedColumns,
+            }),
             comment: col.comment || null,
             source_location: [
               objectSourceUri(

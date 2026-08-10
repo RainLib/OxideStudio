@@ -13,6 +13,8 @@ export interface ColumnInfo {
     is_unique: boolean;
     is_indexed: boolean;
     is_auto_increment?: boolean;
+    is_generated?: boolean;
+    is_hidden?: boolean;
     default_value?: string;
     comment?: string;
 }

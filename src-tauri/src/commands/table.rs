@@ -5359,8 +5359,23 @@ fn build_data_transfer_column_mapping(
     source_columns: &[ColumnInfo],
     target_columns: &[ColumnInfo],
 ) -> Result<(Vec<TableDataTransferColumnMapping>, Vec<String>), String> {
+    let unknown_write_metadata = target_columns
+        .iter()
+        .filter(|column| column.is_generated.is_none() || column.is_hidden.is_none())
+        .map(|column| column.name.clone())
+        .take(16)
+        .collect::<Vec<_>>();
+    if !unknown_write_metadata.is_empty() {
+        return Err(format!(
+            "Target driver did not classify generated/hidden status for column(s): {}. A reviewed transfer cannot assume they are writable.",
+            unknown_write_metadata.join(", ")
+        ));
+    }
     let mut target_by_name = BTreeMap::<String, Vec<&ColumnInfo>>::new();
-    for target in target_columns {
+    for target in target_columns
+        .iter()
+        .filter(|column| column.is_generated != Some(true) && column.is_hidden != Some(true))
+    {
         target_by_name
             .entry(target.name.to_ascii_lowercase())
             .or_default()
@@ -5412,6 +5427,8 @@ fn build_data_transfer_column_mapping(
         .filter(|column| {
             !column.is_nullable
                 && !column.is_auto_increment
+                && column.is_generated != Some(true)
+                && column.is_hidden != Some(true)
                 && column
                     .default_value
                     .as_deref()
@@ -5862,18 +5879,51 @@ fn transfer_target_column_type(
     }
 }
 
+#[derive(Debug)]
+struct TransferTargetColumnsPlan {
+    columns: Vec<TableDataTransferTargetColumn>,
+    create_columns: Vec<CreateTableColumn>,
+    warnings: Vec<String>,
+}
+
 fn build_transfer_target_columns(
     source_columns: &[ColumnInfo],
     source_driver: &str,
     target_driver: &str,
-) -> Result<(Vec<TableDataTransferTargetColumn>, Vec<CreateTableColumn>), String> {
+) -> Result<TransferTargetColumnsPlan, String> {
     if source_columns.is_empty() {
         return Err("Source table has no column metadata".to_string());
     }
+    let unknown_ownership = source_columns
+        .iter()
+        .filter(|column| column.is_generated.is_none() || column.is_hidden.is_none())
+        .map(|column| column.name.clone())
+        .take(16)
+        .collect::<Vec<_>>();
+    if !unknown_ownership.is_empty() {
+        return Err(format!(
+            "Source driver did not classify generated/hidden status for column(s): {}. Target DDL cannot safely decide which values are materialized.",
+            unknown_ownership.join(", ")
+        ));
+    }
+
+    let hidden_columns = source_columns
+        .iter()
+        .filter(|column| column.is_hidden == Some(true))
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let generated_columns = source_columns
+        .iter()
+        .filter(|column| column.is_generated == Some(true) && column.is_hidden != Some(true))
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
 
     let mut planned = Vec::with_capacity(source_columns.len());
     let mut create_columns = Vec::with_capacity(source_columns.len());
-    for source in source_columns {
+    for source in source_columns
+        .iter()
+        .filter(|column| column.is_hidden != Some(true))
+    {
         let mapping = transfer_target_column_type(&source.data_type, source_driver, target_driver);
         planned.push(TableDataTransferTargetColumn {
             name: source.name.clone(),
@@ -5897,7 +5947,24 @@ fn build_transfer_target_columns(
             comment: None,
         });
     }
-    Ok((planned, create_columns))
+    let mut warnings = Vec::new();
+    if !hidden_columns.is_empty() {
+        warnings.push(format!(
+            "Hidden/invisible source column(s) are omitted from the target: {}.",
+            hidden_columns.join(", ")
+        ));
+    }
+    if !generated_columns.is_empty() {
+        warnings.push(format!(
+            "Generated source column(s) are materialized as ordinary target values; generation expressions are not retained: {}.",
+            generated_columns.join(", ")
+        ));
+    }
+    Ok(TransferTargetColumnsPlan {
+        columns: planned,
+        create_columns,
+        warnings,
+    })
 }
 
 async fn ensure_transfer_target_table_absent(
@@ -5971,8 +6038,10 @@ async fn resolve_table_data_transfer_target_plan(
     .map_err(|error| error.to_string())?;
     let source_driver = normalized_transfer_driver_id(&request.source.driver);
     let mapping_profile = transfer_target_mapping_profile(&source_driver, &target_driver);
-    let (columns, create_columns) =
+    let target_columns_plan =
         build_transfer_target_columns(&source_columns, &source_driver, &target_driver)?;
+    let columns = target_columns_plan.columns;
+    let create_columns = target_columns_plan.create_columns;
     let can_execute = columns
         .iter()
         .all(|column| column.compatibility != TableDataTransferCompatibility::Unsupported);
@@ -6003,9 +6072,10 @@ async fn resolve_table_data_transfer_target_plan(
         endpoint_label(&request.target)
     )];
     warnings.push(
-        "Identity, sequence, foreign-key, check, trigger, index, and default expressions are not synthesized. Primary-key and nullability metadata are retained."
+        "Identity, sequence, generated-expression, foreign-key, check, trigger, index, and default expressions are not synthesized. Primary-key and nullability metadata are retained."
             .to_string(),
     );
+    warnings.extend(target_columns_plan.warnings);
     if !can_execute {
         warnings.push(
             "Executable CREATE TABLE DDL is blocked because at least one source type has no explicit cross-product mapping. No textual fallback DDL was generated."
@@ -7741,6 +7811,18 @@ pub async fn export_table_data(
                     columns
                         .iter()
                         .filter(|column| is_postgres_tsvector_export_type(&column.data_type))
+                        .map(|column| column.name.clone()),
+                );
+            }
+        }
+        if sql_export {
+            if let Some(columns) = table_columns.as_ref() {
+                sql_excluded_columns.extend(
+                    columns
+                        .iter()
+                        .filter(|column| {
+                            column.is_generated == Some(true) || column.is_hidden == Some(true)
+                        })
                         .map(|column| column.name.clone()),
                 );
             }
@@ -10788,15 +10870,16 @@ mod tests {
         build_rename_table_index_statement, build_sqlite_add_column_statements,
         build_sqlite_create_index_statement, build_sqlite_create_table_statements,
         build_sqlite_drop_column_statement, build_sqlite_drop_index_statement,
-        build_structured_filter_where, build_table_order_by, build_update_mutation,
-        build_upsert_mutation, canonical_import_columns, column_lookup, csv_delimiter, csv_escape,
-        csv_record_values, delete_table_data_transfer_target_for_overwrite,
-        ensure_host_table_ddl_capability, ensure_sql_insert_conflict_policy,
-        ensure_table_export_format, ensure_transfer_endpoint_driver_matches_connection,
-        execute_target_parameterized_batch, filter_sql_export_batch,
-        finish_table_data_transfer_transaction, generate_postgres_materialized_view_ddl,
-        generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
-        is_json_lines_path, normalized_table_data_transfer_project_id, object_label_from_type,
+        build_structured_filter_where, build_table_order_by, build_transfer_target_columns,
+        build_update_mutation, build_upsert_mutation, canonical_import_columns, column_lookup,
+        csv_delimiter, csv_escape, csv_record_values,
+        delete_table_data_transfer_target_for_overwrite, ensure_host_table_ddl_capability,
+        ensure_sql_insert_conflict_policy, ensure_table_export_format,
+        ensure_transfer_endpoint_driver_matches_connection, execute_target_parameterized_batch,
+        filter_sql_export_batch, finish_table_data_transfer_transaction,
+        generate_postgres_materialized_view_ddl, generate_postgres_table_ddl,
+        generate_postgres_view_ddl, get_target_columns, is_json_lines_path,
+        normalized_table_data_transfer_project_id, object_label_from_type,
         object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
         overwrite_transfer_verification, postgres_identity_reseed_verification_query,
         postgres_view_definition_query, preview_metadata_required, query_target,
@@ -11602,6 +11685,74 @@ mod tests {
     }
 
     #[test]
+    fn data_transfer_requires_ownership_metadata_and_skips_database_owned_targets() {
+        let mut unknown = target_column("unknown");
+        unknown.is_generated = None;
+        assert!(
+            build_data_transfer_column_mapping(&[target_column("unknown")], &[unknown])
+                .unwrap_err()
+                .contains("did not classify generated/hidden status")
+        );
+
+        let mut generated = target_column("computed_total");
+        generated.is_nullable = false;
+        generated.is_generated = Some(true);
+        let mut hidden = target_column("period_start");
+        hidden.is_nullable = false;
+        hidden.is_hidden = Some(true);
+        let (mappings, skipped) = build_data_transfer_column_mapping(
+            &[
+                target_column("id"),
+                target_column("computed_total"),
+                target_column("period_start"),
+            ],
+            &[target_column("id"), generated, hidden],
+        )
+        .unwrap();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].target, "id");
+        assert_eq!(skipped, vec!["computed_total", "period_start"]);
+    }
+
+    #[test]
+    fn transfer_target_materializes_generated_values_and_omits_hidden_columns() {
+        let mut generated = target_column("computed_total");
+        generated.is_generated = Some(true);
+        let mut hidden = target_column("period_start");
+        hidden.is_hidden = Some(true);
+
+        let plan = build_transfer_target_columns(
+            &[target_column("id"), generated, hidden],
+            "postgres",
+            "mysql",
+        )
+        .unwrap();
+        assert_eq!(
+            plan.columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "computed_total"]
+        );
+        assert_eq!(plan.create_columns.len(), 2);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| { warning.contains("period_start") && warning.contains("omitted") }));
+        assert!(plan.warnings.iter().any(|warning| {
+            warning.contains("computed_total") && warning.contains("materialized")
+        }));
+
+        let mut unknown = target_column("legacy_package_column");
+        unknown.is_hidden = None;
+        assert!(
+            build_transfer_target_columns(&[unknown], "postgres", "mysql")
+                .unwrap_err()
+                .contains("Target DDL cannot safely decide")
+        );
+    }
+
+    #[test]
     fn data_transfer_surfaces_type_conversion_review_before_confirmation() {
         let mapping = |source: &str, target: &str, source_type: &str, target_type: &str| {
             let (compatibility, conversion, reason) =
@@ -12152,6 +12303,8 @@ mod tests {
             is_auto_increment: false,
             default_value: None,
             comment: None,
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }
     }
 
@@ -12382,6 +12535,8 @@ mod tests {
                     default_value: Some("nextval('users_id_seq'::regclass)".to_string()),
                     is_auto_increment: false,
                     comment: None,
+                    is_generated: Some(false),
+                    is_hidden: Some(false),
                 },
                 ColumnInfo {
                     name: "email".to_string(),
@@ -12393,6 +12548,8 @@ mod tests {
                     default_value: None,
                     is_auto_increment: false,
                     comment: None,
+                    is_generated: Some(false),
+                    is_hidden: Some(false),
                 },
             ],
             &[
@@ -12654,6 +12811,8 @@ SELECT id FROM users WHERE active;"#
             default_value: None,
             is_auto_increment: false,
             comment: None,
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }]);
         let mut values = BTreeMap::new();
         values.insert("name".to_string(), json!("Ada"));
@@ -12679,6 +12838,8 @@ SELECT id FROM users WHERE active;"#
                 default_value: None,
                 is_auto_increment: false,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             },
             ColumnInfo {
                 name: "id".to_string(),
@@ -12690,6 +12851,8 @@ SELECT id FROM users WHERE active;"#
                 default_value: None,
                 is_auto_increment: true,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             },
             ColumnInfo {
                 name: "status".to_string(),
@@ -12701,6 +12864,8 @@ SELECT id FROM users WHERE active;"#
                 default_value: Some("'pending'".to_string()),
                 is_auto_increment: false,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             },
         ]);
 
@@ -12774,6 +12939,8 @@ SELECT id FROM users WHERE active;"#
                 default_value: None,
                 is_auto_increment: false,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             },
             ColumnInfo {
                 name: "email".to_string(),
@@ -12785,6 +12952,8 @@ SELECT id FROM users WHERE active;"#
                 default_value: None,
                 is_auto_increment: false,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             },
         ]);
         let mut key = BTreeMap::new();
@@ -12821,6 +12990,8 @@ SELECT id FROM users WHERE active;"#
                 default_value: None,
                 is_auto_increment: false,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             },
             ColumnInfo {
                 name: "id".to_string(),
@@ -12832,6 +13003,8 @@ SELECT id FROM users WHERE active;"#
                 default_value: None,
                 is_auto_increment: false,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             },
         ]);
 
@@ -12876,6 +13049,8 @@ SELECT id FROM users WHERE active;"#
             default_value: None,
             is_auto_increment: false,
             comment: None,
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }]);
 
         let (where_clause, params) = build_structured_filter_where(
@@ -12907,6 +13082,8 @@ SELECT id FROM users WHERE active;"#
             default_value: None,
             is_auto_increment: false,
             comment: None,
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }]);
 
         assert!(build_structured_filter_where(
@@ -12946,6 +13123,8 @@ SELECT id FROM users WHERE active;"#
             default_value: None,
             is_auto_increment: false,
             comment: None,
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }]);
 
         let order = build_table_order_by(
@@ -12989,6 +13168,8 @@ SELECT id FROM users WHERE active;"#
                 default_value: None,
                 is_auto_increment: false,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             },
             ColumnInfo {
                 name: "id".to_string(),
@@ -13000,6 +13181,8 @@ SELECT id FROM users WHERE active;"#
                 default_value: None,
                 is_auto_increment: false,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             },
             ColumnInfo {
                 name: "created_at".to_string(),
@@ -13011,6 +13194,8 @@ SELECT id FROM users WHERE active;"#
                 default_value: None,
                 is_auto_increment: false,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             },
         ]);
         assert_eq!(
@@ -13350,6 +13535,8 @@ WITH DATA;"#
                 default_value: None,
                 is_auto_increment: false,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             },
             ColumnInfo {
                 name: "name".to_string(),
@@ -13361,6 +13548,8 @@ WITH DATA;"#
                 default_value: None,
                 is_auto_increment: false,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             },
         ]);
 
@@ -13399,6 +13588,8 @@ WITH DATA;"#
             default_value: None,
             is_auto_increment: false,
             comment: None,
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }]);
 
         let statements = build_alter_table_column_statements(
@@ -13445,6 +13636,8 @@ WITH DATA;"#
             default_value: None,
             is_auto_increment: true,
             comment: Some("identifier".to_string()),
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }]);
 
         let statements = build_alter_table_column_statements(
@@ -13486,6 +13679,8 @@ WITH DATA;"#
                 default_value: None,
                 is_auto_increment: false,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             },
             ColumnInfo {
                 name: "tenant_id".to_string(),
@@ -13497,6 +13692,8 @@ WITH DATA;"#
                 default_value: None,
                 is_auto_increment: false,
                 comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
             },
         ]);
 
@@ -13540,6 +13737,8 @@ WITH DATA;"#
             default_value: None,
             is_auto_increment: false,
             comment: None,
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }]);
 
         assert!(build_create_table_index_statement(
@@ -13652,6 +13851,8 @@ WITH DATA;"#
             default_value: None,
             is_auto_increment: false,
             comment: None,
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }]);
 
         assert_eq!(
@@ -13680,6 +13881,8 @@ WITH DATA;"#
             default_value: None,
             is_auto_increment: false,
             comment: None,
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }]);
 
         assert_eq!(
@@ -13708,6 +13911,8 @@ WITH DATA;"#
             default_value: None,
             is_auto_increment: false,
             comment: None,
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }]);
 
         assert!(build_create_primary_key_statement(
@@ -13756,6 +13961,8 @@ WITH DATA;"#
             default_value: None,
             is_auto_increment: false,
             comment: None,
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }]);
         let referenced_columns = column_lookup(vec![ColumnInfo {
             name: "id".to_string(),
@@ -13767,6 +13974,8 @@ WITH DATA;"#
             default_value: None,
             is_auto_increment: false,
             comment: None,
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }]);
 
         assert_eq!(
@@ -13968,6 +14177,8 @@ WITH DATA;"#
             default_value: None,
             is_auto_increment: false,
             comment: None,
+            is_generated: Some(false),
+            is_hidden: Some(false),
         }]);
         assert_eq!(
             build_sqlite_create_index_statement(

@@ -47,7 +47,10 @@ fn main() {
             Ok(line) => handle_line(&line, &mut connections),
             Err(error) => DriverResponseEnvelope {
                 id: 0,
-                response: DriverResponse::Error(protocol_error("INPUT_READ_FAILED", error.to_string())),
+                response: DriverResponse::Error(protocol_error(
+                    "INPUT_READ_FAILED",
+                    error.to_string(),
+                )),
             },
         };
         let serialized = serde_json::to_string(&response);
@@ -69,10 +72,15 @@ fn handle_line(
 ) -> DriverResponseEnvelope {
     let request: DriverRequestEnvelope = match serde_json::from_str(line) {
         Ok(request) => request,
-        Err(error) => return DriverResponseEnvelope {
-            id: 0,
-            response: DriverResponse::Error(protocol_error("INVALID_REQUEST", error.to_string())),
-        },
+        Err(error) => {
+            return DriverResponseEnvelope {
+                id: 0,
+                response: DriverResponse::Error(protocol_error(
+                    "INVALID_REQUEST",
+                    error.to_string(),
+                )),
+            }
+        }
     };
     let id = request.id;
     let response = match handle_request(request.request, connections) {
@@ -426,9 +434,14 @@ fn bind_clickhouse_parameters(
                     index += 2;
                 } else if current == '?' {
                     if next_question_mark >= typed.len() {
-                        return Err(protocol_error("PARAMETER_COUNT_MISMATCH", "SQL contains more positional parameters than the request"));
+                        return Err(protocol_error(
+                            "PARAMETER_COUNT_MISMATCH",
+                            "SQL contains more positional parameters than the request",
+                        ));
                     }
-                    output.push_str(&clickhouse_parameter_placeholder(&typed[next_question_mark]));
+                    output.push_str(&clickhouse_parameter_placeholder(
+                        &typed[next_question_mark],
+                    ));
                     used[next_question_mark] = true;
                     next_question_mark += 1;
                     index += 1;
@@ -442,9 +455,17 @@ fn bind_clickhouse_parameters(
                         .iter()
                         .collect::<String>()
                         .parse::<usize>()
-                        .map_err(|_| protocol_error("PARAMETER_COUNT_MISMATCH", "SQL parameter marker is invalid"))?;
+                        .map_err(|_| {
+                            protocol_error(
+                                "PARAMETER_COUNT_MISMATCH",
+                                "SQL parameter marker is invalid",
+                            )
+                        })?;
                     if ordinal == 0 || ordinal > typed.len() {
-                        return Err(protocol_error("PARAMETER_COUNT_MISMATCH", "SQL parameter marker is outside the request parameter range"));
+                        return Err(protocol_error(
+                            "PARAMETER_COUNT_MISMATCH",
+                            "SQL parameter marker is outside the request parameter range",
+                        ));
                     }
                     output.push_str(&clickhouse_parameter_placeholder(&typed[ordinal - 1]));
                     used[ordinal - 1] = true;
@@ -509,7 +530,10 @@ fn bind_clickhouse_parameters(
         }
     }
     if used.iter().any(|value| !value) {
-        return Err(protocol_error("PARAMETER_COUNT_MISMATCH", "Every request parameter must have a SQL marker"));
+        return Err(protocol_error(
+            "PARAMETER_COUNT_MISMATCH",
+            "Every request parameter must have a SQL marker",
+        ));
     }
     Ok((output, typed))
 }
@@ -535,7 +559,14 @@ fn clickhouse_bound_parameter(
                 "ClickHouse HTTP parameter binding does not support NULL without an explicit nullable type contract",
             ));
         }
-        Value::Bool(value) => ("UInt8", if *value { "1".to_string() } else { "0".to_string() }),
+        Value::Bool(value) => (
+            "UInt8",
+            if *value {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            },
+        ),
         Value::Number(value) if value.is_i64() => ("Int64", value.to_string()),
         Value::Number(value) if value.is_u64() => ("UInt64", value.to_string()),
         Value::Number(value) if value.is_f64() => ("Float64", value.to_string()),
@@ -661,7 +692,22 @@ fn metadata(
             let database = required_database(database.as_deref().unwrap_or(&namespace))?;
             let relation = validate_identifier(&relation)?;
             let rows = metadata_rows(connection, "SELECT name, type, default_kind, default_expression, comment FROM system.columns WHERE database = {database:String} AND table = {table:String} ORDER BY position", &format!("{database}\u{1f}{relation}"))?;
-            Ok(Value::Array(rows.iter().map(|row| json!({ "name": row_string(row, 0), "data_type": row_string(row, 1), "is_nullable": row_string(row, 1).starts_with("Nullable("), "is_primary_key": false, "is_unique": false, "is_indexed": false, "is_auto_increment": false, "default_value": nullable_string(row, 3), "comment": nullable_string(row, 4) })).collect()))
+            Ok(Value::Array(rows.iter().map(|row| {
+                let default_kind = row_string(row, 2).to_ascii_uppercase();
+                json!({
+                    "name": row_string(row, 0),
+                    "data_type": row_string(row, 1),
+                    "is_nullable": row_string(row, 1).starts_with("Nullable("),
+                    "is_primary_key": false,
+                    "is_unique": false,
+                    "is_indexed": false,
+                    "is_auto_increment": false,
+                    "is_generated": matches!(default_kind.as_str(), "MATERIALIZED" | "ALIAS" | "EPHEMERAL"),
+                    "is_hidden": false,
+                    "default_value": nullable_string(row, 3),
+                    "comment": nullable_string(row, 4)
+                })
+            }).collect()))
         }
         MetadataRequest::Indexes { database, namespace, relation } => {
             let database = required_database(database.as_deref().unwrap_or(&namespace))?;

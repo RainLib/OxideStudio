@@ -955,6 +955,8 @@ fn elasticsearch_mapping_to_columns(value: &Value, index: &str, major: u8) -> Ve
         is_unique: true,
         is_indexed: true,
         is_auto_increment: false,
+        is_generated: Some(false),
+        is_hidden: Some(false),
         default_value: None,
         comment: Some("Elasticsearch document id".to_string()),
     }];
@@ -1014,6 +1016,8 @@ fn collect_mapping_properties(
                 is_unique: false,
                 is_indexed,
                 is_auto_increment: false,
+                is_generated: Some(false),
+                is_hidden: Some(false),
                 default_value: None,
                 comment: None,
             });

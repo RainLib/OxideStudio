@@ -37,6 +37,13 @@ fn parse_mysql_connection_id(value: &str) -> Option<u64> {
         .filter(|thread_id| *thread_id > 0)
 }
 
+fn mysql_column_ownership(extra: &str) -> (bool, bool) {
+    let extra = extra.to_ascii_lowercase();
+    let generated = extra.contains("virtual generated") || extra.contains("stored generated");
+    let hidden = extra.split_whitespace().any(|token| token == "invisible");
+    (generated, hidden)
+}
+
 pub struct MysqlDriver {
     // Map of schema name -> Pool. Empty string key "" represents the default/base connection.
     pub pools: Mutex<HashMap<String, Pool<MySql>>>,
@@ -912,6 +919,7 @@ impl DatabaseDriver for MysqlDriver {
                 let is_unique = column_key == "PRI" || column_key == "UNI";
                 let is_indexed = !column_key.is_empty();
                 let extra = mysql_string_by_name(r, "ex").unwrap_or_default();
+                let (is_generated, is_hidden) = mysql_column_ownership(&extra);
                 let comment = mysql_string_by_name(r, "cc")
                     .and_then(|value| (!value.trim().is_empty()).then_some(value));
 
@@ -923,6 +931,8 @@ impl DatabaseDriver for MysqlDriver {
                     is_unique,
                     is_indexed,
                     is_auto_increment: extra.to_ascii_lowercase().contains("auto_increment"),
+                    is_generated: Some(is_generated),
+                    is_hidden: Some(is_hidden),
                     default_value: mysql_string_by_name(r, "cd"),
                     comment,
                 }
@@ -940,7 +950,10 @@ impl DatabaseDriver for MysqlDriver {
             FROM information_schema.columns
             WHERE table_schema = ?
               AND table_name = ?
-              AND LOWER(extra) LIKE '%generated%'
+              AND (
+                LOWER(extra) LIKE '%virtual generated%'
+                OR LOWER(extra) LIKE '%stored generated%'
+              )
             ORDER BY ordinal_position
             "#,
         )
@@ -1525,6 +1538,21 @@ mod tests {
     use super::*;
     use dotenvy::dotenv;
     use std::env;
+
+    #[test]
+    fn mysql_column_ownership_does_not_confuse_default_generated_with_computed() {
+        assert_eq!(mysql_column_ownership("DEFAULT_GENERATED"), (false, false));
+        assert_eq!(
+            mysql_column_ownership("DEFAULT_GENERATED on update CURRENT_TIMESTAMP"),
+            (false, false)
+        );
+        assert_eq!(mysql_column_ownership("VIRTUAL GENERATED"), (true, false));
+        assert_eq!(
+            mysql_column_ownership("STORED GENERATED INVISIBLE"),
+            (true, true)
+        );
+        assert_eq!(mysql_column_ownership("INVISIBLE"), (false, true));
+    }
 
     #[test]
     fn empty_mysql_rows_preserve_described_columns() {

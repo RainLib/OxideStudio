@@ -20,6 +20,10 @@ use tokio::sync::Mutex;
 
 type SqliteTransactionSession = Arc<Mutex<sqlx::pool::PoolConnection<Sqlite>>>;
 
+fn sqlite_column_ownership(hidden_code: i64) -> (bool, bool) {
+    (hidden_code >= 2, hidden_code == 1)
+}
+
 /// SQLite is intentionally implemented as a local, file-based driver. It has
 /// no server/database switching, but exposes the same bounded query and
 /// Explorer metadata contract as the network relational drivers.
@@ -414,7 +418,7 @@ impl DatabaseDriver for SqliteDriver {
     async fn get_columns(&self, schema: &str, table: &str) -> Result<Vec<ColumnInfo>> {
         let schema_name = normalized_sqlite_schema(schema);
         let schema = sqlite_schema_identifier(schema_name)?;
-        let statement = format!("PRAGMA {schema}.table_info({})", sqlite_identifier(table)?);
+        let statement = format!("PRAGMA {schema}.table_xinfo({})", sqlite_identifier(table)?);
         let rows = sqlx::query(&statement)
             .fetch_all(&self.pool().await?)
             .await?;
@@ -423,6 +427,8 @@ impl DatabaseDriver for SqliteDriver {
             .iter()
             .map(|row| {
                 let name: String = row.try_get("name").unwrap_or_default();
+                let hidden = row.try_get::<i64, _>("hidden").unwrap_or(0);
+                let (is_generated, is_hidden) = sqlite_column_ownership(hidden);
                 ColumnInfo {
                     name: name.clone(),
                     data_type: row
@@ -437,6 +443,8 @@ impl DatabaseDriver for SqliteDriver {
                         .iter()
                         .any(|index| index.columns.iter().any(|column| column == &name)),
                     is_auto_increment: false,
+                    is_generated: Some(is_generated),
+                    is_hidden: Some(is_hidden),
                     default_value: row.try_get("dflt_value").ok(),
                     comment: None,
                 }
@@ -628,6 +636,14 @@ fn bind_sqlite_parameter<'q>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_xinfo_codes_separate_hidden_and_generated_columns() {
+        assert_eq!(sqlite_column_ownership(0), (false, false));
+        assert_eq!(sqlite_column_ownership(1), (false, true));
+        assert_eq!(sqlite_column_ownership(2), (true, false));
+        assert_eq!(sqlite_column_ownership(3), (true, false));
+    }
 
     #[tokio::test]
     async fn sqlite_driver_exposes_bounded_query_and_explorer_metadata() {

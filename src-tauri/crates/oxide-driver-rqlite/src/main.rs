@@ -39,7 +39,10 @@ fn main() {
             Ok(line) => handle_line(&line, &mut connections),
             Err(error) => DriverResponseEnvelope {
                 id: 0,
-                response: DriverResponse::Error(protocol_error("INPUT_READ_FAILED", error.to_string())),
+                response: DriverResponse::Error(protocol_error(
+                    "INPUT_READ_FAILED",
+                    error.to_string(),
+                )),
             },
         };
         let serialized = serde_json::to_string(&response);
@@ -61,10 +64,15 @@ fn handle_line(
 ) -> DriverResponseEnvelope {
     let request: DriverRequestEnvelope = match serde_json::from_str(line) {
         Ok(request) => request,
-        Err(error) => return DriverResponseEnvelope {
-            id: 0,
-            response: DriverResponse::Error(protocol_error("INVALID_REQUEST", error.to_string())),
-        },
+        Err(error) => {
+            return DriverResponseEnvelope {
+                id: 0,
+                response: DriverResponse::Error(protocol_error(
+                    "INVALID_REQUEST",
+                    error.to_string(),
+                )),
+            }
+        }
     };
     let id = request.id;
     let response = match handle_request(request.request, connections) {
@@ -504,7 +512,7 @@ fn rqlite_columns(
     relation: &str,
 ) -> Result<Value, DriverProtocolError> {
     let relation = quote_identifier(relation)?;
-    let rows = metadata_rows(connection, &format!("PRAGMA table_info({relation})"))?;
+    let rows = metadata_rows(connection, &format!("PRAGMA table_xinfo({relation})"))?;
     Ok(Value::Array(
         rows.iter()
             .map(|row| {
@@ -516,6 +524,8 @@ fn rqlite_columns(
                     "is_unique": false,
                     "is_indexed": false,
                     "is_auto_increment": false,
+                    "is_generated": row_u64(row, 6) >= 2,
+                    "is_hidden": row_u64(row, 6) == 1,
                     "default_value": row.get(4).filter(|value| !value.is_null()).map(Value::to_string),
                     "comment": Value::Null,
                 })
