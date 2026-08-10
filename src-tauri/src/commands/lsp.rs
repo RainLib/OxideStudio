@@ -382,7 +382,7 @@ fn parse_completion_item(item: &Value, defaults: Option<&Value>) -> Option<Compl
                     .and_then(|value| value.as_array())
                     .map(|tags| tags.iter().any(|tag| tag.as_u64() == Some(1)))
             }),
-        data: item.get("data").cloned(),
+        data: completion_value(item, defaults, "data").cloned(),
     })
 }
 
@@ -1106,7 +1106,11 @@ mod tests {
                 }
             },
             "insertTextFormat": 2,
-            "insertTextMode": 1
+            "insertTextMode": 1,
+            "data": {
+                "document": "file:///query.sql",
+                "completionListRevision": 7
+            }
         });
 
         let parsed = parse_completion_item(&item, Some(&defaults)).unwrap();
@@ -1114,6 +1118,13 @@ mod tests {
         assert_eq!(parsed.commit_characters, Some(vec![".".to_string()]));
         assert_eq!(parsed.insert_text_format, Some(2));
         assert_eq!(parsed.insert_text_mode, Some(1));
+        assert_eq!(
+            parsed.data,
+            Some(serde_json::json!({
+                "document": "file:///query.sql",
+                "completionListRevision": 7
+            }))
+        );
         assert_eq!(
             parsed.text_edit,
             Some(CompletionTextEdit::InsertAndReplace(InsertReplaceEdit {

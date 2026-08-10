@@ -292,6 +292,10 @@ explicit deferred validation task rather than an implicit release check.
   bounds, nested decimal types and STRUCT/ROW generic types. Bare-name
   completion must create one Monaco field per real parameter and must leave
   oversized or malformed signatures untouched.
+- Exercise a real LSP 3.17 provider that returns `CompletionList.itemDefaults`
+  with list-level `data` and per-item overrides. `completionItem/resolve` must
+  receive the inherited or overridden opaque identity unchanged, while a
+  provider that does not advertise resolve must never receive the request.
 - In Monaco, accept zero-, fixed-, optional-, variadic- and ClickHouse
   multi-group built-in function candidates with each keyword/function casing
   preference. Confirm tab stops, closing parentheses, retriggered signature

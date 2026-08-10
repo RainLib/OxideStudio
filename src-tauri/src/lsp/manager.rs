@@ -42,7 +42,8 @@ fn completion_client_capabilities() -> Value {
                 "commitCharacters",
                 "editRange",
                 "insertTextFormat",
-                "insertTextMode"
+                "insertTextMode",
+                "data"
             ]
         }
     })
@@ -582,7 +583,8 @@ mod tests {
                 "commitCharacters",
                 "editRange",
                 "insertTextFormat",
-                "insertTextMode"
+                "insertTextMode",
+                "data"
             ]))
         );
     }
