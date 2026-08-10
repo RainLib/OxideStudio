@@ -16,6 +16,7 @@ describe("query editor completion options", () => {
     );
     expect(options.quickSuggestions).toBe(false);
     expect(options.suggestOnTriggerCharacters).toBe(false);
+    expect(options.tabCompletion).toBe("off");
   });
 
   it("keeps automatic suggestions out of comments and strings", () => {
@@ -25,5 +26,24 @@ describe("query editor completion options", () => {
       comments: false,
       strings: false,
     });
+    expect(options.tabCompletion).toBe("on");
   });
+
+  it.each(["positional", "require-prefix"] as const)(
+    "waits for pending %s completions before falling back to a normal Tab",
+    (triggerMode) => {
+      const options = buildQueryEditorOptions(
+        {
+          ...DEFAULT_APP_SETTINGS.editor,
+          sqlCompletion: {
+            ...DEFAULT_APP_SETTINGS.editor.sqlCompletion,
+            triggerMode,
+          },
+        },
+        false,
+      );
+
+      expect(options.tabCompletion).toBe("on");
+    },
+  );
 });

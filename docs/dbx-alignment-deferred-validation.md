@@ -1305,3 +1305,19 @@ explicit deferred validation task rather than an implicit release check.
   target compiles, but this Windows environment exits before tests with
   `STATUS_ENTRYPOINT_NOT_FOUND`; rerun those committed tests in CI/a repaired
   host. No database was opened.
+
+## Pending SQL completion acceptance on Tab
+
+- In a real Monaco/WebView session backed by a deliberately slow completion
+  provider, type a valid prefix and press Tab before the provider resolves.
+  Verify one applicable suggestion is accepted atomically, an empty/cancelled
+  result performs exactly one normal Tab edit, and a stale result after further
+  typing or a model/connection switch performs no edit.
+- Repeat inside INSERT/function/custom-command snippets. Existing tab stops
+  must advance immediately and must not be stolen by a pending popup. Cover an
+  inline ghost and popup appearing together, IME composition, Vim insert and
+  normal modes, multi-cursor, read-only documents, undo and configured tab size.
+- Confirm `manual` completion mode never starts completion from Tab, while
+  `positional` and `require-prefix` keep their existing semantic trigger gates.
+  Phase 118 adds option-contract tests only; no database was opened and real
+  Monaco/provider timing remains in the consolidated validation queue.

@@ -30,6 +30,12 @@ export function buildQueryEditorOptions(
     minimap: { enabled: preferences.minimap },
     glyphMargin: isElasticsearchConsole,
     inlineSuggest: { enabled: preferences.inlineCompletion.enabled },
+    // Monaco's native tab-completion command waits for the completion model
+    // to settle, accepts the best applicable item, and falls back to the
+    // normal Tab edit when no candidate is returned. It also yields to active
+    // snippet tab stops. This closes the fast "type, then Tab" race without a
+    // second polling loop in React. Manual mode keeps Tab as indentation.
+    tabCompletion: automaticCompletion ? ("on" as const) : ("off" as const),
     quickSuggestions: automaticCompletion
       ? { other: true, comments: false, strings: false }
       : false,

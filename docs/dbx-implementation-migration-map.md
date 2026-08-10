@@ -339,6 +339,21 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
 - Oxide 当前没有 DBX `DocumentBrowser.vue` 的可视化 clone surface；后续新增时必须携带源 document
   identity 和 edited-field metadata，并复用本阶段原生边界，不能在前端重新解释 BSON。
 
+## Phase 118：pending completion 的 Tab 接受迁移映射
+
+- DBX `apps/desktop/src/components/editor/QueryEditor.vue:acceptCompletionOrNextSnippetField` /
+  `waitForCompletionTab`（`fe10790bb`）→ Oxide
+  `src/features/query-editor/model/editorOptions.ts:buildQueryEditorOptions`。
+- DBX 在 CodeMirror 层以 16ms timer 等待 pending completion，并在超时/空结果时恢复普通 Tab；
+  Oxide 使用 Monaco 已有的 `tabCompletion: on` command contract：等待 suggest model、只接受确实
+  产生 edit 的最佳候选、无候选回退 `tab`，避免在 React 生命周期再复制 pending/timer 状态机。
+- Monaco 的 `inSnippetMode` 上下文先于 tab completion，因此 INSERT/函数/command 代码块的 tab stop
+  不会被新请求抢占；popup 与 inline suggestion 仍按编辑器内核的标准上下文决定 Tab 接受者。
+- `manual` 模式显式设置 `tabCompletion: off`，保留“仅 Ctrl+Space/显式动作触发”的用户契约；
+  `positional` 与 `require-prefix` 模式启用等待逻辑。
+- `editorOptions.test.ts` 固定三种触发模式的配置边界。真实慢 provider、IME、Vim、多光标、
+  read-only、popup/ghost 同现与原子 undo 进入统一延期验证；本阶段不连接数据库。
+
 ## 9. 文档维护规则
 
 当某项能力状态发生变化时：

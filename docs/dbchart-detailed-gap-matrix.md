@@ -3,6 +3,7 @@
 > Phase 104 DBX/LSP 补充：Manticore Search 已对齐 DBX 的完整 31 项产品签名目录；SQLite 保留 `NOW()`，Cloudflare D1 按 DBX 过滤该函数，兼容 parser 不再泄漏产品目录之外的基线函数。
 > Phase 105 对象编辑补充：MySQL/MariaDB 既有 view 保存改用 `ALTER VIEW`；新建仍用 `CREATE VIEW`，PostgreSQL Replace 仍用 `CREATE OR REPLACE VIEW`。
 > Phase 116 最新审计：重新 fetch `main` 后仍为 `c24936a402bb3e24b4858f05282d69a04fcfe25b`，ChartDB 没有新增 SQL LSP、Editor、Grid export 或迁移实现差异；本阶段新增差异来自 DBX `cd78c0ae1` 基线。
+> Phase 118 最新审计：再次 fetch 后 ChartDB/DBX 仍分别为 `c24936a`/`cd78c0ae1`；补齐 DBX `fe10790bb` 的快速输入后 Tab 接受竞态时，Oxide 复用 Monaco 原生 pending-completion/normal-Tab/snippet 优先级，而不在 React 层轮询。
 
 > 对照日期：2026-08-10
 > 官方仓库：`https://github.com/chartdb/chartdb`
@@ -36,6 +37,7 @@
 | L10 | 本阶段已对齐并增强 | 比较操作符后的值联想缺少列类型驱动的代码块 | DBX `apps/desktop/src/lib/sql/sqlCompletion.ts:buildComparisonValueItems` | bundled LSP 现从当前 metadata 列类型生成 NULL、text、numeric、boolean、date/time/timestamp、UUID、JSON 的安全 snippet/tab stop，并继续提供 ENUM/SET 声明域值；WHERE/HAVING/JOIN ON/UPDATE SET 在 PostgreSQL、MySQL、SQLite、Hive、ClickHouse 共用有界实现。歧义类型只给 NULL，绝不读取真实行样本。 |
 | L11 | 本阶段已对齐，真实 Monaco 验证延期 | INSERT values 的列名提示此前只覆盖显式列清单，省略列清单时无法提示值对应字段，且 fallback 会扫描整份 model | ChartDB 本身没有 SQL LSP；直接参考 DBX `apps/desktop/src/lib/sql/insertValueHints.ts`、`insertValueHintColumns.ts`、`apps/desktop/src/lib/editor/codemirrorInsertValueHints.ts` | bundled LSP 的 `textDocument/inlayHint` 现基于同步 metadata 覆盖显式/隐式列清单、多 values row 与 nested expression；隐式映射排除 identity/generated/hidden，显式 quoted 名称原样展示。server 与 Monaco fallback 都限定到 viewport 前后 32 KiB，server 最多 500 hint。DBChart 最新 `c24936a`、`81dae56`、`3442936`、`1c49c7c` 分别属于 Area 布局、edge handle race、metadata JSON/CSV 容错和 DBML 导出转义，不提供可替代的 SQL hint 实现。 |
 | L12 | 本阶段已对齐，真实 Monaco 验证延期 | 空白行运行当前语句不应静默选择相邻 SQL，编辑器标准 Cut/Paste 不应缺失 | ChartDB 最新 `c24936a` 未涉及 SQL Editor；直接参考 DBX `a83f32d13` 与 `150d0108b` | Rust scanner、执行 controller、当前语句 frame 和设置共同实现默认 no-op、可选整篇 fallback 与可访问状态反馈。Monaco 原生 context menu 显式开启，避免自定义 Cut/Paste 与 read-only、多光标、undo、clipboard permission 分叉。 |
+| L13 | 本阶段逻辑已对齐，真实 Monaco 验证延期 | 快速输入后立即按 Tab 时，异步补全尚未返回会错误插入缩进；代码块 Tab stop 又不能被补全等待抢占 | ChartDB 没有 SQL completion；直接参考 DBX `fe10790bb` 的 pending completion Tab retry 与 snippet-first 规则 | 自动的 `positional`/`require-prefix` 模式启用 Monaco 原生 `tabCompletion`：内核等待 completion model、接受最佳适用候选，无候选时回退普通 Tab，并在 snippet mode 中让位给下一 tab stop；`manual` 模式保持 Tab 纯缩进。React 不维护 timer/polling 副本，inline suggestion 和 popup 继续使用 Monaco 的标准上下文优先级。 |
 
 ## 2. 数据库结构、导入与迁移
 
@@ -91,6 +93,7 @@
 - [x] 记录 completion latency、discarded response、empty fallback 原因，且不保存 SQL/标识符/候选文本。
 - [x] 隔离 metadata-sensitive completion/hover 与稳定 LSP provider lifecycle。
 - [x] 增加智能位置/名称前缀/仅手动三种补全触发策略，并在 IPC 前抑制无效自动请求。
+- [x] 对齐快速输入后 Tab 等待补全：自动模式使用 Monaco 原生 wait/accept/fallback，并保持 snippet tab-stop 与 manual-mode 缩进优先级。
 - [x] 增加 Unicode 与中文拼音首字母对象/列/FK JOIN 检索；拼音词典仅在命中中文 metadata 场景时动态加载。
 - [x] 增加空列清单 INSERT 全列/VALUES tab-stop snippet，以及单表、多表、`alias.*` 的 metadata 星号展开。
 - [x] 把命名事务 session/lifecycle 从 QueryEditor 移入独立 controller，并为 Begin/Commit/Rollback 增加防重复操作和进行中反馈。

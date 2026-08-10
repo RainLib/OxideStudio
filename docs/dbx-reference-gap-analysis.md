@@ -325,6 +325,9 @@ metadata，字符串、注释、反引号/方括号标识符及 PostgreSQL dolla
 都不会重置语句上下文。
 即使 LSP 已返回部分字段，过滤后的 live proposals 也会与这些条件运算符合并，避免部分
 响应重新造成 `WHERE field` 后只有字段、没有谓词的交互断点。
+快速输入后立即按 Tab 也不再与异步补全竞态：智能位置和名称前缀模式启用 Monaco 原生
+tab-completion，内核会等待候选模型并接受最佳有效 edit；空结果回退标准缩进，snippet mode
+优先导航下一个 tab stop。仅手动模式保持 Tab 为纯缩进，因此不会绕过用户选择的触发策略。
 语法兜底同时识别双引号、反引号、方括号和 catalog/schema 限定的字段引用，因此
 `WHERE "order"`、`WHERE [status code]` 与 `ORDER BY public."created at"` 都会继续给出
 谓词或排序方向，而不是退化成字段名列表。
