@@ -58,6 +58,15 @@ const SELECT_CONTINUATIONS = [
   "LIMIT",
 ] as const;
 
+const SELECT_FROM_CONTINUATIONS = [
+  "JOIN",
+  "WHERE",
+  "GROUP BY",
+  "ORDER BY",
+] as const;
+const JOIN_CONTINUATIONS = ["ON", "USING"] as const;
+const GROUP_BY_CONTINUATIONS = ["HAVING", "ORDER BY"] as const;
+
 const WHERE_OPERATORS = [
   "=",
   "!=",
@@ -91,6 +100,18 @@ const CONDITION_FIELD_AT_CURSOR = new RegExp(
 );
 const ORDER_FIELD_AT_CURSOR = new RegExp(
   `\\bORDER\\s+BY\\s+${SQL_IDENTIFIER_REFERENCE}\\s*$`,
+  "iu",
+);
+const SELECT_FROM_RELATION_AT_CURSOR = new RegExp(
+  `^\\s*SELECT\\b[\\s\\S]*?\\bFROM\\s+${SQL_IDENTIFIER_REFERENCE}\\s*$`,
+  "iu",
+);
+const JOIN_RELATION_AT_CURSOR = new RegExp(
+  `\\b(?:INNER\\s+|LEFT(?:\\s+OUTER)?\\s+|RIGHT(?:\\s+OUTER)?\\s+|FULL(?:\\s+OUTER)?\\s+|CROSS\\s+)?JOIN\\s+${SQL_IDENTIFIER_REFERENCE}\\s*$`,
+  "iu",
+);
+const GROUP_BY_FIELD_AT_CURSOR = new RegExp(
+  `\\bGROUP\\s+BY\\s+${SQL_IDENTIFIER_REFERENCE}\\s*$`,
   "iu",
 );
 
@@ -194,6 +215,26 @@ export function sqlSyntaxFallbackCompletions(
     );
   }
 
+  // This intentionally recognizes only a top-level SELECT. `FROM` is also
+  // valid in DELETE and vendor-specific UPDATE forms, where GROUP BY or JOIN
+  // would be misleading. The semantic provider remains authoritative for
+  // aliases, CTEs, and non-standard query grammars.
+  if (SELECT_FROM_RELATION_AT_CURSOR.test(statement)) {
+    return grammarItems(
+      SELECT_FROM_CONTINUATIONS,
+      CompletionItemKind.Keyword,
+      "SELECT continuation",
+    );
+  }
+
+  if (JOIN_RELATION_AT_CURSOR.test(statement)) {
+    return grammarItems(
+      JOIN_CONTINUATIONS,
+      CompletionItemKind.Keyword,
+      "JOIN condition",
+    );
+  }
+
   if (/\b(?:WHERE|HAVING|ON)\s*$/i.test(statement)) {
     return grammarItems(
       WHERE_OPERATORS,
@@ -215,6 +256,14 @@ export function sqlSyntaxFallbackCompletions(
       ORDER_CONTINUATIONS,
       CompletionItemKind.Keyword,
       "ORDER BY direction",
+    );
+  }
+
+  if (GROUP_BY_FIELD_AT_CURSOR.test(statement)) {
+    return grammarItems(
+      GROUP_BY_CONTINUATIONS,
+      CompletionItemKind.Keyword,
+      "GROUP BY continuation",
     );
   }
 

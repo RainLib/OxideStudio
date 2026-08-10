@@ -31,4 +31,35 @@ describe("SQL syntax fallback statement starters", () => {
     );
     expect(labels("postgres")).not.toContain("OPTIMIZE TABLE");
   });
+
+  it("keeps standard SELECT clause transitions available during LSP recovery", () => {
+    expect(
+      sqlSyntaxFallbackCompletions("SELECT * FROM orders"),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "JOIN", detail: "SELECT continuation" }),
+        expect.objectContaining({ label: "WHERE", detail: "SELECT continuation" }),
+      ]),
+    );
+    expect(
+      sqlSyntaxFallbackCompletions("SELECT * FROM orders JOIN customers"),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "ON", detail: "JOIN condition" }),
+        expect.objectContaining({ label: "USING", detail: "JOIN condition" }),
+      ]),
+    );
+    expect(
+      sqlSyntaxFallbackCompletions("SELECT customer_id FROM orders GROUP BY customer_id"),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "HAVING", detail: "GROUP BY continuation" }),
+        expect.objectContaining({ label: "ORDER BY", detail: "GROUP BY continuation" }),
+      ]),
+    );
+  });
+
+  it("does not treat DELETE FROM as a SELECT continuation", () => {
+    expect(sqlSyntaxFallbackCompletions("DELETE FROM orders")).toEqual([]);
+  });
 });
