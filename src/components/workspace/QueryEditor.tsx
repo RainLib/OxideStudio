@@ -1301,6 +1301,7 @@ export function QueryEditor({
         preferredElasticsearchIndex || "",
         editorSettings.sqlCompletion.appendSpace ? "space" : "compact",
         editorSettings.sqlCompletion.keywordCase,
+        editorSettings.sqlCompletion.functionCase,
         rankByUsage ? "usage" : "alphabetic",
         editorSettings.sqlCompletion.triggerMode,
         JSON.stringify(editorSettings.sqlCompletion.snippets),
@@ -1313,6 +1314,7 @@ export function QueryEditor({
       driver,
       driverCatalogStatus,
       editorSettings.sqlCompletion.appendSpace,
+      editorSettings.sqlCompletion.functionCase,
       editorSettings.sqlCompletion.keywordCase,
       editorSettings.sqlCompletion.snippets,
       editorSettings.sqlCompletion.triggerMode,
@@ -1409,6 +1411,7 @@ export function QueryEditor({
               driver: capabilities.driver,
               supportsSqlQuery: capabilities.supportsSqlQuery,
               keywordCase: editorSettings.sqlCompletion.keywordCase,
+              functionCase: editorSettings.sqlCompletion.functionCase,
               snippets: editorSettings.sqlCompletion.snippets,
             }).map((item) => {
               // Use the same completed-keyword replacement semantics as a
@@ -1619,6 +1622,7 @@ export function QueryEditor({
                     driver: capabilities.driver,
                     supportsSqlQuery: capabilities.supportsSqlQuery,
                     keywordCase: editorSettings.sqlCompletion.keywordCase,
+                    functionCase: editorSettings.sqlCompletion.functionCase,
                     snippets: editorSettings.sqlCompletion.snippets,
                   }),
                 );
@@ -1909,6 +1913,7 @@ export function QueryEditor({
                 driver: capabilities.driver,
                 supportsSqlQuery: capabilities.supportsSqlQuery,
                 keywordCase: editorSettings.sqlCompletion.keywordCase,
+                functionCase: editorSettings.sqlCompletion.functionCase,
                 snippets: editorSettings.sqlCompletion.snippets,
               })
                 .filter((item) => item.kind === CompletionItemKind.Snippet)

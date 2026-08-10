@@ -59,6 +59,7 @@ export type LspFileMappings = {
 
 export type LspCompletionPreferences = {
   keywordCase: "upper" | "lower" | "preserve";
+  functionCase: "upper" | "lower" | "preserve";
   tableAlias: "none" | "initials";
 };
 
@@ -264,6 +265,7 @@ export function createLspConfigKey(input: LspConfigKeyInput) {
     lspDialect: input.lspDialect,
     completionPreferences: input.completionPreferences || {
       keywordCase: "upper",
+      functionCase: "preserve",
       tableAlias: "none",
     },
     formattingPreferences: input.formattingPreferences || {

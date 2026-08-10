@@ -1226,3 +1226,21 @@ explicit deferred validation task rather than an implicit release check.
 - Phase 112 adds pure frontend coverage and a production build only. No database
   was opened; real Monaco, AI-provider timing and product/package interaction
   remain in this consolidated queue.
+
+## Independent SQL function casing across all dialect routes
+
+- In real Monaco/WebView sessions, exercise `preserve`, `upper` and `lower`
+  function casing independently from keyword casing. Cover built-in scalar and
+  aggregate functions, portable window blocks, system values, ClickHouse table
+  functions, and Oracle `TABLE`/`THE` versus `XMLTABLE`/`JSON_TABLE` semantics.
+- Repeat the matrix for Oracle/OceanBase Oracle, PostgreSQL, MySQL/MariaDB,
+  SQLite, ClickHouse, Hive, Db2, Dameng and representative generic JDBC
+  profiles. Confirm a settings change invalidates popup and inline providers
+  once, without stale candidates or duplicate registration.
+- Synchronize mixed-case live routines and accept user-edited command blocks.
+  Confirm metadata/user text keeps its original spelling while only generated
+  catalog candidates follow `functionCase`; verify Tab, undo, IME, Vim,
+  cancellation and LSP restart behavior.
+- Phase 114 adds settings/config contracts, source and packaged LSP coverage,
+  and frontend logic coverage only. No database was opened; server-version
+  acceptance and real Monaco/product-package interaction remain deferred.

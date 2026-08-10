@@ -1426,6 +1426,26 @@ function EditorSettings({
           <option value="preserve">Dialect default</option>
         </select>
       </SettingRow>
+      <SettingRow label="Function case:">
+        <select
+          className={selectClass}
+          value={editor.sqlCompletion.functionCase}
+          onChange={(event) =>
+            updateEditor({
+              sqlCompletion: {
+                ...editor.sqlCompletion,
+                functionCase: event.target
+                  .value as AppSettings["editor"]["sqlCompletion"]["functionCase"],
+              },
+            })
+          }
+          title="Applies to generated built-in and window functions; database object names keep their original spelling"
+        >
+          <option value="preserve">Dialect default</option>
+          <option value="upper">UPPER CASE</option>
+          <option value="lower">lower case</option>
+        </select>
+      </SettingRow>
       <SettingRow label="Table alias:">
         <select
           className={selectClass}

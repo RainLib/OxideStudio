@@ -156,10 +156,17 @@ export function LspConnectionSyncer() {
   const keywordCase = useSettingsStore(
     (state) => state.settings.editor.sqlCompletion.keywordCase
   );
+  const functionCase = useSettingsStore(
+    (state) => state.settings.editor.sqlCompletion.functionCase
+  );
   const tableAlias = useSettingsStore(
     (state) => state.settings.editor.sqlCompletion.tableAlias
   );
-  const completionPreferences = { keywordCase, tableAlias } as const;
+  const completionPreferences = {
+    keywordCase,
+    functionCase,
+    tableAlias,
+  } as const;
   const logicalOperatorNewline = useSettingsStore(
     (state) => state.settings.editor.sqlFormatting.logicalOperatorNewline
   );
@@ -1199,6 +1206,7 @@ export function LspConnectionSyncer() {
     metadataVersion,
     supportsMetadataSync,
     keywordCase,
+    functionCase,
     tableAlias,
     logicalOperatorNewline,
     fromClauseLayout,

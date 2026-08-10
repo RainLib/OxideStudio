@@ -13,6 +13,7 @@ export type SqlCommandSnippetOptions = {
   driver?: string | null;
   supportsSqlQuery?: boolean;
   keywordCase?: "upper" | "lower" | "preserve";
+  functionCase?: "upper" | "lower" | "preserve";
   snippets?: readonly SqlSnippetSetting[];
 };
 
@@ -75,9 +76,15 @@ const SQL_SNIPPET_KEYWORDS = [
   "USING",
   "SHOW TABLES",
   "SHOW META",
-  "MATCH",
   "FACET",
   "CALL",
+] as const;
+
+const SQL_SNIPPET_FUNCTIONS = [
+  "SYSDATE",
+  "CURRENT_DATE",
+  "CURRENT_TIMESTAMP",
+  "MATCH",
 ] as const;
 
 function applySnippetKeywordCase(
@@ -90,6 +97,24 @@ function applySnippetKeywordCase(
       sql.replace(
         new RegExp(`\\b${keyword.replace(/ /g, "\\s+")}\\b`, "gu"),
         (match) => match.toLowerCase(),
+      ),
+    body,
+  );
+}
+
+function applySnippetFunctionCase(
+  body: string,
+  functionCase: SqlCommandSnippetOptions["functionCase"],
+) {
+  if (functionCase === undefined || functionCase === "preserve") return body;
+  return SQL_SNIPPET_FUNCTIONS.reduce(
+    (sql, functionName) =>
+      sql.replace(
+        new RegExp(`\\b${functionName}\\b(?=\\s*\\()`, "giu"),
+        (match) =>
+          functionCase === "lower"
+            ? match.toLowerCase()
+            : match.toUpperCase(),
       ),
     body,
   );
@@ -479,9 +504,12 @@ export function sqlCommandSnippetCompletions(
           prefix,
         ) || `${snippet.prefix} ${snippet.label}`,
       insertText: isUnmodifiedBuiltinSnippet(snippet)
-        ? applySnippetKeywordCase(
-            resolvedSnippetBody(snippet, driver),
-            options.keywordCase,
+        ? applySnippetFunctionCase(
+            applySnippetKeywordCase(
+              resolvedSnippetBody(snippet, driver),
+              options.keywordCase,
+            ),
+            options.functionCase,
           )
         : snippet.body,
       insertTextFormat: 2,

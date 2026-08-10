@@ -2723,6 +2723,100 @@ async fn bundled_sql_lsp_exposes_portable_window_function_blocks() -> Result<()>
 }
 
 #[tokio::test]
+async fn bundled_sql_lsp_applies_function_case_independently_from_keywords() -> Result<()> {
+    let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
+        return Ok(());
+    };
+    lsp.initialize().await?;
+
+    let window_uri = "file:///oxide/lower-function-case.postgres.sql";
+    let oracle_function_uri = "file:///oxide/lower-function-case.oracle.sql";
+    let oracle_keyword_uri = "file:///oxide/upper-keyword-case.oracle.sql";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "completionPreferences": {
+                    "keywordCase": "upper",
+                    "functionCase": "lower",
+                    "tableAlias": "none"
+                },
+                "fileDialects": {
+                    (window_uri): "postgres",
+                    (oracle_function_uri): "oracle",
+                    (oracle_keyword_uri): "oracle"
+                }
+            }
+        }),
+    )
+    .await?;
+
+    let window_sql = "SELECT row_";
+    let oracle_function_sql = "SELECT * FROM json_";
+    let oracle_keyword_sql = "SELECT * FROM ta";
+    open_document(&mut lsp, window_uri, "sql", window_sql).await?;
+    open_document(&mut lsp, oracle_function_uri, "sql", oracle_function_sql).await?;
+    open_document(&mut lsp, oracle_keyword_uri, "sql", oracle_keyword_sql).await?;
+
+    let window = completion_items_at(
+        &mut lsp,
+        window_uri,
+        0,
+        window_sql.encode_utf16().count() as u32,
+    )
+    .await?;
+    let oracle_function = completion_items_at(
+        &mut lsp,
+        oracle_function_uri,
+        0,
+        oracle_function_sql.encode_utf16().count() as u32,
+    )
+    .await?;
+    let oracle_keyword = completion_items_at(
+        &mut lsp,
+        oracle_keyword_uri,
+        0,
+        oracle_keyword_sql.encode_utf16().count() as u32,
+    )
+    .await?;
+    let find = |completion: &Value, label: &str| -> Option<Value> {
+        completion
+            .as_array()
+            .or_else(|| completion.get("items").and_then(Value::as_array))
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("label").and_then(Value::as_str) == Some(label))
+            })
+            .cloned()
+    };
+
+    assert_eq!(
+        find(&window, "row_number")
+            .as_ref()
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("row_number() OVER (PARTITION BY ${1:column} ORDER BY ${2:column})")
+    );
+    assert_eq!(
+        find(&oracle_function, "json_table")
+            .as_ref()
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("json_table(${1:expr}, ${2:path})")
+    );
+    assert_eq!(
+        find(&oracle_keyword, "TABLE")
+            .as_ref()
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("TABLE(${1:function_call})")
+    );
+
+    lsp.shutdown().await
+}
+
+#[tokio::test]
 async fn bundled_sql_lsp_exposes_oracle_table_sources_and_wrapped_routines() -> Result<()> {
     let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
         return Ok(());

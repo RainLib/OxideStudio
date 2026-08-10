@@ -64,6 +64,23 @@ describe("sqlCommandSnippetCompletions", () => {
     );
   });
 
+  it("cases generated product functions independently from SQL keywords", () => {
+    expect(
+      sqlCommandSnippetCompletions("dmdt", {
+        driver: "dameng",
+        keywordCase: "upper",
+        functionCase: "lower",
+      })[0]?.insertText,
+    ).toBe("SELECT sysdate(), current_date(), current_timestamp();");
+    expect(
+      sqlCommandSnippetCompletions("match", {
+        driver: "manticoresearch",
+        keywordCase: "lower",
+        functionCase: "upper",
+      })[0]?.insertText,
+    ).toBe("MATCH('${1:query}')");
+  });
+
   it("does not expose SQL templates for non-SQL capabilities", () => {
     expect(
       sqlCommandSnippetCompletions("sel", { supportsSqlQuery: false }),

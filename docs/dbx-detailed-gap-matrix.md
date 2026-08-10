@@ -178,3 +178,14 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 6. 连接凭据、SQL 正文和结果值不进入 driver 日志、遥测或迁移报告。
 
 因此，73 个 catalog candidate 只有在逐项产生上述证据后，才能转换为“70+ 数据库可用”。
+
+## Phase 114 增量：函数大小写与全方言补全偏好
+
+| 差距 | DBX 实现位置 | OxideStudio 对齐位置 | 状态 |
+| --- | --- | --- | --- |
+| 关键字和函数名只能共用一种大小写语义 | `apps/desktop/src/lib/sql/sqlCompletion.ts:1314,1376,1440,3177-3201,4271-4300`；配置默认值在 `apps/desktop/src/lib/sql/sqlFormatterConfig.ts:43,70` | `src/lib/appSettings.ts`、`src/components/settings/SettingsDialog.tsx`、`src/components/lsp/LspConnectionSyncer.tsx`、`src/services/lsp/syncPlan.ts` | 逻辑已对齐：新增独立 `functionCase = preserve/upper/lower`，旧配置默认 preserve |
+| 所有 SQL compatibility route 需要共享偏好，同时不得改写 Elasticsearch/MongoDB/Redis 等非 SQL DSL | DBX `SqlCompletionSource` 仅为 SQL editor 传入 `keywordCase/functionCase` | `vendor/sql-lsp/src/server.rs:completion_candidates_at` | 已对齐：所有注册 SQL baseline 进入统一 preference pass；非 SQL dialect 保持自己的命令/字段拼写 |
+| 内置函数、窗口函数、system value、Oracle/ClickHouse 表函数大小写不一致 | DBX `applySqlFunctionCase`、`applyGeneratedSqlTemplateKeywordCase`、`buildOracleTableFunctionItems`、`buildFunctionSnippetItems` | `vendor/sql-lsp/src/server.rs:apply_completion_preferences`；`src/features/query-editor/model/sqlCommandSnippets.ts` | 已对齐；实时数据库 routine metadata 和用户修改的命令模板保持原始拼写 |
+
+本阶段只执行纯逻辑测试和构建，不连接数据库。真实 Oracle/OceanBase Oracle、ClickHouse、
+Dameng、Db2 及兼容产品的 Monaco 接受行为与 server-version 语法仍按统一后置清单验收。

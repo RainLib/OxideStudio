@@ -272,6 +272,20 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
                                                         Agent 边界
 ```
 
+## Phase 114：函数大小写迁移映射
+
+- DBX `apps/desktop/src/lib/sql/sqlFormatterConfig.ts:functionCase` →
+  Oxide `src/lib/appSettings.ts:SqlCompletionSettings.functionCase` 与 Settings 的 SQL completion 行。
+- DBX `QueryEditor.vue` 向 `SqlCompletionSource` 传递 `functionCase` →
+  Oxide `LspConnectionSyncer.tsx` → `configDispatch.ts` → bundled LSP workspace configuration。
+- DBX `applySqlFunctionCase` / `applyGeneratedSqlTemplateKeywordCase` →
+  Oxide `vendor/sql-lsp/src/server.rs:apply_completion_preferences`。该 pass 同时服务 popup 与
+  inline candidates，不建立第二套补全事实源。
+- DBX `buildOracleTableFunctionItems` / `buildFunctionSnippetItems` →
+  Oxide bundled/window/ClickHouse/Oracle generated items；live routine metadata 不改写。
+- Oxide 本地 product command blocks 在 `sqlCommandSnippets.ts` 使用同一 `functionCase`，但只转换
+  未经用户修改的内置模板，以保留用户配置的 SQL 正文。
+
 ## 9. 文档维护规则
 
 当某项能力状态发生变化时：

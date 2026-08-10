@@ -43,6 +43,7 @@ function textModel(text: string) {
 const sqlCompletion = {
   triggerMode: "positional" as const,
   keywordCase: "upper" as const,
+  functionCase: "preserve" as const,
   tableAlias: "none" as const,
   rankByUsage: true,
   appendSpace: true,

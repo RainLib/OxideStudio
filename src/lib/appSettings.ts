@@ -25,6 +25,7 @@ export type InlineCompletionSettings = {
 export type SqlCompletionSettings = {
   triggerMode: "manual" | "require-prefix" | "positional";
   keywordCase: "upper" | "lower" | "preserve";
+  functionCase: "upper" | "lower" | "preserve";
   tableAlias: "none" | "initials";
   rankByUsage: boolean;
   appendSpace: boolean;
@@ -270,6 +271,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     sqlCompletion: {
       triggerMode: "positional",
       keywordCase: "upper",
+      functionCase: "preserve",
       tableAlias: "none",
       rankByUsage: true,
       appendSpace: true,
@@ -545,6 +547,12 @@ export function normalizeAppSettings(value: unknown): AppSettings {
           ["editor", "sqlCompletion", "keywordCase"],
           ["upper", "lower", "preserve"],
           defaults.editor.sqlCompletion.keywordCase,
+        ),
+        functionCase: enumAt(
+          raw,
+          ["editor", "sqlCompletion", "functionCase"],
+          ["upper", "lower", "preserve"],
+          defaults.editor.sqlCompletion.functionCase,
         ),
         tableAlias: enumAt(
           raw,
