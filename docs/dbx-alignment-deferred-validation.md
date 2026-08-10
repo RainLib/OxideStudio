@@ -283,6 +283,11 @@ explicit deferred validation task rather than an implicit release check.
   select the correct parameter group. Profile the 64 KiB scan and 50-overload
   limits on large consoles; crossing either bound must fail quietly without
   blocking completion.
+- Include external LSP routines whose parameter lists contain quoted commas,
+  escaped quoted identifiers, string defaults with commas, numeric array
+  bounds, nested decimal types and STRUCT/ROW generic types. Bare-name
+  completion must create one Monaco field per real parameter and must leave
+  oversized or malformed signatures untouched.
 - In Monaco, accept zero-, fixed-, optional-, variadic- and ClickHouse
   multi-group built-in function candidates with each keyword/function casing
   preference. Confirm tab stops, closing parentheses, retriggered signature

@@ -21,6 +21,21 @@ const COMPLETION_SPACE_BLOCKING_CHARACTERS = new Set([
   "'",
   '"',
 ]);
+const MAX_COMPLETION_SIGNATURE_LENGTH = 16 * 1024;
+const MAX_COMPLETION_SIGNATURE_PARAMETERS = 64;
+const COMPLETION_GENERIC_TYPE_NAMES = new Set([
+  "array",
+  "list",
+  "map",
+  "row",
+  "struct",
+  "tuple",
+]);
+
+function opensCompletionGenericType(value: string, index: number) {
+  const prefix = value.slice(0, index).match(/([A-Za-z_][A-Za-z0-9_$]*)\s*$/u)?.[1];
+  return Boolean(prefix && COMPLETION_GENERIC_TYPE_NAMES.has(prefix.toLowerCase()));
+}
 
 export function sqlCompletionItemType(item: CompletionItem): SqlCompletionItemType {
   switch (item.kind) {
@@ -107,12 +122,28 @@ export function shouldChainSqlCompletionAfterAccept(
 }
 
 function signatureParameters(signature: string) {
+  if (signature.length > MAX_COMPLETION_SIGNATURE_LENGTH) return null;
   const open = signature.indexOf("(");
   if (open < 0) return null;
   let depth = 0;
   let close = -1;
+  let quote = "";
   for (let index = open; index < signature.length; index += 1) {
-    const character = signature[index];
+    const character = signature[index] || "";
+    if (quote) {
+      if (character === quote) {
+        if (signature[index + 1] === quote) {
+          index += 1;
+        } else if (signature[index - 1] !== "\\") {
+          quote = "";
+        }
+      }
+      continue;
+    }
+    if (["'", '"', "`"].includes(character)) {
+      quote = character;
+      continue;
+    }
     if (character === "(") depth += 1;
     if (character === ")") {
       depth -= 1;
@@ -129,16 +160,48 @@ function signatureParameters(signature: string) {
   const parameters: string[] = [];
   let start = 0;
   depth = 0;
+  let squareDepth = 0;
+  let angleDepth = 0;
+  quote = "";
   for (let index = 0; index <= source.length; index += 1) {
-    const character = source[index];
+    const character = source[index] || "";
+    if (quote) {
+      if (character === quote) {
+        if (source[index + 1] === quote) {
+          index += 1;
+        } else if (source[index - 1] !== "\\") {
+          quote = "";
+        }
+      }
+      continue;
+    }
+    if (["'", '"', "`"].includes(character)) {
+      quote = character;
+      continue;
+    }
     if (character === "(") depth += 1;
     if (character === ")") depth = Math.max(0, depth - 1);
-    if ((character === "," && depth === 0) || index === source.length) {
+    if (character === "[") squareDepth += 1;
+    if (character === "]") squareDepth = Math.max(0, squareDepth - 1);
+    if (
+      character === "<"
+      && (angleDepth > 0 || opensCompletionGenericType(source, index))
+    ) angleDepth += 1;
+    if (character === ">") angleDepth = Math.max(0, angleDepth - 1);
+    if (
+      (character === ","
+        && depth === 0
+        && squareDepth === 0
+        && angleDepth === 0)
+      || index === source.length
+    ) {
       const parameter = source.slice(start, index).trim();
       if (parameter) parameters.push(parameter);
+      if (parameters.length > MAX_COMPLETION_SIGNATURE_PARAMETERS) return null;
       start = index + 1;
     }
   }
+  if (quote || depth > 0 || squareDepth > 0 || angleDepth > 0) return null;
   return parameters;
 }
 
@@ -147,8 +210,13 @@ function snippetParameterLabel(parameter: string, index: number) {
     .replace(/^\s*(?:INOUT|IN|OUT|VARIADIC)\s+/iu, "")
     .replace(/\s*=.*$/u, "")
     .trim();
+  const quotedName = withoutMode.match(/^"((?:""|[^"])*)"\s*/u)?.[1]
+    ?.replace(/""/gu, '"')
+    || withoutMode.match(/^`((?:``|[^`])*)`\s*/u)?.[1]?.replace(/``/gu, "`")
+    || withoutMode.match(/^\[((?:\]\]|[^\]])*)\]\s*/u)?.[1]?.replace(/\]\]/gu, "]");
   const named = withoutMode.match(/^([A-Za-z_][A-Za-z0-9_$]*)\s*(?::|\s)/u)?.[1];
-  return (named || withoutMode || `arg${index + 1}`)
+  return (quotedName || named || withoutMode || `arg${index + 1}`)
+    .replace(/[\r\n\t]+/gu, " ")
     .replace(/[}$\\]/gu, "")
     .slice(0, 48);
 }

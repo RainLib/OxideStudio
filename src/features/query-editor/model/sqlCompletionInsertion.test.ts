@@ -33,6 +33,40 @@ describe("sqlFunctionCompletionInsertion", () => {
     );
   });
 
+  it("keeps quoted, array-bound, struct and default commas inside parameters", () => {
+    const item: CompletionItem = {
+      label: "complex_routine",
+      kind: CompletionItemKind.Function,
+      detail:
+        'complex_routine("last,name" text, pattern text = \'a,b\', bounds numeric[10,2], payload struct<left int, right text>, threshold boolean = x < 1)',
+    };
+
+    expect(sqlFunctionCompletionInsertion(item, "complex_routine").insertText).toBe(
+      "complex_routine(${1:last,name}, ${2:pattern}, ${3:bounds}, ${4:payload}, ${5:threshold})",
+    );
+  });
+
+  it("supports escaped quoted parameter names and rejects oversized signatures", () => {
+    const quoted: CompletionItem = {
+      label: "quoted_routine",
+      kind: CompletionItemKind.Function,
+      detail: 'quoted_routine("display""name" text, `group``name` text, [order]]name] int)',
+    };
+    expect(sqlFunctionCompletionInsertion(quoted, "quoted_routine").insertText).toBe(
+      'quoted_routine(${1:display"name}, ${2:group`name}, ${3:order]name})',
+    );
+
+    const oversized: CompletionItem = {
+      label: "unsafe_routine",
+      kind: CompletionItemKind.Function,
+      detail: `unsafe_routine(${"x".repeat(16 * 1024)})`,
+    };
+    expect(sqlFunctionCompletionInsertion(oversized, "unsafe_routine")).toEqual({
+      insertText: "unsafe_routine",
+      insertAsSnippet: false,
+    });
+  });
+
   it("does not override authoritative server edits or an existing parenthesis", () => {
     const item: CompletionItem = {
       label: "count",
