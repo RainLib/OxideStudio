@@ -25,6 +25,10 @@ export {
 } from "./model/editorDocumentIdentity";
 export { buildQueryEditorOptions } from "./model/editorOptions";
 export {
+  insertLineBelow,
+  type EditorLineActionTarget,
+} from "./model/editorLineActions";
+export {
   completionFilterTextForQuery,
   completionMatchScore,
   completionMatches,

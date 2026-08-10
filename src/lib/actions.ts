@@ -12,6 +12,7 @@ import {
 } from "@/store/useEditorGroupStore";
 import {
   APP_EVENT_FORMAT_SQL,
+  APP_EVENT_INSERT_LINE_BELOW,
   APP_EVENT_INLINE_COMPLETION_ACCEPT,
   APP_EVENT_INLINE_COMPLETION_ACCEPT_NEXT_WORD,
   APP_EVENT_INLINE_COMPLETION_HIDE,
@@ -39,6 +40,7 @@ export type WorkbenchActionId =
   | "query.run"
   | "query.runCurrentStatement"
   | "query.format"
+  | "editor.insertLineBelow"
   | "editor.inlineCompletion.trigger"
   | "editor.inlineCompletion.accept"
   | "editor.inlineCompletion.acceptNextWord"
@@ -184,6 +186,14 @@ export function workbenchActions(): WorkbenchAction[] {
       group: "Query",
       run: () => {
         window.dispatchEvent(new CustomEvent(APP_EVENT_FORMAT_SQL));
+      },
+    },
+    {
+      id: "editor.insertLineBelow",
+      title: "Insert Line Below",
+      group: "Editor",
+      run: () => {
+        window.dispatchEvent(new CustomEvent(APP_EVENT_INSERT_LINE_BELOW));
       },
     },
     {

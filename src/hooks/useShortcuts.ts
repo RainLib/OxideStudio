@@ -28,12 +28,19 @@ export function useShortcuts() {
             "query.run",
             "query.runCurrentStatement",
             "query.format",
+            "editor.insertLineBelow",
             "file.save",
             "editor.inlineCompletion.trigger",
             "editor.inlineCompletion.accept",
             "editor.inlineCompletion.acceptNextWord",
             "editor.inlineCompletion.hide",
           ].includes(actionId)
+        ) {
+          return;
+        }
+        if (
+          actionId === "editor.insertLineBelow" &&
+          !target?.closest(".monaco-editor")
         ) {
           return;
         }

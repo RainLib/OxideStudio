@@ -36,6 +36,7 @@ describe("app settings workbench layout", () => {
       "workbench.openProjectFiles": ["mod+4"],
       "workbench.toggleCommit": ["mod+5"],
       "workbench.toggleVersionControl": ["mod+6"],
+      "editor.insertLineBelow": ["shift+enter"],
     });
   });
 

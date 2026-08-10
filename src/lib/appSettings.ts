@@ -241,6 +241,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     "query.run": ["mod+enter"],
     "query.runCurrentStatement": ["mod+shift+enter"],
     "query.format": ["mod+l"],
+    "editor.insertLineBelow": ["shift+enter"],
     "editor.inlineCompletion.trigger": ["alt+\\"],
     "editor.inlineCompletion.accept": ["tab"],
     "editor.inlineCompletion.acceptNextWord": ["mod+arrowright"],

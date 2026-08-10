@@ -52,6 +52,7 @@ import {
   APP_EVENT_RUN_QUERY,
   APP_EVENT_RUN_CURRENT,
   APP_EVENT_FORMAT_SQL,
+  APP_EVENT_INSERT_LINE_BELOW,
   APP_EVENT_INLINE_COMPLETION_ACCEPT,
   APP_EVENT_INLINE_COMPLETION_ACCEPT_NEXT_WORD,
   APP_EVENT_INLINE_COMPLETION_HIDE,
@@ -159,6 +160,7 @@ import {
   mergeCompletionFallbackSuggestions,
   parseElasticsearchConsoleServerVersion,
   quoteSqlIdentifierSelection,
+  insertLineBelow,
   recordSqlCompletionTelemetry,
   shouldChainSqlCompletionAfterAccept,
   sqlInListFromClipboard,
@@ -2352,15 +2354,25 @@ export function QueryEditor({
     const onRun = () => runAllActionRef.current();
     const onRunCurrent = () => void runCurrentActionRef.current();
     const onFormat = () => formatActionRef.current();
+    const onInsertLineBelow = () => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      insertLineBelow(editor);
+    };
 
     window.addEventListener(APP_EVENT_RUN_QUERY, onRun);
     window.addEventListener(APP_EVENT_RUN_CURRENT, onRunCurrent);
     window.addEventListener(APP_EVENT_FORMAT_SQL, onFormat);
+    window.addEventListener(APP_EVENT_INSERT_LINE_BELOW, onInsertLineBelow);
 
     return () => {
       window.removeEventListener(APP_EVENT_RUN_QUERY, onRun);
       window.removeEventListener(APP_EVENT_RUN_CURRENT, onRunCurrent);
       window.removeEventListener(APP_EVENT_FORMAT_SQL, onFormat);
+      window.removeEventListener(
+        APP_EVENT_INSERT_LINE_BELOW,
+        onInsertLineBelow,
+      );
     };
   }, [isActivePane]);
 
