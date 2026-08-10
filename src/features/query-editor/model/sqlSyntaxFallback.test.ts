@@ -24,4 +24,11 @@ describe("SQL syntax fallback statement starters", () => {
     );
     expect(labels("postgres")).not.toContain("FACET");
   });
+
+  it("recommends ClickHouse operational starters only for ClickHouse", () => {
+    expect(labels("clickhouse")).toEqual(
+      expect.arrayContaining(["OPTIMIZE TABLE", "SYSTEM", "KILL QUERY"]),
+    );
+    expect(labels("postgres")).not.toContain("OPTIMIZE TABLE");
+  });
 });

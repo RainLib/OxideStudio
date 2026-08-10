@@ -28,6 +28,17 @@ unsupported built-ins and old sidecars return an empty list, while new capable
 packages can display their object descriptors without another driver-name
 branch.
 
+## Editor and data-path comparison
+
+DBChart's current head has no SQL editor/LSP change: it provides DBML Monaco
+completion only. Its recent CSV-related fix (`3442936`) repairs quotes in a
+copied metadata JSON payload. OxideStudio's table-data path already uses the
+Rust `csv` parser, bounded preview and preflight, column mapping, streaming
+transaction import, and CSV escaping tests, so there is no direct import
+feature to port. The remaining editor improvement implemented in this phase
+adds ClickHouse-only mutation/maintenance snippets and statement starters;
+they are deliberately unavailable for generic SQL and other products.
+
 ## Implementation boundary
 
 Do not mark every renderer type node as expandable. The next phase adds a

@@ -46,6 +46,7 @@ const MANTICORE_STATEMENT_STARTERS = [
   "FACET",
   "CALL",
 ] as const;
+const CLICKHOUSE_STATEMENT_STARTERS = ["OPTIMIZE TABLE", "SYSTEM", "KILL QUERY"] as const;
 
 const SELECT_CONTINUATIONS = [
   "DISTINCT",
@@ -140,7 +141,9 @@ function statementStartersForProduct(options: SqlCommandSnippetOptions) {
             ? SQLSERVER_STATEMENT_STARTERS
             : driver === "manticoresearch"
               ? MANTICORE_STATEMENT_STARTERS
-              : [];
+              : driver === "clickhouse"
+                ? CLICKHOUSE_STATEMENT_STARTERS
+                : [];
   return [...new Set([...STATEMENT_STARTERS, ...productStarters])];
 }
 

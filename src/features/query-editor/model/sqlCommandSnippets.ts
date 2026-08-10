@@ -400,6 +400,30 @@ export const DAMENG_SQL_COMMAND_SNIPPETS: readonly SqlSnippetSetting[] = [
 ];
 
 /**
+ * ClickHouse mutations and part merges have no portable SQL equivalent.
+ * Keep them product-scoped so a short editor completion never turns into an
+ * invalid `DELETE FROM` or maintenance command on a traditional RDBMS.
+ */
+export const CLICKHOUSE_SQL_COMMAND_SNIPPETS: readonly SqlSnippetSetting[] = [
+  {
+    id: "builtin-clickhouse-delete",
+    prefix: "chdel",
+    label: "delete rows (ClickHouse mutation)",
+    detail: "ClickHouse ALTER TABLE DELETE mutation",
+    body: "ALTER TABLE ${1:table}\nDELETE WHERE ${2:condition};",
+    enabled: true,
+  },
+  {
+    id: "builtin-clickhouse-optimize",
+    prefix: "optimize",
+    label: "optimize table",
+    detail: "Merge ClickHouse table parts",
+    body: "OPTIMIZE TABLE ${1:table} FINAL;",
+    enabled: true,
+  },
+];
+
+/**
  * Conflict-aware INSERT syntax varies materially between database products.
  * Keep these blocks product-scoped so a quick command completion never
  * inserts an invalid PostgreSQL clause into MySQL (or vice versa).
@@ -443,6 +467,7 @@ const BUILTIN_SQL_COMMAND_SNIPPETS = [
   ...ORACLE_SQL_COMMAND_SNIPPETS,
   ...DB2_SQL_COMMAND_SNIPPETS,
   ...DAMENG_SQL_COMMAND_SNIPPETS,
+  ...CLICKHOUSE_SQL_COMMAND_SNIPPETS,
   ...POSTGRES_UPSERT_SQL_COMMAND_SNIPPETS,
   ...MYSQL_UPSERT_SQL_COMMAND_SNIPPETS,
   ...SQLSERVER_MERGE_SQL_COMMAND_SNIPPETS,
@@ -490,6 +515,7 @@ function commandSnippetsForProduct(driver: string) {
   if (driver === "sqlserver") return SQLSERVER_MERGE_SQL_COMMAND_SNIPPETS;
   if (driver === "db2") return DB2_SQL_COMMAND_SNIPPETS;
   if (driver === "dameng") return DAMENG_SQL_COMMAND_SNIPPETS;
+  if (driver === "clickhouse") return CLICKHOUSE_SQL_COMMAND_SNIPPETS;
   return [];
 }
 

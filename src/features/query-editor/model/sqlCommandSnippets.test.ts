@@ -191,4 +191,22 @@ describe("sqlCommandSnippetCompletions", () => {
       sqlCommandSnippetCompletions("dmdt", { driver: "db2" }),
     ).toEqual([]);
   });
+
+  it("keeps ClickHouse maintenance and mutation blocks product-scoped", () => {
+    expect(
+      sqlCommandSnippetCompletions("chdel", { driver: "clickhouse" })[0],
+    ).toMatchObject({
+      label: "delete rows (ClickHouse mutation)",
+      insertText: "ALTER TABLE ${1:table}\nDELETE WHERE ${2:condition};",
+    });
+    expect(
+      sqlCommandSnippetCompletions("optimize", { driver: "clickhouse" })[0],
+    ).toMatchObject({
+      label: "optimize table",
+      insertText: "OPTIMIZE TABLE ${1:table} FINAL;",
+    });
+    expect(
+      sqlCommandSnippetCompletions("chdel", { driver: "postgres" }),
+    ).toEqual([]);
+  });
 });
