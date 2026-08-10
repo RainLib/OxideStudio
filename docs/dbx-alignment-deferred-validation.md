@@ -615,12 +615,15 @@ explicit deferred validation task rather than an implicit release check.
 
 ## Result and table export formats
 
-- Verify query-result CSV, UTF-8 BOM CSV, JSON, JSONL, TSV and SQL template
+- Verify query-result CSV, UTF-8 BOM CSV, JSON, JSONL, Markdown, TSV and SQL template
   downloads with duplicate column names, quotes/newlines, NULL, booleans,
   finite/non-finite numbers, nested JSON, binary values and empty results.
-- Verify table-mode CSV/CSV BOM/JSON/JSONL/TSV/SQL/XLSX still use the Rust streaming task,
+- Verify table-mode CSV/CSV BOM/JSON/JSONL/Markdown/TSV/SQL/XLSX still use the Rust streaming task,
   progress/cancellation/report path after the toolbar entry is consolidated.
   Large tables must not be materialized in the webview.
+- For both Markdown paths, verify pipes and backslashes remain literal table
+  content, CR/LF becomes `<br>`, NULL remains distinguishable from an empty
+  string, and a cancelled native export never publishes its `.partial` file.
 - XLSX logic is implemented but still needs its large-file, cancellation,
   NULL/date/binary/nested-JSON, 1,048,576-row boundary, Excel/LibreOffice and
   atomic-finalization validation matrix. The bounded backpressure pipeline has

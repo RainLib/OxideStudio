@@ -48,9 +48,9 @@
               "lspServerDialect": { "enum": ["postgres", "mysql", "sqlite", "duckdb", "hive", "clickhouse"] },
               "tableExportFormats": {
                 "type": "array",
-                "maxItems": 8,
+                "maxItems": 9,
                 "uniqueItems": true,
-                "items": { "enum": ["csv", "json", "jsonl", "sql", "tsv", "xlsx", "parquet", "arrow"] },
+                "items": { "enum": ["csv", "json", "jsonl", "markdown", "sql", "tsv", "xlsx", "parquet", "arrow"] },
                 "description": "Discovery copy of the package export declaration; the running application still intersects it with locally implemented encoders."
               },
               "supportsTableDataTransfer": {

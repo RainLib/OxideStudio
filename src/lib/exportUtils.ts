@@ -5,6 +5,7 @@ export type QueryResultExportFormat =
   | "csvBom"
   | "json"
   | "jsonl"
+  | "markdown"
   | "tsv"
   | "sql";
 
@@ -94,6 +95,14 @@ export function serializeQueryResultToJson(result: QueryResult) {
   return JSON.stringify(queryResultRowsToObjects(result), null, 2);
 }
 
+function escapeMarkdownValue(value: unknown) {
+  const text = value == null ? "NULL" : stringifyExportValue(value);
+  return text
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\|")
+    .replace(/\r\n|\r|\n/g, "<br>");
+}
+
 export function serializeQueryResultToJsonLines(result: QueryResult) {
   return queryResultRowsToObjects(result)
     .map((row) => JSON.stringify(row))
@@ -107,6 +116,25 @@ export function serializeQueryResultToTsv(result: QueryResult) {
     result.columns.map((_, index) => index),
     true,
   );
+}
+
+export function serializeQueryResultToMarkdown(result: QueryResult) {
+  if (result.columns.length === 0) return "";
+  const header = result.columns
+    .map((_, index) => escapeMarkdownValue(columnLabel(result, index)))
+    .join(" | ");
+  const separator = result.columns.map(() => "---").join(" | ");
+  const rows = result.rows.map((_, rowIndex) => {
+    const cells = result.columns
+      .map((__, columnIndex) =>
+        escapeMarkdownValue(
+          queryResultCellValue(result, rowIndex, columnIndex),
+        ),
+      )
+      .join(" | ");
+    return `| ${cells} |`;
+  });
+  return [`| ${header} |`, `| ${separator} |`, ...rows].join("\n");
 }
 
 function quoteSqlExportIdentifier(identifier: string) {
@@ -259,6 +287,12 @@ export function exportQueryResult(
         serializeQueryResultToJsonLines(result),
         filename,
         "application/x-ndjson;charset=utf-8",
+      );
+    case "markdown":
+      return downloadText(
+        serializeQueryResultToMarkdown(result),
+        filename,
+        "text/markdown;charset=utf-8",
       );
     case "tsv":
       return downloadText(

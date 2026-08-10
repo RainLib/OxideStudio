@@ -67,6 +67,7 @@ interface TableDataToolbarProps {
   onExportCsvBom: () => void;
   onExportJson: () => void;
   onExportJsonl: () => void;
+  onExportMarkdown: () => void;
   onExportSql: (batchSize: number) => void;
   onExportTsv: () => void;
   onExportXlsx: () => void;
@@ -108,6 +109,7 @@ export function TableDataToolbar({
   onExportCsvBom,
   onExportJson,
   onExportJsonl,
+  onExportMarkdown,
   onExportSql,
   onExportTsv,
   onExportXlsx,
@@ -328,6 +330,12 @@ export function TableDataToolbar({
               <DropdownMenuItem className="wb-menu-item" onSelect={onExportJsonl}>
                 <FileJson className="mr-2 h-3.5 w-3.5" />
                 Export JSON Lines
+              </DropdownMenuItem>
+            )}
+            {supportsExport("markdown") && (
+              <DropdownMenuItem className="wb-menu-item" onSelect={onExportMarkdown}>
+                <FileCode2 className="mr-2 h-3.5 w-3.5" />
+                Export Markdown table (.md)
               </DropdownMenuItem>
             )}
             {supportsExport("tsv") && (

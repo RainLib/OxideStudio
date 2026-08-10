@@ -149,7 +149,7 @@ function rangeIndexes(start: number, length: number) {
 
 function exportFilename(
   title: string | undefined,
-  extension: "csv" | "json" | "jsonl" | "tsv" | "sql",
+  extension: "csv" | "json" | "jsonl" | "md" | "tsv" | "sql",
 ) {
   const safeTitle = (title || "query-result")
     .trim()
@@ -1137,7 +1137,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     const handleExport = useCallback(
       (
         format: QueryResultExportFormat,
-        extension: "csv" | "json" | "jsonl" | "tsv" | "sql",
+        extension: "csv" | "json" | "jsonl" | "md" | "tsv" | "sql",
       ) => {
         if (!result) return;
         exportQueryResult(
@@ -2260,6 +2260,13 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                 >
                   <FileJson className="mr-2 h-3.5 w-3.5" />
                   JSON Lines (JSONL)
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="wb-menu-item"
+                  onSelect={() => handleExport("markdown", "md")}
+                >
+                  <FileCode2 className="mr-2 h-3.5 w-3.5" />
+                  Markdown table
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   className="wb-menu-item"

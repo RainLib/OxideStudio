@@ -46,6 +46,7 @@ export type DatabaseTableExportFormat =
   | "csv"
   | "json"
   | "jsonl"
+  | "markdown"
   | "sql"
   | "tsv"
   | "xlsx"

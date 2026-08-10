@@ -254,10 +254,10 @@ fn default_true() -> bool {
 }
 
 pub const HOST_TABLE_EXPORT_FORMATS: &[&str] = &[
-    "csv", "json", "jsonl", "sql", "tsv", "xlsx", "parquet", "arrow",
+    "csv", "json", "jsonl", "markdown", "sql", "tsv", "xlsx", "parquet", "arrow",
 ];
 pub const DECLARED_TABLE_EXPORT_FORMATS: &[&str] = &[
-    "csv", "json", "jsonl", "sql", "tsv", "xlsx", "parquet", "arrow",
+    "csv", "json", "jsonl", "markdown", "sql", "tsv", "xlsx", "parquet", "arrow",
 ];
 
 pub fn host_table_export_formats() -> Vec<String> {
@@ -2010,7 +2010,10 @@ WITH NO DATA;"#
             "arrow".to_string(),
         ];
         retain_host_table_export_formats(&mut capabilities);
-        assert_eq!(capabilities.table_export_formats, vec!["csv"]);
+        assert_eq!(
+            capabilities.table_export_formats,
+            vec!["csv", "parquet", "arrow"]
+        );
     }
 
     #[test]

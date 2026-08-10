@@ -75,6 +75,7 @@ const HOST_TABLE_EXPORT_FORMATS: readonly TableExportFormat[] = [
   "csv",
   "json",
   "jsonl",
+  "markdown",
   "sql",
   "tsv",
   "xlsx",
@@ -1642,6 +1643,7 @@ export function TableDataView() {
         onExportCsvBom={() => void handleExport("csv", "utf8Bom")}
         onExportJson={() => void handleExport("json")}
         onExportJsonl={() => void handleExport("jsonl")}
+        onExportMarkdown={() => void handleExport("markdown")}
         onExportSql={(batchSize) => void handleExport("sql", "utf8", batchSize)}
         onExportTsv={() => void handleExport("tsv")}
         onExportXlsx={() => void handleExport("xlsx")}

@@ -26,11 +26,11 @@ transactions，并要求包明确采用 Host 已审核的 `postgres`、`mysql`�
 跨连接写入入口。
 
 `tableExportFormats` 是独立的签名导出契约。可声明值仅限
-`csv/json/jsonl/sql/tsv/xlsx/parquet/arrow`，且要求 relational table browse 与受审
+`csv/json/jsonl/markdown/sql/tsv/xlsx/parquet/arrow`，且要求 relational table browse 与受审
 PostgreSQL/MySQL/SQLite/DuckDB 分页方言。应用只返回“驱动声明 ∩ 当前构建编码器”的有效
 集合。当前 Host 已实现 Arrow IPC 与 Snappy Parquet；只有内置 PostgreSQL/MySQL/SQLite
 和具有已审 canonical value 编码的 DuckDB 包声明这两种格式。generic JDBC 与 RQLite 在
-补齐值编码 conformance 前继续只声明 CSV/JSON/JSONL/SQL/TSV/XLSX，不能仅凭相似方言
+补齐值编码 conformance 前继续只声明 CSV/JSON/JSONL/Markdown/SQL/TSV/XLSX，不能仅凭相似方言
 获得分析格式入口。无法无损映射的列保留为 UTF-8/JSON，并携带源类型 metadata 与有界提示。
 
 ## 产品目录与实际执行目录分离

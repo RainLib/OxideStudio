@@ -120,6 +120,7 @@ pub enum TableExportFormat {
     Csv,
     Json,
     Jsonl,
+    Markdown,
     Parquet,
     Sql,
     Tsv,
@@ -133,6 +134,7 @@ impl TableExportFormat {
             Self::Csv => "csv",
             Self::Json => "json",
             Self::Jsonl => "jsonl",
+            Self::Markdown => "markdown",
             Self::Parquet => "parquet",
             Self::Sql => "sql",
             Self::Tsv => "tsv",
@@ -1232,6 +1234,22 @@ fn tsv_escape(value: &Value) -> String {
         .collect()
 }
 
+fn markdown_escape_text(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace("\r\n", "<br>")
+        .replace(['\r', '\n'], "<br>")
+}
+
+fn markdown_escape(value: &Value) -> String {
+    if value.is_null() {
+        "NULL".to_string()
+    } else {
+        markdown_escape_text(&value_to_export_string(value))
+    }
+}
+
 fn sanitize_file_part(value: &str) -> String {
     let sanitized: String = value
         .chars()
@@ -1269,6 +1287,7 @@ fn export_file_path(
         TableExportFormat::Csv => "csv",
         TableExportFormat::Json => "json",
         TableExportFormat::Jsonl => "jsonl",
+        TableExportFormat::Markdown => "md",
         TableExportFormat::Parquet => "parquet",
         TableExportFormat::Sql => "sql",
         TableExportFormat::Tsv => "tsv",
@@ -2125,6 +2144,7 @@ fn write_table_export_stream(
         TableExportFormat::Csv
             | TableExportFormat::Json
             | TableExportFormat::Jsonl
+            | TableExportFormat::Markdown
             | TableExportFormat::Sql
             | TableExportFormat::Tsv
     ) {
@@ -2252,6 +2272,26 @@ fn write_table_export_stream(
                     .map_err(|error| error.to_string())?;
                     wrote_delimited_header = true;
                 }
+                if matches!(format, TableExportFormat::Markdown) && !wrote_delimited_header {
+                    let header = column_names
+                        .iter()
+                        .map(|column| markdown_escape_text(column))
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    let separator = column_names
+                        .iter()
+                        .map(|_| "---")
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    writeln!(
+                        text_writer
+                            .as_mut()
+                            .expect("text writer exists for Markdown exports"),
+                        "| {header} |\n| {separator} |"
+                    )
+                    .map_err(|error| error.to_string())?;
+                    wrote_delimited_header = true;
+                }
 
                 if matches!(
                     format,
@@ -2334,6 +2374,20 @@ fn write_table_export_stream(
                                 serde_json::to_writer(&mut *writer, &object)
                                     .map_err(|error| error.to_string())?;
                                 writer.write_all(b"\n").map_err(|error| error.to_string())?;
+                            }
+                            TableExportFormat::Markdown => {
+                                let line = row
+                                    .iter()
+                                    .map(markdown_escape)
+                                    .collect::<Vec<_>>()
+                                    .join(" | ");
+                                writeln!(
+                                    text_writer
+                                        .as_mut()
+                                        .expect("text writer exists for Markdown exports"),
+                                    "| {line} |"
+                                )
+                                .map_err(|error| error.to_string())?;
                             }
                             TableExportFormat::Sql => {
                                 unreachable!("SQL batches are written outside the row loop")
@@ -13518,6 +13572,45 @@ WITH DATA;"#
         assert_eq!(
             fs::read_to_string(&final_path).unwrap(),
             "{\"id\":1,\"name\":\"Ada\"}\n"
+        );
+        assert!(matching_export_partials(&final_path).is_empty());
+        fs::remove_file(final_path).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn markdown_export_escapes_table_structure_and_preserves_nulls() {
+        let final_path = unique_export_test_path("markdown", "md");
+        let context = test_export_writer_context(final_path.clone(), TableExportFormat::Markdown);
+        let (sender, receiver) = mpsc::channel(2);
+        let (_cancel_sender, cancel_rx) = watch::channel(false);
+        let writer = tokio::task::spawn_blocking(move || {
+            write_table_export_stream(context, receiver, cancel_rx)
+        });
+
+        sender
+            .send(TableExportWriterMessage::Batch {
+                columns: vec![
+                    ColumnDef {
+                        name: "name|path".to_string(),
+                        data_type: "TEXT".to_string(),
+                    },
+                    ColumnDef {
+                        name: "enabled".to_string(),
+                        data_type: "BOOLEAN".to_string(),
+                    },
+                ],
+                rows: vec![vec![json!("Ada|one\nline"), Value::Null]],
+            })
+            .await
+            .unwrap();
+        sender.send(TableExportWriterMessage::Finish).await.unwrap();
+        drop(sender);
+
+        let result = writer.await.unwrap().unwrap();
+        assert_eq!(result.rows_exported, 1);
+        assert_eq!(
+            fs::read_to_string(&final_path).unwrap(),
+            "| name\\|path | enabled |\n| --- | --- |\n| Ada\\|one<br>line | NULL |\n"
         );
         assert!(matching_export_partials(&final_path).is_empty());
         fs::remove_file(final_path).unwrap();

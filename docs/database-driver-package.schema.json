@@ -128,9 +128,9 @@
         },
         "tableExportFormats": {
           "type": "array",
-          "maxItems": 8,
+          "maxItems": 9,
           "uniqueItems": true,
-          "items": { "enum": ["csv", "json", "jsonl", "sql", "tsv", "xlsx", "parquet", "arrow"] },
+          "items": { "enum": ["csv", "json", "jsonl", "markdown", "sql", "tsv", "xlsx", "parquet", "arrow"] },
           "description": "Signed table export declaration. The application intersects this list with encoders available in the running build; Parquet/Arrow therefore remain hidden until their reviewed Host encoder is present."
         },
         "supportsTableDataTransfer": {
