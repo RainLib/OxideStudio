@@ -233,6 +233,10 @@ pub struct SchemaObjectInfo {
     pub object_type: String,
     pub parent_name: Option<String>,
     pub comment: Option<String>,
+    /// Drivers opt into lazy member expansion explicitly. The host must never
+    /// infer it merely from an object's `TYPE` label.
+    #[serde(default)]
+    pub members_expandable: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

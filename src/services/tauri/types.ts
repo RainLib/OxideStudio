@@ -1096,6 +1096,8 @@ export interface SchemaObjectInfo {
   objectType: string;
   parentName?: string | null;
   comment?: string | null;
+  /** Explicit sidecar capability; never infer expansion from object type. */
+  membersExpandable?: boolean;
 }
 
 /**

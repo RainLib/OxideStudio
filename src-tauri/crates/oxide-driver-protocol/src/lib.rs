@@ -57,6 +57,10 @@ pub struct DriverRuntimeCapabilities {
     /// Older protocol-compatible packages omit this and therefore safely
     /// degrade relationship navigation to an empty result.
     pub referencing_foreign_keys: bool,
+    /// The sidecar can enumerate descriptor-only schema objects such as
+    /// types, packages, sequences, and extensions. Older packages omit this
+    /// and keep the Explorer's supplemental-object tree empty.
+    pub schema_objects: bool,
     /// The sidecar independently rejects mutation requests when
     /// `DriverQueryContext.read_only` is set. Agent-owned external drivers
     /// require this capability instead of trusting a host-side SQL parser.
@@ -374,6 +378,14 @@ pub enum MetadataRequest {
         database: Option<String>,
         namespace: String,
     },
+    /// Descriptor-only objects that are not relations. This is intentionally
+    /// separate from `Relations` so a host never treats a type or package as
+    /// a table/grid/DDL target.
+    SchemaObjects {
+        #[serde(default)]
+        database: Option<String>,
+        namespace: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -587,6 +599,7 @@ mod tests {
         .unwrap();
         assert!(capabilities.metadata);
         assert!(!capabilities.referencing_foreign_keys);
+        assert!(!capabilities.schema_objects);
         assert!(!capabilities.semantic_schema_migration);
     }
 }

@@ -333,6 +333,7 @@ impl PostgresDriver {
                 object_type: row.try_get("object_type").unwrap_or_default(),
                 parent_name: row.try_get("parent_name").ok(),
                 comment: row.try_get("comment").ok(),
+                members_expandable: false,
             })
             .collect())
     }

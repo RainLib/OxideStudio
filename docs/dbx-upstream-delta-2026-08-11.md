@@ -17,14 +17,16 @@ their attributes, functions, and procedures. Its implementation spans:
 - `apps/desktop/src/stores/connectionStore.ts`
 - `apps/desktop/src/components/sidebar/{SidebarTreeRuntimeHost,TreeItem}.vue`
 
-OxideStudio currently exposes `SchemaObjectInfo` as a flat, descriptor-only
-schema-object list in `src-tauri/src/core/protocol.rs` and
-`src/services/tauri/types.ts`. Its external-driver schema protocol does not
-yet carry a typed-member capability or a parent-type-scoped metadata request.
+OxideStudio now exposes a backward-compatible `SchemaObjects` metadata request
+and a runtime `schemaObjects` capability in
+`src-tauri/crates/oxide-driver-protocol/src/lib.rs`. The host's
+`SchemaObjectInfo.membersExpandable` field is explicit and defaults to false,
+so existing packages and non-Xugu object types stay unchanged. A Xugu sidecar
+still needs to implement the request before the UI can expose an expander.
 
 ## Implementation boundary
 
-Do not mark every renderer type node as expandable. The next phase must first
-extend the external-driver metadata contract, then add a keyboard-accessible,
-explicitly marked lazy tree expansion with loading and error states. Real Xugu
+Do not mark every renderer type node as expandable. The next phase adds a
+keyboard-accessible, explicitly marked lazy tree expansion with loading and
+error states after the Xugu sidecar implements the capability. Real Xugu
 validation remains deferred with the broader database verification work.
