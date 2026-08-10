@@ -3364,6 +3364,33 @@ fn postgres_extension_ddls(results: &[QueryResult]) -> Result<Vec<String>, Strin
         .collect()
 }
 
+fn postgres_trigger_definitions_query(schema: &str) -> String {
+    format!(
+        "SELECT class.relname, pg_get_triggerdef(trigger.oid, true) \
+         FROM pg_catalog.pg_trigger trigger \
+         JOIN pg_catalog.pg_class class ON class.oid = trigger.tgrelid \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = class.relnamespace \
+         WHERE namespace.nspname = {} AND NOT trigger.tgisinternal \
+         ORDER BY class.relname, trigger.tgname;",
+        postgres_sql_string_literal(schema),
+    )
+}
+
+fn postgres_trigger_definitions(results: &[QueryResult]) -> Result<Vec<String>, String> {
+    results
+        .iter()
+        .flat_map(|result| result.rows.iter())
+        .map(|row| {
+            let table = row.first().and_then(value_to_string).unwrap_or_default();
+            row.get(1)
+                .and_then(value_to_string)
+                .filter(|definition| !definition.trim().is_empty())
+                .map(|definition| format!("{};", definition.trim().trim_end_matches(';')))
+                .ok_or_else(|| format!("PostgreSQL trigger on {table} has no definition available for backup"))
+        })
+        .collect()
+}
+
 fn mysql_comment_literal(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
@@ -9032,6 +9059,21 @@ pub async fn export_database_sql(
         } else {
             Vec::new()
         };
+        let triggers = if include_structure {
+            let trigger_results = manager
+                .query(
+                    &connection_id,
+                    &postgres_trigger_definitions_query(schema),
+                    None,
+                    None,
+                    Some(export_id.clone()),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            postgres_trigger_definitions(&trigger_results)?
+        } else {
+            Vec::new()
+        };
         let final_path = export_file_path(&app, schema, "database_backup", TableExportFormat::Sql)?;
         let mut temporary_file = ExportTemporaryFile::create(&final_path)?;
         let file = File::create(&temporary_file.path).map_err(|error| error.to_string())?;
@@ -9239,6 +9281,16 @@ pub async fn export_database_sql(
             writeln!(writer, "\n-- Functions and procedures (created after relations and views)")
                 .map_err(|error| error.to_string())?;
             for definition in &routines {
+                if *cancel_rx.borrow() {
+                    return Err(format!("{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"));
+                }
+                writeln!(writer, "{definition}").map_err(|error| error.to_string())?;
+            }
+        }
+        if include_structure && !triggers.is_empty() {
+            writeln!(writer, "\n-- Triggers (created after their routines)")
+                .map_err(|error| error.to_string())?;
+            for definition in &triggers {
                 if *cancel_rx.borrow() {
                     return Err(format!("{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"));
                 }

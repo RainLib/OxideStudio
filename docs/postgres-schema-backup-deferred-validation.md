@@ -23,6 +23,12 @@
 - Verify a target without the required extension fails atomically and leaves no finalized backup restore; extension version pinning, grants, and ownership remain outside the conservative export contract.
 - `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. No database was opened.
 
+## Phase 133 -- Triggers
+
+- Restore row-level and statement-level triggers that call SQL and PL/pgSQL routines. Confirm trigger DDL follows routine DDL and fires with the original timing, event, condition, and target relation.
+- Verify internal constraint triggers are not emitted and an unavailable trigger function makes the restore transaction fail atomically.
+- `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. No database was opened.
+
 ## Phase 132 -- Sequence ownership
 
 - Restore serial and identity-backed tables, including a sequence owned by a non-primary-key column. Confirm each `ALTER SEQUENCE ... OWNED BY` follows table creation and that next-value behavior remains correct after restore.
