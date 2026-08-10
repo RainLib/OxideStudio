@@ -9,12 +9,18 @@ export type MonacoCompletionProvider = (
   token: { isCancellationRequested?: boolean },
 ) => Promise<{ suggestions: any[]; incomplete?: boolean }>;
 
+export type MonacoCompletionResolver = (
+  item: any,
+  token: { isCancellationRequested?: boolean },
+) => Promise<any>;
+
 export type LspCompletionProviderCoordinatorOptions = {
   editorLanguageId: string;
   isActivePane: boolean;
   monaco: any;
   ownerKey: string;
   provideCompletionItems: MonacoCompletionProvider;
+  resolveCompletionItem: MonacoCompletionResolver;
   rankByUsage: boolean;
   recordUsage: (scope: string, label: string) => void;
   triggerChainedCompletion: () => void;
@@ -27,6 +33,7 @@ type CompletionRuntime = Pick<
   LspCompletionProviderCoordinatorOptions,
   | "ownerKey"
   | "provideCompletionItems"
+  | "resolveCompletionItem"
   | "rankByUsage"
   | "recordUsage"
   | "triggerChainedCompletion"
@@ -91,6 +98,20 @@ export function registerLspCompletionProvider(options: {
           getRuntime().ownerKey !== runtime.ownerKey
         ) {
           return { suggestions: [] };
+        }
+        return result;
+      },
+      resolveCompletionItem: async (
+        item: any,
+        token: { isCancellationRequested?: boolean },
+      ) => {
+        const runtime = getRuntime();
+        const result = await runtime.resolveCompletionItem(item, token);
+        if (
+          token?.isCancellationRequested ||
+          getRuntime().ownerKey !== runtime.ownerKey
+        ) {
+          return item;
         }
         return result;
       },

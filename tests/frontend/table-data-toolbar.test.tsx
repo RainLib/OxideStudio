@@ -46,9 +46,19 @@ describe("TableDataToolbar", () => {
           onFitColumns={onFitColumns}
           onResetColumns={onResetColumns}
           onToggleEditing={noop}
-          onImport={noop}
+          exportFormats={["csv", "json", "jsonl", "sql", "tsv", "xlsx", "parquet", "arrow"]}
+          onImportCsv={noop}
+          onImportJson={noop}
+          onImportXlsx={noop}
           onExportCsv={noop}
+          onExportCsvBom={noop}
           onExportJson={noop}
+          onExportJsonl={noop}
+          onExportSql={noop}
+          onExportTsv={noop}
+          onExportXlsx={noop}
+          onExportParquet={noop}
+          onExportArrow={noop}
         />
       );
     });
@@ -97,9 +107,19 @@ describe("TableDataToolbar", () => {
           onFitColumns={noop}
           onResetColumns={noop}
           onToggleEditing={noop}
-          onImport={noop}
+          exportFormats={["csv", "json", "jsonl", "sql", "tsv", "xlsx", "parquet", "arrow"]}
+          onImportCsv={noop}
+          onImportJson={noop}
+          onImportXlsx={noop}
           onExportCsv={noop}
+          onExportCsvBom={noop}
           onExportJson={noop}
+          onExportJsonl={noop}
+          onExportSql={noop}
+          onExportTsv={noop}
+          onExportXlsx={noop}
+          onExportParquet={noop}
+          onExportArrow={noop}
         />
       );
     });
@@ -153,10 +173,19 @@ describe("TableDataToolbar", () => {
           onToggleEditing={noop}
           transposed
           onToggleTranspose={onToggleTranspose}
-          onImport={noop}
+          exportFormats={["csv", "json", "jsonl", "sql", "tsv", "xlsx", "parquet", "arrow"]}
+          onImportCsv={noop}
+          onImportJson={noop}
+          onImportXlsx={noop}
           onExportCsv={noop}
+          onExportCsvBom={noop}
           onExportJson={noop}
+          onExportJsonl={noop}
           onExportSql={noop}
+          onExportTsv={noop}
+          onExportXlsx={noop}
+          onExportParquet={noop}
+          onExportArrow={noop}
         />,
       );
     });

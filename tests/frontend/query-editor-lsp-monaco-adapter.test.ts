@@ -125,8 +125,15 @@ describe("query editor LSP Monaco adapter", () => {
 
   it("normalizes documentation and validates publish-diagnostics payloads", () => {
     expect(lspDocumentationForMonaco("plain text")).toBe("plain text");
-    expect(lspDocumentationForMonaco({ value: "markdown" })).toEqual({
-      value: "markdown",
+    expect(lspDocumentationForMonaco({ value: "plaintext by default" })).toBe(
+      "plaintext by default",
+    );
+    expect(
+      lspDocumentationForMonaco({ kind: "markdown", value: "**markdown**" }),
+    ).toEqual({
+      value: "**markdown**",
+      isTrusted: false,
+      supportHtml: false,
     });
     expect(lspDocumentationForMonaco({})).toBeUndefined();
 

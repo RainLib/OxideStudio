@@ -6,7 +6,7 @@ database target until its relevant queue entries pass.
 
 ## Completed non-database checks (2026-08-10)
 
-- `npm test`: 204 test files and 1,042 tests passed. PostgreSQL remote-content,
+- `npm test`: 230 test files and 1,175 tests passed. PostgreSQL remote-content,
   CSV import, cross-database table view, export progress and generated
   operation-ID mocks now follow the current frontend contract.
 - `npm run build`: strict TypeScript, Vite production build and frontend bundle
@@ -52,6 +52,13 @@ database target until its relevant queue entries pass.
   ref. Focused tests cover disposal, live usage-ranking changes and stale owner
   rejection; a strict production build confirms metadata or snippet refreshes
   no longer require global Monaco provider re-registration.
+- The optional completion-item resolve path passed 14 focused frontend tests:
+  only server-backed items retain opaque resolve state through context object
+  spreads, resolved Markdown/detail/additional edits enrich the existing Monaco
+  proposal, and cancellation or owner changes discard late enrichment. Rust
+  resolve parsing, data round-trip and capability tests compile; execution of
+  the parent Rust test binary remains deferred by this Windows runtime's known
+  `STATUS_ENTRYPOINT_NOT_FOUND` startup failure.
 - The signature-help and built-in function completion alignment suite passed
   without database access: 131 LSP
   library tests, 12 process-protocol tests and 9 schema contract tests. It
@@ -410,6 +417,13 @@ explicit deferred validation task rather than an implicit release check.
   format and insert text mode apply only when an item has no overriding value.
   Exercise both range and insert/replace default edit shapes plus
   `textEditText`.
+- Against a server that advertises `completionProvider.resolveProvider`, verify
+  selecting an unresolved item issues one `completionItem/resolve`, round-trips
+  opaque `data`, and lazily fills documentation, detail and additional edits.
+  A server without the capability, a syntax/cache fallback, an item above 256
+  KiB, a cancelled request, and a tab/connection/session switch must issue no
+  unsafe enrichment or apply a late response. Restart the provider between list
+  and resolve and confirm the original usable suggestion remains intact.
 - Accept the same proposal while typing inside and at the end of an identifier.
   Monaco must use the LSP insert boundary for insertion and the wider replace
   boundary for overwrite without deleting adjacent SQL.

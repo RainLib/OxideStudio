@@ -339,6 +339,7 @@ pub fn run() {
             commands::lsp::lsp_shutdown,
             commands::lsp::lsp_is_running,
             commands::lsp::lsp_get_completions,
+            commands::lsp::lsp_resolve_completion,
             commands::lsp::lsp_hover,
             commands::lsp::lsp_goto_definition,
             commands::lsp::lsp_references,

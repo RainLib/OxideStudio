@@ -11,6 +11,7 @@ pub struct LspState(pub Arc<Mutex<HashMap<String, Arc<LspServerManager>>>>);
 
 const DEFAULT_LSP_SESSION_KEY: &str = "default";
 const MAX_LSP_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_LSP_COMPLETION_ITEM_BYTES: usize = 256 * 1024;
 
 fn normalize_session_key(session_key: Option<&str>) -> String {
     let trimmed = session_key.unwrap_or(DEFAULT_LSP_SESSION_KEY).trim();
@@ -78,6 +79,15 @@ pub struct CompletionResponse {
     pub items: Vec<CompletionItem>,
     #[serde(rename = "isIncomplete")]
     pub is_incomplete: bool,
+    #[serde(rename = "resolveProvider")]
+    pub resolve_provider: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CompletionResolveRequest {
+    #[serde(default)]
+    pub session_key: Option<String>,
+    pub item: CompletionItem,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,8 +157,11 @@ pub struct CompletionItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub label_details: Option<CompletionItemLabelDetails>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub documentation: Option<CompletionDocumentation>,
     #[serde(
         default,
@@ -194,6 +207,8 @@ pub struct CompletionItem {
     pub commit_characters: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deprecated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
 
 fn parse_completion_documentation(value: &Value) -> Option<CompletionDocumentation> {
@@ -367,7 +382,18 @@ fn parse_completion_item(item: &Value, defaults: Option<&Value>) -> Option<Compl
                     .and_then(|value| value.as_array())
                     .map(|tags| tags.iter().any(|tag| tag.as_u64() == Some(1)))
             }),
+        data: item.get("data").cloned(),
     })
+}
+
+fn merge_completion_item_values(original: Value, resolved: Value) -> Value {
+    match (original, resolved) {
+        (Value::Object(mut original), Value::Object(resolved)) => {
+            original.extend(resolved);
+            Value::Object(original)
+        }
+        (_, resolved) => resolved,
+    }
 }
 
 async fn current_manager(
@@ -514,6 +540,7 @@ pub async fn lsp_get_completions(
         request.character
     );
     let manager = current_manager(&state, request.session_key.as_deref()).await?;
+    let resolve_provider = manager.supports_completion_resolve().await;
     tracing::debug!(
         "Completion request for {}:{}:{}",
         request.uri,
@@ -576,6 +603,7 @@ pub async fn lsp_get_completions(
             Ok(CompletionResponse {
                 items,
                 is_incomplete,
+                resolve_provider,
             })
         }
         Err(e) => {
@@ -583,6 +611,38 @@ pub async fn lsp_get_completions(
             Err(format!("LSP error: {}", e))
         }
     }
+}
+
+/// Resolve lazy completion documentation and edits only when the active server
+/// explicitly advertised `completionItem/resolve` during initialization.
+#[tauri::command]
+pub async fn lsp_resolve_completion(
+    request: CompletionResolveRequest,
+    state: State<'_, LspState>,
+) -> Result<CompletionItem, String> {
+    let manager = current_manager(&state, request.session_key.as_deref()).await?;
+    if !manager.supports_completion_resolve().await {
+        return Err("LSP server does not advertise completionItem/resolve".to_string());
+    }
+
+    let original = serde_json::to_value(&request.item).map_err(|error| error.to_string())?;
+    let encoded_size = serde_json::to_vec(&original)
+        .map_err(|error| error.to_string())?
+        .len();
+    if encoded_size > MAX_LSP_COMPLETION_ITEM_BYTES {
+        return Err(format!(
+            "LSP completion item exceeds {} bytes",
+            MAX_LSP_COMPLETION_ITEM_BYTES
+        ));
+    }
+
+    let resolved = manager
+        .send_request("completionItem/resolve".to_string(), original.clone())
+        .await
+        .map_err(|error| format!("LSP completion resolve failed: {error}"))?;
+    let merged = merge_completion_item_values(original, resolved);
+    parse_completion_item(&merged, None)
+        .ok_or_else(|| "LSP returned an invalid resolved completion item".to_string())
 }
 
 #[tauri::command]
@@ -1080,6 +1140,51 @@ mod tests {
                 },
             }))
         );
+    }
+
+    #[test]
+    fn resolved_completion_fields_preserve_original_identity_and_data() {
+        let original = serde_json::json!({
+            "label": "customer_id",
+            "kind": 5,
+            "sortText": "1:customer_id",
+            "data": { "document": "file:///query.sql", "symbol": 42 }
+        });
+        let resolved = serde_json::json!({
+            "label": "customer_id",
+            "detail": "customers.customer_id bigint",
+            "documentation": {
+                "kind": "markdown",
+                "value": "Primary key"
+            },
+            "additionalTextEdits": [{
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": 0 }
+                },
+                "newText": "-- resolved\n"
+            }]
+        });
+
+        let merged = merge_completion_item_values(original, resolved);
+        let parsed = parse_completion_item(&merged, None).expect("resolved item should parse");
+
+        assert_eq!(parsed.sort_text.as_deref(), Some("1:customer_id"));
+        assert_eq!(
+            parsed.data,
+            Some(serde_json::json!({
+                "document": "file:///query.sql",
+                "symbol": 42
+            }))
+        );
+        assert_eq!(
+            parsed.documentation,
+            Some(CompletionDocumentation::Markup(CompletionMarkupContent {
+                kind: "markdown".to_string(),
+                value: "Primary key".to_string(),
+            }))
+        );
+        assert_eq!(parsed.additional_text_edits.as_ref().map(Vec::len), Some(1));
     }
 
     #[test]

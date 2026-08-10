@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { CompletionItemKind } from "@/services/lsp/types";
-import { lspCompletionItemsToMonacoSuggestions } from "./lspCompletionPresentation";
+import {
+  applyResolvedLspCompletionItem,
+  lspCompletionItemsToMonacoSuggestions,
+  markResolvableLspCompletionItems,
+  sourceLspCompletionItem,
+} from "./lspCompletionPresentation";
 import { lspDocumentationForMonaco } from "./lspMonacoAdapter";
 
 class MockRange {
@@ -152,6 +157,71 @@ describe("lspCompletionItemsToMonacoSuggestions", () => {
 
     expect(suggestions[0]?.insertText).toBe("SELECT");
     expect(suggestions[1]?.insertText).toBe("FROM ");
+  });
+
+  it("attaches only server items and applies lazy resolve fields", () => {
+    const serverItem = {
+      label: "customer_id",
+      kind: CompletionItemKind.Field,
+      data: { symbol: 42 },
+    };
+    const fallbackItem = {
+      label: "WHERE",
+      kind: CompletionItemKind.Keyword,
+    };
+    const suggestions = lspCompletionItemsToMonacoSuggestions({
+      monaco,
+      ownerKey: "owner-1",
+      items: [
+        {
+          ...markResolvableLspCompletionItems([serverItem], true)[0]!,
+          sortText: "adapted-by-context-filter",
+        },
+        fallbackItem,
+      ],
+      typedWord: "",
+      completedContextKeyword: false,
+      defaultRange: new MockRange(1, 1, 1, 1),
+      rankByUsage: false,
+      usageScope: "postgres-scope",
+      recordUsageCommand: "record",
+      appendSpace: false,
+    });
+
+    expect(sourceLspCompletionItem(suggestions[0]!)).toBe(serverItem);
+    expect(sourceLspCompletionItem(suggestions[1]!)).toBeUndefined();
+
+    const resolved = applyResolvedLspCompletionItem(monaco, suggestions[0]!, {
+      ...serverItem,
+      detail: "customers.customer_id bigint",
+      documentation: { kind: "markdown", value: "Primary **key**" },
+      additionalTextEdits: [
+        {
+          range: {
+            start: { line: 0, character: 0 },
+            end: { line: 0, character: 0 },
+          },
+          newText: "-- resolved\n",
+        },
+      ],
+    });
+
+    expect(resolved.detail).toBe("customers.customer_id bigint");
+    expect(resolved.documentation).toEqual({
+      value: "Primary **key**",
+      isTrusted: false,
+      supportHtml: false,
+    });
+    expect(resolved.additionalTextEdits).toEqual([
+      {
+        range: new MockRange(1, 1, 1, 1),
+        text: "-- resolved\n",
+      },
+    ]);
+    expect(sourceLspCompletionItem(resolved)).toMatchObject({
+      data: { symbol: 42 },
+      detail: "customers.customer_id bigint",
+    });
   });
 });
 

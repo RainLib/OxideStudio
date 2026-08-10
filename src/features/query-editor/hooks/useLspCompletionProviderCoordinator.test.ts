@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   registerLspCompletionProvider,
   type MonacoCompletionProvider,
+  type MonacoCompletionResolver,
 } from "./useLspCompletionProviderCoordinator";
 
 function deferred<T>() {
@@ -40,6 +41,7 @@ function fixture() {
     provideCompletionItems: vi.fn(async () => ({
       suggestions: [{ label: "SELECT" }],
     })) as MonacoCompletionProvider,
+    resolveCompletionItem: vi.fn(async (item) => item) as MonacoCompletionResolver,
     rankByUsage: true,
     recordUsage: usage,
     triggerChainedCompletion,
@@ -126,5 +128,22 @@ describe("LSP completion provider coordinator", () => {
     state.setRuntime({ ...state.runtime(), ownerKey: "owner-2" });
     response.resolve({ suggestions: [{ label: "stale" }] });
     await expect(pending).resolves.toEqual({ suggestions: [] });
+  });
+
+  it("drops lazy completion enrichment after its owner changes", async () => {
+    const state = fixture();
+    const response = deferred<any>();
+    state.setRuntime({
+      ...state.runtime(),
+      resolveCompletionItem: vi.fn(() => response.promise),
+    });
+    const original = { label: "customer_id" };
+    const pending = state
+      .provider()
+      .resolveCompletionItem(original, { isCancellationRequested: false });
+
+    state.setRuntime({ ...state.runtime(), ownerKey: "owner-2" });
+    response.resolve({ ...original, detail: "stale detail" });
+    await expect(pending).resolves.toBe(original);
   });
 });

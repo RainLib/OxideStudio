@@ -25,6 +25,9 @@ fn completion_client_capabilities() -> Value {
             "snippetSupport": true,
             "commitCharactersSupport": true,
             "documentationFormat": ["markdown", "plaintext"],
+            "resolveSupport": {
+                "properties": ["documentation", "detail", "additionalTextEdits"]
+            },
             "deprecatedSupport": true,
             "preselectSupport": true,
             "tagSupport": { "valueSet": [1] },
@@ -45,6 +48,13 @@ fn completion_client_capabilities() -> Value {
     })
 }
 
+fn server_supports_completion_resolve(capabilities: &Value) -> bool {
+    capabilities
+        .pointer("/completionProvider/resolveProvider")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// LSP Server Manager with bidirectional communication
 pub struct LspServerManager {
     process: Arc<Mutex<Option<Child>>>,
@@ -52,6 +62,7 @@ pub struct LspServerManager {
     binary_path: String,
     session_key: String,
     app_handle: AppHandle,
+    server_capabilities: Arc<Mutex<Value>>,
 }
 
 impl LspServerManager {
@@ -65,6 +76,7 @@ impl LspServerManager {
             binary_path,
             session_key,
             app_handle,
+            server_capabilities: Arc::new(Mutex::new(Value::Null)),
         }
     }
 
@@ -366,6 +378,8 @@ impl LspServerManager {
             .await
         {
             Ok(value) => {
+                *self.server_capabilities.lock().await =
+                    value.get("capabilities").cloned().unwrap_or(Value::Null);
                 println!("✅ [HANDSHAKE] Initialize response received!");
                 println!(
                     "✅ [HANDSHAKE] Response: {}",
@@ -395,6 +409,12 @@ impl LspServerManager {
             .context("Failed to send initialized notification")?;
 
         Ok(())
+    }
+
+    /// Whether the initialized server advertises lazy completion-item resolve.
+    pub async fn supports_completion_resolve(&self) -> bool {
+        let capabilities = self.server_capabilities.lock().await;
+        server_supports_completion_resolve(&capabilities)
     }
 
     async fn kill_process(&self) {
@@ -520,7 +540,10 @@ fn cancel_request_notification(id: u64) -> LspNotification {
 
 #[cfg(test)]
 mod tests {
-    use super::{cancel_request_notification, completion_client_capabilities};
+    use super::{
+        cancel_request_notification, completion_client_capabilities,
+        server_supports_completion_resolve,
+    };
 
     #[test]
     fn timeout_cancellation_uses_the_standard_lsp_notification() {
@@ -533,6 +556,14 @@ mod tests {
     fn completion_capabilities_match_the_values_preserved_by_the_bridge() {
         let capabilities = completion_client_capabilities();
 
+        assert_eq!(
+            capabilities.pointer("/completionItem/resolveSupport/properties"),
+            Some(&serde_json::json!([
+                "documentation",
+                "detail",
+                "additionalTextEdits"
+            ]))
+        );
         assert_eq!(
             capabilities.pointer("/completionItem/insertReplaceSupport"),
             Some(&serde_json::json!(true))
@@ -554,5 +585,18 @@ mod tests {
                 "insertTextMode"
             ]))
         );
+    }
+
+    #[test]
+    fn completion_resolve_requires_an_explicit_server_capability() {
+        assert!(server_supports_completion_resolve(&serde_json::json!({
+            "completionProvider": { "resolveProvider": true }
+        })));
+        assert!(!server_supports_completion_resolve(&serde_json::json!({
+            "completionProvider": { "triggerCharacters": ["."] }
+        })));
+        assert!(!server_supports_completion_resolve(
+            &serde_json::Value::Null
+        ));
     }
 }

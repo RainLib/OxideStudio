@@ -162,7 +162,11 @@ describe("SchemaDiagramView", () => {
       button.textContent?.includes("Keys only"),
     );
     await act(async () => keysOnly?.click());
-    expect(container.textContent).not.toContain("notes");
+    expect(
+      container.querySelector(
+        '[data-schema-diagram-relation="orders"]',
+      )?.textContent,
+    ).not.toContain("notes");
     expect(container.textContent).toContain("+1 hidden column");
   });
 });

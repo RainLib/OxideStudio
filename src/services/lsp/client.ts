@@ -230,7 +230,7 @@ class LspClient {
   ): Promise<CompletionResponse> {
     if (!this.initialized) {
       console.warn("[LSP] Not initialized, returning empty completions");
-      return { items: [], isIncomplete: false };
+      return { items: [], isIncomplete: false, resolveProvider: false };
     }
 
     try {
@@ -253,16 +253,33 @@ class LspClient {
       const completionList = {
         items: Array.isArray(response.items) ? response.items : [],
         isIncomplete: response.isIncomplete === true,
+        resolveProvider: response.resolveProvider === true,
       };
       console.log(`[LSP] ← Response: Got ${completionList.items.length} items`);
-      if (completionList.items.length > 0) {
-        console.log(`[LSP] First 3 items:`, completionList.items.slice(0, 3));
-      }
 
       return completionList;
     } catch (error) {
       console.error("[LSP] ✗ Get completions failed:", error);
-      return { items: [], isIncomplete: false };
+      return { items: [], isIncomplete: false, resolveProvider: false };
+    }
+  }
+
+  /** Resolve documentation/detail/edits that a server deferred for a selected item. */
+  async resolveCompletionItem(item: CompletionItem): Promise<CompletionItem> {
+    if (!this.initialized) return item;
+
+    try {
+      return await invoke<CompletionItem>("lsp_resolve_completion", {
+        request: {
+          ...this.requestSessionPayload(),
+          item,
+        },
+      });
+    } catch (error) {
+      // Resolve is an optional enrichment. Preserve the usable proposal when
+      // a server restarts, retracts the capability, or rejects stale data.
+      console.warn("[LSP] Completion resolve failed:", redactSecrets(error));
+      return item;
     }
   }
 

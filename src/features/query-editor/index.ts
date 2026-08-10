@@ -48,8 +48,11 @@ export {
   toMonacoWorkspaceEdit,
 } from "./model/lspMonacoAdapter";
 export {
+  applyResolvedLspCompletionItem,
   completionLabelForMonaco,
   lspCompletionItemsToMonacoSuggestions,
+  markResolvableLspCompletionItems,
+  sourceLspCompletionItem,
   type LspCompletionPresentationOptions,
 } from "./model/lspCompletionPresentation";
 export {
@@ -133,6 +136,7 @@ export {
   useLspCompletionProviderCoordinator,
   type LspCompletionProviderCoordinatorOptions,
   type MonacoCompletionProvider,
+  type MonacoCompletionResolver,
 } from "./hooks/useLspCompletionProviderCoordinator";
 export {
   boundedSqlCompletionTextBeforeCursor,

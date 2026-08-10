@@ -36,6 +36,66 @@ export interface LspCompletionPresentationOptions {
   nextCharacter?: string;
 }
 
+const LSP_COMPLETION_ITEM_PROPERTY = "__oxideLspCompletionItem";
+const LSP_COMPLETION_RESOLVE_SOURCE = Symbol("oxideLspCompletionResolveSource");
+
+type LspBackedMonacoSuggestion = {
+  [LSP_COMPLETION_ITEM_PROPERTY]?: CompletionItem;
+};
+
+type ResolvableLspCompletionItem = CompletionItem & {
+  [LSP_COMPLETION_RESOLVE_SOURCE]?: CompletionItem;
+};
+
+/**
+ * Keep the exact server item attached while context filters adapt a candidate.
+ * Symbol properties survive object spreads but never leak into JSON payloads.
+ */
+export function markResolvableLspCompletionItems(
+  items: CompletionItem[],
+  enabled: boolean,
+): CompletionItem[] {
+  if (!enabled) return items;
+  return items.map((item) => ({
+    ...item,
+    [LSP_COMPLETION_RESOLVE_SOURCE]: item,
+  }));
+}
+
+export function sourceLspCompletionItem(
+  suggestion: LspBackedMonacoSuggestion,
+) {
+  return suggestion[LSP_COMPLETION_ITEM_PROPERTY];
+}
+
+/**
+ * LSP resolve may enrich only lazy presentation fields. The insertion/ranking
+ * contract already shown by Monaco remains unchanged, including Oxide's usage
+ * command and the range calculated for the original document revision.
+ */
+export function applyResolvedLspCompletionItem(
+  monaco: any,
+  suggestion: LspBackedMonacoSuggestion & Record<string, any>,
+  item: CompletionItem,
+) {
+  return {
+    ...suggestion,
+    detail: item.detail ?? suggestion.detail,
+    documentation:
+      item.documentation === undefined
+        ? suggestion.documentation
+        : lspDocumentationForMonaco(item.documentation),
+    additionalTextEdits:
+      item.additionalTextEdits === undefined
+        ? suggestion.additionalTextEdits
+        : item.additionalTextEdits.map((edit) => ({
+            range: toMonacoRange(monaco, edit.range),
+            text: edit.newText,
+          })),
+    [LSP_COMPLETION_ITEM_PROPERTY]: item,
+  };
+}
+
 export function completionLabelForMonaco(item: CompletionItem) {
   return item.labelDetails?.detail || item.labelDetails?.description
     ? {
@@ -83,6 +143,9 @@ export function lspCompletionItemsToMonacoSuggestions({
   nextCharacter,
 }: LspCompletionPresentationOptions) {
   return items.map((item) => {
+    const resolveSource = (item as ResolvableLspCompletionItem)[
+      LSP_COMPLETION_RESOLVE_SOURCE
+    ];
     const serverInsertText = completionInsertText(
       item,
       completedContextKeyword,
@@ -149,6 +212,9 @@ export function lspCompletionItemsToMonacoSuggestions({
       range: item.textEdit
         ? toMonacoCompletionRange(monaco, item.textEdit)
         : defaultRange,
+      ...(resolveSource
+        ? { [LSP_COMPLETION_ITEM_PROPERTY]: resolveSource }
+        : {}),
     };
   });
 }

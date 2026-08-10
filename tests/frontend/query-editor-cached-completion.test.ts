@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { cachedRelationCompletionSuggestions } from "@/components/workspace/QueryEditor";
 import {
+  cachedRelationCompletionSuggestions,
   completionSuggestionsOrCached,
   mergeCompletionFallbackSuggestions,
 } from "@/features/query-editor";

@@ -152,6 +152,9 @@ import {
   isPublishDiagnosticsParams,
   lspDiagnosticToMonacoMarker,
   lspCompletionItemsToMonacoSuggestions,
+  markResolvableLspCompletionItems,
+  sourceLspCompletionItem,
+  applyResolvedLspCompletionItem,
   mergeCatalogNames,
   mergeCompletionFallbackSuggestions,
   parseElasticsearchConsoleServerVersion,
@@ -1520,7 +1523,10 @@ export function QueryEditor({
               position.column - 1, // LSP uses 0-indexed columns
               toLspCompletionContext(context),
             );
-            const items = completionList.items;
+            const items = markResolvableLspCompletionItems(
+              completionList.items,
+              completionList.resolveProvider,
+            );
 
             if (
               token?.isCancellationRequested ||
@@ -1671,12 +1677,26 @@ export function QueryEditor({
           }
         };
 
+  const resolveCompletionItem = async (
+    suggestion: any,
+    token: { isCancellationRequested?: boolean },
+  ) => {
+    const sourceItem = sourceLspCompletionItem(suggestion);
+    if (!monaco || !sourceItem || token?.isCancellationRequested) {
+      return suggestion;
+    }
+    const resolvedItem = await lspClient.resolveCompletionItem(sourceItem);
+    if (token?.isCancellationRequested) return suggestion;
+    return applyResolvedLspCompletionItem(monaco, suggestion, resolvedItem);
+  };
+
   useLspCompletionProviderCoordinator({
     editorLanguageId,
     isActivePane,
     monaco,
     ownerKey: completionOwnerKey,
     provideCompletionItems,
+    resolveCompletionItem,
     rankByUsage,
     recordUsage: recordCompletionUsage,
     triggerChainedCompletion: () => {

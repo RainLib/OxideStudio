@@ -121,4 +121,47 @@ describe("LSP client", () => {
       },
     });
   });
+
+  it("round-trips lazy completion data through the scoped resolve command", async () => {
+    const client = new LspClient("postgres:connection-1");
+    const unresolved = {
+      label: "customer_id",
+      kind: 5,
+      data: { symbol: 42 },
+    };
+    mocks.invoke
+      .mockResolvedValueOnce("initialized")
+      .mockResolvedValueOnce({
+        items: [unresolved],
+        isIncomplete: true,
+        resolveProvider: true,
+      })
+      .mockResolvedValueOnce({
+        ...unresolved,
+        detail: "customers.customer_id bigint",
+      });
+
+    await client.initialize("/tmp/sql-lsp");
+    const list = await client.getCompletionList("file:///query.sql", 1, 7, {
+      triggerKind: 1,
+    });
+    const resolved = await client.resolveCompletionItem(list.items[0]!);
+
+    expect(list).toEqual({
+      items: [unresolved],
+      isIncomplete: true,
+      resolveProvider: true,
+    });
+    expect(mocks.invoke).toHaveBeenNthCalledWith(3, "lsp_resolve_completion", {
+      request: {
+        session_key: "postgres:connection-1",
+        item: unresolved,
+      },
+    });
+    expect(resolved).toMatchObject({
+      label: "customer_id",
+      detail: "customers.customer_id bigint",
+      data: { symbol: 42 },
+    });
+  });
 });

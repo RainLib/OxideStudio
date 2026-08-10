@@ -133,11 +133,14 @@ export interface CompletionItem {
   preselect?: boolean;
   commitCharacters?: string[];
   deprecated?: boolean;
+  /** Opaque server state that must round-trip through completionItem/resolve. */
+  data?: unknown;
 }
 
 export interface CompletionResponse {
   items: CompletionItem[];
   isIncomplete: boolean;
+  resolveProvider: boolean;
 }
 
 export interface CompletionContext {
