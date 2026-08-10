@@ -17,6 +17,15 @@ function normalizedScopeValue(value: string | null | undefined) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function savedConnectionForScope(input: MetadataConnectionScopeInput) {
+  return useConnectionStore
+    .getState()
+    .connections.find(
+      (candidate) =>
+        candidate.id === input.connectionId && candidate.driver === input.driver,
+    );
+}
+
 /**
  * Cache callers may already own an exact connection snapshot. When they do
  * not, resolve the package/database identity from the current saved
@@ -26,12 +35,7 @@ function normalizedScopeValue(value: string | null | undefined) {
 export function resolveMetadataConnectionScope<T extends MetadataConnectionScopeInput>(
   input: T,
 ): T & ResolvedMetadataConnectionScope {
-  const connection = useConnectionStore
-    .getState()
-    .connections.find(
-      (candidate) =>
-        candidate.id === input.connectionId && candidate.driver === input.driver,
-    );
+  const connection = savedConnectionForScope(input);
   return {
     ...input,
     driverPackageVersion: normalizedScopeValue(
@@ -45,4 +49,16 @@ export function resolveMetadataConnectionScope<T extends MetadataConnectionScope
         : connection?.database,
     ),
   };
+}
+
+export function isMetadataConnectionScopeCurrent(
+  scope: ResolvedMetadataConnectionScope,
+): boolean {
+  const connection = savedConnectionForScope(scope);
+  if (!connection) return true;
+  return (
+    normalizedScopeValue(connection.driverPackageVersion) ===
+      scope.driverPackageVersion &&
+    normalizedScopeValue(connection.database) === scope.connectionDatabaseName
+  );
 }

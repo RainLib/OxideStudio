@@ -12,12 +12,18 @@ import type {
 } from "@/services/tauri/types";
 import {
   isMetadataCacheSupersededError,
+  MetadataCacheSupersededError,
   MetadataCacheGenerationRegistry,
 } from "@/services/metadataCacheGeneration";
 import {
+  isMetadataConnectionScopeCurrent,
   resolveMetadataConnectionScope,
   type ResolvedMetadataConnectionScope,
 } from "@/services/metadataConnectionScope";
+import {
+  MetadataTaskLimiter,
+  type MetadataTaskPriority,
+} from "@/services/metadataTaskLimiter";
 
 const TABLE_METADATA_CACHE_KIND = "TABLE_METADATA_CACHE";
 const TABLE_METADATA_CACHE_VERSION = 3;
@@ -39,6 +45,7 @@ export interface LoadTableMetadataOptions extends TableMetadataIdentity {
   includeIndexes?: boolean;
   includeConstraints?: boolean;
   force?: boolean;
+  priority?: MetadataTaskPriority;
 }
 
 export interface TableMetadataSnapshot {
@@ -72,6 +79,7 @@ interface StoredTableMetadata {
 const metadataLoads = new Map<string, Promise<TableMetadataSnapshot>>();
 const cacheOperations = new Map<string, Promise<unknown>>();
 const cacheGenerations = new MetadataCacheGenerationRegistry();
+const remoteMetadataLimiter = new MetadataTaskLimiter(2, 512);
 
 type ResolvedTableMetadataIdentity = TableMetadataIdentity & {
   projectId: string;
@@ -117,6 +125,17 @@ function scopedTableCacheKey(identity: ResolvedTableMetadataIdentity) {
 function captureCacheGeneration(identity: ResolvedTableMetadataIdentity) {
   const scope = scopedTableCacheKey(identity);
   return { scope, generation: cacheGenerations.capture(scope) };
+}
+
+function remoteMetadataScope(identity: ResolvedTableMetadataIdentity) {
+  return JSON.stringify([
+    identity.projectId,
+    identity.connectionId,
+    identity.driver,
+    identity.driverPackageVersion,
+    identity.connectionDatabaseName,
+    identity.databaseName || null,
+  ]);
 }
 
 function advanceCacheGeneration(identity: ResolvedTableMetadataIdentity) {
@@ -270,6 +289,10 @@ async function loadTableMetadataRemote(
 ): Promise<TableMetadataSnapshot> {
   const resolvedOptions = resolveIdentity(options);
   const scope = scopedTableCacheKey(resolvedOptions);
+  if (!isMetadataConnectionScopeCurrent(resolvedOptions)) {
+    throw new MetadataCacheSupersededError();
+  }
+  cacheGenerations.assertCurrent(scope, expectedGeneration);
   const includeIndexes = options.includeIndexes !== false;
   const includeConstraints = options.includeConstraints !== false;
   const shouldLoadColumns = options.force || !Array.isArray(cached?.columns);
@@ -338,6 +361,9 @@ async function loadTableMetadataRemote(
     constraintsPromise,
   ]);
   cacheGenerations.assertCurrent(scope, expectedGeneration);
+  if (!isMetadataConnectionScopeCurrent(resolvedOptions)) {
+    throw new MetadataCacheSupersededError();
+  }
   const updatedAt = Date.now();
   const patch: Partial<StoredTableMetadata> = {
     columns,
@@ -394,10 +420,12 @@ export async function loadTableMetadata(
     if (pending) return pending;
   }
 
-  const load = loadTableMetadataRemote(
-    resolvedOptions,
-    cached,
-    request.generation,
+  const load = remoteMetadataLimiter.run(
+    remoteMetadataScope(resolvedOptions),
+    "table-metadata",
+    () =>
+      loadTableMetadataRemote(resolvedOptions, cached, request.generation),
+    resolvedOptions.priority,
   );
   metadataLoads.set(key, load);
   try {

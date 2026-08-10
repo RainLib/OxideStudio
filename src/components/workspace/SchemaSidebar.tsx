@@ -632,6 +632,8 @@ export function SchemaSidebar() {
     projectId: activeProjectId,
     connectionId: activeConnectionId,
     driver: activeConnection?.driver,
+    driverPackageVersion: activeConnection?.driverPackageVersion,
+    connectionDatabaseName: activeConnection?.database,
     canBrowseDatabaseCatalogs,
     isConnectionReady: isActiveConnectionReady,
     refreshVersion: postgresDatabaseRefreshVersion,

@@ -27,6 +27,8 @@ interface UsePostgresDatabaseDiscoveryOptions {
   projectId: string;
   connectionId: string | null;
   driver: DatabaseDriver | null | undefined;
+  driverPackageVersion?: string | null;
+  connectionDatabaseName?: string | null;
   canBrowseDatabaseCatalogs?: boolean;
   isConnectionReady: boolean;
   refreshVersion: number;
@@ -43,7 +45,13 @@ const EMPTY_DISCOVERY: PostgresDatabaseDiscoveryState = {
 };
 
 function discoveryKey(identity: PostgresDatabaseCatalogIdentity) {
-  return `${identity.projectId}:${identity.connectionId}:${identity.driver}`;
+  return JSON.stringify([
+    identity.projectId,
+    identity.connectionId,
+    identity.driver,
+    identity.driverPackageVersion || null,
+    identity.connectionDatabaseName || null,
+  ]);
 }
 
 /**
@@ -55,6 +63,8 @@ export function usePostgresDatabaseDiscovery({
   projectId,
   connectionId,
   driver,
+  driverPackageVersion,
+  connectionDatabaseName,
   canBrowseDatabaseCatalogs = false,
   isConnectionReady,
   refreshVersion,
@@ -62,9 +72,22 @@ export function usePostgresDatabaseDiscovery({
   const identity = useMemo<PostgresDatabaseCatalogIdentity | null>(
     () =>
       connectionId && driver && canBrowseDatabaseCatalogs
-        ? { projectId, connectionId, driver }
+        ? {
+            projectId,
+            connectionId,
+            driver,
+            driverPackageVersion: driverPackageVersion || null,
+            connectionDatabaseName: connectionDatabaseName || null,
+          }
         : null,
-    [canBrowseDatabaseCatalogs, connectionId, driver, projectId]
+    [
+      canBrowseDatabaseCatalogs,
+      connectionDatabaseName,
+      connectionId,
+      driver,
+      driverPackageVersion,
+      projectId,
+    ]
   );
   const scopeKey = identity ? discoveryKey(identity) : null;
   const [state, setState] = useState<PostgresDatabaseDiscoveryState>(

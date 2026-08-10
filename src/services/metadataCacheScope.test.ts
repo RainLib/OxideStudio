@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { postgresDatabaseCatalogParentId } from "./postgresDatabaseCatalogCache";
 import { tableMetadataParentId } from "./tableMetadataCache";
+import {
+  isMetadataConnectionScopeCurrent,
+  resolveMetadataConnectionScope,
+} from "./metadataConnectionScope";
+import { useConnectionStore } from "@/store/useConnectionStore";
 
 const tableIdentity = {
   projectId: "project-a",
@@ -57,5 +62,44 @@ describe("metadata cache scope", () => {
         connectionDatabaseName: "warehouse",
       }),
     );
+  });
+
+  it("rejects a request whose saved package scope changed in place", () => {
+    const previousConnections = useConnectionStore.getState().connections;
+    try {
+      useConnectionStore.setState({
+        connections: [
+          {
+            id: "connection-a",
+            name: "Postgres",
+            driver: "postgres",
+            driverPackageVersion: "package@1",
+            database: "app",
+            url: "postgres://localhost/app",
+          },
+        ],
+      });
+      const captured = resolveMetadataConnectionScope({
+        connectionId: "connection-a",
+        driver: "postgres",
+      });
+      expect(isMetadataConnectionScopeCurrent(captured)).toBe(true);
+
+      useConnectionStore.setState({
+        connections: [
+          {
+            id: "connection-a",
+            name: "Postgres",
+            driver: "postgres",
+            driverPackageVersion: "package@2",
+            database: "warehouse",
+            url: "postgres://localhost/warehouse",
+          },
+        ],
+      });
+      expect(isMetadataConnectionScopeCurrent(captured)).toBe(false);
+    } finally {
+      useConnectionStore.setState({ connections: previousConnections });
+    }
   });
 });

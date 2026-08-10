@@ -97,6 +97,7 @@ async function collectionToLspTableDefinitionWithMetadata(
       table: collection.name,
       includeIndexes: capabilities.dataModel === "document",
       includeConstraints: false,
+      priority: "background",
     });
     return collectionToLspTableDefinition(
       capabilities,
@@ -539,6 +540,7 @@ export function LspConnectionSyncer() {
           table: table.name,
           includeIndexes: capabilities.supportsTableIndexes,
           includeConstraints: capabilities.supportsTableConstraints,
+          priority: "background",
         });
         const { columns, indexes, constraints } = metadata;
 

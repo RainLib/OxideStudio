@@ -466,6 +466,8 @@ export function QueryEditor({
     projectId: activeProjectId,
     connectionId: effectiveConnectionId || null,
     driver: activeConnection?.driver,
+    driverPackageVersion: activeConnection?.driverPackageVersion,
+    connectionDatabaseName: activeConnection?.database,
     canBrowseDatabaseCatalogs,
     isConnectionReady: Boolean(
       effectiveConnectionId &&

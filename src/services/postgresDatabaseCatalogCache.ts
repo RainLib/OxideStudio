@@ -6,9 +6,11 @@ import {
 import type { DatabaseDriver } from "@/services/tauri/types";
 import {
   isMetadataCacheSupersededError,
+  MetadataCacheSupersededError,
   MetadataCacheGenerationRegistry,
 } from "@/services/metadataCacheGeneration";
 import {
+  isMetadataConnectionScopeCurrent,
   resolveMetadataConnectionScope,
   type ResolvedMetadataConnectionScope,
 } from "@/services/metadataConnectionScope";
@@ -257,10 +259,16 @@ export function refreshPostgresDatabaseCatalog(
 
   const refresh = (async () => {
     const generation = catalogGenerations.capture(key);
+    if (!isMetadataConnectionScopeCurrent(resolvedIdentity)) {
+      throw new MetadataCacheSupersededError();
+    }
     const databases = normalizeDatabases(
       await schemaService.getDatabases(resolvedIdentity.connectionId)
     );
     catalogGenerations.assertCurrent(key, generation);
+    if (!isMetadataConnectionScopeCurrent(resolvedIdentity)) {
+      throw new MetadataCacheSupersededError();
+    }
     try {
       await persistPostgresDatabaseCatalog(
         resolvedIdentity,

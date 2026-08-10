@@ -15,6 +15,7 @@ import {
   type TableMetadataIdentity,
   type TableMetadataSnapshot,
 } from "@/services/tableMetadataCache";
+import { resolveMetadataConnectionScope } from "@/services/metadataConnectionScope";
 
 type MetadataGroup = "columns" | "indexes" | "constraints";
 
@@ -59,6 +60,7 @@ export function TableObjectTree({
   includeConstraints,
   onReferenceSelect,
 }: TableObjectTreeProps) {
+  const scopedIdentity = resolveMetadataConnectionScope(identity);
   const [metadata, setMetadata] = useState<TableMetadataSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshWarning, setRefreshWarning] = useState<string | null>(null);
@@ -75,7 +77,7 @@ export function TableObjectTree({
     setRefreshWarning(null);
     setIsRefreshing(refreshVersion > 0);
     void loadTableMetadata({
-      ...identity,
+      ...scopedIdentity,
       includeIndexes,
       includeConstraints,
       force: refreshVersion > 0,
@@ -95,7 +97,7 @@ export function TableObjectTree({
         if (refreshVersion > 0) {
           try {
             const cached = await loadTableMetadata({
-              ...identity,
+              ...scopedIdentity,
               includeIndexes,
               includeConstraints,
             });
@@ -122,6 +124,8 @@ export function TableObjectTree({
     identity.projectId,
     identity.schema,
     identity.table,
+    scopedIdentity.connectionDatabaseName,
+    scopedIdentity.driverPackageVersion,
     includeConstraints,
     includeIndexes,
     refreshVersion,
