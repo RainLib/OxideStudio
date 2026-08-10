@@ -6631,139 +6631,31 @@ pub async fn execute_table_data_transfer(
             },
         );
 
-        let transfer_result: Result<(u64, u64, bool), String> = async {
-            if let Some(expected_rows) = plan.target_rows_to_delete {
-                delete_table_data_transfer_target_for_overwrite(
-                    &manager,
-                    &request.target,
-                    plan.target_kind,
-                    &transaction_id,
-                    expected_rows,
-                )
-                .await?;
-            }
-            let order = build_table_order_by(plan.source_kind, &plan.source_columns, None)?;
-            let mut offset = 0_u64;
-            let mut rows_transferred = 0_u64;
-            let mut batches = 0_u64;
-            let mut limit_reached = false;
-            while rows_transferred < u64::from(plan.max_rows) {
-                if *cancel_rx.borrow() {
-                    return Err(format!(
-                        "{TABLE_DATA_TRANSFER_CANCELLED}: Transfer cancelled by the user"
-                    ));
-                }
-                let remaining = u64::from(plan.max_rows) - rows_transferred;
-                let page_size = u64::from(plan.batch_size).min(remaining) as u32;
-                let sql = plan.source_kind.paged_table_query_with_order(
-                    schema_option(&request.source.schema),
-                    &request.source.table,
-                    None,
-                    order.as_deref(),
-                    page_size,
-                    offset,
-                );
-                let mut results = tokio::select! {
-                    result = query_transfer_source_tracked(
-                        &manager,
-                        &request.source,
-                        &transfer_id,
-                        &sql,
-                    ) => result.map_err(|error| error.to_string())?,
-                    changed = cancel_rx.changed() => {
-                        let _ = changed;
-                        return Err(format!(
-                            "{TABLE_DATA_TRANSFER_CANCELLED}: Transfer cancelled by the user"
-                        ));
-                    }
-                };
-                let source_result = results
-                    .drain(..)
-                    .next()
-                    .unwrap_or_else(|| QueryResult::rows(Vec::new(), Vec::new()));
-                let rows = map_transfer_result_rows(&source_result, &plan)?;
-                if rows.is_empty() {
-                    break;
-                }
-                let statements = rows
-                    .iter()
-                    .map(|row| {
-                        let mutation = if request.mode == TableDataTransferMode::Upsert {
-                            build_upsert_mutation(
-                                plan.target_kind,
-                                &request.target.schema,
-                                &request.target.table,
-                                &plan.target_columns,
-                                row,
-                                &plan.upsert_key_columns,
-                            )
-                        } else {
-                            build_insert_mutation(
-                                plan.target_kind,
-                                &request.target.schema,
-                                &request.target.table,
-                                &plan.target_columns,
-                                row,
-                            )
-                        };
-                        mutation
-                        .map(|(sql, params)| ParameterizedStatement { sql, params })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                manager
-                    .execute_parameterized_transaction(
-                        &request.target.connection_id,
-                        &transaction_id,
-                        &statements,
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if *cancel_rx.borrow() {
-                    return Err(format!(
-                        "{TABLE_DATA_TRANSFER_CANCELLED}: Transfer cancelled by the user"
-                    ));
-                }
-                let copied = rows.len() as u64;
-                rows_transferred += copied;
-                offset += copied;
-                batches += 1;
-                last_progress_rows = rows_transferred;
-                last_progress_batches = batches;
-                emit_table_data_transfer_progress(
-                    &app,
-                    TableDataTransferProgress {
-                        transfer_id: transfer_id.clone(),
-                        rows_transferred,
-                        max_rows: plan.max_rows,
-                        batches,
-                        status: TableDataTransferProgressStatus::Running,
-                        terminal: false,
-                        message: None,
-                    },
-                );
-                if copied < u64::from(page_size) {
-                    break;
-                }
-                if rows_transferred == u64::from(plan.max_rows) {
-                    limit_reached = true;
-                }
-            }
-            if !plan.identity_reseed_columns.is_empty() {
-                let statements = postgres_identity_reseed_statements(
-                    &request.target,
-                    &plan.identity_reseed_columns,
-                );
-                manager
-                    .execute_parameterized_transaction(
-                        &request.target.connection_id,
-                        &transaction_id,
-                        &statements,
-                    )
-                    .await
-                    .map_err(|error| format!("Could not synchronize PostgreSQL identity generators: {error}"))?;
-            }
-            Ok((rows_transferred, batches, limit_reached))
-        }
+        let mut on_progress = |rows_transferred, batches| {
+            last_progress_rows = rows_transferred;
+            last_progress_batches = batches;
+            emit_table_data_transfer_progress(
+                &app,
+                TableDataTransferProgress {
+                    transfer_id: transfer_id.clone(),
+                    rows_transferred,
+                    max_rows: plan.max_rows,
+                    batches,
+                    status: TableDataTransferProgressStatus::Running,
+                    terminal: false,
+                    message: None,
+                },
+            );
+        };
+        let transfer_result = execute_resolved_table_data_transfer_in_transaction(
+            &manager,
+            &request,
+            &plan,
+            &transaction_id,
+            &transfer_id,
+            &mut cancel_rx,
+            &mut on_progress,
+        )
         .await;
 
         let (rows_transferred, batches, limit_reached) =

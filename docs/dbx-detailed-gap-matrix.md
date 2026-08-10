@@ -112,7 +112,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 | C01 | 部分对齐：统一 driver conformance runner 与 catalog 证据门禁已落地 | 各 `agents/drivers/*/src/test`、`crates/dbx-core/tests/live_*` | `scripts/run-driver-conformance.mjs`、`docs/database-driver-conformance-*.schema.json`、`DriverPackageConformanceEvidence` | bundled/external 对同一 fixture contract 运行；catalog 只能引用 CI 产生的版本证据。 |
 | C02 | 未对齐：跨层契约 fixture | DBX backend/api types 与 app tests | TS/Rust/sidecar 类型各有测试 | 同一 JSON fixture 验证 TS decode、Rust serde、sidecar schema 和 backward compatibility。 |
 | C03 | 未对齐：failure injection | DBX worker/process、SSE replay、transfer/export cancellation tests | driver handshake、下载摘要、LSP stale response已有部分覆盖 | 增加 crash/restart、下载中断、partial import、transfer rollback、stale metadata 和 reconnect 压测。 |
-| C04 | 部分对齐：巨型模块拆分 | DBX 虽有纯模块，但 `transfer.rs`、主 Vue 组件同样较大 | `QueryEditor.tsx`、`SchemaSidebar.tsx`、`DataGrid.tsx`、`commands/table.rs` 仍大 | 新能力先进入 feature/application/domain 模块；禁止继续把 vendor switch 堆到 UI。 |
+| C04 | 部分对齐：巨型模块拆分 | DBX 虽有纯模块，但 `transfer.rs`、主 Vue 组件同样较大 | `QueryEditor.tsx`、`SchemaSidebar.tsx`、`DataGrid.tsx`、`commands/table.rs` 仍大；单表与多表迁移已收敛到同一个 transaction executor，统一 overwrite、source cancellation、参数化写入、identity reseed 和批次进度，移除约 130 行会漂移的重复执行循环 | 继续按 feature/application/domain 拆出 export/transfer 模块；禁止把 vendor switch 堆到 UI，也不得为单表/批量入口复制第二套执行语义。 |
 
 ## 7. 执行顺序
 

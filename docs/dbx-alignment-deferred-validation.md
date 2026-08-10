@@ -151,6 +151,11 @@ explicit deferred validation task rather than an implicit release check.
 - Verify progress totals, cancellation propagation to the source query, and
   Explorer batch-selection behavior (including a target schema with one
   missing same-named table and a selection changed after preview).
+- Run the same append/overwrite/upsert, cancellation, write-failure and
+  PostgreSQL identity-reseed fixtures through both the single-table and
+  multi-table entrypoints. The shared executor must emit equivalent per-table
+  row/batch totals and rollback semantics; only aggregation/report ownership
+  may differ.
 
 ## Existing transfer and migration work
 
