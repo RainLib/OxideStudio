@@ -967,7 +967,9 @@ export function TableDataView() {
     }
   };
 
-  const handleExportDatabaseSql = async () => {
+  const handleExportDatabaseSql = async (
+    scope: "all" | "structure" | "data",
+  ) => {
     if (
       !tabConnectionId ||
       !activeTab.schemaName ||
@@ -979,15 +981,22 @@ export function TableDataView() {
     ) {
       return;
     }
+    const includeStructure = scope !== "data";
+    const includeData = scope !== "structure";
+    const scopeLabel = includeStructure && includeData
+      ? "relation structure and data"
+      : includeStructure
+        ? "relation structure only"
+        : "relation data only (the target structure must already exist)";
     const confirmed = window.confirm(
-      `Back up all base relations in schema "${activeTab.schemaName}" to one SQL file?\n\nThis initial backup includes relation structure and data. Views, materialized views, routines, sequences, extensions, grants, and foreign-key constraints are not included.`,
+      `Back up all base relations in schema "${activeTab.schemaName}" to one SQL file?\n\nThis export includes ${scopeLabel}. Views, materialized views, routines, sequences, extensions, grants, and foreign-key constraints are not included.`,
     );
     if (!confirmed) return;
 
     const taskId = startTask({
       kind: "export",
       title: `Back up ${activeTab.schemaName}`,
-      detail: "PostgreSQL relation structure and data",
+      detail: `PostgreSQL ${scopeLabel}`,
     });
     const exportId = tableService.createTableExportId();
     const exportTask = { exportId, taskId };
@@ -998,7 +1007,7 @@ export function TableDataView() {
         tabConnectionId,
         driver,
         activeTab.schemaName,
-        { exportId },
+        { exportId, includeStructure, includeData },
       );
       finishTask(
         taskId,
@@ -1723,7 +1732,7 @@ export function TableDataView() {
           normalizeDatabaseDriverName(driver) === "postgres" &&
           !isCrossDatabasePreview &&
           !isNativeObjectPreview
-            ? () => void handleExportDatabaseSql()
+            ? (scope) => void handleExportDatabaseSql(scope)
             : undefined
         }
         onExportTsv={() => void handleExport("tsv")}

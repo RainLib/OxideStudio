@@ -79,7 +79,7 @@ interface TableDataToolbarProps {
     conflictPolicy?: SqlInsertConflictPolicy,
   ) => void;
   /** Available only for the reviewed built-in PostgreSQL backup route. */
-  onExportDatabaseSql?: () => void;
+  onExportDatabaseSql?: (scope: "all" | "structure" | "data") => void;
   onExportTsv: () => void;
   onExportXlsx: () => void;
   onExportParquet: () => void;
@@ -410,16 +410,37 @@ export function TableDataToolbar({
               </DropdownMenuSub>
             )}
             {onExportDatabaseSql && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  className="wb-menu-item"
-                  onSelect={onExportDatabaseSql}
-                >
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger className="wb-menu-item">
                   <FileCode2 className="mr-2 h-3.5 w-3.5" />
-                  Backup PostgreSQL schema to SQL...
-                </DropdownMenuItem>
-              </>
+                  Backup PostgreSQL schema to SQL
+                </DropdownMenuSubTrigger>
+                <DropdownMenuPortal>
+                  <DropdownMenuSubContent className="wb-menu-content min-w-52">
+                    <DropdownMenuItem
+                      className="wb-menu-item"
+                      onSelect={() => onExportDatabaseSql("all")}
+                    >
+                      Structure and data
+                      <span className="ml-auto pl-3 text-[10px] wb-muted">
+                        Recommended
+                      </span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      className="wb-menu-item"
+                      onSelect={() => onExportDatabaseSql("structure")}
+                    >
+                      Structure only
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      className="wb-menu-item"
+                      onSelect={() => onExportDatabaseSql("data")}
+                    >
+                      Data only
+                    </DropdownMenuItem>
+                  </DropdownMenuSubContent>
+                </DropdownMenuPortal>
+              </DropdownMenuSub>
             )}
           </DropdownMenuContent>
         </DropdownMenu>
