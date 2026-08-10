@@ -450,6 +450,9 @@ Editor，而不是引入一个新的 Git UI 框架。
 - Value Editor、FK navigation、selection aggregate、loaded-page compare。
 - 表数据页与 SQL 查询结果都可切换为只读转置视图：字段成为行、加载记录成为列；表格有未提交编辑时禁止切换，避免展示模式改变写入语义。
 - JSON Value Editor 可在文本与只读树之间切换；树仅解析有效且不超过 1 MiB 的草稿，提交始终使用原始 JSON 文本。
+- 原生 MongoDB 的查询与 mutation 统一以 canonical/relaxed Extended JSON 穿过 Rust 边界；
+  ObjectId、Date、Int64、Decimal128、Binary 和 nested values 不再依赖隐式 Serde 行为，
+  shell-like 字符串保持 literal。可视化 document clone/edit surface 及 edited-field metadata 仍缺。
 - CSV/JSON/XLSX/SQL 导入导出有路径、格式、行数和批次边界。表数据视图的 CSV 导入已提供
   编码、分隔符、首行 header、空值和列映射预览；Explorer 的 `Import CSV…` 会先打开
   对应表的数据页并复用同一对话框，不再绕过 mapping。JSON/JSONL 与 XLSX 首工作表也会先读取受限的

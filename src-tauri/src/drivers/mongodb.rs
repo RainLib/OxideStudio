@@ -5,7 +5,7 @@ use crate::core::{
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use mongodb::{
-    bson::{self, doc, Bson, Document},
+    bson::{doc, Bson, Document},
     Client,
 };
 use serde::Deserialize;
@@ -646,7 +646,12 @@ fn build_delete_command(collection: &str, filter: &Value, limit: i32) -> Result<
 }
 
 fn json_to_bson(value: &Value, label: &str) -> Result<Bson> {
-    bson::to_bson(value).with_context(|| format!("{label} is not valid BSON"))
+    // The editor and result grid exchange MongoDB values as canonical or
+    // relaxed Extended JSON. Use BSON's dedicated decoder so cloning a value
+    // such as {"$date": ...} or {"$oid": ...} restores its native type
+    // instead of persisting the wrapper as an ordinary embedded document.
+    Bson::try_from(value.clone())
+        .with_context(|| format!("{label} is not valid MongoDB Extended JSON"))
 }
 
 fn json_to_document(value: &Value, label: &str) -> Result<Document> {
@@ -878,7 +883,7 @@ fn command_result(
 }
 
 fn bson_to_json(value: Bson) -> Value {
-    serde_json::to_value(value).unwrap_or(Value::Null)
+    value.into_relaxed_extjson()
 }
 
 fn mongodb_default_database(url: &str) -> String {
@@ -940,6 +945,61 @@ mod tests {
         );
         assert_eq!(mongodb_server_version(&doc! { "version": "  " }), None);
         assert_eq!(mongodb_server_version(&doc! { "ok": 1 }), None);
+    }
+
+    #[test]
+    fn extended_json_round_trip_preserves_native_bson_types() {
+        let source = serde_json::json!({
+            "_id": { "$oid": "507f1f77bcf86cd799439011" },
+            "createdAt": { "$date": { "$numberLong": "1786291200000" } },
+            "counter": { "$numberLong": "9223372036854775807" },
+            "amount": { "$numberDecimal": "1234567890.0123456789" },
+            "payload": { "$binary": { "base64": "AQID", "subType": "00" } },
+            "nested": [{ "$oid": "507f191e810c19729de860ea" }]
+        });
+
+        let document = json_to_document(&source, "document").unwrap();
+        assert!(matches!(document.get("_id"), Some(Bson::ObjectId(_))));
+        assert!(matches!(document.get("createdAt"), Some(Bson::DateTime(_))));
+        assert!(matches!(
+            document.get("counter"),
+            Some(Bson::Int64(i64::MAX))
+        ));
+        assert!(matches!(document.get("amount"), Some(Bson::Decimal128(_))));
+        assert!(matches!(document.get("payload"), Some(Bson::Binary(_))));
+        assert!(matches!(
+            document.get_array("nested").unwrap().first(),
+            Some(Bson::ObjectId(_))
+        ));
+
+        let encoded = bson_to_json(Bson::Document(document.clone()));
+        assert_eq!(
+            json_to_document(&encoded, "round-trip document").unwrap(),
+            document
+        );
+    }
+
+    #[test]
+    fn extended_json_keeps_mongo_shell_like_strings_literal() {
+        let source = serde_json::json!({
+            "dateText": "ISODate(\"2026-08-10T00:00:00.000Z\")",
+            "objectIdText": "ObjectId(\"507f1f77bcf86cd799439011\")",
+            "actualDate": { "$date": "2026-08-10T00:00:00.000Z" }
+        });
+
+        let document = json_to_document(&source, "document").unwrap();
+        assert!(matches!(
+            document.get("dateText"),
+            Some(Bson::String(value)) if value == "ISODate(\"2026-08-10T00:00:00.000Z\")"
+        ));
+        assert!(matches!(
+            document.get("objectIdText"),
+            Some(Bson::String(value)) if value == "ObjectId(\"507f1f77bcf86cd799439011\")"
+        ));
+        assert!(matches!(
+            document.get("actualDate"),
+            Some(Bson::DateTime(_))
+        ));
     }
 
     #[test]

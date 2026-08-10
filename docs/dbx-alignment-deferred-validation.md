@@ -1285,3 +1285,23 @@ explicit deferred validation task rather than an implicit release check.
   suite and a production frontend build only. No database was opened; real
   Agent offsets and Monaco interaction remain in the consolidated validation
   queue.
+
+## MongoDB Extended JSON clone and mutation fidelity
+
+- Against MongoDB 4.4, 5, 6, 7 and 8 fixtures, read and write ObjectId, date,
+  int32/int64, Decimal128, binary subtypes, timestamp, regex, JavaScript/code,
+  MinKey/MaxKey and deeply nested mixed arrays through find, aggregate, insert
+  and update. Compare BSON type tags on the server, not only rendered JSON.
+- When a visual DocumentBrowser/Grid clone surface is introduced, preserve the
+  source document identity and explicit edited-field set. Unedited fields must
+  reuse their canonical Extended JSON values, `_id` handling must be explicit,
+  and preview must distinguish literal strings such as `ISODate(...)` from
+  actual `$date` wrappers.
+- Exercise malformed wrappers, unsupported binary subtype, out-of-range numeric
+  values, timezone offsets, duplicate keys, payload limits, cancellation and
+  error redaction. No shell-like string may be evaluated or silently coerced.
+- Phase 117 passes `cargo clippy --lib -- -D warnings` and a locked-dependency
+  minimal Rust round-trip executable. The formal `oxide_studio_lib` unit test
+  target compiles, but this Windows environment exits before tests with
+  `STATUS_ENTRYPOINT_NOT_FOUND`; rerun those committed tests in CI/a repaired
+  host. No database was opened.

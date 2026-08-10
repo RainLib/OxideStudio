@@ -322,6 +322,23 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
   quoted case、zero offset、越界拒绝和原生 PostgreSQL位置；完整前端 237 文件/1,261 项测试及
   生产构建通过。本阶段未连接数据库。
 
+## Phase 117：MongoDB Extended JSON / BSON 类型保真映射
+
+- DBX `crates/dbx-core/src/db/mongo_driver.rs:insert_document_extended_json` → Oxide
+  `src-tauri/src/drivers/mongodb.rs:json_to_bson/json_to_document`：使用 BSON crate 的专用
+  Extended JSON decoder，而非依赖未声明的通用 Serde 表现。
+- DBX canonical document clone payload → Oxide `bson_to_json` 显式输出 relaxed Extended JSON；
+  `command/find/aggregate/count/insert/update/delete` 全部复用同一输入边界，结果 grid 和后续 mutation
+  不维护第二套类型转换。
+- Rust contract 覆盖 ObjectId、DateTime、Int64、Decimal128、Binary、nested ObjectId 和完整
+  encode/decode equality；Mongo shell-like `ISODate(...)`/`ObjectId(...)` 保持普通字符串，不执行
+  或猜测 shell 语法。
+- `cargo clippy --lib -- -D warnings` 与锁定依赖的最小 Rust executable round-trip 通过。正式
+  `oxide_studio_lib` 单测已成功编译，但当前 Windows 宿主在运行任何该测试二进制前报
+  `STATUS_ENTRYPOINT_NOT_FOUND`；未把它记为测试通过，已进入延期验证记录。本阶段未连接数据库。
+- Oxide 当前没有 DBX `DocumentBrowser.vue` 的可视化 clone surface；后续新增时必须携带源 document
+  identity 和 edited-field metadata，并复用本阶段原生边界，不能在前端重新解释 BSON。
+
 ## 9. 文档维护规则
 
 当某项能力状态发生变化时：
