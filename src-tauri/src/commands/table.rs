@@ -113,6 +113,64 @@ pub struct TablePageResult {
     pub total_rows: Option<u64>,
 }
 
+/// A reviewed table endpoint used by the bounded, server-side data compare
+/// path. It intentionally mirrors the transfer endpoint rather than accepting
+/// arbitrary SQL: this keeps pagination and identifier quoting host-owned.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataCompareEndpoint {
+    pub connection_id: String,
+    pub driver: String,
+    #[serde(default)]
+    pub database: Option<String>,
+    pub schema: String,
+    pub table: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataCompareRequest {
+    pub source: TableDataCompareEndpoint,
+    pub target: TableDataCompareEndpoint,
+    pub columns: Vec<String>,
+    pub key_columns: Vec<String>,
+    #[serde(default)]
+    pub batch_size: Option<u32>,
+    /// Hard safety ceiling for each side. Larger relations must use a future
+    /// sampled/checksum compare rather than silently producing a partial diff.
+    #[serde(default)]
+    pub max_rows: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataCompareRow {
+    pub key: String,
+    pub values: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataCompareModifiedRow {
+    pub key: String,
+    pub source_values: BTreeMap<String, Value>,
+    pub target_values: BTreeMap<String, Value>,
+    pub changed_columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataCompareResult {
+    pub added: Vec<TableDataCompareRow>,
+    pub removed: Vec<TableDataCompareRow>,
+    pub modified: Vec<TableDataCompareModifiedRow>,
+    pub equal_count: u64,
+    pub source_row_count: u64,
+    pub target_row_count: u64,
+    pub compared_key_count: u64,
+    pub batch_size: u32,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TableExportFormat {
@@ -7678,6 +7736,208 @@ fn preview_metadata_required(
     structured_filters.is_some() || requested_sort.is_some()
 }
 
+fn data_compare_transfer_endpoint(
+    endpoint: &TableDataCompareEndpoint,
+) -> TableDataTransferEndpoint {
+    TableDataTransferEndpoint {
+        connection_id: endpoint.connection_id.clone(),
+        driver: endpoint.driver.clone(),
+        schema: endpoint.schema.clone(),
+        table: endpoint.table.clone(),
+        database: endpoint.database.clone(),
+    }
+}
+
+fn data_compare_row_count(result: &[QueryResult]) -> Result<u64, String> {
+    result
+        .first()
+        .and_then(|set| set.rows.first())
+        .and_then(|row| row.first())
+        .and_then(value_to_u64)
+        .ok_or_else(|| "COUNT query returned no numeric row count".to_string())
+}
+
+fn data_compare_row_values(columns: &[String], row: &[Value]) -> BTreeMap<String, Value> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            (
+                column.clone(),
+                row.get(index).cloned().unwrap_or(Value::Null),
+            )
+        })
+        .collect()
+}
+
+fn data_compare_key(values: &BTreeMap<String, Value>, key_columns: &[String]) -> String {
+    key_columns
+        .iter()
+        .map(|column| {
+            serde_json::to_string(values.get(column).unwrap_or(&Value::Null)).unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join("\u{001f}")
+}
+
+async fn fetch_full_data_compare_rows(
+    manager: &ConnectionManager,
+    endpoint: &TableDataCompareEndpoint,
+    kind: DatabaseKind,
+    columns: &[String],
+    key_columns: &[String],
+    batch_size: u32,
+) -> Result<Vec<BTreeMap<String, Value>>, String> {
+    let selected = columns
+        .iter()
+        .map(|column| kind.quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let order = key_columns
+        .iter()
+        .map(|column| format!("{} ASC", kind.quote_identifier(column)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let relation = kind.qualified_table(schema_option(&endpoint.schema), &endpoint.table);
+    let mut offset = 0_u64;
+    let mut rows = Vec::new();
+    loop {
+        let sql = format!(
+            "SELECT {selected} FROM {relation} ORDER BY {order} LIMIT {batch_size} OFFSET {offset};"
+        );
+        let mut result = query_target(
+            manager,
+            &endpoint.connection_id,
+            endpoint.database.as_deref(),
+            &sql,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let page = result
+            .drain(..)
+            .next()
+            .unwrap_or_else(|| QueryResult::rows(Vec::new(), Vec::new()));
+        let fetched = page.rows.len() as u32;
+        rows.extend(
+            page.rows
+                .iter()
+                .map(|row| data_compare_row_values(columns, row)),
+        );
+        if fetched < batch_size {
+            break;
+        }
+        offset += u64::from(fetched);
+    }
+    Ok(rows)
+}
+
+#[tauri::command]
+pub async fn compare_table_data_full(
+    manager: State<'_, ConnectionManager>,
+    request: TableDataCompareRequest,
+) -> Result<Response<TableDataCompareResult>, String> {
+    let result: Result<TableDataCompareResult, String> = async {
+        let columns = request
+            .columns
+            .into_iter()
+            .map(|column| column.trim().to_string())
+            .filter(|column| !column.is_empty())
+            .collect::<Vec<_>>();
+        let key_columns = request
+            .key_columns
+            .into_iter()
+            .map(|column| column.trim().to_string())
+            .filter(|column| !column.is_empty())
+            .collect::<Vec<_>>();
+        if columns.is_empty() || key_columns.is_empty() {
+            return Err("Full data comparison requires selected columns and at least one key column".to_string());
+        }
+        if columns.iter().collect::<HashSet<_>>().len() != columns.len()
+            || key_columns.iter().collect::<HashSet<_>>().len() != key_columns.len()
+        {
+            return Err("Data comparison columns and key columns must be unique".to_string());
+        }
+        if key_columns.iter().any(|key| !columns.contains(key)) {
+            return Err("Every data comparison key column must be selected for comparison".to_string());
+        }
+        let source_endpoint = data_compare_transfer_endpoint(&request.source);
+        let target_endpoint = data_compare_transfer_endpoint(&request.target);
+        let source_kind = table_data_transfer_dialect(&manager, &source_endpoint).await?;
+        let target_kind = table_data_transfer_dialect(&manager, &target_endpoint).await?;
+        let batch_size = request.batch_size.unwrap_or(1_000).clamp(100, 5_000);
+        let max_rows = request.max_rows.unwrap_or(100_000).clamp(1, 100_000) as u64;
+        let source_count_sql = source_kind.count_table_query(schema_option(&request.source.schema), &request.source.table, None);
+        let target_count_sql = target_kind.count_table_query(schema_option(&request.target.schema), &request.target.table, None);
+        let (source_count_result, target_count_result) = tokio::try_join!(
+            query_target(&manager, &request.source.connection_id, request.source.database.as_deref(), &source_count_sql),
+            query_target(&manager, &request.target.connection_id, request.target.database.as_deref(), &target_count_sql),
+        ).map_err(|error| error.to_string())?;
+        let source_row_count = data_compare_row_count(&source_count_result)?;
+        let target_row_count = data_compare_row_count(&target_count_result)?;
+        if source_row_count > max_rows || target_row_count > max_rows {
+            return Err(format!(
+                "Full data compare is limited to {max_rows} rows per table (source: {source_row_count}, target: {target_row_count}). Use a sampled/checksum compare when available."
+            ));
+        }
+        let (source_rows, target_rows) = tokio::try_join!(
+            fetch_full_data_compare_rows(&manager, &request.source, source_kind, &columns, &key_columns, batch_size),
+            fetch_full_data_compare_rows(&manager, &request.target, target_kind, &columns, &key_columns, batch_size),
+        )?;
+        let mut source = HashMap::with_capacity(source_rows.len());
+        for values in source_rows {
+            let key = data_compare_key(&values, &key_columns);
+            if source.insert(key.clone(), values).is_some() {
+                return Err(format!("Duplicate source key: {key}"));
+            }
+        }
+        let mut target = HashMap::with_capacity(target_rows.len());
+        for values in target_rows {
+            let key = data_compare_key(&values, &key_columns);
+            if target.insert(key.clone(), values).is_some() {
+                return Err(format!("Duplicate target key: {key}"));
+            }
+        }
+        let mut added = Vec::new();
+        let mut removed = Vec::new();
+        let mut modified = Vec::new();
+        let mut equal_count = 0_u64;
+        for (key, source_values) in &source {
+            let Some(target_values) = target.get(key) else {
+                added.push(TableDataCompareRow { key: key.clone(), values: source_values.clone() });
+                continue;
+            };
+            let changed_columns = columns
+                .iter()
+                .filter(|column| !key_columns.contains(column))
+                .filter(|column| source_values.get(*column) != target_values.get(*column))
+                .cloned()
+                .collect::<Vec<_>>();
+            if changed_columns.is_empty() {
+                equal_count += 1;
+            } else {
+                modified.push(TableDataCompareModifiedRow {
+                    key: key.clone(),
+                    source_values: source_values.clone(),
+                    target_values: target_values.clone(),
+                    changed_columns,
+                });
+            }
+        }
+        for (key, values) in &target {
+            if !source.contains_key(key) {
+                removed.push(TableDataCompareRow { key: key.clone(), values: values.clone() });
+            }
+        }
+        let compared_key_count = (source.len() + target.len() - equal_count as usize - modified.len()) as u64;
+        Ok(TableDataCompareResult { added, removed, modified, equal_count, source_row_count, target_row_count, compared_key_count, batch_size })
+    }
+    .await;
+    match result {
+        Ok(result) => Ok(Response::ok(result)),
+        Err(error) => Ok(Response::err("COMPARE_TABLE_DATA_FULL_ERROR", &error)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn preview_table_page(
@@ -11020,7 +11280,7 @@ mod tests {
         build_sqlite_drop_column_statement, build_sqlite_drop_index_statement,
         build_structured_filter_where, build_table_order_by, build_transfer_target_columns,
         build_update_mutation, build_upsert_mutation, canonical_import_columns, column_lookup,
-        csv_delimiter, csv_escape, csv_record_values,
+        csv_delimiter, csv_escape, csv_record_values, data_compare_key, data_compare_row_values,
         delete_table_data_transfer_target_for_overwrite, ensure_host_table_ddl_capability,
         ensure_sql_insert_conflict_policy, ensure_table_export_format,
         ensure_transfer_endpoint_driver_matches_connection, execute_target_parameterized_batch,
@@ -14833,6 +15093,16 @@ WITH DATA;"#
             ensure_table_export_format(&capabilities, TableExportFormat::Xlsx)
                 .unwrap_err()
                 .contains("does not declare XLSX")
+        );
+    }
+
+    #[test]
+    fn full_data_compare_key_preserves_composite_value_boundaries() {
+        let columns = vec!["tenant".to_string(), "id".to_string()];
+        let values = data_compare_row_values(&columns, &[json!("a\u{001f}b"), json!(7)]);
+        assert_eq!(
+            data_compare_key(&values, &columns),
+            "\"a\\u001fb\"\u{001f}7"
         );
     }
 }

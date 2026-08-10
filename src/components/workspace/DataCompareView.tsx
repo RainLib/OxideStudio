@@ -14,9 +14,12 @@ import {
   type DataCompareFieldDifference,
   type DataCompareRow,
   type DataCompareRowStatus,
+  type DataCompareResult,
   type DataCompareSource,
 } from "@/lib/dataCompare";
 import { cn } from "@/lib/utils";
+import { tableService, type TableDataCompareResult } from "@/services/tauri";
+import { useConnectionStore } from "@/store/useConnectionStore";
 import {
   canCreateDataCompareSource,
   useTabStore,
@@ -26,6 +29,7 @@ const DISPLAY_LIMIT = 2_000;
 
 export function DataCompareView() {
   const { tabs, activeTabId, openDataCompareTab } = useTabStore();
+  const connections = useConnectionStore((state) => state.connections);
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
   const left = activeTab?.dataCompareLeft;
   const right = activeTab?.dataCompareRight;
@@ -34,10 +38,21 @@ export function DataCompareView() {
   const [relativeTolerancePercent, setRelativeTolerancePercent] = useState("0");
   const [showEqual, setShowEqual] = useState(false);
   const [query, setQuery] = useState("");
+  const [fullComparison, setFullComparison] = useState<DataCompareResult | null>(null);
+  const [fullComparisonMeta, setFullComparisonMeta] = useState<{
+    sourceRows: number;
+    targetRows: number;
+    batchSize: number;
+  } | null>(null);
+  const [isComparingFull, setIsComparingFull] = useState(false);
+  const [fullComparisonError, setFullComparisonError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!left || !right) return;
     setKeyColumns(suggestedDataCompareKeys(left, right));
+    setFullComparison(null);
+    setFullComparisonMeta(null);
+    setFullComparisonError(null);
   }, [left, right]);
 
   const comparison = useMemo(() => {
@@ -77,17 +92,66 @@ export function DataCompareView() {
       canCreateDataCompareSource(rightSourceTab),
   );
   const sharedColumns = sharedDataCompareColumns(left, right);
-  const rows = comparison.result
-    ? flattenRows(comparison.result.rows, left, right, showEqual, query)
+  const displayedComparison = fullComparison || comparison.result;
+  const rows = displayedComparison
+    ? flattenRows(displayedComparison.rows, left, right, showEqual, query)
     : [];
   const displayedRows = rows.slice(0, DISPLAY_LIMIT);
 
   const toggleKey = (column: string) => {
+    setFullComparison(null);
+    setFullComparisonMeta(null);
+    setFullComparisonError(null);
     setKeyColumns((current) =>
       current.includes(column)
         ? current.filter((candidate) => candidate !== column)
         : [...current, column],
     );
+  };
+  const leftConnection = connections.find((connection) => connection.id === left.connectionId);
+  const rightConnection = connections.find((connection) => connection.id === right.connectionId);
+  const canCompareFull = Boolean(
+    left.sourceKind === "table" &&
+      right.sourceKind === "table" &&
+      left.connectionId && right.connectionId &&
+      left.objectName && right.objectName &&
+      leftConnection?.driver && rightConnection?.driver &&
+      keyColumns.length > 0,
+  );
+  const runFullComparison = async () => {
+    if (!canCompareFull || !leftConnection || !rightConnection) return;
+    setIsComparingFull(true);
+    setFullComparisonError(null);
+    try {
+      const result = await tableService.compareTableDataFull({
+        source: {
+          connectionId: left.connectionId!,
+          driver: leftConnection.driver,
+          database: left.databaseName,
+          schema: left.schemaName || "",
+          table: left.objectName!,
+        },
+        target: {
+          connectionId: right.connectionId!,
+          driver: rightConnection.driver,
+          database: right.databaseName,
+          schema: right.schemaName || "",
+          table: right.objectName!,
+        },
+        columns: sharedColumns,
+        keyColumns,
+      });
+      setFullComparison(fullComparisonFromServer(result, left, right, keyColumns, sharedColumns));
+      setFullComparisonMeta({
+        sourceRows: result.sourceRowCount,
+        targetRows: result.targetRowCount,
+        batchSize: result.batchSize,
+      });
+    } catch (error) {
+      setFullComparisonError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsComparingFull(false);
+    }
   };
 
   return (
@@ -112,16 +176,29 @@ export function DataCompareView() {
         >
           <RefreshCw size={11} /> Refresh loaded data
         </button>
+        <button
+          type="button"
+          className="wb-text-button h-7 gap-1.5 px-2.5 text-[10px]"
+          disabled={!canCompareFull || isComparingFull}
+          title={
+            canCompareFull
+              ? "Compare all rows on the host, up to 100,000 rows per table"
+              : "Full compare requires two table tabs, their connections, and at least one shared key"
+          }
+          onClick={() => void runFullComparison()}
+        >
+          <Rows3 size={11} /> {isComparingFull ? "Comparing tables…" : "Compare full tables"}
+        </button>
       </header>
 
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.62)] px-3">
-        {comparison.result && (
+        {displayedComparison && (
           <>
-            <SummaryBadge label="Changed" value={comparison.result.counts.changed} tone="warning" />
-            <SummaryBadge label="Left only" value={comparison.result.counts.leftOnly} tone="danger" />
-            <SummaryBadge label="Right only" value={comparison.result.counts.rightOnly} tone="success" />
-            <SummaryBadge label="Duplicate" value={comparison.result.counts.duplicate} tone="warning" />
-            <SummaryBadge label="Equal" value={comparison.result.counts.equal} />
+            <SummaryBadge label="Changed" value={displayedComparison.counts.changed} tone="warning" />
+            <SummaryBadge label="Left only" value={displayedComparison.counts.leftOnly} tone="danger" />
+            <SummaryBadge label="Right only" value={displayedComparison.counts.rightOnly} tone="success" />
+            <SummaryBadge label="Duplicate" value={displayedComparison.counts.duplicate} tone="warning" />
+            <SummaryBadge label="Equal" value={displayedComparison.counts.equal} />
           </>
         )}
         <label className="ml-auto flex items-center gap-1.5 text-[9px] wb-muted">
@@ -209,24 +286,34 @@ export function DataCompareView() {
             </p>
           </section>
 
-          {comparison.result && (
+          {displayedComparison && (
             <section className="px-3 py-3 text-[8px] leading-4 wb-muted">
-              <div>{comparison.result.comparedColumns.length} shared value columns</div>
-              <div>{left.rows.length.toLocaleString()} loaded left rows</div>
-              <div>{right.rows.length.toLocaleString()} loaded right rows</div>
-              {comparison.result.leftOnlyColumns.length > 0 && (
+              <div>{displayedComparison.comparedColumns.length} shared value columns</div>
+              {fullComparisonMeta ? (
+                <>
+                  <div>{fullComparisonMeta.sourceRows.toLocaleString()} full left rows</div>
+                  <div>{fullComparisonMeta.targetRows.toLocaleString()} full right rows</div>
+                  <div>{fullComparisonMeta.batchSize.toLocaleString()} rows per host batch</div>
+                </>
+              ) : (
+                <>
+                  <div>{left.rows.length.toLocaleString()} loaded left rows</div>
+                  <div>{right.rows.length.toLocaleString()} loaded right rows</div>
+                </>
+              )}
+              {displayedComparison.leftOnlyColumns.length > 0 && (
                 <div className="mt-2 break-words">
-                  Left-only columns: {comparison.result.leftOnlyColumns.join(", ")}
+                  Left-only columns: {displayedComparison.leftOnlyColumns.join(", ")}
                 </div>
               )}
-              {comparison.result.rightOnlyColumns.length > 0 && (
+              {displayedComparison.rightOnlyColumns.length > 0 && (
                 <div className="mt-1 break-words">
-                  Right-only columns: {comparison.result.rightOnlyColumns.join(", ")}
+                  Right-only columns: {displayedComparison.rightOnlyColumns.join(", ")}
                 </div>
               )}
-              {comparison.result.typeMismatchColumns.length > 0 && (
+              {displayedComparison.typeMismatchColumns.length > 0 && (
                 <div className="mt-1 break-words">
-                  Type mismatches: {comparison.result.typeMismatchColumns
+                  Type mismatches: {displayedComparison.typeMismatchColumns
                     .map(
                       (item) =>
                         `${item.column} (${item.leftDataType} ↔ ${item.rightDataType})`,
@@ -239,15 +326,15 @@ export function DataCompareView() {
         </aside>
 
         <main className="min-h-0 overflow-auto">
-          {comparison.error ? (
+          {(fullComparison ? fullComparisonError : comparison.error || fullComparisonError) ? (
             <div className="flex h-full items-center justify-center px-6 text-center text-[10px] text-rose-300">
-              {comparison.error}
+              {fullComparisonError || comparison.error}
             </div>
-          ) : comparison.result ? (
+          ) : displayedComparison ? (
             <>
-              {comparison.result.warnings.length > 0 && (
+              {displayedComparison.warnings.length > 0 && (
                 <div className="border-b border-amber-400/20 bg-amber-400/[0.06] px-3 py-2 text-[9px] text-amber-200">
-                  {comparison.result.warnings.map((warning) => (
+                  {displayedComparison.warnings.map((warning) => (
                     <div key={warning} className="flex items-start gap-1.5 leading-4">
                       <AlertTriangle size={10} className="mt-0.5 shrink-0" /> {warning}
                     </div>
@@ -465,6 +552,82 @@ function formatRow(source: DataCompareSource, row: unknown[]) {
       source.columns.map((column, index) => [column.name, row[index]]),
     ),
   );
+}
+
+function fullComparisonFromServer(
+  result: TableDataCompareResult,
+  left: DataCompareSource,
+  right: DataCompareSource,
+  keyColumns: string[],
+  sharedColumns: string[],
+): DataCompareResult {
+  const leftIndexes = new Map(left.columns.map((column, index) => [column.name, index]));
+  const rightIndexes = new Map(right.columns.map((column, index) => [column.name, index]));
+  const toRow = (values: Record<string, unknown>, source: DataCompareSource) =>
+    source.columns.map((column) => values[column.name]);
+  const keyFor = (values: Record<string, unknown>) =>
+    keyColumns.map((column) => ({ column, value: values[column] }));
+  const rows: DataCompareRow[] = [
+    ...result.added.map((row) => ({
+      id: `full:left:${row.key}`,
+      status: "leftOnly" as const,
+      key: keyFor(row.values),
+      leftRow: toRow(row.values, left),
+      fields: [],
+      leftMatchCount: 1,
+      rightMatchCount: 0,
+    })),
+    ...result.removed.map((row) => ({
+      id: `full:right:${row.key}`,
+      status: "rightOnly" as const,
+      key: keyFor(row.values),
+      rightRow: toRow(row.values, right),
+      fields: [],
+      leftMatchCount: 0,
+      rightMatchCount: 1,
+    })),
+    ...result.modified.map((row) => ({
+      id: `full:changed:${row.key}`,
+      status: "changed" as const,
+      key: keyFor(row.sourceValues),
+      leftRow: toRow(row.sourceValues, left),
+      rightRow: toRow(row.targetValues, right),
+      fields: row.changedColumns.map((column) => ({
+        column,
+        left: row.sourceValues[column],
+        right: row.targetValues[column],
+        equal: false,
+        toleranceMatched: false,
+      })),
+      leftMatchCount: 1,
+      rightMatchCount: 1,
+    })),
+  ];
+  const leftOnlyColumns = left.columns
+    .map((column) => column.name)
+    .filter((column) => !rightIndexes.has(column));
+  const rightOnlyColumns = right.columns
+    .map((column) => column.name)
+    .filter((column) => !leftIndexes.has(column));
+  return {
+    rows,
+    keyColumns,
+    comparedColumns: sharedColumns.filter((column) => !keyColumns.includes(column)),
+    leftOnlyColumns,
+    rightOnlyColumns,
+    typeMismatchColumns: [],
+    counts: {
+      equal: result.equalCount,
+      changed: result.modified.length,
+      leftOnly: result.added.length,
+      rightOnly: result.removed.length,
+      duplicate: 0,
+    },
+    comparedKeyCount: result.comparedKeyCount,
+    warnings: [
+      "Full table comparison ran in the host process. Equal rows are counted but not materialized in the result list.",
+    ],
+  };
 }
 
 function formatValue(value: unknown) {

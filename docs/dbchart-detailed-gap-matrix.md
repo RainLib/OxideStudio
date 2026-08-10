@@ -173,3 +173,4 @@
 - PostgreSQL/MySQL/SQLite 的 migration preflight、rollback/journal 与 crash recovery。
 - PostgreSQL/MySQL/SQL Server/SQLite/Oracle 的真实 dump DDL corpus、方言误判率、复杂对象 lossiness 与 8 MiB 导入交互。
 - 1k/5k/10k relation diagram 和 100k+ row table 的渲染、内存和交互延迟。
+# Phase 125 data compare: DBX `crates/dbx-core/src/data_compare.rs` now has an Oxide counterpart for reviewed table endpoints. `compare_table_data_full` counts first, refuses tables above 100,000 rows per side, reads deterministically by selected key in 100--5,000 row batches, rejects duplicate keys, and returns only changed/one-sided rows. `DataCompareView` keeps loaded-result comparison as its fast default and offers an explicit host-side full-table action for two table tabs. Sampling/checksum degradation and generated sync SQL remain separate follow-up work.

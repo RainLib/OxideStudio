@@ -1,5 +1,11 @@
 # DBX alignment: deferred validation queue
 
+## Phase 125 -- full table data compare
+
+- Exercise `compare_table_data_full` against PostgreSQL, MySQL, SQLite/DuckDB and every explicitly opted-in external table-data-transfer package. Verify the count query, deterministic key ordering, null/composite keys, duplicate-key rejection, empty schema handling and independent source/target databases.
+- Confirm the 100,000-row ceiling rejects rather than degrades to an incomplete diff. Add sampled/checksum degradation only after a result contract can surface method, confidence and coverage exactly as DBX does.
+- Verify a full comparison does not block the workbench, that cancellation/progress is added before raising the cap, and that comparison results never expose source values through durable reports or logs.
+
 Implementation work is intentionally being completed before these checks run.
 Do not mark a capability as production-ready or count it toward the 70+
 database target until its relevant queue entries pass.

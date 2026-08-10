@@ -468,6 +468,46 @@ export interface TableExportTypeCoercion {
   reason: string;
 }
 
+export interface TableDataCompareEndpoint {
+  connectionId: string;
+  driver: DatabaseDriver;
+  database?: string;
+  schema: string;
+  table: string;
+}
+
+export interface TableDataCompareRequest {
+  source: TableDataCompareEndpoint;
+  target: TableDataCompareEndpoint;
+  columns: string[];
+  keyColumns: string[];
+  batchSize?: number;
+  maxRows?: number;
+}
+
+export interface TableDataCompareRow {
+  key: string;
+  values: Record<string, unknown>;
+}
+
+export interface TableDataCompareModifiedRow {
+  key: string;
+  sourceValues: Record<string, unknown>;
+  targetValues: Record<string, unknown>;
+  changedColumns: string[];
+}
+
+export interface TableDataCompareResult {
+  added: TableDataCompareRow[];
+  removed: TableDataCompareRow[];
+  modified: TableDataCompareModifiedRow[];
+  equalCount: number;
+  sourceRowCount: number;
+  targetRowCount: number;
+  comparedKeyCount: number;
+  batchSize: number;
+}
+
 export interface TableExportResult {
   exportId: string;
   filePath: string;

@@ -450,3 +450,10 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
 
 这样可以在数月后继续实施某个领域时，仍能从原理、源码、当前边界和验收条件四个方向
 快速恢复上下文。
+# Phase 125 -- full table compare mapping
+
+| DBX reference | OxideStudio implementation | Deliberate boundary |
+| --- | --- | --- |
+| `crates/dbx-core/src/data_compare.rs:prepare_data_compare_from_tables` | `src-tauri/src/commands/table.rs:compare_table_data_full` | Both count before reading, page in stable key order and fail on duplicate keys. Oxide accepts only the existing reviewed transfer dialect/capability contract. |
+| `data_compare.rs:fetch_compare_rows` | `fetch_full_data_compare_rows` | 100--5,000 row host batches; 100,000 rows per side hard cap avoids a partial result masquerading as full compare. |
+| `apps/desktop/src/components/diff/DataCompareDialog.vue:startCompare` | `src/components/workspace/DataCompareView.tsx` | Loaded-result compare stays available for query/table snapshots; the new explicit action is table-to-table only and labels host/full scope. |

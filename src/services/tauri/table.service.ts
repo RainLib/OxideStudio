@@ -38,6 +38,8 @@ import type {
   TableFilter,
   TableSort,
   TablePageResult,
+  TableDataCompareRequest,
+  TableDataCompareResult,
   TableColumnChangeResult,
   TableIndexChangeResult,
   TableConstraintChangeResult,
@@ -165,6 +167,20 @@ export async function exportTableData(
     sqlInsertBatchSize: options.sqlInsertBatchSize,
     sqlInsertConflictPolicy: options.sqlInsertConflictPolicy,
   });
+}
+
+/**
+ * Compare complete table contents in the host process. The host only accepts
+ * reviewed table endpoints and refuses a relation over its explicit safety
+ * ceiling; it never silently falls back to the rows currently loaded in Grid.
+ */
+export async function compareTableDataFull(
+  request: TableDataCompareRequest,
+): Promise<TableDataCompareResult> {
+  return invokeWithInterceptors<TableDataCompareResult>(
+    "compare_table_data_full",
+    { request },
+  );
 }
 
 export async function importTableData(
@@ -770,6 +786,7 @@ export async function refreshMaterializedView(
 export const tableService = {
   createTableExportId,
   previewTablePage,
+  compareTableDataFull,
   previewTableDataTransfer,
   previewTableDataTransferBatchPlan,
   executeTableDataTransferBatch,

@@ -228,6 +228,7 @@ pub fn run() {
             commands::schema_diff::list_schema_migration_journal,
             // Table commands
             commands::table::preview_table_page,
+            commands::table::compare_table_data_full,
             commands::table::preview_table_data_transfer,
             commands::table::preview_table_data_transfer_batch_plan,
             commands::table::execute_table_data_transfer_batch,
