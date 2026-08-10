@@ -260,6 +260,12 @@ explicit deferred validation task rather than an implicit release check.
   must succeed in every non-query-error case; cancellation may be advertised
   only when the normalized value is a positive `i32`, and an unavailable PID
   must not fail connection setup or execution.
+- Run native MySQL queries against MySQL/MariaDB/TiDB/OceanBase-compatible
+  fixtures that append columns to scalar metadata and expose
+  `CONNECTION_ID()` as integer-compatible text, malformed text, a missing
+  function, and zero. Only column zero may be decoded; normal queries must not
+  fail when cancellation tracking is unavailable, and `KILL QUERY` evidence
+  requires a successfully normalized positive `u64` connection id.
 - Run the Headless Agent Host against a controlled MySQL-compatible routing
   proxy with leading `/*+`, `/*@`, and `/*&` hints. Its server-side row-limit
   wrapper must keep the hint before the outer SELECT, preserve ordinary comments

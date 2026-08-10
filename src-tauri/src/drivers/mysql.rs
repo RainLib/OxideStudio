@@ -27,6 +27,15 @@ use tokio::time::timeout;
 
 type MysqlTransactionSession = Arc<Mutex<PoolConnection<MySql>>>;
 const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+const MYSQL_CONNECTION_ID_SQL: &str = "SELECT CAST(CONNECTION_ID() AS CHAR)";
+
+fn parse_mysql_connection_id(value: &str) -> Option<u64> {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|thread_id| *thread_id > 0)
+}
 
 pub struct MysqlDriver {
     // Map of schema name -> Pool. Empty string key "" represents the default/base connection.
@@ -48,7 +57,7 @@ impl Drop for MysqlTrackedQueryGuard<'_> {
             let mut active_queries = self
                 .active_queries
                 .lock()
-                .expect("MySQL active query map mutex poisoned");
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             active_queries.remove(&query_id);
         }
     }
@@ -383,16 +392,32 @@ impl MysqlDriver {
         conn: &mut sqlx::MySqlConnection,
     ) -> Result<MysqlTrackedQueryGuard<'a>> {
         let tracked_query_id = if let Some(query_id) = query_id {
-            let thread_id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
+            // `query_scalar` intentionally decodes only column zero. That also
+            // tolerates MySQL-compatible servers which append metadata columns
+            // to otherwise scalar queries.
+            let thread_id = sqlx::query_scalar::<_, String>(MYSQL_CONNECTION_ID_SQL)
                 .persistent(false)
                 .fetch_one(&mut *conn)
-                .await?;
-            let mut active_queries = self
-                .active_queries
-                .lock()
-                .expect("MySQL active query map mutex poisoned");
-            active_queries.insert(query_id.to_string(), thread_id);
-            Some(query_id.to_string())
+                .await
+                .ok()
+                .and_then(|value| parse_mysql_connection_id(&value));
+
+            if let Some(thread_id) = thread_id {
+                let mut active_queries = self
+                    .active_queries
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                active_queries.insert(query_id.to_string(), thread_id);
+                Some(query_id.to_string())
+            } else {
+                // Query execution remains available on compatible products that
+                // do not expose a standard MySQL connection id. Only server-side
+                // KILL QUERY support is unavailable for this request.
+                tracing::debug!(
+                    "MySQL-compatible server did not expose a cancellable connection id"
+                );
+                None
+            }
         } else {
             None
         };
@@ -406,7 +431,7 @@ impl MysqlDriver {
     fn drain_active_query_threads(&self) -> Vec<(String, u64)> {
         self.active_queries
             .lock()
-            .expect("MySQL active query map mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .drain()
             .collect()
     }
@@ -414,7 +439,7 @@ impl MysqlDriver {
     fn active_query_thread(&self, query_id: &str) -> Option<u64> {
         self.active_queries
             .lock()
-            .expect("MySQL active query map mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(query_id)
             .copied()
     }
@@ -423,7 +448,7 @@ impl MysqlDriver {
         let mut active_queries = self
             .active_queries
             .lock()
-            .expect("MySQL active query map mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if active_queries.get(query_id) == Some(&thread_id) {
             active_queries.remove(query_id);
         }
@@ -1574,6 +1599,22 @@ mod tests {
         assert!(is_mysql_binary_type(Some("longblob")));
         assert!(!is_mysql_binary_type(Some("varchar(255)")));
         assert!(is_mysql_bit_type(Some("bit(64)")));
+    }
+
+    #[test]
+    fn parses_mysql_connection_id_from_compatible_text_value() {
+        assert_eq!(parse_mysql_connection_id(" 4242 "), Some(4242));
+        assert_eq!(parse_mysql_connection_id("0"), None);
+        assert_eq!(parse_mysql_connection_id("-1"), None);
+        assert_eq!(parse_mysql_connection_id("not-a-thread"), None);
+    }
+
+    #[test]
+    fn mysql_connection_id_query_normalizes_compatible_numeric_types() {
+        assert_eq!(
+            MYSQL_CONNECTION_ID_SQL,
+            "SELECT CAST(CONNECTION_ID() AS CHAR)"
+        );
     }
 
     #[test]
