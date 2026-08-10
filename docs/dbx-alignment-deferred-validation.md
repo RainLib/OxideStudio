@@ -1088,3 +1088,19 @@ explicit deferred validation task rather than an implicit release check.
   metadata, overloads and documentation remain authoritative. Exercise supported
   Manticore, SQLite and D1 server versions only during the consolidated database
   validation phase; no database was opened during Phase 104 implementation.
+
+## MySQL and MariaDB existing-view save semantics
+
+- In supported MySQL and MariaDB fixtures, create views with explicit
+  `ALGORITHM`, `DEFINER`, `SQL SECURITY`, comments and dependent objects, then
+  open them through Edit View and save a changed SELECT body. Confirm the Host
+  sends `ALTER VIEW`, keeps the same qualified object, and preserves every
+  server-owned property that ALTER is documented to retain.
+- Confirm Create View still sends `CREATE VIEW`, the explicit Replace Existing
+  action uses `ALTER VIEW`, PostgreSQL keeps `CREATE OR REPLACE VIEW`, and
+  SQLite continues to reject replace instead of guessing a drop/recreate flow.
+- Verify syntax/error mapping, metadata-cache invalidation, refreshed definition
+  text and undoable editor state against supported server versions during the
+  consolidated database-validation phase. Phase 105 compiled the offline Rust
+  tests but the Windows unit-test process exited before its harness with the
+  known `STATUS_ENTRYPOINT_NOT_FOUND`; no database was opened.

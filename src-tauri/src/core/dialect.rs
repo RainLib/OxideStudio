@@ -864,9 +864,17 @@ impl DatabaseKind {
         select_sql: &str,
         replace: bool,
     ) -> String {
-        let replace = if replace { " OR REPLACE" } else { "" };
+        // MySQL's editable-view path must use ALTER for an existing object.
+        // CREATE OR REPLACE can recreate the view and lose properties owned by
+        // the existing object; PostgreSQL's reviewed replacement grammar is
+        // still CREATE OR REPLACE.
+        let action = match (self, replace) {
+            (Self::Mysql, true) => "ALTER",
+            (Self::Postgres, true) => "CREATE OR REPLACE",
+            (_, false) => "CREATE",
+        };
         format!(
-            "CREATE{replace} VIEW {} AS\n{};",
+            "{action} VIEW {} AS\n{};",
             self.qualified_table(schema, view),
             select_sql.trim().trim_end_matches(';').trim()
         )
@@ -1717,9 +1725,18 @@ SELECT * FROM users;"#
                 Some("app"),
                 "active_users",
                 "SELECT * FROM users",
+                true
+            ),
+            "ALTER VIEW `app`.`active_users` AS\nSELECT * FROM users;"
+        );
+        assert_eq!(
+            DatabaseKind::Mysql.create_view_query(
+                Some("app"),
+                "new_users",
+                "SELECT id FROM users",
                 false
             ),
-            "CREATE VIEW `app`.`active_users` AS\nSELECT * FROM users;"
+            "CREATE VIEW `app`.`new_users` AS\nSELECT id FROM users;"
         );
         assert_eq!(
             DatabaseKind::Postgres.refresh_materialized_view_query(

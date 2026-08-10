@@ -13509,10 +13509,22 @@ SELECT id, email FROM users WHERE active = true;"#
                 "app",
                 "active_users",
                 "WITH scoped AS (SELECT id FROM users) SELECT id FROM scoped",
+                true,
+            )
+            .unwrap(),
+            "ALTER VIEW `app`.`active_users` AS\nWITH scoped AS (SELECT id FROM users) SELECT id FROM scoped;"
+        );
+
+        assert_eq!(
+            build_create_view_statement(
+                DatabaseKind::Mysql,
+                "app",
+                "new_users",
+                "SELECT id FROM users",
                 false,
             )
             .unwrap(),
-            "CREATE VIEW `app`.`active_users` AS\nWITH scoped AS (SELECT id FROM users) SELECT id FROM scoped;"
+            "CREATE VIEW `app`.`new_users` AS\nSELECT id FROM users;"
         );
     }
 
