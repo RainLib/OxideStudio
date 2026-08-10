@@ -59,6 +59,13 @@ database target until its relevant queue entries pass.
   resolve parsing, data round-trip and capability tests compile; execution of
   the parent Rust test binary remains deferred by this Windows runtime's known
   `STATUS_ENTRYPOINT_NOT_FOUND` startup failure.
+- The bundled SQL LSP lazy-documentation implementation passed all 135 library
+  tests, all 13 real subprocess protocol tests, the remaining integration
+  suites, and strict Clippy without database access. Capable clients now receive
+  lightweight completion lists and resolve selected table/column/function/
+  constraint/index documentation from a bounded 8,192-entry/4-MiB FIFO cache;
+  individual payloads above 256 KiB remain inline, original opaque data is
+  restored, and an evicted identity cannot invalidate the proposal itself.
 - The signature-help and built-in function completion alignment suite passed
   without database access: 131 LSP
   library tests, 12 process-protocol tests and 9 schema contract tests. It
@@ -424,6 +431,10 @@ explicit deferred validation task rather than an implicit release check.
   KiB, a cancelled request, and a tab/connection/session switch must issue no
   unsafe enrichment or apply a late response. Restart the provider between list
   and resolve and confirm the original usable suggestion remains intact.
+- The bundled-server documentation-only resolve path is covered by a real local
+  subprocess test. Deferred coverage here now means the packaged desktop Monaco
+  interaction with a genuinely large remote catalog, including cache eviction,
+  process restart between list and resolve, and visible Markdown rendering.
 - Accept the same proposal while typing inside and at the end of an identifier.
   Monaco must use the LSP insert boundary for insertion and the wider replace
   boundary for overwrite without deleting adjacent SQL.
