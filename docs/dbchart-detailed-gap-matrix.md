@@ -4,6 +4,7 @@
 > Phase 105 对象编辑补充：MySQL/MariaDB 既有 view 保存改用 `ALTER VIEW`；新建仍用 `CREATE VIEW`，PostgreSQL Replace 仍用 `CREATE OR REPLACE VIEW`。
 > Phase 116 最新审计：重新 fetch `main` 后仍为 `c24936a402bb3e24b4858f05282d69a04fcfe25b`，ChartDB 没有新增 SQL LSP、Editor、Grid export 或迁移实现差异；本阶段新增差异来自 DBX `cd78c0ae1` 基线。
 > Phase 118 最新审计：再次 fetch 后 ChartDB/DBX 仍分别为 `c24936a`/`cd78c0ae1`；补齐 DBX `fe10790bb` 的快速输入后 Tab 接受竞态时，Oxide 复用 Monaco 原生 pending-completion/normal-Tab/snippet 优先级，而不在 React 层轮询。
+> Phase 119 最新审计：ChartDB/DBX 基线未变；对齐 DBX `868f7961e` 的 relation alias 候选排序与原始 `aliasSql` 保留。Oxide 以同一有界 identifier rank 匹配 alias，普通 alias 按 SQL 大小写语义回查 relation，quoted alias collision 保留为独立可接受候选。
 
 > 对照日期：2026-08-10
 > 官方仓库：`https://github.com/chartdb/chartdb`

@@ -354,6 +354,22 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
 - `editorOptions.test.ts` 固定三种触发模式的配置边界。真实慢 provider、IME、Vim、多光标、
   read-only、popup/ghost 同现与原子 undo 进入统一延期验证；本阶段不连接数据库。
 
+## Phase 119：relation alias 匹配与引用语义迁移映射
+
+- DBX `lib/sql/sqlCompletion.ts:buildReferencedAliasItems`、
+  `lib/sql/semantic/completion.ts:sourceQualifierSql`（`868f7961e`）→ Oxide
+  `vendor/sql-lsp/src/server.rs:add_referenced_alias_completions`、
+  `parser/sql.rs:resolve_relation_alias` 与
+  `dialects/{postgres,mysql,hive,clickhouse}.rs`。
+- DBX 把 source qualifier 的显示名、精确插入 SQL 与底层 relation 分开保存；Oxide 的
+  `RelationAlias { name, sql, relation }` 延续同一边界，并把普通未引用 alias 的 lookup
+  收敛为 case-insensitive，而 quoted alias 的原始 SQL 拼写继续只由 `sql` 提供。
+- alias 候选现在复用列名的 exact/prefix/缩写/subsequence rank，排序稳定且有界；去重键同时
+  包含 label 和 insertText，因此 `u`、`"U"`、`` `U` `` 或 `[U]` 不会因展示名相同被压扁。
+- 新增 library 与 PostgreSQL schema-aware contract，覆盖大小写普通 alias、quoted collision
+  候选、fuzzy alias 与 `alias.` 到 metadata column 的解析。真实服务端 quotation/case setting、
+  IME/Monaco 接受和中文 live metadata 继续进入统一延期队列。
+
 ## 9. 文档维护规则
 
 当某项能力状态发生变化时：

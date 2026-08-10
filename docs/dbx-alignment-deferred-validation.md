@@ -1321,3 +1321,21 @@ explicit deferred validation task rather than an implicit release check.
   `positional` and `require-prefix` keep their existing semantic trigger gates.
   Phase 118 adds option-contract tests only; no database was opened and real
   Monaco/provider timing remains in the consolidated validation queue.
+
+## Relation alias matching, quoting, and case semantics
+
+- Against PostgreSQL, MySQL, SQL Server, Hive, and ClickHouse fixtures, create
+  normal aliases with mixed case and quoted aliases which collide after case
+  folding. Verify that ordinary aliases resolve case-insensitively for
+  `alias.` column completion, while double-quoted, backtick, and bracketed
+  candidate insertions retain their exact source spelling and remain separate
+  selectable items.
+- Repeat with Unicode/Chinese relation and alias names, schema-qualified and
+  cross-schema sources, CTE/derived scopes, and correlated outer aliases. Check
+  exact, prefix, abbreviation, and subsequence ranking; no lookup may select a
+  different physical relation merely because quoted and unquoted names share a
+  normalized spelling.
+- In a packaged Monaco/WebView session, accept each candidate and confirm the
+  following `.` trigger, filtering, undo, IME, Vim, multi-cursor, cancellation,
+  and slow metadata behavior. Phase 119 covers LSP library and dialect contracts
+  only; no database was opened.

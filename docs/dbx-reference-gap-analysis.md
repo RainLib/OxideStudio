@@ -338,7 +338,9 @@ tab-completion，内核会等待候选模型并接受最佳有效 edit；空结�
 - `WITH ... SELECT`、`INSERT ... SELECT`、`EXPLAIN SELECT` 不被错误切开。
 - 有 FROM 时仅优先当前 relation 字段；无 FROM 时使用当前 database/schema 的
   限定候选，不跨连接泄漏。
-- alias、同名表、跨 schema、临时表、CTE 和子查询遮蔽。
+- alias、同名表、跨 schema、临时表、CTE 和子查询遮蔽；普通 alias 以 SQL
+  大小写语义解析，quoted alias 候选保持独立的精确 insertText，且按 exact/prefix/
+  缩写/subsequence 有界排序。
 - `WHERE field` 后推荐 operator；`field =` 后推荐类型兼容值；完成谓词后推荐
   `AND/OR/GROUP BY/ORDER BY/LIMIT`。
 - MongoDB find/aggregate/update 上下文和字符串内字段路径。
