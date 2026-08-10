@@ -153,6 +153,7 @@ import {
   elasticsearchJsonStringCompletionRange,
   editorDocumentIdentity,
   completionLabelForMonaco,
+  completionResolveRequestContext,
   isPublishDiagnosticsParams,
   lspDiagnosticToMonacoMarker,
   lspCompletionItemsToMonacoSuggestions,
@@ -1700,6 +1701,8 @@ export function QueryEditor({
               appendSpace: editorSettings.sqlCompletion.appendSpace,
               driver: completionDriver,
               nextCharacter,
+              requestUri: uri,
+              requestModelVersion: modelVersion,
             });
             const cachedMetadata = await cachedMetadataSuggestions();
             if (!isCompletionRequestCurrent({
@@ -1765,11 +1768,30 @@ export function QueryEditor({
     token: LspCancellationToken,
   ) => {
     const sourceItem = sourceLspCompletionItem(suggestion);
-    if (!monaco || !sourceItem || token?.isCancellationRequested) {
+    const resolveContext = completionResolveRequestContext(suggestion);
+    const model = mountedEditor?.getModel();
+    if (
+      !monaco ||
+      !sourceItem ||
+      token?.isCancellationRequested ||
+      (resolveContext &&
+        (!model ||
+          model.uri.toString() !== resolveContext.uri ||
+          model.getVersionId() !== resolveContext.modelVersion))
+    ) {
       return suggestion;
     }
     const resolvedItem = await lspClient.resolveCompletionItem(sourceItem, token);
-    if (token?.isCancellationRequested) return suggestion;
+    const currentModel = mountedEditor?.getModel();
+    if (
+      token?.isCancellationRequested ||
+      (resolveContext &&
+        (!currentModel ||
+          currentModel.uri.toString() !== resolveContext.uri ||
+          currentModel.getVersionId() !== resolveContext.modelVersion))
+    ) {
+      return suggestion;
+    }
     return applyResolvedLspCompletionItem(monaco, suggestion, resolvedItem);
   };
 

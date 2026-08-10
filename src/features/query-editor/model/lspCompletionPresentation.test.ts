@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CompletionItemKind } from "@/services/lsp/types";
 import {
   applyResolvedLspCompletionItem,
+  completionResolveRequestContext,
   lspCompletionItemsToMonacoSuggestions,
   markResolvableLspCompletionItems,
   sourceLspCompletionItem,
@@ -186,10 +187,17 @@ describe("lspCompletionItemsToMonacoSuggestions", () => {
       usageScope: "postgres-scope",
       recordUsageCommand: "record",
       appendSpace: false,
+      requestUri: "oxide://postgres/editor.sql",
+      requestModelVersion: 7,
     });
 
     expect(sourceLspCompletionItem(suggestions[0]!)).toBe(serverItem);
     expect(sourceLspCompletionItem(suggestions[1]!)).toBeUndefined();
+    expect(completionResolveRequestContext(suggestions[0]!)).toEqual({
+      uri: "oxide://postgres/editor.sql",
+      modelVersion: 7,
+    });
+    expect(completionResolveRequestContext(suggestions[1]!)).toBeUndefined();
 
     const resolved = applyResolvedLspCompletionItem(monaco, suggestions[0]!, {
       ...serverItem,

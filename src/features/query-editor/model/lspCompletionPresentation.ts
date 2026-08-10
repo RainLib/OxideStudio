@@ -34,10 +34,14 @@ export interface LspCompletionPresentationOptions {
   appendSpace: boolean;
   driver?: string;
   nextCharacter?: string;
+  /** The document revision that produced these lazy-resolvable candidates. */
+  requestUri?: string;
+  requestModelVersion?: number;
 }
 
 const LSP_COMPLETION_ITEM_PROPERTY = "__oxideLspCompletionItem";
 const LSP_COMPLETION_RESOLVE_SOURCE = Symbol("oxideLspCompletionResolveSource");
+const LSP_COMPLETION_RESOLVE_CONTEXT = Symbol("oxideLspCompletionResolveContext");
 
 type LspBackedMonacoSuggestion = {
   [LSP_COMPLETION_ITEM_PROPERTY]?: CompletionItem;
@@ -45,6 +49,15 @@ type LspBackedMonacoSuggestion = {
 
 type ResolvableLspCompletionItem = CompletionItem & {
   [LSP_COMPLETION_RESOLVE_SOURCE]?: CompletionItem;
+};
+
+export type LspCompletionResolveContext = {
+  uri: string;
+  modelVersion: number;
+};
+
+type LspBackedMonacoSuggestionWithContext = LspBackedMonacoSuggestion & {
+  [LSP_COMPLETION_RESOLVE_CONTEXT]?: LspCompletionResolveContext;
 };
 
 /**
@@ -66,6 +79,13 @@ export function sourceLspCompletionItem(
   suggestion: LspBackedMonacoSuggestion,
 ) {
   return suggestion[LSP_COMPLETION_ITEM_PROPERTY];
+}
+
+/** Resolves are rejected when their original document revision is no longer live. */
+export function completionResolveRequestContext(
+  suggestion: LspBackedMonacoSuggestionWithContext,
+) {
+  return suggestion[LSP_COMPLETION_RESOLVE_CONTEXT];
 }
 
 /**
@@ -141,6 +161,8 @@ export function lspCompletionItemsToMonacoSuggestions({
   appendSpace,
   driver,
   nextCharacter,
+  requestUri,
+  requestModelVersion,
 }: LspCompletionPresentationOptions) {
   return items.map((item) => {
     const resolveSource = (item as ResolvableLspCompletionItem)[
@@ -214,6 +236,14 @@ export function lspCompletionItemsToMonacoSuggestions({
         : defaultRange,
       ...(resolveSource
         ? { [LSP_COMPLETION_ITEM_PROPERTY]: resolveSource }
+        : {}),
+      ...(resolveSource && requestUri && requestModelVersion !== undefined
+        ? {
+            [LSP_COMPLETION_RESOLVE_CONTEXT]: {
+              uri: requestUri,
+              modelVersion: requestModelVersion,
+            },
+          }
         : {}),
     };
   });

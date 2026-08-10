@@ -53,11 +53,13 @@ export {
 } from "./model/lspMonacoAdapter";
 export {
   applyResolvedLspCompletionItem,
+  completionResolveRequestContext,
   completionLabelForMonaco,
   lspCompletionItemsToMonacoSuggestions,
   markResolvableLspCompletionItems,
   sourceLspCompletionItem,
   type LspCompletionPresentationOptions,
+  type LspCompletionResolveContext,
 } from "./model/lspCompletionPresentation";
 export {
   appendSqlCompletionSpace,
