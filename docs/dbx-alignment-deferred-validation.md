@@ -1410,3 +1410,8 @@ explicit deferred validation task rather than an implicit release check.
 - Verify driver error mapping, generated/identity/read-only columns, SQL Server
   and SQLite dialect contracts, multiline editor behavior, IME and screen-reader
   focus. Phase 124 performs no database connection.
+# Phase 128 — whole-schema SQL export
+
+- Run PostgreSQL fixtures that cover empty schemas, generated/identity columns, foreign-key ordering, large relations, cancellation during metadata and data pages, and restore into a clean target.
+- Validate the exported structure/data against `pg_dump`/DBX for foreign-key ordering, sequences, views, materialized views, routines, extensions, grants, comments, ownership, RLS policies, partitioning, and privilege-sensitive objects. These are deliberately omitted by the initial relation-only path.
+- Add a signed, product-owned backup contract before enabling this command for an external driver or a non-PostgreSQL built-in dialect.

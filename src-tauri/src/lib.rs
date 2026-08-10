@@ -238,6 +238,7 @@ pub fn run() {
             commands::table::cancel_table_data_transfer,
             commands::table::list_table_data_transfer_reports,
             commands::table::export_table_data,
+            commands::table::export_database_sql,
             commands::table::cancel_table_export,
             commands::table::list_table_export_reports,
             commands::table::preview_table_csv_import,

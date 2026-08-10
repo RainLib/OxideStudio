@@ -15,6 +15,7 @@ import type {
   TableExportProgress,
   TableExportReport,
   TableExportResult,
+  DatabaseSqlExportResult,
   SqlInsertConflictPolicy,
   TableImportFormat,
   TableCsvImportOptions,
@@ -64,6 +65,14 @@ export interface TableExportOptions {
   sqlInsertBatchSize?: number;
   /** Defaults to strict. Skip is accepted only for reviewed native SQL dialects. */
   sqlInsertConflictPolicy?: SqlInsertConflictPolicy;
+}
+
+export interface DatabaseSqlExportOptions {
+  exportId?: string;
+  includeStructure?: boolean;
+  includeData?: boolean;
+  pageSize?: number;
+  sqlInsertBatchSize?: number;
 }
 
 export interface TableImportOptions {
@@ -166,6 +175,29 @@ export async function exportTableData(
     maxRows,
     sqlInsertBatchSize: options.sqlInsertBatchSize,
     sqlInsertConflictPolicy: options.sqlInsertConflictPolicy,
+  });
+}
+
+/**
+ * Whole-schema SQL backup for the built-in PostgreSQL driver. The backend
+ * refuses external packages and reports every object kind not yet covered.
+ */
+export async function exportDatabaseSql(
+  connectionId: string,
+  driver: DatabaseDriver,
+  schema: string,
+  options: DatabaseSqlExportOptions = {},
+): Promise<DatabaseSqlExportResult> {
+  const exportId = options.exportId || createTableExportId();
+  return invokeWithInterceptors<DatabaseSqlExportResult>("export_database_sql", {
+    connectionId,
+    exportId,
+    driver,
+    schema,
+    includeStructure: options.includeStructure,
+    includeData: options.includeData,
+    pageSize: options.pageSize,
+    sqlInsertBatchSize: options.sqlInsertBatchSize,
   });
 }
 
@@ -797,6 +829,7 @@ export const tableService = {
   listTableDataTransferReports,
   listenTableDataTransferProgress,
   exportTableData,
+  exportDatabaseSql,
   cancelTableExport,
   listenTableExportProgress,
   listTableExportReports,

@@ -235,6 +235,24 @@ pub struct TableExportResult {
     pub type_coercions: Vec<TableExportTypeCoercion>,
 }
 
+/// A conservative whole-schema SQL backup.  Unlike the single-table exporter,
+/// this intentionally starts with the one host-owned dialect whose relation
+/// reconstruction and SQL literal rules are exercised together: PostgreSQL.
+/// Other products must provide a signed, product-owned backup contract before
+/// they can be advertised here.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseSqlExportResult {
+    pub export_id: String,
+    pub file_path: String,
+    pub tables_exported: u64,
+    pub rows_exported: u64,
+    pub batches: u64,
+    /// Kept explicit so a caller never mistakes this initial relation backup
+    /// for a complete dump of routines, extensions, grants, or sequences.
+    pub omitted_object_kinds: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableExportTypeCoercion {
@@ -8567,6 +8585,182 @@ pub async fn export_table_data(
             ))
         }
         Err(error) => Ok(Response::err("EXPORT_TABLE_DATA_ERROR", &error)),
+    }
+}
+
+/// Export every base relation in one PostgreSQL schema into a single replayable
+/// SQL file.  The output is written to a sibling partial file and published
+/// only after every relation has completed.  It is deliberately not a generic
+/// `pg_dump` replacement: non-relation objects remain excluded until their
+/// source/ownership semantics have a reviewed per-product contract.
+#[tauri::command]
+pub async fn export_database_sql(
+    app: AppHandle,
+    manager: State<'_, ConnectionManager>,
+    cancellation: State<'_, TableExportCancellationState>,
+    connection_id: String,
+    export_id: String,
+    driver: String,
+    schema: String,
+    include_structure: Option<bool>,
+    include_data: Option<bool>,
+    page_size: Option<u32>,
+    sql_insert_batch_size: Option<usize>,
+) -> Result<Response<DatabaseSqlExportResult>, String> {
+    let cancel_rx = cancellation.register(&export_id, &connection_id).await?;
+    let include_structure = include_structure.unwrap_or(true);
+    let include_data = include_data.unwrap_or(true);
+    let progress_rows = Arc::new(AtomicU64::new(0));
+    let progress_batches = Arc::new(AtomicU64::new(0));
+    let result: Result<DatabaseSqlExportResult, String> = async {
+        if !include_structure && !include_data {
+            return Err("Select structure, data, or both for database SQL export".to_string());
+        }
+        // A package may reuse the postgres name while changing catalog or DDL
+        // semantics.  Do not widen it into this host-owned backup path.
+        if manager
+            .package_capabilities(&connection_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Err("Whole-schema SQL export requires a signed product-owned backup contract for external drivers".to_string());
+        }
+        if canonical_driver_name(&driver) != Some("postgres") {
+            return Err("Whole-schema SQL export is currently available for the built-in PostgreSQL driver only".to_string());
+        }
+        let schema = schema.trim();
+        if schema.is_empty() {
+            return Err("A PostgreSQL schema is required for database SQL export".to_string());
+        }
+        let page_size = page_size.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE);
+        let insert_batch_size = sql_export_insert_batch_rows(sql_insert_batch_size)?;
+        let tables = manager
+            .get_tables(&connection_id, schema)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|table| !object_type_is_view(table.table_type.as_deref()))
+            .collect::<Vec<_>>();
+        let final_path = export_file_path(&app, schema, "database_backup", TableExportFormat::Sql)?;
+        let mut temporary_file = ExportTemporaryFile::create(&final_path)?;
+        let file = File::create(&temporary_file.path).map_err(|error| error.to_string())?;
+        let mut writer = BufWriter::new(file);
+        writeln!(writer, "-- OxideStudio PostgreSQL schema backup for {}", schema)
+            .map_err(|error| error.to_string())?;
+        writeln!(writer, "-- Relation structure: {}; relation data: {}", include_structure, include_data)
+            .map_err(|error| error.to_string())?;
+        let mut rows_exported = 0_u64;
+        let mut batches = 0_u64;
+        for table_info in &tables {
+            if *cancel_rx.borrow() {
+                return Err(format!("{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"));
+            }
+            let table = table_info.name.trim();
+            if table.is_empty() {
+                return Err("Schema metadata contains a relation with no name".to_string());
+            }
+            if include_structure {
+                let columns = manager.get_columns(&connection_id, schema, table).await
+                    .map_err(|error| error.to_string())?;
+                // Emit FKs only after a future dependency-aware second pass.
+                // Inline FK constraints make otherwise valid schemas fail when
+                // catalog enumeration places a child before its parent.
+                let constraints = manager.get_constraints(&connection_id, schema, table).await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|constraint| !constraint.constraint_type.eq_ignore_ascii_case("FOREIGN KEY"))
+                    .collect::<Vec<_>>();
+                let indexes = manager.get_indexes(&connection_id, schema, table).await
+                    .unwrap_or_default();
+                writeln!(writer, "\n-- Structure for {}", DatabaseKind::Postgres.qualified_table(Some(schema), table))
+                    .map_err(|error| error.to_string())?;
+                writeln!(writer, "{}", generate_postgres_table_ddl(schema, table, &columns, &constraints, &indexes))
+                    .map_err(|error| error.to_string())?;
+            }
+            if include_data {
+                let excluded_columns = manager.get_generated_columns(&connection_id, schema, table).await
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                let override_system_value = manager
+                    .sql_export_requires_identity_override(&connection_id, schema, table)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let mut offset = 0_u64;
+                loop {
+                    if *cancel_rx.borrow() {
+                        return Err(format!("{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"));
+                    }
+                    let sql = DatabaseKind::Postgres.paged_table_query_with_order(
+                        Some(schema), table, None, None, page_size, offset,
+                    );
+                    let mut result = manager.query(&connection_id, &sql, None, None, Some(export_id.clone()))
+                        .await.map_err(|error| error.to_string())?;
+                    let result = result.drain(..).next().unwrap_or_else(|| QueryResult::rows(Vec::new(), Vec::new()));
+                    let page_rows = result.rows.len() as u64;
+                    let (columns, rows) = filter_sql_export_batch(result.columns, result.rows, &excluded_columns)?;
+                    for statement in sql_insert_statements(
+                        SqlInsertExportOptions {
+                            kind: DatabaseKind::Postgres,
+                            dialect: SqlExportDialect::Postgres,
+                            override_system_value,
+                            batch_rows: insert_batch_size,
+                            conflict_policy: SqlInsertConflictPolicy::Strict,
+                            conflict_key_columns: &[],
+                            schema,
+                            table,
+                        },
+                        &columns,
+                        &rows,
+                    )? {
+                        writeln!(writer, "{statement}").map_err(|error| error.to_string())?;
+                    }
+                    rows_exported += page_rows;
+                    batches += u64::from(page_rows > 0);
+                    progress_rows.store(rows_exported, Ordering::Relaxed);
+                    progress_batches.store(batches, Ordering::Relaxed);
+                    if page_rows == 0 || page_rows < page_size as u64 {
+                        break;
+                    }
+                    offset += page_rows;
+                }
+            }
+        }
+        writer.flush().map_err(|error| error.to_string())?;
+        writer.get_ref().sync_all().map_err(|error| error.to_string())?;
+        temporary_file.finalize(&final_path)?;
+        Ok(DatabaseSqlExportResult {
+            export_id: export_id.clone(),
+            file_path: final_path.to_string_lossy().to_string(),
+            tables_exported: tables.len() as u64,
+            rows_exported,
+            batches,
+            omitted_object_kinds: vec![
+                "views".to_string(), "materialized views".to_string(), "routines".to_string(),
+                "sequences".to_string(), "extensions".to_string(), "grants".to_string(),
+                "foreign key constraints".to_string(),
+            ],
+        })
+    }.await;
+    let cancellation_requested = *cancel_rx.borrow();
+    cancellation.take(&export_id).await;
+    let (status, message) = match &result {
+        Ok(_) => ("done", Some("Database SQL export completed".to_string())),
+        Err(error) if cancellation_requested || error.contains(TABLE_EXPORT_CANCELLED) =>
+            ("cancelled", Some("Database SQL export cancelled; partial file removed".to_string())),
+        Err(_) => ("error", Some("Database SQL export failed; partial file removed".to_string())),
+    };
+    let _ = app.emit(TABLE_EXPORT_PROGRESS_EVENT, TableExportProgress {
+        export_id: export_id.clone(), rows_exported: progress_rows.load(Ordering::Relaxed),
+        batches: progress_batches.load(Ordering::Relaxed), terminal: true,
+        status: status.to_string(), message,
+    });
+    match result {
+        Ok(result) => Ok(Response::ok(result)),
+        Err(error) if cancellation_requested || error.contains(TABLE_EXPORT_CANCELLED) =>
+            Ok(Response::err(TABLE_EXPORT_CANCELLED, "Database SQL export cancelled and the partial file was removed.")),
+        Err(error) => Ok(Response::err("EXPORT_DATABASE_SQL_ERROR", &error)),
     }
 }
 

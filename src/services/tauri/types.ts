@@ -519,6 +519,20 @@ export interface TableExportResult {
   typeCoercions: TableExportTypeCoercion[];
 }
 
+/**
+ * Conservative whole-schema backup result. `omittedObjectKinds` is always
+ * explicit so callers do not treat the initial relation backup as a complete
+ * logical database dump.
+ */
+export interface DatabaseSqlExportResult {
+  exportId: string;
+  filePath: string;
+  tablesExported: number;
+  rowsExported: number;
+  batches: number;
+  omittedObjectKinds: string[];
+}
+
 export interface TableExportProgress {
   exportId: string;
   rowsExported: number;
