@@ -3,6 +3,7 @@ import type { SchemaDiagramLayout } from "./schemaDiagram";
 import {
   applySchemaDiagramAreas,
   autoArrangeSchemaDiagramArea,
+  autoArrangeSchemaDiagramAreas,
   commitSchemaDiagramAreas,
   createSchemaDiagramAreaHistory,
   moveSchemaDiagramRelationsToArea,
@@ -79,6 +80,35 @@ describe("schema diagram areas", () => {
     expect(redoSchemaDiagramAreas(undoSchemaDiagramAreas(committed)).present).toEqual(
       arranged,
     );
+  });
+
+  it("auto-arranges every area without applying cross-area dependencies", () => {
+    const arranged = autoArrangeSchemaDiagramAreas(
+      [
+        { id: "a", name: "Core", relationNames: ["orders", "users"] },
+        { id: "b", name: "Catalog", relationNames: ["items", "products"] },
+      ],
+      [
+        ...layout.edges,
+        {
+          ...layout.edges[0]!,
+          id: "items-products",
+          sourceRelation: "items",
+          targetRelation: "products",
+        },
+        {
+          ...layout.edges[0]!,
+          id: "orders-products",
+          sourceRelation: "orders",
+          targetRelation: "products",
+        },
+      ],
+    );
+
+    expect(arranged.map((area) => area.relationNames)).toEqual([
+      ["users", "orders"],
+      ["products", "items"],
+    ]);
   });
 
   it("removes a multi-selection from every area", () => {

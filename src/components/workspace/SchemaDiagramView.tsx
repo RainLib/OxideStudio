@@ -51,6 +51,7 @@ import {
 import {
   applySchemaDiagramAreas,
   autoArrangeSchemaDiagramArea,
+  autoArrangeSchemaDiagramAreas,
   moveSchemaDiagramRelationsToArea,
   removeSchemaDiagramRelationsFromAreas,
   renameSchemaDiagramArea,
@@ -207,6 +208,10 @@ export function SchemaDiagramView() {
       activeTab?.selectedDiagramRelationName,
       activeTab?.selectedDiagramRelationNames,
     ],
+  );
+  const selectedRelationList = useMemo(
+    () => [...selectedRelationNames],
+    [selectedRelationNames],
   );
   const scopedRelationNames = useMemo(() => {
     if (!snapshot || relationScope === "all") return undefined;
@@ -740,6 +745,10 @@ export function SchemaDiagramView() {
     );
   };
 
+  const autoArrangeAllAreas = () => {
+    commitAreas(autoArrangeSchemaDiagramAreas(areas, fullLayout.edges));
+  };
+
   const beginRenameArea = (areaId: string) => {
     const area = areas.find((candidate) => candidate.id === areaId);
     if (!area) return;
@@ -1228,11 +1237,14 @@ export function SchemaDiagramView() {
             : "grid-cols-[minmax(0,1fr)_260px]",
         )}
       >
-        <div
-          ref={viewportRef}
-          onScroll={scheduleViewportWindowUpdate}
-          className="min-h-0 overflow-auto bg-[radial-gradient(circle_at_center,hsl(var(--wb-border-subtle)/0.42)_0.75px,transparent_0.75px)] bg-[length:18px_18px]"
-        >
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <div
+              ref={viewportRef}
+              data-schema-diagram-canvas
+              onScroll={scheduleViewportWindowUpdate}
+              className="min-h-0 overflow-auto bg-[radial-gradient(circle_at_center,hsl(var(--wb-border-subtle)/0.42)_0.75px,transparent_0.75px)] bg-[length:18px_18px]"
+            >
           {layout.nodes.length === 0 && diagramNotes.length === 0 ? (
             <div className="flex h-full items-center justify-center text-[10px] wb-muted">
               No relation or column matches “{query}”.
@@ -1274,6 +1286,7 @@ export function SchemaDiagramView() {
                         <button
                           type="button"
                           className="pointer-events-auto absolute left-2 top-1 rounded px-1 py-0.5 text-[9px] font-medium text-violet-200/85 outline-none hover:bg-violet-300/10 focus-visible:ring-1 focus-visible:ring-violet-300/60"
+                          onContextMenu={(event) => event.stopPropagation()}
                           onClick={() =>
                             selectSchemaDiagramArea(activeTab.id, area.id)
                           }
@@ -1324,7 +1337,8 @@ export function SchemaDiagramView() {
                       )
                     }
                     onReveal={() => void revealRelation(node.relationName)}
-                    onContextSelect={() => {
+                    onContextSelect={(event) => {
+                      event.stopPropagation();
                       if (!selectedRelationNames.has(node.relationName)) {
                         selectRelation(node.relationName);
                       }
@@ -1385,7 +1399,84 @@ export function SchemaDiagramView() {
               </div>
             </div>
           )}
-        </div>
+            </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent className="w-60 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+            <ContextMenuItem
+              className="gap-2 text-[10px]"
+              onClick={() => createArea()}
+            >
+              <FolderPlus size={11} /> New area
+            </ContextMenuItem>
+            {selectedRelationList.length > 0 && (
+              <>
+                <ContextMenuSeparator />
+                <ContextMenuSub>
+                  <ContextMenuSubTrigger className="gap-2 text-[10px]">
+                    <FolderInput size={11} /> Move {selectedRelationList.length}{" "}
+                    selected relation
+                    {selectedRelationList.length === 1 ? "" : "s"} to area
+                  </ContextMenuSubTrigger>
+                  <ContextMenuSubContent className="max-h-72 w-52 overflow-y-auto border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                    <ContextMenuItem
+                      className="gap-2 text-[10px]"
+                      onClick={() => createArea(selectedRelationList)}
+                    >
+                      <FolderPlus size={11} /> New area with selection
+                    </ContextMenuItem>
+                    {areas.length > 0 && <ContextMenuSeparator />}
+                    {areas.map((area) => {
+                      const containsSelection = selectedRelationList.every(
+                        (name) => area.relationNames.includes(name),
+                      );
+                      return (
+                        <ContextMenuItem
+                          key={area.id}
+                          className="gap-2 text-[10px]"
+                          onClick={() =>
+                            moveRelationsToArea(area.id, selectedRelationList)
+                          }
+                        >
+                          <span className="h-2 w-2 rounded-full bg-violet-400/70" />
+                          <span className="min-w-0 flex-1 truncate">
+                            {area.name}
+                          </span>
+                          {containsSelection && <Check size={11} />}
+                        </ContextMenuItem>
+                      );
+                    })}
+                    {areas.length > 0 && (
+                      <>
+                        <ContextMenuSeparator />
+                        <ContextMenuItem
+                          className="gap-2 text-[10px]"
+                          disabled={!selectedRelationList.some((name) =>
+                            areas.some((area) =>
+                              area.relationNames.includes(name),
+                            ),
+                          )}
+                          onClick={() =>
+                            removeRelationsFromAreas(selectedRelationList)
+                          }
+                        >
+                          <X size={11} /> No area
+                        </ContextMenuItem>
+                      </>
+                    )}
+                  </ContextMenuSubContent>
+                </ContextMenuSub>
+              </>
+            )}
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              className="gap-2 text-[10px]"
+              disabled={!areas.some((area) => area.relationNames.length > 1)}
+              onClick={autoArrangeAllAreas}
+            >
+              <LayoutGrid size={11} /> Auto-arrange diagram areas
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
 
         {!inspectorCollapsed && (
         <aside className="min-h-0 overflow-auto border-l border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel)/0.72)]">
@@ -1579,7 +1670,7 @@ function DiagramRelationNode({
   selected: boolean;
   onSelect: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   onReveal: () => void;
-  onContextSelect: () => void;
+  onContextSelect: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   contextRelationNames: string[];
   areas: Array<{ id: string; name: string; relationNames: string[] }>;
   onCreateArea: (relationNames: readonly string[]) => void;

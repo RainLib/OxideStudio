@@ -169,4 +169,40 @@ describe("SchemaDiagramView", () => {
     ).not.toContain("notes");
     expect(container.textContent).toContain("+1 hidden column");
   });
+
+  it("exposes the current multi-selection from the canvas context menu", async () => {
+    await act(async () => {
+      root.render(<SchemaDiagramView />);
+    });
+    const users = container.querySelector<HTMLButtonElement>(
+      '[data-schema-diagram-relation="users"]',
+    );
+    const orders = container.querySelector<HTMLButtonElement>(
+      '[data-schema-diagram-relation="orders"]',
+    );
+    await act(async () => {
+      users?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      orders?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, ctrlKey: true }),
+      );
+    });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>("[data-schema-diagram-canvas]")
+        ?.dispatchEvent(
+          new MouseEvent("contextmenu", {
+            bubbles: true,
+            button: 2,
+            clientX: 120,
+            clientY: 120,
+          }),
+        );
+    });
+
+    expect(document.body.textContent).toContain(
+      "Move 2 selected relations to area",
+    );
+    expect(document.body.textContent).toContain("Auto-arrange diagram areas");
+  });
 });

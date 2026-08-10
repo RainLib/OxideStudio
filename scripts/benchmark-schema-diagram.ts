@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { buildSchemaDiagram } from "../src/lib/schemaDiagram";
+import { autoArrangeSchemaDiagramAreas } from "../src/lib/schemaDiagramAreas";
 import {
   buildSchemaDiagramViewportIndex,
   querySchemaDiagramViewport,
@@ -71,6 +72,22 @@ const rows = requestedSizes().map((size) => {
   const layout = buildSchemaDiagram(snapshot, { maxColumns: 18 });
   const layoutMs = elapsed(started);
 
+  const areaSize = 100;
+  const areas = Array.from(
+    { length: Math.ceil(layout.nodes.length / areaSize) },
+    (_, areaIndex) => ({
+      id: `area-${areaIndex}`,
+      name: `Area ${areaIndex + 1}`,
+      relationNames: layout.nodes
+        .slice(areaIndex * areaSize, (areaIndex + 1) * areaSize)
+        .map((node) => node.relationName)
+        .reverse(),
+    }),
+  );
+  started = performance.now();
+  autoArrangeSchemaDiagramAreas(areas, layout.edges);
+  const arrangeAreasMs = elapsed(started);
+
   started = performance.now();
   const index = buildSchemaDiagramViewportIndex(layout.nodes, layout.edges);
   const indexMs = elapsed(started);
@@ -95,6 +112,8 @@ const rows = requestedSizes().map((size) => {
     relations: size,
     relationships: layout.edges.length,
     layoutMs,
+    areaCount: areas.length,
+    arrangeAreasMs,
     indexMs,
     viewportQueries: QUERY_COUNT,
     viewportQueriesMs,

@@ -771,7 +771,9 @@ explicit deferred validation task rather than an implicit release check.
   move/new/no-area from a relation context menu and auto-arrange/remove from an
   area-title context menu; right-clicking outside the current multi-selection
   must target only that relation, while right-clicking inside it preserves the
-  entire selection. Rename areas from the toolbar and context menu; empty and
+  entire selection. From blank canvas space, repeat move/new/no-area for the
+  preserved selection and auto-arrange all areas; nested relation/area menus
+  must not also open the canvas menu. Rename areas from the toolbar and context menu; empty and
   case-equivalent duplicate names must remain blocked, and switching diagrams
   must dismiss a stale rename dialog.
 - Verify selected+related and selected-area scope filters compose with text and

@@ -127,6 +127,42 @@ export function autoArrangeSchemaDiagramArea(
   );
 }
 
+/**
+ * Reorders every area in one bounded pass. Relations are exclusive to an area,
+ * so cross-area dependencies must not distort a group's internal layout.
+ */
+export function autoArrangeSchemaDiagramAreas(
+  areas: SchemaDiagramArea[],
+  edges: SchemaDiagramEdge[],
+) {
+  const areaIdByRelation = new Map<string, string>();
+  const edgesByArea = new Map<string, SchemaDiagramEdge[]>();
+  for (const area of areas) {
+    for (const relationName of area.relationNames) {
+      areaIdByRelation.set(relationName, area.id);
+    }
+  }
+  for (const edge of edges) {
+    const sourceAreaId = areaIdByRelation.get(edge.sourceRelation);
+    if (
+      !sourceAreaId ||
+      sourceAreaId !== areaIdByRelation.get(edge.targetRelation)
+    ) {
+      continue;
+    }
+    const areaEdges = edgesByArea.get(sourceAreaId) || [];
+    areaEdges.push(edge);
+    edgesByArea.set(sourceAreaId, areaEdges);
+  }
+  return areas.map((area) => ({
+    ...area,
+    relationNames: dependencyOrder(
+      area.relationNames,
+      edgesByArea.get(area.id) || [],
+    ),
+  }));
+}
+
 export function applySchemaDiagramAreas(
   layout: SchemaDiagramLayout,
   areas: SchemaDiagramArea[],
