@@ -1128,3 +1128,18 @@ explicit deferred validation task rather than an implicit release check.
   100-item and 64 KiB bounds, cancellation, stale-response rejection, undo and
   product switching. Phase 106 performed no real ClickHouse or other database
   connection; all live/version/Monaco checks remain in this consolidated queue.
+
+## Portable window-function completion blocks
+
+- In real Monaco/WebView sessions for PostgreSQL, MySQL/MariaDB, SQLite,
+  SQL Server, Oracle, Db2, Dameng and representative compatibility profiles,
+  accept `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`, `LEAD`, `FIRST_VALUE`,
+  `LAST_VALUE` and `NTILE`. Tab through function arguments, partition and order
+  expressions; verify undo, casing preferences and completion cancellation.
+- Verify each supported server version accepts the generated call shape and
+  document product/version exceptions. Confirm live same-name routine metadata
+  wins, relation targets/comments/literals receive no window blocks, and
+  ClickHouse keeps its product-registry `row_number()` shape without an injected
+  portable `OVER` block.
+- Phase 107 added source and packaged LSP protocol coverage only. No database
+  was opened; server-version syntax and real Monaco interaction remain deferred.

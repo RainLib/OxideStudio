@@ -2635,6 +2635,94 @@ async fn bundled_sql_lsp_exposes_the_dbx_clickhouse_function_registry() -> Resul
 }
 
 #[tokio::test]
+async fn bundled_sql_lsp_exposes_portable_window_function_blocks() -> Result<()> {
+    let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
+        return Ok(());
+    };
+    lsp.initialize().await?;
+
+    let postgres_uri = "file:///oxide/window-functions.postgres.sql";
+    let mysql_uri = "file:///oxide/window-functions.mysql.sql";
+    let clickhouse_uri = "file:///oxide/window-functions.clickhouse.sql";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "fileDialects": {
+                    (postgres_uri): "postgres",
+                    (mysql_uri): "mysql",
+                    (clickhouse_uri): "clickhouse"
+                }
+            }
+        }),
+    )
+    .await?;
+
+    let row_sql = "SELECT row_";
+    let lag_sql = "SELECT la";
+    open_document(&mut lsp, postgres_uri, "sql", row_sql).await?;
+    open_document(&mut lsp, mysql_uri, "sql", lag_sql).await?;
+    open_document(&mut lsp, clickhouse_uri, "sql", row_sql).await?;
+
+    let postgres = completion_items_at(
+        &mut lsp,
+        postgres_uri,
+        0,
+        row_sql.encode_utf16().count() as u32,
+    )
+    .await?;
+    let mysql = completion_items_at(
+        &mut lsp,
+        mysql_uri,
+        0,
+        lag_sql.encode_utf16().count() as u32,
+    )
+    .await?;
+    let clickhouse = completion_items_at(
+        &mut lsp,
+        clickhouse_uri,
+        0,
+        row_sql.encode_utf16().count() as u32,
+    )
+    .await?;
+    let find = |completion: &Value, label: &str| -> Option<Value> {
+        completion
+            .as_array()
+            .or_else(|| completion.get("items").and_then(Value::as_array))
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("label").and_then(Value::as_str) == Some(label))
+            })
+            .cloned()
+    };
+
+    assert_eq!(
+        find(&postgres, "ROW_NUMBER")
+            .as_ref()
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("ROW_NUMBER() OVER (PARTITION BY ${1:column} ORDER BY ${2:column})")
+    );
+    assert_eq!(
+        find(&mysql, "LAG")
+            .as_ref()
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("LAG(${1:value}) OVER (PARTITION BY ${2:column} ORDER BY ${3:column})")
+    );
+    assert_eq!(
+        find(&clickhouse, "row_number")
+            .as_ref()
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("row_number()")
+    );
+
+    lsp.shutdown().await
+}
+
+#[tokio::test]
 async fn bundled_sql_lsp_isolates_a_new_query_block_without_a_semicolon() -> Result<()> {
     let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
         return Ok(());
