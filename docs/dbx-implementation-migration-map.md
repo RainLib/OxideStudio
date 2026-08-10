@@ -219,7 +219,7 @@ WHERE 与 SORT 输入不是普通文本框。应复用同一个 dialect/metadata
 - [x] Transfer overwrite 已使用事务内 DELETE、目标行数硬上限、确认摘要绑定与执行时 affected-row 复检，避免 TRUNCATE 隐式提交。
 - [x] bundled PostgreSQL/MySQL/SQLite 的单表 transfer 已支持以目标完整主键为冲突身份的
   upsert；确认摘要绑定 key columns，外置包在 semantic conflict-write protocol 完成前拒绝。
-- [ ] 继续补齐 transfer 的 owned-sequence/ownership preview、循环 FK policy、schema object transfer、外置驱动逐产品 semantic migration 实现/evidence 和真实数据库验证；descriptor-only plan/preflight/token-bound apply/verify 协议、签名/runtime 双门禁和 evidence runner 已落地，多表依赖顺序、同事务执行、PostgreSQL identity/serial reseed 与持久化逐对象报告已落地。
+- [ ] 继续补齐 transfer 的 owned-sequence/ownership preview、循环 FK policy、schema object transfer、外置驱动逐产品 semantic migration 实现/evidence 和真实数据库验证；descriptor-only plan/preflight/token-bound apply/verify 协议、签名/runtime/exact-evidence 门禁、Host-only 单次 session、UI apply 主路径和双重 post-verify 已落地，多表依赖顺序、同事务执行、PostgreSQL identity/serial reseed 与持久化逐对象报告已落地。
 - [ ] 按 capability 扩展 snapshot/diff/migration，禁止未实现的方言生成可执行 DDL。
 
 ### 7.4 P3：工作台体验

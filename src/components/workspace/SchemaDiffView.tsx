@@ -135,25 +135,34 @@ export function SchemaDiffView() {
   const selectedChange = plan.changes.find(
     (change) => change.id === activeTab.selectedSchemaChangeId,
   );
-  const requiresReview = plan.changes.some(
+  const requiresReview = plan.requiresReviewApproval ?? plan.changes.some(
     (change) => change.manualReview || change.risk === "review",
   );
-  const reviewChangeCount = plan.changes.filter(
-    (change) => change.manualReview || change.risk === "review",
-  ).length;
-  const requiresDestructive = plan.changes.some(
+  const reviewChangeCount = Math.max(
+    plan.summary.review,
+    plan.changes.filter(
+      (change) => change.manualReview || change.risk === "review",
+    ).length,
+  );
+  const requiresDestructive = plan.requiresDestructiveApproval ?? plan.changes.some(
     (change) => change.risk === "destructive" || !change.reversible,
   );
-  const destructiveChangeCount = plan.changes.filter(
-    (change) => change.risk === "destructive" || !change.reversible,
-  ).length;
+  const destructiveChangeCount = Math.max(
+    plan.summary.destructive,
+    plan.changes.filter(
+      (change) => change.risk === "destructive" || !change.reversible,
+    ).length,
+  );
   const conversionIssues = plan.conversionIssues || [];
   // The backend resolves aliases (for example `mariadb`) through the dialect
   // registry before it executes a migration. Mirror that decision here so the
   // confirmation surface cannot hide a reviewed, executable family plan.
   const normalizedPlanDriver = normalizeDatabaseDriverName(plan.driver);
+  const executionOwner = plan.executionOwner || "hostSql";
+  const isTargetOwnedPlan = executionOwner === "externalDriver";
   const isNonTransactionalPlan =
-    normalizedPlanDriver === "mysql" && !plan.transactional;
+    !plan.transactional &&
+    (isTargetOwnedPlan || normalizedPlanDriver === "mysql");
   const isOfflineProjectDdlSource = isProjectDdlSnapshot(source);
   const isOfflineDbmlSource = isSchemaDbmlSnapshot(source);
   const isOfflineMetadataSource = isChartDbMetadataSnapshot(source);
@@ -172,8 +181,11 @@ export function SchemaDiffView() {
       : "Project DDL";
   const supportsSafeApply =
     !isOfflineSource &&
-    ((normalizedPlanDriver === "postgres" && plan.transactional) ||
-      isNonTransactionalPlan);
+    executionOwner !== "reviewOnly" &&
+    (isTargetOwnedPlan ||
+      (executionOwner === "hostSql" &&
+        ((normalizedPlanDriver === "postgres" && plan.transactional) ||
+          isNonTransactionalPlan)));
   const currentJournal = execution || recentExecutions[0] || null;
   const requiredConfirmationTarget = [
     target.connectionName,
@@ -194,7 +206,12 @@ export function SchemaDiffView() {
   };
 
   const openInConsole = () => {
-    if (!previewSql || previewSurface === "run" || isOfflineSource) return;
+    if (
+      !previewSql ||
+      previewSurface === "run" ||
+      isOfflineSource ||
+      isTargetOwnedPlan
+    ) return;
     const surfaceName = previewSurface === "migration"
       ? "migration"
       : previewSurface === "preflight"
@@ -308,12 +325,15 @@ export function SchemaDiffView() {
             title={
               isOfflineSource
                 ? `${offlineSourceLabel} review artifacts cannot open a runnable console.`
+                : isTargetOwnedPlan
+                  ? "Target-owned plans never expose or execute sidecar DDL in a Host SQL console."
                 : previewSurface === "migration" && plan.summary.blocked > 0
                 ? "Resolve blocked changes before opening a runnable migration console"
                 : undefined
             }
             disabled={
               isOfflineSource ||
+              isTargetOwnedPlan ||
               (previewSurface === "run" || previewSurface === "rollback"
                 ? !previewSql
                 : previewSurface === "migration"
@@ -334,23 +354,31 @@ export function SchemaDiffView() {
             disabled={
               isApplying ||
               !supportsSafeApply ||
-              plan.changes.length === 0 ||
+              plan.summary.total === 0 ||
               plan.summary.blocked > 0
             }
             title={
               !supportsSafeApply
                 ? isOfflineSource
                   ? `${offlineSourceLabel} baselines are review-only. Capture a live snapshot before applying a migration.`
-                  : "Automatic apply is available for PostgreSQL transactions and explicitly acknowledged MySQL DDL"
+                  : executionOwner === "reviewOnly"
+                    ? "This external package or server version has no exact semantic migration evidence."
+                    : "Automatic apply is available for verified target-owned plans, PostgreSQL transactions, and explicitly acknowledged MySQL DDL"
                 : plan.summary.blocked > 0
                   ? "Resolve blocked changes before applying"
                   : isNonTransactionalPlan
-                    ? "Refresh the live target, run preflight, apply each reviewed statement, then verify"
+                    ? "Refresh the live target, run target-owned preflight/apply, then verify"
                     : "Refresh the live target, run preflight, apply atomically, then verify"
             }
           >
             {isApplying ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
-            {isApplying ? "Applying…" : isNonTransactionalPlan ? "Apply reviewed plan" : "Apply safely"}
+            {isApplying
+              ? "Applying…"
+              : isTargetOwnedPlan
+                ? "Apply target-owned plan"
+                : isNonTransactionalPlan
+                  ? "Apply reviewed plan"
+                  : "Apply safely"}
           </button>
         </div>
       </header>
@@ -367,10 +395,12 @@ export function SchemaDiffView() {
           <div className="flex items-start justify-between gap-6">
             <div className="min-w-0">
               <div className="flex items-center gap-2 text-[11px] font-semibold text-amber-200">
-                <ShieldAlert size={13} /> Confirm {isNonTransactionalPlan ? "non-transactional" : "transactional"} migration
+                <ShieldAlert size={13} /> Confirm {isTargetOwnedPlan ? "target-owned" : isNonTransactionalPlan ? "non-transactional" : "transactional"} migration
               </div>
               <p className="mt-1 max-w-3xl text-[9px] leading-4 wb-muted">
-                {isNonTransactionalPlan
+                {isTargetOwnedPlan
+                  ? `OxideStudio will recapture the live target, then ask the verified driver process to preflight, apply and verify its opaque semantic plan. Sidecar tokens remain only in Host memory, and no driver-generated DDL is exposed or executed as console SQL.${isNonTransactionalPlan ? " The driver declares non-transactional execution, so partial apply remains possible." : ""}`
+                  : isNonTransactionalPlan
                   ? `OxideStudio will recapture the live target and reject stale plans, run every generated preflight check, then execute ${plan.changes.flatMap((change) => change.sql).length} reviewed MySQL statement(s) one at a time. MySQL can auto-commit DDL, so a failed run may leave earlier statements applied; the journal and post-verification show the exact outcome.`
                   : `OxideStudio will recapture the live target and reject stale plans, run every generated preflight check, commit all ${plan.changes.flatMap((change) => change.sql).length} statement(s) in one PostgreSQL transaction, then recapture and compare the schema again.`}
               </p>
@@ -430,7 +460,7 @@ export function SchemaDiffView() {
                   disabled={isApplying}
                   className="accent-amber-400"
                 />
-                I understand MySQL DDL can partially commit before a failure
+                I understand {isTargetOwnedPlan ? "this target-owned migration" : "MySQL DDL"} can partially commit before a failure
               </label>
             )}
             <button
@@ -472,10 +502,18 @@ export function SchemaDiffView() {
           <div className="min-h-0 flex-1 overflow-auto p-2">
             {plan.changes.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center px-5 text-center">
-                <CheckCircle2 size={22} className="mb-2 text-emerald-400" />
-                <div className="text-[11px] font-medium">Schemas match</div>
+                {plan.summary.total > 0 ? (
+                  <ListChecks size={22} className="mb-2 text-sky-300" />
+                ) : (
+                  <CheckCircle2 size={22} className="mb-2 text-emerald-400" />
+                )}
+                <div className="text-[11px] font-medium">
+                  {plan.summary.total > 0 ? "Bounded plan summary" : "Schemas match"}
+                </div>
                 <div className="mt-1 text-[9px] leading-4 wb-muted">
-                  The live target has the same captured structure as this snapshot.
+                  {plan.summary.total > 0
+                    ? `The target driver reported ${plan.summary.total} change(s) without individual preview rows.`
+                    : "The live target has the same captured structure as this snapshot."}
                 </div>
               </div>
             ) : (
@@ -572,6 +610,10 @@ export function SchemaDiffView() {
                     ? currentJournal?.rollback.requiresManualReview
                       ? "Generated reverse plan · manual review required"
                       : "Generated reverse plan · review before use"
+                : isTargetOwnedPlan
+                  ? plan.transactional
+                    ? "Verified target-owned plan · opaque transactional session"
+                    : "Verified target-owned plan · partial apply possible"
                 : plan.transactional && normalizedPlanDriver === "postgres"
                   ? "PostgreSQL · ROLLBACK guard"
                   : normalizedPlanDriver === "mysql"

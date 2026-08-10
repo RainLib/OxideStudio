@@ -233,6 +233,15 @@ pub struct SchemaConversionIssue {
     pub blocks_automatic_conversion: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SchemaDiffExecutionOwner {
+    #[default]
+    HostSql,
+    ExternalDriver,
+    ReviewOnly,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaDiffPlan {
@@ -245,6 +254,12 @@ pub struct SchemaDiffPlan {
     pub target_schema_name: String,
     pub generated_at: i64,
     pub transactional: bool,
+    #[serde(default)]
+    pub execution_owner: SchemaDiffExecutionOwner,
+    #[serde(default)]
+    pub requires_review_approval: bool,
+    #[serde(default)]
+    pub requires_destructive_approval: bool,
     pub summary: SchemaDiffSummary,
     pub changes: Vec<SchemaChange>,
     pub migration_sql: String,
@@ -508,6 +523,13 @@ pub fn compare_schema_snapshots(
         target_schema_name: target.schema_name.clone(),
         generated_at,
         transactional,
+        execution_owner: SchemaDiffExecutionOwner::HostSql,
+        requires_review_approval: changes
+            .iter()
+            .any(|change| change.manual_review || change.risk == SchemaChangeRisk::Review),
+        requires_destructive_approval: changes
+            .iter()
+            .any(|change| change.risk == SchemaChangeRisk::Destructive || !change.reversible),
         summary,
         changes,
         migration_sql,
@@ -1084,6 +1106,9 @@ fn compare_metadata_snapshots(
         target_schema_name: target.schema_name.clone(),
         generated_at,
         transactional: false,
+        execution_owner: SchemaDiffExecutionOwner::ReviewOnly,
+        requires_review_approval: true,
+        requires_destructive_approval: false,
         summary,
         changes,
         migration_sql: "-- Metadata-only comparison; no migration commands were generated.\n"
@@ -1274,6 +1299,9 @@ fn compare_sqlite_schema_snapshots(
         target_schema_name: target.schema_name.clone(),
         generated_at,
         transactional: false,
+        execution_owner: SchemaDiffExecutionOwner::ReviewOnly,
+        requires_review_approval: true,
+        requires_destructive_approval: false,
         summary,
         migration_sql: render_sqlite_rebuild_migration_sql(source, target, &changes, &warnings),
         preflight_checks: Vec::new(),

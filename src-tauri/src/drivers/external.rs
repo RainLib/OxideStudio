@@ -499,6 +499,8 @@ fn validate_schema_migration_plan_result(
         ));
     }
     let mut preview_ids = HashSet::with_capacity(result.preview.len());
+    let mut preview_requires_review = false;
+    let mut preview_requires_destructive = false;
     for change in &result.preview {
         validate_migration_token(&change.id, "semantic migration preview id")?;
         validate_bounded_migration_text(&change.kind, "semantic migration preview kind", false)?;
@@ -515,6 +517,15 @@ fn validate_schema_migration_plan_result(
                 "External driver returned an invalid semantic migration preview"
             ));
         }
+        preview_requires_review |= change.risk == "review";
+        preview_requires_destructive |= change.risk == "destructive" || !change.reversible;
+    }
+    if (preview_requires_review && !result.requires_review)
+        || (preview_requires_destructive && !result.requires_destructive)
+    {
+        return Err(anyhow!(
+            "External driver migration approvals do not cover its preview risks"
+        ));
     }
     validate_migration_warnings(&result.warnings)
 }
@@ -1572,6 +1583,16 @@ mod tests {
             &request,
             SchemaMigrationMode::Transactional,
             &oversized_warning,
+        )
+        .is_err());
+
+        let mut missing_approval = migration_plan_result();
+        missing_approval.preview[0].risk = "destructive".to_string();
+        missing_approval.preview[0].reversible = false;
+        assert!(validate_schema_migration_plan_result(
+            &request,
+            SchemaMigrationMode::Transactional,
+            &missing_approval,
         )
         .is_err());
     }

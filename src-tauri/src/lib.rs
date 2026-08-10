@@ -94,6 +94,7 @@ pub fn run() {
             app.manage(QueryCancellationState::default());
             app.manage(commands::table::TableDataTransferCancellationState::default());
             app.manage(commands::table::TableExportCancellationState::default());
+            app.manage(commands::schema_diff::ExternalSchemaMigrationSessionState::default());
             app.manage(commands::ai::AiCancellationState::default());
             app.manage(enterprise::EnterpriseClient::new(app.handle()));
             // AgentHostManager is side-effect free here. The sidecar and

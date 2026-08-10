@@ -1229,6 +1229,10 @@ export interface SchemaDiffPlan {
   targetSchemaName: string;
   generatedAt: number;
   transactional: boolean;
+  /** Host SQL, target-owned sidecar session, or an explicitly review-only plan. */
+  executionOwner?: "hostSql" | "externalDriver" | "reviewOnly";
+  requiresReviewApproval?: boolean;
+  requiresDestructiveApproval?: boolean;
   summary: SchemaDiffSummary;
   changes: SchemaChange[];
   migrationSql: string;

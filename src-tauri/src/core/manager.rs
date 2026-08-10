@@ -267,6 +267,14 @@ impl ConnectionManager {
         Ok(self.get_driver(id).await?.server_version().await)
     }
 
+    pub async fn external_runtime_process_id(&self, id: &str) -> Result<Option<u32>> {
+        Ok(self
+            .get_driver(id)
+            .await?
+            .external_runtime_process_id()
+            .await)
+    }
+
     /// Resolve all connection-owned capability inputs from the same live
     /// driver instance. The global connection lock is released before asking
     /// the driver for its negotiated version, so a slow sidecar cannot block

@@ -258,7 +258,10 @@ explicit deferred validation task rather than an implicit release check.
   migration fixture and publish hash-bound `migration` evidence. Verify stale
   target fingerprints, plan/preflight/apply token swaps, blocked preflight,
   missing review/destructive/non-transactional approval, partial-apply reports
-  and post-apply drift. Until then the product remains review-only.
+  sidecar restart/session expiry/single-use rejection, Host recapture failure,
+  and post-apply drift. Confirm no renderer payload or persisted journal
+  contains sidecar plan ids, tokens, DDL, raw preflight observations or row
+  values. Until then that exact product/server pair remains review-only.
 - Re-run the Host-side semantic migration boundary tests on a Windows runner
   with the complete native test runtime. The current workstation compiled the
   test binary successfully, but Windows exited before the test harness started
