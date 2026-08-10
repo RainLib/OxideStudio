@@ -123,6 +123,20 @@ pub struct CompletionItemLabelDetails {
     pub description: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionMarkupContent {
+    pub kind: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum CompletionDocumentation {
+    Text(String),
+    Markup(CompletionMarkupContent),
+}
+
 /// Completion item
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionItem {
@@ -135,7 +149,7 @@ pub struct CompletionItem {
     pub label_details: Option<CompletionItemLabelDetails>,
     pub kind: Option<u32>,
     pub detail: Option<String>,
-    pub documentation: Option<String>,
+    pub documentation: Option<CompletionDocumentation>,
     #[serde(
         default,
         rename = "insertText",
@@ -182,23 +196,34 @@ pub struct CompletionItem {
     pub deprecated: Option<bool>,
 }
 
-fn lsp_documentation_to_string(value: &Value) -> Option<String> {
+fn parse_completion_documentation(value: &Value) -> Option<CompletionDocumentation> {
     if let Some(text) = value.as_str() {
-        return Some(text.to_string());
+        return Some(CompletionDocumentation::Text(text.to_string()));
     }
 
     if let Some(text) = value.get("value").and_then(|value| value.as_str()) {
-        return Some(text.to_string());
+        return Some(CompletionDocumentation::Markup(CompletionMarkupContent {
+            kind: value
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("plaintext")
+                .to_string(),
+            value: text.to_string(),
+        }));
     }
 
     if let Some(items) = value.as_array() {
         let docs: Vec<String> = items
             .iter()
-            .filter_map(lsp_documentation_to_string)
+            .filter_map(parse_completion_documentation)
+            .map(|documentation| match documentation {
+                CompletionDocumentation::Text(text) => text,
+                CompletionDocumentation::Markup(markup) => markup.value,
+            })
             .filter(|doc| !doc.trim().is_empty())
             .collect();
         if !docs.is_empty() {
-            return Some(docs.join("\n\n"));
+            return Some(CompletionDocumentation::Text(docs.join("\n\n")));
         }
     }
 
@@ -289,7 +314,7 @@ fn parse_completion_item(item: &Value, defaults: Option<&Value>) -> Option<Compl
             .map(|s| s.to_string()),
         documentation: item
             .get("documentation")
-            .and_then(lsp_documentation_to_string),
+            .and_then(parse_completion_documentation),
         insert_text: item
             .get("insertText")
             .and_then(|v| v.as_str())
@@ -898,6 +923,10 @@ mod tests {
             },
             "kind": 3,
             "detail": "Function",
+            "documentation": {
+                "kind": "markdown",
+                "value": "Calculates **score**."
+            },
             "insertText": "calculate_score()",
             "insertTextFormat": 1,
             "insertTextMode": 2,
@@ -937,6 +966,13 @@ mod tests {
             })
         );
         assert_eq!(parsed.insert_text.as_deref(), Some("calculate_score()"));
+        assert_eq!(
+            parsed.documentation,
+            Some(CompletionDocumentation::Markup(CompletionMarkupContent {
+                kind: "markdown".to_string(),
+                value: "Calculates **score**.".to_string(),
+            }))
+        );
         assert_eq!(parsed.insert_text_format, Some(1));
         assert_eq!(parsed.insert_text_mode, Some(2));
         assert_eq!(parsed.sort_text.as_deref(), Some("1:calculate_score"));

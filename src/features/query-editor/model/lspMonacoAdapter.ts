@@ -16,11 +16,15 @@ export function lspDocumentationForMonaco(
     | undefined,
 ) {
   if (!documentation) return undefined;
-  return typeof documentation === "string"
-    ? documentation
-    : documentation.value
-      ? { value: documentation.value }
-      : undefined;
+  if (typeof documentation === "string") return documentation;
+  if (!documentation.value) return undefined;
+  return documentation.kind?.toLocaleLowerCase() === "markdown"
+    ? {
+        value: documentation.value,
+        isTrusted: false,
+        supportHtml: false,
+      }
+    : documentation.value;
 }
 
 export function toMonacoRange(monaco: any, range: LspRange) {

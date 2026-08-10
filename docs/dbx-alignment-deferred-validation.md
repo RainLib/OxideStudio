@@ -399,6 +399,10 @@ explicit deferred validation task rather than an implicit release check.
   must remain authoritative even when “append space after completion” is
   enabled; only plain insertText/label proposals may receive client whitespace.
   An older request must never overwrite a newer model revision.
+- Verify Markdown completion documentation renders emphasis, code and links
+  without enabling embedded HTML or trusted command links. Plaintext containing
+  `*`, backticks or brackets must remain literal rather than being rendered as
+  Markdown.
 - Verify a server `CompletionList` with `isIncomplete: true` is returned to
   Monaco so the next typing event uses trigger kind 3, and becomes complete
   when the server returns `false`.

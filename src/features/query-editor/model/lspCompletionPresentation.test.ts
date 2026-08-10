@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CompletionItemKind } from "@/services/lsp/types";
 import { lspCompletionItemsToMonacoSuggestions } from "./lspCompletionPresentation";
+import { lspDocumentationForMonaco } from "./lspMonacoAdapter";
 
 class MockRange {
   constructor(
@@ -44,6 +45,10 @@ describe("lspCompletionItemsToMonacoSuggestions", () => {
             description: "orders",
           },
           kind: CompletionItemKind.Field,
+          documentation: {
+            kind: "markdown",
+            value: "Customer **identifier**.",
+          },
           insertTextFormat: 2,
           insertTextMode: 1,
           textEdit: {
@@ -74,6 +79,11 @@ describe("lspCompletionItemsToMonacoSuggestions", () => {
       description: "orders",
     });
     expect(suggestion?.insertTextRules).toBe(5);
+    expect(suggestion?.documentation).toEqual({
+      value: "Customer **identifier**.",
+      isTrusted: false,
+      supportHtml: false,
+    });
     expect(suggestion?.range).toEqual({
       insert: new MockRange(3, 5, 3, 8),
       replace: new MockRange(3, 5, 3, 12),
@@ -142,5 +152,16 @@ describe("lspCompletionItemsToMonacoSuggestions", () => {
 
     expect(suggestions[0]?.insertText).toBe("SELECT");
     expect(suggestions[1]?.insertText).toBe("FROM ");
+  });
+});
+
+describe("lspDocumentationForMonaco", () => {
+  it("keeps plaintext literal instead of interpreting Markdown markers", () => {
+    expect(
+      lspDocumentationForMonaco({
+        kind: "plaintext",
+        value: "* is a wildcard",
+      }),
+    ).toBe("* is a wildcard");
   });
 });
