@@ -157,6 +157,31 @@ pub async fn get_schema_objects(
     ))
 }
 
+/// Lists children of a descriptor object that the driver explicitly marked as
+/// expandable. The result remains read-only metadata, never a table target.
+#[tauri::command]
+pub async fn get_schema_object_members(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    schema: String,
+    object_name: String,
+    object_type: String,
+) -> Result<Response<Vec<SchemaObjectInfo>>, String> {
+    let result = manager
+        .get_schema_object_members(&connection_id, &schema, &object_name, &object_type)
+        .await;
+    Ok(schema_result(
+        result,
+        "SCHEMA_OBJECT_MEMBER_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "schema": schema,
+            "objectName": object_name,
+            "objectType": object_type,
+        }),
+    ))
+}
+
 /// Get read-only descriptors for non-relation objects in one explicitly
 /// selected database. This metadata path never changes the query connection's
 /// active database.
@@ -177,6 +202,38 @@ pub async fn get_database_schema_objects(
             "connectionId": connection_id,
             "database": database,
             "schema": schema,
+        }),
+    ))
+}
+
+/// Database-scoped descriptor members without changing the active database.
+#[tauri::command]
+pub async fn get_database_schema_object_members(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    object_name: String,
+    object_type: String,
+) -> Result<Response<Vec<SchemaObjectInfo>>, String> {
+    let result = manager
+        .get_database_schema_object_members(
+            &connection_id,
+            &database,
+            &schema,
+            &object_name,
+            &object_type,
+        )
+        .await;
+    Ok(schema_result(
+        result,
+        "DATABASE_SCHEMA_OBJECT_MEMBER_LIST_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "database": database,
+            "schema": schema,
+            "objectName": object_name,
+            "objectType": object_type,
         }),
     ))
 }

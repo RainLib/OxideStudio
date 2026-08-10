@@ -775,6 +775,35 @@ impl ConnectionManager {
         driver.get_schema_objects(schema).await
     }
 
+    /// Read-only lazy descriptor members. The driver remains authoritative
+    /// for whether an object kind is expandable.
+    pub async fn get_schema_object_members(
+        &self,
+        id: &str,
+        schema: &str,
+        object_name: &str,
+        object_type: &str,
+    ) -> Result<Vec<super::protocol::SchemaObjectInfo>> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .get_schema_object_members(schema, object_name, object_type)
+            .await
+    }
+
+    pub async fn get_database_schema_object_members(
+        &self,
+        id: &str,
+        database: &str,
+        schema: &str,
+        object_name: &str,
+        object_type: &str,
+    ) -> Result<Vec<super::protocol::SchemaObjectInfo>> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .get_database_schema_object_members(database, schema, object_name, object_type)
+            .await
+    }
+
     pub async fn get_collections(
         &self,
         id: &str,

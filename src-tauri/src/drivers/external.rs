@@ -1434,6 +1434,47 @@ impl DatabaseDriver for ExternalDriver {
         })
         .await
     }
+
+    async fn get_schema_object_members(
+        &self,
+        schema: &str,
+        object_name: &str,
+        object_type: &str,
+    ) -> Result<Vec<crate::core::protocol::SchemaObjectInfo>> {
+        let capabilities = self.capabilities.lock().await;
+        if !capabilities.schema_objects || !capabilities.schema_object_members {
+            return Ok(Vec::new());
+        }
+        drop(capabilities);
+        self.metadata(MetadataRequest::SchemaObjectMembers {
+            database: None,
+            namespace: schema.to_string(),
+            object_name: object_name.to_string(),
+            object_type: object_type.to_string(),
+        })
+        .await
+    }
+
+    async fn get_database_schema_object_members(
+        &self,
+        database: &str,
+        schema: &str,
+        object_name: &str,
+        object_type: &str,
+    ) -> Result<Vec<crate::core::protocol::SchemaObjectInfo>> {
+        let capabilities = self.capabilities.lock().await;
+        if !capabilities.schema_objects || !capabilities.schema_object_members {
+            return Ok(Vec::new());
+        }
+        drop(capabilities);
+        self.metadata(MetadataRequest::SchemaObjectMembers {
+            database: Some(database.to_string()),
+            namespace: schema.to_string(),
+            object_name: object_name.to_string(),
+            object_type: object_type.to_string(),
+        })
+        .await
+    }
 }
 
 #[cfg(test)]

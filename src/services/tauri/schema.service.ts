@@ -97,6 +97,33 @@ export async function getSchemaObjects(
   });
 }
 
+/** Read-only children of a descriptor the driver marked as expandable. */
+export async function getSchemaObjectMembers(
+  connectionId: string,
+  schema: string,
+  objectName: string,
+  objectType: string,
+): Promise<SchemaObjectInfo[]> {
+  return invokeWithInterceptors<SchemaObjectInfo[]>(
+    "get_schema_object_members",
+    { connectionId, schema, objectName, objectType },
+  );
+}
+
+/** Database-scoped descriptor members without changing the active database. */
+export async function getDatabaseSchemaObjectMembers(
+  connectionId: string,
+  database: string,
+  schema: string,
+  objectName: string,
+  objectType: string,
+): Promise<SchemaObjectInfo[]> {
+  return invokeWithInterceptors<SchemaObjectInfo[]>(
+    "get_database_schema_object_members",
+    { connectionId, database, schema, objectName, objectType },
+  );
+}
+
 export async function getCollections(
   connectionId: string,
   namespace: string

@@ -28,6 +28,14 @@ unsupported built-ins and old sidecars return an empty list, while new capable
 packages can display their object descriptors without another driver-name
 branch.
 
+The host protocol now also defines a separate `SchemaObjectMembers` metadata
+request and `schemaObjectMembers` runtime capability. It reaches the external
+driver, connection manager, Tauri command and frontend service, and defaults
+to an empty result unless both descriptor capabilities are signed. A Xugu
+sidecar still needs to implement the catalog query and the Explorer still
+needs a lazy member-row renderer; this contract intentionally does not mark
+ordinary descriptors as expandable.
+
 ## Editor and data-path comparison
 
 DBChart's current head has no SQL editor/LSP change: it provides DBML Monaco

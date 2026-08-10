@@ -342,6 +342,30 @@ pub trait DatabaseDriver: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Lazily list child descriptors of an explicitly expandable schema
+    /// object. This is metadata only; returning children never grants table,
+    /// grid, source or mutation capabilities to the parent object.
+    async fn get_schema_object_members(
+        &self,
+        _schema: &str,
+        _object_name: &str,
+        _object_type: &str,
+    ) -> Result<Vec<SchemaObjectInfo>> {
+        Ok(Vec::new())
+    }
+
+    /// Database-scoped counterpart of `get_schema_object_members`.
+    async fn get_database_schema_object_members(
+        &self,
+        _database: &str,
+        schema: &str,
+        object_name: &str,
+        object_type: &str,
+    ) -> Result<Vec<SchemaObjectInfo>> {
+        self.get_schema_object_members(schema, object_name, object_type)
+            .await
+    }
+
     /// Get collections, indexes, or analogous document/search objects in a namespace.
     async fn get_collections(&self, _namespace: &str) -> Result<Vec<CollectionInfo>> {
         Ok(Vec::new())

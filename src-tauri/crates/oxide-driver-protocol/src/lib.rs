@@ -61,6 +61,11 @@ pub struct DriverRuntimeCapabilities {
     /// types, packages, sequences, and extensions. Older packages omit this
     /// and keep the Explorer's supplemental-object tree empty.
     pub schema_objects: bool,
+    /// The sidecar can lazily enumerate children of an explicitly marked
+    /// descriptor object (for example Xugu TYPE attributes or package
+    /// routines). This is separate from `schema_objects` so older packages
+    /// cannot accidentally turn every descriptor into an expandable node.
+    pub schema_object_members: bool,
     /// The sidecar independently rejects mutation requests when
     /// `DriverQueryContext.read_only` is set. Agent-owned external drivers
     /// require this capability instead of trusting a host-side SQL parser.
@@ -386,6 +391,15 @@ pub enum MetadataRequest {
         database: Option<String>,
         namespace: String,
     },
+    /// Read-only members of one descriptor object. A caller must have first
+    /// received `membersExpandable: true` for that object from SchemaObjects.
+    SchemaObjectMembers {
+        #[serde(default)]
+        database: Option<String>,
+        namespace: String,
+        object_name: String,
+        object_type: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -600,6 +614,27 @@ mod tests {
         assert!(capabilities.metadata);
         assert!(!capabilities.referencing_foreign_keys);
         assert!(!capabilities.schema_objects);
+        assert!(!capabilities.schema_object_members);
         assert!(!capabilities.semantic_schema_migration);
+    }
+
+    #[test]
+    fn schema_object_member_requests_keep_parent_identity_explicit() {
+        let request = MetadataRequest::SchemaObjectMembers {
+            database: Some("app".to_string()),
+            namespace: "public".to_string(),
+            object_name: "customer_type".to_string(),
+            object_type: "TYPE".to_string(),
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["kind"], "schemaObjectMembers");
+        assert_eq!(encoded["database"], "app");
+        // MetadataRequest keeps its existing snake_case field wire contract;
+        // only the tagged enum discriminator is camelCase.
+        assert_eq!(encoded["object_name"], "customer_type");
+        assert_eq!(
+            serde_json::from_value::<MetadataRequest>(encoded).unwrap(),
+            request
+        );
     }
 }
