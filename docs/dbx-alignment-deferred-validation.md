@@ -756,6 +756,22 @@ explicit deferred validation task rather than an implicit release check.
   review-only `IndexModify`; it must never emit `DROP INDEX`/`CREATE INDEX`.
   Product-specific semantic comment apply requires separate version evidence.
 
+## DBML table comments and mixed-dialect types
+
+- Capture PostgreSQL and MySQL/MariaDB tables with absent, Unicode,
+  single-quote, backslash and multiline comments. Confirm the table-list
+  comment enters the saved snapshot, fingerprint and DBML `Note`, then
+  round-trips without being confused with review warnings for views.
+- Compare comment-only live snapshots and verify PostgreSQL emits `COMMENT ON
+  TABLE ... IS ...` (or `NULL` for removal) while MySQL emits `ALTER TABLE ...
+  COMMENT = ...` (or an empty string for removal). Re-capture must converge
+  without rebuilding the table.
+- Import/export a deliberately mixed DBML fixture containing MySQL
+  `longtext`/`tinyint` and PostgreSQL arrays or schema-qualified custom types.
+  Oxide must preserve the exact declared type for review rather than silently
+  normalizing it. Product-owned execution remains gated by target dialect
+  preflight and the offline DBML sentinel.
+
 ## ChartDB metadata JSON import
 
 - Copy each target-scoped query from the Snapshot dialog and execute it on the

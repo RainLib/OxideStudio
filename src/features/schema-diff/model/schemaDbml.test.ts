@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SchemaSnapshot } from "@/services/tauri/types";
 import { serializeSchemaSnapshotToDbml } from "./schemaDbml";
+import { parseSchemaDbml } from "./schemaDbmlImport";
 
 describe("schema snapshot DBML export", () => {
   it("preserves columns, composite foreign keys and review warnings", () => {
@@ -140,5 +141,75 @@ describe("schema snapshot DBML export", () => {
     const artifact = serializeSchemaSnapshotToDbml(snapshot);
     expect(artifact.content).toContain('Enum "public"."state" {\n}');
     expect(artifact.warnings.join(" ")).toContain("enum values are unavailable");
+  });
+
+  it("round-trips table comments and mixed-dialect types without normalization", () => {
+    const snapshot = {
+      version: 1,
+      id: "snapshot-mixed-types",
+      fingerprint: "fingerprint-mixed-types",
+      projectId: "project-1",
+      connectionId: "connection-1",
+      connectionName: "Mixed model",
+      driver: "postgres" as const,
+      databaseName: "app",
+      schemaName: "public",
+      capturedAt: 1,
+      relations: [
+        {
+          name: "events",
+          objectType: "BASE TABLE",
+          comment: "Audit trail's source\\name\nkept readable",
+          columns: [
+            {
+              name: "payload",
+              data_type: "longtext",
+              is_nullable: true,
+              is_primary_key: false,
+              is_unique: false,
+              is_indexed: false,
+              is_auto_increment: false,
+            },
+            {
+              name: "flags",
+              data_type: "tinyint",
+              is_nullable: false,
+              is_primary_key: false,
+              is_unique: false,
+              is_indexed: false,
+              is_auto_increment: false,
+            },
+            {
+              name: "labels",
+              data_type: "text[]",
+              is_nullable: true,
+              is_primary_key: false,
+              is_unique: false,
+              is_indexed: false,
+              is_auto_increment: false,
+            },
+          ],
+          indexes: [],
+          constraints: [],
+        },
+      ],
+      schemaObjects: [],
+      warnings: [],
+    } satisfies SchemaSnapshot;
+
+    const artifact = serializeSchemaSnapshotToDbml(snapshot);
+    const parsed = parseSchemaDbml(artifact.content, "public");
+
+    expect(artifact.content).toContain('"payload" longtext');
+    expect(artifact.content).toContain('"flags" tinyint');
+    expect(artifact.content).toContain('"labels" text[]');
+    expect(parsed.relations[0]?.comment).toBe(
+      "Audit trail's source\\name kept readable",
+    );
+    expect(parsed.relations[0]?.columns.map((column) => column.data_type)).toEqual([
+      "longtext",
+      "tinyint",
+      "text[]",
+    ]);
   });
 });

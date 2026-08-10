@@ -1081,6 +1081,7 @@ export interface ForeignKeyReferenceInfo {
 export interface SchemaRelationSnapshot {
   name: string;
   objectType?: string | null;
+  comment?: string | null;
   columns: ColumnInfo[];
   indexes: IndexInfo[];
   constraints: ConstraintInfo[];

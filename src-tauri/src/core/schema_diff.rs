@@ -20,6 +20,8 @@ pub const SCHEMA_SNAPSHOT_VERSION: u32 = 1;
 pub struct SchemaRelationSnapshot {
     pub name: String,
     pub object_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
     pub columns: Vec<ColumnInfo>,
     pub indexes: Vec<IndexInfo>,
     pub constraints: Vec<ConstraintInfo>,
@@ -2246,6 +2248,25 @@ fn compare_relation(
         changes,
         warnings,
     );
+    if source.comment != target.comment {
+        changes.push(change(
+            SchemaChangeKind::RelationModify,
+            SchemaChangeRisk::Safe,
+            target_schema,
+            &source.name,
+            source.object_type.clone(),
+            None,
+            format!("Update table comment for {}", source.name),
+            vec![table_comment_sql(
+                kind,
+                target_schema,
+                &source.name,
+                source.comment.as_deref(),
+            )],
+            true,
+            false,
+        ));
+    }
 }
 
 fn compare_columns(
@@ -2743,6 +2764,18 @@ fn create_relation_sql(
                 sql_string_literal(column.comment.as_deref().unwrap_or_default())
             ));
         }
+    }
+    if relation
+        .comment
+        .as_deref()
+        .is_some_and(|value| !value.is_empty())
+    {
+        sql.push(table_comment_sql(
+            kind,
+            target_schema,
+            &relation.name,
+            relation.comment.as_deref(),
+        ));
     }
     let constraint_names = relation
         .constraints
@@ -3994,6 +4027,27 @@ fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+fn table_comment_sql(
+    kind: DatabaseKind,
+    schema: &str,
+    table: &str,
+    comment: Option<&str>,
+) -> String {
+    let relation = kind.qualified_table(Some(schema), table);
+    match kind {
+        DatabaseKind::Postgres => format!(
+            "COMMENT ON TABLE {relation} IS {};",
+            comment
+                .map(sql_string_literal)
+                .unwrap_or_else(|| "NULL".to_string())
+        ),
+        DatabaseKind::Mysql => format!(
+            "ALTER TABLE {relation} COMMENT = {};",
+            sql_string_literal(comment.unwrap_or_default())
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4027,6 +4081,7 @@ mod tests {
             relations: vec![SchemaRelationSnapshot {
                 name: "users".to_string(),
                 object_type: Some("BASE TABLE".to_string()),
+                comment: None,
                 columns,
                 indexes: Vec::new(),
                 constraints: Vec::new(),
@@ -4106,11 +4161,56 @@ mod tests {
     }
 
     #[test]
+    fn table_comment_changes_use_semantic_postgres_ddl() {
+        let mut source = snapshot("desired", vec![column("id", "bigint", false)]);
+        let target = snapshot("actual", vec![column("id", "bigint", false)]);
+        source.relations[0].comment = Some("Owner's audit table".to_string());
+        source = finalize_schema_snapshot(source).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| {
+                change.kind == SchemaChangeKind::RelationModify
+                    && change.summary.contains("table comment")
+            })
+            .expect("table comment change");
+
+        assert_eq!(change.risk, SchemaChangeRisk::Safe);
+        assert!(!change.manual_review);
+        assert_eq!(
+            change.sql,
+            vec!["COMMENT ON TABLE \"public\".\"users\" IS 'Owner''s audit table';"]
+        );
+    }
+
+    #[test]
+    fn created_mysql_tables_restore_comments_after_creation() {
+        let mut source = snapshot("desired", vec![column("id", "bigint", false)]);
+        source.driver = "mysql".to_string();
+        source.schema_name = "app".to_string();
+        source.relations[0].comment = Some("audit trail".to_string());
+        source = finalize_schema_snapshot(source).unwrap();
+        let mut target = source.clone();
+        target.id = "actual".to_string();
+        target.relations.clear();
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+
+        assert!(plan
+            .migration_sql
+            .contains("ALTER TABLE `app`.`users` COMMENT = 'audit trail';"));
+    }
+
+    #[test]
     fn fingerprint_is_stable_after_relation_sorting() {
         let mut first = snapshot("first", vec![column("id", "int4", false)]);
         first.relations.push(SchemaRelationSnapshot {
             name: "accounts".to_string(),
             object_type: Some("BASE TABLE".to_string()),
+            comment: None,
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
             constraints: Vec::new(),
@@ -4426,6 +4526,7 @@ mod tests {
         source.relations.push(SchemaRelationSnapshot {
             name: "accounts".to_string(),
             object_type: Some("BASE TABLE".to_string()),
+            comment: None,
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
             constraints: Vec::new(),
@@ -4619,6 +4720,7 @@ mod tests {
         target.relations.push(SchemaRelationSnapshot {
             name: "accounts".to_string(),
             object_type: Some("BASE TABLE".to_string()),
+            comment: None,
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
             constraints: Vec::new(),

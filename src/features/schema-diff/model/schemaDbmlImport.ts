@@ -300,6 +300,7 @@ function parseTableBlock(
   const constraints: ConstraintInfo[] = [];
   const indexes: IndexInfo[] = [];
   const inlineReferences: ParsedRef[] = [];
+  let comment: string | undefined;
   const indexBlocks = extractBlocks(body, "indexes", warnings);
   const bodyWithoutIndexes = replaceRangesWithWhitespace(
     body,
@@ -308,7 +309,18 @@ function parseTableBlock(
 
   for (const line of bodyWithoutIndexes.split(/\r?\n/u)) {
     const value = line.trim();
-    if (!value || /^(?:Note|HeaderColor)\s*:/iu.test(value)) continue;
+    if (!value || /^HeaderColor\s*:/iu.test(value)) continue;
+    if (/^Note\s*:/iu.test(value)) {
+      const parsedComment = parseStandaloneNote(value);
+      if (parsedComment == null) {
+        warnings.add(`${tableName}: unsupported table Note was ignored.`);
+      } else if (comment == null) {
+        comment = parsedComment;
+      } else {
+        warnings.add(`${tableName}: duplicate table Note was ignored.`);
+      }
+      continue;
+    }
     const parsedColumn = parseColumn(value, warnings, tableName);
     if (!parsedColumn) continue;
     const { column } = parsedColumn;
@@ -399,12 +411,21 @@ function parseTableBlock(
     relation: {
       name: tableName,
       objectType: "BASE TABLE",
+      comment,
       columns,
       indexes,
       constraints,
     },
     inlineReferences,
   };
+}
+
+function parseStandaloneNote(value: string) {
+  const separator = findTopLevel(value, ":");
+  if (separator < 0) return null;
+  const note = value.slice(separator + 1).trim();
+  if (!note) return null;
+  return unquote(note);
 }
 
 function parseEnumValues(

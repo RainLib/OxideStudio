@@ -364,33 +364,34 @@ async fn capture_schema_snapshot_inner(
         return Err("Schema name is required".to_string());
     }
     let database = database.as_deref();
-    let objects: Vec<(String, Option<String>)> = if capabilities.supports_table_browsing {
-        match database {
-            Some(database) => {
-                manager
-                    .get_database_tables(&connection_id, database, schema)
-                    .await
+    let objects: Vec<(String, Option<String>, Option<String>)> =
+        if capabilities.supports_table_browsing {
+            match database {
+                Some(database) => {
+                    manager
+                        .get_database_tables(&connection_id, database, schema)
+                        .await
+                }
+                None => manager.get_tables(&connection_id, schema).await,
             }
-            None => manager.get_tables(&connection_id, schema).await,
-        }
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .map(|table| (table.name, table.table_type))
-        .collect()
-    } else {
-        manager
-            .get_collections(&connection_id, schema)
-            .await
             .map_err(|error| error.to_string())?
             .into_iter()
-            .map(|collection| (collection.name, collection.collection_type))
+            .map(|table| (table.name, table.table_type, table.comment))
             .collect()
-    };
+        } else {
+            manager
+                .get_collections(&connection_id, schema)
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|collection| (collection.name, collection.collection_type, None))
+                .collect()
+        };
 
     let manager = manager.clone();
     let concurrency = Arc::new(Semaphore::new(SNAPSHOT_METADATA_CONCURRENCY));
     let mut captures = JoinSet::new();
-    for (relation_name, object_type) in objects {
+    for (relation_name, object_type, comment) in objects {
         let manager = manager.clone();
         let concurrency = Arc::clone(&concurrency);
         let connection_id = connection_id.clone();
@@ -464,6 +465,7 @@ async fn capture_schema_snapshot_inner(
             Ok::<_, String>(SchemaRelationSnapshot {
                 name: relation_name,
                 object_type,
+                comment,
                 columns: metadata.0,
                 indexes: metadata.1,
                 constraints: metadata.2,
@@ -2191,6 +2193,7 @@ mod tests {
             relations: vec![SchemaRelationSnapshot {
                 name: "users".to_string(),
                 object_type: Some("TABLE".to_string()),
+                comment: None,
                 columns: vec![ColumnInfo {
                     name: "id".to_string(),
                     data_type: "integer".to_string(),

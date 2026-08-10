@@ -104,13 +104,13 @@ export function serializeSchemaSnapshotToDbml(
     lines.push(
       `Table ${qualifiedRelation(snapshot.schemaName, relation.name)} {`,
     );
+    if (relation.comment) {
+      lines.push(`  Note: ${quotedText(relation.comment)}`);
+    }
     if (
       relation.objectType &&
       !/^(?:base\s+table|table)$/iu.test(relation.objectType)
     ) {
-      lines.push(
-        `  Note: ${quotedText(`Captured object type: ${relation.objectType}; exported as a review-only DBML table.`)}`,
-      );
       warnings.add(
         `${relation.name}: ${relation.objectType} semantics are not representable as an editable DBML table.`,
       );
