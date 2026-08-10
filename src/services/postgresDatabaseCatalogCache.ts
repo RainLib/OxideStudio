@@ -4,6 +4,10 @@ import {
   type Resource,
 } from "@/services/tauri/store.service";
 import type { DatabaseDriver } from "@/services/tauri/types";
+import {
+  isMetadataCacheSupersededError,
+  MetadataCacheGenerationRegistry,
+} from "@/services/metadataCacheGeneration";
 
 export const POSTGRES_DATABASE_CATALOG_CACHE_KIND =
   "POSTGRES_DATABASE_CATALOG_CACHE";
@@ -38,6 +42,8 @@ const catalogRefreshes = new Map<
   string,
   Promise<PostgresDatabaseCatalogSnapshot>
 >();
+const catalogOperations = new Map<string, Promise<unknown>>();
+const catalogGenerations = new MetadataCacheGenerationRegistry();
 const catalogListeners = new Map<
   string,
   Set<(snapshot: PostgresDatabaseCatalogSnapshot) => void>
@@ -161,31 +167,44 @@ export async function readCachedPostgresDatabaseCatalog(
 
 export async function persistPostgresDatabaseCatalog(
   identity: PostgresDatabaseCatalogIdentity,
-  databases: readonly string[]
+  databases: readonly string[],
+  expectedGeneration = catalogGenerations.capture(catalogKey(identity)),
 ): Promise<void> {
   const normalizedDatabases = normalizeDatabases(databases);
   const parentId = postgresDatabaseCatalogParentId(identity);
-
-  await storeService.saveResources(
-    [
-      {
-        id: postgresDatabaseCatalogResourceId(identity),
-        project_id: identity.projectId,
-        connection_id: identity.connectionId,
-        parent_id: parentId,
-        kind: POSTGRES_DATABASE_CATALOG_CACHE_KIND,
-        name: `${identity.driver} database catalog`,
-        metadata: {
-          version: POSTGRES_DATABASE_CATALOG_CACHE_VERSION,
-          driver: identity.driver,
-          connectionId: identity.connectionId,
-          databases: normalizedDatabases,
-        } satisfies StoredPostgresDatabaseCatalog,
-        last_updated: Date.now(),
-      },
-    ],
-    identity.projectId
-  );
+  const key = catalogKey(identity);
+  const previousOperation = catalogOperations.get(key) || Promise.resolve();
+  const write = previousOperation.catch(() => null).then(async () => {
+    catalogGenerations.assertCurrent(key, expectedGeneration);
+    await storeService.saveResources(
+      [
+        {
+          id: postgresDatabaseCatalogResourceId(identity),
+          project_id: identity.projectId,
+          connection_id: identity.connectionId,
+          parent_id: parentId,
+          kind: POSTGRES_DATABASE_CATALOG_CACHE_KIND,
+          name: `${identity.driver} database catalog`,
+          metadata: {
+            version: POSTGRES_DATABASE_CATALOG_CACHE_VERSION,
+            driver: identity.driver,
+            connectionId: identity.connectionId,
+            databases: normalizedDatabases,
+          } satisfies StoredPostgresDatabaseCatalog,
+          last_updated: Date.now(),
+        },
+      ],
+      identity.projectId
+    );
+  });
+  catalogOperations.set(key, write);
+  try {
+    await write;
+  } finally {
+    if (catalogOperations.get(key) === write) {
+      catalogOperations.delete(key);
+    }
+  }
 }
 
 /**
@@ -200,14 +219,18 @@ export function refreshPostgresDatabaseCatalog(
   if (pending) return pending;
 
   const refresh = (async () => {
+    const generation = catalogGenerations.capture(key);
     const databases = normalizeDatabases(
       await schemaService.getDatabases(identity.connectionId)
     );
+    catalogGenerations.assertCurrent(key, generation);
     try {
-      await persistPostgresDatabaseCatalog(identity, databases);
+      await persistPostgresDatabaseCatalog(identity, databases, generation);
     } catch (error) {
+      if (isMetadataCacheSupersededError(error)) throw error;
       console.warn("Failed to cache database catalog", error);
     }
+    catalogGenerations.assertCurrent(key, generation);
     const snapshot = {
       databases,
       source: "remote" as const,
@@ -230,10 +253,24 @@ export function refreshPostgresDatabaseCatalog(
 export async function clearPostgresDatabaseCatalog(
   identity: PostgresDatabaseCatalogIdentity
 ): Promise<void> {
-  await storeService.deleteResources(
-    identity.connectionId,
-    postgresDatabaseCatalogParentId(identity),
-    POSTGRES_DATABASE_CATALOG_CACHE_KIND,
-    identity.projectId
-  );
+  const key = catalogKey(identity);
+  catalogGenerations.advance(key);
+  catalogRefreshes.delete(key);
+  const previousOperation = catalogOperations.get(key) || Promise.resolve();
+  const clear = previousOperation.catch(() => null).then(async () => {
+    await storeService.deleteResources(
+      identity.connectionId,
+      postgresDatabaseCatalogParentId(identity),
+      POSTGRES_DATABASE_CATALOG_CACHE_KIND,
+      identity.projectId
+    );
+  });
+  catalogOperations.set(key, clear);
+  try {
+    await clear;
+  } finally {
+    if (catalogOperations.get(key) === clear) {
+      catalogOperations.delete(key);
+    }
+  }
 }

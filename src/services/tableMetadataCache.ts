@@ -10,6 +10,10 @@ import type {
   DatabaseDriver,
   IndexInfo,
 } from "@/services/tauri/types";
+import {
+  isMetadataCacheSupersededError,
+  MetadataCacheGenerationRegistry,
+} from "@/services/metadataCacheGeneration";
 
 const TABLE_METADATA_CACHE_KIND = "TABLE_METADATA_CACHE";
 const TABLE_METADATA_CACHE_VERSION = 1;
@@ -59,7 +63,8 @@ interface StoredTableMetadata {
 }
 
 const metadataLoads = new Map<string, Promise<TableMetadataSnapshot>>();
-const cacheWrites = new Map<string, Promise<StoredTableMetadata>>();
+const cacheOperations = new Map<string, Promise<unknown>>();
+const cacheGenerations = new MetadataCacheGenerationRegistry();
 
 type ResolvedTableMetadataIdentity = TableMetadataIdentity & {
   projectId: string;
@@ -111,17 +116,30 @@ function scopedTableCacheKey(identity: ResolvedTableMetadataIdentity) {
   return `${encodeURIComponent(identity.projectId)}:${tableCacheKey(identity)}`;
 }
 
+function captureCacheGeneration(identity: ResolvedTableMetadataIdentity) {
+  const scope = scopedTableCacheKey(identity);
+  return { scope, generation: cacheGenerations.capture(scope) };
+}
+
+function advanceCacheGeneration(identity: ResolvedTableMetadataIdentity) {
+  const scope = scopedTableCacheKey(identity);
+  return { scope, generation: cacheGenerations.advance(scope) };
+}
+
 function cacheVersion(identity: TableMetadataIdentity) {
   return identity.databaseName
     ? DATABASE_SCOPED_TABLE_METADATA_CACHE_VERSION
     : TABLE_METADATA_CACHE_VERSION;
 }
 
-function metadataLoadKey(options: LoadTableMetadataOptions) {
+function metadataLoadKey(
+  options: LoadTableMetadataOptions,
+  generation: number,
+) {
   const identity = resolveIdentity(options);
   return `${scopedTableCacheKey(identity)}:indexes:${
     options.includeIndexes !== false
-  }:constraints:${options.includeConstraints !== false}`;
+  }:constraints:${options.includeConstraints !== false}:generation:${generation}`;
 }
 
 export function tableMetadataParentId(identity: TableMetadataIdentity) {
@@ -178,15 +196,18 @@ export async function readCachedTableMetadata(
 
 async function persistTableMetadata(
   identity: TableMetadataIdentity,
-  patch: Partial<StoredTableMetadata>
+  patch: Partial<StoredTableMetadata>,
+  expectedGeneration: number,
 ): Promise<StoredTableMetadata> {
   const resolvedIdentity = resolveIdentity(identity);
   const key = scopedTableCacheKey(resolvedIdentity);
-  const previousWrite = cacheWrites.get(key) || Promise.resolve(null);
-  const nextWrite = previousWrite
+  const previousOperation = cacheOperations.get(key) || Promise.resolve();
+  const nextWrite = previousOperation
     .catch(() => null)
     .then(async () => {
+      cacheGenerations.assertCurrent(key, expectedGeneration);
       const current = await readCachedTableMetadata(resolvedIdentity);
+      cacheGenerations.assertCurrent(key, expectedGeneration);
       const metadata: StoredTableMetadata = {
         ...(current || {}),
         version: cacheVersion(resolvedIdentity),
@@ -218,12 +239,12 @@ async function persistTableMetadata(
       return metadata;
     });
 
-  cacheWrites.set(key, nextWrite);
+  cacheOperations.set(key, nextWrite);
   try {
     return await nextWrite;
   } finally {
-    if (cacheWrites.get(key) === nextWrite) {
-      cacheWrites.delete(key);
+    if (cacheOperations.get(key) === nextWrite) {
+      cacheOperations.delete(key);
     }
   }
 }
@@ -244,9 +265,11 @@ function cachedSnapshot(
 
 async function loadTableMetadataRemote(
   options: LoadTableMetadataOptions,
-  cached: (StoredTableMetadata & { updatedAt: number }) | null
+  cached: (StoredTableMetadata & { updatedAt: number }) | null,
+  expectedGeneration: number,
 ): Promise<TableMetadataSnapshot> {
   const resolvedOptions = resolveIdentity(options);
+  const scope = scopedTableCacheKey(resolvedOptions);
   const includeIndexes = options.includeIndexes !== false;
   const includeConstraints = options.includeConstraints !== false;
   const shouldLoadColumns = options.force || !Array.isArray(cached?.columns);
@@ -314,6 +337,7 @@ async function loadTableMetadataRemote(
     indexesPromise,
     constraintsPromise,
   ]);
+  cacheGenerations.assertCurrent(scope, expectedGeneration);
   const updatedAt = Date.now();
   const patch: Partial<StoredTableMetadata> = {
     columns,
@@ -326,10 +350,12 @@ async function loadTableMetadataRemote(
   }
 
   try {
-    await persistTableMetadata(resolvedOptions, patch);
+    await persistTableMetadata(resolvedOptions, patch, expectedGeneration);
   } catch (error) {
+    if (isMetadataCacheSupersededError(error)) throw error;
     console.warn("Failed to persist table metadata cache", error);
   }
+  cacheGenerations.assertCurrent(scope, expectedGeneration);
 
   return {
     columns,
@@ -346,7 +372,11 @@ export async function loadTableMetadata(
   options: LoadTableMetadataOptions
 ): Promise<TableMetadataSnapshot> {
   const resolvedOptions = resolveIdentity(options);
+  const request = options.force
+    ? advanceCacheGeneration(resolvedOptions)
+    : captureCacheGeneration(resolvedOptions);
   const cached = await readCachedTableMetadata(resolvedOptions);
+  cacheGenerations.assertCurrent(request.scope, request.generation);
   const cacheSatisfiesRequest = Boolean(
     !options.force &&
       Array.isArray(cached?.columns) &&
@@ -358,13 +388,17 @@ export async function loadTableMetadata(
     return cachedSnapshot(cached);
   }
 
-  const key = metadataLoadKey(resolvedOptions);
+  const key = metadataLoadKey(resolvedOptions, request.generation);
   if (!options.force) {
     const pending = metadataLoads.get(key);
     if (pending) return pending;
   }
 
-  const load = loadTableMetadataRemote(resolvedOptions, cached);
+  const load = loadTableMetadataRemote(
+    resolvedOptions,
+    cached,
+    request.generation,
+  );
   metadataLoads.set(key, load);
   try {
     return await load;
@@ -381,7 +415,11 @@ export async function loadTableDdl(
   force = false
 ): Promise<string> {
   const resolvedIdentity = resolveIdentity(identity);
+  const request = force
+    ? advanceCacheGeneration(resolvedIdentity)
+    : captureCacheGeneration(resolvedIdentity);
   const cached = await readCachedTableMetadata(resolvedIdentity);
+  cacheGenerations.assertCurrent(request.scope, request.generation);
   const normalizedObjectType = objectType || null;
   if (
     !force &&
@@ -399,14 +437,17 @@ export async function loadTableDdl(
     objectType,
     resolvedIdentity.databaseName
   );
+  cacheGenerations.assertCurrent(request.scope, request.generation);
   try {
     await persistTableMetadata(resolvedIdentity, {
       ddl,
       ddlObjectType: normalizedObjectType,
-    });
+    }, request.generation);
   } catch (error) {
+    if (isMetadataCacheSupersededError(error)) throw error;
     console.warn("Failed to persist table DDL cache", error);
   }
+  cacheGenerations.assertCurrent(request.scope, request.generation);
   return ddl;
 }
 
@@ -416,6 +457,9 @@ export async function loadViewDefinition(
   force = false
 ): Promise<string> {
   const resolvedIdentity = resolveIdentity(identity);
+  const request = force
+    ? advanceCacheGeneration(resolvedIdentity)
+    : captureCacheGeneration(resolvedIdentity);
   if (resolvedIdentity.databaseName) {
     throw new Error(
       `View definitions are unavailable for read-only database "${resolvedIdentity.databaseName}".`
@@ -423,6 +467,7 @@ export async function loadViewDefinition(
   }
 
   const cached = await readCachedTableMetadata(resolvedIdentity);
+  cacheGenerations.assertCurrent(request.scope, request.generation);
   const normalizedObjectType = objectType || null;
   if (
     !force &&
@@ -439,14 +484,17 @@ export async function loadViewDefinition(
     resolvedIdentity.table,
     objectType
   );
+  cacheGenerations.assertCurrent(request.scope, request.generation);
   try {
     await persistTableMetadata(resolvedIdentity, {
       viewDefinition: definition,
       viewObjectType: normalizedObjectType,
-    });
+    }, request.generation);
   } catch (error) {
+    if (isMetadataCacheSupersededError(error)) throw error;
     console.warn("Failed to persist view definition cache", error);
   }
+  cacheGenerations.assertCurrent(request.scope, request.generation);
   return definition;
 }
 
@@ -454,14 +502,24 @@ export async function invalidateTableMetadata(
   identity: TableMetadataIdentity
 ): Promise<void> {
   const resolvedIdentity = resolveIdentity(identity);
-  try {
+  const { scope } = advanceCacheGeneration(resolvedIdentity);
+  const previousOperation = cacheOperations.get(scope) || Promise.resolve();
+  const invalidation = previousOperation.catch(() => null).then(async () => {
     await storeService.deleteResources(
       resolvedIdentity.connectionId,
       tableMetadataParentId(resolvedIdentity),
       TABLE_METADATA_CACHE_KIND,
       resolvedIdentity.projectId
     );
+  });
+  cacheOperations.set(scope, invalidation);
+  try {
+    await invalidation;
   } catch (error) {
     console.warn("Failed to invalidate table metadata cache", error);
+  } finally {
+    if (cacheOperations.get(scope) === invalidation) {
+      cacheOperations.delete(scope);
+    }
   }
 }
