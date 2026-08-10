@@ -1178,3 +1178,16 @@ explicit deferred validation task rather than an implicit release check.
 - Phase 109 added pure model and component coverage only. No database was
   opened; real provider/Monaco interaction and server ordering conformance stay
   deferred.
+
+## High-frequency SQL keyword ranking
+
+- In real Monaco/WebView sessions, type overlapping prefixes across supported
+  relational profiles and confirm DBX's common-keyword preference is visible
+  without crossing the server's column/table/function semantic groups.
+- Build connection-scoped usage history for both common and less-common
+  candidates, then confirm the numeric personal usage rank remains stronger
+  than the static alphabetic frequency tier. Cover upper/lower/preserve casing,
+  cancellation, inline suggestions, keyboard acceptance and undo.
+- Phase 110 added source and packaged LSP protocol coverage only. No database
+  was opened; real Monaco ordering and provider/version interaction remain in
+  the consolidated validation queue.

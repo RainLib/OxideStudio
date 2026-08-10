@@ -205,6 +205,9 @@ WHERE 与 SORT 输入不是普通文本框。应复用同一个 dialect/metadata
   覆盖 NOT/IS NOT、quoted identifier、BETWEEN/IN 零宽续写、类型化值候选，以及
   ResultSet 类型驱动的任意精度数值、日期、自然文本、NULL-last 和稳定本地排序。
   真实 Monaco 与各产品数据库排序/谓词语义继续进入延期验证队列。
+- [x] 将 DBX `sqlCompletion.ts:HIGH_FREQUENCY_KEYWORDS` 的常用关键字层迁入 bundled LSP；
+  该层仅在既有语义分组内排序，并保留 connection-scoped usage ranking 的更高个人优先级。
+  标准 completion 与有界 inline candidate 共用同一逻辑，真实 Monaco 接受顺序继续延期验证。
 
 ### 7.2 P1：以产品族推进，而不是堆菜单项
 

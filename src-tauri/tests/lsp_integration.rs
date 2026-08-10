@@ -2832,6 +2832,66 @@ async fn bundled_sql_lsp_exposes_oracle_table_sources_and_wrapped_routines() -> 
 }
 
 #[tokio::test]
+async fn bundled_sql_lsp_ranks_common_keywords_without_crossing_semantic_groups() -> Result<()> {
+    let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
+        return Ok(());
+    };
+    lsp.initialize().await?;
+
+    let uri = "file:///oxide/postgres-keyword-frequency.sql";
+    let schema_id = "99999999-9999-4999-8999-999999999999";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "schemas": [schema(
+                    schema_id,
+                    "public",
+                    "users",
+                    "table",
+                    vec![column("status", "varchar")]
+                )],
+                "fileSchemas": {
+                    (uri): schema_id
+                },
+                "fileDialects": {
+                    (uri): "postgres"
+                }
+            }
+        }),
+    )
+    .await?;
+
+    let sql = "SELECT * FROM users WHERE status ";
+    open_document(&mut lsp, uri, "sql", sql).await?;
+    let completion =
+        completion_items_at(&mut lsp, uri, 0, sql.encode_utf16().count() as u32).await?;
+    let items = completion
+        .as_array()
+        .or_else(|| completion.get("items").and_then(Value::as_array))
+        .context("keyword completion items")?;
+    let sort_text = |label: &str| -> Result<String> {
+        items
+            .iter()
+            .find(|item| item.get("label").and_then(Value::as_str) == Some(label))
+            .and_then(|item| item.get("sortText"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .with_context(|| format!("missing {label} completion sortText"))
+    };
+
+    let common = sort_text("IN")?;
+    let less_common = sort_text("ILIKE")?;
+    if common >= less_common {
+        bail!("common keyword rank was not preserved: IN={common}, ILIKE={less_common}");
+    }
+    assert!(common.starts_with("1:a:"));
+    assert!(less_common.starts_with("1:b:"));
+
+    lsp.shutdown().await
+}
+
+#[tokio::test]
 async fn bundled_sql_lsp_isolates_a_new_query_block_without_a_semicolon() -> Result<()> {
     let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
         return Ok(());
