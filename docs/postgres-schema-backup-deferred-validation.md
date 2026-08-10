@@ -22,3 +22,9 @@
 - Restore a schema using an extension-provided type, operator, default, and function. Confirm extension DDL is emitted before dependent relation DDL and the target's compatible installed extension version is selected.
 - Verify a target without the required extension fails atomically and leaves no finalized backup restore; extension version pinning, grants, and ownership remain outside the conservative export contract.
 - `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. No database was opened.
+
+## Phase 132 -- Sequence ownership
+
+- Restore serial and identity-backed tables, including a sequence owned by a non-primary-key column. Confirm each `ALTER SEQUENCE ... OWNED BY` follows table creation and that next-value behavior remains correct after restore.
+- Verify an independently owned sequence remains unowned, and a missing owner relation produces an atomic restore failure rather than a finalized partial schema.
+- `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. No database was opened.

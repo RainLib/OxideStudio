@@ -1345,6 +1345,8 @@ struct PostgresExportSequence {
     cycle: bool,
     cache_size: String,
     last_value: Option<String>,
+    owner_table: Option<String>,
+    owner_column: Option<String>,
 }
 
 fn postgres_sql_string_literal(value: &str) -> String {
@@ -1404,6 +1406,8 @@ fn postgres_sequence_from_row(row: &[Value]) -> Result<PostgresExportSequence, S
         cycle,
         cache_size: postgres_sequence_integer(row.get(7), "cache size", &name)?,
         last_value,
+        owner_table: row.get(9).and_then(value_to_string).filter(|value| !value.trim().is_empty()),
+        owner_column: row.get(10).and_then(value_to_string).filter(|value| !value.trim().is_empty()),
     })
 }
 
@@ -1430,6 +1434,17 @@ fn postgres_sequence_setval_sql(schema: &str, sequence: &PostgresExportSequence)
             last_value
         )
     })
+}
+
+fn postgres_sequence_owner_sql(schema: &str, sequence: &PostgresExportSequence) -> Option<String> {
+    let table = sequence.owner_table.as_deref()?;
+    let column = sequence.owner_column.as_deref()?;
+    Some(format!(
+        "ALTER SEQUENCE {} OWNED BY {}.{};",
+        DatabaseKind::Postgres.qualified_table(Some(schema), &sequence.name),
+        DatabaseKind::Postgres.qualified_table(Some(schema), table),
+        DatabaseKind::Postgres.quote_identifier(column),
+    ))
 }
 
 fn csv_escape(value: &Value) -> String {
@@ -8970,8 +8985,14 @@ pub async fn export_database_sql(
         // metadata once and use it for DDL before relations plus state after
         // data, rather than inferring sequences from column default text.
         let sequence_metadata_sql = format!(
-            "SELECT sequencename, data_type, start_value, min_value, max_value, increment_by, cycle, cache_size, last_value \
-             FROM pg_catalog.pg_sequences WHERE schemaname = {} ORDER BY sequencename",
+            "SELECT sequence_class.relname, sequences.data_type, sequences.start_value, sequences.min_value, sequences.max_value, sequences.increment_by, sequences.cycle, sequences.cache_size, sequences.last_value, owner_table.relname, owner_column.attname \
+             FROM pg_catalog.pg_sequences sequences \
+             JOIN pg_catalog.pg_class sequence_class ON sequence_class.relname = sequences.sequencename \
+             JOIN pg_catalog.pg_namespace sequence_namespace ON sequence_namespace.oid = sequence_class.relnamespace AND sequence_namespace.nspname = sequences.schemaname \
+             LEFT JOIN pg_catalog.pg_depend ownership ON ownership.classid = 'pg_class'::regclass AND ownership.objid = sequence_class.oid AND ownership.refclassid = 'pg_class'::regclass AND ownership.deptype IN ('a', 'i') \
+             LEFT JOIN pg_catalog.pg_class owner_table ON owner_table.oid = ownership.refobjid \
+             LEFT JOIN pg_catalog.pg_attribute owner_column ON owner_column.attrelid = owner_table.oid AND owner_column.attnum = ownership.refobjsubid \
+             WHERE sequences.schemaname = {} ORDER BY sequence_class.relname",
             postgres_sql_string_literal(schema),
         );
         let sequence_results = manager
@@ -9138,6 +9159,19 @@ pub async fn export_database_sql(
                 }
             }
         }
+        if include_structure {
+            let sequence_ownership = sequences
+                .iter()
+                .filter_map(|sequence| postgres_sequence_owner_sql(schema, sequence))
+                .collect::<Vec<_>>();
+            if !sequence_ownership.is_empty() {
+                writeln!(writer, "\n-- Sequence ownership (applied after relation creation)")
+                    .map_err(|error| error.to_string())?;
+                for statement in sequence_ownership {
+                    writeln!(writer, "{statement}").map_err(|error| error.to_string())?;
+                }
+            }
+        }
         if include_structure && !foreign_key_constraints.is_empty() {
             writeln!(writer, "\n-- Foreign-key constraints (applied after relation data)")
                 .map_err(|error| error.to_string())?;
@@ -9222,7 +9256,7 @@ pub async fn export_database_sql(
             rows_exported,
             batches,
             omitted_object_kinds: vec![
-                "grants".to_string(), "sequence ownership".to_string(), "view options".to_string(),
+                "grants".to_string(), "view options".to_string(),
                 "materialized view indexes and refresh state".to_string(),
             ],
         })
