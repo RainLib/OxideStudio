@@ -1037,3 +1037,20 @@ explicit deferred validation task rather than an implicit release check.
   settings and tab through every placeholder. Confirm Oracle aliases contain no
   `AS`, a same-id user snippet overrides the built-in, and other products never
   receive these blocks. No database was opened during Phase 101 implementation.
+
+## Db2 special registers and Dameng functions
+
+- In real Monaco/WebView sessions bound separately to Db2 and Dameng, accept
+  `SYSDATE`, current date/time/timestamp and local timestamp candidates in
+  SELECT, predicate, CASE and INSERT-value expressions. Db2 special registers
+  must remain bare (including spaced and underscore forms); Dameng date/time
+  functions must retain `()` and signature help.
+- Verify Db2 `ADD_DAYS`/`ADD_MONTHS`/formatting functions and Dameng
+  `TO_DATE`/`DATEADD`/`DATEDIFF`/`REGEXP_SUBSTR` against supported server-version
+  fixtures. Live routine metadata must continue to outrank static entries, and
+  generic JDBC or unrelated compatibility products must receive neither
+  catalog.
+- Accept the Db2 `regs` and Dameng `dmdt` command blocks with upper/lower keyword
+  settings, user override/disable behavior and undo. Confirm product switching
+  immediately removes the previous product's block. No database was opened
+  during Phase 102 implementation.

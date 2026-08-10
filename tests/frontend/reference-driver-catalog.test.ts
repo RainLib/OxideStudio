@@ -116,6 +116,13 @@ describe("reference database driver catalogue", () => {
       lspServerDialect: "doris",
       lspParserBaseline: "mysql",
     });
+    expect(referenceDriverDeliveryPlan(referenceDriverCandidate("db2")!)).toMatchObject({
+      runtimeRoute: "signedJdbc",
+      lspRoute: "compatibleSql",
+      lspLanguageId: "sql",
+      lspServerDialect: "db2",
+      lspParserBaseline: "postgres",
+    });
     expect(referenceDriverDeliveryPlan(referenceDriverCandidate("neo4j")!)).toMatchObject({
       runtimeRoute: "dedicatedWorkspace",
       lspRoute: "notApplicable",

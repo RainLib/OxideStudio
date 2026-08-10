@@ -2391,6 +2391,61 @@ async fn bundled_sql_lsp_inserts_oracle_system_values_without_parentheses() -> R
 }
 
 #[tokio::test]
+async fn bundled_sql_lsp_distinguishes_db2_registers_from_dameng_functions() -> Result<()> {
+    let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
+        return Ok(());
+    };
+    lsp.initialize().await?;
+
+    let db2_uri = "file:///oxide/db2-special-register.sql";
+    let dameng_uri = "file:///oxide/dameng-date-function.sql";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "fileDialects": {
+                    (db2_uri): "db2",
+                    (dameng_uri): "dameng"
+                }
+            }
+        }),
+    )
+    .await?;
+    let sql = "SELECT sys";
+    open_document(&mut lsp, db2_uri, "sql", sql).await?;
+    open_document(&mut lsp, dameng_uri, "sql", sql).await?;
+
+    let db2 = completion_items_at(&mut lsp, db2_uri, 0, sql.len() as u32).await?;
+    let dameng = completion_items_at(&mut lsp, dameng_uri, 0, sql.len() as u32).await?;
+    let find_sysdate = |completion: &Value| -> Result<Value> {
+        completion
+            .as_array()
+            .or_else(|| completion.get("items").and_then(Value::as_array))
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("label").and_then(Value::as_str) == Some("SYSDATE"))
+            })
+            .cloned()
+            .context("completion did not contain SYSDATE")
+    };
+    let db2_sysdate = find_sysdate(&db2)?;
+    assert_eq!(
+        db2_sysdate.get("insertText").and_then(Value::as_str),
+        Some("SYSDATE")
+    );
+    assert_eq!(db2_sysdate.get("kind").and_then(Value::as_u64), Some(12));
+    let dameng_sysdate = find_sysdate(&dameng)?;
+    assert_eq!(
+        dameng_sysdate.get("insertText").and_then(Value::as_str),
+        Some("SYSDATE()")
+    );
+    assert_eq!(dameng_sysdate.get("kind").and_then(Value::as_u64), Some(3));
+
+    lsp.shutdown().await
+}
+
+#[tokio::test]
 async fn bundled_sql_lsp_isolates_a_new_query_block_without_a_semicolon() -> Result<()> {
     let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
         return Ok(());

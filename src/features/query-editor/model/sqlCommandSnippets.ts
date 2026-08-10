@@ -350,10 +350,36 @@ export const ORACLE_SQL_COMMAND_SNIPPETS: readonly SqlSnippetSetting[] = [
   },
 ];
 
+/** IBM Db2 special-register inspection, kept on the reviewed Db2 route. */
+export const DB2_SQL_COMMAND_SNIPPETS: readonly SqlSnippetSetting[] = [
+  {
+    id: "builtin-db2-registers",
+    prefix: "regs",
+    label: "current special registers",
+    detail: "Inspect Db2 date/time and authorization special registers",
+    body: "VALUES (CURRENT DATE, CURRENT TIME, CURRENT TIMESTAMP, CURRENT USER);",
+    enabled: true,
+  },
+];
+
+/** Dameng functions intentionally retain their documented call parentheses. */
+export const DAMENG_SQL_COMMAND_SNIPPETS: readonly SqlSnippetSetting[] = [
+  {
+    id: "builtin-dameng-datetime",
+    prefix: "dmdt",
+    label: "Dameng current date/time",
+    detail: "Inspect Dameng server date and timestamp functions",
+    body: "SELECT SYSDATE(), CURRENT_DATE(), CURRENT_TIMESTAMP();",
+    enabled: true,
+  },
+];
+
 const BUILTIN_SQL_COMMAND_SNIPPETS = [
   ...DEFAULT_SQL_COMMAND_SNIPPETS,
   ...MANTICORE_SQL_COMMAND_SNIPPETS,
   ...ORACLE_SQL_COMMAND_SNIPPETS,
+  ...DB2_SQL_COMMAND_SNIPPETS,
+  ...DAMENG_SQL_COMMAND_SNIPPETS,
 ];
 
 const ORACLE_SNIPPET_DRIVERS = new Set(["oracle", "oceanbase-oracle"]);
@@ -369,6 +395,14 @@ function appendProductSnippets(
         !configuredSnippets.some((snippet) => snippet.id === candidate.id),
     ),
   ];
+}
+
+function commandSnippetsForProduct(driver: string) {
+  if (driver === "manticoresearch") return MANTICORE_SQL_COMMAND_SNIPPETS;
+  if (ORACLE_SNIPPET_DRIVERS.has(driver)) return ORACLE_SQL_COMMAND_SNIPPETS;
+  if (driver === "db2") return DB2_SQL_COMMAND_SNIPPETS;
+  if (driver === "dameng") return DAMENG_SQL_COMMAND_SNIPPETS;
+  return [];
 }
 
 function isUnmodifiedBuiltinSnippet(snippet: SqlSnippetSetting) {
@@ -416,12 +450,7 @@ export function sqlCommandSnippetCompletions(
   const prefix = trimmed.toLowerCase();
   const driver = normalizeDriver(options.driver);
   const configuredSnippets = options.snippets ?? DEFAULT_SQL_COMMAND_SNIPPETS;
-  const productSnippets =
-    driver === "manticoresearch"
-      ? MANTICORE_SQL_COMMAND_SNIPPETS
-      : ORACLE_SNIPPET_DRIVERS.has(driver)
-        ? ORACLE_SQL_COMMAND_SNIPPETS
-        : [];
+  const productSnippets = commandSnippetsForProduct(driver);
   const snippets = appendProductSnippets(configuredSnippets, productSnippets);
   return snippets
     .map((snippet, index) => ({

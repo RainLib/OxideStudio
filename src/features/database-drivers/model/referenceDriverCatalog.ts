@@ -280,6 +280,7 @@ export const SQL_LSP_COMPATIBILITY_BASELINE_BY_DRIVER: Readonly<
   access: "postgres",
   cockroachdb: "postgres",
   dameng: "postgres",
+  db2: "postgres",
   databend: "mysql",
   doris: "mysql",
   exasol: "postgres",

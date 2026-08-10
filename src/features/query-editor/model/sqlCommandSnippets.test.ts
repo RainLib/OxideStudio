@@ -120,4 +120,26 @@ describe("sqlCommandSnippetCompletions", () => {
     expect(item?.label).toBe("custom merge");
     expect(item?.insertText).toBe("MERGE CUSTOM ${1:body}");
   });
+
+  it("keeps Db2 registers bare and Dameng date functions parenthesized", () => {
+    expect(
+      sqlCommandSnippetCompletions("regs", { driver: "db2" })[0],
+    ).toMatchObject({
+      label: "current special registers",
+      insertText:
+        "VALUES (CURRENT DATE, CURRENT TIME, CURRENT TIMESTAMP, CURRENT USER);",
+    });
+    expect(
+      sqlCommandSnippetCompletions("dmdt", { driver: "dameng" })[0],
+    ).toMatchObject({
+      label: "Dameng current date/time",
+      insertText: "SELECT SYSDATE(), CURRENT_DATE(), CURRENT_TIMESTAMP();",
+    });
+    expect(
+      sqlCommandSnippetCompletions("regs", { driver: "dameng" }),
+    ).toEqual([]);
+    expect(
+      sqlCommandSnippetCompletions("dmdt", { driver: "db2" }),
+    ).toEqual([]);
+  });
 });

@@ -146,6 +146,7 @@ export const JDBC_REFERENCE_LSP_SERVER_DIALECTS = Object.freeze({
   access: "access",
   cockroachdb: "cockroachdb",
   dameng: "dameng",
+  db2: "db2",
   databend: "databend",
   doris: "doris",
   exasol: "exasol",

@@ -296,6 +296,15 @@ describe("database dialect capabilities", () => {
     expect(lspLanguageIdForCapabilities(oracleCompatible)).toBe("sql");
     expect(lspServerDialectForCapabilities(oracleCompatible)).toBe("oracle");
     expect(queryEditorLanguageIdForCapabilities(oracleCompatible)).toBe("sql");
+
+    expect(
+      lspServerDialectForCapabilities({
+        ...oracleCompatible,
+        driver: "db2",
+        displayName: "IBM Db2",
+        lspServerDialect: "db2",
+      }),
+    ).toBe("db2");
   });
 
   it("uses a connection-pinned capability contract for editor and LSP routing", () => {

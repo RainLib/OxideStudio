@@ -58,6 +58,7 @@ const SUPPORTED_SQL_LSP_SERVER_DIALECTS = new Set([
   "access",
   "cockroachdb",
   "dameng",
+  "db2",
   "databend",
   "doris",
   "exasol",
