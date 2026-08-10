@@ -5163,6 +5163,34 @@ fn generate_postgres_table_ddl(
     ddl
 }
 
+/// PostgreSQL exposes a complete replayable `CREATE INDEX` statement for an
+/// index through `pg_get_indexdef`.  Unlike table indexes, materialized-view
+/// indexes do not have a table-DDL builder to carry them along, so keep the
+/// strict all-or-nothing backup contract here: a missing definition must fail
+/// the export instead of silently publishing an incomplete schema backup.
+fn postgres_backup_index_definitions(
+    relation: &str,
+    indexes: &[IndexInfo],
+) -> Result<Vec<String>, String> {
+    indexes
+        .iter()
+        .map(|index| {
+            index
+                .definition
+                .as_deref()
+                .map(str::trim)
+                .filter(|definition| !definition.is_empty())
+                .map(|definition| definition.trim_end_matches(';').to_string())
+                .ok_or_else(|| {
+                    format!(
+                        "PostgreSQL index {} on materialized view {relation} has no definition available for backup",
+                        index.name
+                    )
+                })
+        })
+        .collect()
+}
+
 async fn resolve_object_type(
     manager: &ConnectionManager,
     connection_id: &str,
@@ -9405,6 +9433,20 @@ pub async fn export_database_sql(
                     generate_postgres_view_ddl(DatabaseKind::Postgres, schema, view, &definition)
                 };
                 writeln!(writer, "{ddl}").map_err(|error| error.to_string())?;
+                if object_type_is_materialized_view(view_info.table_type.as_deref()) {
+                    let indexes = manager
+                        .get_indexes(&connection_id, schema, view)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let definitions = postgres_backup_index_definitions(view, &indexes)?;
+                    if !definitions.is_empty() {
+                        writeln!(writer, "-- Indexes for materialized view {}", DatabaseKind::Postgres.qualified_table(Some(schema), view))
+                            .map_err(|error| error.to_string())?;
+                        for definition in definitions {
+                            writeln!(writer, "{definition};").map_err(|error| error.to_string())?;
+                        }
+                    }
+                }
             }
         }
         if include_structure && !routines.is_empty() {
@@ -9439,7 +9481,7 @@ pub async fn export_database_sql(
             batches,
             omitted_object_kinds: vec![
                 "grants".to_string(), "view options".to_string(),
-                "materialized view indexes and refresh state".to_string(),
+                "materialized view refresh state".to_string(),
             ],
         })
     }.await;
@@ -12184,6 +12226,7 @@ mod tests {
         normalized_table_data_transfer_project_id, object_label_from_type,
         object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
         order_postgres_views, overwrite_transfer_verification,
+        postgres_backup_index_definitions,
         postgres_backup_routine_definitions, postgres_backup_routine_definitions_query,
         postgres_identity_reseed_verification_query,
         postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_setval_sql,
@@ -14059,6 +14102,35 @@ SELECT id FROM users WHERE active;"#
             r#"CREATE MATERIALIZED VIEW "public"."active_users_mv" AS
 SELECT id FROM users WHERE active;"#
         );
+    }
+
+    #[test]
+    fn preserves_materialized_view_index_definitions_for_backup() {
+        let indexes = vec![IndexInfo {
+            name: "active_users_mv_email_idx".to_string(),
+            columns: vec!["email".to_string()],
+            is_unique: true,
+            is_primary: false,
+            index_type: Some("btree".to_string()),
+            definition: Some(
+                "CREATE UNIQUE INDEX active_users_mv_email_idx ON public.active_users_mv USING btree (email);"
+                    .to_string(),
+            ),
+            comment: None,
+        }];
+
+        assert_eq!(
+            postgres_backup_index_definitions("active_users_mv", &indexes).unwrap(),
+            vec![
+                "CREATE UNIQUE INDEX active_users_mv_email_idx ON public.active_users_mv USING btree (email)"
+                    .to_string()
+            ]
+        );
+
+        indexes[0].definition = None;
+        assert!(postgres_backup_index_definitions("active_users_mv", &indexes)
+            .unwrap_err()
+            .contains("active_users_mv_email_idx"));
     }
 
     #[test]
