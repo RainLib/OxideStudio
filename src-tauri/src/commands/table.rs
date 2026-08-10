@@ -3,7 +3,7 @@ use crate::core::{
     manager::ConnectionManager,
     protocol::{
         ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter,
-        QueryResult, Response,
+        QueryResult, Response, TableInfo,
     },
     statement::{validate_sql_filter_expression, StatementScanDialect},
     store::{MetaStore, Resource},
@@ -3194,6 +3194,74 @@ fn generate_postgres_materialized_view_ddl(
         kind.qualified_table(schema_option(schema), view),
         definition.trim().trim_end_matches(';')
     )
+}
+
+/// Return direct relation dependencies that affect the replay order of views
+/// in one PostgreSQL schema. `pg_rewrite` is the catalog object that owns a
+/// view definition, so its normal dependencies describe both regular and
+/// materialized view references without parsing database-owned SQL text.
+fn postgres_view_dependency_query(schema: &str) -> String {
+    format!(
+        "SELECT dependent.relname AS view_name, referenced.relname AS depends_on \
+         FROM pg_catalog.pg_rewrite rewrite \
+         JOIN pg_catalog.pg_class dependent ON dependent.oid = rewrite.ev_class \
+         JOIN pg_catalog.pg_namespace dependent_namespace ON dependent_namespace.oid = dependent.relnamespace \
+         JOIN pg_catalog.pg_depend dependency ON dependency.objid = rewrite.oid \
+         JOIN pg_catalog.pg_class referenced ON referenced.oid = dependency.refobjid \
+         JOIN pg_catalog.pg_namespace referenced_namespace ON referenced_namespace.oid = referenced.relnamespace \
+         WHERE dependent_namespace.nspname = {schema} \
+           AND referenced_namespace.nspname = {schema} \
+           AND dependent.relkind IN ('v', 'm') \
+           AND referenced.relkind IN ('v', 'm') \
+           AND dependent.oid <> referenced.oid \
+           AND dependency.deptype = 'n' \
+         ORDER BY dependent.relname, referenced.relname;",
+        schema = postgres_sql_string_literal(schema),
+    )
+}
+
+/// A view can reference another view, but PostgreSQL requires that dependency
+/// to exist when replaying `CREATE VIEW`. Keep the catalog ordering local to
+/// the selected schema and reject an unexpected cycle rather than emitting a
+/// dump that is known to fail during restore.
+fn order_postgres_views(
+    views: Vec<TableInfo>,
+    dependencies: &[(String, String)],
+) -> Result<Vec<TableInfo>, String> {
+    let views_by_name = views
+        .into_iter()
+        .map(|view| (view.name.clone(), view))
+        .collect::<BTreeMap<_, _>>();
+    let mut remaining = views_by_name.keys().cloned().collect::<BTreeSet<_>>();
+    let mut requirements = BTreeMap::<String, BTreeSet<String>>::new();
+    for (view, dependency) in dependencies {
+        if views_by_name.contains_key(view) && views_by_name.contains_key(dependency) {
+            requirements
+                .entry(view.clone())
+                .or_default()
+                .insert(dependency.clone());
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(views_by_name.len());
+    while !remaining.is_empty() {
+        let next = remaining.iter().find(|view| {
+            requirements
+                .get(*view)
+                .map_or(true, |dependencies| dependencies.is_disjoint(&remaining))
+        }).cloned();
+        let Some(next) = next else {
+            let unresolved = remaining.into_iter().collect::<Vec<_>>().join(", ");
+            return Err(format!(
+                "PostgreSQL view dependency cycle prevents a safe schema backup: {unresolved}"
+            ));
+        };
+        remaining.remove(&next);
+        if let Some(view) = views_by_name.get(&next) {
+            ordered.push(view.clone());
+        }
+    }
+    Ok(ordered)
 }
 
 fn mysql_comment_literal(value: &str) -> String {
@@ -8755,13 +8823,48 @@ pub async fn export_database_sql(
         }
         let page_size = page_size.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE);
         let insert_batch_size = sql_export_insert_batch_rows(sql_insert_batch_size)?;
-        let tables = manager
+        let relations = manager
             .get_tables(&connection_id, schema)
             .await
             .map_err(|error| error.to_string())?
             .into_iter()
-            .filter(|table| !object_type_is_view(table.table_type.as_deref()))
             .collect::<Vec<_>>();
+        let tables = relations
+            .iter()
+            .filter(|table| !object_type_is_view(table.table_type.as_deref()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let discovered_views = relations
+            .iter()
+            .filter(|table| object_type_is_view(table.table_type.as_deref()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let views = if include_structure && !discovered_views.is_empty() {
+            let dependency_results = manager
+                .query(
+                    &connection_id,
+                    &postgres_view_dependency_query(schema),
+                    None,
+                    None,
+                    Some(export_id.clone()),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let dependencies = dependency_results
+                .iter()
+                .flat_map(|result| result.rows.iter())
+                .filter_map(|row| {
+                    Some((
+                        row.first()?.as_str()?.trim().to_string(),
+                        row.get(1)?.as_str()?.trim().to_string(),
+                    ))
+                })
+                .filter(|(view, dependency)| !view.is_empty() && !dependency.is_empty())
+                .collect::<Vec<_>>();
+            order_postgres_views(discovered_views, &dependencies)?
+        } else {
+            discovered_views
+        };
         // `serial` and `nextval(...)` defaults require the referenced sequence
         // to exist before CREATE TABLE is replayed.  Read the bounded catalog
         // metadata once and use it for DDL before relations plus state after
@@ -8933,6 +9036,49 @@ pub async fn export_database_sql(
                 }
             }
         }
+        if include_structure && !views.is_empty() {
+            writeln!(writer, "\n-- Views (created after base relations and data)")
+                .map_err(|error| error.to_string())?;
+            for view_info in &views {
+                if *cancel_rx.borrow() {
+                    return Err(format!("{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"));
+                }
+                let view = view_info.name.trim();
+                if view.is_empty() {
+                    return Err("Schema metadata contains a view with no name".to_string());
+                }
+                let definition_results = manager
+                    .query(
+                        &connection_id,
+                        &postgres_view_definition_query(DatabaseKind::Postgres, schema, view),
+                        None,
+                        None,
+                        Some(export_id.clone()),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let definition = definition_results
+                    .first()
+                    .and_then(|result| result.rows.first())
+                    .and_then(|row| row.first())
+                    .and_then(value_to_string)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        format!("PostgreSQL view {view} has no definition available for backup")
+                    })?;
+                let ddl = if object_type_is_materialized_view(view_info.table_type.as_deref()) {
+                    generate_postgres_materialized_view_ddl(
+                        DatabaseKind::Postgres,
+                        schema,
+                        view,
+                        &definition,
+                    )
+                } else {
+                    generate_postgres_view_ddl(DatabaseKind::Postgres, schema, view, &definition)
+                };
+                writeln!(writer, "{ddl}").map_err(|error| error.to_string())?;
+            }
+        }
         writeln!(writer, "COMMIT;").map_err(|error| error.to_string())?;
         writer.flush().map_err(|error| error.to_string())?;
         writer.get_ref().sync_all().map_err(|error| error.to_string())?;
@@ -8944,8 +9090,9 @@ pub async fn export_database_sql(
             rows_exported,
             batches,
             omitted_object_kinds: vec![
-                "views".to_string(), "materialized views".to_string(), "routines".to_string(),
-                "extensions".to_string(), "grants".to_string(), "sequence ownership".to_string(),
+                "routines".to_string(), "extensions".to_string(), "grants".to_string(),
+                "sequence ownership".to_string(), "view options".to_string(),
+                "materialized view indexes and refresh state".to_string(),
             ],
         })
     }.await;
@@ -11689,9 +11836,11 @@ mod tests {
         generate_postgres_view_ddl, get_target_columns, is_json_lines_path,
         normalized_table_data_transfer_project_id, object_label_from_type,
         object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
-        overwrite_transfer_verification, postgres_identity_reseed_verification_query,
+        order_postgres_views, overwrite_transfer_verification,
+        postgres_identity_reseed_verification_query,
         postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_setval_sql,
-        postgres_view_definition_query, preview_metadata_required, query_target,
+        postgres_view_definition_query, postgres_view_dependency_query,
+        preview_metadata_required, query_target,
         query_target_parameterized, read_csv_import_preview, read_json_import_preview,
         relation_operation_allowed, resolve_csv_import_columns,
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect, sanitize_file_part,
@@ -11723,7 +11872,7 @@ mod tests {
         manager::ConnectionManager,
         protocol::{
             ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement,
-            QueryParameter, QueryResult,
+            QueryParameter, QueryResult, TableInfo,
         },
     };
     use anyhow::Result;
@@ -13562,6 +13711,44 @@ SELECT id FROM users WHERE active;"#
             r#"CREATE MATERIALIZED VIEW "public"."active_users_mv" AS
 SELECT id FROM users WHERE active;"#
         );
+    }
+
+    #[test]
+    fn orders_postgres_views_by_catalog_dependencies() {
+        let view = |name: &str, table_type: &str| TableInfo {
+            name: name.to_string(),
+            schema: Some("public".to_string()),
+            table_type: Some(table_type.to_string()),
+            comment: None,
+        };
+        let ordered = order_postgres_views(
+            vec![
+                view("active_orders", "VIEW"),
+                view("order_totals", "MATERIALIZED VIEW"),
+                view("orders_source", "VIEW"),
+            ],
+            &[
+                ("active_orders".to_string(), "orders_source".to_string()),
+                ("order_totals".to_string(), "active_orders".to_string()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            ordered.into_iter().map(|view| view.name).collect::<Vec<_>>(),
+            vec!["orders_source", "active_orders", "order_totals"]
+        );
+        assert!(postgres_view_dependency_query("public").contains(
+            "dependent.relkind IN ('v', 'm')"
+        ));
+        assert!(order_postgres_views(
+            vec![view("first", "VIEW"), view("second", "VIEW")],
+            &[
+                ("first".to_string(), "second".to_string()),
+                ("second".to_string(), "first".to_string()),
+            ],
+        )
+        .unwrap_err()
+        .contains("dependency cycle"));
     }
 
     #[test]
