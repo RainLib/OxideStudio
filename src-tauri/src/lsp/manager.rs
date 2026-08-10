@@ -27,6 +27,7 @@ fn validate_lsp_message_size(bytes: usize) -> Result<()> {
 enum LspOutgoingMessage {
     Request(LspRequest, ResponseSender),
     Notification(LspNotification),
+    ServerResponse(Value),
     CancelRequest(u64),
 }
 
@@ -65,6 +66,46 @@ fn server_supports_completion_resolve(capabilities: &Value) -> bool {
         .pointer("/completionProvider/resolveProvider")
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+fn lsp_server_request_response(message: &Value) -> Option<Value> {
+    let id = message.get("id")?.clone();
+    let method = message.get("method")?.as_str()?;
+    let params = message.get("params").unwrap_or(&Value::Null);
+
+    let result = match method {
+        "workspace/configuration" => {
+            let item_count = params
+                .get("items")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            Some(Value::Array(vec![Value::Null; item_count]))
+        }
+        "workspace/workspaceFolders" => Some(Value::Array(Vec::new())),
+        "window/workDoneProgress/create" => Some(Value::Null),
+        "window/showMessageRequest" => Some(Value::Null),
+        "workspace/applyEdit" => Some(serde_json::json!({
+            "applied": false,
+            "failureReason": "Workspace edits initiated by the language server are not supported"
+        })),
+        _ => None,
+    };
+
+    Some(match result {
+        Some(result) => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result
+        }),
+        None => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32601,
+                "message": format!("Unsupported LSP server request: {method}")
+            }
+        }),
+    })
 }
 
 /// LSP Server Manager with bidirectional communication
@@ -159,7 +200,7 @@ impl LspServerManager {
 
         // Channel for sending messages to writer task
         let (message_tx, mut message_rx) = mpsc::channel::<LspOutgoingMessage>(100);
-        self.message_tx = message_tx;
+        self.message_tx = message_tx.clone();
 
         // Map to track pending responses by request ID
         let pending_responses = Arc::new(Mutex::new(HashMap::<u64, ResponseSender>::new()));
@@ -168,6 +209,7 @@ impl LspServerManager {
         let pending_responses_clone = pending_responses.clone();
         let app_handle = self.app_handle.clone();
         let session_key = self.session_key.clone();
+        let server_response_tx = message_tx;
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
@@ -212,18 +254,26 @@ impl LspServerManager {
 
                 match serde_json::from_slice::<Value>(&buffer) {
                     Ok(message) => {
-                        if let Some(id) = message.get("id").and_then(|v| v.as_u64()) {
-                            if message.get("method").is_some()
-                                && message.get("result").is_none()
-                                && message.get("error").is_none()
+                        if let Some(response) = lsp_server_request_response(&message) {
+                            tracing::debug!(
+                                "Responding to LSP server request: {}",
+                                message
+                                    .get("method")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or("unknown")
+                            );
+                            if server_response_tx
+                                .send(LspOutgoingMessage::ServerResponse(response))
+                                .await
+                                .is_err()
                             {
-                                tracing::debug!(
-                                    "Ignoring unsupported LSP server request: {}",
-                                    message
-                                );
-                                continue;
+                                tracing::warn!("LSP writer closed before server response");
+                                break;
                             }
+                            continue;
+                        }
 
+                        if let Some(id) = message.get("id").and_then(Value::as_u64) {
                             let mut pending = pending_responses_clone.lock().await;
                             if let Some(tx) = pending.remove(&id) {
                                 let result = if let Some(error) = message.get("error") {
@@ -277,6 +327,9 @@ impl LspServerManager {
                     }
                     LspOutgoingMessage::Notification(notif) => {
                         (serde_json::to_string(&notif), None, None)
+                    }
+                    LspOutgoingMessage::ServerResponse(response) => {
+                        (serde_json::to_string(&response), None, None)
                     }
                     LspOutgoingMessage::CancelRequest(id) => {
                         let mut pending = pending_responses_for_writer.lock().await;
@@ -563,7 +616,7 @@ fn cancel_request_notification(id: u64) -> LspNotification {
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_request_notification, completion_client_capabilities,
+        cancel_request_notification, completion_client_capabilities, lsp_server_request_response,
         server_supports_completion_resolve, validate_lsp_message_size, MAX_LSP_MESSAGE_BYTES,
     };
 
@@ -629,5 +682,50 @@ mod tests {
         assert!(validate_lsp_message_size(MAX_LSP_MESSAGE_BYTES).is_ok());
         assert!(validate_lsp_message_size(0).is_err());
         assert!(validate_lsp_message_size(MAX_LSP_MESSAGE_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn server_configuration_requests_receive_one_value_per_item() {
+        let response = lsp_server_request_response(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "server-1",
+            "method": "workspace/configuration",
+            "params": { "items": [{ "section": "sql" }, { "section": "editor" }] }
+        }))
+        .expect("server request response");
+
+        assert_eq!(response["id"], "server-1");
+        assert_eq!(response["result"], serde_json::json!([null, null]));
+    }
+
+    #[test]
+    fn server_workspace_edits_are_rejected_without_mutating_user_files() {
+        let response = lsp_server_request_response(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "workspace/applyEdit",
+            "params": { "edit": { "changes": {} } }
+        }))
+        .expect("server request response");
+
+        assert_eq!(response["result"]["applied"], false);
+        assert!(response["result"]["failureReason"].is_string());
+    }
+
+    #[test]
+    fn unknown_server_requests_receive_method_not_found() {
+        let response = lsp_server_request_response(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "workspace/unknown"
+        }))
+        .expect("server request response");
+
+        assert_eq!(response["error"]["code"], -32601);
+        assert!(lsp_server_request_response(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "window/logMessage"
+        }))
+        .is_none());
     }
 }

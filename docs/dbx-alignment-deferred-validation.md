@@ -301,6 +301,10 @@ explicit deferred validation task rather than an implicit release check.
   The bridge must cap renderer work, mark truncated completion incomplete,
   reject oversized frames without allocating their declared body, and leave
   pending requests in a terminal error state rather than hanging.
+- Use a provider that initiates `workspace/configuration`,
+  `workspace/workspaceFolders`, progress, message, workspace-edit and unknown
+  requests. Confirm every request receives a matching numeric or string id,
+  unsupported edits never mutate files, and unknown methods receive -32601.
 - In Monaco, accept zero-, fixed-, optional-, variadic- and ClickHouse
   multi-group built-in function candidates with each keyword/function casing
   preference. Confirm tab stops, closing parentheses, retriggered signature
