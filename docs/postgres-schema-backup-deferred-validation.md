@@ -23,6 +23,12 @@
 - Verify a target without the required extension fails atomically and leaves no finalized backup restore; extension version pinning, grants, and ownership remain outside the conservative export contract.
 - `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. No database was opened.
 
+## Phase 134 -- Enum types
+
+- Restore enum-backed columns whose labels contain quotes, commas, Unicode, and a non-alphabetical declared order. Confirm `CREATE TYPE ... AS ENUM` runs before dependent tables and preserves ordering.
+- Verify extensions that supply types are restored before user enum types. Domain, composite, range, and multirange type definitions remain explicit conservative-export boundaries.
+- `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. No database was opened.
+
 ## Phase 133 -- Triggers
 
 - Restore row-level and statement-level triggers that call SQL and PL/pgSQL routines. Confirm trigger DDL follows routine DDL and fires with the original timing, event, condition, and target relation.

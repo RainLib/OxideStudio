@@ -3391,6 +3391,34 @@ fn postgres_trigger_definitions(results: &[QueryResult]) -> Result<Vec<String>, 
         .collect()
 }
 
+fn postgres_enum_definitions_query(schema: &str) -> String {
+    format!(
+        "SELECT type.typname, enum.enumlabel \
+         FROM pg_catalog.pg_type type \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = type.typnamespace \
+         JOIN pg_catalog.pg_enum enum ON enum.enumtypid = type.oid \
+         WHERE namespace.nspname = {} AND type.typtype = 'e' \
+         ORDER BY type.typname, enum.enumsortorder;",
+        postgres_sql_string_literal(schema),
+    )
+}
+
+fn postgres_enum_ddls(schema: &str, results: &[QueryResult]) -> Result<Vec<String>, String> {
+    let mut labels = BTreeMap::<String, Vec<String>>::new();
+    for row in results.iter().flat_map(|result| result.rows.iter()) {
+        let name = row.first().and_then(value_to_string).filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "PostgreSQL enum metadata has no type name".to_string())?;
+        let label = row.get(1).and_then(value_to_string)
+            .ok_or_else(|| format!("PostgreSQL enum {name} has no label"))?;
+        labels.entry(name).or_default().push(label);
+    }
+    Ok(labels.into_iter().map(|(name, labels)| format!(
+        "CREATE TYPE {} AS ENUM ({});",
+        DatabaseKind::Postgres.qualified_table(Some(schema), &name),
+        labels.into_iter().map(|label| postgres_sql_string_literal(&label)).collect::<Vec<_>>().join(", "),
+    )).collect())
+}
+
 fn mysql_comment_literal(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
@@ -9007,6 +9035,11 @@ pub async fn export_database_sql(
         } else {
             Vec::new()
         };
+        let enum_types = if include_structure {
+            let enum_results = manager.query(&connection_id, &postgres_enum_definitions_query(schema), None, None, Some(export_id.clone()))
+                .await.map_err(|error| error.to_string())?;
+            postgres_enum_ddls(schema, &enum_results)?
+        } else { Vec::new() };
         // `serial` and `nextval(...)` defaults require the referenced sequence
         // to exist before CREATE TABLE is replayed.  Read the bounded catalog
         // metadata once and use it for DDL before relations plus state after
@@ -9090,6 +9123,13 @@ pub async fn export_database_sql(
             writeln!(writer, "\n-- Extensions (created before dependent relation types and defaults)")
                 .map_err(|error| error.to_string())?;
             for ddl in &extensions {
+                writeln!(writer, "{ddl}").map_err(|error| error.to_string())?;
+            }
+        }
+        if include_structure && !enum_types.is_empty() {
+            writeln!(writer, "\n-- Enum types (created before dependent relations)")
+                .map_err(|error| error.to_string())?;
+            for ddl in &enum_types {
                 writeln!(writer, "{ddl}").map_err(|error| error.to_string())?;
             }
         }
