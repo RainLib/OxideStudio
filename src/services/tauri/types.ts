@@ -459,7 +459,7 @@ export interface TableSort {
 
 export type TableExportFormat = DatabaseTableExportFormat;
 export type TableExportEncoding = "utf8" | "utf8Bom" | "binary";
-export type SqlInsertConflictPolicy = "strict" | "skip";
+export type SqlInsertConflictPolicy = "strict" | "skip" | "update";
 
 export interface TableExportTypeCoercion {
   column: string;

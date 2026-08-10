@@ -885,6 +885,11 @@ explicit deferred validation task rather than an implicit release check.
 - Replay exports containing 101+ rows and individual rows larger than 512 KiB
   against PostgreSQL, MySQL and SQLite. Confirm statements split at both the
   100-row and 512 KiB boundaries without losing or duplicating a row.
+- Replay explicit conflict-update exports for single and composite primary keys.
+  Confirm PostgreSQL and SQLite target the full key with `ON CONFLICT`, MySQL
+  uses its native duplicate-key form, non-key columns update, and strict export
+  remains the default. Tables without a complete writable primary key must be
+  rejected before any file is published.
 - Round-trip PostgreSQL arrays (including empty and nested arrays) and `bytea`,
   MySQL binary values plus NUL/newline/backslash text, and SQLite BLOB values.
   Repeat under non-default string/escape modes where the server exposes them.

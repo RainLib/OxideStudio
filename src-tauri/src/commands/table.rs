@@ -132,6 +132,7 @@ pub enum TableExportFormat {
 pub enum SqlInsertConflictPolicy {
     Strict,
     Skip,
+    Update,
 }
 
 impl TableExportFormat {
@@ -1557,6 +1558,7 @@ struct TableExportWriterContext {
     override_system_value: bool,
     sql_insert_batch_rows: usize,
     sql_insert_conflict_policy: SqlInsertConflictPolicy,
+    sql_conflict_key_columns: Vec<String>,
     analytical_type_policy: AnalyticalTypePolicy,
     schema: String,
     table: String,
@@ -2137,6 +2139,7 @@ fn write_table_export_stream(
         override_system_value,
         sql_insert_batch_rows,
         sql_insert_conflict_policy,
+        sql_conflict_key_columns,
         analytical_type_policy,
         schema,
         table,
@@ -2324,6 +2327,7 @@ fn write_table_export_stream(
                             override_system_value,
                             batch_rows: sql_insert_batch_rows,
                             conflict_policy: sql_insert_conflict_policy,
+                            conflict_key_columns: &sql_conflict_key_columns,
                             schema: &schema,
                             table: &table,
                         },
@@ -2616,6 +2620,7 @@ struct SqlInsertExportOptions<'a> {
     override_system_value: bool,
     batch_rows: usize,
     conflict_policy: SqlInsertConflictPolicy,
+    conflict_key_columns: &'a [String],
     schema: &'a str,
     table: &'a str,
 }
@@ -2645,13 +2650,7 @@ fn sql_insert_statements(
         (SqlInsertConflictPolicy::Skip, SqlExportDialect::Sqlite) => "INSERT OR IGNORE INTO",
         _ => "INSERT INTO",
     };
-    let conflict_suffix = if options.conflict_policy == SqlInsertConflictPolicy::Skip
-        && options.dialect == SqlExportDialect::Postgres
-    {
-        " ON CONFLICT DO NOTHING"
-    } else {
-        ""
-    };
+    let conflict_suffix = sql_insert_conflict_suffix(options, columns)?;
     let prefix = format!(
         "{insert_keyword} {} ({quoted_columns}){identity_override} VALUES\n",
         options
@@ -2688,6 +2687,92 @@ fn sql_insert_statements(
     Ok(statements)
 }
 
+fn sql_insert_conflict_suffix(
+    options: SqlInsertExportOptions<'_>,
+    columns: &[ColumnDef],
+) -> Result<String, String> {
+    match options.conflict_policy {
+        SqlInsertConflictPolicy::Strict => Ok(String::new()),
+        SqlInsertConflictPolicy::Skip if options.dialect == SqlExportDialect::Postgres => {
+            Ok(" ON CONFLICT DO NOTHING".to_string())
+        }
+        SqlInsertConflictPolicy::Skip => Ok(String::new()),
+        SqlInsertConflictPolicy::Update => {
+            if options.conflict_key_columns.is_empty() {
+                return Err(
+                    "Updating conflicting SQL INSERT rows requires a primary key".to_string(),
+                );
+            }
+            let column_names = columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<HashSet<_>>();
+            if options
+                .conflict_key_columns
+                .iter()
+                .any(|column| !column_names.contains(column.as_str()))
+            {
+                return Err(
+                    "The SQL export does not contain every primary-key conflict column".to_string(),
+                );
+            }
+            let conflict_keys = options
+                .conflict_key_columns
+                .iter()
+                .map(|column| options.kind.quote_identifier(column))
+                .collect::<Vec<_>>();
+            let update_columns = columns
+                .iter()
+                .filter(|column| {
+                    !options
+                        .conflict_key_columns
+                        .iter()
+                        .any(|key| key == &column.name)
+                })
+                .map(|column| options.kind.quote_identifier(&column.name))
+                .collect::<Vec<_>>();
+
+            match options.dialect {
+                SqlExportDialect::Postgres | SqlExportDialect::Sqlite => {
+                    if update_columns.is_empty() {
+                        Ok(format!(
+                            " ON CONFLICT ({}) DO NOTHING",
+                            conflict_keys.join(", ")
+                        ))
+                    } else {
+                        let assignments = update_columns
+                            .iter()
+                            .map(|column| format!("{column} = excluded.{column}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        Ok(format!(
+                            " ON CONFLICT ({}) DO UPDATE SET {assignments}",
+                            conflict_keys.join(", ")
+                        ))
+                    }
+                }
+                SqlExportDialect::Mysql => {
+                    let assignments = if update_columns.is_empty() {
+                        let key = &conflict_keys[0];
+                        format!("{key} = {key}")
+                    } else {
+                        update_columns
+                            .iter()
+                            .map(|column| format!("{column} = VALUES({column})"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    Ok(format!(" ON DUPLICATE KEY UPDATE {assignments}"))
+                }
+                _ => Err(
+                    "Updating conflicting SQL INSERT rows is unavailable for this database dialect"
+                        .to_string(),
+                ),
+            }
+        }
+    }
+}
+
 fn ensure_sql_insert_conflict_policy(
     dialect: SqlExportDialect,
     policy: SqlInsertConflictPolicy,
@@ -2700,7 +2785,7 @@ fn ensure_sql_insert_conflict_policy(
     {
         return Ok(());
     }
-    Err("Skipping conflicting SQL INSERT rows is unavailable for this database dialect".to_string())
+    Err("SQL INSERT conflict handling is unavailable for this database dialect".to_string())
 }
 
 fn sql_export_insert_batch_rows(requested: Option<usize>) -> Result<usize, String> {
@@ -7348,11 +7433,11 @@ pub async fn export_table_data(
             SqlInsertConflictPolicy::Strict
         };
         ensure_sql_insert_conflict_policy(sql_dialect, sql_insert_conflict_policy)?;
-        if sql_insert_conflict_policy == SqlInsertConflictPolicy::Skip
+        if sql_insert_conflict_policy != SqlInsertConflictPolicy::Strict
             && analytical_type_policy == AnalyticalTypePolicy::ExternalText
         {
             return Err(
-                "Skipping conflicting SQL INSERT rows requires a native reviewed dialect"
+                "SQL INSERT conflict handling requires a native reviewed dialect"
                     .to_string(),
             );
         }
@@ -7393,6 +7478,35 @@ pub async fn export_table_data(
                 );
             }
         }
+        let sql_conflict_key_columns = if sql_insert_conflict_policy
+            == SqlInsertConflictPolicy::Update
+        {
+            let columns = table_columns
+                .as_ref()
+                .ok_or_else(|| "Missing column metadata for SQL conflict updates".to_string())?;
+            let primary_keys = columns
+                .iter()
+                .filter(|column| column.is_primary_key)
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            if primary_keys.is_empty() {
+                return Err(
+                    "Updating conflicting SQL INSERT rows requires a primary key".to_string(),
+                );
+            }
+            if primary_keys
+                .iter()
+                .any(|column| sql_excluded_columns.contains(column))
+            {
+                return Err(
+                    "A generated primary-key column cannot be used for SQL conflict updates"
+                        .to_string(),
+                );
+            }
+            primary_keys
+        } else {
+            Vec::new()
+        };
         let columns_metadata = table_columns.clone().map(column_lookup);
         let analytical_columns = table_columns.map(|columns| {
             columns
@@ -7451,6 +7565,7 @@ pub async fn export_table_data(
                         override_system_value,
                         sql_insert_batch_rows,
                         sql_insert_conflict_policy,
+                        sql_conflict_key_columns,
                         analytical_type_policy,
                         schema: writer_schema,
                         table: writer_table,
@@ -10609,6 +10724,7 @@ mod tests {
                     override_system_value: false,
                     batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
                     conflict_policy: SqlInsertConflictPolicy::Strict,
+                    conflict_key_columns: &[],
                     schema: "public",
                     table: "users",
                 },
@@ -10638,6 +10754,7 @@ mod tests {
                     override_system_value: false,
                     batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
                     conflict_policy: SqlInsertConflictPolicy::Strict,
+                    conflict_key_columns: &[],
                     schema: "app",
                     table: "events",
                 },
@@ -10721,6 +10838,7 @@ mod tests {
                 override_system_value: true,
                 batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
                 conflict_policy: SqlInsertConflictPolicy::Strict,
+                conflict_key_columns: &[],
                 schema: "public",
                 table: "users",
             },
@@ -10737,6 +10855,7 @@ mod tests {
                 override_system_value: true,
                 batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
                 conflict_policy: SqlInsertConflictPolicy::Strict,
+                conflict_key_columns: &[],
                 schema: "app",
                 table: "users",
             },
@@ -10762,6 +10881,7 @@ mod tests {
                     override_system_value: false,
                     batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
                     conflict_policy: SqlInsertConflictPolicy::Skip,
+                    conflict_key_columns: &[],
                     schema: "main",
                     table: "events",
                 },
@@ -10793,6 +10913,73 @@ mod tests {
     }
 
     #[test]
+    fn sql_export_can_update_conflicting_rows_by_complete_primary_key() {
+        let columns = [
+            ColumnDef {
+                name: "tenant_id".to_string(),
+                data_type: "integer".to_string(),
+            },
+            ColumnDef {
+                name: "event_id".to_string(),
+                data_type: "integer".to_string(),
+            },
+            ColumnDef {
+                name: "display name".to_string(),
+                data_type: "text".to_string(),
+            },
+        ];
+        let conflict_keys = vec!["tenant_id".to_string(), "event_id".to_string()];
+        let statement = |kind, dialect| {
+            sql_insert_statements(
+                SqlInsertExportOptions {
+                    kind,
+                    dialect,
+                    override_system_value: false,
+                    batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                    conflict_policy: SqlInsertConflictPolicy::Update,
+                    conflict_key_columns: &conflict_keys,
+                    schema: "main",
+                    table: "events",
+                },
+                &columns,
+                &[vec![json!(7), json!(42), json!("renamed")]],
+            )
+            .unwrap()
+            .remove(0)
+        };
+
+        assert!(statement(DatabaseKind::Postgres, SqlExportDialect::Postgres).ends_with(
+            " ON CONFLICT (\"tenant_id\", \"event_id\") DO UPDATE SET \"display name\" = excluded.\"display name\";"
+        ));
+        assert!(statement(DatabaseKind::Postgres, SqlExportDialect::Sqlite).ends_with(
+            " ON CONFLICT (\"tenant_id\", \"event_id\") DO UPDATE SET \"display name\" = excluded.\"display name\";"
+        ));
+        assert!(statement(DatabaseKind::Mysql, SqlExportDialect::Mysql)
+            .ends_with(" ON DUPLICATE KEY UPDATE `display name` = VALUES(`display name`);"));
+
+        let missing_key = sql_insert_statements(
+            SqlInsertExportOptions {
+                kind: DatabaseKind::Postgres,
+                dialect: SqlExportDialect::Postgres,
+                override_system_value: false,
+                batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                conflict_policy: SqlInsertConflictPolicy::Update,
+                conflict_key_columns: &[],
+                schema: "public",
+                table: "events",
+            },
+            &columns,
+            &[vec![json!(7), json!(42), json!("renamed")]],
+        );
+        assert!(missing_key.is_err());
+        assert!(ensure_sql_insert_conflict_policy(
+            SqlExportDialect::Standard,
+            SqlInsertConflictPolicy::Update
+        )
+        .is_err());
+    }
+
+    #[test]
     fn sql_exports_batch_rows_and_preserve_typed_literals() {
         let columns = vec![
             ColumnDef {
@@ -10814,6 +11001,7 @@ mod tests {
                 override_system_value: false,
                 batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
                 conflict_policy: SqlInsertConflictPolicy::Strict,
+                conflict_key_columns: &[],
                 schema: "public",
                 table: "events",
             },
@@ -10835,6 +11023,7 @@ mod tests {
                 override_system_value: false,
                 batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
                 conflict_policy: SqlInsertConflictPolicy::Strict,
+                conflict_key_columns: &[],
                 schema: "app",
                 table: "files",
             },
@@ -10860,6 +11049,7 @@ mod tests {
                 override_system_value: false,
                 batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
                 conflict_policy: SqlInsertConflictPolicy::Strict,
+                conflict_key_columns: &[],
                 schema: "main",
                 table: "files",
             },
@@ -10894,6 +11084,7 @@ mod tests {
                 override_system_value: false,
                 batch_rows: 25,
                 conflict_policy: SqlInsertConflictPolicy::Strict,
+                conflict_key_columns: &[],
                 schema: "public",
                 table: "events",
             },
@@ -13502,6 +13693,7 @@ WITH DATA;"#
             override_system_value: false,
             sql_insert_batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
             sql_insert_conflict_policy: SqlInsertConflictPolicy::Strict,
+            sql_conflict_key_columns: Vec::new(),
             analytical_type_policy: AnalyticalTypePolicy::Native,
             schema: "public".to_string(),
             table: "users".to_string(),

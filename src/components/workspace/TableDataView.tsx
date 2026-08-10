@@ -177,6 +177,9 @@ export function TableDataView() {
     Array<{ name: string; type?: string }>
   >([]);
   const [metadataColumns, setMetadataColumns] = useState<ColumnInfo[]>([]);
+  const supportsSqlConflictUpdate =
+    supportsSqlConflictSkip &&
+    metadataColumns.some((column) => column.is_primary_key);
   const [tableIndexes, setTableIndexes] = useState<IndexInfo[]>([]);
   const [tableConstraints, setTableConstraints] = useState<ConstraintInfo[]>(
     [],
@@ -1615,6 +1618,7 @@ export function TableDataView() {
         exportDisabled={isCrossDatabasePreview || isNativeObjectPreview}
         exportFormats={tableExportFormats}
         supportsSqlConflictSkip={supportsSqlConflictSkip}
+        supportsSqlConflictUpdate={supportsSqlConflictUpdate}
         isExporting={Boolean(activeTableExport)}
         transferDisabled={
           isCrossDatabasePreview ||

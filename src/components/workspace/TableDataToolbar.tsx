@@ -45,6 +45,7 @@ interface TableDataToolbarProps {
   exportDisabled?: boolean;
   exportFormats: readonly TableExportFormat[];
   supportsSqlConflictSkip?: boolean;
+  supportsSqlConflictUpdate?: boolean;
   isExporting?: boolean;
   transferDisabled?: boolean;
   editingEnabled: boolean;
@@ -91,6 +92,7 @@ export function TableDataToolbar({
   exportDisabled = false,
   exportFormats,
   supportsSqlConflictSkip = false,
+  supportsSqlConflictUpdate = false,
   isExporting = false,
   transferDisabled = false,
   editingEnabled,
@@ -388,6 +390,17 @@ export function TableDataToolbar({
                           </span>
                         </DropdownMenuItem>
                       </>
+                    )}
+                    {supportsSqlConflictUpdate && (
+                      <DropdownMenuItem
+                        className="wb-menu-item"
+                        onSelect={() => onExportSql(100, "update")}
+                      >
+                        <span>Update conflicting rows</span>
+                        <span className="ml-auto pl-3 text-[10px] wb-muted">
+                          Primary key
+                        </span>
+                      </DropdownMenuItem>
                     )}
                   </DropdownMenuSubContent>
                 </DropdownMenuPortal>
