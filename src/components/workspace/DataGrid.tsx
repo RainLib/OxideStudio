@@ -30,7 +30,7 @@ import { useTabStore } from "@/store/useTabStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTheme } from "@/theme/useTheme";
-import { createTypedCell, applyFilter, compareValues } from "@/lib/gridUtils";
+import { createTypedCell, applyFilter } from "@/lib/gridUtils";
 import {
   ArrowDownAZ,
   ArrowUpAZ,
@@ -82,6 +82,7 @@ import {
   resolveHeaderColumnType,
   resolveRenderedColumnType,
   resultColumnTypeFamily,
+  sortDataGridRowIndexes,
   transposeQueryResult,
   gridLayoutKey,
   loadGridLayout,
@@ -586,10 +587,12 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           gridState.sortColumn,
         );
         if (colIndex >= 0) {
-          indices.sort((a, b) => {
-            const valA = result.rows[a]?.[colIndex];
-            const valB = result.rows[b]?.[colIndex];
-            return compareValues(valA, valB, gridState.sortDirection!);
+          indices = sortDataGridRowIndexes({
+            rows: result.rows,
+            rowIndexes: indices,
+            columnIndex: colIndex,
+            direction: gridState.sortDirection,
+            columnType: result.columns[colIndex]?.data_type,
           });
         }
       }

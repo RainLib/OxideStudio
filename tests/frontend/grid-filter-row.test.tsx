@@ -192,4 +192,61 @@ describe("GridFilterRow", () => {
     expect(input.selectionStart).toBe("name LIKE '%".length);
     expect(input.selectionEnd).toBe("name LIKE '%".length);
   });
+
+  it("appends an IN-list continuation without replacing the current value", async () => {
+    function ControlledFilterRow() {
+      const [filter, setFilter] = useState("age IN (1");
+      return (
+        <GridFilterRow
+          columns={[
+            {
+              id: "age",
+              title: "age",
+              width: 120,
+              dataType: "integer",
+            } as never,
+          ]}
+          mode="sql"
+          visualFilters={[]}
+          sqlFilter={filter}
+          onModeChange={vi.fn()}
+          onVisualFiltersChange={vi.fn()}
+          onSqlFilterChange={setFilter}
+          onSearch={vi.fn()}
+          driver="postgres"
+          tabId="table-users"
+          schemaName="public"
+          tableName="users"
+        />
+      );
+    }
+
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<ControlledFilterRow />);
+    });
+
+    const input = container.querySelector("input")!;
+    await act(async () => {
+      input.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          code: "Space",
+          key: " ",
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    await act(async () => {
+      Array.from(container.querySelectorAll('[role="option"]'))
+        .find((option) => option.textContent?.trim().startsWith(","))
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+
+    expect(input.value).toBe("age IN (1, ");
+    expect(input.selectionStart).toBe(input.value.length);
+  });
 });

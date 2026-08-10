@@ -20,6 +20,8 @@ export type WhereCompletionCandidate = {
   insertText: string;
   /** Place the caret before this many trailing code units after insertion. */
   cursorOffsetFromEnd?: number;
+  /** Insert continuations at the caret instead of replacing the active token. */
+  replacementRange?: WhereReplacementRange;
   detail?: string;
   kind?: number;
   sortText: string;
@@ -58,11 +60,16 @@ const WHERE_IS_PREDICATES = [
   { label: "FALSE", insertText: "FALSE " },
   { label: "UNKNOWN", insertText: "UNKNOWN " },
 ];
+const WHERE_IS_NOT_PREDICATES = [
+  { label: "NULL", insertText: "NULL " },
+  { label: "TRUE", insertText: "TRUE " },
+  { label: "FALSE", insertText: "FALSE " },
+  { label: "UNKNOWN", insertText: "UNKNOWN " },
+];
 const WHERE_NOT_PREDICATES = [
   { label: "IN", insertText: "IN (" },
   { label: "LIKE", insertText: "LIKE " },
   { label: "BETWEEN", insertText: "BETWEEN " },
-  { label: "NULL", insertText: "NULL " },
 ];
 const SQL_RESERVED_IDENTIFIERS = new Set([
   "ALL",
@@ -247,6 +254,7 @@ function predicateValueCandidates(columnType?: string) {
   }
   if (/\b(?:date|time|timestamp|interval)\b/u.test(type)) {
     return [
+      { label: "''", insertText: "'' ", cursorOffsetFromEnd: 2 },
       { label: "CURRENT_DATE", insertText: "CURRENT_DATE " },
       { label: "CURRENT_TIMESTAMP", insertText: "CURRENT_TIMESTAMP " },
       { label: "NULL", insertText: "NULL " },
@@ -261,7 +269,7 @@ function predicateValueCandidates(columnType?: string) {
   }
   if (/\b(?:char|varchar|nvarchar|nchar|text|string|clob|json|xml|uuid)\b/u.test(type)) {
     return [
-      { label: "''", insertText: "'' " },
+      { label: "''", insertText: "'' ", cursorOffsetFromEnd: 2 },
       { label: "'%…%'", insertText: "'%%' ", cursorOffsetFromEnd: 3 },
       { label: "NULL", insertText: "NULL " },
     ];
@@ -345,7 +353,10 @@ export function localWhereCompletionCandidates(options: {
     );
   const afterNullPredicate = /\bis\s+(?:not\s+)?null\s*$/iu.test(beforeCursor);
   const afterIsKeyword = /\bis\s*$/iu.test(beforeCursor);
+  const afterIsNotKeyword = /\bis\s+not\s*$/iu.test(beforeCursor);
   const afterNotKeyword = /\bnot\s*$/iu.test(beforeCursor);
+  const afterNegatedOperand =
+    /(?:^|\(|\b(?:and|or)\s+)\s*not\s*$/iu.test(beforeCursor);
   const afterCompletedExpression =
     afterNullPredicate ||
     (!afterColumn &&
@@ -369,14 +380,16 @@ export function localWhereCompletionCandidates(options: {
           label: string;
           insertText: string;
           cursorOffsetFromEnd?: number;
+          replacementRange?: WhereReplacementRange;
         }
     >,
     detail: string,
     sortGroup: string,
+    filterByTyped = true,
   ) =>
     keywords
       .filter((keyword) =>
-        Number.isFinite(
+        !filterByTyped || Number.isFinite(
           fuzzyScore(typeof keyword === "string" ? keyword : keyword.label, typed),
         ),
       )
@@ -388,6 +401,8 @@ export function localWhereCompletionCandidates(options: {
           typeof keyword === "string"
             ? undefined
             : keyword.cursorOffsetFromEnd,
+        replacementRange:
+          typeof keyword === "string" ? undefined : keyword.replacementRange,
         detail,
         kind: CompletionItemKind.Keyword,
         sortText: `${sortGroup}:${String(index).padStart(4, "0")}`,
@@ -395,29 +410,69 @@ export function localWhereCompletionCandidates(options: {
       }));
 
   if (betweenNeedsSeparator) {
+    const needsSpace = !/\s$/u.test(beforeCursor);
     return keywordCandidates(
-      [{ label: "AND", insertText: "AND " }],
+      [{
+        label: "AND",
+        insertText: `${needsSpace ? " " : ""}AND `,
+        replacementRange: {
+          start: options.cursorOffset,
+          end: options.cursorOffset,
+        },
+      }],
       "BETWEEN range separator",
       "0",
+      false,
     );
   }
   if (afterInValue) {
     return keywordCandidates(
       [
-        { label: ",", insertText: ", " },
-        { label: ")", insertText: ") " },
+        {
+          label: ",",
+          insertText: ", ",
+          replacementRange: {
+            start: options.cursorOffset,
+            end: options.cursorOffset,
+          },
+        },
+        {
+          label: ")",
+          insertText: ") ",
+          replacementRange: {
+            start: options.cursorOffset,
+            end: options.cursorOffset,
+          },
+        },
       ],
       "IN list continuation",
       "0",
+      false,
     );
   }
   if (afterCompletedExpression) {
-    return keywordCandidates(WHERE_FOLLOW_UPS, "WHERE continuation", "0");
+    const needsSpace = !/\s$/u.test(beforeCursor);
+    return keywordCandidates(
+      WHERE_FOLLOW_UPS.map((label) => ({
+        label,
+        insertText: `${needsSpace ? " " : ""}${label} `,
+        replacementRange: {
+          start: options.cursorOffset,
+          end: options.cursorOffset,
+        },
+      })),
+      "WHERE continuation",
+      "0",
+      false,
+    );
   }
   if (afterIsKeyword) {
     return keywordCandidates(WHERE_IS_PREDICATES, "IS predicate", "0");
   }
-  if (afterNotKeyword) {
+  if (afterIsNotKeyword) {
+    return keywordCandidates(WHERE_IS_NOT_PREDICATES, "IS NOT predicate", "0");
+  }
+  if (afterNotKeyword && !afterNegatedOperand) {
     return keywordCandidates(WHERE_NOT_PREDICATES, "NOT predicate", "0");
   }
   if (afterPredicateOperator) {
@@ -445,7 +500,7 @@ export function localWhereCompletionCandidates(options: {
     }));
   }
 
-  const columns = options.columns
+  const columns: WhereCompletionCandidate[] = options.columns
     .map((column) => ({
       column,
       score: fuzzyScore(column.name, typed),
@@ -472,7 +527,23 @@ export function localWhereCompletionCandidates(options: {
       source: "local" as const,
     }));
 
-  return columns;
+  const canStartNegatedPredicate =
+    !afterNegatedOperand &&
+    (!beforeToken || /(?:\(|\b(?:and|or))\s*$/iu.test(beforeToken));
+  if (!canStartNegatedPredicate || !Number.isFinite(fuzzyScore("NOT", typed))) {
+    return columns;
+  }
+  return [
+    ...columns,
+    {
+      label: "NOT",
+      insertText: "NOT ",
+      detail: "Negate the next predicate",
+      kind: CompletionItemKind.Keyword,
+      sortText: "1:0000",
+      source: "local" as const,
+    },
+  ];
 }
 
 export function mergeWhereCompletionCandidates(
@@ -490,12 +561,16 @@ export function mergeWhereCompletionCandidates(
     const preserveLocalWorkflowInsert =
       existing?.source === "local" &&
       (existing.kind === CompletionItemKind.Field ||
-        existing.kind === CompletionItemKind.Operator);
+        existing.kind === CompletionItemKind.Operator ||
+        existing.cursorOffsetFromEnd !== undefined ||
+        existing.replacementRange !== undefined);
     merged.set(key, {
       label: item.label,
       insertText: preserveLocalWorkflowInsert
         ? existing.insertText
         : lspInsertText,
+      cursorOffsetFromEnd: existing?.cursorOffsetFromEnd,
+      replacementRange: existing?.replacementRange,
       detail: item.detail || existing?.detail,
       kind: item.kind || existing?.kind,
       sortText: item.sortText || existing?.sortText || `1:${key}`,

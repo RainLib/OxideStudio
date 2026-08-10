@@ -201,7 +201,10 @@ WHERE 与 SORT 输入不是普通文本框。应复用同一个 dialect/metadata
   server version、签名 capability 与 schema migration mode 统一为单次只读快照；LSP sync
   与 Query Editor 优先读取该快照，重连时不复用旧 server/package 组合。
 - [x] 将 `QueryEditor.tsx` 的已识别 model lifecycle、LSP adapter、execution controller 和 view lifecycle 拆入独立模块；Console auto-suggest 已完成 focus/model-version 门禁和清理，真实 Monaco/provider 组合验证延期。
-- [ ] 为 Grid filter/sort 建立语法位置、typed literal 和 multi-predicate 测试矩阵。
+- [x] 为 Grid filter/sort 建立语法位置、typed literal 和 multi-predicate 测试矩阵；
+  覆盖 NOT/IS NOT、quoted identifier、BETWEEN/IN 零宽续写、类型化值候选，以及
+  ResultSet 类型驱动的任意精度数值、日期、自然文本、NULL-last 和稳定本地排序。
+  真实 Monaco 与各产品数据库排序/谓词语义继续进入延期验证队列。
 
 ### 7.2 P1：以产品族推进，而不是堆菜单项
 

@@ -18,6 +18,11 @@ export {
 } from "./ui/DataGridHoverTooltip";
 export { transposeQueryResult } from "./model/transposeQueryResult";
 export {
+  compareDataGridValues,
+  sortDataGridRowIndexes,
+  type DataGridSortDirection,
+} from "./model/dataGridSort";
+export {
   dataGridConditionHistoryScopeKey,
   loadDataGridConditionHistory,
   rememberDataGridConditionHistory,

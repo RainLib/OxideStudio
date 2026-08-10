@@ -1160,3 +1160,21 @@ explicit deferred validation task rather than an implicit release check.
   OceanBase or other database was opened; provider metadata accuracy, actual
   collection return types, product-version syntax and Monaco interaction remain
   in the consolidated validation queue.
+
+## Grid predicate completion and typed local sorting
+
+- In a real Monaco/WebView session, exercise the table WHERE input with keyboard,
+  mouse, IME and screen-reader navigation. Cover quoted/non-ASCII columns,
+  prefix `NOT`, column `NOT`, `IS NOT`, nested predicates, `BETWEEN`, numeric and
+  quoted `IN` lists, typed values, cancellation, history and stale LSP results.
+  Confirm zero-width continuation acceptance preserves the preceding literal
+  and keeps undo atomic.
+- Against supported PostgreSQL, MySQL/MariaDB, SQLite, SQL Server and Oracle
+  fixtures, compare database-side filter/sort results with local loaded-result
+  sorting for signed/exponent/large decimal values, dates, booleans, natural
+  text, duplicate values and NULL in both directions. Record collation,
+  timezone, NaN and product-specific NULL-order differences explicitly rather
+  than presenting local ordering as a server-wide guarantee.
+- Phase 109 added pure model and component coverage only. No database was
+  opened; real provider/Monaco interaction and server ordering conformance stay
+  deferred.

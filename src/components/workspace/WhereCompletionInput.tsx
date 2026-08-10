@@ -315,7 +315,8 @@ export function WhereCompletionInput({
       const replacement =
         candidate.source === "history"
           ? { start: 0, end: valueRef.current.length }
-          : whereReplacementRange(valueRef.current, cursorOffset);
+          : candidate.replacementRange ||
+            whereReplacementRange(valueRef.current, cursorOffset);
       const insertText = plainInsertText(candidate.insertText);
       const nextValue =
         valueRef.current.slice(0, replacement.start) +

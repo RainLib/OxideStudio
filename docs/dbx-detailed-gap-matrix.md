@@ -97,7 +97,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 
 | ID | 状态 / 差距 | DBX 实现位置 | Oxide 当前落点 | 对齐验收 |
 | --- | --- | --- | --- | --- |
-| G01 | 部分对齐：filter/sort builder | `useDataGridFilterBuilder.ts`、`dataGridConditionCompletion.ts`、`dataGridSort.ts` | SQL WHERE、visual filters、sort、typed completion 已有 | 建立 dialect × literal type × operator × multi-predicate × quote 的测试矩阵。 |
+| G01 | 核心逻辑已对齐，真实产品/Monaco 验证延期：filter/sort builder | `useDataGridFilterBuilder.ts`、`dataGridConditionCompletion.ts`、`dataGridSort.ts` | SQL WHERE、visual filters、sort 与 typed completion 已有；纯逻辑矩阵现覆盖空条件/AND/OR/括号、前缀 NOT 与列后 NOT、IS/IS NOT、quoted identifier、PostgreSQL ILIKE 边界、boolean/numeric/temporal/text literal、BETWEEN/IN 零宽续写和完成谓词续写。查询结果本地排序迁入独立 model，按 ResultSet 类型对任意精度数值文本排序、自然文本/日期排序、NULL 双向置后并以源行号稳定打破相等值。 | 在真实 Monaco/WebView 与 PostgreSQL/MySQL/SQLite/SQL Server/Oracle 产品版本中验证接受、光标、IME、键盘、数据库端排序语义和服务端返回顺序；live value sampling 继续保持显式 opt-in。 |
 | G02 | 部分对齐：专用值查看器 | `JsonValueTable.vue`、binary/image/geometry/spatial modules | Value Editor 已区分 NULL/空串/未加载，提供 1,000,000 字符上限的 JSON tree、严格 binary hex 编辑与 byte 计数，并新增 JSON array / PostgreSQL array literal 的有界只读树预览：最多 64 层、100,000 项，叶子不做类型强转，切换树视图不重写原始数据库文本。 | 继续补 XML、map 专用键值视图、image 与 geometry；各自需要独立大小预算和只读/编辑边界。 |
 | G03 | 未对齐：expression cell/default preview | DBX grid edit adapter、cell generation 与 bulk edit modules | 普通 typed cell mutation | 表达式必须显式切换；generated/default 在提交预览中区分“不发送”“NULL”“表达式”。 |
 | G04 | 未对齐：全量数据 compare | DBX `dataGrid/dataCompare.ts` 与批量数据工具 | 仅 loaded-page compare | 后端 keyset 分页、稳定 key、断点、冲突/重复 key 报告和可恢复 artifact。 |

@@ -172,31 +172,3 @@ export function applyFilter(rowValue: any, filter: FilterState): boolean {
       return true;
   }
 }
-
-/**
- * Sort comparator for grid data
- */
-export function compareValues(
-  a: any,
-  b: any,
-  direction: "asc" | "desc",
-): number {
-  // Handle null values
-  if (a === null || a === undefined) return direction === "asc" ? -1 : 1;
-  if (b === null || b === undefined) return direction === "asc" ? 1 : -1;
-
-  // Numeric comparison
-  if (typeof a === "number" && typeof b === "number") {
-    return direction === "asc" ? a - b : b - a;
-  }
-
-  // String comparison
-  const aStr = String(a).toLowerCase();
-  const bStr = String(b).toLowerCase();
-
-  if (direction === "asc") {
-    return aStr.localeCompare(bStr);
-  } else {
-    return bStr.localeCompare(aStr);
-  }
-}

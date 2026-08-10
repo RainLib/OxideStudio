@@ -469,7 +469,10 @@ Editor，而不是引入一个新的 Git UI 框架。
   JSON object/array 仍未实现增量解析与类型转换。所有入口
   仍缺错误行隔离、断点恢复、映射快照和可恢复失败报告。
 - 批量编辑、fill、normalize、find/replace、extractor profile 不足。
-- 表格过滤和 SQL editor 的 completion/type system 尚未完全共享。
+- 表格 WHERE 已复用 LSP 虚拟文档并以相同 metadata 类型提供本地即时降级；语法位置、
+  typed literal、quoted identifier、NOT/IS NOT、BETWEEN/IN 与多谓词测试矩阵已补齐。
+  剩余差距是显式授权的 live value sampling、真实 Monaco/provider 组合验证和逐产品
+  服务端谓词/排序语义 conformance，而不是再建立第二套无界补全实现。
 - 冻结、列宽、顺序与隐藏状态已进入版本化本地 layout repository：对象表按
   connection/database/schema/table 隔离，查询结果按 SQL revision 隔离；重开后会自动
   剔除已不存在的列，Reset column layout 会清除对应对象/查询的已保存布局。布局仅保存
