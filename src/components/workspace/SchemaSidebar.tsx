@@ -3377,6 +3377,16 @@ export function SchemaSidebar() {
                   const relationCapabilities = isCurrentSchema
                     ? activeCapabilities
                     : defaultDatabaseCapabilities(driver || activeDriver);
+                  // The table editor already consumes this signed capability
+                  // list. Keep the Explorer's quicker context-menu route on
+                  // the same contract: an unreviewed sidecar must not show a
+                  // download action that the host will later reject.
+                  const supportsRelationExport = (
+                    format: "csv" | "json" | "jsonl" | "markdown" | "sql" | "tsv" | "xlsx" | "parquet" | "arrow",
+                  ) => relationCapabilities.tableExportFormats?.includes(format) === true;
+                  const canImportRelationRows =
+                    !isReadOnlyRelation &&
+                    relationCapabilities.supportsTableRowMutation;
 
                   return (
                     <div key={`${schema}:${table.name}`}>
@@ -3770,7 +3780,7 @@ export function SchemaSidebar() {
                           <ContextMenuSubContent className={menuContentClass}>
                             <ContextMenuItem
                               className={menuItemClass}
-                              disabled={isReadOnlyRelation}
+                              disabled={!canImportRelationRows}
                               onClick={() =>
                                 void runForSchema(schema, () =>
                                   handleTableCsvImport(table, schema),
@@ -3782,7 +3792,7 @@ export function SchemaSidebar() {
                             </ContextMenuItem>
                             <ContextMenuItem
                               className={menuItemClass}
-                              disabled={isReadOnlyRelation}
+                              disabled={!canImportRelationRows}
                               title="Stream a UTF-8 comma-separated CSV with a header row. Use Import CSV… when you need encoding, delimiter, or column mapping."
                               onClick={() =>
                                 void runForSchema(schema, () =>
@@ -3795,7 +3805,7 @@ export function SchemaSidebar() {
                             </ContextMenuItem>
                             <ContextMenuItem
                               className={menuItemClass}
-                              disabled={isReadOnlyRelation}
+                              disabled={!canImportRelationRows}
                               onClick={() =>
                                 void runForSchema(schema, () =>
                                   handleTableJsonImport(table, schema),
@@ -3807,7 +3817,7 @@ export function SchemaSidebar() {
                             </ContextMenuItem>
                             <ContextMenuItem
                               className={menuItemClass}
-                              disabled={isReadOnlyRelation}
+                              disabled={!canImportRelationRows}
                               onClick={() =>
                                 void runForSchema(schema, () =>
                                   handleTableXlsxImport(table, schema),
@@ -3820,10 +3830,7 @@ export function SchemaSidebar() {
                             <ContextMenuItem
                               className={menuItemClass}
                               disabled={
-                                !defaultDatabaseCapabilities(
-                                  driver || DEFAULT_DATABASE_DRIVER,
-                                )
-                                  .supportsSqlQuery
+                                !relationCapabilities.supportsSqlQuery
                               }
                               onClick={() =>
                                 void handleImportSqlScript({
@@ -3846,50 +3853,101 @@ export function SchemaSidebar() {
                             <ContextMenuSeparator
                               className={menuSeparatorClass}
                             />
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  exportTableData(table.name, "csv"),
-                                )
-                              }
-                            >
-                              <Download className="mr-2 h-3.5 w-3.5" />
-                              Export CSV
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  exportTableData(table.name, "csv", "utf8Bom"),
-                                )
-                              }
-                            >
-                              <Download className="mr-2 h-3.5 w-3.5" />
-                              Export CSV (UTF-8 BOM)
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  exportTableData(table.name, "json"),
-                                )
-                              }
-                            >
-                              <Download className="mr-2 h-3.5 w-3.5" />
-                              Export JSON
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  exportTableData(table.name, "sql"),
-                                )
-                              }
-                            >
-                              <Download className="mr-2 h-3.5 w-3.5" />
-                              Export SQL Inserts
-                            </ContextMenuItem>
+                            {supportsRelationExport("csv") && (
+                              <>
+                                <ContextMenuItem
+                                  className={menuItemClass}
+                                  onClick={() =>
+                                    void runForSchema(schema, () =>
+                                      exportTableData(table.name, "csv"),
+                                    )
+                                  }
+                                >
+                                  <Download className="mr-2 h-3.5 w-3.5" />
+                                  Export CSV
+                                </ContextMenuItem>
+                                <ContextMenuItem
+                                  className={menuItemClass}
+                                  onClick={() =>
+                                    void runForSchema(schema, () =>
+                                      exportTableData(table.name, "csv", "utf8Bom"),
+                                    )
+                                  }
+                                >
+                                  <Download className="mr-2 h-3.5 w-3.5" />
+                                  Export CSV (UTF-8 BOM)
+                                </ContextMenuItem>
+                              </>
+                            )}
+                            {supportsRelationExport("json") && (
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    exportTableData(table.name, "json"),
+                                  )
+                                }
+                              >
+                                <Download className="mr-2 h-3.5 w-3.5" />
+                                Export JSON
+                              </ContextMenuItem>
+                            )}
+                            {supportsRelationExport("jsonl") && (
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    exportTableData(table.name, "jsonl"),
+                                  )
+                                }
+                              >
+                                <Download className="mr-2 h-3.5 w-3.5" />
+                                Export JSON Lines
+                              </ContextMenuItem>
+                            )}
+                            {supportsRelationExport("sql") && (
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    exportTableData(table.name, "sql"),
+                                  )
+                                }
+                              >
+                                <Download className="mr-2 h-3.5 w-3.5" />
+                                Export SQL Inserts
+                              </ContextMenuItem>
+                            )}
+                            {supportsRelationExport("tsv") && (
+                              <ContextMenuItem className={menuItemClass} onClick={() => void runForSchema(schema, () => exportTableData(table.name, "tsv"))}>
+                                <Download className="mr-2 h-3.5 w-3.5" />
+                                Export TSV
+                              </ContextMenuItem>
+                            )}
+                            {supportsRelationExport("xlsx") && (
+                              <ContextMenuItem className={menuItemClass} onClick={() => void runForSchema(schema, () => exportTableData(table.name, "xlsx", "binary"))}>
+                                <Download className="mr-2 h-3.5 w-3.5" />
+                                Export Excel workbook (.xlsx)
+                              </ContextMenuItem>
+                            )}
+                            {supportsRelationExport("parquet") && (
+                              <ContextMenuItem className={menuItemClass} onClick={() => void runForSchema(schema, () => exportTableData(table.name, "parquet", "binary"))}>
+                                <Download className="mr-2 h-3.5 w-3.5" />
+                                Export Apache Parquet (.parquet)
+                              </ContextMenuItem>
+                            )}
+                            {supportsRelationExport("arrow") && (
+                              <ContextMenuItem className={menuItemClass} onClick={() => void runForSchema(schema, () => exportTableData(table.name, "arrow", "binary"))}>
+                                <Download className="mr-2 h-3.5 w-3.5" />
+                                Export Arrow IPC (.arrow)
+                              </ContextMenuItem>
+                            )}
+                            {supportsRelationExport("markdown") && (
+                              <ContextMenuItem className={menuItemClass} onClick={() => void runForSchema(schema, () => exportTableData(table.name, "markdown"))}>
+                                <Download className="mr-2 h-3.5 w-3.5" />
+                                Export Markdown table (.md)
+                              </ContextMenuItem>
+                            )}
                             {activeTableExport?.tableName === table.name && (
                               <ContextMenuItem
                                 className={cn(menuItemClass, "text-destructive")}
