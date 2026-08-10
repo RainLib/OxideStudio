@@ -41,6 +41,7 @@ function coordinatorFixture() {
     getReferences: vi.fn(async () => []),
     rename: vi.fn(async () => null),
     getCodeActions: vi.fn(async () => []),
+    getInlayHints: vi.fn(async () => []),
   } as unknown as LspClient;
 
   const coordinator = registerLspCoreProviders({
@@ -132,5 +133,37 @@ describe("LSP core provider coordinator", () => {
       [],
       ["source"],
     );
+  });
+
+  it("bounds the local INSERT hint fallback to the visible neighborhood", async () => {
+    const { providers } = coordinatorFixture();
+    const prefix = " ".repeat(40_000);
+    const statement = "INSERT INTO users (id, name) VALUES (1, 'Ada');";
+    const text = `${prefix}${statement}`;
+    const getValueInRange = vi.fn((range: any) =>
+      text.slice(range.startColumn - 1, range.endColumn - 1),
+    );
+    const model = {
+      uri: { toString: () => "oxide://query/active.postgres.sql" },
+      getOffsetAt: ({ column }: { column: number }) => column - 1,
+      getPositionAt: (offset: number) => ({ lineNumber: 1, column: offset + 1 }),
+      getValueLength: () => text.length,
+      getValueInRange,
+    };
+    const valueOffset = text.indexOf("1, 'Ada'");
+
+    const result = await providers.get("inlayHints").provideInlayHints(model, {
+      startLineNumber: 1,
+      startColumn: prefix.length + 1,
+      endLineNumber: 1,
+      endColumn: text.length + 1,
+    });
+
+    expect(getValueInRange).toHaveBeenCalledTimes(1);
+    expect(getValueInRange.mock.calls[0]?.[0].startColumn).toBe(
+      prefix.length - 32 * 1024 + 1,
+    );
+    expect(result.hints.map((hint: any) => hint.label)).toEqual(["id:", "name:"]);
+    expect(result.hints[0]?.position.column).toBe(valueOffset + 1);
   });
 });

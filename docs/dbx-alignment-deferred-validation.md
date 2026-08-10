@@ -29,6 +29,13 @@ database target until its relevant queue entries pass.
   and strict frontend build. Defer real WebView checks for indentation,
   multi-cursor undo, Vim mode, IME and an open completion widget; no database
   is required for those checks.
+- INSERT value inlay hints passed 152 bundled-LSP unit tests plus the complete
+  integration suite, five focused parser tests, the real packaged-binary
+  JSON-RPC test, seven focused Monaco/provider tests, Clippy and the strict
+  frontend build. Coverage includes implicit metadata order, generated/hidden
+  ownership, SQL Server catalog/dbo, bounded large-document UTF-16 positions
+  and multi-row nested values; real product metadata and WebView interaction
+  remain deferred below.
 - The ChartDB metadata-query catalog unit suite passed for PostgreSQL,
   CockroachDB, MySQL, MariaDB, SQLite, SQL Server, ClickHouse and Oracle query
   contracts; no query was executed against a live database.
@@ -981,3 +988,18 @@ explicit deferred validation task rather than an implicit release check.
   `EPHEMERAL` and rqlite `table_xinfo` fixtures. The local Java harness was
   skipped on 2026-08-10 because this runner had no JDK fixture; do not treat the
   successful Rust sidecar suites as JDBC product conformance evidence.
+
+## INSERT value inlay hints
+
+- In a real Monaco/WebView session, open large PostgreSQL, MySQL, SQLite and
+  SQL Server scripts and verify explicit plus implicit `INSERT ... VALUES`
+  hints while scrolling, editing, undoing and switching connections. Confirm a
+  stale schema response cannot repaint hints for the new owner.
+- Cover multi-row values, nested function/JSON expressions, quoted Unicode
+  identifiers, SQL Server target aliases/table hints, PostgreSQL overriding
+  clauses, comments and dollar-quoted strings. Hint positions must remain
+  UTF-16 correct and INSERT-SELECT/default-values statements must stay quiet.
+- Against real metadata, verify omitted-column order for identity,
+  auto-increment, generated/computed, hidden/temporal and ordinary-default
+  combinations. The phase's unit and subprocess tests do not replace these
+  provider/product checks, and no database was opened during implementation.

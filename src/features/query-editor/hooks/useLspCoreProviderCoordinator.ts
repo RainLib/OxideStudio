@@ -412,7 +412,33 @@ export function registerLspCoreProviders({
             (hint) => `${hint.position.lineNumber}:${hint.position.column}`,
           ),
         );
-        const insertValueHints = sqlInsertValueHints(model.getValue())
+        // Keep the explicit-column fallback bounded to the visible statement
+        // neighborhood. The bundled LSP resolves implicit columns from schema
+        // metadata; this local path remains useful while schema sync is pending.
+        const provisionalScanStart = Math.max(0, rangeStart - 32 * 1024);
+        const scanEnd = Math.min(model.getValueLength(), rangeEnd + 32 * 1024);
+        const provisionalScanStartPosition = model.getPositionAt(
+          provisionalScanStart,
+        );
+        const scanStart =
+          provisionalScanStartPosition.lineNumber < range.startLineNumber
+            ? model.getOffsetAt({
+                lineNumber: provisionalScanStartPosition.lineNumber + 1,
+                column: 1,
+              })
+            : provisionalScanStart;
+        const scanStartPosition = model.getPositionAt(scanStart);
+        const scanEndPosition = model.getPositionAt(scanEnd);
+        const scanRange = {
+          startLineNumber: scanStartPosition.lineNumber,
+          startColumn: scanStartPosition.column,
+          endLineNumber: scanEndPosition.lineNumber,
+          endColumn: scanEndPosition.column,
+        };
+        const insertValueHints = sqlInsertValueHints(
+          model.getValueInRange(scanRange),
+        )
+          .map((hint) => ({ ...hint, offset: hint.offset + scanStart }))
           .filter((hint) => hint.offset >= rangeStart && hint.offset <= rangeEnd)
           .map((hint) => ({
             position: model.getPositionAt(hint.offset),

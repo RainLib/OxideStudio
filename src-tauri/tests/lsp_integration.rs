@@ -2276,6 +2276,78 @@ async fn bundled_sql_lsp_serves_schema_aware_completions() -> Result<()> {
 }
 
 #[tokio::test]
+async fn bundled_sql_lsp_labels_implicit_insert_values() -> Result<()> {
+    let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
+        return Ok(());
+    };
+    lsp.initialize().await?;
+
+    let uri = "file:///oxide/postgres-insert-inlay.sql";
+    let schema_id = "66666666-6666-4666-8666-666666666666";
+    let columns = vec![
+        json!({
+            "name": "id",
+            "data_type": "bigint",
+            "nullable": false,
+            "auto_increment": true
+        }),
+        json!({
+            "name": "customer_id",
+            "data_type": "bigint",
+            "nullable": false
+        }),
+        json!({
+            "name": "computed_total",
+            "data_type": "numeric",
+            "nullable": true,
+            "generated": true
+        }),
+        json!({
+            "name": "system_period",
+            "data_type": "timestamp",
+            "nullable": true,
+            "hidden": true
+        }),
+    ];
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "defaultDialect": "postgres",
+                "schemas": [schema(schema_id, "public", "orders", "table", columns)],
+                "fileSchemas": { (uri): schema_id },
+                "fileDialects": { (uri): "postgres" }
+            }
+        }),
+    )
+    .await?;
+    let sql = "INSERT INTO public.orders VALUES (42);";
+    open_document(&mut lsp, uri, "postgres", sql).await?;
+
+    let hints = lsp
+        .request(
+            "textDocument/inlayHint",
+            json!({
+                "textDocument": { "uri": uri },
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": sql.encode_utf16().count() }
+                }
+            }),
+        )
+        .await?;
+    let labels = hints
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|hint| hint.get("label").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(labels, vec!["customer_id:"]);
+
+    lsp.shutdown().await
+}
+
+#[tokio::test]
 async fn bundled_sql_lsp_isolates_a_new_query_block_without_a_semicolon() -> Result<()> {
     let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
         return Ok(());
