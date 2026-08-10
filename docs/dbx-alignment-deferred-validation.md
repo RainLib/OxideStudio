@@ -771,6 +771,10 @@ explicit deferred validation task rather than an implicit release check.
   Oxide must preserve the exact declared type for review rather than silently
   normalizing it. Product-owned execution remains gated by target dialect
   preflight and the offline DBML sentinel.
+- Round-trip DBML defaults covering escaped strings, bare enum/string values,
+  signed decimal numbers, booleans, NULL, temporal keywords and backtick
+  expressions. PostgreSQL review SQL must retain string quotes while function
+  calls and keywords remain expressions.
 
 ## ChartDB metadata JSON import
 

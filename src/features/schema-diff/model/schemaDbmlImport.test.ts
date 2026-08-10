@@ -94,6 +94,25 @@ const snapshot: SchemaSnapshot = {
 };
 
 describe("schema DBML import", () => {
+  it("preserves literal and expression default semantics", () => {
+    const parsed = parseSchemaDbml(
+      `Table public.accounts {
+        status text [default: 'owner\\'s review']
+        retries integer [default: 3]
+        enabled boolean [default: true]
+        created_at timestamp [default: \`now()\`]
+      }`,
+      "public",
+    );
+
+    expect(parsed.relations[0]?.columns.map((column) => column.default_value)).toEqual([
+      "'owner''s review'",
+      "3",
+      "true",
+      "now()",
+    ]);
+  });
+
   it("round-trips the portable exported subset", () => {
     const artifact = serializeSchemaSnapshotToDbml(snapshot);
     const parsed = parseSchemaDbml(artifact.content, "public");

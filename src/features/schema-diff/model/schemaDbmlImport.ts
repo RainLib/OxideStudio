@@ -800,10 +800,25 @@ function parseSettings(value: string, warnings: Set<string>) {
     if (!key) continue;
     settings.set(
       key,
-      separator >= 0 ? unquote(part.slice(separator + 1).trim()) : true,
+      separator >= 0
+        ? key === "default"
+          ? parseDefaultSetting(part.slice(separator + 1).trim())
+          : unquote(part.slice(separator + 1).trim())
+        : true,
     );
   }
   return settings;
+}
+
+function parseDefaultSetting(value: string) {
+  if (value.startsWith("`") && value.endsWith("`")) return unquote(value);
+  if (
+    (value.startsWith("'") && value.endsWith("'"))
+    || (value.startsWith('"') && value.endsWith('"'))
+  ) {
+    return `'${unquote(value).replace(/'/gu, "''")}'`;
+  }
+  return value;
 }
 
 function settingText(value: string | true | undefined) {

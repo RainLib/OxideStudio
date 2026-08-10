@@ -188,6 +188,26 @@ describe("schema snapshot DBML export", () => {
               is_indexed: false,
               is_auto_increment: false,
             },
+            {
+              name: "status",
+              data_type: "varchar(20)",
+              is_nullable: false,
+              is_primary_key: false,
+              is_unique: false,
+              is_indexed: false,
+              is_auto_increment: false,
+              default_value: "'owner''s review'",
+            },
+            {
+              name: "mode",
+              data_type: "text",
+              is_nullable: false,
+              is_primary_key: false,
+              is_unique: false,
+              is_indexed: false,
+              is_auto_increment: false,
+              default_value: "active",
+            },
           ],
           indexes: [],
           constraints: [],
@@ -203,6 +223,8 @@ describe("schema snapshot DBML export", () => {
     expect(artifact.content).toContain('"payload" longtext');
     expect(artifact.content).toContain('"flags" tinyint');
     expect(artifact.content).toContain('"labels" text[]');
+    expect(artifact.content).toContain("default: 'owner\\'s review'");
+    expect(artifact.content).toContain("default: 'active'");
     expect(parsed.relations[0]?.comment).toBe(
       "Audit trail's source\\name kept readable",
     );
@@ -210,6 +232,12 @@ describe("schema snapshot DBML export", () => {
       "longtext",
       "tinyint",
       "text[]",
+      "varchar(20)",
+      "text",
     ]);
+    expect(parsed.relations[0]?.columns[3]?.default_value).toBe(
+      "'owner''s review'",
+    );
+    expect(parsed.relations[0]?.columns[4]?.default_value).toBe("'active'");
   });
 });

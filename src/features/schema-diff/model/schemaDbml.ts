@@ -25,6 +25,50 @@ function expression(value: string) {
   return `\`${value.replace(/`/g, "\\`")}\``;
 }
 
+const PORTABLE_DEFAULT_KEYWORDS = new Set([
+  "true",
+  "false",
+  "null",
+  "current_date",
+  "current_time",
+  "current_timestamp",
+  "current_user",
+  "localtime",
+  "localtimestamp",
+  "session_user",
+  "system_user",
+  "user",
+]);
+
+function sqlStringValue(value: string) {
+  if (!value.startsWith("'")) return null;
+  let result = "";
+  for (let index = 1; index < value.length; index += 1) {
+    const character = value[index] || "";
+    if (character !== "'") {
+      result += character;
+      continue;
+    }
+    if (value[index + 1] === "'") {
+      result += "'";
+      index += 1;
+      continue;
+    }
+    return index === value.length - 1 ? result : null;
+  }
+  return null;
+}
+
+function dbmlDefault(value: string) {
+  const trimmed = value.trim();
+  const stringValue = sqlStringValue(trimmed);
+  if (stringValue != null) return quotedText(stringValue);
+  if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/u.test(trimmed)) return trimmed;
+  if (PORTABLE_DEFAULT_KEYWORDS.has(trimmed.toLowerCase())) return trimmed;
+  if (/^[A-Za-z_][A-Za-z0-9_$]*$/u.test(trimmed)) return quotedText(trimmed);
+  return expression(trimmed);
+}
+
 function enumValue(value: string) {
   return `"${value.replace(/"/g, '""')}"`;
 }
@@ -50,7 +94,7 @@ function columnSettings(column: SchemaSnapshot["relations"][number]["columns"][n
   if (column.is_unique && !column.is_primary_key) settings.push("unique");
   if (column.is_auto_increment) settings.push("increment");
   if (column.default_value != null) {
-    settings.push(`default: ${expression(column.default_value)}`);
+    settings.push(`default: ${dbmlDefault(column.default_value)}`);
   }
   if (column.comment) settings.push(`note: ${quotedText(column.comment)}`);
   return settings.length > 0 ? ` [${settings.join(", ")}]` : "";
