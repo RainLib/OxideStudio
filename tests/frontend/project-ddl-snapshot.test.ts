@@ -53,7 +53,10 @@ describe("project DDL schema snapshot", () => {
 
     expect(isProjectDdlSnapshot(snapshot)).toBe(true);
     expect(snapshot.warnings).toContain("Source: db/schema.sql");
-    expect(snapshot.warnings.join(" ")).toContain("No supported CREATE TABLE");
+    expect(snapshot.relations).toEqual([
+      expect.objectContaining({ name: "active_users", objectType: "VIEW", columns: [] }),
+    ]);
+    expect(snapshot.warnings.join(" ")).toContain("no safely inferable columns");
     expect(snapshot.id).toMatch(/^project-ddl-1-offline-/);
   });
 

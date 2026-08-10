@@ -774,3 +774,20 @@ explicit deferred validation task rather than an implicit release check.
   remains deferred because this Windows environment exits before test startup
   with `STATUS_ENTRYPOINT_NOT_FOUND`. Re-run the focused SQL export tests in a
   clean CI/runtime environment before release.
+
+## Offline DDL views and schema objects
+
+- Import PostgreSQL, MySQL, SQL Server and Oracle fixtures containing ordinary
+  views, materialized views where supported, explicit view column lists,
+  expression aliases, wildcard projections and quoted identifiers. Compare the
+  review snapshot with live metadata: inferred names must remain stable,
+  `UNKNOWN` types must never become executable DDL, and missing inference must
+  stay visible as a warning rather than inventing columns.
+- Import PostgreSQL enum types and sequences with quoted/schema-qualified names,
+  escaped enum values and non-default sequence options. Confirm they appear as
+  descriptor-only Manual Review changes, affect the offline fingerprint, and
+  never enable Apply or Open in console.
+- Exercise generated/virtual/stored columns for each supported family.
+  Expressions must be reported as omitted, must not leak into `default_value`,
+  and must keep the offline snapshot on the review-only path until a
+  dialect-owned lossless expression model is available.

@@ -195,6 +195,134 @@ describe("project DDL snapshot", () => {
     );
   });
 
+  it("imports views as review-only relations with conservatively inferred columns", () => {
+    const parsed = parseProjectDdl(
+      `
+        CREATE VIEW public.active_users (user_id, display_name) AS
+          SELECT id, name FROM public.users WHERE active = true;
+        CREATE MATERIALIZED VIEW public.account_totals AS
+          SELECT account_id, sum(amount) AS total FROM public.entries GROUP BY account_id;
+        CREATE VIEW public.all_users AS SELECT * FROM public.users;
+      `,
+      "public",
+      "postgres",
+    );
+
+    expect(parsed.relations.find((relation) => relation.name === "active_users")).toMatchObject({
+      objectType: "VIEW",
+      columns: [
+        expect.objectContaining({ name: "user_id", data_type: "UNKNOWN" }),
+        expect.objectContaining({ name: "display_name", data_type: "UNKNOWN" }),
+      ],
+    });
+    expect(parsed.relations.find((relation) => relation.name === "account_totals")).toMatchObject({
+      objectType: "MATERIALIZED VIEW",
+      columns: [
+        expect.objectContaining({ name: "account_id" }),
+        expect.objectContaining({ name: "total" }),
+      ],
+    });
+    expect(parsed.relations.find((relation) => relation.name === "all_users")?.columns).toEqual([]);
+    expect(parsed.warnings).toContain(
+      "View all_users has no safely inferable columns; its relation descriptor remains review-only.",
+    );
+  });
+
+  it.each([
+    [
+      "oracle",
+      "APP",
+      "CREATE OR REPLACE FORCE EDITIONABLE VIEW APP.active_users AS SELECT id AS user_id FROM APP.users",
+    ],
+    [
+      "mysql",
+      "app",
+      "CREATE ALGORITHM=MERGE DEFINER=root@localhost SQL SECURITY DEFINER VIEW app.active_users AS SELECT id AS user_id FROM app.users",
+    ],
+    [
+      "sqlserver",
+      "dbo",
+      "CREATE OR ALTER VIEW dbo.active_users WITH SCHEMABINDING AS SELECT id AS user_id FROM dbo.users",
+    ],
+  ] as const)("accepts %s view modifiers", (dialect, schema, sql) => {
+    const parsed = parseProjectDdl(sql, schema, dialect);
+    expect(parsed.relations).toEqual([
+      expect.objectContaining({
+        name: "active_users",
+        objectType: "VIEW",
+        columns: [expect.objectContaining({ name: "user_id" })],
+      }),
+    ]);
+  });
+
+  it("preserves enum types and sequences as descriptor-only schema objects", () => {
+    const parsed = parseProjectDdl(
+      `
+        CREATE TYPE public.order_status AS ENUM ('draft', 'in_progress', 'it''s done');
+        CREATE SEQUENCE public.order_number_seq START WITH 100 INCREMENT BY 5;
+        CREATE TABLE public.orders (
+          id bigint DEFAULT nextval('public.order_number_seq'),
+          status public.order_status NOT NULL
+        );
+      `,
+      "public",
+      "postgres",
+    );
+
+    expect(parsed.schemaObjects).toEqual([
+      {
+        name: "order_status",
+        objectType: "ENUM TYPE",
+        description: "Values: 'draft', 'in_progress', 'it''s done'",
+      },
+      { name: "order_number_seq", objectType: "SEQUENCE" },
+    ]);
+    expect(parsed.relations[0]?.columns.find((column) => column.name === "status")?.data_type)
+      .toBe("public.order_status");
+  });
+
+  it("flags generated expressions without treating them as defaults", () => {
+    const parsed = parseProjectDdl(
+      `CREATE TABLE line_items (
+        quantity integer NOT NULL,
+        unit_price numeric(12, 2) NOT NULL,
+        total numeric(12, 2) GENERATED ALWAYS AS (quantity * unit_price) STORED
+      );`,
+      "public",
+      "postgres",
+    );
+    const total = parsed.relations[0]?.columns.find((column) => column.name === "total");
+    expect(total).toMatchObject({ data_type: "numeric(12, 2)" });
+    expect(total?.default_value).toBeUndefined();
+    expect(parsed.warnings).toContain(
+      "Generated expression on line_items.total was recognized but omitted because snapshots cannot preserve executable expressions safely.",
+    );
+  });
+
+  it("includes descriptor-only schema objects in the offline fingerprint", () => {
+    const identity = {
+      projectId: "project",
+      connectionId: "connection",
+      connectionName: "Local",
+      driver: "postgres" as const,
+      schemaName: "public",
+    };
+    const first = createProjectDdlSnapshot(
+      identity,
+      "schema.sql",
+      "CREATE TYPE state AS ENUM ('open'); CREATE TABLE jobs (id bigint);",
+      1,
+    );
+    const second = createProjectDdlSnapshot(
+      identity,
+      "schema.sql",
+      "CREATE TYPE state AS ENUM ('open', 'closed'); CREATE TABLE jobs (id bigint);",
+      1,
+    );
+    expect(first.fingerprint).not.toBe(second.fingerprint);
+    expect(first.schemaObjects).toHaveLength(1);
+  });
+
   it("uses the connection driver as the portable DDL preference", () => {
     const snapshot = createProjectDdlSnapshot(
       {

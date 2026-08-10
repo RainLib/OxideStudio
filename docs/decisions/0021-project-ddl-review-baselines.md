@@ -21,6 +21,14 @@ or the source fingerprint needed for executable migrations.
 - Parse a bounded `CREATE TABLE` / `CREATE INDEX` subset, including common
   multiword and precision types, standalone and inline indexes, columns,
   primary/unique keys and supported table-level or inline foreign keys.
+- Represent `VIEW` and `MATERIALIZED VIEW` as review-only relations. Infer only
+  explicit column lists or conservative top-level `SELECT` names, use an
+  `UNKNOWN` type, and never retain or execute the view body.
+- Represent `CREATE TYPE ... AS ENUM` and `CREATE SEQUENCE` as descriptor-only
+  schema objects. Include them in the offline fingerprint, but force their
+  diff entries into manual review because source DDL is intentionally absent.
+- Detect generated expressions and emit an explicit omission warning. Do not
+  put generated SQL into `default_value` or any executable migration field.
 - Preserve unsupported syntax as explicit warnings instead of guessing.
 - Store every relative source path and the `OFFLINE_PROJECT_DDL_REVIEW_ONLY`
   marker on the snapshot.
@@ -34,4 +42,6 @@ This adds useful offline drift review and editable structured drafts without
 treating a convenience parser as a migration engine. Full executable DDL
 support requires a dialect-owned parser, source dependency and fingerprint
 contract, preflight generation, and post-apply verification for that database
-family. Advanced objects and expressions remain explicit review gaps.
+family. Partitioning, complete dialect grammars, lossless generated
+expressions, dependency ordering and executable object source remain explicit
+review gaps.

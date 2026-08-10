@@ -3,6 +3,7 @@ import type {
   ConstraintInfo,
   DatabaseDriver,
   IndexInfo,
+  SchemaObjectSnapshot,
   SchemaRelationSnapshot,
   SchemaSnapshot,
 } from "@/services/tauri/types";
@@ -19,6 +20,7 @@ export type ProjectDdlSnapshotIdentity = {
 export type ProjectDdlParseResult = {
   dialect: ProjectDdlDialect;
   relations: SchemaRelationSnapshot[];
+  schemaObjects: SchemaObjectSnapshot[];
   warnings: string[];
 };
 
@@ -75,16 +77,26 @@ export function parseProjectDdl(
     );
   }
   const relations = new Map<string, SchemaRelationSnapshot>();
+  const schemaObjects = new Map<string, SchemaObjectSnapshot>();
   const pendingIndexes: Array<{ table: string; index: IndexInfo }> = [];
   const pendingConstraints: Array<{ table: string; constraint: ConstraintInfo }> = [];
 
   for (const statement of splitStatements(stripSqlComments(sql), dialect)) {
     const trimmed = statement.trim();
     if (!trimmed) continue;
+    const view = parseCreateView(trimmed, fallbackSchema, warnings);
+    if (view) {
+      if (relations.has(view.name)) {
+        warnings.add(`Duplicate CREATE relation for ${view.name}; the later definition was ignored.`);
+      } else {
+        relations.set(view.name, view);
+      }
+      continue;
+    }
     const table = parseCreateTable(trimmed, fallbackSchema, warnings);
     if (table) {
       if (relations.has(table.name)) {
-        warnings.add(`Duplicate CREATE TABLE for ${table.name}; the later definition was ignored.`);
+        warnings.add(`Duplicate CREATE relation for ${table.name}; the later definition was ignored.`);
       } else {
         relations.set(table.name, table);
       }
@@ -98,6 +110,18 @@ export function parseProjectDdl(
     const index = parseCreateIndex(trimmed, fallbackSchema);
     if (index) {
       pendingIndexes.push(index);
+      continue;
+    }
+    const schemaObject = parseCreateSchemaObject(trimmed, fallbackSchema, warnings);
+    if (schemaObject) {
+      const key = `${schemaObject.objectType.toUpperCase()}:${schemaObject.name}`;
+      if (schemaObjects.has(key)) {
+        warnings.add(
+          `Duplicate CREATE ${schemaObject.objectType} for ${schemaObject.name}; the later definition was ignored.`,
+        );
+      } else {
+        schemaObjects.set(key, schemaObject);
+      }
       continue;
     }
     if (/^CREATE\b/i.test(trimmed)) {
@@ -129,11 +153,14 @@ export function parseProjectDdl(
   }
 
   if (relations.size === 0) {
-    warnings.add("No supported CREATE TABLE statement was found in this project SQL file.");
+    warnings.add("No supported CREATE TABLE or VIEW statement was found in this project SQL file.");
   }
   return {
     dialect,
     relations: [...relations.values()].sort((left, right) => left.name.localeCompare(right.name)),
+    schemaObjects: [...schemaObjects.values()].sort((left, right) =>
+      `${left.objectType}\u0000${left.name}`.localeCompare(`${right.objectType}\u0000${right.name}`)
+    ),
     warnings: [...warnings].sort(),
   };
 }
@@ -232,7 +259,12 @@ export function createProjectDdlSnapshot(
     identity.schemaName,
     projectDdlDialectForDriver(identity.driver),
   );
-  const fingerprint = stableSnapshotFingerprint(identity, sourcePaths, parsed.relations);
+  const fingerprint = stableSnapshotFingerprint(
+    identity,
+    sourcePaths,
+    parsed.relations,
+    parsed.schemaObjects,
+  );
   return {
     version: 1,
     id: `project-ddl-${capturedAt}-${fingerprint.slice(0, 12)}`,
@@ -245,6 +277,7 @@ export function createProjectDdlSnapshot(
     schemaName: identity.schemaName,
     capturedAt,
     relations: parsed.relations,
+    schemaObjects: parsed.schemaObjects,
     warnings: [
       OFFLINE_DDL_WARNING,
       ...sourcePaths.map((path) => `Source: ${path}`),
@@ -315,7 +348,7 @@ function parseCreateTable(
       }
       continue;
     }
-    const column = parseColumn(entry, warnings);
+    const column = parseColumn(entry, tableName, warnings);
     if (!column) continue;
     columns.push(column);
     const inlineReference = parseInlineReference(entry, tableName, column.name);
@@ -337,6 +370,162 @@ function parseCreateTable(
     column.is_indexed ||= column.is_primary_key || column.is_unique || indexedColumns.has(column.name);
   }
   return { name: tableName, objectType: "BASE TABLE", columns, indexes, constraints };
+}
+
+function parseCreateView(
+  statement: string,
+  fallbackSchema: string,
+  warnings: Set<string>,
+): SchemaRelationSnapshot | null {
+  const match = statement.match(
+    /^CREATE\s+(?:(?:OR\s+(?:REPLACE|ALTER))\s+)?(?:(?:ALGORITHM\s*=\s*[^\s]+|DEFINER\s*=\s*[^\s]+|SQL\s+SECURITY\s+\w+|TEMPORARY|TEMP|FORCE|NOFORCE|EDITIONING|EDITIONABLE|NONEDITIONABLE)\s+)*(MATERIALIZED\s+)?VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?/i,
+  );
+  if (!match) return null;
+
+  const rest = statement.slice(match[0].length).trimStart();
+  const identifier = readQualifiedIdentifier(rest);
+  const name = normalizeRelationName(identifier, fallbackSchema);
+  if (!name) {
+    warnings.add(`CREATE VIEW has an unsupported identifier: ${leadingWords(statement)}.`);
+    return null;
+  }
+
+  const afterName = rest.slice(identifier.length).trimStart();
+  let explicitColumns: string[] = [];
+  let viewBody = afterName;
+  if (afterName.startsWith("(")) {
+    const close = matchingParen(afterName, 0);
+    if (close < 0) {
+      warnings.add(`CREATE VIEW ${name} has an unbalanced explicit column list.`);
+      return null;
+    }
+    explicitColumns = columnList(afterName.slice(1, close));
+    viewBody = afterName.slice(close + 1);
+  }
+
+  const asOffset = findTopLevelKeyword(viewBody, "AS");
+  if (asOffset < 0) {
+    warnings.add(`CREATE VIEW ${name} has no supported AS query and was imported without columns.`);
+  }
+  const selectSql = asOffset >= 0 ? viewBody.slice(asOffset + 2).trimStart() : "";
+  const inferredColumns = explicitColumns.length > 0
+    ? explicitColumns
+    : inferViewColumnNames(selectSql);
+  if (explicitColumns.length === 0 && inferredColumns.length === 0) {
+    warnings.add(
+      `View ${name} has no safely inferable columns; its relation descriptor remains review-only.`,
+    );
+  }
+  if (inferredColumns.length > 0) {
+    warnings.add(
+      `View ${name} column types are unavailable in offline DDL and use UNKNOWN placeholders for review.`,
+    );
+  }
+
+  return {
+    name,
+    objectType: match[1] ? "MATERIALIZED VIEW" : "VIEW",
+    columns: inferredColumns.map(reviewOnlyViewColumn),
+    indexes: [],
+    constraints: [],
+  };
+}
+
+function parseCreateSchemaObject(
+  statement: string,
+  fallbackSchema: string,
+  warnings: Set<string>,
+): SchemaObjectSnapshot | null {
+  const sequence = statement.match(
+    /^CREATE\s+(?:OR\s+REPLACE\s+)?SEQUENCE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s;]+)/i,
+  );
+  if (sequence) {
+    const name = normalizeRelationName(sequence[1] || "", fallbackSchema);
+    if (!name) {
+      warnings.add(`CREATE SEQUENCE has an unsupported identifier: ${leadingWords(statement)}.`);
+      return null;
+    }
+    return { name, objectType: "SEQUENCE" };
+  }
+
+  const type = statement.match(
+    /^CREATE\s+(?:OR\s+REPLACE\s+)?TYPE\s+([^\s]+)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\b/is,
+  );
+  if (!type) return null;
+  const name = normalizeRelationName(type[1] || "", fallbackSchema);
+  if (!name) {
+    warnings.add(`CREATE TYPE has an unsupported identifier: ${leadingWords(statement)}.`);
+    return null;
+  }
+  const typeKind = (type[2] || "TYPE").toUpperCase();
+  const description = typeKind === "ENUM" ? enumTypeDescription(statement) : undefined;
+  return {
+    name,
+    objectType: typeKind === "ENUM" ? "ENUM TYPE" : "TYPE",
+    ...(description ? { description } : {}),
+  };
+}
+
+function enumTypeDescription(statement: string) {
+  const enumOffset = statement.search(/\bENUM\b/i);
+  if (enumOffset < 0) return undefined;
+  const group = parenthesizedContent(statement.slice(enumOffset + 4));
+  if (!group) return undefined;
+  const values = splitTopLevel(group.content, ",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (values.length === 0) return undefined;
+  const description = `Values: ${values.join(", ")}`;
+  return description.length <= 2_048
+    ? description
+    : `${description.slice(0, 2_045)}...`;
+}
+
+function reviewOnlyViewColumn(name: string): ColumnInfo {
+  return {
+    name,
+    data_type: "UNKNOWN",
+    is_nullable: true,
+    is_primary_key: false,
+    is_unique: false,
+    is_indexed: false,
+    is_auto_increment: false,
+  };
+}
+
+function inferViewColumnNames(sql: string) {
+  const select = sql.match(/^SELECT\s+(?:(?:DISTINCT|ALL)\s+)?/i);
+  if (!select) return [];
+  const selectBody = sql.slice(select[0].length);
+  const fromOffset = findTopLevelKeyword(selectBody, "FROM");
+  if (fromOffset < 0) return [];
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const item of splitTopLevel(selectBody.slice(0, fromOffset), ",")) {
+    const expression = item.trim();
+    if (!expression || /(?:^|\.)\*$/i.test(expression)) continue;
+    const aliasOffset = findLastTopLevelKeyword(expression, "AS");
+    const alias = aliasOffset >= 0
+      ? normalizeIdentifier(expression.slice(aliasOffset + 2))
+      : normalizeSimpleColumnReference(expression);
+    if (alias && !seen.has(alias)) {
+      seen.add(alias);
+      names.push(alias);
+    }
+  }
+  return names;
+}
+
+function normalizeSimpleColumnReference(value: string) {
+  const identifier = readQualifiedIdentifier(value.trim());
+  if (!identifier || identifier.length !== value.trim().length) return "";
+  const segments = identifier.split(".").map(normalizeIdentifier).filter(Boolean);
+  return segments[segments.length - 1] || "";
+}
+
+function readQualifiedIdentifier(value: string) {
+  const part = String.raw`(?:"(?:[^"]|"")*"|\x60(?:[^\x60]|\x60\x60)*\x60|\[(?:[^\]]|\]\])*\]|[A-Za-z_][A-Za-z0-9_$]*)`;
+  return value.match(new RegExp(`^${part}(?:\\s*\\.\\s*${part})*`))?.[0] || "";
 }
 
 function parseCreateIndex(statement: string, fallbackSchema: string) {
@@ -474,7 +663,7 @@ function parseInlineReference(
   };
 }
 
-function parseColumn(entry: string, warnings: Set<string>): ColumnInfo | null {
+function parseColumn(entry: string, table: string, warnings: Set<string>): ColumnInfo | null {
   const parts = entry.match(/^([^\s]+)\s+(.+)$/s);
   if (!parts) {
     warnings.add(`Unsupported table item was ignored: ${leadingWords(entry)}.`);
@@ -493,6 +682,11 @@ function parseColumn(entry: string, warnings: Set<string>): ColumnInfo | null {
   const defaultValue = definition.match(
     /\bDEFAULT\s+(.+?)(?=\s+(?:NOT\s+NULL|NULL|PRIMARY\s+KEY|UNIQUE|REFERENCES|CHECK|COLLATE|GENERATED|IDENTITY|AUTO_INCREMENT|AUTOINCREMENT|CONSTRAINT)\b|$)/i,
   )?.[1]?.trim();
+  if (/\bGENERATED\b/i.test(definition) && !/\bGENERATED\s+(?:ALWAYS|BY\s+DEFAULT)\s+AS\s+IDENTITY\b/i.test(definition)) {
+    warnings.add(
+      `Generated expression on ${table}.${name} was recognized but omitted because snapshots cannot preserve executable expressions safely.`,
+    );
+  }
   return {
     name,
     data_type: type,
@@ -628,6 +822,76 @@ function splitTopLevel(value: string, delimiter: string) {
   }
   parts.push(value.slice(start));
   return parts;
+}
+
+function findTopLevelKeyword(value: string, keyword: string) {
+  return topLevelKeywordOffsets(value, keyword)[0] ?? -1;
+}
+
+function findLastTopLevelKeyword(value: string, keyword: string) {
+  const offsets = topLevelKeywordOffsets(value, keyword);
+  return offsets[offsets.length - 1] ?? -1;
+}
+
+function topLevelKeywordOffsets(value: string, keyword: string) {
+  const offsets: number[] = [];
+  const expected = keyword.toUpperCase();
+  let depth = 0;
+  let quote = "";
+  let dollarQuote = "";
+  let bracketQuote = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index] || "";
+    if (dollarQuote) {
+      if (value.startsWith(dollarQuote, index)) {
+        index += dollarQuote.length - 1;
+        dollarQuote = "";
+      }
+      continue;
+    }
+    if (bracketQuote) {
+      if (char === "]" && value[index + 1] === "]") index += 1;
+      else if (char === "]") bracketQuote = false;
+      continue;
+    }
+    if (quote) {
+      if (char === quote && value[index + 1] === quote) index += 1;
+      else if (char === quote && value[index - 1] !== "\\") quote = "";
+      continue;
+    }
+    if (["'", '"', "`"].includes(char)) {
+      quote = char;
+      continue;
+    }
+    if (char === "[") {
+      bracketQuote = true;
+      continue;
+    }
+    const tag = char === "$" ? readDollarQuoteTag(value, index) : "";
+    if (tag) {
+      dollarQuote = tag;
+      index += tag.length - 1;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (char === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (
+      depth === 0 &&
+      value.slice(index, index + expected.length).toUpperCase() === expected &&
+      !/[A-Za-z0-9_$]/.test(value[index - 1] || "") &&
+      !/[A-Za-z0-9_$]/.test(value[index + expected.length] || "")
+    ) {
+      offsets.push(index);
+      index += expected.length - 1;
+    }
+  }
+  return offsets;
 }
 
 function matchingParen(value: string, opening: number) {
@@ -791,14 +1055,19 @@ function stableSnapshotFingerprint(
   identity: ProjectDdlSnapshotIdentity,
   paths: readonly string[],
   relations: SchemaRelationSnapshot[],
+  schemaObjects: SchemaObjectSnapshot[],
 ) {
-  const input = JSON.stringify([
+  const payload: unknown[] = [
     identity.driver,
     identity.databaseName || null,
     identity.schemaName,
     paths,
     relations,
-  ]);
+  ];
+  // Keep existing relation-only baselines stable while making descriptor-only
+  // objects authoritative as soon as the source contains one.
+  if (schemaObjects.length > 0) payload.push(schemaObjects);
+  const input = JSON.stringify(payload);
   let hash = 0x811c9dc5;
   for (let index = 0; index < input.length; index += 1) {
     hash ^= input.charCodeAt(index);
