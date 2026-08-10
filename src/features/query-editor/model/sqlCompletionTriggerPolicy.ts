@@ -23,10 +23,42 @@ export function sqlCompletionIdentifierPrefix(textBeforeCursor: string) {
   return textBeforeCursor.match(IDENTIFIER_PREFIX)?.[1] || "";
 }
 
-function sqlCompletionIsSuppressed(textBeforeCursor: string) {
+function normalizedCompletionDriver(driver?: string) {
+  return driver?.trim().toLocaleLowerCase().replace(/[_\s]+/gu, "-") || "";
+}
+
+function mysqlFamilyCompletionDriver(driver: string) {
+  return [
+    "mysql",
+    "mariadb",
+    "tidb",
+    "oceanbase",
+    "singlestore",
+    "manticore",
+    "manticoresearch",
+  ].includes(driver);
+}
+
+function postgresFamilyCompletionDriver(driver: string) {
+  return [
+    "postgres",
+    "postgresql",
+    "cockroachdb",
+    "yugabytedb",
+    "neon",
+    "supabase",
+    "timescaledb",
+  ].includes(driver);
+}
+
+function sqlCompletionIsSuppressed(textBeforeCursor: string, driver?: string) {
+  const normalizedDriver = normalizedCompletionDriver(driver);
+  const mysqlFamily = mysqlFamilyCompletionDriver(normalizedDriver);
+  const postgresFamily = postgresFamilyCompletionDriver(normalizedDriver);
   let lineComment = false;
   let blockComment = false;
   let stringQuote = false;
+  let stringBackslashEscapes = false;
   let dollarQuote: string | null = null;
 
   for (let offset = 0; offset < textBeforeCursor.length; ) {
@@ -56,6 +88,10 @@ function sqlCompletionIsSuppressed(textBeforeCursor: string) {
       continue;
     }
     if (stringQuote) {
+      if (stringBackslashEscapes && character === "\\" && next !== undefined) {
+        offset += 2;
+        continue;
+      }
       if (character === "'" && next === "'") {
         offset += 2;
       } else {
@@ -67,11 +103,21 @@ function sqlCompletionIsSuppressed(textBeforeCursor: string) {
     if (character === "-" && next === "-") {
       lineComment = true;
       offset += 2;
+    } else if (mysqlFamily && character === "#") {
+      lineComment = true;
+      offset += 1;
     } else if (character === "/" && next === "*") {
       blockComment = true;
       offset += 2;
     } else if (character === "'") {
       stringQuote = true;
+      const previous = textBeforeCursor[offset - 1] || "";
+      const beforePrevious = textBeforeCursor[offset - 2] || "";
+      stringBackslashEscapes = mysqlFamily || (
+        postgresFamily
+        && /e/iu.test(previous)
+        && !/[$@#_\p{ID_Continue}]/u.test(beforePrevious)
+      );
       offset += 1;
     } else if (character === "$") {
       const tag = textBeforeCursor.slice(offset).match(/^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/u)?.[0];
@@ -100,8 +146,9 @@ export function sqlCompletionTriggerDecision(
   mode: SqlCompletionTriggerMode,
   textBeforeCursor: string,
   explicit: boolean,
+  driver?: string,
 ): SqlCompletionTriggerDecision {
-  if (sqlCompletionIsSuppressed(textBeforeCursor)) {
+  if (sqlCompletionIsSuppressed(textBeforeCursor, driver)) {
     return { allowed: false, reason: "suppressed" };
   }
   if (explicit) return { allowed: true, reason: "explicit" };

@@ -275,6 +275,10 @@ explicit deferred validation task rather than an implicit release check.
   table functions, `WITH ORDINALITY`, positional correlation columns, JOIN
   followed by comma sources, and SQL Server `(NOLOCK)`; repeat those cases
   against real versioned metadata before marking driver families conformant.
+- In each completion trigger mode, type inside MySQL/MariaDB `#` comments,
+  MySQL backslash-escaped strings and PostgreSQL `E'...'` strings; automatic
+  and explicit completion must remain suppressed. SQL Server `#temp` and
+  `##global_temp` prefixes must still produce relation completion.
 - Against real PostgreSQL/MySQL/SQLite/SQL Server/ClickHouse versions, verify
   signature help preserves database-reported overload order, default/optional
   arguments, variadic routines, quoted routine names and procedures. Confirm

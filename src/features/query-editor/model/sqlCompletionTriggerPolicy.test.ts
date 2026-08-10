@@ -26,4 +26,42 @@ describe("SQL completion trigger policy", () => {
     expect(sqlCompletionTriggerDecision("positional", "SELECT 1 -- fro", true).reason).toBe("suppressed");
     expect(sqlCompletionTriggerDecision("positional", "SELECT /* fro", false).reason).toBe("suppressed");
   });
+
+  it("recognizes MySQL hash comments without breaking SQL Server temp tables", () => {
+    expect(
+      sqlCompletionTriggerDecision(
+        "positional",
+        "SELECT 1 # fro",
+        false,
+        "mariadb",
+      ).reason,
+    ).toBe("suppressed");
+    expect(
+      sqlCompletionTriggerDecision(
+        "require-prefix",
+        "SELECT * FROM #tem",
+        false,
+        "sqlserver",
+      ).reason,
+    ).toBe("prefix");
+  });
+
+  it("keeps escaped MySQL and PostgreSQL E strings suppressed", () => {
+    expect(
+      sqlCompletionTriggerDecision(
+        "require-prefix",
+        "SELECT 'it\\'s fro",
+        false,
+        "mysql",
+      ).reason,
+    ).toBe("suppressed");
+    expect(
+      sqlCompletionTriggerDecision(
+        "require-prefix",
+        "SELECT E'it\\'s fro",
+        false,
+        "postgres",
+      ).reason,
+    ).toBe("suppressed");
+  });
 });

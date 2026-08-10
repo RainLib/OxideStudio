@@ -1333,6 +1333,7 @@ export function QueryEditor({
               editorSettings.sqlCompletion.triggerMode,
               textBeforeCursor,
               explicitCompletion,
+              completionDriver,
             );
             if (!trigger.allowed) {
               recordSqlCompletionTelemetry({
