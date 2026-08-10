@@ -1527,6 +1527,7 @@ struct TableExportWriterContext {
     final_path: PathBuf,
     kind: DatabaseKind,
     sql_dialect: SqlExportDialect,
+    override_system_value: bool,
     analytical_type_policy: AnalyticalTypePolicy,
     schema: String,
     table: String,
@@ -2104,6 +2105,7 @@ fn write_table_export_stream(
         final_path,
         kind,
         sql_dialect,
+        override_system_value,
         analytical_type_policy,
         schema,
         table,
@@ -2263,9 +2265,15 @@ fn write_table_export_stream(
                             .write(&batch)?;
                     }
                 } else if matches!(format, TableExportFormat::Sql) {
-                    for statement in
-                        sql_insert_statements(kind, sql_dialect, &schema, &table, &columns, &rows)
-                    {
+                    for statement in sql_insert_statements(
+                        kind,
+                        sql_dialect,
+                        override_system_value,
+                        &schema,
+                        &table,
+                        &columns,
+                        &rows,
+                    ) {
                         if *cancel_rx.borrow() {
                             return Err(format!(
                                 "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
@@ -2534,6 +2542,7 @@ fn sql_export_literal(dialect: SqlExportDialect, value: &Value, data_type: Optio
 fn sql_insert_statements(
     kind: DatabaseKind,
     dialect: SqlExportDialect,
+    override_system_value: bool,
     schema: &str,
     table: &str,
     columns: &[ColumnDef],
@@ -2547,8 +2556,13 @@ fn sql_insert_statements(
         .map(|column| kind.quote_identifier(&column.name))
         .collect::<Vec<_>>()
         .join(", ");
+    let identity_override = if override_system_value && dialect == SqlExportDialect::Postgres {
+        " OVERRIDING SYSTEM VALUE"
+    } else {
+        ""
+    };
     let prefix = format!(
-        "INSERT INTO {} ({quoted_columns}) VALUES\n",
+        "INSERT INTO {} ({quoted_columns}){identity_override} VALUES\n",
         kind.qualified_table(schema_option(schema), table),
     );
     let mut statements = Vec::new();
@@ -7327,6 +7341,14 @@ pub async fn export_table_data(
         } else {
             HashSet::new()
         };
+        let override_system_value = if sql_export {
+            manager
+                .sql_export_requires_identity_override(&connection_id, &schema, &table)
+                .await
+                .map_err(|error| error.to_string())?
+        } else {
+            false
+        };
         if sql_export && sql_dialect == SqlExportDialect::Postgres {
             if let Some(columns) = table_columns.as_ref() {
                 sql_excluded_columns.extend(
@@ -7392,6 +7414,7 @@ pub async fn export_table_data(
                         final_path: file_path,
                         kind,
                         sql_dialect,
+                        override_system_value,
                         analytical_type_policy,
                         schema: writer_schema,
                         table: writer_table,
@@ -10544,6 +10567,7 @@ mod tests {
             sql_insert_statements(
                 DatabaseKind::Postgres,
                 SqlExportDialect::Postgres,
+                false,
                 "public",
                 "users",
                 &[
@@ -10567,6 +10591,7 @@ mod tests {
             sql_insert_statements(
                 DatabaseKind::Mysql,
                 SqlExportDialect::Mysql,
+                false,
                 "app",
                 "events",
                 &[
@@ -10634,6 +10659,37 @@ mod tests {
     }
 
     #[test]
+    fn postgres_sql_export_overrides_always_identity_values_only_when_requested() {
+        let columns = [ColumnDef {
+            name: "id".to_string(),
+            data_type: "bigint".to_string(),
+        }];
+        let rows = [vec![json!(42)]];
+
+        let overridden = sql_insert_statements(
+            DatabaseKind::Postgres,
+            SqlExportDialect::Postgres,
+            true,
+            "public",
+            "users",
+            &columns,
+            &rows,
+        );
+        assert!(overridden[0].contains(") OVERRIDING SYSTEM VALUE VALUES"));
+
+        let mysql = sql_insert_statements(
+            DatabaseKind::Mysql,
+            SqlExportDialect::Mysql,
+            true,
+            "app",
+            "users",
+            &columns,
+            &rows,
+        );
+        assert!(!mysql[0].contains("OVERRIDING SYSTEM VALUE"));
+    }
+
+    #[test]
     fn sql_exports_batch_rows_and_preserve_typed_literals() {
         let columns = vec![
             ColumnDef {
@@ -10651,6 +10707,7 @@ mod tests {
         let statements = sql_insert_statements(
             DatabaseKind::Postgres,
             SqlExportDialect::Postgres,
+            false,
             "public",
             "events",
             &columns,
@@ -10666,6 +10723,7 @@ mod tests {
         let mysql = sql_insert_statements(
             DatabaseKind::Mysql,
             SqlExportDialect::Mysql,
+            false,
             "app",
             "files",
             &[
@@ -10685,6 +10743,7 @@ mod tests {
         let sqlite = sql_insert_statements(
             DatabaseKind::Postgres,
             SqlExportDialect::Sqlite,
+            false,
             "main",
             "files",
             &[
@@ -13292,6 +13351,7 @@ WITH DATA;"#
             final_path,
             kind: DatabaseKind::Postgres,
             sql_dialect: SqlExportDialect::Postgres,
+            override_system_value: false,
             analytical_type_policy: AnalyticalTypePolicy::Native,
             schema: "public".to_string(),
             table: "users".to_string(),

@@ -384,6 +384,17 @@ pub trait DatabaseDriver: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Whether replaying explicit values requires a dialect-owned identity
+    /// override clause. The default remains false so external and unrelated
+    /// drivers never inherit PostgreSQL syntax from a broad family mapping.
+    async fn sql_export_requires_identity_override(
+        &self,
+        _schema: &str,
+        _table: &str,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Get columns for a table in an explicitly selected server database.
     async fn get_database_columns(
         &self,

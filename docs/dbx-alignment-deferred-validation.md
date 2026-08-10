@@ -310,6 +310,9 @@ explicit deferred validation task rather than an implicit release check.
   SQL. Confirm INSERT columns and row values stay aligned, computed columns
   are absent, and a table with no writable columns fails without publishing a
   partial file.
+- Export explicit values from PostgreSQL 10+ `GENERATED ALWAYS AS IDENTITY`
+  and `BY DEFAULT` tables. Only the former must use `OVERRIDING SYSTEM VALUE`;
+  pre-10 servers and non-PostgreSQL drivers must never receive that clause.
 - Use a provider that initiates `workspace/configuration`,
   `workspace/workspaceFolders`, progress, message, workspace-edit and unknown
   requests. Confirm every request receives a matching numeric or string id,

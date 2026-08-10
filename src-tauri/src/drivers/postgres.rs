@@ -495,6 +495,47 @@ impl PostgresDriver {
             .collect())
     }
 
+    async fn requires_identity_override_on_pool(
+        pool: &Pool<Postgres>,
+        schema: &str,
+        table: &str,
+    ) -> Result<bool> {
+        let server_version_num =
+            sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::integer")
+                .persistent(false)
+                .fetch_one(pool)
+                .await?;
+        // Identity columns and `pg_attribute.attidentity` were introduced in
+        // PostgreSQL 10. Older servers require no override and cannot safely
+        // parse a query referencing the newer catalog field.
+        if server_version_num < 100_000 {
+            return Ok(false);
+        }
+
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_class t
+                JOIN pg_namespace n ON n.oid = t.relnamespace
+                JOIN pg_attribute a ON a.attrelid = t.oid
+                WHERE n.nspname = $1
+                  AND t.relname = $2
+                  AND t.relkind IN ('r', 'p')
+                  AND a.attnum > 0
+                  AND NOT a.attisdropped
+                  AND a.attidentity = 'a'
+            )
+            "#,
+        )
+        .bind(schema)
+        .bind(table)
+        .persistent(false)
+        .fetch_one(pool)
+        .await
+        .map_err(Into::into)
+    }
+
     async fn indexes_on_pool(
         pool: &Pool<Postgres>,
         schema: &str,
@@ -1814,6 +1855,15 @@ impl DatabaseDriver for PostgresDriver {
     async fn get_generated_columns(&self, schema: &str, table: &str) -> Result<Vec<String>> {
         let pool = self.get_pool().await?;
         Self::generated_columns_on_pool(&pool, schema, table).await
+    }
+
+    async fn sql_export_requires_identity_override(
+        &self,
+        schema: &str,
+        table: &str,
+    ) -> Result<bool> {
+        let pool = self.get_pool().await?;
+        Self::requires_identity_override_on_pool(&pool, schema, table).await
     }
 
     async fn get_database_columns(

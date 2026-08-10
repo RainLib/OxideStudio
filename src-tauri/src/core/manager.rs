@@ -819,6 +819,18 @@ impl ConnectionManager {
         driver.get_generated_columns(schema, table).await
     }
 
+    pub async fn sql_export_requires_identity_override(
+        &self,
+        id: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<bool> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .sql_export_requires_identity_override(schema, table)
+            .await
+    }
+
     pub async fn get_database_columns(
         &self,
         id: &str,
