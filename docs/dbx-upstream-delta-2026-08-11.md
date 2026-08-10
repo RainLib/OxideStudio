@@ -23,6 +23,10 @@ and a runtime `schemaObjects` capability in
 `SchemaObjectInfo.membersExpandable` field is explicit and defaults to false,
 so existing packages and non-Xugu object types stay unchanged. A Xugu sidecar
 still needs to implement the request before the UI can expose an expander.
+The Explorer now requests descriptor objects for all relational drivers;
+unsupported built-ins and old sidecars return an empty list, while new capable
+packages can display their object descriptors without another driver-name
+branch.
 
 ## Implementation boundary
 

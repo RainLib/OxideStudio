@@ -1215,10 +1215,11 @@ export function SchemaSidebar() {
   ]);
 
   useEffect(() => {
-    const normalizedDriver = activeDriver.trim().toLowerCase();
-    const supportsDescriptors = ["postgres", "postgresql", "pgsql"].includes(
-      normalizedDriver,
-    );
+    // Descriptor objects are supplementary metadata. Built-in drivers that do
+    // not expose them and older external sidecars both return an empty list,
+    // while a newly capable package (for example Xugu types) can appear here
+    // without adding another driver-name branch to the Explorer.
+    const supportsDescriptors = activeCapabilities.dataModel === "relational";
     if (
       !shouldAutoIntrospect ||
       !isActiveConnectionReady ||
