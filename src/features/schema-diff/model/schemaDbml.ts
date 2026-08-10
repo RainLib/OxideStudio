@@ -128,6 +128,7 @@ export function serializeSchemaSnapshotToDbml(
           index.is_primary ? "pk" : "",
           index.is_unique && !index.is_primary ? "unique" : "",
           index.index_type ? `type: ${index.index_type}` : "",
+          index.comment ? `note: ${quotedText(index.comment)}` : "",
         ].filter(Boolean);
         lines.push(
           `    (${indexColumns(index.columns)})${

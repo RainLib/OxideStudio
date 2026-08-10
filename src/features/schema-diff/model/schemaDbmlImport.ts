@@ -555,6 +555,7 @@ function parseIndex(
     is_unique: settings.has("unique") || settings.has("pk"),
     is_primary: settings.has("pk"),
     index_type: settingText(settings.get("type")),
+    comment: settingText(settings.get("note")),
   };
 }
 

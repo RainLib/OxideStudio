@@ -11612,6 +11612,7 @@ mod tests {
                 definition: Some(
                     "CREATE INDEX users_email_idx ON public.users USING btree (email)".to_string(),
                 ),
+                comment: None,
             }],
         );
 
@@ -12759,6 +12760,7 @@ WITH DATA;"#
                 is_primary: false,
                 index_type: Some("btree".to_string()),
                 definition: None,
+                comment: None,
             },
             IndexInfo {
                 name: "users_pkey".to_string(),
@@ -12767,6 +12769,7 @@ WITH DATA;"#
                 is_primary: true,
                 index_type: Some("btree".to_string()),
                 definition: None,
+                comment: None,
             },
         ];
 

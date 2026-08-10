@@ -464,6 +464,7 @@ impl PostgresDriver {
                 ix.indisprimary,
                 am.amname AS index_type,
                 pg_get_indexdef(ix.indexrelid) AS definition,
+                obj_description(ix.indexrelid, 'pg_class') AS index_comment,
                 COALESCE((
                     SELECT array_agg(a.attname ORDER BY keys.ordinality)
                     FROM unnest(ix.indkey) WITH ORDINALITY AS keys(attnum, ordinality)
@@ -496,6 +497,10 @@ impl PostgresDriver {
                 is_primary: row.try_get("indisprimary").unwrap_or(false),
                 index_type: row.try_get("index_type").ok(),
                 definition: row.try_get("definition").ok(),
+                comment: row
+                    .try_get::<String, _>("index_comment")
+                    .ok()
+                    .filter(|comment| !comment.trim().is_empty()),
             })
             .collect())
     }

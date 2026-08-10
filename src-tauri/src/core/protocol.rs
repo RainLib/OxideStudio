@@ -279,6 +279,8 @@ pub struct IndexInfo {
     pub is_primary: bool,
     pub index_type: Option<String>,
     pub definition: Option<String>,
+    #[serde(default)]
+    pub comment: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

@@ -1128,6 +1128,7 @@ mod tests {
                 is_primary: false,
                 index_type: None,
                 definition: None,
+                comment: None,
             }])
         }
 

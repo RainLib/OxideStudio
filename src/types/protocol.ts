@@ -24,6 +24,7 @@ export interface IndexInfo {
     is_primary: boolean;
     index_type?: string;
     definition?: string;
+    comment?: string;
 }
 
 export interface ConstraintInfo {

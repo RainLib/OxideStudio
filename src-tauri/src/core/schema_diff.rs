@@ -2405,7 +2405,18 @@ fn compare_indexes(
                     &source.name,
                     source_index,
                 );
+                let comment_requires_review = source_index
+                    .comment
+                    .as_deref()
+                    .is_some_and(|comment| !comment.trim().is_empty());
                 let (sql, manual_review) = match sql {
+                    Ok(_) if comment_requires_review => {
+                        warnings.push(format!(
+                            "Index {}.{} has a comment that requires a product-specific semantic migration.",
+                            source.name, index_name
+                        ));
+                        (Vec::new(), true)
+                    }
                     Ok(sql) => (vec![sql], false),
                     Err(warning) => {
                         warnings.push(warning);
@@ -2441,7 +2452,9 @@ fn compare_indexes(
                 true,
                 true,
             )),
-            (Some(source_index), Some(target_index)) if source_index != target_index => {
+            (Some(source_index), Some(target_index))
+                if index_structure_changed(source_index, target_index) =>
+            {
                 let replacement = create_index_sql(
                     kind,
                     source_schema,
@@ -2449,7 +2462,17 @@ fn compare_indexes(
                     &source.name,
                     source_index,
                 );
-                let can_rebuild = replacement.is_ok();
+                let comment_requires_review = source_index
+                    .comment
+                    .as_deref()
+                    .is_some_and(|comment| !comment.trim().is_empty());
+                let can_rebuild = replacement.is_ok() && !comment_requires_review;
+                if comment_requires_review {
+                    warnings.push(format!(
+                        "Index {}.{} has a comment that requires a product-specific semantic migration.",
+                        source.name, index_name
+                    ));
+                }
                 changes.push(change(
                     SchemaChangeKind::IndexDrop,
                     SchemaChangeRisk::Review,
@@ -2467,6 +2490,7 @@ fn compare_indexes(
                     true,
                 ));
                 let sql = match replacement {
+                    Ok(_) if comment_requires_review => Vec::new(),
                     Ok(replacement) => vec![replacement],
                     Err(warning) => {
                         warnings.push(warning);
@@ -2484,6 +2508,18 @@ fn compare_indexes(
                     sql,
                     true,
                     true,
+                ));
+            }
+            (Some(source_index), Some(target_index))
+                if source_index.comment != target_index.comment =>
+            {
+                changes.push(metadata_only_change(
+                    SchemaChangeKind::IndexModify,
+                    target_schema,
+                    &source.name,
+                    source.object_type.clone(),
+                    Some(index_name.to_string()),
+                    format!("Index {} comment changed", index_name),
                 ));
             }
             _ => {}
@@ -3014,6 +3050,15 @@ fn column_structure_changed(source: &ColumnInfo, target: &ColumnInfo) -> bool {
         || source.is_auto_increment != target.is_auto_increment
         || source.default_value != target.default_value
         || source.comment != target.comment
+}
+
+fn index_structure_changed(source: &IndexInfo, target: &IndexInfo) -> bool {
+    source.name != target.name
+        || source.columns != target.columns
+        || source.is_unique != target.is_unique
+        || source.is_primary != target.is_primary
+        || source.index_type != target.index_type
+        || source.definition != target.definition
 }
 
 fn relation_map(relations: &[SchemaRelationSnapshot]) -> BTreeMap<String, &SchemaRelationSnapshot> {
@@ -4027,7 +4072,37 @@ mod tests {
             is_primary: false,
             index_type: Some(index_type.to_string()),
             definition: None,
+            comment: None,
         }
+    }
+
+    #[test]
+    fn index_comment_change_is_review_only_and_never_rebuilds_the_index() {
+        let mut source = snapshot("desired", vec![column("id", "bigint", false)]);
+        let mut target = snapshot("actual", vec![column("id", "bigint", false)]);
+        source.relations[0]
+            .indexes
+            .push(index("users_id_idx", &["id"], "btree"));
+        target.relations[0]
+            .indexes
+            .push(index("users_id_idx", &["id"], "btree"));
+        source.relations[0].indexes[0].comment = Some("lookup path".to_string());
+        source = finalize_schema_snapshot(source).unwrap();
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::IndexModify)
+            .expect("index comment change");
+        assert!(change.sql.is_empty());
+        assert!(change.manual_review);
+        assert_eq!(change.phase, SchemaChangePhase::ManualReview);
+        assert!(change.blocked_reason.is_some());
+        assert!(!plan.migration_sql.contains("DROP INDEX"));
+        assert!(!plan.migration_sql.contains("CREATE INDEX"));
     }
 
     #[test]
@@ -4202,6 +4277,7 @@ mod tests {
             is_primary: false,
             index_type: Some("gin".to_string()),
             definition: Some("CREATE INDEX users_tags_gin ON users USING gin (tags)".to_string()),
+            comment: None,
         });
         source = finalize_schema_snapshot(source).unwrap();
         let mut target = snapshot("actual", vec![column("id", "char(36)", false)]);
@@ -4255,6 +4331,7 @@ mod tests {
             definition: Some(
                 "CREATE INDEX users_search_gist ON users USING gist (search_vector)".to_string(),
             ),
+            comment: None,
         });
         source = finalize_schema_snapshot(source).unwrap();
         let mut target = snapshot(

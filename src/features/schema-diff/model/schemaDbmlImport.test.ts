@@ -76,6 +76,7 @@ const snapshot: SchemaSnapshot = {
           is_unique: false,
           is_primary: false,
           index_type: "btree",
+          comment: "Owner's \\ routing index\nreview before changing",
         },
       ],
       constraints: [
@@ -109,6 +110,7 @@ describe("schema DBML import", () => {
       name: "orders_user_idx",
       columns: ["user_id"],
       index_type: "btree",
+      comment: "Owner's \\ routing index review before changing",
     });
     expect(
       orders.constraints.find((constraint) => constraint.constraint_type === "FOREIGN KEY"),

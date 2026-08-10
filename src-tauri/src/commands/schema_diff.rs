@@ -2209,6 +2209,7 @@ mod tests {
                     is_primary: true,
                     index_type: Some("btree".to_string()),
                     definition: Some("CREATE INDEX private_source".to_string()),
+                    comment: Some("private index comment".to_string()),
                 }],
                 constraints: vec![ConstraintInfo {
                     name: "users_check".to_string(),

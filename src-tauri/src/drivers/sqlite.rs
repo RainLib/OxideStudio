@@ -475,6 +475,7 @@ impl DatabaseDriver for SqliteDriver {
                     .unwrap_or(false),
                 index_type: Some("BTREE".to_string()),
                 definition: None,
+                comment: None,
                 name,
             });
         }

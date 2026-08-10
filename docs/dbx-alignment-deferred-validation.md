@@ -744,6 +744,18 @@ explicit deferred validation task rather than an implicit release check.
   content; resized note bounds must expand the artifact without bypassing the
   24 MP raster limit.
 
+## DBML index comments
+
+- Capture PostgreSQL indexes with `COMMENT ON INDEX` and MySQL/MariaDB indexes
+  with `INDEX_COMMENT`, then confirm Explorer metadata, saved snapshot,
+  fingerprint and DBML `note` preserve the exact Unicode text. Include empty,
+  single-quote, backslash and multiline comments; empty server comments must
+  normalize to absent rather than creating a perpetual diff.
+- Import/export the same comments through DBML and confirm only the portable
+  text round-trips. A comment-only live difference must remain a blocked
+  review-only `IndexModify`; it must never emit `DROP INDEX`/`CREATE INDEX`.
+  Product-specific semantic comment apply requires separate version evidence.
+
 ## ChartDB metadata JSON import
 
 - Copy each target-scoped query from the Snapshot dialog and execute it on the

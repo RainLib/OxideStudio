@@ -773,6 +773,7 @@ fn mongodb_indexes_to_info(indexes: Vec<Document>) -> Vec<IndexInfo> {
                 is_primary,
                 index_type,
                 definition,
+                comment: None,
             })
         })
         .collect()
