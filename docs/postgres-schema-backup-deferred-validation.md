@@ -3,7 +3,7 @@
 ## Phase 128 -- Views and materialized views
 
 - Restore a schema containing a base table, a view that depends on it, a second view that depends on the first, and a materialized view. Confirm the emitted file restores all relations in dependency order and the materialized view has the expected rows.
-- Repeat with non-default view options, an unpopulated materialized view, and indexes on a materialized view. Confirm the materialized-view indexes are emitted only after their relation is created. View options and the unpopulated refresh state remain explicitly out of scope and must remain listed in the export result rather than silently degrading during restore.
+- Repeat with non-default view options, an unpopulated materialized view, and indexes on a materialized view. Confirm the materialized-view indexes are emitted only after their relation is created and unpopulated views use `WITH NO DATA`. View options remain explicitly out of scope and must remain listed in the export result rather than silently degrading during restore.
 - Exercise cancellation while the exporter is reading view definitions and confirm that the partial file is removed and no final file is published.
 
 ## Static validation completed

@@ -3178,6 +3178,18 @@ fn postgres_view_definition_query(kind: DatabaseKind, schema: &str, view: &str) 
     )
 }
 
+fn postgres_materialized_view_populated_query(
+    kind: DatabaseKind,
+    schema: &str,
+    view: &str,
+) -> String {
+    let qualified = kind.qualified_table(schema_option(schema), view);
+    format!(
+        "SELECT relispopulated FROM pg_catalog.pg_class WHERE oid = to_regclass({}) AND relkind = 'm';",
+        sql_string_literal(&qualified)
+    )
+}
+
 fn view_definition_query(kind: DatabaseKind, schema: &str, view: &str) -> String {
     match kind {
         DatabaseKind::Postgres => postgres_view_definition_query(kind, schema, view),
@@ -3208,10 +3220,21 @@ fn generate_postgres_materialized_view_ddl(
     view: &str,
     definition: &str,
 ) -> String {
+    generate_postgres_materialized_view_ddl_with_data(kind, schema, view, definition, true)
+}
+
+fn generate_postgres_materialized_view_ddl_with_data(
+    kind: DatabaseKind,
+    schema: &str,
+    view: &str,
+    definition: &str,
+    with_data: bool,
+) -> String {
     format!(
-        "CREATE MATERIALIZED VIEW {} AS\n{};",
+        "CREATE MATERIALIZED VIEW {} AS\n{} WITH {};",
         kind.qualified_table(schema_option(schema), view),
-        definition.trim().trim_end_matches(';')
+        definition.trim().trim_end_matches(';'),
+        if with_data { "DATA" } else { "NO DATA" },
     )
 }
 
@@ -9422,18 +9445,46 @@ pub async fn export_database_sql(
                     .ok_or_else(|| {
                         format!("PostgreSQL view {view} has no definition available for backup")
                     })?;
-                let ddl = if object_type_is_materialized_view(view_info.table_type.as_deref()) {
-                    generate_postgres_materialized_view_ddl(
+                let is_materialized_view =
+                    object_type_is_materialized_view(view_info.table_type.as_deref());
+                let ddl = if is_materialized_view {
+                    let populated_results = manager
+                        .query(
+                            &connection_id,
+                            &postgres_materialized_view_populated_query(
+                                DatabaseKind::Postgres,
+                                schema,
+                                view,
+                            ),
+                            None,
+                            None,
+                            Some(export_id.clone()),
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let populated = populated_results
+                        .first()
+                        .and_then(|result| result.rows.first())
+                        .and_then(|row| row.first())
+                        .and_then(value_to_string)
+                        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "t" | "1"))
+                        .ok_or_else(|| {
+                            format!(
+                                "PostgreSQL materialized view {view} has no populated state available for backup"
+                            )
+                        })?;
+                    generate_postgres_materialized_view_ddl_with_data(
                         DatabaseKind::Postgres,
                         schema,
                         view,
                         &definition,
+                        populated,
                     )
                 } else {
                     generate_postgres_view_ddl(DatabaseKind::Postgres, schema, view, &definition)
                 };
                 writeln!(writer, "{ddl}").map_err(|error| error.to_string())?;
-                if object_type_is_materialized_view(view_info.table_type.as_deref()) {
+                if is_materialized_view {
                     let indexes = manager
                         .get_indexes(&connection_id, schema, view)
                         .await
@@ -9481,7 +9532,6 @@ pub async fn export_database_sql(
             batches,
             omitted_object_kinds: vec![
                 "grants".to_string(), "view options".to_string(),
-                "materialized view refresh state".to_string(),
             ],
         })
     }.await;
@@ -12221,7 +12271,8 @@ mod tests {
         ensure_sql_insert_conflict_policy, ensure_table_export_format,
         ensure_transfer_endpoint_driver_matches_connection, execute_target_parameterized_batch,
         filter_sql_export_batch, finish_table_data_transfer_transaction,
-        generate_postgres_materialized_view_ddl, generate_postgres_table_ddl,
+        generate_postgres_materialized_view_ddl,
+        generate_postgres_materialized_view_ddl_with_data, generate_postgres_table_ddl,
         generate_postgres_view_ddl, get_target_columns, is_json_lines_path,
         normalized_table_data_transfer_project_id, object_label_from_type,
         object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
@@ -12230,7 +12281,8 @@ mod tests {
         postgres_backup_routine_definitions, postgres_backup_routine_definitions_query,
         postgres_identity_reseed_verification_query,
         postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_setval_sql,
-        postgres_view_definition_query, postgres_view_dependency_query,
+        postgres_materialized_view_populated_query, postgres_view_definition_query,
+        postgres_view_dependency_query,
         preview_metadata_required, query_target,
         query_target_parameterized, read_csv_import_preview, read_json_import_preview,
         relation_operation_allowed, resolve_csv_import_columns,
@@ -14075,6 +14127,14 @@ mod tests {
             r#"SELECT pg_get_viewdef(to_regclass('"public"."active_users"'), true) AS definition;"#
         );
         assert_eq!(
+            postgres_materialized_view_populated_query(
+                DatabaseKind::Postgres,
+                "public",
+                "active_users_mv",
+            ),
+            r#"SELECT relispopulated FROM pg_catalog.pg_class WHERE oid = to_regclass('"public"."active_users_mv"') AND relkind = 'm';"#
+        );
+        assert_eq!(
             view_definition_query(DatabaseKind::Postgres, "public", "active_users"),
             r#"SELECT pg_get_viewdef(to_regclass('"public"."active_users"'), true) AS definition;"#
         );
@@ -14100,7 +14160,18 @@ SELECT id FROM users WHERE active;"#
                 " SELECT id FROM users WHERE active "
             ),
             r#"CREATE MATERIALIZED VIEW "public"."active_users_mv" AS
-SELECT id FROM users WHERE active;"#
+SELECT id FROM users WHERE active WITH DATA;"#
+        );
+        assert_eq!(
+            generate_postgres_materialized_view_ddl_with_data(
+                DatabaseKind::Postgres,
+                "public",
+                "active_users_mv",
+                " SELECT id FROM users WHERE active ",
+                false,
+            ),
+            r#"CREATE MATERIALIZED VIEW "public"."active_users_mv" AS
+SELECT id FROM users WHERE active WITH NO DATA;"#
         );
     }
 
