@@ -3,6 +3,7 @@ import type {
   SchemaDiagramLayout,
   SchemaDiagramNode,
 } from "@/lib/schemaDiagram";
+import { lexicalTopologicalOrder } from "@/lib/lexicalTopologicalOrder";
 
 export type SchemaDiagramArea = {
   id: string;
@@ -215,38 +216,12 @@ export function applySchemaDiagramAreas(
 }
 
 function dependencyOrder(names: string[], edges: SchemaDiagramEdge[]) {
-  const included = new Set(names);
-  const children = new Map<string, Set<string>>();
-  const indegree = new Map(names.map((name) => [name, 0]));
-  for (const edge of edges) {
-    if (!included.has(edge.sourceRelation) || !included.has(edge.targetRelation)) {
-      continue;
-    }
-    const next = children.get(edge.targetRelation) || new Set<string>();
-    if (!next.has(edge.sourceRelation)) {
-      next.add(edge.sourceRelation);
-      children.set(edge.targetRelation, next);
-      indegree.set(edge.sourceRelation, (indegree.get(edge.sourceRelation) || 0) + 1);
-    }
-  }
-  const queue = names
-    .filter((name) => indegree.get(name) === 0)
-    .sort((left, right) => left.localeCompare(right));
-  const ordered: string[] = [];
-  while (queue.length > 0) {
-    const name = queue.shift();
-    if (!name) break;
-    ordered.push(name);
-    for (const child of [...(children.get(name) || [])].sort((left, right) =>
-      left.localeCompare(right),
-    )) {
-      const next = (indegree.get(child) || 0) - 1;
-      indegree.set(child, next);
-      if (next === 0) queue.push(child);
-    }
-    queue.sort((left, right) => left.localeCompare(right));
-  }
-  return [...ordered, ...names.filter((name) => !ordered.includes(name)).sort()];
+  return lexicalTopologicalOrder(
+    names,
+    edges.map(
+      (edge) => [edge.targetRelation, edge.sourceRelation] as const,
+    ),
+  ).order;
 }
 
 function cloneAreas(areas: SchemaDiagramArea[]) {

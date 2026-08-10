@@ -64,7 +64,7 @@
 | U04 | 本阶段增强 | SVG/PNG/JPG 图像导出 | `src/pages/editor-page/top-navbar/menu/menu.tsx:83` 起，`src/context/export-image-context/export-image-provider.tsx` | Diagram 可导出 SVG/PNG/JPG，选择过滤结果或完整画布、深色/浅色/透明背景；Note 会以 XML 安全文本和固定调色板进入矢量/栅格产物并扩展画布边界。栅格导出限制 2400 万像素并按比例缩小，右侧 inspector 可收起。 |
 | U05 | 本阶段增强 | 图过滤、选择聚焦、依赖高亮、lost-in-canvas 提示 | `src/pages/editor-page/canvas/canvas-filter/`、`canvas/hooks/use-is-lost-in-canvas.tsx` | Diagram 已有关系/列搜索、keys-only、选择/reveal、visible-count，并新增“选中表 + 一阶依赖”/当前 Area 范围过滤；选中表被搜索或范围隐藏时显示 `Show hidden selection`，清理过滤并居中找回 |
 | P01 | 已对齐并增强 | 大结果表格虚拟化 | ChartDB 重点是 React Flow 画布 | Oxide 使用 `@glideapps/glide-data-grid`，长表不创建每个单元格 DOM；大表 export 继续走 Rust streaming |
-| P02 | 本阶段增强 | 高频画布事件批处理 | ChartDB `canvas.tsx:397/:718/:967` debounce，`:1530` 用 `requestAnimationFrame` throttle；节点测量也使用 rAF | `SchemaDiagramView.tsx` 已用 rAF + 量化 overscan 更新视口，并新增布局级二维空间桶与 relation→edge 邻接索引：滚动只检查相交桶和可见关系的相邻边，edge layer 复用全局 relation map。Note 拖动/缩放只更新节点本地状态，pointer-up 才向统一历史提交一次；Area/Note 持久化 450ms 防抖、串行写入，并在 tab 离开时 flush 最新状态。仍需 1k/5k/10k relation 基准与极端缩放策略。 |
+| P02 | 离线主路径已对齐，真实 WebView 验证延期 | 高频画布事件批处理 | ChartDB `canvas.tsx:397/:718/:967` debounce，`:1530` 用 `requestAnimationFrame` throttle；节点测量也使用 rAF | `SchemaDiagramView.tsx` 已用 rAF + 量化 overscan 更新视口，并新增布局级二维空间桶与 relation→edge 邻接索引：滚动只检查相交桶和可见关系的相邻边，edge layer 复用全局 relation map。Note 拖动/缩放只更新节点本地状态，pointer-up 才向统一历史提交一次；Area/Note 持久化 450ms 防抖、串行写入并在 tab 离开时 flush。布局和 Area 自动排列共用 `O((V+E) log V)` 稳定最小堆拓扑遍历，外部关系判定改为 Set，移除了 10k relation 下的重复全量排序、数组头删除和 edge×relation 扫描。`npm run benchmark:diagram` 固定生成 1k/5k/10k relation + 近似等量 FK，并测 layout、空间索引和 100 次 viewport query；当前 Windows 主机 10k 结果约为 67ms / 4ms / 2ms | 延期在真实 Tauri WebView 记录 React commit、SVG edge path、极端缩放帧率和内存；基准数值不是跨机器 SLA。 |
 | P03 | 本阶段增强 | 派生状态 memo 与细粒度 context | ChartDB 大量 `useMemo/useCallback`，但单一 chartdb provider 也很大 | Oxide QueryEditor/DataGrid 已缓存 metadata、虚拟化行并拆纯函数；稳定协议、hover、completion provider 均有独立生命周期。Diagram 的 relation lookup、隐藏选择判断和 inspector 关联边已复用布局级 Map/adjacency，不再在每次选择时扫描完整 relation/node/edge 列表；后续用 profiler 定位 execution state 与 edge path 计算热点 |
 
 ## 5. 分阶段执行顺序
@@ -141,7 +141,7 @@
 - [x] 增加 PNG/JPG、过滤/完整画布范围和背景选项。
 - [x] 增加依赖/Area 范围过滤与 lost-selection 找回入口。
 - [x] 增加 250ms DBML Draft 诊断与 snapshot-only reviewed diff；offline artifact 禁止 Apply/Open in console。
-- [ ] 增加 1k/5k/10k relation 性能基准。
+- [x] 增加 1k/5k/10k relation 的可重复 layout/index/viewport benchmark，并移除布局与 Area 自动排列的平方复杂度热点。
 
 ## 6. 延后验证
 

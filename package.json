@@ -21,6 +21,7 @@
         "test:release": "node --test scripts/*.node-test.mjs",
         "test:live-db": "bash scripts/test-live-databases.sh",
         "driver:conformance": "node scripts/run-driver-conformance.mjs",
+        "benchmark:diagram": "tsx scripts/benchmark-schema-diagram.ts",
         "agent-host:build": "npm run build --workspace @oxide/agent-host",
         "agent-host:package": "npm run package --workspace @oxide/agent-host --",
         "oxide-agent:prepare": "node scripts/prepare-oxide-agent.mjs",

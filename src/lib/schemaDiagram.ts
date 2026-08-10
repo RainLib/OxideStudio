@@ -3,6 +3,7 @@ import type {
   ConstraintInfo,
   SchemaSnapshot,
 } from "@/services/tauri/types";
+import { lexicalTopologicalOrder } from "@/lib/lexicalTopologicalOrder";
 
 export interface SchemaDiagramColumn {
   name: string;
@@ -134,48 +135,12 @@ function relationRanks(
   relationNames: string[],
   edges: SchemaDiagramEdge[],
 ) {
-  const visible = new Set(relationNames);
-  const children = new Map<string, Set<string>>();
-  const indegree = new Map(relationNames.map((name) => [name, 0]));
-  for (const edge of edges) {
-    if (!visible.has(edge.sourceRelation) || !visible.has(edge.targetRelation)) {
-      continue;
-    }
-    const parentChildren = children.get(edge.targetRelation) || new Set<string>();
-    if (!parentChildren.has(edge.sourceRelation)) {
-      parentChildren.add(edge.sourceRelation);
-      children.set(edge.targetRelation, parentChildren);
-      indegree.set(
-        edge.sourceRelation,
-        (indegree.get(edge.sourceRelation) || 0) + 1,
-      );
-    }
-  }
-
-  const ranks = new Map(relationNames.map((name) => [name, 0]));
-  const queue = relationNames
-    .filter((name) => indegree.get(name) === 0)
-    .sort((left, right) => left.localeCompare(right));
-  const visited = new Set<string>();
-  while (queue.length > 0) {
-    const parent = queue.shift();
-    if (!parent || visited.has(parent)) continue;
-    visited.add(parent);
-    const parentRank = ranks.get(parent) || 0;
-    for (const child of [...(children.get(parent) || [])].sort((left, right) =>
-      left.localeCompare(right),
-    )) {
-      ranks.set(child, Math.max(ranks.get(child) || 0, parentRank + 1));
-      const nextIndegree = (indegree.get(child) || 0) - 1;
-      indegree.set(child, nextIndegree);
-      if (nextIndegree === 0) queue.push(child);
-    }
-    queue.sort((left, right) => left.localeCompare(right));
-  }
-
-  // Cycles cannot be topologically ranked. Keeping their nodes in rank zero
-  // preserves every relation and relationship without inventing a direction.
-  return ranks;
+  return lexicalTopologicalOrder(
+    relationNames,
+    edges.map(
+      (edge) => [edge.targetRelation, edge.sourceRelation] as const,
+    ),
+  ).ranks;
 }
 
 export function buildSchemaDiagram(
@@ -185,6 +150,9 @@ export function buildSchemaDiagram(
   const query = options.query?.trim().toLocaleLowerCase() || "";
   const maxColumns = Math.max(1, Math.min(50, options.maxColumns || 18));
   const allEdges = relationshipEdges(snapshot);
+  const allRelationNames = new Set(
+    snapshot.relations.map((relation) => relation.name),
+  );
   const visibleRelations = snapshot.relations
     .filter(
       (relation) =>
@@ -202,9 +170,7 @@ export function buildSchemaDiagram(
   const externalRelationshipCount = allEdges.filter(
     (edge) =>
       edge.targetSchema !== snapshot.schemaName ||
-      !snapshot.relations.some(
-        (relation) => relation.name === edge.targetRelation,
-      ),
+      !allRelationNames.has(edge.targetRelation),
   ).length;
   const ranks = relationRanks(
     visibleRelations.map((relation) => relation.name),
