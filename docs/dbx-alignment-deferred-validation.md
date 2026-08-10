@@ -701,6 +701,18 @@ explicit deferred validation task rather than an implicit release check.
   automatic preflight path. Old stored payloads without `conversionIssues`
   must continue rendering with an empty list.
 
+## Structured array value preview
+
+- Open JSON arrays and PostgreSQL array literals containing quoted commas,
+  escaped quotes/backslashes, NULL versus quoted `"NULL"`, nested dimensions,
+  explicit dimension bounds and empty arrays. Confirm PostgreSQL literal leaves
+  stay strings (except unquoted NULL) and toggling the tree never rewrites the draft.
+- Confirm malformed, deeper-than-64, larger-than-100,000-item and larger-than-
+  1,000,000-character arrays stay in text mode with a bounded diagnostic.
+- Exercise the preview with PostgreSQL array columns and JSON-array values from
+  the other reviewed drivers; database writes remain deferred until the full
+  logic-alignment pass is complete.
+
 ## Schema diagram SVG and viewport culling
 
 - Export filtered and keys-only diagrams containing XML-sensitive relation,

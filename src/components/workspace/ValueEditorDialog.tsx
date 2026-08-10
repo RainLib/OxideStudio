@@ -11,6 +11,7 @@ import {
   FileText,
   Hash,
   LoaderCircle,
+  ListTree,
   ToggleLeft,
   Type,
 } from "lucide-react";
@@ -33,6 +34,7 @@ import {
   valueEditorState,
   valueEditorSupportsEmpty,
   parseJsonPreview,
+  parseArrayPreview,
   type ValueEditorKind,
   type ValueEditorState,
 } from "@/lib/valueEditor";
@@ -88,6 +90,8 @@ function kindIcon(kind: ValueEditorKind) {
   switch (kind) {
     case "json":
       return <Braces {...props} />;
+    case "array":
+      return <ListTree {...props} />;
     case "binary":
       return <Binary {...props} />;
     case "date":
@@ -198,7 +202,15 @@ export function ValueEditorDialog({
         : null,
     [draft, kind, semanticState],
   );
-  const canShowJsonTree = jsonPreview?.ok === true;
+  const arrayPreview = useMemo(
+    () =>
+      kind === "array" && semanticState === "value"
+        ? parseArrayPreview(draft)
+        : null,
+    [draft, kind, semanticState],
+  );
+  const structuredPreview = kind === "array" ? arrayPreview : jsonPreview;
+  const canShowStructuredTree = structuredPreview?.ok === true;
 
   if (!target) return null;
 
@@ -420,6 +432,10 @@ export function ValueEditorDialog({
                     >
                       Compact
                     </button>
+                  </>
+                )}
+                {(kind === "json" || kind === "array") &&
+                  semanticState === "value" && (
                     <button
                       type="button"
                       className={cn(
@@ -428,19 +444,19 @@ export function ValueEditorDialog({
                           "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]",
                       )}
                       title={
-                        canShowJsonTree
+                        canShowStructuredTree
                           ? jsonPresentation === "tree"
-                            ? "Show JSON text"
-                            : "Inspect JSON as a tree"
-                          : jsonPreview?.error || "JSON tree is unavailable"
+                            ? `Show ${kindLabel(kind)} text`
+                            : `Inspect ${kindLabel(kind)} as a tree`
+                          : structuredPreview?.error || "Tree preview is unavailable"
                       }
                       aria-label={
                         jsonPresentation === "tree"
-                          ? "Show JSON text"
-                          : "Inspect JSON as a tree"
+                          ? `Show ${kindLabel(kind)} text`
+                          : `Inspect ${kindLabel(kind)} as a tree`
                       }
                       aria-pressed={jsonPresentation === "tree"}
-                      disabled={!canShowJsonTree}
+                      disabled={!canShowStructuredTree}
                       onClick={() =>
                         setJsonPresentation((current) =>
                           current === "tree" ? "text" : "tree",
@@ -449,8 +465,7 @@ export function ValueEditorDialog({
                     >
                       Tree
                     </button>
-                  </>
-                )}
+                  )}
                 <button
                   type="button"
                   className={cn(
@@ -529,10 +544,10 @@ export function ValueEditorDialog({
                     </span>
                   </label>
                 </div>
-              ) : kind === "json" &&
+              ) : (kind === "json" || kind === "array") &&
                 jsonPresentation === "tree" &&
-                jsonPreview?.ok ? (
-                <JsonTreePreview value={jsonPreview.value} />
+                structuredPreview?.ok ? (
+                <JsonTreePreview value={structuredPreview.value} />
               ) : (
                 <Editor
                   height="100%"

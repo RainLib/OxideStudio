@@ -86,7 +86,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 | ID | 状态 / 差距 | DBX 实现位置 | Oxide 当前落点 | 对齐验收 |
 | --- | --- | --- | --- | --- |
 | G01 | 部分对齐：filter/sort builder | `useDataGridFilterBuilder.ts`、`dataGridConditionCompletion.ts`、`dataGridSort.ts` | SQL WHERE、visual filters、sort、typed completion 已有 | 建立 dialect × literal type × operator × multi-predicate × quote 的测试矩阵。 |
-| G02 | 未对齐：专用值查看器 | `JsonValueTable.vue`、binary/image/geometry/spatial modules | JSON tree、value editor、transpose 已有 | XML、array/map、binary hex、image、geometry 分别有大小预算和只读/编辑边界。 |
+| G02 | 部分对齐：专用值查看器 | `JsonValueTable.vue`、binary/image/geometry/spatial modules | Value Editor 已区分 NULL/空串/未加载，提供 1,000,000 字符上限的 JSON tree、严格 binary hex 编辑与 byte 计数，并新增 JSON array / PostgreSQL array literal 的有界只读树预览：最多 64 层、100,000 项，叶子不做类型强转，切换树视图不重写原始数据库文本。 | 继续补 XML、map 专用键值视图、image 与 geometry；各自需要独立大小预算和只读/编辑边界。 |
 | G03 | 未对齐：expression cell/default preview | DBX grid edit adapter、cell generation 与 bulk edit modules | 普通 typed cell mutation | 表达式必须显式切换；generated/default 在提交预览中区分“不发送”“NULL”“表达式”。 |
 | G04 | 未对齐：全量数据 compare | DBX `dataGrid/dataCompare.ts` 与批量数据工具 | 仅 loaded-page compare | 后端 keyset 分页、稳定 key、断点、冲突/重复 key 报告和可恢复 artifact。 |
 | I01 | 部分对齐：CSV/JSON/XLSX import | `crates/dbx-core/src/table_import.rs`；`TableImportDialog.vue`；`lib/table/tableImport.ts` | preview、mapping、原生事务流式导入已存在；native CSV/JSON/XLSX preview 现返回完整文件 SHA-256，确认写入时回传并核验，文件在预览后变化会被拒绝。UTF-8 原生 CSV 在确认后、事务前进行全文件只读预检，验证映射与每行可生成参数化 INSERT；有拒绝行时严格导入不启动，仅返回有界行号/错误码。每次有有效 project ID 的 native import 生成稳定 import ID，并持久化脱敏终态报告。 | 增加 reject-row 文件、显式错误行隔离与 resume token；浏览器 fallback 的非 UTF-8 CSV 暂不生成 native report。 |

@@ -1,5 +1,5 @@
 export type ValueEditorKind =
-  "text" | "json" | "date" | "binary" | "number" | "boolean";
+  "text" | "json" | "array" | "date" | "binary" | "number" | "boolean";
 
 export type ValueEditorState = "unloaded" | "value" | "empty" | "null";
 
@@ -24,6 +24,7 @@ export type JsonPreviewResult =
 export const JSON_TREE_PREVIEW_MAX_CHARACTERS = 1_000_000;
 
 const JSON_TYPE = /\b(jsonb?|object|map|document)\b/i;
+const ARRAY_TYPE = /(?:\[\]\s*$|\barray\b)/i;
 const BINARY_TYPE =
   /\b(bytea|binary|varbinary|tinyblob|blob|mediumblob|longblob|raw)\b/i;
 const DATE_TYPE = /\b(date|time|timestamp|datetime|timestamptz|timetz)\b/i;
@@ -39,6 +40,7 @@ export function inferValueEditorKind(
   value: unknown,
 ): ValueEditorKind {
   const normalizedType = columnType?.trim() || "";
+  if (ARRAY_TYPE.test(normalizedType)) return "array";
   if (JSON_TYPE.test(normalizedType)) return "json";
   if (BINARY_TYPE.test(normalizedType)) return "binary";
   if (DATE_TYPE.test(normalizedType)) return "date";
@@ -120,6 +122,17 @@ export function parseValueEditorDraft(options: {
         error: `Invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
+  }
+
+  if (kind === "array") {
+    const preview = parseArrayPreview(draft);
+    if (!preview.ok) return preview;
+    // JSON-backed drivers accept a structured array. PostgreSQL-style array
+    // literals remain exact strings so inspection never changes bounds,
+    // quoting, element types, or server-side casting semantics.
+    return draft.trimStart().startsWith("[")
+      ? { ok: true, value: preview.value }
+      : { ok: true, value: draft };
   }
 
   if (kind === "binary") {
@@ -234,6 +247,120 @@ export function parseJsonPreview(draft: string): JsonPreviewResult {
   }
 }
 
+/**
+ * Produces a bounded, read-only tree for JSON arrays and PostgreSQL array
+ * literals. It deliberately returns string leaves: only the database can
+ * assign element types, and the preview must not coerce precision-sensitive
+ * values or rewrite the staged text.
+ */
+export function parseArrayPreview(draft: string): JsonPreviewResult {
+  if (draft.length > JSON_TREE_PREVIEW_MAX_CHARACTERS) {
+    return {
+      ok: false,
+      error: "Array is too large for the tree preview. Use the text view instead.",
+    };
+  }
+  const input = draft.trim();
+  const postgresDimensions = /^(?:\[[+-]?\d+:[+-]?\d+\])+=\{/.test(input);
+  if (input.startsWith("[") && !postgresDimensions) {
+    try {
+      const value = JSON.parse(input);
+      return Array.isArray(value)
+        ? { ok: true, value }
+        : { ok: false, error: "The JSON value is not an array." };
+    } catch (error) {
+      return {
+        ok: false,
+        error: `Invalid JSON array: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  try {
+    return { ok: true, value: parsePostgresArrayLiteral(input) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function parsePostgresArrayLiteral(source: string): unknown[] {
+  const dimensions = source.startsWith("[") ? source.indexOf("=") : -1;
+  let input = source;
+  if (dimensions >= 0) {
+    const prefix = source.slice(0, dimensions + 1);
+    if (!/^(?:\[[+-]?\d+:[+-]?\d+\])+=$/.test(prefix)) {
+      throw new Error("Invalid PostgreSQL array dimensions.");
+    }
+    input = source.slice(dimensions + 1);
+  }
+
+  let index = 0;
+  let itemCount = 0;
+  const parseLevel = (depth: number): unknown[] => {
+    if (depth > 64) throw new Error("Array nesting exceeds the 64-level preview limit.");
+    if (input[index] !== "{") throw new Error("PostgreSQL arrays must start with '{'.");
+    index += 1;
+    const values: unknown[] = [];
+    if (input[index] === "}") {
+      index += 1;
+      return values;
+    }
+    while (index < input.length) {
+      if (++itemCount > 100_000) {
+        throw new Error("Array exceeds the 100,000-item preview limit.");
+      }
+      let value: unknown;
+      if (input[index] === "{") {
+        value = parseLevel(depth + 1);
+      } else if (input[index] === '"') {
+        index += 1;
+        let decoded = "";
+        let closed = false;
+        while (index < input.length) {
+          const character = input[index++]!;
+          if (character === "\\") {
+            if (index >= input.length) throw new Error("Invalid array escape sequence.");
+            decoded += input[index++]!;
+          } else if (character === '"') {
+            closed = true;
+            break;
+          } else {
+            decoded += character;
+          }
+        }
+        if (!closed) throw new Error("Unterminated quoted array element.");
+        value = decoded;
+      } else {
+        const start = index;
+        while (index < input.length && input[index] !== "," && input[index] !== "}") {
+          index += 1;
+        }
+        const token = input.slice(start, index).trim();
+        if (!token) throw new Error("Array contains an empty unquoted element.");
+        value = token.toUpperCase() === "NULL" ? null : token;
+      }
+      values.push(value);
+      if (input[index] === ",") {
+        index += 1;
+        continue;
+      }
+      if (input[index] === "}") {
+        index += 1;
+        return values;
+      }
+      throw new Error("Array elements must be separated by ',' and closed with '}'.");
+    }
+    throw new Error("Unterminated PostgreSQL array literal.");
+  };
+
+  const value = parseLevel(0);
+  if (index !== input.length) throw new Error("Unexpected text after the array literal.");
+  return value;
+}
+
 export function binaryByteLength(draft: string) {
   if (!draft.startsWith("\\x") && !draft.startsWith("0x")) return null;
   const hex = draft.slice(2);
@@ -245,6 +372,8 @@ export function kindLabel(kind: ValueEditorKind) {
   switch (kind) {
     case "json":
       return "JSON";
+    case "array":
+      return "Array";
     case "date":
       return "Date / time";
     case "binary":
