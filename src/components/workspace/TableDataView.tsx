@@ -1755,7 +1755,7 @@ export function TableDataView() {
           className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 py-1 text-[10px] wb-muted"
           title={recentExportReport.error || "Latest export audit record"}
         >
-          Latest export: {recentExportReport.status} · {recentExportReport.format.toUpperCase()} · {recentExportReport.encoding === "utf8Bom" ? "UTF-8 BOM" : recentExportReport.encoding === "binary" ? "Binary" : "UTF-8"} · {recentExportReport.rowsExported.toLocaleString()} rows · {recentExportReport.batches.toLocaleString()} batches
+          Latest export: {recentExportReport.status} · {recentExportReport.format.toUpperCase()} · {recentExportReport.encoding === "utf8Bom" ? "UTF-8 BOM" : recentExportReport.encoding === "binary" ? "Binary" : "UTF-8"} · {recentExportReport.maxRows ? `first ${recentExportReport.maxRows.toLocaleString()} requested · ` : "all matching rows · "}{recentExportReport.rowsExported.toLocaleString()} rows · {recentExportReport.batches.toLocaleString()} batches
         </div>
       )}
 

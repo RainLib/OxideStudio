@@ -22,7 +22,7 @@
 - 新命令代码块有 Monaco snippet tab stop，且可被已有 SQL completion 的 trigger、排序、usage rank、取消与 generation guard 共同管理。
 - `completionItem/resolve` 的延迟 documentation/additional edits 也已绑定到产生候选的 URI 和 Monaco model version；用户继续输入、切换 tab 或取消后，旧 resolve 响应只保留原候选，不会覆盖新文档的展示/编辑合同。
 - 产品范围：PostgreSQL、CockroachDB、YugabyteDB、Neon、Supabase、TimescaleDB 和 SQLite 使用 `ON CONFLICT`；MySQL、TiDB、OceanBase MySQL、SingleStore 使用 `ON DUPLICATE KEY UPDATE`；SQL Server 只显示 `MERGE`。
-- Table Grid 的导出菜单现在可选择全部匹配行或前 1,000/10,000/100,000 行；选择对 CSV、SQL、JSON、JSONL、TSV、XLSX、Parquet、Arrow 和 Markdown 共享，后端仍按当前过滤和排序流式读取，而不是从当前可见页截断。
+- Table Grid 的导出菜单现在可选择全部匹配行或前 1,000/10,000/100,000 行；选择对 CSV、SQL、JSON、JSONL、TSV、XLSX、Parquet、Arrow 和 Markdown 共享，后端仍按当前过滤和排序流式读取，而不是从当前可见页截断。导出结果和项目级终态审计报告会保存该请求上限，旧报告保持兼容为空。
 - `src/features/query-editor/model/sqlCommandSnippets.test.ts` 已验证三种语法不会互相泄漏，及已有 Oracle、Db2、Dameng 专属块。
 - 已执行：`npm.cmd exec vitest run src/features/query-editor/model/sqlCommandSnippets.test.ts`（16 tests）和 `npm.cmd run build`。真实数据库/LSP provider 组合验证继续在总体验收阶段执行。
 

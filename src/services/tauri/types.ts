@@ -513,6 +513,8 @@ export interface TableExportResult {
   filePath: string;
   rowsExported: number;
   batches: number;
+  /** Undefined means every row matching the current filters was exported. */
+  maxRows?: number | null;
   /** Present only when a valid project ID was supplied and local audit storage succeeded. */
   reportId?: string | null;
   /** Schema-only notices for analytical columns represented losslessly as UTF-8. */
@@ -557,6 +559,8 @@ export interface TableExportReport {
   encoding: TableExportEncoding;
   rowsExported: number;
   batches: number;
+  /** Undefined for reports produced before scoped exports were introduced. */
+  maxRows?: number | null;
   status: TableExportReportStatus;
   startedAt: number;
   finishedAt: number;

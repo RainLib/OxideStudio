@@ -227,6 +227,9 @@ pub struct TableExportResult {
     pub file_path: String,
     pub rows_exported: u64,
     pub batches: u64,
+    /// Requested source-row ceiling. `None` means every matching row was read.
+    #[serde(default)]
+    pub max_rows: Option<u64>,
     pub report_id: Option<String>,
     /// Analytical formats retain the source type in Arrow field metadata when
     /// no lossless native mapping exists. The UI surfaces these bounded,
@@ -286,6 +289,9 @@ pub struct TableExportReport {
     pub encoding: TableExportEncoding,
     pub rows_exported: u64,
     pub batches: u64,
+    /// Privacy-safe execution scope retained for export auditability.
+    #[serde(default)]
+    pub max_rows: Option<u64>,
     pub status: TableExportReportStatus,
     pub started_at: i64,
     pub finished_at: i64,
@@ -2697,6 +2703,7 @@ fn write_table_export_stream(
         file_path: final_path.display().to_string(),
         rows_exported,
         batches,
+        max_rows: None,
         report_id: None,
         type_coercions,
     })
@@ -8643,6 +8650,9 @@ pub async fn export_table_data(
     );
 
     let mut result = result;
+    if let Ok(export) = result.as_mut() {
+        export.max_rows = max_rows;
+    }
     if let Some(project_id) = normalized_table_export_project_id(project_id.as_deref()) {
         let (report_status, report_error) = match &result {
             Ok(_) => (TableExportReportStatus::Done, None),
@@ -8670,6 +8680,7 @@ pub async fn export_table_data(
             encoding,
             rows_exported,
             batches,
+            max_rows,
             status: report_status,
             started_at,
             finished_at: current_table_timestamp_millis(),
