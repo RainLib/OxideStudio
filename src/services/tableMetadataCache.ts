@@ -14,10 +14,13 @@ import {
   isMetadataCacheSupersededError,
   MetadataCacheGenerationRegistry,
 } from "@/services/metadataCacheGeneration";
+import {
+  resolveMetadataConnectionScope,
+  type ResolvedMetadataConnectionScope,
+} from "@/services/metadataConnectionScope";
 
 const TABLE_METADATA_CACHE_KIND = "TABLE_METADATA_CACHE";
-const TABLE_METADATA_CACHE_VERSION = 1;
-const DATABASE_SCOPED_TABLE_METADATA_CACHE_VERSION = 2;
+const TABLE_METADATA_CACHE_VERSION = 3;
 const ACTIVE_PROJECT_KEY = "oxide-studio-active-project";
 const DEFAULT_PROJECT_ID = "sqls";
 
@@ -25,6 +28,8 @@ export interface TableMetadataIdentity {
   projectId?: string;
   connectionId: string;
   driver: DatabaseDriver;
+  driverPackageVersion?: string | null;
+  connectionDatabaseName?: string | null;
   databaseName?: string;
   schema: string;
   table: string;
@@ -50,6 +55,8 @@ interface StoredTableMetadata {
   version: number;
   projectId?: string;
   driver: DatabaseDriver;
+  driverPackageVersion: string | null;
+  connectionDatabaseName: string | null;
   databaseName?: string;
   schema: string;
   table: string;
@@ -68,7 +75,7 @@ const cacheGenerations = new MetadataCacheGenerationRegistry();
 
 type ResolvedTableMetadataIdentity = TableMetadataIdentity & {
   projectId: string;
-};
+} & ResolvedMetadataConnectionScope;
 
 function activeProjectId() {
   try {
@@ -82,29 +89,20 @@ function resolveIdentity<T extends TableMetadataIdentity>(
   identity: T
 ): T & ResolvedTableMetadataIdentity {
   return {
-    ...identity,
+    ...resolveMetadataConnectionScope(identity),
     projectId: identity.projectId || activeProjectId(),
     databaseName: identity.databaseName || undefined,
   };
 }
 
-function legacyTableCacheKey(identity: TableMetadataIdentity) {
-  return [
-    identity.connectionId,
-    identity.driver,
-    identity.schema,
-    identity.table,
-  ].join(":");
-}
-
 function tableCacheKey(identity: ResolvedTableMetadataIdentity) {
-  if (!identity.databaseName) return legacyTableCacheKey(identity);
-
-  return `oxide:table-metadata:v2:${encodeURIComponent(
+  return `oxide:table-metadata:v3:${encodeURIComponent(
     JSON.stringify([
       identity.projectId,
       identity.connectionId,
       identity.driver,
+      identity.driverPackageVersion,
+      identity.connectionDatabaseName,
       identity.databaseName,
       identity.schema,
       identity.table,
@@ -126,10 +124,8 @@ function advanceCacheGeneration(identity: ResolvedTableMetadataIdentity) {
   return { scope, generation: cacheGenerations.advance(scope) };
 }
 
-function cacheVersion(identity: TableMetadataIdentity) {
-  return identity.databaseName
-    ? DATABASE_SCOPED_TABLE_METADATA_CACHE_VERSION
-    : TABLE_METADATA_CACHE_VERSION;
+function cacheVersion() {
+  return TABLE_METADATA_CACHE_VERSION;
 }
 
 function metadataLoadKey(
@@ -157,14 +153,16 @@ function parseCachedMetadata(
   const metadata = resource?.metadata as Partial<StoredTableMetadata> | undefined;
   if (
     !metadata ||
-    metadata.version !== cacheVersion(identity) ||
+    metadata.version !== cacheVersion() ||
     metadata.driver !== identity.driver ||
+    (metadata.driverPackageVersion || null) !== identity.driverPackageVersion ||
+    (metadata.connectionDatabaseName || null) !==
+      identity.connectionDatabaseName ||
     (metadata.databaseName || undefined) !== identity.databaseName ||
     metadata.schema !== identity.schema ||
     metadata.table !== identity.table ||
-    (identity.databaseName &&
-      (metadata.projectId !== identity.projectId ||
-        resource?.project_id !== identity.projectId))
+    metadata.projectId !== identity.projectId ||
+    resource?.project_id !== identity.projectId
   ) {
     return null;
   }
@@ -210,9 +208,11 @@ async function persistTableMetadata(
       cacheGenerations.assertCurrent(key, expectedGeneration);
       const metadata: StoredTableMetadata = {
         ...(current || {}),
-        version: cacheVersion(resolvedIdentity),
+        version: cacheVersion(),
         projectId: resolvedIdentity.projectId,
         driver: resolvedIdentity.driver,
+        driverPackageVersion: resolvedIdentity.driverPackageVersion,
+        connectionDatabaseName: resolvedIdentity.connectionDatabaseName,
         databaseName: resolvedIdentity.databaseName,
         schema: resolvedIdentity.schema,
         table: resolvedIdentity.table,

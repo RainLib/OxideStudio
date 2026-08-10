@@ -8,11 +8,15 @@ import {
   isMetadataCacheSupersededError,
   MetadataCacheGenerationRegistry,
 } from "@/services/metadataCacheGeneration";
+import {
+  resolveMetadataConnectionScope,
+  type ResolvedMetadataConnectionScope,
+} from "@/services/metadataConnectionScope";
 
 export const POSTGRES_DATABASE_CATALOG_CACHE_KIND =
   "POSTGRES_DATABASE_CATALOG_CACHE";
 
-const POSTGRES_DATABASE_CATALOG_CACHE_VERSION = 1;
+const POSTGRES_DATABASE_CATALOG_CACHE_VERSION = 2;
 
 export interface PostgresDatabaseCatalogIdentity {
   projectId: string;
@@ -23,7 +27,12 @@ export interface PostgresDatabaseCatalogIdentity {
    * catalog provider (for example DuckDB attached databases).
    */
   driver: DatabaseDriver;
+  driverPackageVersion?: string | null;
+  connectionDatabaseName?: string | null;
 }
+
+type ResolvedPostgresDatabaseCatalogIdentity =
+  PostgresDatabaseCatalogIdentity & ResolvedMetadataConnectionScope;
 
 export interface PostgresDatabaseCatalogSnapshot {
   databases: string[];
@@ -34,6 +43,8 @@ export interface PostgresDatabaseCatalogSnapshot {
 interface StoredPostgresDatabaseCatalog {
   version: number;
   driver: DatabaseDriver;
+  driverPackageVersion: string | null;
+  connectionDatabaseName: string | null;
   connectionId: string;
   databases: string[];
 }
@@ -50,14 +61,22 @@ const catalogListeners = new Map<
 >();
 
 function catalogKey(identity: PostgresDatabaseCatalogIdentity) {
-  return [identity.projectId, identity.connectionId, identity.driver].join(":");
+  const resolvedIdentity = resolveMetadataConnectionScope(identity);
+  return JSON.stringify([
+    resolvedIdentity.projectId,
+    resolvedIdentity.connectionId,
+    resolvedIdentity.driver,
+    resolvedIdentity.driverPackageVersion,
+    resolvedIdentity.connectionDatabaseName,
+  ]);
 }
 
 export function subscribePostgresDatabaseCatalog(
   identity: PostgresDatabaseCatalogIdentity,
   listener: (snapshot: PostgresDatabaseCatalogSnapshot) => void
 ) {
-  const key = catalogKey(identity);
+  const resolvedIdentity = resolveMetadataConnectionScope(identity);
+  const key = catalogKey(resolvedIdentity);
   const listeners = catalogListeners.get(key) || new Set();
   listeners.add(listener);
   catalogListeners.set(key, listeners);
@@ -84,7 +103,15 @@ function notifyPostgresDatabaseCatalog(
 export function postgresDatabaseCatalogParentId(
   identity: PostgresDatabaseCatalogIdentity
 ) {
-  return `oxide:server-catalog:${identity.connectionId}:${identity.driver}`;
+  const resolvedIdentity = resolveMetadataConnectionScope(identity);
+  return `oxide:server-catalog:v2:${encodeURIComponent(
+    JSON.stringify([
+      resolvedIdentity.connectionId,
+      resolvedIdentity.driver,
+      resolvedIdentity.driverPackageVersion,
+      resolvedIdentity.connectionDatabaseName,
+    ]),
+  )}`;
 }
 
 export function postgresDatabaseCatalogResourceId(
@@ -106,7 +133,7 @@ function normalizeDatabases(databases: readonly string[]) {
 
 function parseCatalogResource(
   resource: Resource | undefined,
-  identity: PostgresDatabaseCatalogIdentity
+  identity: ResolvedPostgresDatabaseCatalogIdentity
 ): StoredPostgresDatabaseCatalog | null {
   if (
     !resource ||
@@ -124,6 +151,9 @@ function parseCatalogResource(
   if (
     metadata?.version !== POSTGRES_DATABASE_CATALOG_CACHE_VERSION ||
     metadata.driver !== identity.driver ||
+    (metadata.driverPackageVersion || null) !== identity.driverPackageVersion ||
+    (metadata.connectionDatabaseName || null) !==
+      identity.connectionDatabaseName ||
     metadata.connectionId !== identity.connectionId ||
     !Array.isArray(metadata.databases) ||
     metadata.databases.some((database) => typeof database !== "string")
@@ -134,6 +164,8 @@ function parseCatalogResource(
   return {
     version: POSTGRES_DATABASE_CATALOG_CACHE_VERSION,
     driver: identity.driver,
+    driverPackageVersion: identity.driverPackageVersion,
+    connectionDatabaseName: identity.connectionDatabaseName,
     connectionId: identity.connectionId,
     databases: normalizeDatabases(metadata.databases),
   };
@@ -142,16 +174,17 @@ function parseCatalogResource(
 export async function readCachedPostgresDatabaseCatalog(
   identity: PostgresDatabaseCatalogIdentity
 ): Promise<PostgresDatabaseCatalogSnapshot | null> {
+  const resolvedIdentity = resolveMetadataConnectionScope(identity);
   try {
     const resources = await storeService.getResources(
-      identity.connectionId,
-      postgresDatabaseCatalogParentId(identity),
-      identity.projectId
+      resolvedIdentity.connectionId,
+      postgresDatabaseCatalogParentId(resolvedIdentity),
+      resolvedIdentity.projectId
     );
     const resource = resources.find(
       (item) => item.kind === POSTGRES_DATABASE_CATALOG_CACHE_KIND
     );
-    const catalog = parseCatalogResource(resource, identity);
+    const catalog = parseCatalogResource(resource, resolvedIdentity);
     return catalog
       ? {
           databases: catalog.databases,
@@ -170,31 +203,34 @@ export async function persistPostgresDatabaseCatalog(
   databases: readonly string[],
   expectedGeneration = catalogGenerations.capture(catalogKey(identity)),
 ): Promise<void> {
+  const resolvedIdentity = resolveMetadataConnectionScope(identity);
   const normalizedDatabases = normalizeDatabases(databases);
-  const parentId = postgresDatabaseCatalogParentId(identity);
-  const key = catalogKey(identity);
+  const parentId = postgresDatabaseCatalogParentId(resolvedIdentity);
+  const key = catalogKey(resolvedIdentity);
   const previousOperation = catalogOperations.get(key) || Promise.resolve();
   const write = previousOperation.catch(() => null).then(async () => {
     catalogGenerations.assertCurrent(key, expectedGeneration);
     await storeService.saveResources(
       [
         {
-          id: postgresDatabaseCatalogResourceId(identity),
-          project_id: identity.projectId,
-          connection_id: identity.connectionId,
+          id: postgresDatabaseCatalogResourceId(resolvedIdentity),
+          project_id: resolvedIdentity.projectId,
+          connection_id: resolvedIdentity.connectionId,
           parent_id: parentId,
           kind: POSTGRES_DATABASE_CATALOG_CACHE_KIND,
-          name: `${identity.driver} database catalog`,
+          name: `${resolvedIdentity.driver} database catalog`,
           metadata: {
             version: POSTGRES_DATABASE_CATALOG_CACHE_VERSION,
-            driver: identity.driver,
-            connectionId: identity.connectionId,
+            driver: resolvedIdentity.driver,
+            driverPackageVersion: resolvedIdentity.driverPackageVersion,
+            connectionDatabaseName: resolvedIdentity.connectionDatabaseName,
+            connectionId: resolvedIdentity.connectionId,
             databases: normalizedDatabases,
           } satisfies StoredPostgresDatabaseCatalog,
           last_updated: Date.now(),
         },
       ],
-      identity.projectId
+      resolvedIdentity.projectId
     );
   });
   catalogOperations.set(key, write);
@@ -214,18 +250,23 @@ export async function persistPostgresDatabaseCatalog(
 export function refreshPostgresDatabaseCatalog(
   identity: PostgresDatabaseCatalogIdentity
 ): Promise<PostgresDatabaseCatalogSnapshot> {
-  const key = catalogKey(identity);
+  const resolvedIdentity = resolveMetadataConnectionScope(identity);
+  const key = catalogKey(resolvedIdentity);
   const pending = catalogRefreshes.get(key);
   if (pending) return pending;
 
   const refresh = (async () => {
     const generation = catalogGenerations.capture(key);
     const databases = normalizeDatabases(
-      await schemaService.getDatabases(identity.connectionId)
+      await schemaService.getDatabases(resolvedIdentity.connectionId)
     );
     catalogGenerations.assertCurrent(key, generation);
     try {
-      await persistPostgresDatabaseCatalog(identity, databases, generation);
+      await persistPostgresDatabaseCatalog(
+        resolvedIdentity,
+        databases,
+        generation,
+      );
     } catch (error) {
       if (isMetadataCacheSupersededError(error)) throw error;
       console.warn("Failed to cache database catalog", error);
@@ -236,7 +277,7 @@ export function refreshPostgresDatabaseCatalog(
       source: "remote" as const,
       updatedAt: Date.now(),
     };
-    notifyPostgresDatabaseCatalog(identity, snapshot);
+    notifyPostgresDatabaseCatalog(resolvedIdentity, snapshot);
     return snapshot;
   })();
 
@@ -253,16 +294,17 @@ export function refreshPostgresDatabaseCatalog(
 export async function clearPostgresDatabaseCatalog(
   identity: PostgresDatabaseCatalogIdentity
 ): Promise<void> {
-  const key = catalogKey(identity);
+  const resolvedIdentity = resolveMetadataConnectionScope(identity);
+  const key = catalogKey(resolvedIdentity);
   catalogGenerations.advance(key);
   catalogRefreshes.delete(key);
   const previousOperation = catalogOperations.get(key) || Promise.resolve();
   const clear = previousOperation.catch(() => null).then(async () => {
     await storeService.deleteResources(
-      identity.connectionId,
-      postgresDatabaseCatalogParentId(identity),
+      resolvedIdentity.connectionId,
+      postgresDatabaseCatalogParentId(resolvedIdentity),
       POSTGRES_DATABASE_CATALOG_CACHE_KIND,
-      identity.projectId
+      resolvedIdentity.projectId
     );
   });
   catalogOperations.set(key, clear);
