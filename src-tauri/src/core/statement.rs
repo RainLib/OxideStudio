@@ -157,6 +157,53 @@ fn skip_ws_and_comments(sql: &str, mut index: usize) -> usize {
     }
 }
 
+/// Separates a vendor execution/routing hint from the leading comment block so
+/// callers that wrap a read-only statement can keep the hint attached to the
+/// outer statement. Ordinary comments remain with the original SQL.
+pub fn split_leading_execution_hint(sql: &str) -> (&str, &str) {
+    let mut index = 0usize;
+    let mut hint_start = None;
+
+    loop {
+        while index < sql.len() {
+            let Some(character) = sql[index..].chars().next() else {
+                break;
+            };
+            if !character.is_whitespace() {
+                break;
+            }
+            index += character.len_utf8();
+        }
+
+        let rest = &sql[index..];
+        if rest.starts_with("--") {
+            index += 2;
+            while index < sql.len() {
+                let character = sql[index..]
+                    .chars()
+                    .next()
+                    .expect("index remains on a character boundary");
+                index += character.len_utf8();
+                if character == '\n' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if !rest.starts_with("/*") {
+            return hint_start
+                .map(|start| (&sql[start..index], sql[index..].trim_start()))
+                .unwrap_or(("", sql));
+        }
+
+        let marker = sql[index + 2..].chars().next();
+        if hint_start.is_none() && matches!(marker, Some('+' | '@' | '&')) {
+            hint_start = Some(index);
+        }
+        index = skip_block_comment(sql, index, StatementScanDialect::Postgres);
+    }
+}
+
 fn is_identifier_start(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphabetic()
 }
@@ -1471,9 +1518,10 @@ pub fn validate_sql_filter_expression(
 mod tests {
     use super::{
         classify_statement, execution_mode, execution_statement_kind, has_multiple_statements,
-        split_sql_statement_spans, split_sql_statement_spans_with_soft_boundaries,
-        split_sql_statements, validate_read_only_sql, validate_sql_filter_expression,
-        QueryExecutionMode, StatementKind, StatementScanDialect,
+        split_leading_execution_hint, split_sql_statement_spans,
+        split_sql_statement_spans_with_soft_boundaries, split_sql_statements,
+        validate_read_only_sql, validate_sql_filter_expression, QueryExecutionMode, StatementKind,
+        StatementScanDialect,
     };
 
     #[test]
@@ -1491,6 +1539,19 @@ mod tests {
             StatementKind::Explain
         );
         assert_eq!(classify_statement("analyze users"), StatementKind::Analyze);
+    }
+
+    #[test]
+    fn splits_only_supported_leading_execution_hints() {
+        for hint in ["/*+ optimizer */", "/*@global:true*/", "/*& tenant:'a' */"] {
+            let sql = format!("-- report\n{hint}\nSELECT 1");
+            let (prefix, statement) = split_leading_execution_hint(&sql);
+            assert_eq!(prefix, format!("{hint}\n"));
+            assert_eq!(statement, "SELECT 1");
+        }
+
+        let ordinary = "/* report */\nSELECT 1";
+        assert_eq!(split_leading_execution_hint(ordinary), ("", ordinary));
     }
 
     #[test]

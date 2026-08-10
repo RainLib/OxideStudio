@@ -14,8 +14,8 @@ use oxide_studio_lib::{
         protocol::{ExplainPlanMode, QueryResult},
         ssh::SshTunnel,
         statement::{
-            execution_statement_kind, split_sql_statements, validate_read_only_sql, StatementKind,
-            StatementScanDialect,
+            execution_statement_kind, split_leading_execution_hint, split_sql_statements,
+            validate_read_only_sql, StatementKind, StatementScanDialect,
         },
     },
     drivers::connect_agent_read_only_driver,
@@ -186,8 +186,7 @@ impl ToolRuntime {
             .unwrap_or(self.grant.max_rows())
             .clamp(1, self.grant.max_rows());
         let fetch_rows = max_rows.saturating_add(1);
-        let bounded_statement =
-            format!("SELECT * FROM (\n{statement}\n) AS oxide_agent_result LIMIT {fetch_rows}");
+        let bounded_statement = bounded_read_only_statement(statement, fetch_rows);
         // SQLite is opened by the shared Agent connection factory with the
         // engine's read-only flag. It does not accept PostgreSQL/MySQL's
         // transaction syntax, so the bounded SELECT is sent directly.
@@ -429,6 +428,13 @@ impl ToolRuntime {
         let sequence = self.next_query_id.fetch_add(1, Ordering::Relaxed);
         format!("oxide-agent-{prefix}-{}-{sequence}", std::process::id())
     }
+}
+
+fn bounded_read_only_statement(statement: &str, fetch_rows: usize) -> String {
+    let (execution_hint, statement) = split_leading_execution_hint(statement);
+    format!(
+        "{execution_hint}SELECT * FROM (\n{statement}\n) AS oxide_agent_result LIMIT {fetch_rows}"
+    )
 }
 
 fn parse_input<T: DeserializeOwned>(input: Value) -> Result<T> {
@@ -718,15 +724,33 @@ mod tests {
     #[test]
     fn read_only_wrapper_has_server_side_limit_and_transaction_rollback() {
         let statement = "SELECT id FROM users";
-        let wrapped = format!(
-            "SELECT * FROM (\n{statement}\n) AS oxide_agent_result LIMIT {}",
-            201
-        );
+        let wrapped = bounded_read_only_statement(statement, 201);
         let script = read_only_transaction_script(StatementScanDialect::Postgres, &wrapped)
             .expect("PostgreSQL read-only wrapper should be available");
         assert!(script.starts_with("BEGIN READ ONLY;"));
         assert!(script.contains("LIMIT 201"));
         assert!(script.ends_with("ROLLBACK;"));
+    }
+
+    #[test]
+    fn read_only_wrapper_keeps_execution_hints_on_the_outer_statement() {
+        for hint in [
+            "/*+ MAX_EXECUTION_TIME(1000) */",
+            "/*@global:true*/",
+            "/*& tenant:'test' */",
+        ] {
+            let sql = format!("{hint}\nSELECT id FROM users");
+            let statement = split_sql_statements(&sql, StatementScanDialect::Mysql)
+                .into_iter()
+                .next()
+                .unwrap();
+            let wrapped = bounded_read_only_statement(statement, 201);
+            assert!(wrapped.starts_with(&format!("{hint}\nSELECT * FROM (")));
+            assert!(!wrapped.contains(&format!("(\n{hint}")));
+        }
+
+        let ordinary = bounded_read_only_statement("/* report */\nSELECT 1", 2);
+        assert!(ordinary.starts_with("SELECT * FROM (\n/* report */"));
     }
 
     #[test]

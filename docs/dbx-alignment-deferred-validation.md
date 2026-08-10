@@ -254,6 +254,12 @@ explicit deferred validation task rather than an implicit release check.
   including connect, metadata, query, parameter binding, cancellation, and
   normalized error mapping. The catalog must remain candidate-only without
   evidence.
+- Run the Headless Agent Host against a controlled MySQL-compatible routing
+  proxy with leading `/*+`, `/*@`, and `/*&` hints. Its server-side row-limit
+  wrapper must keep the hint before the outer SELECT, preserve ordinary comments
+  inside the wrapped statement, and retain read-only transaction/row limits.
+  Repeat with multibyte whitespace/comment text; no database product may infer
+  hint support merely from a compatible SQL parser.
 - For each external driver that claims migration, run a descriptor-only
   migration fixture and publish hash-bound `migration` evidence. Verify stale
   target fingerprints, plan/preflight/apply token swaps, blocked preflight,
