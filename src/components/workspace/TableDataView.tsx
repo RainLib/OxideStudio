@@ -967,6 +967,64 @@ export function TableDataView() {
     }
   };
 
+  const handleExportDatabaseSql = async () => {
+    if (
+      !tabConnectionId ||
+      !activeTab.schemaName ||
+      activeTab.isExecuting ||
+      activeTableExportRef.current ||
+      isCrossDatabasePreview ||
+      isNativeObjectPreview ||
+      normalizeDatabaseDriverName(driver) !== "postgres"
+    ) {
+      return;
+    }
+    const confirmed = window.confirm(
+      `Back up all base relations in schema "${activeTab.schemaName}" to one SQL file?\n\nThis initial backup includes relation structure and data. Views, materialized views, routines, sequences, extensions, grants, and foreign-key constraints are not included.`,
+    );
+    if (!confirmed) return;
+
+    const taskId = startTask({
+      kind: "export",
+      title: `Back up ${activeTab.schemaName}`,
+      detail: "PostgreSQL relation structure and data",
+    });
+    const exportId = tableService.createTableExportId();
+    const exportTask = { exportId, taskId };
+    activeTableExportRef.current = exportTask;
+    setActiveTableExport(exportTask);
+    try {
+      const exported = await tableService.exportDatabaseSql(
+        tabConnectionId,
+        driver,
+        activeTab.schemaName,
+        { exportId },
+      );
+      finishTask(
+        taskId,
+        `${exported.tablesExported.toLocaleString()} relations, ${exported.rowsExported.toLocaleString()} rows; ${exported.omittedObjectKinds.length.toLocaleString()} object kinds omitted`,
+      );
+      await revealItemInDir(exported.filePath);
+    } catch (error) {
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? String(error.code)
+          : "";
+      const message = error instanceof Error ? error.message : String(error);
+      if (code === "TABLE_EXPORT_CANCELLED") {
+        cancelTask(taskId, "Backup cancelled; partial file removed");
+      } else {
+        failTask(taskId, message);
+        console.error("PostgreSQL schema backup failed:", error);
+      }
+    } finally {
+      if (activeTableExportRef.current?.exportId === exportId) {
+        activeTableExportRef.current = null;
+        setActiveTableExport(null);
+      }
+    }
+  };
+
   const handleImportCsvRows = async (
     rows: Array<Record<string, unknown>>,
     csvOptions: TableCsvImportOptions,
@@ -1660,6 +1718,13 @@ export function TableDataView() {
         onExportMarkdown={() => void handleExport("markdown")}
         onExportSql={(batchSize, conflictPolicy) =>
           void handleExport("sql", "utf8", batchSize, conflictPolicy)
+        }
+        onExportDatabaseSql={
+          normalizeDatabaseDriverName(driver) === "postgres" &&
+          !isCrossDatabasePreview &&
+          !isNativeObjectPreview
+            ? () => void handleExportDatabaseSql()
+            : undefined
         }
         onExportTsv={() => void handleExport("tsv")}
         onExportXlsx={() => void handleExport("xlsx")}

@@ -78,6 +78,8 @@ interface TableDataToolbarProps {
     batchSize: number,
     conflictPolicy?: SqlInsertConflictPolicy,
   ) => void;
+  /** Available only for the reviewed built-in PostgreSQL backup route. */
+  onExportDatabaseSql?: () => void;
   onExportTsv: () => void;
   onExportXlsx: () => void;
   onExportParquet: () => void;
@@ -122,6 +124,7 @@ export function TableDataToolbar({
   onExportJsonl,
   onExportMarkdown,
   onExportSql,
+  onExportDatabaseSql,
   onExportTsv,
   onExportXlsx,
   onExportParquet,
@@ -405,6 +408,18 @@ export function TableDataToolbar({
                   </DropdownMenuSubContent>
                 </DropdownMenuPortal>
               </DropdownMenuSub>
+            )}
+            {onExportDatabaseSql && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  className="wb-menu-item"
+                  onSelect={onExportDatabaseSql}
+                >
+                  <FileCode2 className="mr-2 h-3.5 w-3.5" />
+                  Backup PostgreSQL schema to SQL...
+                </DropdownMenuItem>
+              </>
             )}
           </DropdownMenuContent>
         </DropdownMenu>

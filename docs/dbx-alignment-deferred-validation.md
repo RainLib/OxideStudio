@@ -1,5 +1,10 @@
 # DBX alignment: deferred validation queue
 
+## Phase 130 -- PostgreSQL relation-backup entry point
+
+- In a real Tauri desktop build, verify that only an eligible built-in PostgreSQL table tab shows the backup menu item; verify the confirmation boundary, task progress, cancellation and file reveal. Confirm cross-database previews, native-object previews and non-PostgreSQL drivers do not expose it.
+- Restore a produced file into a clean PostgreSQL target and compare the relation schema/data. The omitted object kinds shown in the confirmation must remain absent until their source and ordering contracts are implemented.
+
 ## Phase 129 -- fallback completion generation
 
 - In a real Monaco WebView, make two completion requests at the same cursor while the first cached-metadata read is delayed; repeat with LSP unavailable and with a forced LSP error. Confirm only the newest request can publish a fallback list and that cancellation leaves the active list untouched.
