@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import Editor from "@monaco-editor/react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, FileCode2, GitCompareArrows, Loader2 } from "lucide-react";
 import {
   Dialog,
@@ -33,6 +34,53 @@ export function SchemaDbmlDraftDialog({
   const [debouncedSource, setDebouncedSource] = useState("");
   const [operationError, setOperationError] = useState<string | null>(null);
   const [isReviewing, setIsReviewing] = useState(false);
+  const completionDisposableRef = useRef<{ dispose: () => void } | null>(null);
+
+  const registerDbmlLanguage = useCallback((monaco: any) => {
+    if (!monaco.languages.getLanguages().some((language: any) => language.id === "dbml")) {
+      monaco.languages.register({ id: "dbml" });
+      monaco.languages.setMonarchTokensProvider("dbml", {
+        tokenizer: {
+          root: [
+            [/\/\/.*/, "comment"],
+            [/\b(Table|TableGroup|Ref|Enum|Note|Project)\b/, "keyword"],
+            [/\b(pk|unique|not null|increment|default|ref)\b/, "keyword"],
+            [/"[^"\n]*"/, "string"],
+          ],
+        },
+      });
+    }
+  }, []);
+
+  const handleDbmlMount = useCallback((editor: any, monaco: any) => {
+    completionDisposableRef.current?.dispose();
+    completionDisposableRef.current = monaco.languages.registerCompletionItemProvider("dbml", {
+      triggerCharacters: [" ", "[", ":", ".", ">", "<", "-"],
+      provideCompletionItems: (model: any, position: any) => {
+        const line = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
+        const word = model.getWordUntilPosition(position);
+        const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
+        const tables = Array.from(
+          model.getValue().matchAll(/^\s*Table\s+([\w.]+)/gm),
+          (match: RegExpMatchArray) => match[1],
+        ).filter((table): table is string => Boolean(table));
+        const settings = ["pk", "not null", "unique", "increment", "default:", "ref:"];
+        const suggestions = line.includes("[")
+          ? settings.map((label) => ({ label, kind: monaco.languages.CompletionItemKind.Keyword, insertText: label, range }))
+          : [
+              { label: "Table", detail: "DBML table", insertText: "Table ${1:name} {\n  ${2:id} ${3:int} [pk]\n}", kind: monaco.languages.CompletionItemKind.Snippet, insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet, range },
+              { label: "Ref", detail: "DBML relationship", insertText: "Ref: ${1:table}.${2:column} > ${3:table}.${4:column}", kind: monaco.languages.CompletionItemKind.Snippet, insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet, range },
+              { label: "Enum", detail: "DBML enum", insertText: "Enum ${1:name} {\n  ${2:value}\n}", kind: monaco.languages.CompletionItemKind.Snippet, insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet, range },
+              { label: "TableGroup", detail: "DBML table group", insertText: "TableGroup ${1:name} {\n  ${2:table}\n}", kind: monaco.languages.CompletionItemKind.Snippet, insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet, range },
+              ...tables.map((table: string) => ({ label: table, detail: "DBML table", kind: monaco.languages.CompletionItemKind.Reference, insertText: table, range })),
+            ];
+        return { suggestions };
+      },
+    });
+    editor.focus();
+  }, []);
+
+  useEffect(() => () => completionDisposableRef.current?.dispose(), []);
 
   useEffect(() => {
     if (!open) return;
@@ -112,15 +160,25 @@ export function SchemaDbmlDraftDialog({
         </DialogHeader>
 
         <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_250px]">
-          <textarea
+          <Editor
+            beforeMount={registerDbmlLanguage}
+            onMount={handleDbmlMount}
+            language="dbml"
             value={source}
-            onChange={(event) => {
-              setSource(event.target.value);
+            onChange={(value) => {
+              setSource(value || "");
               setOperationError(null);
             }}
-            spellCheck={false}
-            aria-label="DBML schema draft"
-            className="min-h-0 resize-none border-0 bg-[hsl(var(--wb-editor))] p-4 font-mono text-[11px] leading-[1.55] text-[hsl(var(--wb-text))] outline-none"
+            options={{
+              minimap: { enabled: false },
+              fontSize: 11,
+              lineHeight: 17,
+              wordWrap: "on",
+              automaticLayout: true,
+              padding: { top: 12, bottom: 12 },
+              scrollBeyondLastLine: false,
+              suggest: { showKeywords: true, showSnippets: true },
+            }}
           />
           <aside className="min-h-0 overflow-auto border-l border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel)/0.72)] p-3">
             <div className="text-[8px] uppercase tracking-[0.12em] wb-muted">Draft diagnostics</div>
