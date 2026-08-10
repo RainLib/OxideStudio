@@ -596,6 +596,9 @@ export function SchemaSidebar() {
   const databaseExplorerSettings = useSettingsStore(
     (store) => store.settings.databaseExplorer,
   );
+  const tableTabReuseMode = useSettingsStore(
+    (store) => store.settings.dataGrid.tableTabReuseMode,
+  );
   const shouldAutoIntrospect =
     databaseExplorerSettings.refreshMode === "cache-first";
   const shouldLimitVisibleSchemas =
@@ -1627,6 +1630,8 @@ export function SchemaSidebar() {
       schemaName,
       table.name,
       table.type,
+      undefined,
+      { reuseMode: tableTabReuseMode },
     );
 
     await loadTablePage(tabId, 0);
@@ -1715,6 +1720,7 @@ export function SchemaSidebar() {
       table.name,
       table.type,
       databaseName,
+      { reuseMode: tableTabReuseMode },
     );
 
     await loadTablePage(tabId, 0);

@@ -57,6 +57,7 @@ export type PinnableTitleToolId = Extract<
 export type WorkbenchSide = "left" | "right";
 
 export type AppLocale = "system" | "en-US" | "zh-CN";
+export type TableTabReuseMode = "always-new" | "same-table" | "active-tab";
 export type AppearanceStylePreset = "oxide" | "graphite" | "violet" | "terminal";
 export type AppearanceAccent = "blue" | "violet" | "teal" | "amber";
 export type AppearanceFontFamily = "system" | "sans" | "mono";
@@ -138,6 +139,7 @@ export type AppSettings = {
     zoomPercent: number;
     pageSize: number;
     readOnlyByDefault: boolean;
+    tableTabReuseMode: TableTabReuseMode;
     copyIncludeHeaders: boolean;
     showTypeIcons: boolean;
   };
@@ -304,6 +306,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     zoomPercent: 100,
     pageSize: 500,
     readOnlyByDefault: false,
+    tableTabReuseMode: "same-table",
     copyIncludeHeaders: true,
     showTypeIcons: true,
   },
@@ -692,6 +695,12 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         raw,
         ["dataGrid", "readOnlyByDefault"],
         defaults.dataGrid.readOnlyByDefault,
+      ),
+      tableTabReuseMode: enumAt(
+        raw,
+        ["dataGrid", "tableTabReuseMode"],
+        ["always-new", "same-table", "active-tab"],
+        defaults.dataGrid.tableTabReuseMode,
       ),
       copyIncludeHeaders: boolAt(
         raw,

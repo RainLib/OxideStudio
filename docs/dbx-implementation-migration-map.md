@@ -386,6 +386,21 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
 - 真实 Elasticsearch 6/7/8、Kibana proxy、受限 role、data stream/wildcard mapping、非法正则、
   group 后 Console/LSP field completion 与大索引列表性能继续延期验证；本阶段不连接集群。
 
+## Phase 121：对象浏览器表 Tab 复用策略迁移映射
+
+- DBX `apps/desktop/src/App.vue:onClickTable/onViewTableData` 与
+  `composables/useNavigationTargets.ts:openObjectBrowserTableTarget`
+  （`04580355d`）→ Oxide `SchemaSidebar.tsx` 与
+  `useTabStore.ts:findOrCreateTableTab`。
+- Data Grid 设置现在提供 `same-table`（默认）、`always-new` 与 `active-tab`。本地树和
+  PostgreSQL remote database 入口将策略显式传给同一 tab-store action，避免右键、双击、
+  导入前打开和远程 database 路径形成不同的 reuse 行为。
+- `active-tab` 只重定向同连接/同 database 的闲置、无 pending edit 表 Tab；重定向前清除
+  relation-specific results/filter/metadata，防止旧表数据短暂显示。执行中、带编辑或跨数据库
+  的 Tab 都 fail-safe 新建，绝不丢弃用户工作。
+- 真实 WebView 的双击、右键菜单、键盘 command palette、Tab restore、multi-window 和
+  PostgreSQL 多 database 开关进入延期验证；本阶段不连接数据库。
+
 ## 9. 文档维护规则
 
 当某项能力状态发生变化时：

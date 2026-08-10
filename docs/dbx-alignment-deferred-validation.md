@@ -1353,3 +1353,14 @@ explicit deferred validation task rather than an implicit release check.
 - Re-run the focused Rust test executable after repairing the Windows incremental
   target/DLL entry-point environment. Phase 120 source checks and frontend URL
   contract tests pass; no live Elasticsearch cluster was opened.
+
+## Object-browser table tab reuse policy
+
+- In a packaged WebView, open tables/views/materialized views from the Explorer,
+  remote PostgreSQL database tree, command palette, and import actions under
+  `same-table`, `always-new`, and `active-tab`. Verify tab identity, focus,
+  query cancellation, row loading and persisted setting behavior after restart.
+- Keep staged edits, active execution, failed results, different connection IDs,
+  and different PostgreSQL databases as non-reusable boundaries. Confirm that a
+  switch never flashes previous relation rows, filters, metadata, or selection,
+  and that undoable table edits are never discarded.

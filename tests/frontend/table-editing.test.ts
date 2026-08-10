@@ -275,6 +275,67 @@ describe("table editing store", () => {
     ).toMatchObject({ title: "users · archive", databaseName: "archive" });
   });
 
+  it("honors table-tab reuse modes without discarding pending edits", () => {
+    useTabStore.setState({ tabs: [], activeTabId: null });
+    const store = useTabStore.getState();
+    const firstTab = store.findOrCreateTableTab(
+      "postgres-1",
+      "public",
+      "users",
+      "BASE TABLE",
+      undefined,
+      { reuseMode: "same-table" },
+    );
+    const secondTab = store.findOrCreateTableTab(
+      "postgres-1",
+      "public",
+      "users",
+      "BASE TABLE",
+      undefined,
+      { reuseMode: "always-new" },
+    );
+    expect(secondTab).not.toBe(firstTab);
+
+    useTabStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === secondTab
+          ? { ...tab, pendingEdits: new Map([["0:0", "draft"]]) }
+          : tab,
+      ),
+      activeTabId: secondTab,
+    }));
+    const protectedTab = useTabStore.getState().findOrCreateTableTab(
+      "postgres-1",
+      "public",
+      "orders",
+      "BASE TABLE",
+      undefined,
+      { reuseMode: "active-tab" },
+    );
+    expect(protectedTab).not.toBe(secondTab);
+
+    useTabStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === protectedTab ? { ...tab, pendingEdits: new Map() } : tab,
+      ),
+      activeTabId: protectedTab,
+    }));
+    const reusedTab = useTabStore.getState().findOrCreateTableTab(
+      "postgres-1",
+      "public",
+      "audit_log",
+      "BASE TABLE",
+      undefined,
+      { reuseMode: "active-tab" },
+    );
+    expect(reusedTab).toBe(protectedTab);
+    expect(useTabStore.getState().tabs.find((tab) => tab.id === reusedTab)).toMatchObject({
+      tableName: "audit_log",
+      schemaName: "public",
+      results: null,
+    });
+  });
+
   it("opens native database objects as reusable data tabs", () => {
     useTabStore.setState({ tabs: [], activeTabId: null });
 

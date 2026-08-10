@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
+import type { TableTabReuseMode } from "@/lib/appSettings";
 import {
   databaseService,
   queryService,
@@ -737,6 +738,7 @@ interface TabState {
     tableName: string,
     objectType?: string | null,
     databaseName?: string,
+    options?: { reuseMode?: TableTabReuseMode },
   ) => string;
   findOrCreateObjectQueryTab: (
     connectionId: string,
@@ -1044,9 +1046,21 @@ export const useTabStore = create<TabState>((set, get) => ({
     tableName: string,
     objectType?: string | null,
     databaseName?: string,
+    options?: { reuseMode?: TableTabReuseMode },
   ) => {
     const { tabs } = get();
     const normalizedDatabase = normalizedDatabaseName(databaseName);
+    const reuseMode = options?.reuseMode || "same-table";
+
+    if (reuseMode === "always-new") {
+      return get().createTab("table", tableName, "", {
+        connectionId,
+        databaseName: normalizedDatabase,
+        tableName,
+        schemaName,
+        objectType: objectType || null,
+      });
+    }
 
     // Find existing tab with same schema+table
     const existingTab = tabs.find(
@@ -1069,6 +1083,44 @@ export const useTabStore = create<TabState>((set, get) => ({
         ),
       }));
       return existingTab.id;
+    }
+
+    if (reuseMode === "active-tab") {
+      const activeTab = tabs.find((tab) => tab.id === get().activeTabId);
+      if (
+        activeTab?.type === "table" &&
+        activeTab.connectionId === connectionId &&
+        tabMatchesDatabase(activeTab, normalizedDatabase) &&
+        !activeTab.isExecuting &&
+        (activeTab.pendingEdits?.size ?? 0) === 0
+      ) {
+        set((state) => ({
+          tabs: state.tabs.map((tab) =>
+            tab.id === activeTab.id
+              ? {
+                  ...tab,
+                  title: tableName,
+                  tableName,
+                  schemaName,
+                  objectType: objectType || null,
+                  results: null,
+                  error: null,
+                  queryError: null,
+                  tablePage: 0,
+                  tableTotalRows: null,
+                  tableFilterSql: null,
+                  tableFilters: null,
+                  visualFilters: undefined,
+                  sqlFilter: undefined,
+                  tableColumns: undefined,
+                  tableIndexes: undefined,
+                  tableConstraints: undefined,
+                }
+              : tab,
+          ),
+        }));
+        return activeTab.id;
+      }
     }
 
     // Include the remote database in the title so same-named tables remain

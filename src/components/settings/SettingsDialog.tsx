@@ -1923,6 +1923,22 @@ function DataEditorSettings({
           onChange={(pageSize) => updateDataGrid({ pageSize })}
         />
       </SettingRow>
+      <SettingRow label="Table tab reuse:">
+        <select
+          className={selectClass}
+          value={dataGrid.tableTabReuseMode}
+          onChange={(event) =>
+            updateDataGrid({
+              tableTabReuseMode:
+                event.target.value as AppSettings["dataGrid"]["tableTabReuseMode"],
+            })
+          }
+        >
+          <option value="same-table">Reuse the same table</option>
+          <option value="always-new">Always open a new tab</option>
+          <option value="active-tab">Reuse the active clean table tab</option>
+        </select>
+      </SettingRow>
       <CheckboxLabel
         label="Open table data read-only by default"
         checked={dataGrid.readOnlyByDefault}
