@@ -26,13 +26,19 @@
 ## Phase 135 -- Domains
 
 - Restore domains with parameterized base types, defaults, NOT NULL, and multiple named CHECK constraints, including quoted identifiers. Confirm domains are created before dependent table columns and retain their validation behavior.
-- Verify composite, range, and multirange types remain explicit backup boundaries until their catalog dependencies have a reviewed recovery order.
+- Verify multirange types remain an explicit backup boundary. Composite types and simple range types are emitted before dependent relations; ranges whose canonical or subtype-diff function is outside `pg_catalog` fail conservatively until their restore ordering is reviewed.
 - `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. No database was opened.
+
+## Phase 136 -- Range types
+
+- Restore a range type with a built-in subtype, subtype opclass, collation, canonical function, and subtype-diff function. Confirm it is emitted before a dependent table and retains range operators and constraints after restore.
+- Verify a range whose canonical or subtype-diff function is user-defined is rejected before a backup is finalized. Multirange types remain an explicit backup boundary until PostgreSQL-version capability handling is reviewed.
+- `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. The focused Rust test binary compilation exceeded the local 60-second command limit; no database was opened.
 
 ## Phase 134 -- Enum types
 
 - Restore enum-backed columns whose labels contain quotes, commas, Unicode, and a non-alphabetical declared order. Confirm `CREATE TYPE ... AS ENUM` runs before dependent tables and preserves ordering.
-- Verify extensions that supply types are restored before user enum types. Domain, composite, range, and multirange type definitions remain explicit conservative-export boundaries.
+- Verify extensions that supply types are restored before user enum types. Domain, composite, and multirange type definitions remain explicit conservative-export boundaries; range types use the separately documented conservative restore contract.
 - `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. No database was opened.
 
 ## Phase 133 -- Triggers

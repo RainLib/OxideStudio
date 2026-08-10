@@ -3508,6 +3508,96 @@ fn postgres_composite_type_ddls(schema: &str, results: &[QueryResult]) -> Result
     )).collect())
 }
 
+/// Read only user-defined range types.  PostgreSQL's built-in ranges live in
+/// `pg_catalog`; their definitions must come from the target server rather
+/// than being recreated in a schema backup.
+fn postgres_range_type_query(schema: &str) -> String {
+    format!(
+        "SELECT type.typname, pg_catalog.format_type(range.rngsubtype, NULL), opclass_namespace.nspname, opclass.opcname, collation_namespace.nspname, collation.collname, canonical_namespace.nspname, canonical.proname, diff_namespace.nspname, diff.proname \
+         FROM pg_catalog.pg_type type \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = type.typnamespace \
+         JOIN pg_catalog.pg_range range ON range.rngtypid = type.oid \
+         JOIN pg_catalog.pg_opclass opclass ON opclass.oid = range.rngsubopc \
+         JOIN pg_catalog.pg_namespace opclass_namespace ON opclass_namespace.oid = opclass.opcnamespace \
+         LEFT JOIN pg_catalog.pg_collation collation ON collation.oid = range.rngcollation \
+         LEFT JOIN pg_catalog.pg_namespace collation_namespace ON collation_namespace.oid = collation.collnamespace \
+         LEFT JOIN pg_catalog.pg_proc canonical ON canonical.oid = range.rngcanonical \
+         LEFT JOIN pg_catalog.pg_namespace canonical_namespace ON canonical_namespace.oid = canonical.pronamespace \
+         LEFT JOIN pg_catalog.pg_proc diff ON diff.oid = range.rngsubdiff \
+         LEFT JOIN pg_catalog.pg_namespace diff_namespace ON diff_namespace.oid = diff.pronamespace \
+         WHERE namespace.nspname = {} AND type.typtype = 'r' \
+         ORDER BY type.typname;",
+        postgres_sql_string_literal(schema),
+    )
+}
+
+fn postgres_qualified_catalog_name(schema: &str, name: &str) -> String {
+    format!(
+        "{}.{}",
+        DatabaseKind::Postgres.quote_identifier(schema),
+        DatabaseKind::Postgres.quote_identifier(name),
+    )
+}
+
+fn postgres_range_type_ddls(schema: &str, results: &[QueryResult]) -> Result<Vec<String>, String> {
+    results
+        .iter()
+        .flat_map(|result| result.rows.iter())
+        .map(|row| {
+            let name = row.first().and_then(value_to_string).filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "PostgreSQL range metadata has no type name".to_string())?;
+            let subtype = row.get(1).and_then(value_to_string).filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| format!("PostgreSQL range type {name} has no subtype"))?;
+            let opclass_schema = row.get(2).and_then(value_to_string).filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| format!("PostgreSQL range type {name} has no subtype opclass schema"))?;
+            let opclass = row.get(3).and_then(value_to_string).filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| format!("PostgreSQL range type {name} has no subtype opclass"))?;
+            let mut options = vec![format!("SUBTYPE = {subtype}")];
+            options.push(format!(
+                "SUBTYPE_OPCLASS = {}",
+                postgres_qualified_catalog_name(&opclass_schema, &opclass),
+            ));
+            if let (Some(collation_schema), Some(collation)) = (
+                row.get(4).and_then(value_to_string).filter(|value| !value.trim().is_empty()),
+                row.get(5).and_then(value_to_string).filter(|value| !value.trim().is_empty()),
+            ) {
+                options.push(format!(
+                    "COLLATION = {}",
+                    postgres_qualified_catalog_name(&collation_schema, &collation),
+                ));
+            }
+            for (option, schema_index, name_index) in [
+                ("CANONICAL", 6, 7),
+                ("SUBTYPE_DIFF", 8, 9),
+            ] {
+                if let (Some(function_schema), Some(function_name)) = (
+                    row.get(schema_index).and_then(value_to_string).filter(|value| !value.trim().is_empty()),
+                    row.get(name_index).and_then(value_to_string).filter(|value| !value.trim().is_empty()),
+                ) {
+                    // User-defined support functions would have to precede the
+                    // type but routines are intentionally restored after
+                    // relations. Refuse that unsafe ordering rather than
+                    // publish a dump which can only fail during replay.
+                    if function_schema != "pg_catalog" {
+                        return Err(format!(
+                            "PostgreSQL range type {name} uses non-catalog {option} function {function_schema}.{function_name}; its restore order is not yet supported"
+                        ));
+                    }
+                    options.push(format!(
+                        "{option} = {}",
+                        postgres_qualified_catalog_name(&function_schema, &function_name),
+                    ));
+                }
+            }
+            Ok(format!(
+                "CREATE TYPE {} AS RANGE ({});",
+                DatabaseKind::Postgres.qualified_table(Some(schema), &name),
+                options.join(", "),
+            ))
+        })
+        .collect()
+}
+
 fn mysql_comment_literal(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
@@ -9167,6 +9257,11 @@ pub async fn export_database_sql(
                 .await.map_err(|error| error.to_string())?;
             postgres_composite_type_ddls(schema, &results)?
         } else { Vec::new() };
+        let range_types = if include_structure {
+            let results = manager.query(&connection_id, &postgres_range_type_query(schema), None, None, Some(export_id.clone()))
+                .await.map_err(|error| error.to_string())?;
+            postgres_range_type_ddls(schema, &results)?
+        } else { Vec::new() };
         // `serial` and `nextval(...)` defaults require the referenced sequence
         // to exist before CREATE TABLE is replayed.  Read the bounded catalog
         // metadata once and use it for DDL before relations plus state after
@@ -9271,6 +9366,13 @@ pub async fn export_database_sql(
             writeln!(writer, "\n-- Composite types (created before dependent relations)")
                 .map_err(|error| error.to_string())?;
             for ddl in &composite_types {
+                writeln!(writer, "{ddl}").map_err(|error| error.to_string())?;
+            }
+        }
+        if include_structure && !range_types.is_empty() {
+            writeln!(writer, "\n-- Range types (created before dependent relations)")
+                .map_err(|error| error.to_string())?;
+            for ddl in &range_types {
                 writeln!(writer, "{ddl}").map_err(|error| error.to_string())?;
             }
         }
@@ -12280,6 +12382,7 @@ mod tests {
         postgres_backup_index_definitions,
         postgres_backup_routine_definitions, postgres_backup_routine_definitions_query,
         postgres_identity_reseed_verification_query,
+        postgres_range_type_ddls, postgres_range_type_query,
         postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_setval_sql,
         postgres_materialized_view_populated_query, postgres_view_definition_query,
         postgres_view_dependency_query,
@@ -14268,6 +14371,59 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
         )])
         .unwrap_err()
         .contains("no definition"));
+    }
+
+    #[test]
+    fn preserves_postgres_range_types_with_catalog_support_functions() {
+        let query = postgres_range_type_query("public");
+        assert!(query.contains("JOIN pg_catalog.pg_range range"));
+        assert!(query.contains("type.typtype = 'r'"));
+
+        let ddls = postgres_range_type_ddls(
+            "public",
+            &[QueryResult::rows(
+                Vec::new(),
+                vec![vec![
+                    Value::String("business_hours".to_string()),
+                    Value::String("time without time zone".to_string()),
+                    Value::String("pg_catalog".to_string()),
+                    Value::String("time_ops".to_string()),
+                    Value::Null,
+                    Value::Null,
+                    Value::String("pg_catalog".to_string()),
+                    Value::String("time_canonical".to_string()),
+                    Value::String("pg_catalog".to_string()),
+                    Value::String("time_subdiff".to_string()),
+                ]],
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            ddls,
+            vec![
+                "CREATE TYPE \"public\".\"business_hours\" AS RANGE (SUBTYPE = time without time zone, SUBTYPE_OPCLASS = \"pg_catalog\".\"time_ops\", CANONICAL = \"pg_catalog\".\"time_canonical\", SUBTYPE_DIFF = \"pg_catalog\".\"time_subdiff\");"
+                    .to_string()
+            ]
+        );
+
+        let non_catalog = vec![
+            Value::String("business_hours".to_string()),
+            Value::String("time without time zone".to_string()),
+            Value::String("pg_catalog".to_string()),
+            Value::String("time_ops".to_string()),
+            Value::Null,
+            Value::Null,
+            Value::String("public".to_string()),
+            Value::String("business_hours_canonical".to_string()),
+            Value::Null,
+            Value::Null,
+        ];
+        assert!(postgres_range_type_ddls(
+            "public",
+            &[QueryResult::rows(Vec::new(), vec![non_catalog.clone()])],
+        )
+        .unwrap_err()
+        .contains("restore order"));
     }
 
     #[test]
