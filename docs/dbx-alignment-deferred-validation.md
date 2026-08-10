@@ -503,6 +503,12 @@ explicit deferred validation task rather than an implicit release check.
 - Verify `INSERT INTO table (` all-column completion with quoted/non-ASCII names,
   identity/generated/default columns and placeholder navigation. Validate the
   intended include/exclude policy per database before declaring this aligned.
+- At a fresh statement, type `in`, `ins` and `insert` against schemas containing
+  views, identity/generated/default/nullable columns, quoted names, more than 32
+  tables and a table wider than 64 writable columns. Verify table-specific
+  required/all INSERT blocks remain bounded, use the active keyword case, replace
+  only the typed prefix, and preserve Tab/Shift+Tab value navigation. After
+  `INSERT `, ordinary relation completion must remain authoritative instead.
 - Verify `SELECT *` and `alias.*` expansion for one and multiple sources, duplicate
   column names, quoted aliases, joins, views and schema-qualified objects. Multi-source
   output must remain unambiguous and preserve the typed alias where applicable.
