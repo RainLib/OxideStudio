@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, ArrowRightLeft, FilePlus2, Loader2 } from "lucide-react";
+import {
+  AlertCircle,
+  ArrowRightLeft,
+  CheckCircle2,
+  FilePlus2,
+  Loader2,
+  ShieldAlert,
+} from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -963,31 +970,56 @@ export function TableDataTransferDialog({
       )
     : planIsCurrent &&
       canExecuteTableDataTransfer(preview, confirmation, isSubmitting);
+  const hasCurrentReview = isBatchTransfer ? batchPlanIsCurrent : planIsCurrent;
+  const destinationReady = Boolean(
+    targetConnectionId &&
+      targetSchema.trim() &&
+      (isBatchTransfer || targetTable.trim()),
+  );
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !isSubmitting && onClose()}>
-      <DialogContent className="w-[min(800px,calc(100vw-32px))] max-w-none gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
-        <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3">
+      <DialogContent className="flex max-h-[min(760px,calc(100vh-32px))] w-[min(1040px,calc(100vw-32px))] max-w-none flex-col gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+        <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-5 py-4">
           <div className="flex items-center gap-2">
             <span className="flex h-7 w-7 items-center justify-center rounded-[4px] bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-accent))]">
               <ArrowRightLeft size={15} />
             </span>
-            <div>
-              <DialogTitle className="text-[13px] tracking-normal">Transfer table data</DialogTitle>
-              <DialogDescription className="text-[10px] text-[hsl(var(--wb-text-muted))]">
+            <div className="min-w-0">
+              <DialogTitle className="text-[14px] tracking-normal">Transfer table data</DialogTitle>
+              <DialogDescription className="truncate text-[11px] text-[hsl(var(--wb-text-muted))]">
                 {displayEndpoint(source)} → {targetTableMode === "new" ? "review new target table" : `existing target table · ${mode}`}
               </DialogDescription>
             </div>
           </div>
+          <ol className="mt-4 grid grid-cols-4 gap-2 text-[10px]" aria-label="Transfer workflow">
+            {[
+              ["1", "Choose destination", destinationReady],
+              ["2", "Set copy mode", destinationReady && targetTableMode === "existing"],
+              ["3", "Preview mapping", hasCurrentReview],
+              ["4", "Confirm transfer", canExecute],
+            ].map(([step, label, complete]) => (
+              <li
+                key={step as string}
+                className={`flex min-w-0 items-center gap-1.5 border-t pt-2 ${complete ? "border-[hsl(var(--wb-accent))] text-[hsl(var(--wb-text))]" : "border-[hsl(var(--wb-border-subtle))] text-[hsl(var(--wb-text-muted))]"}`}
+              >
+                {complete ? <CheckCircle2 size={12} className="shrink-0 text-[hsl(var(--wb-accent))]" /> : <span className="flex size-3.5 shrink-0 items-center justify-center rounded-full border border-current text-[8px]">{step}</span>}
+                <span className="truncate">{label as string}</span>
+              </li>
+            ))}
+          </ol>
         </DialogHeader>
 
-        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] divide-x divide-[hsl(var(--wb-border-subtle))]">
-          <section className="space-y-3 p-4">
-            <div className="text-[11px] font-medium">Target</div>
+        <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto lg:grid-cols-[minmax(0,1.12fr)_minmax(360px,0.88fr)] lg:overflow-hidden">
+          <section className="space-y-4 border-b border-[hsl(var(--wb-border-subtle))] p-5 lg:overflow-y-auto lg:border-b-0 lg:border-r">
+            <div>
+              <div className="text-[12px] font-medium">Destination</div>
+              <p className="mt-0.5 text-[10px] wb-muted">Choose where this data will be copied. No data is changed until you confirm a reviewed plan.</p>
+            </div>
             {sourceTables.length > 1 && (
               <div className="space-y-1.5 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-[10px] font-medium">Source tables</span>
+                  <span className="text-[10px] font-medium">Source scope</span>
                   <span className="text-[9px] wb-muted">
                     {selectedSourceTables.size} selected
                   </span>
@@ -1009,7 +1041,7 @@ export function TableDataTransferDialog({
               </div>
             )}
             <label className="block space-y-1">
-              <span className="text-[10px] wb-muted">Connection</span>
+              <span className="text-[10px] font-medium">Destination connection</span>
               <Select value={targetConnectionId} onValueChange={setTargetConnectionId} disabled={isSubmitting}>
                 <SelectTrigger className={fieldClass}><SelectValue placeholder="Choose connection" /></SelectTrigger>
                 <SelectContent>
@@ -1068,7 +1100,7 @@ export function TableDataTransferDialog({
               </Select>
             </label>
             <label className="block space-y-1">
-              <span className="text-[10px] wb-muted">Target table</span>
+              <span className="text-[10px] font-medium">Destination table</span>
               <Select
                 value={targetTableMode}
                 onValueChange={(value) =>
@@ -1118,7 +1150,7 @@ export function TableDataTransferDialog({
             {targetTableMode === "existing" && (
               <>
                 <label className="block space-y-1">
-                  <span className="text-[10px] wb-muted">Transfer mode</span>
+                  <span className="text-[10px] font-medium">Copy mode</span>
                   <Select
                     value={mode}
                     onValueChange={(value) =>
@@ -1138,6 +1170,12 @@ export function TableDataTransferDialog({
                     </SelectContent>
                   </Select>
                 </label>
+                {mode === "overwrite" && (
+                  <p className="flex items-start gap-1.5 rounded-[4px] border border-[hsl(var(--wb-warning)/0.35)] bg-[hsl(var(--wb-warning)/0.08)] px-2 py-1.5 text-[10px] leading-4 text-[hsl(var(--wb-text))]">
+                    <ShieldAlert size={13} className="mt-0.5 shrink-0 text-[hsl(var(--wb-warning))]" />
+                    Replace deletes destination rows inside the reviewed transaction before copying. Check the preview carefully before confirming.
+                  </p>
+                )}
                 <div className="grid grid-cols-2 gap-2">
                   <label className="block space-y-1">
                     <span className="text-[10px] wb-muted">Row limit</span>
@@ -1175,8 +1213,14 @@ export function TableDataTransferDialog({
             )}
           </section>
 
-          <section className="min-w-0 p-4">
-            <div className="mb-3 text-[11px] font-medium">Review</div>
+          <section className="min-w-0 bg-[hsl(var(--wb-panel))] p-5 lg:overflow-y-auto">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <div className="text-[12px] font-medium">Review & confirm</div>
+                <p className="mt-0.5 text-[10px] wb-muted">Inspect the generated mapping before a single row is written.</p>
+              </div>
+              {hasCurrentReview && <span className="shrink-0 rounded-[3px] bg-[hsl(var(--wb-active-strong))] px-1.5 py-0.5 text-[9px] text-[hsl(var(--wb-accent))]">Ready for confirmation</span>}
+            </div>
             {recentReports.length > 0 && targetTableMode === "existing" && (
               <div className="mb-3 space-y-1 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2 text-[10px]">
                 <p className="font-medium wb-muted">Recent target transfer history</p>
@@ -1538,7 +1582,11 @@ export function TableDataTransferDialog({
 
         {error && <div role="alert" className="flex items-start gap-2 border-t border-[hsl(var(--destructive)/0.3)] bg-[hsl(var(--destructive)/0.08)] px-4 py-2 text-[10px] text-[hsl(var(--destructive))]"><AlertCircle size={13} className="mt-0.5 shrink-0" />{error}</div>}
 
-        <DialogFooter className="border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3">
+        <DialogFooter className="flex-row items-center justify-between border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-5 py-3">
+          <p className="hidden text-[10px] wb-muted sm:block">
+            {hasCurrentReview ? "Settings are locked to this one-time review token." : "Preview is read-only and does not write rows."}
+          </p>
+          <div className="ml-auto flex items-center gap-2">
           <Button
             type="button"
             variant="outline"
@@ -1562,6 +1610,7 @@ export function TableDataTransferDialog({
               {isSubmitting ? <Loader2 size={13} className="animate-spin" /> : isBatchTransfer ? "Transfer selected tables" : mode === "overwrite" ? "Replace target rows" : mode === "upsert" ? "Upsert rows" : "Append rows"}
             </Button>
           )}
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>
