@@ -9146,19 +9146,6 @@ pub async fn export_database_sql(
                 }
             }
         }
-        if include_data {
-            let sequence_state = sequences
-                .iter()
-                .filter_map(|sequence| postgres_sequence_setval_sql(schema, sequence))
-                .collect::<Vec<_>>();
-            if !sequence_state.is_empty() {
-                writeln!(writer, "\n-- Sequence state (restored after relation data)")
-                    .map_err(|error| error.to_string())?;
-                for statement in sequence_state {
-                    writeln!(writer, "{statement}").map_err(|error| error.to_string())?;
-                }
-            }
-        }
         if include_structure {
             let sequence_ownership = sequences
                 .iter()
@@ -9168,6 +9155,19 @@ pub async fn export_database_sql(
                 writeln!(writer, "\n-- Sequence ownership (applied after relation creation)")
                     .map_err(|error| error.to_string())?;
                 for statement in sequence_ownership {
+                    writeln!(writer, "{statement}").map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        if include_data {
+            let sequence_state = sequences
+                .iter()
+                .filter_map(|sequence| postgres_sequence_setval_sql(schema, sequence))
+                .collect::<Vec<_>>();
+            if !sequence_state.is_empty() {
+                writeln!(writer, "\n-- Sequence state (restored after relation data and ownership)")
+                    .map_err(|error| error.to_string())?;
+                for statement in sequence_state {
                     writeln!(writer, "{statement}").map_err(|error| error.to_string())?;
                 }
             }
