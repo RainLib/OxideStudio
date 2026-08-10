@@ -6,7 +6,7 @@ database target until its relevant queue entries pass.
 
 ## Completed non-database checks (2026-08-10)
 
-- `npm test`: 230 test files and 1,179 tests passed. PostgreSQL remote-content,
+- `npm test`: 230 test files and 1,181 tests passed. PostgreSQL remote-content,
   CSV import, cross-database table view, export progress and generated
   operation-ID mocks now follow the current frontend contract.
 - `npm run build`: strict TypeScript, Vite production build and frontend bundle
@@ -16,6 +16,10 @@ database target until its relevant queue entries pass.
   25 schema diff and migration-planning unit tests passed.
 - Targeted Rust SQL/TSV export and type-conversion review tests passed.
 - `cargo fmt --manifest-path src-tauri/Cargo.toml` and `git diff --check` passed.
+- SQL Server default-schema selection passed focused frontend unit coverage:
+  the saved catalog is not treated as a schema, an explicit schema still wins,
+  and an unscoped LSP document binds to a discovered case-preserving `dbo`.
+  No SQL Server connection was opened.
 - The ChartDB metadata-query catalog unit suite passed for PostgreSQL,
   CockroachDB, MySQL, MariaDB, SQLite, SQL Server, ClickHouse and Oracle query
   contracts; no query was executed against a live database.
@@ -731,6 +735,18 @@ explicit deferred validation task rather than an implicit release check.
   partial persistence.
 - Saved metadata imports must remain offline/review-only: diagram and live diff
   are allowed, while Apply and direct DDL generation remain disabled.
+
+## SQL Server default schema and completion metadata
+
+- Connect with a login whose default schema is `dbo`, leave the Query Editor
+  schema unset, and confirm Explorer plus LSP table/column completion both use
+  the discovered `dbo` entry while retaining the selected database catalog.
+- Repeat with an explicit non-`dbo` schema, a login with a custom default
+  schema, and a principal that cannot enumerate `dbo`; explicit user state must
+  win and system schemas must not become the silent generic fallback.
+- Exercise two catalogs containing the same schema/table names and refresh
+  metadata while completion is open. Late metadata from the old catalog or
+  schema must not overwrite the current document mapping.
 
 ## Typed SQL table export
 

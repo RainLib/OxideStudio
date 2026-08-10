@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  connectionDatabaseNamespacePreference,
   defaultDatabaseCapabilities,
   lspLanguageIdForCapabilities,
   lspServerDialectForCapabilities,
@@ -14,11 +15,27 @@ import {
   supportsLspCapabilities,
   supportedDatabaseDriverProfiles,
   syncExternalDatabaseDriverProfiles,
+  selectPreferredNamespace,
 } from "@/lib/databaseDialect";
 import { buildConnectionUrl, parseConnectionUrl } from "@/lib/connectionUrlParser";
 import { REFERENCE_DATABASE_DRIVER_CANDIDATES } from "@/features/database-drivers";
 
 describe("database dialect capabilities", () => {
+  it("keeps SQL Server catalog names separate from its dbo schema default", () => {
+    expect(
+      connectionDatabaseNamespacePreference("sqlserver", "warehouse"),
+    ).toBeNull();
+    expect(
+      selectPreferredNamespace("sqlserver", ["sys", "sales", "DBO"]),
+    ).toBe("DBO");
+    expect(
+      selectPreferredNamespace("sqlserver", ["dbo", "sales"], ["sales"]),
+    ).toBe("sales");
+    expect(
+      connectionDatabaseNamespacePreference("mysql", "warehouse"),
+    ).toBe("warehouse");
+  });
+
   it("renders declared asymmetric identifier delimiters without corrupting SQL", () => {
     expect(
       quoteIdentifierWithCapabilities({ identifierQuote: "[" }, "order] detail"),

@@ -936,7 +936,28 @@ export function isSystemNamespace(
     );
   }
 
+  if (normalizedDriver === "sqlserver") {
+    return normalized === "information_schema" || normalized === "sys";
+  }
+
   return false;
+}
+
+/**
+ * Some products use the saved connection database as their Explorer
+ * namespace (for example MySQL and MongoDB), while SQL Server keeps catalog
+ * and schema as separate levels. Do not let a catalog that happens to share a
+ * schema name displace SQL Server's real default schema.
+ */
+export function connectionDatabaseNamespacePreference(
+  driver: DatabaseDriver | null | undefined,
+  database: string | null | undefined,
+) {
+  const normalizedDriver =
+    normalizeDatabaseDriverName(String(driver || "")) || driver;
+  if (normalizedDriver === "sqlserver") return null;
+  const trimmed = database?.trim();
+  return trimmed || null;
 }
 
 export function selectPreferredNamespace(
@@ -949,6 +970,15 @@ export function selectPreferredNamespace(
   for (const candidate of preferred) {
     const trimmed = candidate?.trim();
     if (trimmed && namespaces.includes(trimmed)) return trimmed;
+  }
+
+  const normalizedDriver =
+    normalizeDatabaseDriverName(String(driver || "")) || driver;
+  if (normalizedDriver === "sqlserver") {
+    const defaultSqlServerSchema = namespaces.find(
+      (namespace) => namespace.toLowerCase() === "dbo",
+    );
+    if (defaultSqlServerSchema) return defaultSqlServerSchema;
   }
 
   const publicNamespace = namespaces.find(

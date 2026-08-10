@@ -8,6 +8,35 @@ import { collectionToLspTableDefinition } from "@/services/lsp/schemaConfig";
 import { defaultDatabaseCapabilities, lspLanguageId } from "@/lib/databaseDialect";
 
 describe("LSP sync plan", () => {
+  it("binds an unscoped SQL Server document to dbo instead of its catalog name", () => {
+    const plan = createLspSyncPlan({
+      activeConnectionId: "sqlserver-main",
+      connection: {
+        id: "sqlserver-main",
+        driver: "sqlserver",
+        database: "warehouse",
+        supportsDatabaseCatalogs: true,
+      },
+      schemas: ["warehouse", "audit", "dbo"],
+      tabs: [
+        {
+          id: "query",
+          type: "query",
+          connectionId: "sqlserver-main",
+          sql: "SELECT * FROM ",
+        },
+      ],
+    });
+
+    expect(plan?.defaultSchema).toBe("dbo");
+    expect(plan?.defaultCatalog).toEqual({
+      catalogName: "warehouse",
+      databaseName: null,
+      schemaName: "dbo",
+    });
+    expect(plan?.schemaByTabId.query).toBe("dbo");
+  });
+
   it("selects active connection tabs, target schemas, and preferred objects", () => {
     const plan = createLspSyncPlan({
       activeConnectionId: "conn-main",

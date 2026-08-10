@@ -1,4 +1,5 @@
 import {
+  connectionDatabaseNamespacePreference,
   isFileBasedDatabaseDriver,
   selectPreferredNamespace,
 } from "@/lib/databaseDialect";
@@ -87,7 +88,10 @@ export function createLspSyncPlan(options: {
   } = options;
   const defaultSchema = selectPreferredNamespace(connection.driver, schemas, [
     currentSchema,
-    connection.database,
+    connectionDatabaseNamespacePreference(
+      connection.driver,
+      connection.database,
+    ),
   ]);
   if (!defaultSchema) return null;
 

@@ -9,7 +9,10 @@ import {
 } from "@/services/tauri";
 import { useConnectionStore } from "./useConnectionStore";
 import { useTaskStore } from "./useTaskStore";
-import { selectPreferredNamespace } from "@/lib/databaseDialect";
+import {
+  connectionDatabaseNamespacePreference,
+  selectPreferredNamespace,
+} from "@/lib/databaseDialect";
 
 interface SchemaState {
   schemas: string[];
@@ -601,7 +604,10 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     const connections = useConnectionStore.getState().connections;
     const connection = connections.find((item) => item.id === connectionId);
     const activeDriver = connection?.driver || null;
-    const configDefault = connection?.database;
+    const configDefault = connectionDatabaseNamespacePreference(
+      activeDriver,
+      connection?.database,
+    );
     const savedDefault = getSavedDefaultSchema(connectionId, activeDriver);
 
     try {
@@ -1006,7 +1012,10 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
       const connections = useConnectionStore.getState().connections;
       const activeConn = connections.find((c) => c.id === connectionId);
       const activeDriver = activeConn?.driver || null;
-      const configDefault = activeConn?.database;
+      const configDefault = connectionDatabaseNamespacePreference(
+        activeDriver,
+        activeConn?.database,
+      );
       const savedDefault = getSavedDefaultSchema(connectionId, activeDriver);
       const loadKey = getLoadKey(connectionId, activeDriver);
       const nodeKey = getConnectionMetadataNodeKey(connectionId, activeDriver);
