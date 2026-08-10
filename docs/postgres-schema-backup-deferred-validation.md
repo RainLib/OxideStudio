@@ -23,6 +23,12 @@
 - Verify a target without the required extension fails atomically and leaves no finalized backup restore; extension version pinning, grants, and ownership remain outside the conservative export contract.
 - `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. No database was opened.
 
+## Phase 135 -- Domains
+
+- Restore domains with parameterized base types, defaults, NOT NULL, and multiple named CHECK constraints, including quoted identifiers. Confirm domains are created before dependent table columns and retain their validation behavior.
+- Verify composite, range, and multirange types remain explicit backup boundaries until their catalog dependencies have a reviewed recovery order.
+- `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. No database was opened.
+
 ## Phase 134 -- Enum types
 
 - Restore enum-backed columns whose labels contain quotes, commas, Unicode, and a non-alphabetical declared order. Confirm `CREATE TYPE ... AS ENUM` runs before dependent tables and preserves ordering.

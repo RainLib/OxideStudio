@@ -3419,6 +3419,41 @@ fn postgres_enum_ddls(schema: &str, results: &[QueryResult]) -> Result<Vec<Strin
     )).collect())
 }
 
+fn postgres_domain_definitions_query(schema: &str) -> String {
+    format!(
+        "SELECT type.typname, pg_catalog.format_type(type.typbasetype, type.typtypmod), type.typnotnull, pg_catalog.pg_get_expr(type.typdefaultbin, 0), constraint.conname, pg_catalog.pg_get_constraintdef(constraint.oid, true) \
+         FROM pg_catalog.pg_type type \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = type.typnamespace \
+         LEFT JOIN pg_catalog.pg_constraint constraint ON constraint.contypid = type.oid \
+         WHERE namespace.nspname = {} AND type.typtype = 'd' \
+         ORDER BY type.typname, constraint.conname;",
+        postgres_sql_string_literal(schema),
+    )
+}
+
+fn postgres_domain_ddls(schema: &str, results: &[QueryResult]) -> Result<Vec<String>, String> {
+    let mut domains = BTreeMap::<String, (String, bool, Option<String>, Vec<(String, String)>)>::new();
+    for row in results.iter().flat_map(|result| result.rows.iter()) {
+        let name = row.first().and_then(value_to_string).filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "PostgreSQL domain metadata has no type name".to_string())?;
+        let base_type = row.get(1).and_then(value_to_string).filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("PostgreSQL domain {name} has no base type"))?;
+        let not_null = row.get(2).and_then(value_to_string).is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "t" | "1"));
+        let default = row.get(3).and_then(value_to_string).filter(|value| !value.trim().is_empty());
+        let entry = domains.entry(name).or_insert((base_type, not_null, default, Vec::new()));
+        if let (Some(constraint_name), Some(definition)) = (row.get(4).and_then(value_to_string), row.get(5).and_then(value_to_string)) {
+            entry.3.push((constraint_name, definition));
+        }
+    }
+    Ok(domains.into_iter().map(|(name, (base_type, not_null, default, constraints))| {
+        let mut clauses = vec![format!("CREATE DOMAIN {} AS {}", DatabaseKind::Postgres.qualified_table(Some(schema), &name), base_type)];
+        if let Some(default) = default { clauses.push(format!("DEFAULT {default}")); }
+        if not_null { clauses.push("NOT NULL".to_string()); }
+        clauses.extend(constraints.into_iter().map(|(name, definition)| format!("CONSTRAINT {} {}", DatabaseKind::Postgres.quote_identifier(&name), definition)));
+        format!("{};", clauses.join(" "))
+    }).collect())
+}
+
 fn mysql_comment_literal(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
@@ -9040,6 +9075,11 @@ pub async fn export_database_sql(
                 .await.map_err(|error| error.to_string())?;
             postgres_enum_ddls(schema, &enum_results)?
         } else { Vec::new() };
+        let domains = if include_structure {
+            let domain_results = manager.query(&connection_id, &postgres_domain_definitions_query(schema), None, None, Some(export_id.clone()))
+                .await.map_err(|error| error.to_string())?;
+            postgres_domain_ddls(schema, &domain_results)?
+        } else { Vec::new() };
         // `serial` and `nextval(...)` defaults require the referenced sequence
         // to exist before CREATE TABLE is replayed.  Read the bounded catalog
         // metadata once and use it for DDL before relations plus state after
@@ -9130,6 +9170,13 @@ pub async fn export_database_sql(
             writeln!(writer, "\n-- Enum types (created before dependent relations)")
                 .map_err(|error| error.to_string())?;
             for ddl in &enum_types {
+                writeln!(writer, "{ddl}").map_err(|error| error.to_string())?;
+            }
+        }
+        if include_structure && !domains.is_empty() {
+            writeln!(writer, "\n-- Domains (created before dependent relations)")
+                .map_err(|error| error.to_string())?;
+            for ddl in &domains {
                 writeln!(writer, "{ddl}").map_err(|error| error.to_string())?;
             }
         }
