@@ -399,15 +399,71 @@ export const DAMENG_SQL_COMMAND_SNIPPETS: readonly SqlSnippetSetting[] = [
   },
 ];
 
+/**
+ * Conflict-aware INSERT syntax varies materially between database products.
+ * Keep these blocks product-scoped so a quick command completion never
+ * inserts an invalid PostgreSQL clause into MySQL (or vice versa).
+ */
+export const POSTGRES_UPSERT_SQL_COMMAND_SNIPPETS: readonly SqlSnippetSetting[] = [
+  {
+    id: "builtin-postgres-upsert",
+    prefix: "upsert",
+    label: "upsert row",
+    detail: "PostgreSQL-compatible INSERT … ON CONFLICT template",
+    body: "INSERT INTO ${1:table} (${2:columns})\nVALUES (${3:values})\nON CONFLICT (${4:conflict_column}) DO UPDATE\nSET ${5:column} = EXCLUDED.${5:column};",
+    enabled: true,
+  },
+];
+
+export const MYSQL_UPSERT_SQL_COMMAND_SNIPPETS: readonly SqlSnippetSetting[] = [
+  {
+    id: "builtin-mysql-upsert",
+    prefix: "upsert",
+    label: "upsert row",
+    detail: "MySQL INSERT … ON DUPLICATE KEY UPDATE template",
+    body: "INSERT INTO ${1:table} (${2:columns})\nVALUES (${3:values})\nON DUPLICATE KEY UPDATE\n${4:column} = VALUES(${4:column});",
+    enabled: true,
+  },
+];
+
+export const SQLSERVER_MERGE_SQL_COMMAND_SNIPPETS: readonly SqlSnippetSetting[] = [
+  {
+    id: "builtin-sqlserver-merge",
+    prefix: "merge",
+    label: "merge rows",
+    detail: "SQL Server MERGE template; review concurrency semantics",
+    body: "MERGE INTO ${1:target_table} AS ${2:t}\nUSING ${3:source_table} AS ${4:s}\nON ${5:t.id = s.id}\nWHEN MATCHED THEN\n  UPDATE SET ${6:t.value = s.value}\nWHEN NOT MATCHED THEN\n  INSERT (${7:id, value})\n  VALUES (${8:s.id, s.value});",
+    enabled: true,
+  },
+];
+
 const BUILTIN_SQL_COMMAND_SNIPPETS = [
   ...DEFAULT_SQL_COMMAND_SNIPPETS,
   ...MANTICORE_SQL_COMMAND_SNIPPETS,
   ...ORACLE_SQL_COMMAND_SNIPPETS,
   ...DB2_SQL_COMMAND_SNIPPETS,
   ...DAMENG_SQL_COMMAND_SNIPPETS,
+  ...POSTGRES_UPSERT_SQL_COMMAND_SNIPPETS,
+  ...MYSQL_UPSERT_SQL_COMMAND_SNIPPETS,
+  ...SQLSERVER_MERGE_SQL_COMMAND_SNIPPETS,
 ];
 
 const ORACLE_SNIPPET_DRIVERS = new Set(["oracle", "oceanbase-oracle"]);
+const POSTGRES_UPSERT_SNIPPET_DRIVERS = new Set([
+  "postgres",
+  "cockroachdb",
+  "yugabytedb",
+  "neon",
+  "supabase",
+  "timescaledb",
+  "sqlite",
+]);
+const MYSQL_UPSERT_SNIPPET_DRIVERS = new Set([
+  "mysql",
+  "tidb",
+  "oceanbase",
+  "singlestore",
+]);
 
 function appendProductSnippets(
   configuredSnippets: readonly SqlSnippetSetting[],
@@ -425,6 +481,13 @@ function appendProductSnippets(
 function commandSnippetsForProduct(driver: string) {
   if (driver === "manticoresearch") return MANTICORE_SQL_COMMAND_SNIPPETS;
   if (ORACLE_SNIPPET_DRIVERS.has(driver)) return ORACLE_SQL_COMMAND_SNIPPETS;
+  if (POSTGRES_UPSERT_SNIPPET_DRIVERS.has(driver)) {
+    return POSTGRES_UPSERT_SQL_COMMAND_SNIPPETS;
+  }
+  if (MYSQL_UPSERT_SNIPPET_DRIVERS.has(driver)) {
+    return MYSQL_UPSERT_SQL_COMMAND_SNIPPETS;
+  }
+  if (driver === "sqlserver") return SQLSERVER_MERGE_SQL_COMMAND_SNIPPETS;
   if (driver === "db2") return DB2_SQL_COMMAND_SNIPPETS;
   if (driver === "dameng") return DAMENG_SQL_COMMAND_SNIPPETS;
   return [];

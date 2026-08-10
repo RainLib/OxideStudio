@@ -120,6 +120,38 @@ describe("sqlCommandSnippetCompletions", () => {
     ).toEqual([]);
   });
 
+  it("keeps conflict-aware INSERT blocks scoped to their product syntax", () => {
+    expect(
+      sqlCommandSnippetCompletions("upsert", { driver: "postgres" })[0],
+    ).toMatchObject({
+      label: "upsert row",
+      insertText:
+        "INSERT INTO ${1:table} (${2:columns})\nVALUES (${3:values})\nON CONFLICT (${4:conflict_column}) DO UPDATE\nSET ${5:column} = EXCLUDED.${5:column};",
+    });
+    expect(
+      sqlCommandSnippetCompletions("upsert", { driver: "mysql" })[0],
+    ).toMatchObject({
+      label: "upsert row",
+      insertText:
+        "INSERT INTO ${1:table} (${2:columns})\nVALUES (${3:values})\nON DUPLICATE KEY UPDATE\n${4:column} = VALUES(${4:column});",
+    });
+    expect(
+      sqlCommandSnippetCompletions("upsert", { driver: "sqlserver" }),
+    ).toEqual([]);
+  });
+
+  it("offers SQL Server MERGE without exposing it to PostgreSQL", () => {
+    expect(
+      sqlCommandSnippetCompletions("merge", { driver: "sqlserver" })[0],
+    ).toMatchObject({
+      label: "merge rows",
+      insertText: expect.stringContaining("MERGE INTO ${1:target_table} AS ${2:t}"),
+    });
+    expect(
+      sqlCommandSnippetCompletions("merge", { driver: "postgres" }),
+    ).toEqual([]);
+  });
+
   it("allows an explicit Oracle product snippet override", () => {
     const [item] = sqlCommandSnippetCompletions("merge", {
       driver: "oracle",
