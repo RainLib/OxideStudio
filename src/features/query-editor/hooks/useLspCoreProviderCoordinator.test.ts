@@ -41,6 +41,7 @@ function coordinatorFixture() {
     getReferences: vi.fn(async () => []),
     rename: vi.fn(async () => null),
     getCodeActions: vi.fn(async () => []),
+    getSignatureHelp: vi.fn(async () => null),
     getInlayHints: vi.fn(async () => []),
   } as unknown as LspClient;
 
@@ -165,5 +166,42 @@ describe("LSP core provider coordinator", () => {
     );
     expect(result.hints.map((hint: any) => hint.label)).toEqual(["id:", "name:"]);
     expect(result.hints[0]?.position.column).toBe(valueOffset + 1);
+  });
+
+  it("drops stale signature and inlay responses after the model changes", async () => {
+    const { lspClient, providers } = coordinatorFixture();
+    let version = 1;
+    let resolveSignature!: (value: any) => void;
+    let resolveHints!: (value: any[]) => void;
+    vi.mocked(lspClient.getSignatureHelp).mockReturnValue(
+      new Promise((resolve) => {
+        resolveSignature = resolve;
+      }),
+    );
+    vi.mocked(lspClient.getInlayHints).mockReturnValue(
+      new Promise((resolve) => {
+        resolveHints = resolve;
+      }),
+    );
+    const model = {
+      uri: { toString: () => "oxide://query/active.postgres.sql" },
+      getVersionId: () => version,
+    };
+    const signature = providers.get("signature").provideSignatureHelp(
+      model,
+      { lineNumber: 1, column: 4 },
+      { isCancellationRequested: false },
+    );
+    const hints = providers.get("inlayHints").provideInlayHints(
+      model,
+      { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 4 },
+      { isCancellationRequested: false },
+    );
+    version = 2;
+    resolveSignature({ signatures: [{ label: "count(value)" }] });
+    resolveHints([]);
+
+    await expect(signature).resolves.toBeNull();
+    await expect(hints).resolves.toMatchObject({ hints: [] });
   });
 });

@@ -28,6 +28,23 @@ function emptyDisposableResult<T extends object>(value: T) {
   return { ...value, dispose: () => undefined };
 }
 
+function providerModelVersion(model: any): number | undefined {
+  return typeof model?.getVersionId === "function"
+    ? model.getVersionId()
+    : undefined;
+}
+
+function providerRequestIsCurrent(
+  model: any,
+  modelVersion: number | undefined,
+  token?: { isCancellationRequested?: boolean },
+) {
+  return (
+    !token?.isCancellationRequested &&
+    (modelVersion === undefined || providerModelVersion(model) === modelVersion)
+  );
+}
+
 /**
  * Owns Monaco providers backed only by the stable LSP protocol surface.
  *
@@ -144,13 +161,25 @@ export function registerLspCoreProviders({
     monaco.languages.registerSignatureHelpProvider(editorLanguageId, {
       signatureHelpTriggerCharacters: ["(", ","],
       signatureHelpRetriggerCharacters: [","],
-      provideSignatureHelp: async (model: any, position: any) => {
+      provideSignatureHelp: async (
+        model: any,
+        position: any,
+        token?: { isCancellationRequested?: boolean },
+      ) => {
         if (!handlesModel(model)) return null;
-        const help = await lspClient.getSignatureHelp(
-          documentUri,
-          position.lineNumber - 1,
-          position.column - 1,
-        );
+        const modelVersion = providerModelVersion(model);
+        let help;
+        try {
+          help = await lspClient.getSignatureHelp(
+            documentUri,
+            position.lineNumber - 1,
+            position.column - 1,
+          );
+        } catch (error) {
+          console.error("[LSP] Signature help failed:", error);
+          return null;
+        }
+        if (!providerRequestIsCurrent(model, modelVersion, token)) return null;
         if (!help) return null;
         return emptyDisposableResult({
           value: {
@@ -361,20 +390,34 @@ export function registerLspCoreProviders({
     }),
     monaco.languages.registerInlayHintsProvider(editorLanguageId, {
       displayName: "Database parameter and INSERT column hints",
-      provideInlayHints: async (model: any, range: any) => {
+      provideInlayHints: async (
+        model: any,
+        range: any,
+        token?: { isCancellationRequested?: boolean },
+      ) => {
         if (!handlesModel(model)) {
           return emptyDisposableResult({ hints: [] });
         }
-        const hints = await lspClient.getInlayHints(documentUri, {
-          start: {
-            line: range.startLineNumber - 1,
-            character: range.startColumn - 1,
-          },
-          end: {
-            line: range.endLineNumber - 1,
-            character: range.endColumn - 1,
-          },
-        });
+        const modelVersion = providerModelVersion(model);
+        let hints;
+        try {
+          hints = await lspClient.getInlayHints(documentUri, {
+            start: {
+              line: range.startLineNumber - 1,
+              character: range.startColumn - 1,
+            },
+            end: {
+              line: range.endLineNumber - 1,
+              character: range.endColumn - 1,
+            },
+          });
+        } catch (error) {
+          console.error("[LSP] Inlay hints failed:", error);
+          return emptyDisposableResult({ hints: [] });
+        }
+        if (!providerRequestIsCurrent(model, modelVersion, token)) {
+          return emptyDisposableResult({ hints: [] });
+        }
         const lspInlayHints = hints.map((hint) => ({
           position: {
             lineNumber: hint.position.line + 1,

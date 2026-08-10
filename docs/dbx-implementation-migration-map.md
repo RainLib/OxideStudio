@@ -470,3 +470,4 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
 阶段 129：DBX 的 completion request 生命周期原则继续用于 Monaco fallback。每一个通过 trigger gate 的请求（包括 LSP 尚未就绪或报错时的 cache-only fallback）都先取得 document-scoped generation；缓存读取完成后同时校验 model version、取消 token 与 generation，因而在同一光标位置连续重新打开补全也不会让旧的 fallback 覆盖新的候选列表。
 
 阶段 130：受限 PostgreSQL relation backup 已在 Table Grid 的 SQL 导出菜单暴露，可显式选择 structure + data、structure-only 或 data-only（后者提示目标结构须已存在）。为避免 catalog 枚举顺序造成建表失败，外键在全部 relation/data 后统一 `ALTER TABLE ... ADD CONSTRAINT`；点击前确认明确写出其他对象覆盖边界，长任务复用同一取消/进度/文件揭示通道；不对非 PostgreSQL 或 cross-database/object preview 显示入口。
+阶段 131：将 completion/hover 的防过期原则延伸到 signature help 与 inlay hints。请求前捕获 Monaco model version，异步 LSP 返回后检查 cancellation/version；编辑过内容的函数参数/INSERT 列提示被丢弃，服务异常退化为空结果而不扰乱编辑器。

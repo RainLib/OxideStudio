@@ -1,5 +1,9 @@
 # DBX alignment: deferred validation queue
 
+## Phase 131 -- signature and inlay freshness
+
+- In a real Monaco WebView, delay signature-help and inlay-hint responses while typing inside nested calls and INSERT values. Confirm cancelled or stale responses never replace the current parameter/column hints, and server errors leave the editor usable.
+
 ## Phase 130 -- PostgreSQL relation-backup entry point
 
 - In a real Tauri desktop build, verify that only an eligible built-in PostgreSQL table tab shows the backup menu item; verify the confirmation boundary, task progress, cancellation and file reveal. Confirm cross-database previews, native-object previews and non-PostgreSQL drivers do not expose it.
