@@ -301,6 +301,10 @@ explicit deferred validation task rather than an implicit release check.
   The bridge must cap renderer work, mark truncated completion incomplete,
   reject oversized frames without allocating their declared body, and leave
   pending requests in a terminal error state rather than hanging.
+- Repeat framing with lowercase `content-length`, an optional `Content-Type`
+  before and after it, duplicate matching lengths, and conflicting lengths.
+  Legal header blocks must parse; malformed or conflicting blocks must close
+  the session without reading a misaligned response body.
 - Use a provider that initiates `workspace/configuration`,
   `workspace/workspaceFolders`, progress, message, workspace-edit and unknown
   requests. Confirm every request receives a matching numeric or string id,

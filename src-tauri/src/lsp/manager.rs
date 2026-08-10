@@ -23,6 +23,22 @@ fn validate_lsp_message_size(bytes: usize) -> Result<()> {
     Ok(())
 }
 
+fn content_length_from_lsp_header(line: &str) -> Result<Option<usize>> {
+    let Some((name, value)) = line.trim_end_matches(['\r', '\n']).split_once(':') else {
+        return Ok(None);
+    };
+    if !name.trim().eq_ignore_ascii_case("content-length") {
+        return Ok(None);
+    }
+
+    let bytes = value
+        .trim()
+        .parse::<usize>()
+        .context("LSP returned an invalid Content-Length header")?;
+    validate_lsp_message_size(bytes)?;
+    Ok(Some(bytes))
+}
+
 /// Outgoing message type (Request or Notification)
 enum LspOutgoingMessage {
     Request(LspRequest, ResponseSender),
@@ -217,33 +233,51 @@ impl LspServerManager {
             loop {
                 line.clear();
 
-                // Read Content-Length header
+                // Start a header block. A few servers accidentally log plain
+                // text to stdout, so skip non-header lines and recover at the
+                // next valid LSP frame.
                 if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
                     tracing::warn!("LSP stdout closed");
                     break;
                 }
-
-                if !line.starts_with("Content-Length:") {
+                if line == "\r\n" || line == "\n" || !line.contains(':') {
                     continue;
                 }
 
-                let content_length = line
-                    .trim()
-                    .split(':')
-                    .nth(1)
-                    .and_then(|s| s.trim().parse::<usize>().ok());
+                let mut content_length = None;
+                loop {
+                    match content_length_from_lsp_header(&line) {
+                        Ok(Some(length)) => match content_length {
+                            Some(existing) if existing != length => {
+                                tracing::error!("LSP returned conflicting Content-Length headers");
+                                content_length = None;
+                                break;
+                            }
+                            _ => content_length = Some(length),
+                        },
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::error!("Rejecting LSP response: {error}");
+                            content_length = None;
+                            break;
+                        }
+                    }
+
+                    line.clear();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) => break,
+                        Ok(_) if line == "\r\n" || line == "\n" => break,
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::error!("Failed to read LSP headers: {error}");
+                            break;
+                        }
+                    }
+                }
                 let Some(content_length) = content_length else {
-                    tracing::error!("LSP returned an invalid Content-Length header");
+                    tracing::error!("LSP header block did not contain a valid Content-Length");
                     break;
                 };
-                if let Err(error) = validate_lsp_message_size(content_length) {
-                    tracing::error!("Rejecting LSP response: {error}");
-                    break;
-                }
-
-                // Read empty line
-                line.clear();
-                let _ = reader.read_line(&mut line).await;
 
                 // Read JSON content
                 let mut buffer = vec![0u8; content_length];
@@ -616,7 +650,8 @@ fn cancel_request_notification(id: u64) -> LspNotification {
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_request_notification, completion_client_capabilities, lsp_server_request_response,
+        cancel_request_notification, completion_client_capabilities,
+        content_length_from_lsp_header, lsp_server_request_response,
         server_supports_completion_resolve, validate_lsp_message_size, MAX_LSP_MESSAGE_BYTES,
     };
 
@@ -682,6 +717,24 @@ mod tests {
         assert!(validate_lsp_message_size(MAX_LSP_MESSAGE_BYTES).is_ok());
         assert!(validate_lsp_message_size(0).is_err());
         assert!(validate_lsp_message_size(MAX_LSP_MESSAGE_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn lsp_content_length_header_is_case_insensitive_and_allows_other_headers() {
+        assert_eq!(
+            content_length_from_lsp_header("content-length: 42\r\n")
+                .expect("lowercase content length"),
+            Some(42)
+        );
+        assert_eq!(
+            content_length_from_lsp_header(
+                "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n"
+            )
+            .expect("optional content type"),
+            None
+        );
+        assert!(content_length_from_lsp_header("Content-Length: invalid\r\n").is_err());
+        assert!(content_length_from_lsp_header("Content-Length: 0\r\n").is_err());
     }
 
     #[test]
