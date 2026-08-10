@@ -2446,6 +2446,89 @@ async fn bundled_sql_lsp_distinguishes_db2_registers_from_dameng_functions() -> 
 }
 
 #[tokio::test]
+async fn bundled_sql_lsp_keeps_manticore_and_d1_signature_catalog_boundaries() -> Result<()> {
+    let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
+        return Ok(());
+    };
+    lsp.initialize().await?;
+
+    let manticore_uri = "file:///oxide/manticore-functions.sql";
+    let sqlite_uri = "file:///oxide/sqlite-functions.sql";
+    let d1_uri = "file:///oxide/cloudflare-d1-functions.sql";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "fileDialects": {
+                    (manticore_uri): "manticoresearch",
+                    (sqlite_uri): "sqlite",
+                    (d1_uri): "cloudflare-d1"
+                }
+            }
+        }),
+    )
+    .await?;
+    let manticore_sql = "SELECT ";
+    let now_sql = "SELECT now";
+    open_document(&mut lsp, manticore_uri, "sql", manticore_sql).await?;
+    open_document(&mut lsp, sqlite_uri, "sql", now_sql).await?;
+    open_document(&mut lsp, d1_uri, "sql", now_sql).await?;
+
+    let manticore = completion_items_at(
+        &mut lsp,
+        manticore_uri,
+        0,
+        manticore_sql.encode_utf16().count() as u32,
+    )
+    .await?;
+    let sqlite = completion_items_at(
+        &mut lsp,
+        sqlite_uri,
+        0,
+        now_sql.encode_utf16().count() as u32,
+    )
+    .await?;
+    let d1 =
+        completion_items_at(&mut lsp, d1_uri, 0, now_sql.encode_utf16().count() as u32).await?;
+    let find = |completion: &Value, label: &str| -> Option<Value> {
+        completion
+            .as_array()
+            .or_else(|| completion.get("items").and_then(Value::as_array))
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("label").and_then(Value::as_str) == Some(label))
+            })
+            .cloned()
+    };
+
+    for label in ["POLY2D", "TO_STRING", "CRC32", "DATE_FORMAT"] {
+        if find(&manticore, label).is_none() {
+            bail!("bundled LSP did not expose Manticore {label}");
+        }
+    }
+    assert_eq!(
+        find(&manticore, "POLY2D")
+            .as_ref()
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("POLY2D(${1:points})")
+    );
+    assert_eq!(
+        find(&sqlite, "NOW")
+            .as_ref()
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("NOW()")
+    );
+    if find(&d1, "NOW").is_some() {
+        bail!("Cloudflare D1 inherited SQLite's unsupported NOW() completion");
+    }
+
+    lsp.shutdown().await
+}
+
+#[tokio::test]
 async fn bundled_sql_lsp_isolates_a_new_query_block_without_a_semicolon() -> Result<()> {
     let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
         return Ok(());

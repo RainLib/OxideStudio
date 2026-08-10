@@ -1073,3 +1073,18 @@ explicit deferred validation task rather than an implicit release check.
   unchanged. The Rust test compiled during Phase 103 but this Windows runtime
   still exited before the harness with `STATUS_ENTRYPOINT_NOT_FOUND`; no
   database was opened.
+
+## Manticore, SQLite and Cloudflare D1 static signature boundaries
+
+- In real Monaco/WebView sessions, bind separate documents to Manticore Search,
+  SQLite and Cloudflare D1. Confirm Manticore exposes all 31 DBX product
+  signatures, including `POLY2D`, `TO_STRING`, `CRC32`, `DATE_FORMAT` and the
+  date-part functions, with editable variadic placeholders and signature help.
+- Confirm SQLite offers the DBX convenience `NOW()` completion while Cloudflare
+  D1 does not expose `NOW` through either completion or signature help. D1 must
+  retain `JSON_EXTRACT`, `JSON_SET`, `STRFTIME`, `IFNULL` and portable common
+  functions without inheriting other MySQL-baseline functions.
+- Repeat with live routines that collide with static names and verify live
+  metadata, overloads and documentation remain authoritative. Exercise supported
+  Manticore, SQLite and D1 server versions only during the consolidated database
+  validation phase; no database was opened during Phase 104 implementation.

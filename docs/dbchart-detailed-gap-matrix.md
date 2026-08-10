@@ -1,5 +1,7 @@
 # OxideStudio 与 ChartDB 最新主干差距矩阵
 
+> Phase 104 DBX/LSP 补充：Manticore Search 已对齐 DBX 的完整 31 项产品签名目录；SQLite 保留 `NOW()`，Cloudflare D1 按 DBX 过滤该函数，兼容 parser 不再泄漏产品目录之外的基线函数。
+
 > 对照日期：2026-08-10
 > 官方仓库：`https://github.com/chartdb/chartdb`
 > 本地只读基线：`sources/dbchart`
