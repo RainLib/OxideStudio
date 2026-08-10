@@ -211,6 +211,9 @@ WHERE 与 SORT 输入不是普通文本框。应复用同一个 dialect/metadata
 - [x] 将 popup 与 inline 智能提示收敛到同一候选增强管线；产品函数、窗口/表函数、表级
   INSERT 代码块、alias、权威 edit、casing、去重和排序不再只存在于 popup。inline 仍限制为
   32 项，ghost text 能处理限定 member、零宽空格续写和去 tab-stop 的多行 snippet。
+- [x] 将用户配置与产品专属 command snippet 接入同一 popup/inline 事实源；exact trigger、
+  connection-scoped usage、插入内容去重和 32 项上限保持有界，LSP 启动/恢复期间仍可本地推荐，
+  Oracle/Manticore/Db2/Dameng 代码块不会泄漏到其他产品或非 SQL 编辑器。
 
 ### 7.2 P1：以产品族推进，而不是堆菜单项
 

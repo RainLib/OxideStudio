@@ -13,6 +13,78 @@ export type InlineCompletionStatus =
 export const INLINE_COMPLETION_PREFIX_LIMIT = 8_192;
 export const INLINE_COMPLETION_SUFFIX_LIMIT = 4_096;
 export const INLINE_COMPLETION_DEBOUNCE_MS = 300;
+export const INLINE_COMPLETION_CANDIDATE_LIMIT = 32;
+
+type InlineCandidate = NonNullable<InlineLspContext["candidates"]>[number];
+
+export type InlineCandidateAddition = InlineCandidate & {
+  /** Exact command triggers stay ahead of broader semantic suggestions. */
+  preferred?: boolean;
+};
+
+/**
+ * Adds editor-owned candidates to the semantic-server context without creating
+ * a second ranking contract. Exact snippet triggers form their own semantic
+ * tier, server candidates retain their existing order, and fuzzy snippets are
+ * appended. Personal usage only reorders candidates inside the same tier.
+ */
+export function mergeInlineCompletionCandidates(
+  context: InlineLspContext,
+  additions: readonly InlineCandidateAddition[],
+  options: {
+    maxCandidates?: number;
+    rankByUsage?: boolean;
+    usageScore?: (label: string) => number;
+  } = {},
+): InlineLspContext {
+  const rows = [
+    ...additions
+      .filter((candidate) => candidate.preferred)
+      .map((candidate, order) => ({ candidate, tier: 0, order })),
+    ...(context.candidates || []).map((candidate, order) => ({
+      candidate,
+      tier: 1,
+      order,
+    })),
+    ...additions
+      .filter((candidate) => !candidate.preferred)
+      .map((candidate, order) => ({ candidate, tier: 2, order })),
+  ];
+  const seen = new Set<string>();
+  const unique = rows.filter(({ candidate }) => {
+    const insertion = candidate.insertText?.trim() || candidate.label.trim();
+    const key = insertion.toLocaleLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (options.rankByUsage && options.usageScore) {
+    unique.sort(
+      (left, right) =>
+        left.tier - right.tier ||
+        options.usageScore!(right.candidate.label) -
+          options.usageScore!(left.candidate.label) ||
+        left.order - right.order,
+    );
+  }
+  const maxCandidates = Math.max(
+    0,
+    options.maxCandidates ?? INLINE_COMPLETION_CANDIDATE_LIMIT,
+  );
+  return {
+    ...context,
+    candidates: unique.slice(0, maxCandidates).map(({ candidate }) => ({
+      label: candidate.label,
+      ...(candidate.insertText === undefined
+        ? {}
+        : { insertText: candidate.insertText }),
+      ...(candidate.kind === undefined ? {} : { kind: candidate.kind }),
+      ...(candidate.sortText === undefined
+        ? {}
+        : { sortText: candidate.sortText }),
+    })),
+  };
+}
 
 export function boundedInlineContext(value: string, positionOffset: number) {
   return {

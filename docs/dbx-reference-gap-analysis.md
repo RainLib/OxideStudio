@@ -1,7 +1,7 @@
 # OxideStudio 对照 dbx 的能力差距与演进方案
 
 > 基线日期：2026-08-10
-> DBX 参考提交：`3f74fc37f`
+> DBX 参考提交：`bd08fb630`
 > 主工程：`C:/HouShuai/project/rust/OxideStudio`
 > 只读参考工程：`sources/dbx`
 

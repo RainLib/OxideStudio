@@ -49,6 +49,7 @@ import {
 } from "@/services/lsp";
 import type { LspServerNotification } from "@/services/lsp";
 import type { LspCancellationToken } from "@/services/lsp/client";
+import { CompletionItemKind } from "@/services/lsp/types";
 import {
   APP_EVENT_RUN_QUERY,
   APP_EVENT_RUN_CURRENT,
@@ -122,6 +123,7 @@ import {
   inlineCompletionCacheKey,
   InlineCompletionCache,
   localInlineSuggestion,
+  mergeInlineCompletionCandidates,
   shouldRequestAiInlineCompletion,
   type InlineCompletionStatus,
 } from "@/lib/inlineCompletion";
@@ -1793,7 +1795,9 @@ export function QueryEditor({
       !isActivePane ||
       !monaco ||
       !settings.enabled ||
-      ((!lspReady || !canUseLsp) && !isElasticsearchConsole)
+      ((!lspReady || !canUseLsp) &&
+        !isElasticsearchConsole &&
+        !capabilities.supportsSqlQuery)
     ) {
       inlineCompletionAbortRef.current?.abort();
       setInlineCompletionStatus(settings.enabled ? "offline" : "off");
@@ -1899,9 +1903,37 @@ export function QueryEditor({
           ) {
             return { items: [] };
           }
+          const commandSnippetAdditions = isElasticsearchConsole
+            ? []
+            : sqlSyntaxFallbackCompletions(bounded.prefix, {
+                driver: capabilities.driver,
+                supportsSqlQuery: capabilities.supportsSqlQuery,
+                keywordCase: editorSettings.sqlCompletion.keywordCase,
+                snippets: editorSettings.sqlCompletion.snippets,
+              })
+                .filter((item) => item.kind === CompletionItemKind.Snippet)
+                .map((item) => ({
+                  label: item.label,
+                  insertText: item.insertText || item.label,
+                  kind: item.kind,
+                  sortText: item.sortText,
+                  preferred: item.sortText?.startsWith("0:") || false,
+                }));
+          const commandSnippetContext = mergeInlineCompletionCandidates(
+            {},
+            commandSnippetAdditions,
+            {
+              rankByUsage,
+              usageScore: (label) => completionUsageScore(usageScope, label),
+            },
+          );
+          const commandSnippetText = localInlineSuggestion(
+            bounded.prefix,
+            commandSnippetContext,
+          );
           if (!lspReady || !canUseLsp) {
-            setInlineCompletionStatus("offline");
-            return { items: [] };
+            setInlineCompletionStatus(commandSnippetText ? "local" : "offline");
+            return inlineResult(commandSnippetText);
           }
 
           const modelVersion = model.getVersionId();
@@ -1970,7 +2002,15 @@ export function QueryEditor({
                   area: consoleContext.area,
                 },
               }
-            : lspContext;
+            : mergeInlineCompletionCandidates(
+                lspContext,
+                commandSnippetAdditions,
+                {
+                  rankByUsage,
+                  usageScore: (label) =>
+                    completionUsageScore(usageScope, label),
+                },
+              );
           const canUseSchemaInlineCandidate = Boolean(
             consoleContext &&
               elasticsearchCompletionExpectsMappingField(consoleContext),
@@ -2167,11 +2207,15 @@ export function QueryEditor({
     aiEnabled,
     aiProviderConfig,
     canUseLsp,
+    capabilities.driver,
+    capabilities.supportsSqlQuery,
     documentLanguageId,
     documentUri,
     driver,
     editorLanguageId,
     editorSettings.inlineCompletion,
+    editorSettings.sqlCompletion.keywordCase,
+    editorSettings.sqlCompletion.snippets,
     inlineCompletionModel,
     inlineCompletionProtocol,
     isElasticsearchConsole,
@@ -2184,6 +2228,8 @@ export function QueryEditor({
     projectId,
     projectRootPath,
     preferredElasticsearchIndex,
+    rankByUsage,
+    usageScope,
   ]);
 
   useEffect(() => {

@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-08-10
-> DBX 参考提交：`3f74fc37f`
+> DBX 参考提交：`bd08fb630`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -9,10 +9,11 @@
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
 
-### 最新增量审计（`27f3ea728` → `3f74fc37f`）
+### 最新增量审计（`27f3ea728` → `bd08fb630`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
+| `bd08fb630` | 已安装 JDBC plugin 后仍允许本地离线包覆盖更新，并把 Agent 离线包入口限制在 Agent 页签 | Oxide 的 Driver Manager 始终显示独立的 `Import package…` 与 `Import Java runtime…`，不因同产品已有 active/installed 版本隐藏；离线包由签名、SHA-256、版本目录、原子激活和 previous rollback 约束，且没有 Agent/JDBC 共用入口，因此逻辑已等价覆盖。真实旧版→新版 package 更新与 Windows 占用验证继续延期。 |
 | `3f74fc37f` | MQTT TLS 证书读取失败不再导致客户端崩溃 | 与 SQL LSP、数据库迁移、Grid 和驱动打包链路无交集；已纳入最新基线，但本阶段无需迁移。 |
 | `a83f32d13` | 空白行可选执行全部 SQL，并在没有当前语句时给出反馈 | 本阶段对齐：Rust scanner 不再把物理空白行归给下一条语句；默认关闭的设置可显式回退整篇，状态栏提供可访问反馈。 |
 | `150d0108b` | Query Editor 右键菜单增加 Cut/Paste | 已有等价能力：Monaco 原生菜单被显式保持启用，继续统一处理 clipboard permission、read-only、multi-cursor 和 undo，不注册第二套冲突动作。 |
@@ -78,6 +79,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 | L18 | 逻辑已对齐并加强，真实 provider 验证延期：过期补全取消 | DBX `apps/desktop/src/components/editor/QueryEditor.vue:3348-3384` 通过 CodeMirror `CompletionContext` abort 事件递增 epoch，在 debounce 和异步结果边界丢弃旧候选 | Monaco cancellation token 现贯通 completion 与 `completionItem/resolve`；renderer 为每次调用生成会话内 token，Tauri 映射到 JSON-RPC request id，Rust writer 删除 pending response 并发送标准 `$/cancelRequest`。取消先于请求注册或先于 writer 写出的竞态都有有界 tombstone，旧请求不会继续占用 provider 队列；重复/迟到取消保持幂等，token 长度与字符集受限 | 延期使用受控慢 provider 连续快速输入，确认旧 completion/resolve 收到 `$/cancelRequest`、新请求无饥饿、进程重启与会话切换不串 token；不需要连接数据库。 |
 | L19 | 本阶段逻辑已对齐，真实 Monaco 验证延期：空白行执行与编辑菜单 | DBX `components/editor/QueryEditor.vue:requestExecuteFromView`、`lib/sql/sqlExecutionTarget.ts:executionCandidateForMode`（`a83f32d13`）；Cut/Paste 见 `150d0108b` | Rust UTF-16 scanner 对物理空白行返回无当前语句；“运行当前语句”默认明确 no-op，并在状态栏显示 3 秒 `aria-live` 反馈。设置可显式启用整篇 fallback，仍经过参数、危险 SQL、事务和重复执行门禁。Monaco 原生 context menu 显式开启 Cut/Copy/Paste，复用 read-only/multi-cursor/undo/clipboard 语义 | 延期在真实 Tauri WebView 验证 Windows/macOS/Linux 剪贴板权限、Vim 模式、空白行前后软边界、状态反馈和设置持久化；不得在 React 层复制 Monaco 原生剪切/粘贴编辑。 |
 | L20 | 本阶段逻辑已对齐，真实 Monaco/AI provider 验证延期：inline 智能候选与代码块 | DBX `lib/sql/sqlCompletion.ts:buildKeywordItems`、`lib/sql/sqlSnippetTemplates.ts`、`components/editor/QueryEditor.vue` 的 completion context/accept 链路 | bundled LSP 的 popup 与 `oxide/inlineCompletionContext` 现共用单一有界增强管线：产品函数、窗口块、ClickHouse/Oracle relation function、metadata-safe INSERT 代码块、alias、completed-keyword/qualified edit、casing、去重和排序不再分叉。inline 最多保留排序后的 32 项，并把权威 text edit 的 `newText` 作为插入事实；本地 ghost text 支持 `u.` member、`FROM` 后零宽空格续写和去 tab-stop 的多行 snippet。 | 延期在真实 Monaco/WebView 验证 popup/ghost 同时出现时的 Tab 优先级、IME、Vim、multi-cursor、undo、AI fallback/cache、慢 provider 取消和 32 项截断；不得让 inline 路径重新查询数据库或维护第二套候选生成器。 |
+| L21 | 本阶段逻辑已对齐，真实 Monaco 验证延期：用户/产品 command snippet 的 popup-inline 一致性 | DBX `lib/sql/sqlSnippetTemplates.ts`、`lib/sql/sqlCompletion.ts`、`components/editor/QueryEditor.vue` 的 snippet 建议与接受链路 | 前端 command snippet 继续由 `sqlCommandSnippetCompletions` 单点处理用户启停/改写、关键字大小写和 Oracle/Manticore/Db2/Dameng 产品隔离；popup 与 inline 现在都从 `sqlSyntaxFallbackCompletions` 消费该事实源。exact trigger 位于独立语义层，LSP 候选保持原顺序，个人 usage 只在同层排序；按插入内容去重并统一截断为 32 项。LSP 尚未 ready/restarting 时，SQL 产品仍可提供本地多行 ghost text，非 SQL 产品不会注入 SQL block。 | 延期在真实 Monaco/WebView 验证用户自定义/禁用 snippet 热更新、产品切换、exact/fuzzy/usage 组合排序、多行 Tab/undo/IME/Vim，以及 LSP restart 窗口内的本地接受行为；不得连接数据库来生成 snippet。 |
 
 ## 4. Explorer、metadata 与数据库管理
 

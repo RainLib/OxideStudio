@@ -37,7 +37,12 @@ export interface InlineLspContext {
   referencedObjects?: string[];
   aliases?: Record<string, string>;
   expectedKinds?: string[];
-  candidates?: Array<{ label: string; insertText?: string; kind?: number }>;
+  candidates?: Array<{
+    label: string;
+    insertText?: string;
+    kind?: number;
+    sortText?: string;
+  }>;
   diagnostics?: Array<{ severity?: number; message: string }>;
   errorCount?: number;
   console?: {

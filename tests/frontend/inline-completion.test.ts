@@ -4,6 +4,7 @@ import {
   cleanInlineSuggestion,
   InlineCompletionCache,
   localInlineSuggestion,
+  mergeInlineCompletionCandidates,
   shouldRequestAiInlineCompletion,
 } from "@/lib/inlineCompletion";
 
@@ -49,6 +50,56 @@ describe("inline completion helpers", () => {
         candidates: [{ label: "users", insertText: " users" }],
       })
     ).toBe(" users");
+  });
+
+  it("merges exact command blocks ahead of LSP candidates with bounded usage ranking", () => {
+    const context = mergeInlineCompletionCandidates(
+      {
+        candidates: [
+          { label: "SELECT", insertText: "SELECT", kind: 14 },
+          { label: "source_table", insertText: "source_table", kind: 6 },
+        ],
+      },
+      [
+        {
+          label: "select rows",
+          insertText: "SELECT ${1:*}\nFROM ${2:table};",
+          kind: 15,
+          preferred: true,
+        },
+        { label: "show tables", insertText: "SHOW TABLES;", kind: 15 },
+      ],
+      {
+        maxCandidates: 3,
+        rankByUsage: true,
+        usageScore: (label) => (label === "source_table" ? 50 : 0),
+      },
+    );
+
+    expect(context.candidates?.map((candidate) => candidate.label)).toEqual([
+      "select rows",
+      "source_table",
+      "SELECT",
+    ]);
+    expect(localInlineSuggestion("sel", context)).toBe(
+      "ECT *\nFROM table;",
+    );
+  });
+
+  it("deduplicates shared insertions before enforcing the inline candidate cap", () => {
+    const context = mergeInlineCompletionCandidates(
+      { candidates: [{ label: "SELECT", insertText: "SELECT" }] },
+      [
+        { label: "select duplicate", insertText: "select" },
+        { label: "transaction", insertText: "START TRANSACTION;" },
+      ],
+      { maxCandidates: 2 },
+    );
+
+    expect(context.candidates).toEqual([
+      { label: "SELECT", insertText: "SELECT" },
+      { label: "transaction", insertText: "START TRANSACTION;" },
+    ]);
   });
 
   it("cleans fences, repeated prefix, suffix overlap, and line overflow", () => {

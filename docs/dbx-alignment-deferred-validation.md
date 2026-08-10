@@ -1206,3 +1206,21 @@ explicit deferred validation task rather than an implicit release check.
 - Phase 111 adds source, frontend and packaged subprocess coverage only. No
   database was opened; live provider timing and real Monaco interaction remain
   in the consolidated validation queue.
+
+## Configured command blocks across popup and inline completion
+
+- In a real Monaco/WebView session, accept built-in, user-edited and user-disabled
+  command blocks from both popup and ghost text. Cover upper/lower/preserve
+  keyword casing, exact and fuzzy prefixes, personal usage history, undo,
+  next-word acceptance, IME, Vim and multi-cursor behavior.
+- Switch between Oracle/OceanBase Oracle, Manticore Search, Db2, Dameng, a
+  generic relational package and native non-SQL products. Confirm product-only
+  blocks disappear immediately, custom bodies remain authoritative, and no SQL
+  command block leaks into MongoDB, Redis or Elasticsearch editors.
+- Stop/restart the bundled LSP while typing a command trigger and confirm the
+  deterministic local block remains available, no stale server candidate
+  replaces it, insertion-level deduplication holds, and the combined context
+  never exceeds 32 candidates.
+- Phase 112 adds pure frontend coverage and a production build only. No database
+  was opened; real Monaco, AI-provider timing and product/package interaction
+  remain in this consolidated queue.
