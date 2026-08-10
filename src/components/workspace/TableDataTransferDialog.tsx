@@ -1192,7 +1192,9 @@ export function TableDataTransferDialog({
                       {report.verification && (
                         <span
                           className={
-                            report.verification.status === "verified"
+                            report.verification.status === "verified" ||
+                            (report.verification.status === "notAvailable" &&
+                              report.verification.identityReseedVerified === true)
                               ? "shrink-0 text-[hsl(var(--wb-success))]"
                               : report.verification.status === "needsReview"
                                 ? "shrink-0 text-[hsl(var(--wb-warning))]"
@@ -1200,10 +1202,14 @@ export function TableDataTransferDialog({
                           }
                           title={report.verification.message}
                         >
-                          {report.verification.status === "verified"
+                          {report.verification.identityReseedVerified === false
+                              ? "review generator"
+                              : report.verification.status === "needsReview"
+                                ? "review count"
+                                : report.verification.status === "verified"
                             ? "verified"
-                            : report.verification.status === "needsReview"
-                              ? "review count"
+                            : report.verification.identityReseedVerified === true
+                              ? "generator verified"
                               : "count n/a"}
                         </span>
                       )}

@@ -715,6 +715,7 @@ export interface TableDataTransferBatchTableResult {
   rowsTransferred: number;
   batches: number;
   limitReached: boolean;
+  identityReseedColumns: string[];
   reportId?: string | null;
 }
 
@@ -784,6 +785,7 @@ export interface TableDataTransferResult {
   batches: number;
   limitReached: boolean;
   mappedColumns: TableDataTransferColumnMapping[];
+  identityReseedColumns: string[];
   /** Set when the terminal transfer report was stored successfully. */
   reportId?: string | null;
 }
@@ -804,6 +806,8 @@ export interface TableDataTransferVerification {
   status: TableDataTransferVerificationStatus;
   expectedRows?: number | null;
   observedRows?: number | null;
+  identityReseedColumns?: string[];
+  identityReseedVerified?: boolean | null;
   message: string;
 }
 

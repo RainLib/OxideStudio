@@ -162,7 +162,10 @@ explicit deferred validation task rather than an implicit release check.
 - Verify PostgreSQL serial and identity reseed previews against empty/non-empty
   targets, a target without owned generators, rollback after a reseed failure,
   and stale-token rejection when the reseed option changes. Confirm reseed SQL
-  runs before the copy transaction commits.
+  runs before the copy transaction commits. After commit, confirm the read-only
+  generator-vs-table-maximum comparison reports verified/needs-review without
+  persisting either numeric value; unavailable catalog functions or privileges
+  must degrade to review rather than relabeling a committed transfer as failed.
 - Run append baseline and overwrite post-commit verification tests under
   concurrent target writers; append must remain `needs review` until a stable
   baseline is implemented.

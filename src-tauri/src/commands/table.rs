@@ -554,6 +554,9 @@ pub struct TableDataTransferBatchTableResult {
     pub rows_transferred: u64,
     pub batches: u64,
     pub limit_reached: bool,
+    /// Exact PostgreSQL generators synchronized by the reviewed table plan.
+    #[serde(default)]
+    pub identity_reseed_columns: Vec<String>,
     /// A terminal, privacy-bounded report is persisted for each object when
     /// the request supplies a project id.
     pub report_id: Option<String>,
@@ -645,6 +648,9 @@ pub struct TableDataTransferResult {
     pub batches: u64,
     pub limit_reached: bool,
     pub mapped_columns: Vec<TableDataTransferColumnMapping>,
+    /// Exact PostgreSQL generators synchronized by the reviewed plan.
+    #[serde(default)]
+    pub identity_reseed_columns: Vec<String>,
     /// Present only when the caller supplied a project id and the terminal
     /// report was persisted successfully.
     pub report_id: Option<String>,
@@ -676,6 +682,12 @@ pub struct TableDataTransferVerification {
     pub status: TableDataTransferVerificationStatus,
     pub expected_rows: Option<u64>,
     pub observed_rows: Option<u64>,
+    /// Stores only column identities and a boolean comparison result;
+    /// sequence values and copied row values are intentionally omitted.
+    #[serde(default)]
+    pub identity_reseed_columns: Vec<String>,
+    #[serde(default)]
+    pub identity_reseed_verified: Option<bool>,
     pub message: String,
 }
 
@@ -4865,11 +4877,14 @@ async fn verify_completed_table_data_transfer(
     request: &TableDataTransferRequest,
     transfer: &TableDataTransferResult,
 ) -> TableDataTransferVerification {
-    if request.mode != TableDataTransferMode::Overwrite {
-        return TableDataTransferVerification {
+    let target_kind = table_data_transfer_dialect(manager, &request.target).await;
+    let mut verification = if request.mode != TableDataTransferMode::Overwrite {
+        TableDataTransferVerification {
             status: TableDataTransferVerificationStatus::NotAvailable,
             expected_rows: None,
             observed_rows: None,
+            identity_reseed_columns: Vec::new(),
+            identity_reseed_verified: None,
             message: if request.mode == TableDataTransferMode::Upsert {
                 "Row-count verification is inconclusive for upsert because existing rows may be updated."
                     .to_string()
@@ -4877,42 +4892,129 @@ async fn verify_completed_table_data_transfer(
                 "Append verification requires a stable baseline count and is not recorded for this transfer."
                     .to_string()
             },
+        }
+    } else {
+        let target_kind = match target_kind.as_ref() {
+            Ok(kind) => *kind,
+            Err(_) => {
+                return TableDataTransferVerification {
+                    status: TableDataTransferVerificationStatus::NeedsReview,
+                    expected_rows: Some(transfer.rows_transferred),
+                    observed_rows: None,
+                    identity_reseed_columns: transfer.identity_reseed_columns.clone(),
+                    identity_reseed_verified: None,
+                    message: "The transfer committed, but the target could not be reopened for post-commit verification."
+                        .to_string(),
+                }
+            }
         };
+        let count_sql = target_kind.count_table_query(
+            schema_option(&request.target.schema),
+            &request.target.table,
+            None,
+        );
+        let observed_rows = query_target(
+            manager,
+            &request.target.connection_id,
+            request.target.database.as_deref(),
+            &count_sql,
+        )
+        .await
+        .ok()
+        .and_then(|results| {
+            results
+                .first()
+                .and_then(|result| result.rows.first())
+                .and_then(|row| row.first())
+                .and_then(value_to_u64)
+        });
+        overwrite_transfer_verification(transfer.rows_transferred, observed_rows)
+    };
+
+    if transfer.identity_reseed_columns.is_empty() {
+        return verification;
     }
 
-    let target_kind = match table_data_transfer_dialect(manager, &request.target).await {
-        Ok(kind) => kind,
-        Err(_) => {
-            return TableDataTransferVerification {
-                status: TableDataTransferVerificationStatus::NeedsReview,
-                expected_rows: Some(transfer.rows_transferred),
-                observed_rows: None,
-                message: "The transfer committed, but the target could not be reopened for post-commit verification."
-                    .to_string(),
-            }
+    verification.identity_reseed_columns = transfer.identity_reseed_columns.clone();
+    let identity_verified = match target_kind.as_ref() {
+        Ok(DatabaseKind::Postgres) => {
+            verify_postgres_identity_reseed(
+                manager,
+                &request.target,
+                &transfer.identity_reseed_columns,
+            )
+            .await
         }
+        _ => None,
     };
-    let count_sql = target_kind.count_table_query(
-        schema_option(&request.target.schema),
-        &request.target.table,
-        None,
-    );
-    let observed_rows = query_target(
-        manager,
-        &request.target.connection_id,
-        request.target.database.as_deref(),
-        &count_sql,
+    verification.identity_reseed_verified = identity_verified;
+    let columns = transfer.identity_reseed_columns.join(", ");
+    match identity_verified {
+        Some(true) => verification.message.push_str(&format!(
+            " PostgreSQL generator state is at or beyond the post-commit table maximum for: {columns}."
+        )),
+        Some(false) => {
+            verification.status = TableDataTransferVerificationStatus::NeedsReview;
+            verification.message.push_str(&format!(
+                " PostgreSQL generator state is behind or detached from the post-commit table maximum for: {columns}. Review before inserting more rows."
+            ));
+        }
+        None => {
+            verification.status = TableDataTransferVerificationStatus::NeedsReview;
+            verification.message.push_str(&format!(
+                " PostgreSQL generator state could not be verified for: {columns}. Review before inserting more rows."
+            ));
+        }
+    }
+    verification
+}
+
+async fn verify_postgres_identity_reseed(
+    manager: &ConnectionManager,
+    target: &TableDataTransferEndpoint,
+    columns: &[String],
+) -> Option<bool> {
+    if columns.is_empty() {
+        return Some(true);
+    }
+    for column in columns {
+        let sql = postgres_identity_reseed_verification_query(target, column);
+        let verified = query_target(
+            manager,
+            &target.connection_id,
+            target.database.as_deref(),
+            &sql,
+        )
+        .await
+        .ok()
+        .and_then(|results| {
+            results
+                .first()
+                .and_then(|result| result.rows.first())
+                .and_then(|row| row.first())
+                .and_then(|value| analytical_bool(value).ok().flatten())
+        });
+        match verified {
+            Some(true) => {}
+            Some(false) => return Some(false),
+            None => return None,
+        }
+    }
+    Some(true)
+}
+
+fn postgres_identity_reseed_verification_query(
+    target: &TableDataTransferEndpoint,
+    column: &str,
+) -> String {
+    let relation =
+        DatabaseKind::Postgres.qualified_table(schema_option(&target.schema), &target.table);
+    let relation_literal = sql_string_literal(&relation);
+    let quoted_column = DatabaseKind::Postgres.quote_identifier(column);
+    let column_literal = sql_string_literal(column);
+    format!(
+        "SELECT COALESCE(pg_sequence_last_value(pg_get_serial_sequence({relation_literal}, {column_literal})::regclass) >= COALESCE(MAX({quoted_column}), 0), FALSE) FROM {relation}"
     )
-    .await
-    .ok()
-    .and_then(|results| {
-        results
-            .first()
-            .and_then(|result| result.rows.first())
-            .and_then(|row| row.first())
-            .and_then(value_to_u64)
-    });
-    overwrite_transfer_verification(transfer.rows_transferred, observed_rows)
 }
 
 fn overwrite_transfer_verification(
@@ -4924,6 +5026,8 @@ fn overwrite_transfer_verification(
             status: TableDataTransferVerificationStatus::Verified,
             expected_rows: Some(expected_rows),
             observed_rows: Some(observed_rows),
+            identity_reseed_columns: Vec::new(),
+            identity_reseed_verified: None,
             message: "Post-commit target row count matches the completed overwrite transfer."
                 .to_string(),
         },
@@ -4931,6 +5035,8 @@ fn overwrite_transfer_verification(
             status: TableDataTransferVerificationStatus::NeedsReview,
             expected_rows: Some(expected_rows),
             observed_rows: Some(observed_rows),
+            identity_reseed_columns: Vec::new(),
+            identity_reseed_verified: None,
             message: "The transfer committed, but the post-commit target row count differs; review concurrent writes before retrying."
                 .to_string(),
         },
@@ -4938,6 +5044,8 @@ fn overwrite_transfer_verification(
             status: TableDataTransferVerificationStatus::NeedsReview,
             expected_rows: Some(expected_rows),
             observed_rows: None,
+            identity_reseed_columns: Vec::new(),
+            identity_reseed_verified: None,
             message: "The transfer committed, but the target row count could not be verified after commit."
                 .to_string(),
         },
@@ -6757,6 +6865,7 @@ pub async fn execute_table_data_transfer(
             batches,
             limit_reached,
             mapped_columns: plan.mapped_columns,
+            identity_reseed_columns: plan.identity_reseed_columns,
             report_id: None,
         })
     }
@@ -6999,7 +7108,8 @@ pub async fn execute_table_data_transfer_batch(
                 limit_reached |= table_limit_reached;
                 tables.push(TableDataTransferBatchTableResult {
                     table: table_request.target.table.clone(), rows_transferred: table_rows,
-                    batches: table_batches, limit_reached: table_limit_reached, report_id: None,
+                    batches: table_batches, limit_reached: table_limit_reached,
+                    identity_reseed_columns: table_plan.identity_reseed_columns.clone(), report_id: None,
                 });
             }
             Ok(TableDataTransferBatchResult { rows_transferred, batches, limit_reached, tables })
@@ -7066,12 +7176,34 @@ pub async fn execute_table_data_transfer_batch(
             Err(_) => (TableDataTransferProgressStatus::Error, Some("Batch transfer failed. The target transaction was rolled back when supported; capture a fresh batch preview before retrying.".to_string())),
         };
         for (index, table_request) in expected_tables.iter().enumerate() {
-            let (rows_transferred, batches, limit_reached) = result
+            let table_result = result
                 .as_ref()
                 .ok()
-                .and_then(|summary| summary.tables.get(index))
+                .and_then(|summary| summary.tables.get(index));
+            let (rows_transferred, batches, limit_reached) = table_result
                 .map(|table| (table.rows_transferred, table.batches, table.limit_reached))
                 .unwrap_or((0, 0, false));
+            let verification = match table_result {
+                Some(table) => {
+                    let transfer = TableDataTransferResult {
+                        rows_transferred: table.rows_transferred,
+                        batches: table.batches,
+                        limit_reached: table.limit_reached,
+                        mapped_columns: Vec::new(),
+                        identity_reseed_columns: table.identity_reseed_columns.clone(),
+                        report_id: None,
+                    };
+                    Some(
+                        verify_completed_table_data_transfer(
+                            manager.inner(),
+                            table_request,
+                            &transfer,
+                        )
+                        .await,
+                    )
+                }
+                None => None,
+            };
             let table_digest = Sha256::digest(table_request.target.table.as_bytes());
             let report_id = format!(
                 "table-transfer-report-{}-{:X}",
@@ -7094,7 +7226,7 @@ pub async fn execute_table_data_transfer_batch(
                 started_at,
                 finished_at: current_table_timestamp_millis(),
                 error: error.clone(),
-                verification: None,
+                verification,
             };
             match persist_table_data_transfer_report(meta_store.inner(), &report).await {
                 Ok(()) => {
@@ -10531,9 +10663,10 @@ mod tests {
         generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
         is_json_lines_path, normalized_table_data_transfer_project_id, object_label_from_type,
         object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
-        overwrite_transfer_verification, postgres_view_definition_query, preview_metadata_required,
-        query_target, query_target_parameterized, read_csv_import_preview,
-        read_json_import_preview, relation_operation_allowed, resolve_csv_import_columns,
+        overwrite_transfer_verification, postgres_identity_reseed_verification_query,
+        postgres_view_definition_query, preview_metadata_required, query_target,
+        query_target_parameterized, read_csv_import_preview, read_json_import_preview,
+        relation_operation_allowed, resolve_csv_import_columns,
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect, sanitize_file_part,
         sql_export_insert_batch_rows, sql_insert_statements, summarize_mutation_affected,
         table_data_dialect, table_data_transfer_batch_plan, table_data_transfer_dialect,
@@ -12928,6 +13061,26 @@ WITH DATA;"#
 
         assert!(statements[0].contains(r#""id" INTEGER GENERATED BY DEFAULT AS IDENTITY NOT NULL"#));
         assert!(statements[0].contains(r#"PRIMARY KEY ("id")"#));
+    }
+
+    #[test]
+    fn postgres_identity_verification_query_quotes_reviewed_identifiers() {
+        let query = postgres_identity_reseed_verification_query(
+            &TableDataTransferEndpoint {
+                connection_id: "target".to_string(),
+                driver: "postgres".to_string(),
+                schema: "sales data".to_string(),
+                table: "order's".to_string(),
+                database: None,
+            },
+            "identity value",
+        );
+
+        assert!(query.contains(r#"FROM "sales data"."order's""#));
+        assert!(query.contains(r#"MAX("identity value")"#));
+        assert!(query.contains(r#"'"sales data"."order''s"'"#));
+        assert!(query.contains("'identity value'"));
+        assert!(query.contains("pg_sequence_last_value"));
     }
 
     #[test]
