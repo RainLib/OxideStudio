@@ -1143,3 +1143,20 @@ explicit deferred validation task rather than an implicit release check.
   portable `OVER` block.
 - Phase 107 added source and packaged LSP protocol coverage only. No database
   was opened; server-version syntax and real Monaco interaction remain deferred.
+
+## Oracle table-function relation sources
+
+- Against supported Oracle and OceanBase Oracle versions, verify `TABLE`,
+  `THE`, `XMLTABLE` and `JSON_TABLE` suggestions in `FROM` and `JOIN`, including
+  valid collection-returning routines, package/schema qualification, overloads
+  and quoted identifiers. Confirm procedures and scalar-only routines do not
+  appear inside `TABLE(...)`, and document any server-version syntax boundary.
+- In a real Monaco/WebView session, accept each static block and a synchronized
+  packaged routine, then tab through arguments and the generated table alias.
+  Confirm tab stops remain unique, the full typed qualifier is replaced once,
+  undo is atomic, cancellation/stale-response guards hold, and switching away
+  from an Oracle-family product removes these candidates immediately.
+- Phase 108 added source and packaged subprocess coverage only. No Oracle,
+  OceanBase or other database was opened; provider metadata accuracy, actual
+  collection return types, product-version syntax and Monaco interaction remain
+  in the consolidated validation queue.

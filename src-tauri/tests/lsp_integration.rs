@@ -2723,6 +2723,115 @@ async fn bundled_sql_lsp_exposes_portable_window_function_blocks() -> Result<()>
 }
 
 #[tokio::test]
+async fn bundled_sql_lsp_exposes_oracle_table_sources_and_wrapped_routines() -> Result<()> {
+    let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
+        return Ok(());
+    };
+    lsp.initialize().await?;
+
+    let relation_uri = "file:///oxide/oracle-table-source.sql";
+    let routine_uri = "file:///oxide/oceanbase-oracle-table-routine.sql";
+    let schema_id = "77777777-7777-4777-8777-777777777777";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "completionPreferences": {
+                    "keywordCase": "upper",
+                    "tableAlias": "initials"
+                },
+                "schemas": [{
+                    "id": schema_id,
+                    "database": "APP",
+                    "tables": [],
+                    "functions": [
+                        {
+                            "name": "fetch_rows",
+                            "routine_type": "function",
+                            "parameters": [{
+                                "name": "limit",
+                                "data_type": "NUMBER",
+                                "optional": false
+                            }],
+                            "return_type": "ROWSET",
+                            "description": "Fetch rows"
+                        },
+                        {
+                            "name": "refresh_rows",
+                            "routine_type": "procedure",
+                            "parameters": [],
+                            "return_type": "void",
+                            "description": null
+                        }
+                    ],
+                    "source_uri": null
+                }],
+                "fileSchemas": {
+                    (relation_uri): schema_id,
+                    (routine_uri): schema_id
+                },
+                "fileDialects": {
+                    (relation_uri): "oracle",
+                    (routine_uri): "oceanbase-oracle"
+                }
+            }
+        }),
+    )
+    .await?;
+
+    let relation_sql = "SELECT * FROM json_";
+    let routine_sql = "SELECT * FROM TABLE(pkg.fe";
+    open_document(&mut lsp, relation_uri, "sql", relation_sql).await?;
+    open_document(&mut lsp, routine_uri, "sql", routine_sql).await?;
+
+    let relation = completion_items_at(
+        &mut lsp,
+        relation_uri,
+        0,
+        relation_sql.encode_utf16().count() as u32,
+    )
+    .await?;
+    let routine = completion_items_at(
+        &mut lsp,
+        routine_uri,
+        0,
+        routine_sql.encode_utf16().count() as u32,
+    )
+    .await?;
+    let find = |completion: &Value, label: &str| -> Option<Value> {
+        completion
+            .as_array()
+            .or_else(|| completion.get("items").and_then(Value::as_array))
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("label").and_then(Value::as_str) == Some(label))
+            })
+            .cloned()
+    };
+
+    assert_eq!(
+        find(&relation, "JSON_TABLE")
+            .as_ref()
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("JSON_TABLE(${1:expr}, ${2:path}) ${3:jt}")
+    );
+    let fetch_rows = find(&routine, "fetch_rows").context("Oracle table routine completion")?;
+    assert_eq!(
+        fetch_rows
+            .pointer("/textEdit/newText")
+            .and_then(Value::as_str),
+        Some("pkg.fetch_rows(${1:limit})")
+    );
+    if find(&routine, "refresh_rows").is_some() || find(&routine, "JSON_TABLE").is_some() {
+        bail!("TABLE(...) routine context leaked procedures or static relation blocks");
+    }
+
+    lsp.shutdown().await
+}
+
+#[tokio::test]
 async fn bundled_sql_lsp_isolates_a_new_query_block_without_a_semicolon() -> Result<()> {
     let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
         return Ok(());
