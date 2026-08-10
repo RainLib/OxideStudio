@@ -376,6 +376,14 @@ pub trait DatabaseDriver: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Column names whose values are computed by the database and therefore
+    /// must not be written back by a replayable SQL INSERT export. Drivers
+    /// return an empty list unless they can determine this from an exact
+    /// catalog contract; the host never guesses from type or default text.
+    async fn get_generated_columns(&self, _schema: &str, _table: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// Get columns for a table in an explicitly selected server database.
     async fn get_database_columns(
         &self,

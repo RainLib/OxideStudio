@@ -451,6 +451,50 @@ impl PostgresDriver {
             .collect())
     }
 
+    async fn generated_columns_on_pool(
+        pool: &Pool<Postgres>,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<String>> {
+        let server_version_num =
+            sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::integer")
+                .persistent(false)
+                .fetch_one(pool)
+                .await?;
+        // PostgreSQL added stored generated columns and `attgenerated` in 12.
+        // Older supported servers cannot contain such columns, and querying
+        // the newer catalog field would itself fail during export.
+        if server_version_num < 120_000 {
+            return Ok(Vec::new());
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT a.attname
+            FROM pg_class t
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            JOIN pg_attribute a ON a.attrelid = t.oid
+            WHERE n.nspname = $1
+              AND t.relname = $2
+              AND t.relkind IN ('r', 'p')
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+              AND a.attgenerated <> ''
+            ORDER BY a.attnum
+            "#,
+        )
+        .bind(schema)
+        .bind(table)
+        .persistent(false)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .filter_map(|row| row.try_get("attname").ok())
+            .collect())
+    }
+
     async fn indexes_on_pool(
         pool: &Pool<Postgres>,
         schema: &str,
@@ -1765,6 +1809,11 @@ impl DatabaseDriver for PostgresDriver {
     async fn get_columns(&self, schema: &str, table: &str) -> Result<Vec<ColumnInfo>> {
         let pool = self.get_pool().await?;
         Self::columns_on_pool(&pool, schema, table).await
+    }
+
+    async fn get_generated_columns(&self, schema: &str, table: &str) -> Result<Vec<String>> {
+        let pool = self.get_pool().await?;
+        Self::generated_columns_on_pool(&pool, schema, table).await
     }
 
     async fn get_database_columns(

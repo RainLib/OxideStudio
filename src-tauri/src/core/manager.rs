@@ -809,6 +809,16 @@ impl ConnectionManager {
         driver.get_columns(schema, table).await
     }
 
+    pub async fn get_generated_columns(
+        &self,
+        id: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<String>> {
+        let driver = self.get_driver(id).await?;
+        driver.get_generated_columns(schema, table).await
+    }
+
     pub async fn get_database_columns(
         &self,
         id: &str,

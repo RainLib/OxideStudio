@@ -305,6 +305,11 @@ explicit deferred validation task rather than an implicit release check.
   before and after it, duplicate matching lengths, and conflicting lengths.
   Legal header blocks must parse; malformed or conflicting blocks must close
   the session without reading a misaligned response body.
+- Export tables containing PostgreSQL stored generated/`tsvector`, MySQL
+  virtual/stored generated, and SQLite virtual/stored generated columns to
+  SQL. Confirm INSERT columns and row values stay aligned, computed columns
+  are absent, and a table with no writable columns fails without publishing a
+  partial file.
 - Use a provider that initiates `workspace/configuration`,
   `workspace/workspaceFolders`, progress, message, workspace-edit and unknown
   requests. Confirm every request receives a matching numeric or string id,

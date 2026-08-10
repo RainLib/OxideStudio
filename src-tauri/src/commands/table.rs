@@ -2578,6 +2578,42 @@ fn sql_insert_statements(
     statements
 }
 
+fn filter_sql_export_batch(
+    columns: Vec<ColumnDef>,
+    rows: Vec<Vec<Value>>,
+    excluded_columns: &HashSet<String>,
+) -> Result<(Vec<ColumnDef>, Vec<Vec<Value>>), String> {
+    if excluded_columns.is_empty() {
+        return Ok((columns, rows));
+    }
+
+    let retained_indices = columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| (!excluded_columns.contains(&column.name)).then_some(index))
+        .collect::<Vec<_>>();
+    if retained_indices.is_empty() && !columns.is_empty() {
+        return Err(
+            "SQL export has no writable columns after excluding database-generated values"
+                .to_string(),
+        );
+    }
+    let columns = retained_indices
+        .iter()
+        .map(|index| columns[*index].clone())
+        .collect();
+    let rows = rows
+        .into_iter()
+        .map(|row| {
+            retained_indices
+                .iter()
+                .map(|index| row.get(*index).cloned().unwrap_or(Value::Null))
+                .collect()
+        })
+        .collect();
+    Ok((columns, rows))
+}
+
 fn format_sql_export_row(
     dialect: SqlExportDialect,
     columns: &[ColumnDef],
@@ -2635,6 +2671,11 @@ fn is_mysql_binary_export_type(data_type: &str) -> bool {
 
 fn is_postgres_bytea_export_type(data_type: &str) -> bool {
     data_type.trim().eq_ignore_ascii_case("bytea")
+}
+
+fn is_postgres_tsvector_export_type(data_type: &str) -> bool {
+    let normalized = data_type.trim().trim_matches('"').to_ascii_lowercase();
+    normalized == "tsvector" || normalized.ends_with(".tsvector")
 }
 
 fn is_sqlite_blob_export_type(data_type: &str) -> bool {
@@ -7266,13 +7307,36 @@ pub async fn export_table_data(
             format,
             TableExportFormat::Arrow | TableExportFormat::Parquet
         );
-        let metadata_required =
-            structured_filters.is_some() || requested_sort.is_some() || analytical_export;
+        let sql_export = matches!(format, TableExportFormat::Sql);
+        let metadata_required = structured_filters.is_some()
+            || requested_sort.is_some()
+            || analytical_export
+            || sql_export;
         let table_columns = match manager.get_columns(&connection_id, &schema, &table).await {
             Ok(columns) => Some(columns),
             Err(error) if metadata_required => return Err(error.to_string()),
             Err(_) => None,
         };
+        let mut sql_excluded_columns = if sql_export {
+            manager
+                .get_generated_columns(&connection_id, &schema, &table)
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .collect::<HashSet<_>>()
+        } else {
+            HashSet::new()
+        };
+        if sql_export && sql_dialect == SqlExportDialect::Postgres {
+            if let Some(columns) = table_columns.as_ref() {
+                sql_excluded_columns.extend(
+                    columns
+                        .iter()
+                        .filter(|column| is_postgres_tsvector_export_type(&column.data_type))
+                        .map(|column| column.name.clone()),
+                );
+            }
+        }
         let columns_metadata = table_columns.clone().map(column_lookup);
         let analytical_columns = table_columns.map(|columns| {
             columns
@@ -7420,9 +7484,18 @@ pub async fn export_table_data(
                 } else {
                     result.columns
                 };
+                let (batch_columns, batch_rows) = if sql_export {
+                    filter_sql_export_batch(
+                        batch_columns,
+                        result.rows,
+                        &sql_excluded_columns,
+                    )?
+                } else {
+                    (batch_columns, result.rows)
+                };
                 let message = TableExportWriterMessage::Batch {
                     columns: batch_columns,
-                    rows: result.rows,
+                    rows: batch_rows,
                 };
                 tokio::select! {
                     sent = batch_tx.send(message) => {
@@ -10279,9 +10352,10 @@ mod tests {
         csv_record_values, delete_table_data_transfer_target_for_overwrite,
         ensure_host_table_ddl_capability, ensure_table_export_format,
         ensure_transfer_endpoint_driver_matches_connection, execute_target_parameterized_batch,
-        finish_table_data_transfer_transaction, generate_postgres_materialized_view_ddl,
-        generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
-        is_json_lines_path, normalized_table_data_transfer_project_id, object_label_from_type,
+        filter_sql_export_batch, finish_table_data_transfer_transaction,
+        generate_postgres_materialized_view_ddl, generate_postgres_table_ddl,
+        generate_postgres_view_ddl, get_target_columns, is_json_lines_path,
+        normalized_table_data_transfer_project_id, object_label_from_type,
         object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
         overwrite_transfer_verification, postgres_view_definition_query, preview_metadata_required,
         query_target, query_target_parameterized, read_csv_import_preview,
@@ -10321,7 +10395,7 @@ mod tests {
     use calamine::{open_workbook_auto, Data, Reader};
     use serde_json::{json, Value};
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, HashSet},
         fs,
         path::{Path, PathBuf},
         sync::{atomic::AtomicU64, Arc, Mutex},
@@ -10512,6 +10586,51 @@ mod tests {
 ('{"kind":"login"}', TRUE);"#
             ]
         );
+    }
+
+    #[test]
+    fn sql_export_filter_keeps_columns_and_values_aligned() {
+        let columns = vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+            },
+            ColumnDef {
+                name: "computed".to_string(),
+                data_type: "integer".to_string(),
+            },
+            ColumnDef {
+                name: "label".to_string(),
+                data_type: "text".to_string(),
+            },
+        ];
+        let excluded = HashSet::from(["computed".to_string()]);
+        let (columns, rows) = filter_sql_export_batch(
+            columns,
+            vec![vec![json!(1), json!(2), json!("one")], vec![json!(3)]],
+            &excluded,
+        )
+        .expect("filtered SQL batch");
+
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "label"]
+        );
+        assert_eq!(rows[0], vec![json!(1), json!("one")]);
+        assert_eq!(rows[1], vec![json!(3), Value::Null]);
+
+        assert!(filter_sql_export_batch(
+            vec![ColumnDef {
+                name: "computed".to_string(),
+                data_type: "integer".to_string(),
+            }],
+            vec![vec![json!(2)]],
+            &excluded,
+        )
+        .is_err());
     }
 
     #[test]

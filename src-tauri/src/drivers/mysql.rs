@@ -907,6 +907,31 @@ impl DatabaseDriver for MysqlDriver {
         Ok(cols)
     }
 
+    async fn get_generated_columns(&self, schema: &str, table: &str) -> Result<Vec<String>> {
+        let pool = self.get_pool(None).await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = ?
+              AND table_name = ?
+              AND LOWER(extra) LIKE '%generated%'
+            ORDER BY ordinal_position
+            "#,
+        )
+        .bind(schema)
+        .bind(table)
+        .persistent(false)
+        .fetch_all(&pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .filter_map(|row| mysql_string_by_index(row, 0))
+            .filter(|name| !name.is_empty())
+            .collect())
+    }
+
     async fn get_indexes(&self, schema: &str, table: &str) -> Result<Vec<IndexInfo>> {
         let pool = self.get_pool(None).await?;
         let rows = sqlx::query(

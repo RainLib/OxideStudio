@@ -444,6 +444,19 @@ impl DatabaseDriver for SqliteDriver {
             .collect())
     }
 
+    async fn get_generated_columns(&self, schema: &str, table: &str) -> Result<Vec<String>> {
+        let schema = sqlite_schema_identifier(normalized_sqlite_schema(schema))?;
+        let statement = format!("PRAGMA {schema}.table_xinfo({})", sqlite_identifier(table)?);
+        let rows = sqlx::query(&statement)
+            .fetch_all(&self.pool().await?)
+            .await?;
+        Ok(rows
+            .iter()
+            .filter(|row| row.try_get::<i64, _>("hidden").unwrap_or(0) >= 2)
+            .filter_map(|row| row.try_get("name").ok())
+            .collect())
+    }
+
     async fn get_indexes(&self, schema: &str, table: &str) -> Result<Vec<IndexInfo>> {
         let schema = sqlite_schema_identifier(schema)?;
         let statement = format!("PRAGMA {schema}.index_list({})", sqlite_identifier(table)?);
