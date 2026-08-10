@@ -13,6 +13,22 @@ const DEFAULT_LSP_SESSION_KEY: &str = "default";
 const MAX_LSP_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_LSP_COMPLETION_ITEM_BYTES: usize = 256 * 1024;
 const MAX_LSP_COMPLETION_ITEMS: usize = 2_000;
+const MAX_LSP_REQUEST_TOKEN_BYTES: usize = 128;
+
+fn validate_lsp_request_token(request_token: Option<&str>) -> Result<Option<String>, String> {
+    let Some(token) = request_token else {
+        return Ok(None);
+    };
+    if token.is_empty()
+        || token.len() > MAX_LSP_REQUEST_TOKEN_BYTES
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("Invalid LSP request token".to_string());
+    }
+    Ok(Some(token.to_string()))
+}
 
 fn normalize_session_key(session_key: Option<&str>) -> String {
     let trimmed = session_key.unwrap_or(DEFAULT_LSP_SESSION_KEY).trim();
@@ -41,6 +57,8 @@ pub struct CompletionRequest {
     pub character: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<CompletionContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_token: Option<String>,
 }
 
 pub type TextDocumentPositionRequest = CompletionRequest;
@@ -89,6 +107,8 @@ pub struct CompletionResolveRequest {
     #[serde(default)]
     pub session_key: Option<String>,
     pub item: CompletionItem,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -556,6 +576,7 @@ pub async fn lsp_get_completions(
     request: CompletionRequest,
     state: State<'_, LspState>,
 ) -> Result<CompletionResponse, String> {
+    let request_token = validate_lsp_request_token(request.request_token.as_deref())?;
     tracing::debug!(
         "LSP completion request: uri={}, pos={}:{}",
         request.uri,
@@ -590,7 +611,7 @@ pub async fn lsp_get_completions(
 
     // Send LSP request
     match manager
-        .send_request("textDocument/completion".to_string(), params)
+        .send_request_with_token("textDocument/completion".to_string(), params, request_token)
         .await
     {
         Ok(result) => {
@@ -640,6 +661,7 @@ pub async fn lsp_resolve_completion(
     request: CompletionResolveRequest,
     state: State<'_, LspState>,
 ) -> Result<CompletionItem, String> {
+    let request_token = validate_lsp_request_token(request.request_token.as_deref())?;
     let manager = current_manager(&state, request.session_key.as_deref()).await?;
     if !manager.supports_completion_resolve().await {
         return Err("LSP server does not advertise completionItem/resolve".to_string());
@@ -657,12 +679,33 @@ pub async fn lsp_resolve_completion(
     }
 
     let resolved = manager
-        .send_request("completionItem/resolve".to_string(), original.clone())
+        .send_request_with_token(
+            "completionItem/resolve".to_string(),
+            original.clone(),
+            request_token,
+        )
         .await
         .map_err(|error| format!("LSP completion resolve failed: {error}"))?;
     let merged = merge_completion_item_values(original, resolved);
     parse_completion_item(&merged, None)
         .ok_or_else(|| "LSP returned an invalid resolved completion item".to_string())
+}
+
+/// Cancel a completion or completion-resolve request that is no longer useful
+/// to Monaco. Unknown/already-completed tokens are intentionally idempotent.
+#[tauri::command]
+pub async fn lsp_cancel_request(
+    session_key: Option<String>,
+    request_token: String,
+    state: State<'_, LspState>,
+) -> Result<bool, String> {
+    let request_token = validate_lsp_request_token(Some(&request_token))?
+        .expect("a supplied request token is always present");
+    let manager = current_manager(&state, session_key.as_deref()).await?;
+    manager
+        .cancel_request_token(&request_token)
+        .await
+        .map_err(|error| format!("Failed to cancel LSP request: {error}"))
 }
 
 #[tauri::command]
@@ -985,12 +1028,25 @@ mod tests {
                 trigger_kind: 2,
                 trigger_character: Some(".".to_string()),
             }),
+            request_token: Some("completion-test-1".to_string()),
         };
 
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("file:///test.sql"));
         assert!(json.contains("\"triggerKind\":2"));
         assert!(json.contains("\"triggerCharacter\":\".\""));
+        assert!(json.contains("\"request_token\":\"completion-test-1\""));
+    }
+
+    #[test]
+    fn validates_cancellable_request_tokens() {
+        assert_eq!(
+            validate_lsp_request_token(Some("completion-abc_123")).unwrap(),
+            Some("completion-abc_123".to_string())
+        );
+        assert!(validate_lsp_request_token(Some("")).is_err());
+        assert!(validate_lsp_request_token(Some("completion/token")).is_err());
+        assert!(validate_lsp_request_token(Some(&"x".repeat(129))).is_err());
     }
 
     #[test]

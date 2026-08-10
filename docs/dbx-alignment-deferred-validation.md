@@ -499,6 +499,11 @@ explicit deferred validation task rather than an implicit release check.
   KiB, a cancelled request, and a tab/connection/session switch must issue no
   unsafe enrichment or apply a late response. Restart the provider between list
   and resolve and confirm the original usable suggestion remains intact.
+- With a controlled provider that delays completion and resolve, type rapidly
+  enough to supersede both calls. Confirm the desktop sends one standard
+  `$/cancelRequest` per superseded JSON-RPC id, releases the pending response,
+  does not starve the newest request, and keeps tokens isolated across LSP
+  sessions and provider restarts. This test does not require a database.
 - The bundled-server documentation-only resolve path is covered by a real local
   subprocess test. Deferred coverage here now means the packaged desktop Monaco
   interaction with a genuinely large remote catalog, including cache eviction,

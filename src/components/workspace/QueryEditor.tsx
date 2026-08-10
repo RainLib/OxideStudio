@@ -48,6 +48,7 @@ import {
   LSP_NOTIFICATION_EVENT,
 } from "@/services/lsp";
 import type { LspServerNotification } from "@/services/lsp";
+import type { LspCancellationToken } from "@/services/lsp/client";
 import {
   APP_EVENT_RUN_QUERY,
   APP_EVENT_RUN_CURRENT,
@@ -1307,7 +1308,7 @@ export function QueryEditor({
           model: any,
           position: any,
           context: any,
-          token: { isCancellationRequested?: boolean },
+          token: LspCancellationToken,
         ) => {
           if (!monaco) return { suggestions: [] };
           const completionStartedAt = performance.now();
@@ -1527,6 +1528,7 @@ export function QueryEditor({
               position.lineNumber - 1, // LSP uses 0-indexed lines
               position.column - 1, // LSP uses 0-indexed columns
               toLspCompletionContext(context),
+              token,
             );
             const items = markResolvableLspCompletionItems(
               completionList.items,
@@ -1684,13 +1686,13 @@ export function QueryEditor({
 
   const resolveCompletionItem = async (
     suggestion: any,
-    token: { isCancellationRequested?: boolean },
+    token: LspCancellationToken,
   ) => {
     const sourceItem = sourceLspCompletionItem(suggestion);
     if (!monaco || !sourceItem || token?.isCancellationRequested) {
       return suggestion;
     }
-    const resolvedItem = await lspClient.resolveCompletionItem(sourceItem);
+    const resolvedItem = await lspClient.resolveCompletionItem(sourceItem, token);
     if (token?.isCancellationRequested) return suggestion;
     return applyResolvedLspCompletionItem(monaco, suggestion, resolvedItem);
   };

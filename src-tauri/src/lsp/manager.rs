@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -45,6 +45,43 @@ enum LspOutgoingMessage {
     Notification(LspNotification),
     ServerResponse(Value),
     CancelRequest(u64),
+}
+
+#[derive(Default)]
+struct LspRequestTokens {
+    active: HashMap<String, u64>,
+    cancelled_before_registration: HashSet<String>,
+}
+
+impl LspRequestTokens {
+    fn register(&mut self, token: String, id: u64) -> Result<bool> {
+        if self.cancelled_before_registration.remove(&token) {
+            return Ok(false);
+        }
+        anyhow::ensure!(
+            !self.active.contains_key(&token),
+            "LSP request token is already active"
+        );
+        self.active.insert(token, id);
+        Ok(true)
+    }
+
+    fn cancel(&mut self, token: &str) -> Option<u64> {
+        if let Some(id) = self.active.remove(token) {
+            return Some(id);
+        }
+        if self.cancelled_before_registration.len() >= 1_024 {
+            self.cancelled_before_registration.clear();
+        }
+        self.cancelled_before_registration.insert(token.to_string());
+        None
+    }
+
+    fn clear(&mut self, token: &str, id: u64) {
+        if self.active.get(token) == Some(&id) {
+            self.active.remove(token);
+        }
+    }
 }
 
 fn completion_client_capabilities() -> Value {
@@ -132,6 +169,7 @@ pub struct LspServerManager {
     session_key: String,
     app_handle: AppHandle,
     server_capabilities: Arc<Mutex<Value>>,
+    request_tokens: Arc<Mutex<LspRequestTokens>>,
 }
 
 impl LspServerManager {
@@ -146,6 +184,7 @@ impl LspServerManager {
             session_key,
             app_handle,
             server_capabilities: Arc::new(Mutex::new(Value::Null)),
+            request_tokens: Arc::new(Mutex::new(LspRequestTokens::default())),
         }
     }
 
@@ -352,11 +391,19 @@ impl LspServerManager {
         let pending_responses_for_writer = pending_responses.clone();
         tokio::spawn(async move {
             let mut stdin = stdin;
+            // A cancellation command can be scheduled before its request has
+            // reached this single writer. Remember that small race window so
+            // the superseded request is never written afterwards.
+            let mut cancelled_before_send = HashSet::<u64>::new();
 
             while let Some(msg) = message_rx.recv().await {
                 // Serialize message
                 let (json, id_opt, response_tx_opt) = match msg {
                     LspOutgoingMessage::Request(req, tx) => {
+                        if cancelled_before_send.remove(&req.id) {
+                            let _ = tx.send(Err(anyhow::anyhow!("LSP request cancelled")));
+                            continue;
+                        }
                         (serde_json::to_string(&req), Some(req.id), Some(tx))
                     }
                     LspOutgoingMessage::Notification(notif) => {
@@ -367,8 +414,14 @@ impl LspServerManager {
                     }
                     LspOutgoingMessage::CancelRequest(id) => {
                         let mut pending = pending_responses_for_writer.lock().await;
-                        pending.remove(&id);
+                        let was_pending = pending.remove(&id).is_some();
                         drop(pending);
+                        if !was_pending {
+                            if cancelled_before_send.len() >= 1_024 {
+                                cancelled_before_send.clear();
+                            }
+                            cancelled_before_send.insert(id);
+                        }
                         (
                             serde_json::to_string(&cancel_request_notification(id)),
                             None,
@@ -560,8 +613,26 @@ impl LspServerManager {
 
     /// Send a request to the LSP server and wait for response
     pub async fn send_request(&self, method: String, params: Value) -> Result<Value> {
+        self.send_request_with_token(method, params, None).await
+    }
+
+    /// Send a cancellable request. The caller-provided token is local to this
+    /// LSP session and is translated to the JSON-RPC request ID internally.
+    pub async fn send_request_with_token(
+        &self,
+        method: String,
+        params: Value,
+        request_token: Option<String>,
+    ) -> Result<Value> {
         static REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        if let Some(token) = request_token.as_ref() {
+            let mut tokens = self.request_tokens.lock().await;
+            if !tokens.register(token.clone(), id)? {
+                return Err(anyhow::anyhow!("LSP request cancelled"));
+            }
+        }
 
         let request = LspRequest {
             jsonrpc: "2.0".to_string(),
@@ -573,12 +644,16 @@ impl LspServerManager {
         let (tx, rx) = oneshot::channel();
 
         // This effectively clones the sender
-        self.message_tx
+        if let Err(error) = self
+            .message_tx
             .send(LspOutgoingMessage::Request(request, tx))
             .await
-            .context("Failed to send request to LSP writer")?;
+        {
+            self.clear_request_token(request_token.as_deref(), id).await;
+            return Err(error).context("Failed to send request to LSP writer");
+        }
 
-        match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+        let result = match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(anyhow::anyhow!("Response channel closed")),
             Err(_) => {
@@ -588,7 +663,32 @@ impl LspServerManager {
                     .await;
                 Err(anyhow::anyhow!("LSP request timeout"))
             }
-        }
+        };
+        self.clear_request_token(request_token.as_deref(), id).await;
+        result
+    }
+
+    async fn clear_request_token(&self, request_token: Option<&str>, id: u64) {
+        let Some(token) = request_token else {
+            return;
+        };
+        let mut tokens = self.request_tokens.lock().await;
+        tokens.clear(token, id);
+    }
+
+    /// Cancel an active request by its caller-visible token.
+    pub async fn cancel_request_token(&self, request_token: &str) -> Result<bool> {
+        let mut tokens = self.request_tokens.lock().await;
+        let id = tokens.cancel(request_token);
+        drop(tokens);
+        let Some(id) = id else {
+            return Ok(false);
+        };
+        self.message_tx
+            .send(LspOutgoingMessage::CancelRequest(id))
+            .await
+            .context("Failed to send cancellation to LSP writer")?;
+        Ok(true)
     }
 
     /// Send a notification to the LSP server
@@ -652,7 +752,8 @@ mod tests {
     use super::{
         cancel_request_notification, completion_client_capabilities,
         content_length_from_lsp_header, lsp_server_request_response,
-        server_supports_completion_resolve, validate_lsp_message_size, MAX_LSP_MESSAGE_BYTES,
+        server_supports_completion_resolve, validate_lsp_message_size, LspRequestTokens,
+        MAX_LSP_MESSAGE_BYTES,
     };
 
     #[test]
@@ -660,6 +761,19 @@ mod tests {
         let notification = cancel_request_notification(42);
         assert_eq!(notification.method, "$/cancelRequest");
         assert_eq!(notification.params["id"], 42);
+    }
+
+    #[test]
+    fn request_tokens_cancel_active_and_not_yet_registered_requests() {
+        let mut tokens = LspRequestTokens::default();
+        assert!(tokens.register("active".to_string(), 7).unwrap());
+        assert_eq!(tokens.cancel("active"), Some(7));
+
+        assert_eq!(tokens.cancel("early"), None);
+        assert!(!tokens.register("early".to_string(), 8).unwrap());
+        assert!(tokens.register("next".to_string(), 9).unwrap());
+        tokens.clear("next", 9);
+        assert_eq!(tokens.cancel("next"), None);
     }
 
     #[test]

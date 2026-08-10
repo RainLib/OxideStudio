@@ -21,6 +21,13 @@ import type {
 } from "./types";
 import type { InlineLspContext } from "@/services/tauri/ai.service";
 
+export type LspCancellationToken = {
+  isCancellationRequested?: boolean;
+  onCancellationRequested?: (
+    listener: () => void,
+  ) => { dispose: () => void };
+};
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -106,6 +113,7 @@ class LspClient {
   private binaryPath: string | null = null;
   private initializationPromise: Promise<void> | null = null;
   private sessionKey: string;
+  private requestSequence = 0;
 
   constructor(sessionKey = "default") {
     this.sessionKey = sessionKey;
@@ -117,6 +125,45 @@ class LspClient {
 
   private commandSessionPayload() {
     return this.sessionKey === "default" ? {} : { sessionKey: this.sessionKey };
+  }
+
+  private nextRequestToken(kind: "completion" | "resolve"): string {
+    this.requestSequence += 1;
+    return `${kind}-${Date.now().toString(36)}-${this.requestSequence.toString(36)}`;
+  }
+
+  private async invokeCancellable<T>(
+    command: "lsp_get_completions" | "lsp_resolve_completion",
+    request: Record<string, unknown>,
+    token?: LspCancellationToken,
+  ): Promise<T> {
+    if (token?.isCancellationRequested) {
+      throw new Error("LSP request cancelled");
+    }
+
+    const requestToken = this.nextRequestToken(
+      command === "lsp_get_completions" ? "completion" : "resolve",
+    );
+    const response = invoke<T>(command, {
+      request: { ...request, request_token: requestToken },
+    });
+    let cancellationSent = false;
+    const cancel = () => {
+      if (cancellationSent) return;
+      cancellationSent = true;
+      void invoke<boolean>("lsp_cancel_request", {
+        ...this.commandSessionPayload(),
+        requestToken,
+      }).catch(() => undefined);
+    };
+    const cancellation = token?.onCancellationRequested?.(cancel);
+    if (token?.isCancellationRequested) cancel();
+
+    try {
+      return await response;
+    } finally {
+      cancellation?.dispose();
+    }
   }
 
   /**
@@ -217,16 +264,18 @@ class LspClient {
     uri: string,
     line: number,
     character: number,
-    context?: CompletionContext
+    context?: CompletionContext,
+    token?: LspCancellationToken,
   ): Promise<CompletionItem[]> {
-    return (await this.getCompletionList(uri, line, character, context)).items;
+    return (await this.getCompletionList(uri, line, character, context, token)).items;
   }
 
   async getCompletionList(
     uri: string,
     line: number,
     character: number,
-    context?: CompletionContext
+    context?: CompletionContext,
+    token?: LspCancellationToken,
   ): Promise<CompletionResponse> {
     if (!this.initialized) {
       console.warn("[LSP] Not initialized, returning empty completions");
@@ -240,15 +289,17 @@ class LspClient {
         context,
       });
 
-      const response = await invoke<CompletionResponse>("lsp_get_completions", {
-        request: {
+      const response = await this.invokeCancellable<CompletionResponse>(
+        "lsp_get_completions",
+        {
           ...this.requestSessionPayload(),
           uri,
           line,
           character,
           context,
         },
-      });
+        token,
+      );
 
       const completionList = {
         items: Array.isArray(response.items) ? response.items : [],
@@ -259,26 +310,35 @@ class LspClient {
 
       return completionList;
     } catch (error) {
-      console.error("[LSP] ✗ Get completions failed:", error);
+      if (!token?.isCancellationRequested) {
+        console.error("[LSP] ✗ Get completions failed:", error);
+      }
       return { items: [], isIncomplete: false, resolveProvider: false };
     }
   }
 
   /** Resolve documentation/detail/edits that a server deferred for a selected item. */
-  async resolveCompletionItem(item: CompletionItem): Promise<CompletionItem> {
+  async resolveCompletionItem(
+    item: CompletionItem,
+    token?: LspCancellationToken,
+  ): Promise<CompletionItem> {
     if (!this.initialized) return item;
 
     try {
-      return await invoke<CompletionItem>("lsp_resolve_completion", {
-        request: {
+      return await this.invokeCancellable<CompletionItem>(
+        "lsp_resolve_completion",
+        {
           ...this.requestSessionPayload(),
           item,
         },
-      });
+        token,
+      );
     } catch (error) {
       // Resolve is an optional enrichment. Preserve the usable proposal when
       // a server restarts, retracts the capability, or rejects stale data.
-      console.warn("[LSP] Completion resolve failed:", redactSecrets(error));
+      if (!token?.isCancellationRequested) {
+        console.warn("[LSP] Completion resolve failed:", redactSecrets(error));
+      }
       return item;
     }
   }
