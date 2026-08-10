@@ -629,14 +629,17 @@ pub struct TableDataTransferTargetColumn {
     pub target_length: Option<String>,
     pub is_primary_key: bool,
     pub is_not_null: bool,
+    pub compatibility: TableDataTransferCompatibility,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDataTransferTargetPlan {
+    pub mapping_profile: String,
     pub columns: Vec<TableDataTransferTargetColumn>,
     pub statements: Vec<String>,
+    pub can_execute: bool,
     pub confirmation_token: String,
     pub warnings: Vec<String>,
 }
@@ -5679,21 +5682,113 @@ fn apply_transfer_conversion(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransferTargetTypeMapping {
+    data_type: String,
+    length: Option<String>,
+    compatibility: TableDataTransferCompatibility,
+    reason: String,
+}
+
+fn transfer_target_mapping_profile(source_driver: &str, target_driver: &str) -> String {
+    format!(
+        "{}-to-{}/v1",
+        normalized_transfer_driver_id(source_driver),
+        normalized_transfer_driver_id(target_driver)
+    )
+}
+
 fn transfer_target_column_type(
     source_data_type: &str,
+    source_driver: &str,
     target_driver: &str,
-) -> (String, Option<String>, String) {
+) -> TransferTargetTypeMapping {
+    use TableDataTransferCompatibility::{Exact, Review, Safe, Unsupported};
+
     let family = transfer_type_family(source_data_type);
     let normalized = normalized_transfer_type(source_data_type);
     let source_lower = source_data_type.trim().to_ascii_lowercase();
+    let source_driver = normalized_transfer_driver_id(source_driver);
+    let target_driver = normalized_transfer_driver_id(target_driver);
+    if source_lower.is_empty() {
+        return TransferTargetTypeMapping {
+            data_type: "UNMAPPED".to_string(),
+            length: None,
+            compatibility: Unsupported,
+            reason:
+                "The source column has no declared type; no executable target DDL is generated."
+                    .to_string(),
+        };
+    }
+    if source_driver == target_driver {
+        let custom_or_compound = matches!(family, "other" | "unknown")
+            || source_lower.contains("[]")
+            || [
+                "array",
+                "map",
+                "struct",
+                "tuple",
+                "nested",
+                "geometry",
+                "geography",
+                "vector",
+            ]
+            .iter()
+            .any(|marker| source_lower.contains(marker));
+        return TransferTargetTypeMapping {
+            data_type: source_data_type.trim().to_string(),
+            length: None,
+            compatibility: if custom_or_compound { Review } else { Exact },
+            reason: if custom_or_compound {
+                "The exact same-product type is preserved, but target extensions/custom types and dependencies require review."
+                    .to_string()
+            } else {
+                "The exact same-product type declaration is preserved.".to_string()
+            },
+        };
+    }
+    if !matches!(target_driver.as_str(), "postgres" | "mysql" | "sqlite") {
+        return TransferTargetTypeMapping {
+            data_type: "UNMAPPED".to_string(),
+            length: None,
+            compatibility: Unsupported,
+            reason: format!(
+                "No Host-owned executable target-table mapping profile exists for {target_driver}."
+            ),
+        };
+    }
+    let compound_or_custom = matches!(family, "other" | "unknown")
+        || source_lower.contains("[]")
+        || [
+            "array",
+            "map",
+            "struct",
+            "tuple",
+            "nested",
+            "geometry",
+            "geography",
+            "vector",
+        ]
+        .iter()
+        .any(|marker| source_lower.contains(marker));
+    if compound_or_custom {
+        return TransferTargetTypeMapping {
+            data_type: "UNMAPPED".to_string(),
+            length: None,
+            compatibility: Unsupported,
+            reason: format!(
+                "The source type '{}' needs an explicit cross-product mapping; TEXT fallback is not treated as executable migration DDL.",
+                source_data_type.trim()
+            ),
+        };
+    }
     let unsigned_integer = family == "integer" && source_lower.contains("unsigned");
     let floating_numeric = family == "numeric"
         && ["float", "double", "real"]
             .iter()
             .any(|marker| source_lower.contains(marker));
-    let target_driver = normalized_transfer_driver_id(target_driver);
-    let is_sqlite = matches!(target_driver.as_str(), "sqlite" | "sqlite3");
-    let is_mysql = matches!(target_driver.as_str(), "mysql" | "mariadb");
+    let is_sqlite = target_driver == "sqlite";
+    let is_mysql = target_driver == "mysql";
 
     let (data_type, length) = if is_sqlite {
         match family {
@@ -5706,7 +5801,8 @@ fn transfer_target_column_type(
             "temporal" => ("DATETIME", None),
             "binary" => ("BLOB", None),
             "json" => ("JSON", None),
-            _ => ("TEXT", None),
+            "uuid" | "text" => ("TEXT", None),
+            _ => unreachable!("unrecognized families are rejected before target mapping"),
         }
     } else if is_mysql {
         match family {
@@ -5720,7 +5816,8 @@ fn transfer_target_column_type(
             "binary" => ("BLOB", None),
             "json" => ("JSON", None),
             "uuid" => ("VARCHAR", Some("36".to_string())),
-            _ => ("TEXT", None),
+            "text" => ("TEXT", None),
+            _ => unreachable!("unrecognized families are rejected before target mapping"),
         }
     } else {
         match family {
@@ -5734,28 +5831,40 @@ fn transfer_target_column_type(
             "binary" => ("BYTEA", None),
             "json" => ("JSONB", None),
             "uuid" => ("UUID", None),
-            _ => ("TEXT", None),
+            "text" => ("TEXT", None),
+            _ => unreachable!("unrecognized families are rejected before target mapping"),
         }
     };
 
-    let reason = if family == "other" || family == "unknown" {
-        format!(
-            "The source type '{}' is not recognized; the generated target uses TEXT for a reviewable, non-lossy textual fallback.",
-            source_data_type.trim()
-        )
-    } else if data_type.eq_ignore_ascii_case(source_data_type.trim()) && length.is_none() {
-        "The source type is directly supported by the target dialect.".to_string()
+    let compatibility = if family == "uuid" && target_driver != "postgres"
+        || family == "temporal" && normalized != "date"
+        || family == "numeric" && !floating_numeric
+        || family == "json" && target_driver == "sqlite"
+    {
+        Review
     } else {
-        format!(
-            "The source {family} type is mapped to the target dialect's conservative {data_type} representation."
-        )
+        Safe
     };
-
-    (data_type.to_string(), length, reason)
+    TransferTargetTypeMapping {
+        data_type: data_type.to_string(),
+        length,
+        compatibility,
+        reason: format!(
+            "Profile {} maps source {family} to {}{}.",
+            transfer_target_mapping_profile(&source_driver, &target_driver),
+            data_type,
+            if compatibility == Review {
+                " with manual range/semantic review"
+            } else {
+                ""
+            }
+        ),
+    }
 }
 
 fn build_transfer_target_columns(
     source_columns: &[ColumnInfo],
+    source_driver: &str,
     target_driver: &str,
 ) -> Result<(Vec<TableDataTransferTargetColumn>, Vec<CreateTableColumn>), String> {
     if source_columns.is_empty() {
@@ -5765,21 +5874,21 @@ fn build_transfer_target_columns(
     let mut planned = Vec::with_capacity(source_columns.len());
     let mut create_columns = Vec::with_capacity(source_columns.len());
     for source in source_columns {
-        let (target_data_type, target_length, reason) =
-            transfer_target_column_type(&source.data_type, target_driver);
+        let mapping = transfer_target_column_type(&source.data_type, source_driver, target_driver);
         planned.push(TableDataTransferTargetColumn {
             name: source.name.clone(),
             source_data_type: source.data_type.clone(),
-            target_data_type: target_data_type.clone(),
-            target_length: target_length.clone(),
+            target_data_type: mapping.data_type.clone(),
+            target_length: mapping.length.clone(),
             is_primary_key: source.is_primary_key,
             is_not_null: !source.is_nullable,
-            reason,
+            compatibility: mapping.compatibility,
+            reason: mapping.reason,
         });
         create_columns.push(CreateTableColumn {
             name: source.name.clone(),
-            data_type: target_data_type,
-            length: target_length,
+            data_type: mapping.data_type,
+            length: mapping.length,
             is_primary_key: source.is_primary_key,
             is_not_null: !source.is_nullable,
             // Identity/sequence semantics are deliberately not synthesized:
@@ -5860,8 +5969,16 @@ async fn resolve_table_data_transfer_target_plan(
     )
     .await
     .map_err(|error| error.to_string())?;
-    let (columns, create_columns) = build_transfer_target_columns(&source_columns, &target_driver)?;
-    let statements = if matches!(target_driver.as_str(), "sqlite" | "sqlite3") {
+    let source_driver = normalized_transfer_driver_id(&request.source.driver);
+    let mapping_profile = transfer_target_mapping_profile(&source_driver, &target_driver);
+    let (columns, create_columns) =
+        build_transfer_target_columns(&source_columns, &source_driver, &target_driver)?;
+    let can_execute = columns
+        .iter()
+        .all(|column| column.compatibility != TableDataTransferCompatibility::Unsupported);
+    let statements = if !can_execute {
+        Vec::new()
+    } else if matches!(target_driver.as_str(), "sqlite" | "sqlite3") {
         build_sqlite_create_table_statements(
             &request.target.schema,
             &request.target.table,
@@ -5876,7 +5993,11 @@ async fn resolve_table_data_transfer_target_plan(
             &create_columns,
         )?
     };
-    let confirmation_token = transfer_target_confirmation_token(request, &columns, &statements)?;
+    let confirmation_token = if can_execute {
+        transfer_target_confirmation_token(request, &columns, &statements)?
+    } else {
+        String::new()
+    };
     let mut warnings = vec![format!(
         "This creates only the empty target table {}. Data is copied later through a separate reviewed transfer.",
         endpoint_label(&request.target)
@@ -5885,6 +6006,12 @@ async fn resolve_table_data_transfer_target_plan(
         "Identity, sequence, foreign-key, check, trigger, index, and default expressions are not synthesized. Primary-key and nullability metadata are retained."
             .to_string(),
     );
+    if !can_execute {
+        warnings.push(
+            "Executable CREATE TABLE DDL is blocked because at least one source type has no explicit cross-product mapping. No textual fallback DDL was generated."
+                .to_string(),
+        );
+    }
     warnings.extend(
         columns
             .iter()
@@ -5901,8 +6028,10 @@ async fn resolve_table_data_transfer_target_plan(
     );
 
     Ok(TableDataTransferTargetPlan {
+        mapping_profile,
         columns,
         statements,
+        can_execute,
         confirmation_token,
         warnings,
     })
@@ -5930,6 +6059,12 @@ pub async fn create_table_data_transfer_target(
 ) -> Result<Response<CreateTableResult>, String> {
     let result: Result<CreateTableResult, String> = async {
         let plan = resolve_table_data_transfer_target_plan(&manager, &request).await?;
+        if !plan.can_execute {
+            return Err(
+                "The reviewed target-table mapping contains unsupported source types; no DDL was generated."
+                    .to_string(),
+            );
+        }
         if confirmation_token.trim() != plan.confirmation_token {
             return Err(format!(
                 "Type the exact confirmation phrase: {}",
@@ -10722,37 +10857,63 @@ mod tests {
 
     #[test]
     fn transfer_target_types_use_conservative_target_dialect_representations() {
+        let same_product = transfer_target_column_type("uuid", "postgres", "postgres");
+        assert_eq!(same_product.data_type, "uuid");
         assert_eq!(
-            transfer_target_column_type("uuid", "postgres"),
-            (
-                "UUID".to_string(),
-                None,
-                "The source type is directly supported by the target dialect.".to_string(),
-            )
+            same_product.compatibility,
+            TableDataTransferCompatibility::Exact
         );
-        assert_eq!(transfer_target_column_type("uuid", "mysql").0, "VARCHAR");
+
+        let mysql_uuid = transfer_target_column_type("uuid", "postgres", "mysql");
+        assert_eq!(mysql_uuid.data_type, "VARCHAR");
+        assert_eq!(mysql_uuid.length.as_deref(), Some("36"));
         assert_eq!(
-            transfer_target_column_type("uuid", "mysql").1.as_deref(),
-            Some("36")
+            mysql_uuid.compatibility,
+            TableDataTransferCompatibility::Review
         );
-        assert_eq!(transfer_target_column_type("bytea", "postgres").0, "BYTEA");
         assert_eq!(
-            transfer_target_column_type("decimal(18,2)", "sqlite").0,
+            transfer_target_column_type("blob", "mysql", "postgres").data_type,
+            "BYTEA"
+        );
+        assert_eq!(
+            transfer_target_column_type("decimal(18,2)", "postgres", "sqlite").data_type,
             "NUMERIC"
         );
         assert_eq!(
-            transfer_target_column_type("bigint unsigned", "mysql")
-                .1
+            transfer_target_column_type("bigint unsigned", "mysql", "postgres")
+                .length
                 .as_deref(),
-            Some("20,0")
+            None
         );
         assert_eq!(
-            transfer_target_column_type("double precision", "postgres").0,
+            transfer_target_column_type("double precision", "mysql", "postgres").data_type,
             "DOUBLE PRECISION"
         );
+        let unsupported = transfer_target_column_type("vendor_geography", "postgres", "mysql");
+        assert_eq!(unsupported.data_type, "UNMAPPED");
         assert_eq!(
-            transfer_target_column_type("vendor_geography", "mysql").0,
-            "TEXT"
+            unsupported.compatibility,
+            TableDataTransferCompatibility::Unsupported
+        );
+
+        let same_product_custom =
+            transfer_target_column_type("vendor_geography", "postgres", "postgres");
+        assert_eq!(same_product_custom.data_type, "vendor_geography");
+        assert_eq!(
+            same_product_custom.compatibility,
+            TableDataTransferCompatibility::Review
+        );
+    }
+
+    #[test]
+    fn transfer_target_profiles_normalize_driver_aliases() {
+        assert_eq!(
+            super::transfer_target_mapping_profile("postgresql", "mariadb"),
+            "postgres-to-mysql/v1"
+        );
+        assert_eq!(
+            super::transfer_target_mapping_profile("sqlite3", "postgresql"),
+            "sqlite-to-postgres/v1"
         );
     }
 
@@ -10781,6 +10942,7 @@ mod tests {
             target_length: Some("36".to_string()),
             is_primary_key: true,
             is_not_null: true,
+            compatibility: TableDataTransferCompatibility::Review,
             reason: "mapped".to_string(),
         }];
         let first = transfer_target_confirmation_token(

@@ -44,6 +44,8 @@
 | M07 | Oxide 增强项 | 可执行迁移预检、确认、事务/非事务边界和 journal | ChartDB `src/lib/data/sql-export/export-sql-script.ts:154` 主要生成 SQL，不负责安全执行 | Oxide `src-tauri/src/commands/schema_diff.rs` 执行，`src-tauri/src/core/schema_diff.rs` 规划；PostgreSQL 事务、MySQL 显式非事务、SQLite review-only rebuild、Host-owned journal 已存在。verified external driver 使用进程内 opaque-token session、target-owned preflight/apply/verify 和 Host post-recapture；journal 不保存 token、DDL 或 sidecar preflight observed 原文 |
 | M08 | 协议/证据门禁已对齐，逐产品实现与证据延期 | 70+ 产品的 migration capability 仍需逐产品语义实现 | ChartDB 不覆盖此规模 | 外置 driver 已有 descriptor-only `plan/preflight/token-bound apply/verify` 协议、签名 `schemaMigration` contract、runtime 双重握手门禁、Host-owned catalog evidence receipt 和 migration evidence runner；旧包、手工目录包及没有精确 platform/server-version evidence 的产品继续保持 review-only，不借用相似方言猜测。 |
 
+补充：表数据迁移中的“创建空目标表”已采用独立的显式 `<source>-to-<target>/v1` 类型 mapping profile。该路径只为 PostgreSQL/MySQL/SQLite 的已识别标量类型生成可确认 DDL，逐列展示 exact/safe/review/unsupported；跨产品未知、数组、空间、向量和自定义类型返回 blocked plan，不生成 DDL 或 token，也不再静默回退为 `TEXT`。这不代表 ChartDB schema migration 的完整对象语义已经对齐，默认值、identity/sequence、约束、索引、触发器及逐产品 sidecar evidence 仍按 M05/M08 跟踪。
+
 ## 3. 表数据与结果网格导入导出
 
 | ID | 状态 | 差距/能力 | ChartDB 实现位置 | OxideStudio 当前落点与下一步 |

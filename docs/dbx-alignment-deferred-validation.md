@@ -159,6 +159,15 @@ explicit deferred validation task rather than an implicit release check.
 
 ## Existing transfer and migration work
 
+- Exercise target-table creation profiles for PostgreSQL, MySQL/MariaDB and
+  SQLite in every source/target direction. Confirm scalar exact/safe/review
+  mappings produce the reviewed DDL, while unknown, array, spatial, vector and
+  custom cross-product types return `unsupported`, an empty statement list and
+  no confirmation token; they must never fall back to executable `TEXT`.
+- Repeat same-product target creation with native/custom types and confirm the
+  exact declaration is preserved, custom/extension dependencies remain visibly
+  `review`, stale plan tokens are rejected, and the UI exposes the normalized
+  mapping profile while hiding the create action for blocked plans.
 - Verify PostgreSQL serial and identity reseed previews against empty/non-empty
   targets, a target without owned generators, rollback after a reseed failure,
   and stale-token rejection when the reseed option changes. Confirm reseed SQL

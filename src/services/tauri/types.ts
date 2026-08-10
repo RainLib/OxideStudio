@@ -726,6 +726,12 @@ export interface TableDataTransferBatchResult {
   tables: TableDataTransferBatchTableResult[];
 }
 
+export type TableDataTransferCompatibility =
+  | "exact"
+  | "safe"
+  | "review"
+  | "unsupported";
+
 export interface TableDataTransferColumnMapping {
   source: string;
   target: string;
@@ -733,7 +739,7 @@ export interface TableDataTransferColumnMapping {
   dataType: string;
   sourceDataType: string;
   targetDataType: string;
-  compatibility: "exact" | "safe" | "review" | "unsupported";
+  compatibility: TableDataTransferCompatibility;
   conversion:
     | "none"
     | "targetBinding"
@@ -770,12 +776,15 @@ export interface TableDataTransferTargetColumn {
   targetLength?: string | null;
   isPrimaryKey: boolean;
   isNotNull: boolean;
+  compatibility: TableDataTransferCompatibility;
   reason: string;
 }
 
 export interface TableDataTransferTargetPlan {
+  mappingProfile: string;
   columns: TableDataTransferTargetColumn[];
   statements: string[];
+  canExecute: boolean;
   confirmationToken: string;
   warnings: string[];
 }

@@ -753,6 +753,7 @@ export function TableDataTransferDialog({
     if (
       !targetPlanRequest ||
       !targetPlan ||
+      !targetPlan.canExecute ||
       targetPlanPreviewKey !== targetPlanRequestKey ||
       targetPlanConfirmation.trim() !== targetPlan.confirmationToken
     ) {
@@ -1263,8 +1264,11 @@ export function TableDataTransferDialog({
               ) : (
                 <div className="space-y-3 text-[10px]">
                   <div className="rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2">
-                    <div className="mb-1 font-medium">
-                      {targetPlan.columns.length} generated column(s)
+                    <div className="mb-1 flex items-center justify-between gap-2 font-medium">
+                      <span>{targetPlan.columns.length} mapped column(s)</span>
+                      <code className="truncate text-[9px] wb-muted">
+                        {targetPlan.mappingProfile}
+                      </code>
                     </div>
                     <div className="max-h-36 overflow-auto font-mono leading-5 wb-muted">
                       {targetPlan.columns.map((column) => (
@@ -1273,9 +1277,14 @@ export function TableDataTransferDialog({
                           className="border-b border-[hsl(var(--wb-border-subtle))] py-1 last:border-b-0"
                           title={column.reason}
                         >
-                          <div className="truncate">
-                            {column.name}: {column.sourceDataType || "unknown"} → {column.targetDataType}
-                            {column.targetLength ? `(${column.targetLength})` : ""}
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="min-w-0 truncate">
+                              {column.name}: {column.sourceDataType || "unknown"} → {column.targetDataType}
+                              {column.targetLength ? `(${column.targetLength})` : ""}
+                            </span>
+                            <span className={transferCompatibilityClass(column.compatibility)}>
+                              {column.compatibility}
+                            </span>
                           </div>
                           <div className="truncate text-[9px] wb-muted">
                             {column.isPrimaryKey ? "primary key · " : ""}
@@ -1286,9 +1295,15 @@ export function TableDataTransferDialog({
                       ))}
                     </div>
                   </div>
-                  <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2 font-mono leading-4 text-[hsl(var(--wb-text-muted))]">
-                    {targetPlan.statements.join("\n\n")}
-                  </pre>
+                  {targetPlan.canExecute ? (
+                    <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2 font-mono leading-4 text-[hsl(var(--wb-text-muted))]">
+                      {targetPlan.statements.join("\n\n")}
+                    </pre>
+                  ) : (
+                    <p className="rounded-[4px] border border-[hsl(var(--destructive)/0.35)] bg-[hsl(var(--destructive)/0.08)] p-2 leading-4 text-[hsl(var(--destructive))]">
+                      Target-table creation is blocked. At least one source type has no explicit mapping in this profile, so no executable DDL was generated.
+                    </p>
+                  )}
                   {targetPlan.warnings.map((warning) => (
                     <p key={warning} className="leading-4 wb-muted">
                       {warning}
@@ -1299,45 +1314,49 @@ export function TableDataTransferDialog({
                       The target definition changed after preview. Review it again.
                     </p>
                   )}
-                  <label className="block space-y-1">
-                    <span className="text-[10px] wb-muted">
-                      Type{" "}
-                      <code className="select-all text-[hsl(var(--wb-text))]">
-                        {targetPlan.confirmationToken}
-                      </code>{" "}
-                      to create this empty table
-                    </span>
-                    <input
-                      className={fieldClass}
-                      value={targetPlanConfirmation}
-                      onChange={(event) =>
-                        setTargetPlanConfirmation(event.target.value)
-                      }
-                      autoComplete="off"
-                      spellCheck={false}
-                      disabled={
-                        isSubmitting ||
-                        targetPlanPreviewKey !== targetPlanRequestKey
-                      }
-                    />
-                  </label>
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="h-7 text-[10px]"
-                    onClick={handleCreateTarget}
-                    disabled={
-                      isSubmitting ||
-                      targetPlanPreviewKey !== targetPlanRequestKey ||
-                      targetPlanConfirmation.trim() !==
-                        targetPlan.confirmationToken
-                    }
-                  >
-                    {isCreatingTarget && (
-                      <Loader2 size={12} className="mr-1.5 animate-spin" />
-                    )}
-                    Create empty target table
-                  </Button>
+                  {targetPlan.canExecute && (
+                    <>
+                      <label className="block space-y-1">
+                        <span className="text-[10px] wb-muted">
+                          Type{" "}
+                          <code className="select-all text-[hsl(var(--wb-text))]">
+                            {targetPlan.confirmationToken}
+                          </code>{" "}
+                          to create this empty table
+                        </span>
+                        <input
+                          className={fieldClass}
+                          value={targetPlanConfirmation}
+                          onChange={(event) =>
+                            setTargetPlanConfirmation(event.target.value)
+                          }
+                          autoComplete="off"
+                          spellCheck={false}
+                          disabled={
+                            isSubmitting ||
+                            targetPlanPreviewKey !== targetPlanRequestKey
+                          }
+                        />
+                      </label>
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-7 text-[10px]"
+                        onClick={handleCreateTarget}
+                        disabled={
+                          isSubmitting ||
+                          targetPlanPreviewKey !== targetPlanRequestKey ||
+                          targetPlanConfirmation.trim() !==
+                            targetPlan.confirmationToken
+                        }
+                      >
+                        {isCreatingTarget && (
+                          <Loader2 size={12} className="mr-1.5 animate-spin" />
+                        )}
+                        Create empty target table
+                      </Button>
+                    </>
+                  )}
                 </div>
               )
             ) : isBatchTransfer ? (
