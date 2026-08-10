@@ -430,6 +430,15 @@ explicit deferred validation task rather than an implicit release check.
   parenthesis must not receive a second argument list.
 - Verify same-name function overloads with distinct signatures remain separate
   Monaco rows after semantic, JOIN and syntax fallback merges.
+- With real PostgreSQL/MySQL/SQLite/Hive/ClickHouse metadata, verify comparison
+  value completion after WHERE, HAVING, JOIN ON and UPDATE SET. Text, numeric,
+  boolean, date/time/timestamp, UUID and JSON columns must receive the matching
+  snippet with working Tab/Shift+Tab stops; ENUM/SET values must remain bounded
+  to metadata declarations and quote embedded apostrophes safely.
+- Use joins where the same column name has conflicting types, quoted aliases and
+  custom/vendor types. Ambiguous or unknown types may offer NULL but must not
+  guess a typed literal, query distinct values, retain row samples or send data
+  content to the renderer/LSP telemetry path.
 - Verify a visible table alias is offered as its own completion in SELECT,
   WHERE, JOIN predicates and nested query scopes. Quoted aliases such as
   `"User Alias"` must retain their original SQL spelling, accepting the alias

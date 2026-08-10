@@ -98,10 +98,12 @@ describe("query editor LSP completion presentation", () => {
 
   it("uses the caller range and records a scoped usage command", () => {
     const scope = "project:connection:schema";
+    const ownerKey = "tab:connection:schema:model:7";
     recordCompletionUsage(scope, "customer_id", 1_000);
     const fallbackRange = new TestRange(3, 8, 3, 11);
     const [suggestion] = lspCompletionItemsToMonacoSuggestions({
       monaco,
+      ownerKey,
       items: [
         {
           label: "customer_id",
@@ -126,7 +128,7 @@ describe("query editor LSP completion presentation", () => {
     expect(suggestion.command).toEqual({
       id: "record-completion",
       title: "Record SQL completion usage",
-      arguments: [scope, "customer_id"],
+      arguments: [scope, "customer_id", false, ownerKey],
     });
   });
 });
