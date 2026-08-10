@@ -27,6 +27,7 @@ type ResolveQueryExecutionTargetOptions = {
   kind: QueryExecutionKind;
   mode: QueryExecutionMode;
   snapshot: QueryExecutionSnapshot;
+  executeAllOnBlankLine?: boolean;
   resolveSqlStatementAtCursor?: (
     sql: string,
     cursorOffset: number,
@@ -44,6 +45,7 @@ export async function resolveQueryExecutionTarget({
   kind,
   mode,
   snapshot,
+  executeAllOnBlankLine = false,
   resolveSqlStatementAtCursor,
 }: ResolveQueryExecutionTargetOptions): Promise<QueryExecutionTarget | null> {
   if (mode === "all") {
@@ -110,7 +112,11 @@ export async function resolveQueryExecutionTarget({
     snapshot.fullText,
     snapshot.cursorOffset,
   );
-  if (!statement?.sql.trim()) return null;
+  if (!statement?.sql.trim()) {
+    return executeAllOnBlankLine && snapshot.fullText.trim()
+      ? { sql: snapshot.fullText, scope: "document" }
+      : null;
+  }
   return {
     sql: statement.sql,
     sourceStartOffset: statement.startOffset,

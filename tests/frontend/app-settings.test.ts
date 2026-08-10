@@ -174,6 +174,20 @@ describe("app settings workbench layout", () => {
     });
   });
 
+  it("keeps blank-line full-document execution explicitly opt-in", () => {
+    expect(DEFAULT_APP_SETTINGS.editor.executeAllOnBlankLine).toBe(false);
+    expect(
+      normalizeAppSettings({
+        editor: { executeAllOnBlankLine: true },
+      }).editor.executeAllOnBlankLine,
+    ).toBe(true);
+    expect(
+      normalizeAppSettings({
+        editor: { executeAllOnBlankLine: "yes" },
+      }).editor.executeAllOnBlankLine,
+    ).toBe(false);
+  });
+
   it("normalizes SQL formatter layout preferences", () => {
     expect(DEFAULT_APP_SETTINGS.editor.sqlFormatting).toEqual({
       logicalOperatorNewline: "before",

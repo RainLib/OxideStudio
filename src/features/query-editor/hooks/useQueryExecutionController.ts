@@ -66,8 +66,10 @@ type QueryExecutionControllerOptions = {
   canExecute: boolean;
   driver: string;
   kind: QueryExecutionKind;
+  executeAllOnBlankLine: boolean;
   supportsExplainPlan: boolean;
   confirmExecution: (sql: string) => boolean;
+  onNoExecutableTarget?: () => void;
   editorRef: RefObject<QueryExecutionEditor | null>;
   transactionIdForExecution: () => string | undefined;
   updateTabSql: (tabId: string, sql: string) => void;
@@ -127,8 +129,10 @@ export function useQueryExecutionController({
   canExecute,
   driver,
   kind,
+  executeAllOnBlankLine,
   supportsExplainPlan,
   confirmExecution,
+  onNoExecutableTarget,
   editorRef,
   transactionIdForExecution,
   updateTabSql,
@@ -250,6 +254,7 @@ export function useQueryExecutionController({
           kind,
           mode: "current",
           snapshot,
+          executeAllOnBlankLine,
           resolveSqlStatementAtCursor:
             kind === "sql"
               ? (sql, cursorOffset) =>
@@ -278,6 +283,13 @@ export function useQueryExecutionController({
         !mountedRef.current ||
         latestContextKeyRef.current !== contextKey
       ) {
+        if (
+          mountedRef.current &&
+          latestContextKeyRef.current === contextKey &&
+          !target?.sql.trim()
+        ) {
+          onNoExecutableTarget?.();
+        }
         return;
       }
 
@@ -308,7 +320,9 @@ export function useQueryExecutionController({
     connectionLabel,
     contextKey,
     editorRef,
+    executeAllOnBlankLine,
     kind,
+    onNoExecutableTarget,
     requestParameterizedExecution,
     runTabQuery,
     runExclusive,

@@ -1054,3 +1054,22 @@ explicit deferred validation task rather than an implicit release check.
   settings, user override/disable behavior and undo. Confirm product switching
   immediately removes the previous product's block. No database was opened
   during Phase 102 implementation.
+
+## Blank-line execution and native editor clipboard actions
+
+- In a real Tauri/Monaco session, place the cursor on leading, inter-statement
+  and trailing physically blank lines, including CRLF and whitespace-only
+  lines around UTF-16 text. With the preference disabled, Run Current must not
+  execute an adjacent statement and the current-statement frame must clear;
+  the status bar should announce the no-op once without stealing focus.
+- Enable `Run all SQL from a blank line` and repeat with parameterized and
+  destructive multi-statement documents. The exact full document must still
+  pass parameter input, confirmation, transaction binding and duplicate-run
+  gates. A non-empty selection and a cursor on an indented SQL line must keep
+  priority over the fallback.
+- Verify Monaco's native Cut/Copy/Paste menu on Windows, macOS and Linux with
+  ordinary, multi-cursor, Vim visual and read-only selections. Undo must restore
+  a cut/paste as one editor operation and clipboard denial must leave the model
+  unchanged. The Rust test compiled during Phase 103 but this Windows runtime
+  still exited before the harness with `STATUS_ENTRYPOINT_NOT_FOUND`; no
+  database was opened.

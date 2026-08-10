@@ -336,6 +336,7 @@ export function QueryEditor({
   // const [isSaveOpen, setIsSaveOpen] = useState(false);
   // const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false);
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
+  const [executionNotice, setExecutionNotice] = useState<string | null>(null);
   const [inlineCompletionStatus, setInlineCompletionStatus] =
     useState<InlineCompletionStatus>("off");
   const [elasticsearchServerVersion, setElasticsearchServerVersion] =
@@ -360,6 +361,7 @@ export function QueryEditor({
   const runAllActionRef = useRef<() => void>(() => {});
   const runCurrentActionRef = useRef<() => void>(() => {});
   const formatActionRef = useRef<() => void>(() => {});
+  const executionNoticeTimerRef = useRef<number | null>(null);
   const elasticsearchAnalysisWorkerRef = useRef<Worker | null>(null);
   const elasticsearchAnalysisTimerRef = useRef<number | null>(null);
   const elasticsearchAnalysisRequestIdRef = useRef(0);
@@ -616,6 +618,24 @@ export function QueryEditor({
     },
     [driver, editorSettings.confirmDestructiveSql],
   );
+  const showNoExecutableTarget = useCallback(() => {
+    setExecutionNotice("No executable statement at cursor");
+    if (executionNoticeTimerRef.current !== null) {
+      window.clearTimeout(executionNoticeTimerRef.current);
+    }
+    executionNoticeTimerRef.current = window.setTimeout(() => {
+      executionNoticeTimerRef.current = null;
+      setExecutionNotice(null);
+    }, 3000);
+  }, []);
+  useEffect(
+    () => () => {
+      if (executionNoticeTimerRef.current !== null) {
+        window.clearTimeout(executionNoticeTimerRef.current);
+      }
+    },
+    [],
+  );
   const canExecuteDocument =
     !isProjectFilePreview &&
     !activeTab?.agentFileDiffPreview &&
@@ -665,8 +685,10 @@ export function QueryEditor({
       : isMongoDbConsole
         ? "mongodb"
         : "sql",
+    executeAllOnBlankLine: editorSettings.executeAllOnBlankLine,
     supportsExplainPlan: capabilities.supportsExplainPlan,
     confirmExecution: confirmEditorExecution,
+    onNoExecutableTarget: showNoExecutableTarget,
     editorRef,
     transactionIdForExecution,
     updateTabSql,
@@ -3277,6 +3299,16 @@ export function QueryEditor({
                 title="Inline completion status"
               >
                 AI {inlineCompletionStatus}
+              </span>
+            )}
+            {executionNotice && (
+              <span
+                role="status"
+                aria-live="polite"
+                className="max-w-64 truncate px-2 text-[hsl(var(--wb-accent))]"
+                title={executionNotice}
+              >
+                {executionNotice}
               </span>
             )}
             <span

@@ -14,6 +14,10 @@ export const QUERY_EDITOR_OPTIONS = {
   rulers: [120] as number[],
   renderLineHighlight: "all",
   renderWhitespace: "selection",
+  // Keep Monaco's native Cut/Copy/Paste actions available. They already use
+  // the editor undo stack, multi-cursor selections, read-only gates and host
+  // clipboard permissions, so a second custom context menu would diverge.
+  contextmenu: true,
   overviewRulerBorder: false,
   hideCursorInOverviewRuler: true,
   smoothScrolling: true,

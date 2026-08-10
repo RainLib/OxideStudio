@@ -125,4 +125,28 @@ describe("resolveQueryExecutionTarget", () => {
       14,
     );
   });
+
+  it("falls back to the document from a blank line only when opted in", async () => {
+    const source = "SELECT 1;\n\nSELECT 2;";
+    const resolveStatement = vi.fn().mockResolvedValue(null);
+
+    await expect(
+      resolveQueryExecutionTarget({
+        kind: "sql",
+        mode: "current",
+        snapshot: snapshot(source, { cursorOffset: 10 }),
+        executeAllOnBlankLine: false,
+        resolveSqlStatementAtCursor: resolveStatement,
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      resolveQueryExecutionTarget({
+        kind: "sql",
+        mode: "current",
+        snapshot: snapshot(source, { cursorOffset: 10 }),
+        executeAllOnBlankLine: true,
+        resolveSqlStatementAtCursor: resolveStatement,
+      }),
+    ).resolves.toEqual({ sql: source, scope: "document" });
+  });
 });

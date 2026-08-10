@@ -71,6 +71,7 @@ function options(
     canExecute: true,
     driver: "postgres",
     kind: "sql",
+    executeAllOnBlankLine: false,
     supportsExplainPlan: true,
     confirmExecution,
     editorRef: { current: editor(sql, 0, 0, 14) },
@@ -129,6 +130,39 @@ describe("useQueryExecutionController", () => {
       "transaction-1",
       10,
     );
+  });
+
+  it("runs the document from a blank line only when the setting is enabled", async () => {
+    const sql = "SELECT 1;\n\nSELECT 2;";
+    queryMocks.resolveStatement.mockResolvedValueOnce(null);
+    await renderController(
+      options({
+        activeTab: { id: "tab-1", sql },
+        editorRef: { current: editor(sql, 0, 0, 10) },
+        executeAllOnBlankLine: true,
+      }),
+    );
+
+    await act(async () => controller.handleRunCurrent());
+
+    expect(runTabQuery).toHaveBeenCalledWith(
+      "tab-1",
+      "connection-1",
+      sql,
+      "transaction-1",
+      undefined,
+    );
+  });
+
+  it("reports a blank current target without executing when fallback is disabled", async () => {
+    const noTarget = vi.fn();
+    queryMocks.resolveStatement.mockResolvedValueOnce(null);
+    await renderController(options({ onNoExecutableTarget: noTarget }));
+
+    await act(async () => controller.handleRunCurrent());
+
+    expect(noTarget).toHaveBeenCalledOnce();
+    expect(runTabQuery).not.toHaveBeenCalled();
   });
 
   it("opens parameter input before dispatching a query", async () => {

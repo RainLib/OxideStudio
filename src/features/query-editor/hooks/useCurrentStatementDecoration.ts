@@ -135,6 +135,11 @@ export function attachCurrentStatementDecoration(
     const position = editor.getPosition();
     if (!position) return;
     const offset = model.getOffsetAt(position);
+    if (model.getLineContent(position.lineNumber).trim() === "") {
+      requestGeneration += 1;
+      decorate(0, 0);
+      return;
+    }
     if (isMongoDbConsole) {
       requestGeneration += 1;
       rangeCache = null;

@@ -1,13 +1,23 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-08-10
-> DBX 参考提交：`27f3ea728`
+> DBX 参考提交：`28f370559`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
 `apps/desktop/src/lib/...`，`components/...` 表示
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
+
+### 最新增量审计（`27f3ea728` → `28f370559`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `a83f32d13` | 空白行可选执行全部 SQL，并在没有当前语句时给出反馈 | 本阶段对齐：Rust scanner 不再把物理空白行归给下一条语句；默认关闭的设置可显式回退整篇，状态栏提供可访问反馈。 |
+| `150d0108b` | Query Editor 右键菜单增加 Cut/Paste | 已有等价能力：Monaco 原生菜单被显式保持启用，继续统一处理 clipboard permission、read-only、multi-cursor 和 undo，不注册第二套冲突动作。 |
+| `1ca2de42a` | SQL Server 复杂查询的 qualified `ORDER BY` 分页避免失去排序表达式 | 当前 Host 没有原生 SQL Server query-result pagination builder；外置 JDBC/package 的分页 SQL 由受审 driver runtime 所有。待引入 Host-owned SQL Server 分页时必须迁移该安全判定和 fixtures，不借用 PostgreSQL 路径。 |
+| `deba5db2f`、`585e2f3c5`、`ad9075e18` | Oracle clone 保留 index/trigger metadata，并展开 Oracle/Xugu package members | 继续落在 D02/D04/M08 的逐产品运行时和迁移证据缺口；在签名 package、结构化 metadata 与真实版本证据齐备前不伪装为可迁移能力。 |
+| `37f13018d` 等 | Consul 全栈工作台及 KV lazy-tree 增强 | 属于专用数据库工作台宽度，不改变本轮 SQL LSP；候选产品仍须通过安装、连接、能力与 conformance 门禁。 |
 
 ## 1. 支持口径
 
@@ -59,11 +69,12 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 | L11 | 核心逻辑已对齐，真实产品验证延期：结构化编辑 intentions 与列所有权 | `apps/desktop/src/lib/editor/sqlIntentionActions.ts`、`queryEditorTextEdits.ts`、`sqlInListPaste.ts`、`sqlQuoteCaret.ts`；generated/hidden 参考 `lib/sql/insertValueHintColumns.ts`、`crates/dbx-core/src/data_grid_sql.rs:is_grid_insert_omitted_column`、`db/sqlserver.rs:SqlServerColumnMetadata`、`db/cloudflare_d1/mod.rs:list_columns` | 已有格式化、危险语句 guard、Unicode quote/unquote identifier、clipboard→IN-list、metadata 星号展开、qualify/unqualify/batch qualify 与 FK-aware `OXIDE002`。本阶段新增跨 Host/TS/LSP 的 `is_generated`/`is_hidden` 契约：PostgreSQL/MySQL/SQLite 原生 metadata 精确分类，MySQL 不再把 `DEFAULT_GENERATED` 误判成 computed，SQLite/rqlite 改用 `table_xinfo`；JDBC Agent 转发标准 `IS_GENERATEDCOLUMN`，ClickHouse 分类 `MATERIALIZED`/`ALIAS`/`EPHEMERAL`。旧 package 缺生成字段时 INSERT fail-closed，迁移还要求生成/隐藏两项都明确。INSERT/全列 snippet 排除 generated/hidden，星号展开只排除真正 hidden 列，普通补全仍显示并标注所有权；结构化字段存在时不再重复查询 generated catalog | generated/hidden 主路径已闭环；仍需 SQL Server/Oracle/DuckDB 等产品的 hidden/生成表达式专用 metadata、更多外置产品结构化字段、更复杂的多光标编辑及真实 Monaco edit-preview/undo 验证。 |
 | L12 | 主路径已对齐：编辑器模块边界 | DBX `components/editor/QueryEditor.vue:791-924` 将 execution request 编排建立在 `lib/sql/sqlExecutionTarget.ts` 上 | 命名事务、query/explain/parameter execution、文件 workflow、LSP virtual-document lifecycle 与稳定协议 provider coordinator 已独立。metadata-sensitive relation/field/FK JOIN fallback、Monaco viewport/selection、current-statement decoration 和 Console auto-suggest 均有独立 lifecycle；滚动 rAF 合并、offset 有界夹取、authoritative range cache、45ms Console 合并与 stale model/version gate 不再由组件持有。owner key 继续拒绝跨连接/schema/LSP 状态/设置边界的迟到结果；`QueryEditor.tsx` 约 3,253 行 | 已识别 lifecycle 拆分完毕；补真实 Monaco/provider 组合验证，组件测试继续避免加载完整 Monaco。 |
 | L13 | 已对齐：进程恢复遥测 | DBX 本地 semantic model不依赖独立进程 | `useLspSemanticStatusStore` 按连接记录 LSP restart/恢复耗时、schema sync failure 与 stale response drop 的无内容计数；session registry 和同步器在对应路径写入，状态栏 schema 语义提示的 title 展示最新趋势，不记录 SQL/对象内容 | 保持计数有界、仅会话内；如需跨会话分析另建脱敏诊断导出。 |
-| L14 | 逻辑已对齐：当前语句 frame 缓存与响应 | DBX `lib/sql/executableStatementRangeCache.ts`、`lib/sql/currentStatementFrame.ts`、`lib/editor/codemirrorCurrentStatementFrameLayer.ts`；`components/editor/QueryEditor.vue:1519-1533,4519-4558` | SQL 首次 miss 由 Rust driver-aware scanner 一次返回当前范围及最多 10,000 个有序 UTF-16 文档范围；同一 Monaco model version 内跨语句及语句间空白移动直接复用，不重复跨 Tauri 解析。精确 exclusive end、编辑、模型/连接切换立即重解析；超出上限时自动降级为仅缓存当前范围。选区和 Mongo command frame 同步显示，同范围不重复提交 Monaco decorations，过期异步结果不能覆盖新光标 | 延期以大文档和真实 WebView 记录 IPC/decorations 次数，并验证超过 10,000 条语句时的有界降级；前端不复制第二套 SQL parser。 |
+| L14 | 逻辑已对齐：当前语句 frame 缓存与响应 | DBX `lib/sql/executableStatementRangeCache.ts`、`lib/sql/currentStatementFrame.ts`、`lib/editor/codemirrorCurrentStatementFrameLayer.ts`；`components/editor/QueryEditor.vue:1519-1533,4519-4558` | SQL 首次 miss 由 Rust driver-aware scanner 一次返回当前范围及最多 10,000 个有序 UTF-16 文档范围；同一 Monaco model version 内在实际 statement range 中直接复用。物理空白行先由 Monaco 行模型清除 frame，不会被 range cache 错归到下一条语句，也不增加 IPC；精确 exclusive end、其他间隙、编辑和模型/连接切换仍交回 authoritative scanner。超出 10,000 范围时自动降级为仅缓存当前范围。选区和 Mongo command frame 同步显示，同范围不重复提交 decorations，过期响应不能覆盖新光标 | 延期以大文档和真实 WebView 记录 IPC/decorations 次数，并验证超过 10,000 条语句时的有界降级；前端不复制第二套 SQL parser。 |
 | L15 | 逻辑已对齐，真实 metadata 验证延期：SQL Server 默认 schema | DBX `apps/desktop/src/components/editor/QueryEditor.vue` 的 `completionMetadataTarget`、`metadataSchemaForConnection`、`ensureColumnsForTable`；最新 `868f7961e` 在无显式 schema 且首次列 metadata 为空时从缓存 schema（含 `dbo`）恢复 | `connectionDatabaseNamespacePreference` 明确区分 SQL Server catalog 与 schema；Explorer 的缓存/远端 schema 选择和 `createLspSyncPlan` 共用 `selectPreferredNamespace`。用户显式选择优先，否则在已发现 schema 中选择大小写保真的 `dbo`，并避免把 `sys`/`INFORMATION_SCHEMA` 作为普通 fallback；query document 仍绑定原 catalog | 延期连接真实 SQL Server，验证默认登录 schema、无 `dbo` 权限、自定义默认 schema、多 catalog 同名表和 metadata refresh 后的列推荐；不得为寻找 schema 发送额外无界查询。 |
 | L16 | 逻辑已对齐，真实 Monaco 交互验证延期：格式化布局 | DBX `apps/desktop/src/lib/sql/sqlFormatter.ts:applySqlFormatterLayout`、`sqlFormatterConfig.ts`、`components/editor/SqlFormatterSettingsPanel.vue`；最新 `868f7961e` 增加 logical operator `none` 与 FROM source 同行布局 | Settings 增加 `before/after/none` 和 `newLine/sameLine`，经 `LspConnectionSyncer`、配置摘要和 `workspace/didChangeConfiguration` 进入 bundled LSP；整篇与选区格式化共用 parser-mask 安全的线性后处理。字符串、注释、quoted identifier 中的关键词不改写，derived table 与注释开头 source 保持多行；随应用 binary/manifest 已重建 | 延期在真实 Monaco/WebView 验证 selection、undo、光标恢复、超大 SQL 响应和各 dialect formatter 输出；不得复制第二套前端 parser，也不得让布局后处理退化为逐行删除的平方复杂度。 |
 | L17 | 逻辑已对齐，真实键盘交互验证延期：Insert Line Below | DBX `apps/desktop/src/components/editor/QueryEditor.vue:insertLineBelow`、`lib/editor/shortcutRegistry.ts`，最新 `868f7961e` 默认 `Shift+Enter` | `editor.insertLineBelow` 已进入共享 action/keymap/command palette；活动 QueryEditor 接收事件后调用 Monaco 原生 `editor.action.insertLineAfter`，由编辑器内核统一处理继承缩进、multi-cursor、selection、undo 和 read-only；`Ctrl/Cmd+Shift+Enter` 继续执行当前语句 | 延期在真实 Monaco + Vim insert/normal mode、IME 和 completion popup 打开时验证优先级；快捷键冲突仍由 Keymap 页显示，不硬编码第二套按键监听。 |
 | L18 | 逻辑已对齐并加强，真实 provider 验证延期：过期补全取消 | DBX `apps/desktop/src/components/editor/QueryEditor.vue:3348-3384` 通过 CodeMirror `CompletionContext` abort 事件递增 epoch，在 debounce 和异步结果边界丢弃旧候选 | Monaco cancellation token 现贯通 completion 与 `completionItem/resolve`；renderer 为每次调用生成会话内 token，Tauri 映射到 JSON-RPC request id，Rust writer 删除 pending response 并发送标准 `$/cancelRequest`。取消先于请求注册或先于 writer 写出的竞态都有有界 tombstone，旧请求不会继续占用 provider 队列；重复/迟到取消保持幂等，token 长度与字符集受限 | 延期使用受控慢 provider 连续快速输入，确认旧 completion/resolve 收到 `$/cancelRequest`、新请求无饥饿、进程重启与会话切换不串 token；不需要连接数据库。 |
+| L19 | 本阶段逻辑已对齐，真实 Monaco 验证延期：空白行执行与编辑菜单 | DBX `components/editor/QueryEditor.vue:requestExecuteFromView`、`lib/sql/sqlExecutionTarget.ts:executionCandidateForMode`（`a83f32d13`）；Cut/Paste 见 `150d0108b` | Rust UTF-16 scanner 对物理空白行返回无当前语句；“运行当前语句”默认明确 no-op，并在状态栏显示 3 秒 `aria-live` 反馈。设置可显式启用整篇 fallback，仍经过参数、危险 SQL、事务和重复执行门禁。Monaco 原生 context menu 显式开启 Cut/Copy/Paste，复用 read-only/multi-cursor/undo/clipboard 语义 | 延期在真实 Tauri WebView 验证 Windows/macOS/Linux 剪贴板权限、Vim 模式、空白行前后软边界、状态反馈和设置持久化；不得在 React 层复制 Monaco 原生剪切/粘贴编辑。 |
 
 ## 4. Explorer、metadata 与数据库管理
 

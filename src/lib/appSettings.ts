@@ -118,6 +118,7 @@ export type AppSettings = {
     wordWrap: "off" | "on" | "wordWrapColumn" | "bounded";
     minimap: boolean;
     confirmDestructiveSql: boolean;
+    executeAllOnBlankLine: boolean;
     sqlCompletion: SqlCompletionSettings;
     sqlFormatting: SqlFormattingSettings;
     inlineCompletion: InlineCompletionSettings;
@@ -265,6 +266,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     wordWrap: "off",
     minimap: false,
     confirmDestructiveSql: true,
+    executeAllOnBlankLine: false,
     sqlCompletion: {
       triggerMode: "positional",
       keywordCase: "upper",
@@ -525,6 +527,11 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         raw,
         ["editor", "confirmDestructiveSql"],
         defaults.editor.confirmDestructiveSql,
+      ),
+      executeAllOnBlankLine: boolAt(
+        raw,
+        ["editor", "executeAllOnBlankLine"],
+        defaults.editor.executeAllOnBlankLine,
       ),
       sqlCompletion: {
         triggerMode: enumAt(

@@ -460,6 +460,17 @@ fn sql_statement_at_cursor(
         return None;
     }
     let cursor_byte_offset = utf16_offset_to_byte_offset(sql, cursor_utf16_offset);
+    let line_start = sql[..cursor_byte_offset]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let line_end = sql[cursor_byte_offset..]
+        .find('\n')
+        .map(|index| cursor_byte_offset + index)
+        .unwrap_or(sql.len());
+    if sql[line_start..line_end].trim().is_empty() {
+        return None;
+    }
     let statement_index = statements
         .iter()
         .position(|statement| {
@@ -1480,6 +1491,26 @@ mod tests {
         assert_eq!(selected.sql, "SELECT * FROM second_table");
         assert_eq!(selected.statement_index, 1);
         assert_eq!(selected.statement_count, 2);
+    }
+
+    #[test]
+    fn statement_at_cursor_keeps_blank_lines_unassigned() {
+        let sql = "SELECT 1;\n  \n  SELECT 2;";
+        let blank_cursor = sql[..sql.find("  \n  SELECT").unwrap() + 1]
+            .encode_utf16()
+            .count();
+
+        assert!(
+            sql_statement_at_cursor(sql, StatementScanDialect::Postgres, blank_cursor).is_none()
+        );
+
+        let indented_cursor = sql[..sql.find("SELECT 2").unwrap()].encode_utf16().count();
+        assert_eq!(
+            sql_statement_at_cursor(sql, StatementScanDialect::Postgres, indented_cursor)
+                .expect("indentation on a SQL line should target its statement")
+                .sql,
+            "SELECT 2"
+        );
     }
 
     #[test]

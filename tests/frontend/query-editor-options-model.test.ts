@@ -27,6 +27,7 @@ describe("query editor options model", () => {
     );
 
     expect(standard).toMatchObject({
+      contextmenu: true,
       glyphMargin: false,
       lineNumbers: "on",
       wordBasedSuggestions: "off",

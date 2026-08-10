@@ -1340,6 +1340,16 @@ function EditorSettings({
           updateEditor({ confirmDestructiveSql: !editor.confirmDestructiveSql })
         }
       />
+      <CheckboxLabel
+        label="Run all SQL from a blank line"
+        detail="When Run current statement has no statement at the cursor. Disabled by default."
+        checked={editor.executeAllOnBlankLine}
+        onChange={() =>
+          updateEditor({
+            executeAllOnBlankLine: !editor.executeAllOnBlankLine,
+          })
+        }
+      />
       <SettingsDivider title="SQL formatting" />
       <SettingRow label="Logical operators:">
         <select
