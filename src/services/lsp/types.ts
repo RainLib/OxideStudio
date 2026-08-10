@@ -187,6 +187,8 @@ export interface LspServerNotification {
 export interface PublishDiagnosticsParams {
   uri: string;
   diagnostics: Diagnostic[];
+  /** LSP document version, when the server can associate diagnostics with one. */
+  version?: number;
 }
 
 // LSP Completion Kind constants (following LSP spec)

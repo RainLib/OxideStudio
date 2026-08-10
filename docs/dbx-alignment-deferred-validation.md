@@ -1,5 +1,11 @@
 # DBX alignment: deferred validation queue
 
+## Phase 130 -- Versioned LSP diagnostics
+
+- In a real Monaco session, issue rapid edits while the LSP publishes delayed diagnostics and confirm diagnostics for an earlier synchronized LSP document version never replace markers or tab diagnostics for the current model.
+- Restart or switch the LSP session while notifications are in flight; confirm the session key, document URI, synchronized text, and optional protocol version prevent cross-session or stale marker writes.
+- Static coverage completed with `lspMonacoAdapter.test.ts`, `npm.cmd run build`, and `cargo check --manifest-path src-tauri/Cargo.toml`. Interactive WebView/LSP timing remains deferred.
+
 ## Phase 133 -- atomic PostgreSQL backup restore
 
 - Restore an export containing an intentional duplicate/conflicting row and an invalid deferred FK into a clean PostgreSQL target. Confirm PostgreSQL rolls back the complete backup transaction; separately verify a successful restore commits its tables, rows and foreign keys together.

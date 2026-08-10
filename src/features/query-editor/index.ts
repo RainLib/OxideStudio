@@ -47,6 +47,7 @@ export {
   isPublishDiagnosticsParams,
   lspDiagnosticToMonacoMarker,
   lspDocumentationForMonaco,
+  shouldApplyLspDiagnostics,
   toMonacoCompletionRange,
   toMonacoRange,
   toMonacoWorkspaceEdit,

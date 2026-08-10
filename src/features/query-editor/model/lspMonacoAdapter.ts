@@ -87,6 +87,31 @@ export function isPublishDiagnosticsParams(
   return typeof params.uri === "string" && Array.isArray(params.diagnostics);
 }
 
+/**
+ * Diagnostics are asynchronous notifications, so they need the same document
+ * ownership checks as completion and hover responses. A versioned server
+ * notification must match the latest synchronized LSP version; even an
+ * unversioned notification is rejected when the Monaco text has moved ahead
+ * of the synchronized shadow document.
+ */
+export function shouldApplyLspDiagnostics(options: {
+  diagnosticsVersion?: number;
+  currentDocumentVersion?: number;
+  modelText: string;
+  synchronizedText?: string;
+}) {
+  if (
+    options.diagnosticsVersion !== undefined &&
+    options.diagnosticsVersion !== options.currentDocumentVersion
+  ) {
+    return false;
+  }
+  return (
+    options.synchronizedText === undefined ||
+    options.synchronizedText === options.modelText
+  );
+}
+
 export function toMonacoMarkerSeverity(monaco: any, severity?: number) {
   switch (severity) {
     case 1:

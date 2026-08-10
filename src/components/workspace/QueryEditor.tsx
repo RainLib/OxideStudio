@@ -166,6 +166,7 @@ import {
   quoteSqlIdentifierSelection,
   insertLineBelow,
   recordSqlCompletionTelemetry,
+  shouldApplyLspDiagnostics,
   shouldChainSqlCompletionAfterAccept,
   sqlInListFromClipboard,
   sqlSyntaxFallbackCompletions,
@@ -2324,14 +2325,23 @@ export function QueryEditor({
       if (event.payload.method !== "textDocument/publishDiagnostics") return;
       if (!isPublishDiagnosticsParams(event.payload.params)) return;
 
-      const { uri, diagnostics } = event.payload.params;
+      const { uri, diagnostics, version } = event.payload.params;
+      const model = monaco.editor.getModel(monaco.Uri.parse(uri));
+      if (!model) return;
+      if (
+        !shouldApplyLspDiagnostics({
+          diagnosticsVersion: version,
+          currentDocumentVersion: documentVersionsRef.current.get(uri),
+          modelText: model.getValue(),
+          synchronizedText: documentTextsRef.current.get(uri),
+        })
+      ) {
+        return;
+      }
       const tabId = extractSqlDocumentTabId(uri);
       if (tabId) {
         setLspDiagnostics(tabId, diagnostics);
       }
-
-      const model = monaco.editor.getModel(monaco.Uri.parse(uri));
-      if (!model) return;
 
       monaco.editor.setModelMarkers(
         model,
