@@ -10,7 +10,7 @@ define the SQL LSP, driver, or data-transfer contract of OxideStudio.
 
 | DBChart capability | DBChart evidence | OxideStudio status | Alignment decision |
 | --- | --- | --- | --- |
-| Context-aware DBML completion | `src/components/code-snippet/dbml/dbml-completion-provider.ts` wraps `@dbml/parse` and triggers on space, settings and reference operators. | DBML is parsed into review-only schema snapshots by `src/features/schema-diff/model/schemaDbmlImport.ts`; SQL Monaco has a full LSP, metadata, snippets and cached fallback path. | No SQL behavior to port. A dedicated editable DBML Monaco surface remains an optional future feature, not an LSP prerequisite. |
+| Context-aware DBML completion | `src/components/code-snippet/dbml/dbml-completion-provider.ts` wraps `@dbml/parse` and triggers on space, settings and reference operators. | `SchemaDbmlDraftDialog` now provides a Monaco DBML document with Table/Ref/Enum/TableGroup snippets, field-setting suggestions and declared-table references; it remains review-only. | Covered without granting direct database mutation. |
 | DBML/DDL/JSON import detection | `src/lib/import-method/detect-import-method.ts` selects DBML before DDL, then JSON. | DBML import, SQL script import, CSV/JSON/XLSX row import and connection import are separate explicit routes. | Intentional difference: no ambiguous automatic mutation/import. |
 | Deterministic SQL diagram export | `src/dialogs/export-sql-dialog/export-sql-dialog.tsx` chooses deterministic cross-dialect export, with optional AI fallback. | Table-data SQL INSERT export, PostgreSQL schema backup and review-first schema diff/migration are native and capability-gated. | Live-database paths are stronger; diagram-only cross-dialect DDL generation is not a substitute for reviewed migrations. |
 | Diagram JSON export/import | `src/hooks/use-export-diagram.tsx`, `src/dialogs/import-diagram-dialog`. | Schema snapshots, DBML import/export, schema diagram canvas persistence, draft history and schema diff are present. | Covered for live-schema workflow; direct ChartDB JSON interchange is not implemented. |
@@ -40,6 +40,3 @@ define the SQL LSP, driver, or data-transfer contract of OxideStudio.
 3. Run the deferred database matrix: import/export round trips, SQL restore,
    migration/transfer conflict policies, LSP metadata completion, snippets and
    cancellation across the supported live databases.
-4. Consider a dedicated editable DBML Monaco document only if users need
-   authoring parity with DBChart. It should remain review-first and never
-   bypass migration planning or explicit database mutation approval.
