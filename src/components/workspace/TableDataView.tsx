@@ -120,6 +120,7 @@ export function TableDataView() {
   } | null>(null);
   const [recentExportReport, setRecentExportReport] =
     useState<TableExportReport | null>(null);
+  const [exportMaxRows, setExportMaxRows] = useState<number | undefined>();
   const dataGridSettings = useSettingsStore((state) => state.settings.dataGrid);
   const defaultPageSize = dataGridSettings.pageSize;
   const activeTab = tabs.find((t) => t.id === activeTabId);
@@ -851,6 +852,7 @@ export function TableDataView() {
     encoding: TableExportEncoding = "utf8",
     sqlInsertBatchSize?: number,
     sqlInsertConflictPolicy: SqlInsertConflictPolicy = "strict",
+    maxRows?: number,
   ) => {
     if (
       !tabConnectionId ||
@@ -876,7 +878,9 @@ export function TableDataView() {
     const taskId = startTask({
       kind: "export",
       title: `Export ${activeTab.tableName}`,
-      detail: format.toUpperCase(),
+      detail: maxRows
+        ? `${format.toUpperCase()} (first ${maxRows.toLocaleString()} rows)`
+        : `${format.toUpperCase()} (all matching rows)`,
     });
     const exportId = tableService.createTableExportId();
     const exportTask = { exportId, taskId };
@@ -900,6 +904,8 @@ export function TableDataView() {
         activeTab.tableFilterSql || undefined,
         activeTab.tableFilters || undefined,
         sort,
+        undefined,
+        maxRows,
       );
       const coercionPreview = exported.typeCoercions
         .slice(0, 3)
@@ -918,7 +924,7 @@ export function TableDataView() {
           : "";
       finishTask(
         taskId,
-        `${exported.rowsExported.toLocaleString()} rows to ${format.toUpperCase()}${coercionDetail}`,
+        `${exported.rowsExported.toLocaleString()} rows to ${format.toUpperCase()}${maxRows ? ` (first ${maxRows.toLocaleString()} requested)` : ""}${coercionDetail}`,
       );
       if (exported.reportId && activeProjectId) {
         void tableService
@@ -1684,6 +1690,8 @@ export function TableDataView() {
         viewOnly={isTransposed}
         exportDisabled={isCrossDatabasePreview || isNativeObjectPreview}
         exportFormats={tableExportFormats}
+        exportMaxRows={exportMaxRows}
+        onExportMaxRowsChange={setExportMaxRows}
         supportsSqlConflictSkip={supportsSqlConflictSkip}
         supportsSqlConflictUpdate={supportsSqlConflictUpdate}
         isExporting={Boolean(activeTableExport)}
@@ -1720,13 +1728,13 @@ export function TableDataView() {
         onImportJson={() => void openJsonImportPicker()}
         onImportXlsx={() => void openXlsxImportPicker()}
         onTransfer={() => setIsTransferDialogOpen(true)}
-        onExportCsv={() => void handleExport("csv")}
-        onExportCsvBom={() => void handleExport("csv", "utf8Bom")}
-        onExportJson={() => void handleExport("json")}
-        onExportJsonl={() => void handleExport("jsonl")}
-        onExportMarkdown={() => void handleExport("markdown")}
+        onExportCsv={() => void handleExport("csv", "utf8", undefined, "strict", exportMaxRows)}
+        onExportCsvBom={() => void handleExport("csv", "utf8Bom", undefined, "strict", exportMaxRows)}
+        onExportJson={() => void handleExport("json", "utf8", undefined, "strict", exportMaxRows)}
+        onExportJsonl={() => void handleExport("jsonl", "utf8", undefined, "strict", exportMaxRows)}
+        onExportMarkdown={() => void handleExport("markdown", "utf8", undefined, "strict", exportMaxRows)}
         onExportSql={(batchSize, conflictPolicy) =>
-          void handleExport("sql", "utf8", batchSize, conflictPolicy)
+          void handleExport("sql", "utf8", batchSize, conflictPolicy, exportMaxRows)
         }
         onExportDatabaseSql={
           normalizeDatabaseDriverName(driver) === "postgres" &&
@@ -1735,10 +1743,10 @@ export function TableDataView() {
             ? (scope) => void handleExportDatabaseSql(scope)
             : undefined
         }
-        onExportTsv={() => void handleExport("tsv")}
-        onExportXlsx={() => void handleExport("xlsx")}
-        onExportParquet={() => void handleExport("parquet", "binary")}
-        onExportArrow={() => void handleExport("arrow", "binary")}
+        onExportTsv={() => void handleExport("tsv", "utf8", undefined, "strict", exportMaxRows)}
+        onExportXlsx={() => void handleExport("xlsx", "binary", undefined, "strict", exportMaxRows)}
+        onExportParquet={() => void handleExport("parquet", "binary", undefined, "strict", exportMaxRows)}
+        onExportArrow={() => void handleExport("arrow", "binary", undefined, "strict", exportMaxRows)}
         onCancelExport={() => void handleCancelExport()}
       />
 

@@ -44,6 +44,9 @@ interface TableDataToolbarProps {
   viewOnly?: boolean;
   exportDisabled?: boolean;
   exportFormats: readonly TableExportFormat[];
+  /** Undefined exports every row matching the current filters and sort. */
+  exportMaxRows?: number;
+  onExportMaxRowsChange?: (maxRows: number | undefined) => void;
   supportsSqlConflictSkip?: boolean;
   supportsSqlConflictUpdate?: boolean;
   isExporting?: boolean;
@@ -93,6 +96,8 @@ export function TableDataToolbar({
   viewOnly = false,
   exportDisabled = false,
   exportFormats,
+  exportMaxRows,
+  onExportMaxRowsChange,
   supportsSqlConflictSkip = false,
   supportsSqlConflictUpdate = false,
   isExporting = false,
@@ -304,6 +309,48 @@ export function TableDataToolbar({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="wb-menu-content min-w-52">
+            {onExportMaxRowsChange && (
+              <>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger className="wb-menu-item">
+                    <Rows3 className="mr-2 h-3.5 w-3.5" />
+                    Export scope
+                    <span className="ml-auto pl-3 text-[10px] wb-muted">
+                      {exportMaxRows
+                        ? `First ${exportMaxRows.toLocaleString()}`
+                        : "All matching"}
+                    </span>
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuPortal>
+                    <DropdownMenuSubContent className="wb-menu-content min-w-48">
+                      {([
+                        [undefined, "All matching rows"],
+                        [1_000, "First 1,000 rows"],
+                        [10_000, "First 10,000 rows"],
+                        [100_000, "First 100,000 rows"],
+                      ] as const).map(([maxRows, label]) => (
+                        <DropdownMenuItem
+                          key={maxRows ?? "all"}
+                          className="wb-menu-item"
+                          onSelect={() => onExportMaxRowsChange(maxRows)}
+                        >
+                          <Check
+                            className={cn(
+                              "mr-2 h-3.5 w-3.5",
+                              exportMaxRows === maxRows
+                                ? "opacity-100"
+                                : "opacity-0",
+                            )}
+                          />
+                          {label}
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuPortal>
+                </DropdownMenuSub>
+                <DropdownMenuSeparator />
+              </>
+            )}
             {supportsExport("csv") && (
               <>
                 <DropdownMenuItem className="wb-menu-item" onSelect={onExportCsv}>
